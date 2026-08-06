@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest"
 import type { WebFrameMain } from "electron"
-import { buildManualRecorderInjectionScript } from "../../../src/main/browser/recording/manual-recorder-script.js"
+import type { BrowserLocatorMetadata } from "../../../../src/shared/browser-types"
+import { buildPlaywrightLocator } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
+import { PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX } from "../../../../src/main/browser/record/manual-record/manual-recorder-playwright-adapter"
 import {
   getManualRecording,
   markNextManualNavigationExplicit,
@@ -12,7 +14,7 @@ import {
   startManualRecording,
   stopManualRecording,
   updateManualRecordingDraft
-} from "../../../src/main/browser/recording/manual-recording-service"
+} from "../../../../src/main/browser/record/manual-record/manual-recording-service"
 
 function createFrame(input: {
   frameToken?: string
@@ -28,54 +30,95 @@ function createFrame(input: {
   } as WebFrameMain
 }
 
-function emitRecorderMessage(frame: WebFrameMain, payload: Record<string, unknown>): void {
-  recordManualRecorderConsoleMessage(frame, `[ManualRecorder]${JSON.stringify(payload)}`)
+type LegacyRecorderPayload = {
+  type: "click" | "fill" | "select" | "press" | "fileUpload"
+  locator?: BrowserLocatorMetadata
+  locatorCandidates?: BrowserLocatorMetadata[]
+  value?: string
+  values?: string[]
+  key?: string
+  paths?: string[]
+  doubleClick?: boolean
+  toggle?: "check" | "uncheck"
+}
+
+function buildTestFramePath(frame: WebFrameMain): string[] {
+  const chain: string[] = []
+  let current: WebFrameMain | null = frame
+  while (current?.parent) {
+    const frameUrl = current.url || current.origin || current.frameToken
+    chain.unshift(`iframe[src*=${JSON.stringify(frameUrl)}]`)
+    current = current.parent
+  }
+  return chain
+}
+
+function buildTestLocatorPayload(
+  frame: WebFrameMain,
+  locator: BrowserLocatorMetadata | undefined
+): Record<string, unknown> | undefined {
+  if (!locator) return undefined
+  const framePath = buildTestFramePath(frame)
+  const playwrightLocator = buildPlaywrightLocator({
+    ...locator,
+    framePath
+  } as Parameters<typeof buildPlaywrightLocator>[0]).replace(/^page\./u, "")
+
+  return {
+    ...locator,
+    framePath,
+    playwrightLocator
+  }
+}
+
+function emitRecorderMessage(frame: WebFrameMain, payload: LegacyRecorderPayload): void {
+  const locator = buildTestLocatorPayload(frame, payload.locator)
+  const selector = typeof locator?.selector === "string" ? locator.selector : undefined
+
+  const action =
+    payload.type === "click"
+      ? {
+          name: payload.toggle ?? "click",
+          selector,
+          clickCount: payload.doubleClick ? 2 : 1
+        }
+      : payload.type === "fill"
+        ? {
+            name: "fill",
+            selector,
+            text: payload.value ?? ""
+          }
+        : payload.type === "select"
+          ? {
+              name: "select",
+              selector,
+              options: payload.values ?? []
+            }
+          : payload.type === "press"
+            ? {
+                name: "press",
+                selector,
+                key: payload.key
+              }
+            : {
+                name: "setInputFiles",
+                selector,
+                files: payload.paths ?? []
+              }
+
+  recordManualRecorderConsoleMessage(
+    frame,
+    `${PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX}${JSON.stringify({
+      type: "action",
+      action,
+      locator
+    })}`
+  )
 }
 
 describe("manual recording service", () => {
   beforeEach(() => {
     resetManualRecordingForTests()
-  })
-
-  it("treats datalist inputs as comboboxes in the injected recorder", () => {
-    const script = buildManualRecorderInjectionScript()
-    expect(script).toMatch(/tag === "input"[\s\S]*hasAttribute\("list"\)[\s\S]*return "combobox";/u)
-  })
-
-  it("treats numeric inputs as spinbuttons in the injected recorder", () => {
-    const script = buildManualRecorderInjectionScript()
-    expect(script).toMatch(/tag === "input"[\s\S]*type === "number"[\s\S]*return "spinbutton";/u)
-  })
-
-  it("treats range inputs as sliders in the injected recorder", () => {
-    const script = buildManualRecorderInjectionScript()
-    expect(script).toMatch(/tag === "input"[\s\S]*type === "range"[\s\S]*return "slider";/u)
-  })
-
-  it("ignores IME composition input until commit", () => {
-    const script = buildManualRecorderInjectionScript()
-    expect(script).toMatch(/compositionstart/u)
-    expect(script).toMatch(/compositionend/u)
-    expect(script).toMatch(/event\.isComposing/u)
-    expect(script).toMatch(/IME_ENTER_SUPPRESS_WINDOW_MS/u)
-    expect(script).toMatch(/pendingCommittedFillTimers/u)
-    expect(script).toMatch(/markCompositionEnd\(event\.target\)/u)
-    expect(script).toMatch(/const timerId = window\.setTimeout\(\(\) => \{/u)
-    expect(script).toMatch(/emitTextFill\(target\);/u)
-  })
-
-  it("captures occurrence hints for duplicate role locators in the injected recorder", () => {
-    const script = buildManualRecorderInjectionScript()
-    expect(script).toMatch(/matches\.length > 1/u)
-    expect(script).toMatch(/matchCount = matches\.length/u)
-    expect(script).toMatch(/nth = candidateIndex/u)
-  })
-
-  it("prefers href selectors for anchors in the injected recorder", () => {
-    const script = buildManualRecorderInjectionScript()
-    expect(script).toContain('if (element.tagName.toLowerCase() === "a") {')
-    expect(script).toContain('const href = text(element.getAttribute("href"));')
-    expect(script).toContain('a[href="')
   })
 
   it("starts with the current page and generates a manual recording draft", () => {
@@ -96,7 +139,7 @@ describe("manual recording service", () => {
 
     const stopped = stopManualRecording()
     expect(stopped.script).toContain('test("manual recorded flow", async ({ page }) => {')
-    expect(stopped.script).toContain('await page.goto("https://example.com/dashboard");')
+    expect(stopped.script).toContain("await page.goto('https://example.com/dashboard');")
   })
 
   it("records manual fill and click actions and dedupes repeated fills", () => {
@@ -109,7 +152,7 @@ describe("manual recording service", () => {
         role: "textbox",
         label: "邮箱",
         target: "邮箱",
-        selector: "#email"
+        selector: 'internal:role=textbox[name="邮箱"s]'
       },
       value: "first@example.com"
     })
@@ -119,7 +162,7 @@ describe("manual recording service", () => {
         role: "textbox",
         label: "邮箱",
         target: "邮箱",
-        selector: "#email"
+        selector: 'internal:role=textbox[name="邮箱"s]'
       },
       value: "final@example.com"
     })
@@ -144,14 +187,14 @@ describe("manual recording service", () => {
       source: "manual"
     })
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "邮箱", exact: true }).fill("final@example.com");'
+      "await page.getByRole('textbox', { name: '邮箱', exact: true }).fill('final@example.com');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("button", { name: "登录", exact: true }).click();'
+      "await page.getByRole('button', { name: '登录', exact: true }).click();"
     )
   })
 
-  it("keeps workflow links on href selectors instead of occurrence hints", () => {
+  it("uses the recorded href selector with its embedded codegen nth", () => {
     startManualRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://github.com/seanchen1993/CmbCoworkAgent/actions" })
 
@@ -161,21 +204,20 @@ describe("manual recording service", () => {
         role: "link",
         accessibleName: "Build Electron App",
         target: "Build Electron App",
-        selector: 'a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]',
-        tagName: "a",
-        matchCount: 2,
-        nth: 1
+        selector:
+          'a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"] >> nth=1',
+        tagName: "a"
       }
     })
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.locator("a[href=\\"/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml\\"]:visible").click();'
+      `await page.locator('a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]').nth(1).click();`
     )
-    expect(session.script).not.toContain(".nth(1)")
+    expect(session.script).toContain(".nth(1)")
   })
 
-  it("clicks radio cards through their visible label instead of the hidden input", () => {
+  it("uses the codegen label-text selector to click hidden radio cards", () => {
     startManualRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
@@ -185,7 +227,56 @@ describe("manual recording service", () => {
         role: "radio",
         label: "🎨 设计师 做设计的人",
         target: "🎨 设计师 做设计的人",
-        selector: 'input[name="role"][value="designer"]',
+        selector: 'internal:text="🎨 设计师 做设计的人"s',
+        tagName: "input",
+        inputType: "radio",
+        isVisible: false
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      "await page.getByText('🎨 设计师 做设计的人', { exact: true }).click();"
+    )
+    expect(session.script).not.toContain("getByRole('radio'")
+    expect(session.script).not.toContain("getByLabel('🎨 设计师 做设计的人'")
+  })
+
+  it("falls back to the visible label text when a hidden radio has no codegen selector", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/register" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "radio",
+        label: "🎨 设计师 做设计的人",
+        target: "🎨 设计师 做设计的人",
+        tagName: "input",
+        inputType: "radio",
+        isVisible: false
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      "await page.getByText('🎨 设计师 做设计的人', { exact: true }).click();"
+    )
+    expect(session.script).not.toContain("getByRole('radio'")
+    expect(session.script).not.toContain("getByLabel('🎨 设计师 做设计的人'")
+  })
+
+  it("keeps the codegen radio role selector for visible radio inputs", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/register" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "radio",
+        label: "🎨 设计师 做设计的人",
+        target: "🎨 设计师 做设计的人",
+        selector: 'internal:role=radio[name="🎨 设计师 做设计的人"s]',
         tagName: "input",
         inputType: "radio"
       }
@@ -193,10 +284,63 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.locator("label:has(input[name=\\"role\\"][value=\\"designer\\"])").click();'
+      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
     )
-    expect(session.script).not.toContain('getByLabel("🎨 设计师 做设计的人").click()')
-    expect(session.script).not.toContain('getByRole("radio"')
+  })
+
+  it("keeps check semantics when the recorder targets a checkbox directly", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/register" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      toggle: "check",
+      locator: {
+        role: "checkbox",
+        accessibleName: "愿意接收产品更新和活动邮件通知",
+        target: "愿意接收产品更新和活动邮件通知",
+        selector: 'internal:role=checkbox[name="愿意接收产品更新和活动邮件通知"i]',
+        tagName: "input",
+        inputType: "checkbox"
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions[0]).toMatchObject({
+      kind: "click",
+      toggle: "check"
+    })
+    expect(session.script).toContain(
+      "await page.getByRole('checkbox', { name: '愿意接收产品更新和活动邮件通知' }).check();"
+    )
+    expect(session.script).not.toContain(".click();")
+  })
+
+  it("keeps uncheck semantics when unchecking a checkbox", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/register" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      toggle: "uncheck",
+      locator: {
+        role: "checkbox",
+        accessibleName: "愿意接收产品更新和活动邮件通知",
+        target: "愿意接收产品更新和活动邮件通知",
+        selector: 'internal:role=checkbox[name="愿意接收产品更新和活动邮件通知"i]',
+        tagName: "input",
+        inputType: "checkbox"
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions[0]).toMatchObject({
+      kind: "click",
+      toggle: "uncheck"
+    })
+    expect(session.script).toContain(
+      "await page.getByRole('checkbox', { name: '愿意接收产品更新和活动邮件通知' }).uncheck();"
+    )
   })
 
   it("clicks switch-style checkboxes through their label wrapper", () => {
@@ -208,7 +352,7 @@ describe("manual recording service", () => {
       locator: {
         role: "checkbox",
         target: "emailNotif",
-        selector: 'input[name="emailNotif"]',
+        selector: 'internal:role=checkbox[name="emailNotif"s]',
         tagName: "input",
         inputType: "checkbox"
       }
@@ -216,9 +360,9 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.locator("label:has(input[name=\\"emailNotif\\"])").click();'
+      "await page.getByRole('checkbox', { name: 'emailNotif', exact: true }).click();"
     )
-    expect(session.script).not.toContain('getByText("emailNotif", { exact: true }).click()')
+    expect(session.script).not.toContain("getByText('emailNotif', { exact: true }).click()")
   })
 
   it("clicks menuitem radio options through their semantic role", () => {
@@ -231,14 +375,14 @@ describe("manual recording service", () => {
         role: "menuitemradio",
         accessibleName: "fix/bug-doc-qyang",
         target: "fix/bug-doc-qyang",
-        selector: 'button[name="branch"]',
+        selector: 'internal:role=menuitemradio[name="fix/bug-doc-qyang"s]',
         tagName: "button"
       }
     })
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("menuitemradio", { name: "fix/bug-doc-qyang", exact: true }).click();'
+      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
     )
     expect(session.script).not.toContain('locator("button[name=\\"branch\\"]")')
   })
@@ -254,7 +398,7 @@ describe("manual recording service", () => {
         accessibleName: "Select branch",
         placeholder: "Select branch",
         target: "Select branch",
-        selector: "#context-commitish-filter-field",
+        selector: 'internal:role=textbox[name="Select branch"s]',
         tagName: "input",
         inputType: "text"
       }
@@ -266,7 +410,7 @@ describe("manual recording service", () => {
         accessibleName: "Select branch",
         placeholder: "Select branch",
         target: "Select branch",
-        selector: "#context-commitish-filter-field",
+        selector: 'internal:role=textbox[name="Select branch"s]',
         tagName: "input",
         inputType: "text"
       },
@@ -278,23 +422,23 @@ describe("manual recording service", () => {
         role: "menuitemradio",
         accessibleName: "UAT_qyang2",
         target: "UAT_qyang2",
-        selector: 'button[name="branch"]',
+        selector: 'internal:role=menuitemradio[name="UAT_qyang2"s]',
         tagName: "button"
       }
     })
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Select branch", exact: true }).click();'
+      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).click();"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Select branch", exact: true }).fill("qyang");'
+      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).fill('qyang');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("menuitemradio", { name: "UAT_qyang2", exact: true }).click();'
+      "await page.getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click();"
     )
     expect(session.script.indexOf('.fill("qyang")')).toBeLessThan(
-      session.script.indexOf('getByRole("menuitemradio", { name: "UAT_qyang2", exact: true }).click()')
+      session.script.indexOf("getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click()")
     )
   })
 
@@ -323,7 +467,7 @@ describe("manual recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "密码", exact: true }).fill("12345678");'
+      "await page.getByRole('textbox', { name: '密码', exact: true }).fill('12345678');"
     )
   })
 
@@ -343,7 +487,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("combobox", { name: "用户名 (支持自动补全)", exact: true }).fill("你好");'
+      "await page.getByRole('combobox', { name: '用户名 (支持自动补全)', exact: true }).fill('你好');"
     )
   })
 
@@ -364,7 +508,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("spinbutton", { name: "年龄", exact: true }).fill("11");'
+      "await page.getByRole('spinbutton', { name: '年龄', exact: true }).fill('11');"
     )
   })
 
@@ -385,7 +529,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("slider", { name: "编程经验（年）", exact: true }).fill("6");'
+      "await page.getByRole('slider', { name: '编程经验（年）', exact: true }).fill('6');"
     )
   })
 
@@ -432,19 +576,19 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Search", exact: true }).fill("你好");'
+      "await page.getByRole('textbox', { name: 'Search', exact: true }).fill('你好');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Search", exact: true }).fill("哈哈");'
+      "await page.getByRole('textbox', { name: 'Search', exact: true }).fill('哈哈');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Search", exact: true }).press("Enter");'
+      "await page.getByRole('textbox', { name: 'Search', exact: true }).press('Enter');"
     )
     expect(session.script.indexOf('.fill("你好")')).toBeLessThan(
-      session.script.indexOf('.press("Enter")')
+      session.script.indexOf(".press('Enter')")
     )
-    expect(session.script.indexOf('.press("Enter")')).toBeLessThan(
-      session.script.lastIndexOf('.press("Enter")')
+    expect(session.script.indexOf(".press('Enter')")).toBeLessThan(
+      session.script.lastIndexOf(".press('Enter')")
     )
   })
 
@@ -459,7 +603,7 @@ describe("manual recording service", () => {
         accessibleName: "Search",
         target: "Search",
         tagName: "button",
-        selector: "button",
+        selector: 'internal:role=button[name="Search"s] >> nth=0',
         matchCount: 2,
         nth: 0
       }
@@ -471,7 +615,7 @@ describe("manual recording service", () => {
         accessibleName: "Search",
         target: "Search",
         tagName: "button",
-        selector: "button",
+        selector: 'internal:role=button[name="Search"s] >> nth=1',
         matchCount: 2,
         nth: 1
       }
@@ -494,10 +638,10 @@ describe("manual recording service", () => {
       })
     })
     expect(session.script).toContain(
-      'await page.getByRole("button", { name: "Search", exact: true }).nth(0).click();'
+      "await page.getByRole('button', { name: 'Search', exact: true }).first().click();"
     )
     expect(session.script).toContain(
-      'await page.getByRole("button", { name: "Search", exact: true }).nth(1).click();'
+      "await page.getByRole('button', { name: 'Search', exact: true }).nth(1).click();"
     )
   })
 
@@ -534,13 +678,13 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "What needs to be done?", exact: true }).click();'
+      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).click();"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "What needs to be done?", exact: true }).fill("buy milk");'
+      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).fill('buy milk');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "What needs to be done?", exact: true }).press("Enter");'
+      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).press('Enter');"
     )
   })
 
@@ -551,32 +695,12 @@ describe("manual recording service", () => {
     emitRecorderMessage(frame, {
       type: "click",
       locator: {
-        role: "img",
-        tagName: "span",
-        selector: "span"
-      },
-      locatorCandidates: [
-        {
-          role: "img",
-          tagName: "span",
-          selector: "span"
-        },
-        {
-          tagName: "div",
-          target: "编辑",
-          accessibleName: "编辑",
-          textContent: "编辑",
-          selector: "div"
-        },
-        {
-          tagName: "div",
-          testId: "operation-area",
-          target: "operation-area",
-          accessibleName: "编辑",
-          textContent: "编辑",
-          selector: '[data-testid="operation-area"]'
-        }
-      ]
+        tagName: "div",
+        target: "编辑",
+        accessibleName: "编辑",
+        textContent: "编辑",
+        selector: 'internal:text="编辑"s'
+      }
     })
 
     const session = stopManualRecording()
@@ -590,8 +714,53 @@ describe("manual recording service", () => {
         textContent: "编辑"
       })
     })
-    expect(session.script).toContain('await page.getByText("编辑", { exact: true }).click();')
+    expect(session.script).toContain("await page.getByText('编辑', { exact: true }).click();")
     expect(session.script).not.toContain('getByTestId("operation-area")')
+  })
+
+  it("keeps svg targets when ancestor text is volatile", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/detail" })
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        tagName: "svg",
+        selector: "svg >> nth=3",
+        isTarget: true,
+        matchCount: 6,
+        nth: 3
+      },
+      locatorCandidates: [
+        {
+          tagName: "svg",
+          selector: "svg >> nth=3",
+          isTarget: true,
+          matchCount: 6,
+          nth: 3
+        },
+        {
+          tagName: "div",
+          target: "一键报工 数据获取时间：08-05 16:33",
+          accessibleName: "一键报工 数据获取时间：08-05 16:33",
+          textContent: "一键报工 数据获取时间：08-05 16:33",
+          selector: "div"
+        }
+      ]
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions).toHaveLength(1)
+    expect(session.actions[0]).toMatchObject({
+      kind: "click",
+      locator: expect.objectContaining({
+        tagName: "svg",
+        selector: "svg >> nth=3",
+        nth: 3
+      })
+    })
+    expect(session.script).toContain("await page.locator('svg').nth(3).click();")
+    expect(session.script).not.toContain('getByText("一键报工 数据获取时间：08-05 16:33"')
   })
 
   it("persists paused draft edits before continuing recording", () => {
@@ -602,8 +771,8 @@ describe("manual recording service", () => {
 
 test("manual recorded flow", async ({ page }) => {
   // Review generated locators before committing this test.
-  await page.goto("https://demo.playwright.dev/todomvc/#/");
-  await page.getByRole("textbox", { name: "What needs to be done?" }).fill("保存后的内容");
+  await page.goto('https://demo.playwright.dev/todomvc/#/');
+  await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('保存后的内容');
 });
 `
 
@@ -626,13 +795,13 @@ test("manual recorded flow", async ({ page }) => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "What needs to be done?", exact: true }).fill("保存后的内容");'
+      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).fill('保存后的内容');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "What needs to be done?", exact: true }).press("Enter");'
+      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).press('Enter');"
     )
     expect(session.script.indexOf('fill("保存后的内容")')).toBeLessThan(
-      session.script.indexOf('press("Enter")')
+      session.script.indexOf("press('Enter')")
     )
   })
 
@@ -656,9 +825,9 @@ test("manual recorded flow", async ({ page }) => {
     const session = stopManualRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.script).toContain(
-      'await page.getByRole("link", { name: "Open detail", exact: true }).click();'
+      "await page.getByRole('link', { name: 'Open detail', exact: true }).click();"
     )
-    expect(session.script).not.toContain('await page.goto("https://example.com/detail");')
+    expect(session.script).not.toContain("await page.goto('https://example.com/detail');")
   })
 
   it("does not record implicit navigation after tab clicks", () => {
@@ -681,9 +850,9 @@ test("manual recorded flow", async ({ page }) => {
     const session = stopManualRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.script).toContain(
-      'await page.getByRole("tab", { name: "Reposts", exact: true }).click();'
+      "await page.getByRole('tab', { name: 'Reposts', exact: true }).click();"
     )
-    expect(session.script).not.toContain('await page.goto("https://medium.com/@tastejs/reposts");')
+    expect(session.script).not.toContain("await page.goto('https://medium.com/@tastejs/reposts');")
   })
 
   it("builds frame locators for manually recorded iframe actions", () => {
@@ -706,11 +875,11 @@ test("manual recorded flow", async ({ page }) => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      'page.frameLocator("iframe[src*=\\"https://pay.example.com/embedded-card\\"]").getByRole("textbox", { name: "Card number", exact: true }).fill("4242424242424242");'
+      "page.locator('iframe[src*=\"https://pay.example.com/embedded-card\"]').contentFrame().getByRole('textbox', { name: 'Card number', exact: true }).fill('4242424242424242');"
     )
   })
 
-  it("records file uploads and replays them after the triggering click", () => {
+  it("records file uploads as direct setInputFiles calls", () => {
     startManualRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/upload" })
 
@@ -740,15 +909,50 @@ test("manual recorded flow", async ({ page }) => {
       source: "manual",
       paths: ["/tmp/fixtures/contract.pdf"]
     })
+    expect(session.script).not.toContain("Upload document")
     expect(session.script).toContain(
-      'const fileChooserPromise1 = page.waitForEvent("filechooser");'
+      "await page.locator('input[type=\"file\"]').setInputFiles('/tmp/fixtures/contract.pdf');"
     )
-    expect(session.script).toContain(
-      'await page.getByRole("button", { name: "Upload document", exact: true }).click();'
-    )
-    expect(session.script).toContain("const fileChooser1 = await fileChooserPromise1;")
-    expect(session.script).toContain('await fileChooser1.setFiles("/tmp/fixtures/contract.pdf");')
     expect(session.script).not.toContain("TODO_FILE_INPUT_SELECTOR")
+  })
+
+  it("normalizes Playwright fakepath fills on file inputs into setInputFiles", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/profile" })
+    const locator: BrowserLocatorMetadata = {
+      target: "avatar",
+      selector: 'internal:role=button[name="Choose File"i]',
+      tagName: "input",
+      inputType: "file"
+    }
+
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator
+    })
+    emitRecorderMessage(frame, {
+      type: "fill",
+      locator,
+      value: "C:\\fakepath\\think.webp"
+    })
+
+    const session = stopManualRecording()
+
+    expect(session.actions).toHaveLength(2)
+    expect(session.actions[1]).toMatchObject({
+      kind: "fileUpload",
+      source: "manual",
+      paths: ["think.webp"],
+      locator: expect.objectContaining({
+        selector: 'internal:role=button[name="Choose File"i]',
+        inputType: "file"
+      })
+    })
+    expect(session.script).toMatch(
+      /await page\.getByRole\('button', \{ name: 'Choose File'(?:, exact: true)? \}\)\.setInputFiles\('think\.webp'\);/u
+    )
+    expect(session.script).not.toContain(".fill('C:\\fakepath")
+    expect(session.script).not.toContain(".click();")
   })
 
   it("replays direct file-input uploads without clicking a textbox locator first", () => {
@@ -781,10 +985,13 @@ test("manual recorded flow", async ({ page }) => {
 
     expect(session.script).not.toContain('page.waitForEvent("filechooser")')
     expect(session.script).not.toContain(
-      'getByRole("textbox", { name: "avatar", exact: true }).click()'
+      "getByRole('textbox', { name: 'avatar', exact: true }).click()"
+    )
+    expect(session.script).not.toContain(
+      "await page.locator('input[name=\"avatar\"]').click();"
     )
     expect(session.script).toContain(
-      'await page.locator("input[name=\\"avatar\\"]").setInputFiles("think.webp");'
+      "await page.locator('input[name=\"avatar\"]').setInputFiles('think.webp');"
     )
   })
 

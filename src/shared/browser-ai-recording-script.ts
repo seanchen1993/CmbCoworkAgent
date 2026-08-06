@@ -3,7 +3,11 @@ import type {
   BrowserLocatorMetadata,
   BrowserRecordingSource
 } from "./browser-types"
+import { buildPlaywrightLocator as buildCodegenPlaywrightLocator } from "../main/browser/record/common/playwright-codegen/projectLocatorAdapter"
+import { generatePlaywrightCodegenActionLines } from "../main/browser/record/common/playwright-codegen/projectCodegenAdapter"
 
+// 最终 locator 字符串使用 Playwright 源码副本进行格式化。
+// 变量处理和不受标准 codegen 覆盖的少数回退路径仍属于项目自定义功能。
 export type LocatorRole =
   | "button"
   | "checkbox"
@@ -78,26 +82,8 @@ type ParsedRecordedActionInput =
       values: string[]
       locator?: BrowserLocatorMetadata
     }
-  | { kind: "fileUpload"; paths: string[] }
+  | { kind: "fileUpload"; paths: string[]; locator?: BrowserLocatorMetadata }
   | { kind: "press"; key: string; target?: string; locator?: BrowserLocatorMetadata }
-
-type LocatorCandidateKind =
-  | "testId"
-  | "label"
-  | "placeholder"
-  | "role"
-  | "selector"
-  | "text"
-  | "css"
-  | "fallback"
-
-interface LocatorCandidate {
-  kind: LocatorCandidateKind
-  locator: string
-  score: number
-  assumedUnique: boolean
-  reason: string
-}
 
 const ROLE_PATTERNS: Array<{ pattern: RegExp; role: LocatorRole }> = [
   { pattern: /\bradio button\b|\b单选框\b/iu, role: "radio" },
@@ -122,6 +108,7 @@ const ROLE_PATTERNS: Array<{ pattern: RegExp; role: LocatorRole }> = [
   { pattern: /\bmenu item\b|\bmenuitem\b|\b菜单项\b/iu, role: "menuitem" },
   { pattern: /\boption\b|\b选项\b/iu, role: "option" }
 ]
+const WINDOWS_FAKEPATH_PATTERN = /^[a-z]:\\fakepath\\(.+)$/iu
 
 function quote(value: unknown): string {
   return JSON.stringify(value)
@@ -208,31 +195,6 @@ function isChoiceInputLocatorSource(
   )
 }
 
-function inferRoleFromInputMetadata(
-  inputType: string | undefined,
-  tagName: string | undefined
-): LocatorRole | undefined {
-  const normalizedTagName = tagName ? normalizeText(tagName).toLowerCase() : ""
-  const normalizedInputType = inputType ? normalizeText(inputType).toLowerCase() : ""
-
-  if (normalizedTagName === "textarea") return "textbox"
-  if (normalizedTagName !== "input") return undefined
-
-  if (normalizedInputType === "range") return "slider"
-  if (normalizedInputType === "number") return "spinbutton"
-  if (normalizedInputType === "checkbox") return "checkbox"
-  if (normalizedInputType === "radio") return "radio"
-  if (
-    normalizedInputType === "button" ||
-    normalizedInputType === "submit" ||
-    normalizedInputType === "reset"
-  ) {
-    return "button"
-  }
-
-  return undefined
-}
-
 function isLikelyUniqueChoiceInputSelector(selector: string | undefined): boolean {
   const normalizedSelector = selector ? normalizeText(selector).toLowerCase() : ""
   if (!normalizedSelector) return false
@@ -298,245 +260,19 @@ function applyOccurrenceHint(locator: string, source: LocatorSource): string {
   return locator
 }
 
-function buildCandidate(
-  kind: LocatorCandidateKind,
-  locator: string,
-  score: number,
-  assumedUnique: boolean,
-  reason: string
-): LocatorCandidate {
-  return {
-    kind,
-    locator,
-    score,
-    assumedUnique,
-    reason
-  }
-}
-
-function pushCandidate(
-  candidates: LocatorCandidate[],
-  candidate: LocatorCandidate | null | undefined
-): void {
-  if (!candidate) return
-
-  const existing = candidates.find((item) => item.locator === candidate.locator)
-  if (!existing) {
-    candidates.push(candidate)
-    return
-  }
-
-  if (candidate.score > existing.score) {
-    existing.kind = candidate.kind
-    existing.score = candidate.score
-    existing.assumedUnique = candidate.assumedUnique
-    existing.reason = candidate.reason
-  }
-}
-
-function buildRoleCandidate(
-  root: string,
-  role: LocatorRole | undefined,
-  name: string | undefined,
-  reason: string,
-  score: number
-): LocatorCandidate | null {
-  if (!role || !name) return null
-
-  return buildCandidate(
-    "role",
-    `${root}.getByRole(${quote(role)}, { name: ${quote(name)}, exact: true })`,
-    score,
-    true,
-    reason
-  )
-}
-
-function buildLabelCandidate(root: string, label: string | undefined): LocatorCandidate | null {
-  if (!label) return null
-  return buildCandidate("label", `${root}.getByLabel(${quote(label)})`, 90, true, "explicit label")
-}
-
-function buildPlaceholderCandidate(
-  root: string,
-  placeholder: string | undefined
-): LocatorCandidate | null {
-  if (!placeholder) return null
-  return buildCandidate(
-    "placeholder",
-    `${root}.getByPlaceholder(${quote(placeholder)})`,
-    92,
-    true,
-    "explicit placeholder"
-  )
-}
-
-function buildTestIdCandidate(root: string, testId: string | undefined): LocatorCandidate | null {
-  if (!testId) return null
-  return buildCandidate(
-    "testId",
-    `${root}.getByTestId(${quote(testId)})`,
-    100,
-    true,
-    "explicit test id"
-  )
-}
-
-function buildSelectorCandidate(
-  root: string,
-  selector: string | undefined
-): LocatorCandidate | null {
-  if (!selector) return null
-  const genericTagOnly = /^[a-z][a-z0-9-]*$/iu.test(selector)
-  const anchorHrefSelector = /^\s*a\[\s*href\s*=/iu.test(selector)
-  const normalizedSelector =
-    anchorHrefSelector && !/:visible\s*$/iu.test(selector) ? `${selector}:visible` : selector
-  return buildCandidate(
-    "selector",
-    `${root}.locator(${quote(normalizedSelector)})`,
-    anchorHrefSelector ? 98 : genericTagOnly ? 25 : 70,
-    anchorHrefSelector,
-    anchorHrefSelector
-      ? "anchor href selector"
-      : genericTagOnly
-        ? "generic tag selector fallback"
-        : "explicit selector fallback"
-  )
-}
-
-function buildTextCandidate(
-  root: string,
-  text: string | undefined,
-  exact = true
-): LocatorCandidate | null {
-  if (!text) return null
-  return buildCandidate(
-    "text",
-    `${root}.getByText(${quote(text)}, { exact: ${exact ? "true" : "false"} })`,
-    55,
-    false,
-    "text fallback"
-  )
-}
-
-function buildCssCandidate(
-  root: string,
-  tagName: string | undefined,
-  inputType: string | undefined
-): LocatorCandidate | null {
-  const normalizedTag = tagName ? normalizeText(tagName).toLowerCase() : ""
-  const normalizedInputType = inputType ? normalizeText(inputType).toLowerCase() : ""
-
-  if (!normalizedTag && !normalizedInputType) return null
-
-  let selector = normalizedTag || "input"
-  if (normalizedInputType) {
-    if (!normalizedTag || normalizedTag === "input") {
-      selector = `input[type=${normalizedInputType}]`
-    } else {
-      selector = `${normalizedTag}[type=${normalizedInputType}]`
-    }
-  }
-
-  return buildCandidate("css", `${root}.locator(${quote(selector)})`, 40, false, "tag fallback")
-}
-
-function buildFallbackCandidate(root: string): LocatorCandidate {
-  return buildCandidate(
-    "fallback",
-    `${root}.locator("TODO_SELECTOR")`,
-    0,
-    false,
-    "missing locator metadata"
-  )
-}
-
-function compareCandidates(left: LocatorCandidate, right: LocatorCandidate): number {
-  if (left.score !== right.score) return right.score - left.score
-  if (left.assumedUnique !== right.assumedUnique) {
-    return Number(right.assumedUnique) - Number(left.assumedUnique)
-  }
-
-  const order: Record<LocatorCandidateKind, number> = {
-    testId: 0,
-    role: 1,
-    placeholder: 2,
-    label: 3,
-    selector: 4,
-    text: 5,
-    css: 6,
-    fallback: 7
-  }
-
-  return order[left.kind] - order[right.kind]
-}
-
 export function buildPlaywrightLocator(
   source: LocatorSource,
   options: LocatorBuildOptions = {}
 ): string {
   const fileInputLocator = isFileInputLocatorSource(source)
   if (source.playwrightLocator && !fileInputLocator) return `page.${source.playwrightLocator}`
-
-  const root = buildFrameRoot(source.framePath)
-  const candidates: LocatorCandidate[] = []
-  const normalizedLabel = source.label ? normalizeText(source.label) : undefined
-  const normalizedPlaceholder = source.placeholder ? normalizeText(source.placeholder) : undefined
-  const normalizedTestId = source.testId ? normalizeText(source.testId) : undefined
-  const normalizedAccessibleName = source.accessibleName
-    ? normalizeText(source.accessibleName)
-    : undefined
-  const normalizedText = source.textContent ? normalizeText(source.textContent) : undefined
-  const normalizedSelector = source.selector ? normalizeText(source.selector) : undefined
-  const derivedTarget = deriveTargetName(source.target)
-  const normalizedTarget = derivedTarget.name
-  const inferredInputRole = inferRoleFromInputMetadata(source.inputType, source.tagName)
-  const role = source.role ?? inferredInputRole ?? derivedTarget.inferredRole ?? options.defaultRole
-  const roleName =
-    normalizedAccessibleName ?? normalizedLabel ?? normalizedPlaceholder ?? normalizedTarget
-
-  pushCandidate(candidates, buildTestIdCandidate(root, normalizedTestId))
-  pushCandidate(candidates, buildLabelCandidate(root, normalizedLabel))
-  pushCandidate(candidates, buildPlaceholderCandidate(root, normalizedPlaceholder))
-  if (!fileInputLocator) {
-    pushCandidate(
-      candidates,
-      buildRoleCandidate(
-        root,
-        role,
-        roleName,
-        source.role
-          ? "explicit role metadata"
-          : inferredInputRole
-            ? "inferred role from input type"
-            : derivedTarget.inferredRole
-              ? "inferred role from target"
-              : "default role",
-        source.role ? 96 : inferredInputRole ? 90 : derivedTarget.inferredRole ? 86 : 82
-      )
-    )
-  }
-  pushCandidate(candidates, buildSelectorCandidate(root, normalizedSelector))
-  pushCandidate(
-    candidates,
-    buildTextCandidate(root, normalizedText ?? normalizedTarget, source.textExact !== false)
-  )
-  pushCandidate(candidates, buildCssCandidate(root, source.tagName, source.inputType))
-
-  if (candidates.length === 0) {
-    candidates.push(buildFallbackCandidate(root))
-  }
-
-  candidates.sort(compareCandidates)
-  return applyOccurrenceHint(candidates[0]!.locator, source)
+  return buildCodegenPlaywrightLocator(source as LocatorSource, options)
 }
 
-function toLocatorSource(
-  action: Extract<AiRecordedBrowserAction, { target?: string }>
-): LocatorSource {
+function toLocatorSource(action: AiRecordedBrowserAction): LocatorSource {
   const locator = action.locator
   return {
-    target: locator?.target ?? action.target,
+    target: locator?.target ?? ("target" in action ? action.target : undefined),
     role: locator?.role as LocatorRole | undefined,
     label: locator?.label,
     placeholder: locator?.placeholder,
@@ -605,8 +341,7 @@ function getClickLocator(
 }
 
 function getFileUploadLocator(
-  action: Extract<AiRecordedBrowserAction, { kind: "fileUpload" }>,
-  fallbackClickAction?: Extract<AiRecordedBrowserAction, { kind: "click" }>
+  action: Extract<AiRecordedBrowserAction, { kind: "fileUpload" }>
 ): string {
   const locator = action.locator
   if (locator) {
@@ -629,22 +364,23 @@ function getFileUploadLocator(
     })
   }
 
-  if (fallbackClickAction?.locator) {
-    const fallbackSource = toLocatorSource(fallbackClickAction)
-    return buildPlaywrightLocator({
-      ...fallbackSource,
-      role: fallbackSource.role,
-      inputType: fallbackSource.inputType ?? "file"
-    })
-  }
-
   return 'page.locator("input[type=\\"file\\"]")'
 }
 
-function clickTargetsFileInput(
-  action: Extract<AiRecordedBrowserAction, { kind: "click" }>
+function sameFramePath(
+  left: BrowserLocatorMetadata | undefined,
+  right: BrowserLocatorMetadata | undefined
 ): boolean {
-  return isFileInputLocatorSource(toLocatorSource(action))
+  return JSON.stringify(left?.framePath ?? []) === JSON.stringify(right?.framePath ?? [])
+}
+
+function shouldSkipClickBeforeFileUpload(
+  clickAction: Extract<AiRecordedBrowserAction, { kind: "click" }>,
+  fileUploadAction: Extract<AiRecordedBrowserAction, { kind: "fileUpload" }>
+): boolean {
+  if (!fileUploadAction.locator) return false
+  if (!sameFramePath(clickAction.locator, fileUploadAction.locator)) return false
+  return isFileInputLocatorSource(toLocatorSource(fileUploadAction))
 }
 
 function canVariableizeClick(action: Extract<AiRecordedBrowserAction, { kind: "click" }>): boolean {
@@ -936,6 +672,57 @@ function parseScriptActionValue(expression: string): {
   }
 }
 
+function extractFakePathFileName(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  return value.match(WINDOWS_FAKEPATH_PATTERN)?.[1]
+}
+
+function normalizeLegacyFileUploadPaths(value: string): string[] {
+  return [extractFakePathFileName(value) ?? value]
+}
+
+function shouldTreatFillAsLegacyFileUpload(
+  locator: BrowserLocatorMetadata,
+  target: string | undefined,
+  value: string | undefined
+): boolean {
+  if (!extractFakePathFileName(value)) return false
+
+  if (
+    isFileInputLocatorSource({
+      tagName: locator.tagName,
+      inputType: locator.inputType,
+      selector: locator.selector
+    })
+  ) {
+    return true
+  }
+
+  const targetText = [
+    locator.accessibleName,
+    locator.label,
+    locator.target,
+    locator.textContent,
+    target
+  ]
+    .filter((item): item is string => Boolean(item))
+    .join(" ")
+
+  return locator.role === "button" || /choose file|upload|文件|上传/iu.test(targetText)
+}
+
+function preservedFileUploadLocator(
+  locator: BrowserLocatorMetadata
+): BrowserLocatorMetadata | undefined {
+  return isFileInputLocatorSource({
+    tagName: locator.tagName,
+    inputType: locator.inputType,
+    selector: locator.selector
+  })
+    ? locator
+    : undefined
+}
+
 function extractVariableIdentifierFromExpression(expression: string): string | undefined {
   return expression.match(/变量_[\p{L}\p{N}_]+/u)?.[0]
 }
@@ -1019,8 +806,9 @@ function parseLocatorExpression(expression: string): BrowserLocatorMetadata {
     return metadata
   }
 
-  const selectorMatch = /locator\(\s*(['"])(.*?)\1\s*\)/u.exec(locatorExpression)
-  if (selectorMatch) metadata.selector = selectorMatch[2]
+  const selectorMatch =
+    /locator\(\s*(((['"])(?:\\.|.)*?\3))\s*\)/u.exec(locatorExpression)
+  if (selectorMatch) metadata.selector = parseLocatorExpressionValue(selectorMatch[1])
   if (!selectorMatch) metadata.playwrightLocator = locatorExpression
   return metadata
 }
@@ -1145,13 +933,19 @@ function parseRecordedScriptActions(
 
     const setInputFilesMatch = /^await\s+(.+)\.setInputFiles\(\s*(.+)\s*\);$/u.exec(line)
     if (setInputFilesMatch) {
+      const locator = parseLocatorExpression(setInputFilesMatch[1]!)
+      if (!locator.inputType) locator.inputType = "file"
+      if (!locator.tagName && locator.selector?.trim().toLowerCase().startsWith("input")) {
+        locator.tagName = "input"
+      }
       const value = parseScriptActionValue(setInputFilesMatch[2]!)
       const paths = value.values ?? (value.value ? [value.value] : [])
       if (paths.length > 0 || value.identifier) {
         pushAction(
           {
             kind: "fileUpload",
-            paths: paths.length > 0 ? paths : value.identifier ? [value.identifier] : []
+            paths: paths.length > 0 ? paths : value.identifier ? [value.identifier] : [],
+            locator
           },
           value.identifier
         )
@@ -1194,6 +988,14 @@ function parseRecordedScriptActions(
         break
       case "fill": {
         const value = parseScriptActionValue(actionMatch[3]!)
+        if (shouldTreatFillAsLegacyFileUpload(locator, actionTarget, value.value)) {
+          pushAction({
+            kind: "fileUpload",
+            paths: normalizeLegacyFileUploadPaths(value.value!),
+            locator: preservedFileUploadLocator(locator)
+          })
+          break
+        }
         pushAction(
           {
             kind: "fill",
@@ -1312,17 +1114,6 @@ function formatFileUploadPaths(
   return quote(action.paths.length === 1 ? action.paths[0]! : action.paths)
 }
 
-function fileChooserVariableNames(actionIndex: number): {
-  chooser: string
-  promise: string
-} {
-  const suffix = actionIndex + 1
-  return {
-    chooser: `fileChooser${suffix}`,
-    promise: `fileChooserPromise${suffix}`
-  }
-}
-
 function extractClickLocatorExpressionFromLine(line: string): string | null {
   const match = /^await\s+(.+)\.(dblclick|click)\(\);\s*$/u.exec(line.trim())
   return match?.[1] ?? null
@@ -1379,30 +1170,21 @@ function generateAiRecordingActionLines(
     const nextAction = actions[index + 1]
     const variableDescriptor = variableDescriptorMap.get(action.id)
 
-    if (action.kind === "click" && nextAction?.kind === "fileUpload") {
-      if (clickTargetsFileInput(action)) {
-        lines.push(
-          `await ${getFileUploadLocator(nextAction, action)}.setInputFiles(${formatFileUploadPaths(
-            nextAction,
-            variableDescriptorMap.get(nextAction.id)
-          )});`
-        )
-        index += 1
+    if (
+      !variableDescriptor &&
+      action.kind === "click" &&
+      nextAction?.kind === "fileUpload" &&
+      shouldSkipClickBeforeFileUpload(action, nextAction)
+    ) {
+      continue
+    }
+
+    if (!variableDescriptor && !(action.kind === "press" && !action.target)) {
+      const generatedLines = generatePlaywrightCodegenActionLines([action])
+      if (generatedLines.length > 0) {
+        lines.push(...generatedLines)
         continue
       }
-
-      const names = fileChooserVariableNames(index)
-      lines.push(`const ${names.promise} = page.waitForEvent("filechooser");`)
-      lines.push(generateActionLine(action, variableDescriptor))
-      lines.push(`const ${names.chooser} = await ${names.promise};`)
-      lines.push(
-        `await ${names.chooser}.setFiles(${formatFileUploadPaths(
-          nextAction,
-          variableDescriptorMap.get(nextAction.id)
-        )});`
-      )
-      index += 1
-      continue
     }
 
     lines.push(generateActionLine(action, variableDescriptor))

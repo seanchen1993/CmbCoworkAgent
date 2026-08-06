@@ -9,7 +9,20 @@ import eslintPluginReactRefresh from "eslint-plugin-react-refresh"
 export default defineConfig(
   // `.claude/worktrees` holds throwaway git worktree copies of the repo (full
   // duplicate trees); linting them just floods output with duplicate findings.
-  { ignores: ["**/node_modules", "**/.vite", "**/dist", "**/out", "**/.claude/worktrees/**"] },
+  // The playwright-codegen vendor copies are upstream Playwright sources kept
+  // verbatim (with @ts-nocheck etc.); only our own adapter files are linted.
+  {
+    ignores: [
+      "**/node_modules",
+      "**/.vite",
+      "**/dist",
+      "**/out",
+      "**/.claude/worktrees/**",
+      "src/main/browser/record/common/playwright-codegen/codegen/**",
+      "src/main/browser/record/common/playwright-codegen/generated/**",
+      "src/main/browser/record/common/playwright-codegen/{cssParser,cssTokenizer,locatorGenerators,selectorParser,stringUtils,deviceDescriptors}.ts"
+    ]
+  },
   eslint.configs.recommended,
   tseslint.configs.recommended,
   eslintPluginReact.configs.flat.recommended,

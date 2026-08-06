@@ -20,12 +20,12 @@ vi.mock("playwright", () => ({
   }
 }))
 
-import { executeRecordingScriptInBuiltinBrowser } from "../../src/main/browser/recording/browser-script-execution-service"
+import { executeRecordingScriptInBuiltinBrowser } from "../../src/main/browser/record/common/browser-script-execution-service"
 import {
   cancelRecordingScriptExecutionInBuiltinBrowser,
   getBrowserScriptExecutionState,
   onBrowserScriptExecutionStateChange
-} from "../../src/main/browser/recording/browser-script-execution-service"
+} from "../../src/main/browser/record/common/browser-script-execution-service"
 
 describe("browser script execution service", () => {
   beforeEach(() => {

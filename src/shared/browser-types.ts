@@ -46,6 +46,13 @@ export interface BrowserLocatorMetadata {
   selector?: string
   tagName?: string
   inputType?: string
+  isTarget?: boolean
+  /**
+   * Whether the recorded element is visible at recording time. Native
+   * radio/checkbox inputs behind custom-styled labels are often hidden;
+   * locators resolving to them fail to click with "element is not visible".
+   */
+  isVisible?: boolean
   framePath?: string[]
   /**
    * A validated locator chain reported by Playwright MCP, for example
@@ -103,6 +110,8 @@ export type AiRecordedBrowserAction =
       kind: "click"
       target?: string
       doubleClick: boolean
+      /** 由 codegen recorder 记录的 check/uncheck 语义（点击 checkbox/radio 本体时产生）。 */
+      toggle?: "check" | "uncheck"
     })
   | (AiRecordedBrowserActionBase & {
       kind: "fill"

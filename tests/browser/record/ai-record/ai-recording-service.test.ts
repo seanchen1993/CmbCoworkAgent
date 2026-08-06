@@ -6,11 +6,11 @@ import {
   resetAiRecordingForTests,
   startAiRecording,
   stopAiRecording
-} from "../../../src/main/browser/recording/ai-recording-service"
+} from "../../../../src/main/browser/record/ai-record/ai-recording-service"
 import {
   extractAiRecordingVariableNames,
   parseAiRecordingScript
-} from "../../../src/shared/browser-ai-recording-script"
+} from "../../../../src/shared/browser-ai-recording-script"
 
 const LOGIN_SNAPSHOT_RESULT = `### Snapshot
 \`\`\`yaml
@@ -88,15 +88,15 @@ describe("AI recording service", () => {
       value: "super-secret",
       sensitive: true
     })
-    expect(session.script).toContain('await page.goto("https://example.com/login");')
+    expect(session.script).toContain("await page.goto('https://example.com/login');")
     expect(session.script).toContain(
-      'await page.getByRole("button", { name: "Login", exact: true }).click();'
+      "await page.getByRole('button', { name: 'Login', exact: true }).click();"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Email", exact: true }).fill("final@example.com");'
+      "await page.getByRole('textbox', { name: 'Email', exact: true }).fill('final@example.com');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Password", exact: true }).fill("super-secret");'
+      "await page.getByRole('textbox', { name: 'Password', exact: true }).fill('super-secret');"
     )
   })
 
@@ -171,12 +171,12 @@ describe("AI recording service", () => {
 
     expect(session.actions).toHaveLength(3)
     expect(session.script).toContain(
-      'await page.getByRole("tab", { name: "Actions", exact: true }).click();'
+      "await page.getByRole('tab', { name: 'Actions', exact: true }).click();"
     )
-    expect(session.script.match(/getByRole\("tab", \{ name: "Actions", exact: true \}\)/g)).toHaveLength(1)
+    expect(session.script.match(/getByRole\('tab', \{ name: 'Actions', exact: true \}\)/g)).toHaveLength(1)
     expect(session.script.match(/Branch selector/g)).toHaveLength(1)
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Search", exact: true }).press("Enter");'
+      "await page.getByRole('textbox', { name: 'Search', exact: true }).press('Enter');"
     )
   })
 
@@ -218,13 +218,13 @@ describe("AI recording service", () => {
       sensitive: true
     })
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Username", exact: true }).fill("john.doe");'
+      "await page.getByRole('textbox', { name: 'Username', exact: true }).fill('john.doe');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Email", exact: true }).fill("john@example.com");'
+      "await page.getByRole('textbox', { name: 'Email', exact: true }).fill('john@example.com');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "Password", exact: true }).fill("my-secret");'
+      "await page.getByRole('textbox', { name: 'Password', exact: true }).fill('my-secret');"
     )
   })
 
@@ -261,7 +261,7 @@ describe("AI recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      'await page.getByRole("spinbutton", { name: "年龄", exact: true }).fill("11");'
+      "await page.getByRole('spinbutton', { name: '年龄', exact: true }).fill('11');"
     )
   })
 
@@ -298,11 +298,11 @@ describe("AI recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      'await page.getByRole("slider", { name: "编程经验（年）", exact: true }).fill("6");'
+      "await page.getByRole('slider', { name: '编程经验（年）', exact: true }).fill('6');"
     )
   })
 
-  it("clicks radio-card choices through their visible label wrapper", () => {
+  it("clicks radio-card choices with their semantic role", () => {
     startAiRecording({ threadId: "thread-1" })
 
     recordSuccessfulAiBrowserToolCall({
@@ -332,10 +332,9 @@ describe("AI recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      'await page.locator("label:has(input[name=\\"role\\"][value=\\"designer\\"])").click();'
+      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
     )
-    expect(session.script).not.toContain('getByLabel("🎨 设计师 做设计的人").click()')
-    expect(session.script).not.toContain('getByRole("radio"')
+    expect(session.script).not.toContain(`label:has(input[name="role"][value="designer"])`)
   })
 
   it("uses richer locator metadata when available", () => {
@@ -364,9 +363,9 @@ describe("AI recording service", () => {
 
     const session = stopAiRecording()
 
-    expect(session.script).toContain('await page.getByTestId("login-submit").click();')
+    expect(session.script).toContain("await page.getByTestId('login-submit').click();")
     expect(session.script).toContain(
-      'await page.frameLocator("iframe[name=\\"payment\\"]").getByPlaceholder("Card number").fill("4242424242424242");'
+      `await page.locator('iframe[name="payment"]').contentFrame().getByPlaceholder('Card number', { exact: true }).fill('4242424242424242');`
     )
   })
 
@@ -409,10 +408,10 @@ await page.getByRole('textbox', { name: '邮箱' }).fill('test@qq.com');
       })
     })
     expect(session.script).toContain(
-      'await page.getByRole("combobox", { name: "用户名 (支持自动补全)", exact: true }).fill("mktui");'
+      "await page.getByRole('combobox', { name: '用户名 (支持自动补全)', exact: true }).fill('mktui');"
     )
     expect(session.script).toContain(
-      'await page.getByRole("textbox", { name: "邮箱", exact: true }).fill("test@qq.com");'
+      "await page.getByRole('textbox', { name: '邮箱', exact: true }).fill('test@qq.com');"
     )
     expect(session.script).not.toContain("TODO_SELECTOR")
   })
@@ -448,7 +447,7 @@ await page.getByText('分支选项 release', { exact: true }).click();
       })
     })
     expect(session.script).toContain(
-      'await page.getByRole("option", { name: "release", exact: true }).click();'
+      "await page.getByRole('option', { name: 'release', exact: true }).click();"
     )
   })
 
@@ -478,7 +477,7 @@ await page.getByText('分支选项 release', { exact: true }).click();
       })
     })
     expect(session.script).toContain(
-      'await page.getByRole("menuitemradio", { name: "fix/bug-doc-qyang", exact: true }).click();'
+      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
     )
     expect(session.script).not.toContain('locator("button[name=\\"branch\\"]")')
   })
@@ -509,13 +508,11 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
       paths: ["/tmp/fixtures/contract.pdf"]
     })
     expect(session.script).toContain(
-      'const fileChooserPromise1 = page.waitForEvent("filechooser");'
+      "await page.getByRole('button', { name: 'Upload document', exact: true }).click();"
     )
     expect(session.script).toContain(
-      'await page.getByRole("button", { name: "Upload document", exact: true }).click();'
+      "await page.locator('input[type=file]').setInputFiles('/tmp/fixtures/contract.pdf');"
     )
-    expect(session.script).toContain("const fileChooser1 = await fileChooserPromise1;")
-    expect(session.script).toContain('await fileChooser1.setFiles("/tmp/fixtures/contract.pdf");')
     expect(session.script).not.toContain("TODO_FILE_INPUT_SELECTOR")
   })
 

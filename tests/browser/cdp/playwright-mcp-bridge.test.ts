@@ -14,7 +14,7 @@ import {
   getAiRecording,
   resetAiRecordingForTests,
   startAiRecording
-} from "../../../src/main/browser/recording/ai-recording-service"
+} from "../../../src/main/browser/record/ai-record/ai-recording-service"
 import {
   autoSelectPlaywrightInAppBrowserTab,
   invokeMcpToolWithPlaywrightInAppBrowserSupport,

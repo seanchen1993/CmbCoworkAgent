@@ -6,15 +6,15 @@ import type {
   BrowserNavigationSource,
   ManualRecordingStartOptions,
   BrowserRecordingDraftUpdateInput
-} from "../../../shared/browser-types"
+} from "../../../../shared/browser-types"
 import {
   generateAiRecordingScript,
   parseAiRecordingScript
-} from "../../../shared/browser-ai-recording-script"
+} from "../../../../shared/browser-ai-recording-script"
 import {
-  MANUAL_RECORDER_EVENT_PREFIX,
-  buildManualRecorderInjectionScript
-} from "./manual-recorder-script.js"
+  buildPlaywrightManualRecorderInjectionScript,
+  parsePlaywrightManualRecorderEvent
+} from "./manual-recorder-playwright-adapter"
 
 let activeSession: AiRecordingSession | null = null
 let lastSession: AiRecordingSession | null = null
@@ -42,6 +42,9 @@ interface ManualRecorderLocatorPayload {
   selector?: string
   tagName?: string
   inputType?: string
+  isTarget?: boolean
+  isVisible?: boolean
+  playwrightLocator?: string
   matchCount?: number
   nth?: number
 }
@@ -52,6 +55,7 @@ interface ManualRecorderClickEvent extends ManualRecorderEventBase {
   locatorCandidates?: ManualRecorderLocatorPayload[]
   doubleClick?: boolean
   button?: number
+  toggle?: "check" | "uncheck"
 }
 
 interface ManualRecorderFillEvent extends ManualRecorderEventBase {
@@ -179,6 +183,10 @@ function normalizeLocatorPayload(
     selector: readString(payload.selector),
     tagName: readString(payload.tagName),
     inputType: readString(payload.inputType),
+    isTarget: payload.isTarget === true,
+    isVisible:
+      typeof payload.isVisible === "boolean" ? payload.isVisible : undefined,
+    playwrightLocator: readString(payload.playwrightLocator),
     framePath: framePath.length > 0 ? framePath : undefined,
     matchCount: (() => {
       const matchCount = readNonNegativeInteger(payload.matchCount)
@@ -211,10 +219,19 @@ function locatorPayloadScore(
   const label = readString(payload.label)
   const placeholder = readString(payload.placeholder)
   const selector = readString(payload.selector)
+  const isTarget = payload.isTarget === true
+  const matchCount = readNonNegativeInteger(payload.matchCount)
+  const nth = readNonNegativeInteger(payload.nth)
+  const isTargetSvg = tagName === "svg" && isTarget
 
   let score = 0
-  if (tagName && DECORATIVE_TAG_PATTERN.test(tagName)) score -= 120
+  if (tagName && DECORATIVE_TAG_PATTERN.test(tagName)) {
+    score -= isTargetSvg && (nth !== undefined || (matchCount ?? 0) > 1) ? 10 : 120
+  }
   if (rawRole && DECORATIVE_ROLE_PATTERN.test(rawRole)) score -= 80
+  if (isTarget) score += 40
+  if (isTargetSvg) score += 80
+  if (isTargetSvg && nth !== undefined) score += 40
 
   if (normalizedRole) score += 120
   else if (tagName && INTERACTIVE_TAG_NAMES.has(tagName)) score += 110
@@ -235,6 +252,7 @@ function locatorPayloadScore(
 
   if (tagName && (tagName === "div" || tagName === "span" || tagName === "li")) {
     if (accessibleName || textContent || label || testId) score += 10
+    if (textContent && textContent.length > 40) score -= 20
   }
 
   score -= candidateIndex * 5
@@ -275,7 +293,9 @@ function isSensitiveTarget(locator: BrowserLocatorMetadata | undefined): boolean
       locator.placeholder,
       locator.accessibleName,
       locator.testId,
-      locator.inputType
+      locator.inputType,
+      locator.selector,
+      locator.playwrightLocator
     ].some((value) => value && SENSITIVE_TARGET_PATTERN.test(value))
   )
 }
@@ -287,6 +307,7 @@ function actionTargetKey(action: AiRecordedBrowserAction): string {
     kind: action.kind,
     target: target ?? null,
     key: "key" in action ? action.key : null,
+    toggle: "toggle" in action ? action.toggle ?? null : null,
     locator: locator
       ? {
           target: locator.target,
@@ -297,7 +318,9 @@ function actionTargetKey(action: AiRecordedBrowserAction): string {
           accessibleName: locator.accessibleName,
           textContent: locator.textContent,
           selector: locator.selector,
+          playwrightLocator: locator.playwrightLocator,
           framePath: locator.framePath,
+          isTarget: locator.isTarget,
           matchCount: locator.matchCount,
           nth: locator.nth
         }
@@ -508,6 +531,7 @@ function normalizeManualEvent(
         timestamp,
         target: locator?.target,
         doubleClick: event.doubleClick === true,
+        toggle: event.toggle === "check" || event.toggle === "uncheck" ? event.toggle : undefined,
         locator
       }
     }
@@ -684,7 +708,8 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
   if (!activeSession || activeSession.status !== "recording") return
   if (frame.isDestroyed() || frame.url.startsWith("devtools:")) return
 
-  const script = buildManualRecorderInjectionScript()
+  // 主链路只执行 Playwright 注入脚本；旧脚本保留在仓库里，但不再运行。
+  const script = buildPlaywrightManualRecorderInjectionScript()
 
   try {
     await frame.executeJavaScript(script)
@@ -702,24 +727,13 @@ export async function installManualRecorderForSubtree(frame: WebFrameMain): Prom
 
 export function recordManualRecorderConsoleMessage(frame: WebFrameMain, message: string): void {
   if (!activeSession || activeSession.status !== "recording") return
-  if (!message.startsWith(MANUAL_RECORDER_EVENT_PREFIX)) return
-
-  let parsed: ManualRecorderEvent
-  try {
-    parsed = JSON.parse(message.slice(MANUAL_RECORDER_EVENT_PREFIX.length)) as ManualRecorderEvent
-  } catch {
+  const framePath = buildFramePath(frame)
+  const playwrightEvent = parsePlaywrightManualRecorderEvent(message, framePath)
+  if (playwrightEvent) {
+    const action = normalizeManualEvent(playwrightEvent as ManualRecorderEvent, framePath)
+    if (action) appendAction(activeSession, action)
     return
   }
-
-  if (parsed.type === "navigate") {
-    const url = readString(parsed.url ?? parsed.frameHref)
-    if (url) recordManualNavigation(url, "implicit")
-    return
-  }
-
-  const action = normalizeManualEvent(parsed, buildFramePath(frame))
-  if (!action) return
-  appendAction(activeSession, action)
 }
 
 export function resetManualRecordingForTests(): void {

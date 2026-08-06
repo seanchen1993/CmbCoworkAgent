@@ -4138,7 +4138,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             if (msg.role === "tool" && msg.tool_call_id) {
               acc = upsertToolCallState(acc, msg.tool_call_id, {
                 name: msg.name,
-                status: toolResultStatusFromMessage(msg)
+                status: toolResultStatusFromMessage(msg as Message)
               })
             }
             return acc

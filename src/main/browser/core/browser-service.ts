@@ -20,7 +20,7 @@ import {
   markNextManualNavigationExplicit,
   recordManualRecorderConsoleMessage,
   recordManualNavigation
-} from "../recording/manual-recording-service"
+} from "../record/manual-record/manual-recording-service"
 import type {
   BrowserAttachOptions,
   BrowserBounds,

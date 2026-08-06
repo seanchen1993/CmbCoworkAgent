@@ -1,16 +1,16 @@
 import { parse, type Node } from "acorn"
 import path from "node:path"
-import { getCurrentBrowserCdpPort } from "../cdp/browser-cdp"
-import { getGlobalBrowserService } from "../core/browser-service-registry"
+import { getCurrentBrowserCdpPort } from "../../cdp/browser-cdp"
+import { getGlobalBrowserService } from "../../core/browser-service-registry"
 import {
   applyAiRecordingVariableValues,
   buildAiRecordingExecutableScript
-} from "../../../shared/browser-ai-recording-script"
+} from "../../../../shared/browser-ai-recording-script"
 import type {
   BrowserScriptExecutionInput,
   BrowserScriptExecutionState,
   BrowserState
-} from "../../../shared/browser-types"
+} from "../../../../shared/browser-types"
 
 const BROWSER_SCRIPT_EXECUTION_LOG_PREFIX = "[内置浏览器][BrowserScriptExecution]"
 const TARGET_DISCOVERY_TIMEOUT_MS = 5_000

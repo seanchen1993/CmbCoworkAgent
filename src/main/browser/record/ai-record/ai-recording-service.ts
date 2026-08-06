@@ -4,12 +4,12 @@ import type {
   AiRecordingSession,
   AiRecordingStartOptions,
   BrowserRecordingDraftUpdateInput
-} from "../../../shared/browser-types"
+} from "../../../../shared/browser-types"
 import {
   parseAiRecordingScript,
   generateAiRecordingScript,
   type LocatorRole
-} from "../../../shared/browser-ai-recording-script"
+} from "../../../../shared/browser-ai-recording-script"
 
 let activeSession: AiRecordingSession | null = null
 let lastSession: AiRecordingSession | null = null
@@ -62,7 +62,7 @@ function extractSnapshotRef(value: unknown): string | undefined {
   const text = readString(value)
   if (!text) return undefined
 
-  return text.match(/(?:^|[\s\[])(?:aria-)?ref=(e[\w-]+)/iu)?.[1] ?? text.match(/^e[\w-]+$/iu)?.[0]
+  return text.match(/(?:^|[\s[])(?:aria-)?ref=(e[\w-]+)/iu)?.[1] ?? text.match(/^e[\w-]+$/iu)?.[0]
 }
 
 function getRawTarget(args: Record<string, unknown>): string | undefined {

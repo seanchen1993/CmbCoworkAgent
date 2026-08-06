@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
-import { extractAiRecordingVariables } from "../../../shared/browser-ai-recording-script"
+import { extractAiRecordingVariables } from "../../../../shared/browser-ai-recording-script"
 import type {
   BrowserScriptLibraryDeleteInput,
   BrowserScriptLibraryEntry,
@@ -10,7 +10,7 @@ import type {
   BrowserScriptLibraryReadInput,
   BrowserScriptLibrarySaveInput,
   BrowserScriptLibraryUpdateInput
-} from "../../../shared/browser-types"
+} from "../../../../shared/browser-types"
 
 const BROWSER_LIBRARY_LOG_PREFIX = "[内置浏览器][BrowserScriptLibrary]"
 const BROWSER_LIBRARY_DIR = "browser"

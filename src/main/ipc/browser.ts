@@ -9,7 +9,7 @@ import {
   startAiRecording,
   stopAiRecording,
   updateAiRecordingDraft
-} from "../browser/recording/ai-recording-service"
+} from "../browser/record/ai-record/ai-recording-service"
 import {
   getManualRecording,
   installManualRecorderForSubtree,
@@ -18,21 +18,21 @@ import {
   startManualRecording,
   stopManualRecording,
   updateManualRecordingDraft
-} from "../browser/recording/manual-recording-service"
+} from "../browser/record/manual-record/manual-recording-service"
 import {
   deleteBrowserScriptLibraryEntry,
   listBrowserScriptLibraryEntries,
   readBrowserScriptLibraryScript,
   saveBrowserScriptLibraryEntry,
   updateBrowserScriptLibraryEntry
-} from "../browser/recording/browser-script-library-service"
+} from "../browser/record/common/browser-script-library-service"
 import {
   cancelRecordingScriptExecutionInBuiltinBrowser,
   executeRecordingScriptInBuiltinBrowser,
   getBrowserScriptExecutionState,
   isBrowserScriptExecutionCancelledError,
   onBrowserScriptExecutionStateChange
-} from "../browser/recording/browser-script-execution-service"
+} from "../browser/record/common/browser-script-execution-service"
 import type {
   BrowserRecordingDraftUpdateInput,
   BrowserScriptLibraryDeleteInput,

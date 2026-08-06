@@ -1,3 +1,12 @@
+import {
+  asLocators,
+  escapeForAttributeSelector,
+  escapeForTextSelector
+} from "./playwrightVendored"
+
+// 项目适配器：将项目录制元数据转换为 Playwright 源码副本需要的格式化输入，
+// 不修改复制进来的上游源码。
+
 export type LocatorRole =
   | "button"
   | "checkbox"
@@ -26,8 +35,10 @@ export interface LocatorSource {
   tagName?: string
   inputType?: string
   framePath?: string[]
+  textExact?: boolean
   matchCount?: number
   nth?: number
+  isVisible?: boolean
 }
 
 export interface LocatorBuildOptions {
@@ -57,6 +68,10 @@ export interface LocatorResolution {
   candidates: LocatorCandidate[]
 }
 
+interface InternalLocatorCandidate extends LocatorCandidate {
+  selector: string
+}
+
 const ROLE_PATTERNS: Array<{ pattern: RegExp; role: LocatorRole }> = [
   { pattern: /\bradio button\b|\b单选框\b/iu, role: "radio" },
   { pattern: /\bslider\b|\b滑块\b|\b范围滑块\b|\b拖动条\b/iu, role: "slider" },
@@ -80,10 +95,6 @@ const ROLE_PATTERNS: Array<{ pattern: RegExp; role: LocatorRole }> = [
   { pattern: /\bmenu item\b|\bmenuitem\b|\b菜单项\b/iu, role: "menuitem" },
   { pattern: /\boption\b|\b选项\b/iu, role: "option" }
 ]
-
-function quote(value: unknown): string {
-  return JSON.stringify(value)
-}
 
 function normalizeText(value: string): string {
   return value
@@ -126,14 +137,6 @@ function deriveTargetName(
   }
 }
 
-function buildFrameRoot(framePath: string[] | undefined): string {
-  if (!framePath || framePath.length === 0) return "page"
-
-  return framePath.reduce((expression, frameSelector) => {
-    return `${expression}.frameLocator(${quote(frameSelector)})`
-  }, "page")
-}
-
 function isFileInputLocatorSource(
   source: Pick<LocatorSource, "tagName" | "inputType" | "selector">
 ): boolean {
@@ -174,14 +177,16 @@ function inferRoleFromInputMetadata(
 
 function buildCandidate(
   kind: LocatorCandidateKind,
-  locator: string,
+  selector: string,
+  source: LocatorSource,
   score: number,
   assumedUnique: boolean,
   reason: string
-): LocatorCandidate {
+): InternalLocatorCandidate {
   return {
     kind,
-    locator,
+    selector,
+    locator: formatLocator(selector, source, false),
     score,
     assumedUnique,
     reason
@@ -189,8 +194,8 @@ function buildCandidate(
 }
 
 function pushCandidate(
-  candidates: LocatorCandidate[],
-  candidate: LocatorCandidate | null | undefined
+  candidates: InternalLocatorCandidate[],
+  candidate: InternalLocatorCandidate | null | undefined
 ): void {
   if (!candidate) return
 
@@ -202,55 +207,78 @@ function pushCandidate(
 
   if (candidate.score > existing.score) {
     existing.kind = candidate.kind
+    existing.selector = candidate.selector
+    existing.locator = candidate.locator
     existing.score = candidate.score
     existing.assumedUnique = candidate.assumedUnique
     existing.reason = candidate.reason
   }
 }
 
+function buildRoleSelector(role: LocatorRole, name: string): string {
+  return `internal:role=${role}[name=${escapeForAttributeSelector(name, true)}]`
+}
+
 function buildRoleCandidate(
-  root: string,
+  source: LocatorSource,
   role: LocatorRole | undefined,
   name: string | undefined,
   reason: string,
   score: number
-): LocatorCandidate | null {
+): InternalLocatorCandidate | null {
   if (!role || !name) return null
+  return buildCandidate("role", buildRoleSelector(role, name), source, score, true, reason)
+}
 
+function buildLabelCandidate(
+  source: LocatorSource,
+  label: string | undefined
+): InternalLocatorCandidate | null {
+  if (!label) return null
   return buildCandidate(
-    "role",
-    `${root}.getByRole(${quote(role)}, { name: ${quote(name)}, exact: true })`,
-    score,
+    "label",
+    `internal:label=${escapeForTextSelector(label, true)}`,
+    source,
+    90,
     true,
-    reason
+    "explicit label"
   )
 }
 
-function buildLabelCandidate(root: string, label: string | undefined): LocatorCandidate | null {
-  if (!label) return null
-  return buildCandidate("label", `${root}.getByLabel(${quote(label)})`, 90, true, "explicit label")
-}
-
 function buildPlaceholderCandidate(
-  root: string,
+  source: LocatorSource,
   placeholder: string | undefined
-): LocatorCandidate | null {
+): InternalLocatorCandidate | null {
   if (!placeholder) return null
   return buildCandidate(
     "placeholder",
-    `${root}.getByPlaceholder(${quote(placeholder)})`,
+    `internal:attr=[placeholder=${escapeForAttributeSelector(placeholder, true)}]`,
+    source,
     92,
     true,
     "explicit placeholder"
   )
 }
 
-function buildTestIdCandidate(root: string, testId: string | undefined): LocatorCandidate | null {
+function buildTestIdCandidate(
+  source: LocatorSource,
+  testId: string | undefined
+): InternalLocatorCandidate | null {
   if (!testId) return null
-  return buildCandidate("testId", `${root}.getByTestId(${quote(testId)})`, 100, true, "explicit test id")
+  return buildCandidate(
+    "testId",
+    `internal:testid=[data-testid=${escapeForAttributeSelector(testId, true)}]`,
+    source,
+    100,
+    true,
+    "explicit test id"
+  )
 }
 
-function buildSelectorCandidate(root: string, selector: string | undefined): LocatorCandidate | null {
+function buildSelectorCandidate(
+  source: LocatorSource,
+  selector: string | undefined
+): InternalLocatorCandidate | null {
   if (!selector) return null
   const genericTagOnly = /^[a-z][a-z0-9-]*$/iu.test(selector)
   const anchorHrefSelector = /^\s*a\[\s*href\s*=/iu.test(selector)
@@ -258,7 +286,8 @@ function buildSelectorCandidate(root: string, selector: string | undefined): Loc
     anchorHrefSelector && !/:visible\s*$/iu.test(selector) ? `${selector}:visible` : selector
   return buildCandidate(
     "selector",
-    `${root}.locator(${quote(normalizedSelector)})`,
+    normalizedSelector,
+    source,
     anchorHrefSelector ? 98 : genericTagOnly ? 25 : 70,
     anchorHrefSelector,
     anchorHrefSelector
@@ -269,11 +298,16 @@ function buildSelectorCandidate(root: string, selector: string | undefined): Loc
   )
 }
 
-function buildTextCandidate(root: string, text: string | undefined): LocatorCandidate | null {
+function buildTextCandidate(
+  source: LocatorSource,
+  text: string | undefined,
+  exact = true
+): InternalLocatorCandidate | null {
   if (!text) return null
   return buildCandidate(
     "text",
-    `${root}.getByText(${quote(text)}, { exact: true })`,
+    `internal:text=${escapeForTextSelector(text, exact)}`,
+    source,
     55,
     false,
     "text fallback"
@@ -281,10 +315,10 @@ function buildTextCandidate(root: string, text: string | undefined): LocatorCand
 }
 
 function buildCssCandidate(
-  root: string,
+  source: LocatorSource,
   tagName: string | undefined,
   inputType: string | undefined
-): LocatorCandidate | null {
+): InternalLocatorCandidate | null {
   const normalizedTag = tagName ? normalizeText(tagName).toLowerCase() : ""
   const normalizedInputType = inputType ? normalizeText(inputType).toLowerCase() : ""
 
@@ -299,27 +333,30 @@ function buildCssCandidate(
     }
   }
 
-  return buildCandidate("css", `${root}.locator(${quote(selector)})`, 40, false, "tag fallback")
+  return buildCandidate("css", selector, source, 40, false, "tag fallback")
 }
 
-function buildFallbackCandidate(root: string): LocatorCandidate {
-  return buildCandidate("fallback", `${root}.locator("TODO_SELECTOR")`, 0, false, "missing locator metadata")
+function buildFallbackCandidate(source: LocatorSource): InternalLocatorCandidate {
+  return buildCandidate("fallback", "TODO_SELECTOR", source, 0, false, "missing locator metadata")
 }
 
-function applyOccurrenceHint(locator: string, source: LocatorSource): string {
-  if (/\.locator\(\s*["']a\[\s*href\s*=/iu.test(locator)) {
-    return locator
-  }
+// 原生 radio/checkbox 常被自定义样式隐藏（opacity:0、零尺寸等），此时
+// getByLabel/getByRole/getByTestId 都会解析到隐藏的 <input>，回放点击会报
+// "element is not visible"。只有录制时明确检测到元素不可见（isVisible=false）
+// 才切换为点击可见的 label 文本（与上游 Playwright codegen 一致）。
+function isHiddenToggleInput(
+  source: LocatorSource,
+  inferredInputRole: LocatorRole | undefined
+): boolean {
+  return (
+    source.isVisible === false &&
+    (inferredInputRole === "radio" || inferredInputRole === "checkbox")
+  )
+}
 
-  if (typeof source.nth === "number" && Number.isInteger(source.nth) && source.nth >= 0) {
-    return `${locator}.nth(${source.nth})`
-  }
-
-  if (typeof source.matchCount === "number" && source.matchCount > 1) {
-    return `${locator}.first()`
-  }
-
-  return locator
+interface InternalLocatorResolution {
+  best: InternalLocatorCandidate
+  candidates: InternalLocatorCandidate[]
 }
 
 function compareCandidates(left: LocatorCandidate, right: LocatorCandidate): number {
@@ -342,13 +379,93 @@ function compareCandidates(left: LocatorCandidate, right: LocatorCandidate): num
   return order[left.kind] - order[right.kind]
 }
 
-export function resolvePlaywrightLocator(
+export function buildFullSelector(framePath: string[] | undefined, selector: string): string {
+  if (!framePath || framePath.length === 0) return selector
+  return [...framePath, selector].join(" >> internal:control=enter-frame >> ")
+}
+
+function applyOccurrenceHint(selector: string, source: LocatorSource): string {
+  if (/^\s*a\[\s*href\s*=/iu.test(selector)) {
+    return selector
+  }
+
+  if (typeof source.nth === "number" && Number.isInteger(source.nth) && source.nth >= 0) {
+    return `${selector} >> nth=${source.nth}`
+  }
+
+  if (typeof source.matchCount === "number" && source.matchCount > 1) {
+    return `${selector} >> nth=0`
+  }
+
+  return selector
+}
+
+function preferNonCssVariant(locators: string[]): string[] {
+  const preferred = locators.filter(
+    (locator) => !locator.includes('"css=') && !locator.includes("'css=")
+  )
+  return preferred.length > 0 ? preferred : locators
+}
+
+function chooseLocatorVariant(locators: string[], source: LocatorSource): string {
+  let candidates = locators
+
+  if (source.framePath?.length) {
+    const frameLocatorCandidates = candidates.filter((locator) => locator.startsWith("frameLocator("))
+    if (frameLocatorCandidates.length > 0) candidates = frameLocatorCandidates
+  }
+
+  candidates = preferNonCssVariant(candidates)
+
+  if (source.nth === 0) {
+    const nthCandidates = candidates.filter((locator) => locator.includes(".nth(0)"))
+    if (nthCandidates.length > 0) candidates = nthCandidates
+  } else if (
+    source.nth === undefined &&
+    typeof source.matchCount === "number" &&
+    source.matchCount > 1
+  ) {
+    const firstCandidates = candidates.filter((locator) => locator.includes(".first()"))
+    if (firstCandidates.length > 0) candidates = firstCandidates
+  }
+
+  return candidates[0] ?? locators[0] ?? 'locator("TODO_SELECTOR")'
+}
+
+function formatLocator(selector: string, source: LocatorSource, includeOccurrenceHint: boolean): string {
+  const effectiveSelector = includeOccurrenceHint ? applyOccurrenceHint(selector, source) : selector
+  const locators = asLocators(
+    "javascript",
+    buildFullSelector(source.framePath, effectiveSelector),
+    false,
+    20,
+    '"'
+  )
+  return `page.${chooseLocatorVariant(locators, source)}`
+}
+
+// 项目适配器：将 Playwright 录制器直接产出的内部 selector 格式化为
+// 可写入录制动作的 locator 链。这里不再重新推断 role、label 等项目字段。
+export function formatPlaywrightSelector(
+  selector: string,
+  framePath?: string[]
+): string {
+  const locators = asLocators(
+    "javascript",
+    buildFullSelector(framePath, selector),
+    false,
+    20,
+    '"'
+  )
+  return chooseLocatorVariant(locators, { framePath })
+}
+
+function resolveInternalPlaywrightLocator(
   source: LocatorSource,
   options: LocatorBuildOptions = {}
-): LocatorResolution {
-  const root = buildFrameRoot(source.framePath)
+): InternalLocatorResolution {
   const fileInputLocator = isFileInputLocatorSource(source)
-  const candidates: LocatorCandidate[] = []
+  const candidates: InternalLocatorCandidate[] = []
   const normalizedLabel = source.label ? normalizeText(source.label) : undefined
   const normalizedPlaceholder = source.placeholder ? normalizeText(source.placeholder) : undefined
   const normalizedTestId = source.testId ? normalizeText(source.testId) : undefined
@@ -367,43 +484,82 @@ export function resolvePlaywrightLocator(
     normalizedPlaceholder ??
     normalizedTarget
 
-  pushCandidate(candidates, buildTestIdCandidate(root, normalizedTestId))
-  pushCandidate(candidates, buildLabelCandidate(root, normalizedLabel))
-  pushCandidate(candidates, buildPlaceholderCandidate(root, normalizedPlaceholder))
-  if (!fileInputLocator) {
+  // 隐藏的 radio/checkbox：跳过所有会解析到隐藏 <input> 的候选（testId/label/
+  // role/placeholder/selector/css），只保留点击可见 label 文本的 text 候选。
+  const hiddenToggle = isHiddenToggleInput(source, inferredInputRole)
+  const hiddenToggleText = hiddenToggle
+    ? normalizedLabel ?? normalizedAccessibleName ?? normalizedTarget
+    : undefined
+
+  if (hiddenToggle && hiddenToggleText) {
     pushCandidate(
       candidates,
-      buildRoleCandidate(
-        root,
-        role,
-        roleName,
-        source.role
-          ? "explicit role metadata"
-          : inferredInputRole
-            ? "inferred role from input type"
-          : derivedTarget.inferredRole
-            ? "inferred role from target"
-            : "default role",
-        source.role ? 96 : inferredInputRole ? 90 : derivedTarget.inferredRole ? 86 : 82
+      buildCandidate(
+        "text",
+        `internal:text=${escapeForTextSelector(hiddenToggleText, true)}`,
+        source,
+        95,
+        true,
+        "hidden toggle input label text"
       )
     )
+  } else {
+    pushCandidate(candidates, buildTestIdCandidate(source, normalizedTestId))
+    pushCandidate(candidates, buildLabelCandidate(source, normalizedLabel))
+    pushCandidate(candidates, buildPlaceholderCandidate(source, normalizedPlaceholder))
+    if (!fileInputLocator) {
+      pushCandidate(
+        candidates,
+        buildRoleCandidate(
+          source,
+          role,
+          roleName,
+          source.role
+            ? "explicit role metadata"
+            : inferredInputRole
+              ? "inferred role from input type"
+              : derivedTarget.inferredRole
+                ? "inferred role from target"
+                : "default role",
+          source.role ? 96 : inferredInputRole ? 90 : derivedTarget.inferredRole ? 86 : 82
+        )
+      )
+    }
+    pushCandidate(candidates, buildSelectorCandidate(source, normalizedSelector))
+    pushCandidate(
+      candidates,
+      buildTextCandidate(source, normalizedText ?? normalizedTarget, source.textExact !== false)
+    )
+    pushCandidate(candidates, buildCssCandidate(source, source.tagName, source.inputType))
   }
-  pushCandidate(candidates, buildSelectorCandidate(root, normalizedSelector))
-  pushCandidate(candidates, buildTextCandidate(root, normalizedText ?? normalizedTarget))
-  pushCandidate(candidates, buildCssCandidate(root, source.tagName, source.inputType))
 
   if (candidates.length === 0) {
-    candidates.push(buildFallbackCandidate(root))
+    candidates.push(buildFallbackCandidate(source))
   }
 
   candidates.sort(compareCandidates)
-  const best = candidates[0]!
+  return { best: candidates[0]!, candidates }
+}
+
+export function resolvePlaywrightSelector(
+  source: LocatorSource,
+  options: LocatorBuildOptions = {}
+): string {
+  const { best } = resolveInternalPlaywrightLocator(source, options)
+  return buildFullSelector(source.framePath, applyOccurrenceHint(best.selector, source))
+}
+
+export function resolvePlaywrightLocator(
+  source: LocatorSource,
+  options: LocatorBuildOptions = {}
+): LocatorResolution {
+  const resolution = resolveInternalPlaywrightLocator(source, options)
   return {
     best: {
-      ...best,
-      locator: applyOccurrenceHint(best.locator, source)
+      ...resolution.best,
+      locator: formatLocator(resolution.best.selector, source, true)
     },
-    candidates
+    candidates: resolution.candidates
   }
 }
 

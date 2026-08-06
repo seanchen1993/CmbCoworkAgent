@@ -37,7 +37,7 @@ test("AI recorded flow", async ({ page }) => {
     })
 
     expect(regenerated).toContain(
-      'await page.getByRole("button", { name: "Save", exact: true }).first().click();'
+      "await page.getByRole('button', { name: 'Save', exact: true }).first().click();"
     )
   })
 
@@ -114,12 +114,12 @@ test("manual recorded flow", async ({ page }) => {
     )
 
     expect(script).toContain(
-      'await page.locator("a[href=\\"/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml\\"]:visible").click();'
+      `await page.locator('a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]:visible').click();`
     )
     expect(script).not.toContain(".nth(1)")
   })
 
-  it("replays file-input clicks as direct setInputFiles calls", () => {
+  it("collapses file-input clicks into direct setInputFiles calls", () => {
     const script = generateAiRecordingScript(
       [
         {
@@ -156,8 +156,79 @@ test("manual recorded flow", async ({ page }) => {
 
     expect(script).not.toContain('page.waitForEvent("filechooser")')
     expect(script).not.toContain('getByRole("textbox", { name: "avatar", exact: true }).click()')
+    expect(script).not.toContain(`await page.locator('input[name="avatar"]').click();`)
     expect(script).toContain(
-      'await page.locator("input[name=\\"avatar\\"]").setInputFiles("think.webp");'
+      `await page.locator('input[name="avatar"]').setInputFiles('think.webp');`
+    )
+  })
+
+  it("migrates legacy fakepath fills on choose-file buttons into file uploads", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("manual recorded flow", async ({ page }) => {
+  await page.getByRole("button", { name: "Choose File" }).click();
+  await page.getByRole("button", { name: "Choose File" }).fill("C:\\\\fakepath\\\\think.webp");
+});
+`
+
+    const parsed = parseAiRecordingScript(script, "manual")
+
+    expect(parsed.actions).toEqual([
+      expect.objectContaining({
+        kind: "click",
+        target: "Choose File"
+      }),
+      expect.objectContaining({
+        kind: "fileUpload",
+        paths: ["think.webp"]
+      })
+    ])
+
+    const regenerated = generateAiRecordingScript(parsed.actions, {
+      source: "manual",
+      variableActionIds: parsed.variableActionIds,
+      variableActionNames: parsed.variableActionNames
+    })
+
+    expect(regenerated).toContain(
+      "await page.getByRole('button', { name: 'Choose File', exact: true }).click();"
+    )
+    expect(regenerated).toContain(
+      "await page.locator('input[type=file]').setInputFiles('think.webp');"
+    )
+    expect(regenerated).not.toContain("fakepath")
+    expect(regenerated).not.toContain(".fill('")
+  })
+
+  it("preserves file-input locators when round-tripping setInputFiles scripts", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("manual recorded flow", async ({ page }) => {
+  await page.locator("input[name=\\"avatar\\"]").setInputFiles("think.webp");
+});
+`
+
+    const parsed = parseAiRecordingScript(script, "manual")
+
+    expect(parsed.actions).toEqual([
+      expect.objectContaining({
+        kind: "fileUpload",
+        paths: ["think.webp"],
+        locator: expect.objectContaining({
+          selector: 'input[name="avatar"]',
+          inputType: "file"
+        })
+      })
+    ])
+
+    const regenerated = generateAiRecordingScript(parsed.actions, {
+      source: "manual",
+      variableActionIds: parsed.variableActionIds,
+      variableActionNames: parsed.variableActionNames
+    })
+
+    expect(regenerated).toContain(
+      `await page.locator('input[name="avatar"]').setInputFiles('think.webp');`
     )
   })
 
@@ -183,7 +254,7 @@ test("manual recorded flow", async ({ page }) => {
     )
 
     expect(script).toContain(
-      'await page.getByRole("spinbutton", { name: "年龄", exact: true }).fill("11");'
+      "await page.getByRole('spinbutton', { name: '年龄', exact: true }).fill('11');"
     )
   })
 
@@ -209,7 +280,7 @@ test("manual recorded flow", async ({ page }) => {
     )
 
     expect(script).toContain(
-      'await page.getByRole("slider", { name: "编程经验（年）", exact: true }).fill("6");'
+      "await page.getByRole('slider', { name: '编程经验（年）', exact: true }).fill('6');"
     )
   })
 
@@ -309,7 +380,7 @@ test("manual recorded flow", async ({ page }) => {
     ).toContain('const 变量_目标地址 = "https://example.com/login"; // 变量-目标地址')
   })
 
-  it("clicks radio-card choices via their visible label wrapper", () => {
+  it("clicks radio-card choices with their semantic role", () => {
     const script = generateAiRecordingScript(
       [
         {
@@ -333,13 +404,12 @@ test("manual recorded flow", async ({ page }) => {
     )
 
     expect(script).toContain(
-      'await page.locator("label:has(input[name=\\"role\\"][value=\\"designer\\"])").click();'
+      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
     )
-    expect(script).not.toContain('getByLabel("🎨 设计师 做设计的人").click()')
-    expect(script).not.toContain('getByRole("radio"')
+    expect(script).not.toContain(`page.locator('label:has(input[name="role"][value="designer"])')`)
   })
 
-  it("supports externally associated labels for choice inputs", () => {
+  it("uses the semantic radio locator even when the label is externally associated", () => {
     const script = generateAiRecordingScript(
       [
         {
@@ -363,11 +433,11 @@ test("manual recorded flow", async ({ page }) => {
     )
 
     expect(script).toContain(
-      'await page.locator("label:has(#role-designer), label[for=\\"role-designer\\"]").click();'
+      "await page.getByRole('radio', { name: '设计师', exact: true }).click();"
     )
   })
 
-  it("clicks switch-style checkboxes through their label wrapper", () => {
+  it("clicks switch-style checkboxes with their semantic role", () => {
     const script = generateAiRecordingScript(
       [
         {
@@ -389,7 +459,7 @@ test("manual recorded flow", async ({ page }) => {
     )
 
     expect(script).toContain(
-      'await page.locator("label:has(input[name=\\"emailNotif\\"])").click();'
+      "await page.getByRole('checkbox', { name: 'emailNotif', exact: true }).click();"
     )
     expect(script).not.toContain('getByText("emailNotif", { exact: true }).click()')
   })
@@ -416,7 +486,7 @@ test("manual recorded flow", async ({ page }) => {
     )
 
     expect(script).toContain(
-      'await page.getByRole("menuitemradio", { name: "fix/bug-doc-qyang", exact: true }).click();'
+      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
     )
     expect(script).not.toContain('locator("button[name=\\"branch\\"]")')
   })

@@ -10,7 +10,7 @@ import {
   saveBrowserScriptLibraryEntry,
   setBrowserScriptLibraryRootForTests,
   updateBrowserScriptLibraryEntry
-} from "../../../src/main/browser/recording/browser-script-library-service"
+} from "../../../../src/main/browser/record/common/browser-script-library-service"
 
 let libraryRoot = ""
 

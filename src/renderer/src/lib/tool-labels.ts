@@ -38,6 +38,7 @@ export function getChineseLabel(
   toolName: string,
   options?: ToolLabelOptions
 ): string | null {
+  void options
   return TOOL_LABELS[toolName] ?? null
 }
 
