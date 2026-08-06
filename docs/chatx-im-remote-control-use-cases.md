@@ -73,7 +73,9 @@ flowchart LR
 | 授权对象 | 位置 | 含义 | 范围 |
 | --- | --- | --- | --- |
 | 会话 | 会话上的开关 | 驱动这一个已有会话并接收其结果 | 一次性 |
-| Feature | Feature 详情里的开关 | 允许从招乎在该 Feature 下新建会话 | 常设 |
+| Feature | Feature 详情里的开关 | 允许从招乎在该 Feature 下新建会话 | 常设创建权限 |
+
+从 Feature 新建成功的 Thread 会自动打开自己的“接入招乎”开关。之后 Feature 开关和会话开关互不继承：关闭 Feature 只阻止继续新建，关闭会话只撤销这一条 Thread。
 
 ## 4. 关键操作时序
 
@@ -130,6 +132,7 @@ sequenceDiagram
     D-->>Z: 拒绝并说明原因（不含绝对路径）
   else 校验通过
     D->>D: 新建 Project Mode Thread<br/>写入 harnessFeature 与 imDeliveryContext
+    D->>D: 自动为新 Thread 建立独立会话授权
     D-->>Z: 已在该功能下新建会话
   end
 
@@ -137,7 +140,9 @@ sequenceDiagram
   D->>D: 完整 Project Mode 上下文执行<br/>插件注入、额外工作区、当前流程节点<br/>不注册 scheduler tool
   D-->>Z: 结果（带“项目 / 功能”前缀）
 
-  Note over Z: 该 Feature 之后在列表里<br/>直接显示为这条会话，不重复占行
+  Note over Z: Feature 新建入口继续保留<br/>新 Thread 作为独立“项目会话”增加到列表
+  U->>D: 关闭 Feature 新建权限
+  Note over D,Z: 已创建会话继续可用<br/>由各自的会话开关独立管理
 ```
 
 ### 4.3 `[1]` 从招乎批准工具调用

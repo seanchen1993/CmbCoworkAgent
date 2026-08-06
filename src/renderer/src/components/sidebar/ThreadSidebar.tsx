@@ -46,6 +46,7 @@ import {
 import { cn, truncate } from "@/lib/utils"
 import { useFeatureGate } from "@/lib/feature-gates"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
+import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
@@ -73,6 +74,7 @@ interface ThreadProject {
   defaultName: string
   path: string | null
   threads: Thread[]
+  isManagedInbox: boolean
   isPinned: boolean
   hasCustomName: boolean
   sortIndex: number
@@ -189,8 +191,17 @@ function getRemoteThreadKind(thread: Thread): "inbox" | "feature" | null {
 
 function getProjectDisplayName(
   path: string | null,
-  projectNameOverrides: Record<string, string>
+  projectNameOverrides: Record<string, string>,
+  fixedName?: string
 ): { defaultName: string; name: string; hasCustomName: boolean } {
+  if (fixedName) {
+    return {
+      defaultName: fixedName,
+      name: fixedName,
+      hasCustomName: false
+    }
+  }
+
   const defaultName = getWorkspaceName(path)
   const customName = path ? projectNameOverrides[path]?.trim() : ""
 
@@ -700,13 +711,21 @@ export function ThreadSidebar(): React.JSX.Element {
       const path = getThreadWorkspacePath(thread, allThreadStates[thread.thread_id]?.workspacePath)
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
+      const isManagedInbox = isRemoteInboxThread(thread)
 
       if (existing) {
         existing.threads.push(thread)
+        if (isManagedInbox && !existing.isManagedInbox) {
+          existing.isManagedInbox = true
+          existing.defaultName = REMOTE_INBOX_WORKSPACE_NAME
+          existing.name = REMOTE_INBOX_WORKSPACE_NAME
+          existing.hasCustomName = false
+        }
       } else {
         const { defaultName, name, hasCustomName } = getProjectDisplayName(
           path,
-          projectNameOverrides
+          projectNameOverrides,
+          isManagedInbox ? REMOTE_INBOX_WORKSPACE_NAME : undefined
         )
         projectMap.set(key, {
           key,
@@ -714,6 +733,7 @@ export function ThreadSidebar(): React.JSX.Element {
           defaultName,
           path,
           threads: [thread],
+          isManagedInbox,
           isPinned: pinnedProjectKeys.has(key),
           hasCustomName,
           sortIndex: sortIndex++
@@ -818,7 +838,7 @@ export function ThreadSidebar(): React.JSX.Element {
   }, [])
 
   const openProjectRenameDialog = useCallback((project: ThreadProject) => {
-    if (!project.path) return
+    if (!project.path || project.isManagedInbox) return
     setProjectToRename(project)
   }, [])
 
@@ -1282,7 +1302,8 @@ export function ThreadSidebar(): React.JSX.Element {
             <div className="px-2 pb-2 space-y-1 overflow-hidden">
               {threadProjects.map((project) => {
                 const isCollapsed = collapsedProjectKeys.has(project.key)
-                const canCustomizeProject = Boolean(project.path)
+                const canManageProject = Boolean(project.path)
+                const canRenameProject = canManageProject && !project.isManagedInbox
                 const hasSelectedThread = project.threads.some(
                   (thread) => thread.thread_id === currentThreadId
                 )
@@ -1383,27 +1404,29 @@ export function ThreadSidebar(): React.JSX.Element {
                                     popoverContent={
                                       project.isPinned ? "取消置顶工作区" : "置顶工作区"
                                     }
-                                    disabled={!canCustomizeProject}
+                                    disabled={!canManageProject}
                                     stopPropagation
                                     className={cn(
                                       "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
                                       project.isPinned && "text-primary opacity-100",
-                                      !canCustomizeProject && "cursor-not-allowed !opacity-30"
+                                      !canManageProject && "cursor-not-allowed !opacity-30"
                                     )}
                                     onClick={() => toggleProjectPin(project.key)}
                                   />
                                   <IconPopoverButton
                                     icon={<Pencil className="size-3" />}
                                     popoverContent={
-                                      canCustomizeProject
+                                      canRenameProject
                                         ? "修改工作区名称"
-                                        : "未关联工作区无法重命名"
+                                        : project.isManagedInbox
+                                          ? "远程收件箱名称由应用管理"
+                                          : "未关联工作区无法重命名"
                                     }
-                                    disabled={!canCustomizeProject}
+                                    disabled={!canRenameProject}
                                     stopPropagation
                                     className={cn(
                                       "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
-                                      !canCustomizeProject && "cursor-not-allowed !opacity-30"
+                                      !canRenameProject && "cursor-not-allowed !opacity-30"
                                     )}
                                     onClick={() => openProjectRenameDialog(project)}
                                   />
@@ -1442,15 +1465,19 @@ export function ThreadSidebar(): React.JSX.Element {
                           onMouseEnter={() => setHoveredProjectKey(project.key)}
                           onMouseLeave={() => setHoveredProjectKey(null)}
                         >
-                          <div className="mb-1 font-medium text-muted-foreground">工作区路径</div>
+                          <div className="mb-1 font-medium text-muted-foreground">
+                            {project.isManagedInbox ? "工作区说明" : "工作区路径"}
+                          </div>
                           <div className="break-all text-foreground">
-                            {project.path || "未关联工作区"}
+                            {project.isManagedInbox
+                              ? "应用托管目录，路径已隐藏"
+                              : project.path || "未关联工作区"}
                           </div>
                         </PopoverContent>
                       </Popover>
                       <ContextMenuContent>
                         <ContextMenuItem
-                          disabled={!canCustomizeProject}
+                          disabled={!canManageProject}
                           onClick={() => toggleProjectPin(project.key)}
                         >
                           {project.isPinned ? (
@@ -1461,7 +1488,7 @@ export function ThreadSidebar(): React.JSX.Element {
                           {project.isPinned ? "取消置顶工作区" : "置顶工作区"}
                         </ContextMenuItem>
                         <ContextMenuItem
-                          disabled={!canCustomizeProject}
+                          disabled={!canRenameProject}
                           onClick={() => openProjectRenameDialog(project)}
                         >
                           <Pencil className="size-4 mr-2" />

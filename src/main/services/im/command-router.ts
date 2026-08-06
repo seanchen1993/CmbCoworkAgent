@@ -213,8 +213,8 @@ export class ImCommandRouter {
       "可用目标：",
       ...targets.map((target, index) =>
         target.kind === "thread_grant"
-          ? `${index + 1}. ${target.label}（会话）`
-          : `${index + 1}. ${target.label}（功能，${target.existingThreadId ? "已有会话" : "新建会话"}）`
+          ? `${index + 1}. ${target.label}（${target.sessionKind === "project" ? "项目会话" : "普通会话"}）`
+          : `${index + 1}. ${target.label}（功能，新建会话）`
       ),
       "发送 /绑定 <编号> 切换。"
     ].join("\n")
@@ -245,6 +245,7 @@ export class ImCommandRouter {
       principalId: input.principalId,
       conversationKey: input.conversationKey
     }
+    const createsFeatureThread = selected.targetKind === "feature_grant"
     const target =
       selected.targetKind === "thread_grant"
         ? await this.dependencies.access.bindThreadGrant({
@@ -261,6 +262,14 @@ export class ImCommandRouter {
     const switchedDuringRun = Boolean(
       currentEventId && previous?.kind !== "inbox" && previous?.targetId !== target.targetId
     )
+    if (createsFeatureThread) {
+      return [
+        `已在【${selected.label}】下新建会话并切换。`,
+        switchedDuringRun
+          ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将进入新会话队列。`
+          : "后续普通消息将发送到这个新会话。"
+      ].join("\n")
+    }
     return [
       `已绑定并切换到【${targetLabel(target)}】。`,
       switchedDuringRun
@@ -277,9 +286,9 @@ export class ImCommandRouter {
     const inbox = await this.dependencies.inbox.ensureInbox(input)
     await this.dependencies.conversations.setActiveTarget(input.conversationKey, inbox.targetId)
     const currentEventId = this.dependencies.getCurrentEventId(input.conversationKey)
-    const switchedDuringFeatureRun = Boolean(currentEventId && previous?.kind === "feature")
-    return switchedDuringFeatureRun
-      ? `已切换到【收件箱】。\n上一 Feature 任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。\n新消息将进入收件箱队列。`
+    const switchedDuringRemoteRun = Boolean(currentEventId && previous?.kind !== "inbox")
+    return switchedDuringRemoteRun
+      ? `已切换到【收件箱】。\n上一会话任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。\n新消息将进入收件箱队列。`
       : "已切换到【收件箱】。后续普通消息将进入默认聊天。"
   }
 

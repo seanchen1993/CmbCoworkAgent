@@ -15,8 +15,10 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useCurrentThread } from "@/lib/thread-context"
+import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
+import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 
 interface WorkspacePickerProps {
   threadId: string
@@ -93,6 +95,10 @@ function WorkspacePickerImpl({
   onGitStatusChange
 }: WorkspacePickerProps): React.JSX.Element {
   const { workspacePath, setWorkspacePath, setWorkspaceFiles, messages } = useCurrentThread(threadId)
+  const thread = useAppStore(
+    (state) => state.threads.find((candidate) => candidate.thread_id === threadId) ?? null
+  )
+  const concealWorkspacePath = isRemoteInboxThread(thread)
   const canChangeWorkspace = messages.length === 0
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -324,6 +330,7 @@ function WorkspacePickerImpl({
   }
 
   const folderName = getFolderName(workspacePath)
+  const workspaceName = concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : folderName
 
   return (
     <Popover open={open} onOpenChange={(v) => {
@@ -353,7 +360,7 @@ function WorkspacePickerImpl({
                 ? worktreeBaseBranch
                   ? `${worktreeBaseBranch} ← ${worktreeBranch}`
                   : worktreeBranch
-                : folderName
+                : workspaceName
               : "选择工作区"}
           </span>
           <ChevronDown className="size-3 opacity-50" />
@@ -369,8 +376,11 @@ function WorkspacePickerImpl({
             <div className="space-y-3">
               <div className="flex items-center gap-2 p-2 rounded-md bg-background-secondary border border-border">
                 <Folder className="size-3.5 " />
-                <span className="text-sm truncate flex-1" title={workspacePath}>
-                  {isWorktree && worktreeBranch ? worktreeBranch : folderName}
+                <span
+                  className="text-sm truncate flex-1"
+                  title={concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : workspacePath}
+                >
+                  {isWorktree && worktreeBranch ? worktreeBranch : workspaceName}
                 </span>
                 {isWorktree && (
                   <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded shrink-0">
@@ -381,7 +391,11 @@ function WorkspacePickerImpl({
 
               {/* Full path display */}
               <div className="space-y-1">
-                {isWorktree && gitRoot ? (
+                {concealWorkspacePath ? (
+                  <div className="rounded-md border border-border bg-muted/30 px-2.5 py-2 text-xs text-muted-foreground">
+                    应用托管目录，路径已隐藏
+                  </div>
+                ) : isWorktree && gitRoot ? (
                   <>
                     <PathRow label="主仓库" path={gitRoot} />
                     <PathRow label="Worktree" path={workspacePath} highlight />

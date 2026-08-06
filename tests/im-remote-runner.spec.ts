@@ -537,7 +537,7 @@ async function testFeatureDesktopWaitTimeoutCancelsOnlyEvent(): Promise<void> {
       "active",
       "waiting timeout must not revoke the Feature binding"
     )
-    assert(gateway.replies.at(-1)?.message.content.includes("Feature Binding 保持不变"))
+    assert(gateway.replies.at(-1)?.message.content.includes("会话授权保持不变"))
     assert.equal(gateway.acknowledgements.at(-1)?.type, "cancelled")
   } finally {
     context.database.close()

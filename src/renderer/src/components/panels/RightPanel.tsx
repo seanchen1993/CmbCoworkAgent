@@ -50,6 +50,7 @@ import {
   loadWorkspaceFilesDeduped,
   markWorkspaceFilesStale
 } from "@/lib/workspace-file-load"
+import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
 import { marketApi, type MarketItem } from "@/api/market"
@@ -1749,8 +1750,15 @@ function buildPreviewEvent(
 
 function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Element {
   const threadState = useThreadState(threadId)
+  const thread = useAppStore((state) =>
+    threadId ? (state.threads.find((candidate) => candidate.thread_id === threadId) ?? null) : null
+  )
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
+  const concealWorkspacePath = isRemoteInboxThread(thread)
+  const workspaceName = concealWorkspacePath
+    ? REMOTE_INBOX_WORKSPACE_NAME
+    : workspacePath?.split(/[\\/]/).filter(Boolean).pop()
   const setWorkspacePath = threadState?.setWorkspacePath
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
 
@@ -1852,9 +1860,9 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
       <div className="flex items-center justify-between px-3 py-2 border-b border-border/50 bg-background/30">
         <span
           className="text-[10px] text-muted-foreground truncate flex-1"
-          title={workspacePath || undefined}
+          title={concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : workspacePath || undefined}
         >
-          {workspacePath ? workspacePath.split("/").pop() : "未关联文件夹"}
+          {workspacePath ? workspaceName : "未关联文件夹"}
         </span>
       </div>
 
@@ -1864,9 +1872,7 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
           <FolderTree className="size-8 mb-2 opacity-50" />
           <span>暂无工作区文件</span>
           <span className="text-xs mt-1">
-            {workspacePath
-              ? `已关联 ${workspacePath.split("/").pop()}`
-              : "请在工作区选择器中设置文件夹"}
+            {workspacePath ? `已关联 ${workspaceName}` : "请在工作区选择器中设置文件夹"}
           </span>
         </div>
       ) : (

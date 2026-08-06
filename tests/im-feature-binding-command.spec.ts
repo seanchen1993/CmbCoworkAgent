@@ -34,6 +34,7 @@ import type {
   RemoteImEventV1,
   RemoteImReplyV1
 } from "../src/shared/im-gateway-contract"
+import { DEFAULT_IM_CHANNEL_ID } from "../src/shared/im-gateway-contract"
 
 class TestGateway implements ImGatewayClientPort {
   readonly acknowledgements: RemoteImAckV1[] = []
@@ -109,10 +110,15 @@ async function createContext() {
     threads.set(threadId, row)
     return row
   }
-  const updateLocalThread = (threadId: string, patch: { metadata?: string }): void => {
+  const updateLocalThread = (
+    threadId: string,
+    patch: Partial<Omit<ThreadRow, "thread_id" | "created_at">>
+  ): ThreadRow | null => {
     const row = threads.get(threadId)
-    if (!row) return
-    threads.set(threadId, { ...row, ...patch, updated_at: clock.now })
+    if (!row) return null
+    const updated = { ...row, ...patch, updated_at: clock.now }
+    threads.set(threadId, updated)
+    return updated
   }
   let id = 0
   const featureService = new ImFeatureBindingService({
@@ -153,12 +159,7 @@ async function createContext() {
     buildFeatureContext: () => ({ featureId: "feature-pay" }) as never,
     getThread: (threadId) => threads.get(threadId) ?? null,
     createThread: makeThread as never,
-    updateThread: updateLocalThread as never,
-    deleteThread: (threadId) => {
-      threads.delete(threadId)
-    },
-    createId: () => `generated-${++id}`,
-    getRunLease: () => undefined
+    createId: () => `generated-${++id}`
   })
   const inbox = new ImInboxService({
     conversationState: conversations,
@@ -174,6 +175,9 @@ async function createContext() {
     grants,
     features: featureService,
     getThread: (threadId) => threads.get(threadId) ?? null,
+    deleteThread: (threadId) => {
+      threads.delete(threadId)
+    },
     createId: () => `target-${++id}`,
     getGoal: () => null,
     coordinator: {
@@ -203,7 +207,14 @@ async function createContext() {
   }
 }
 
-async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Promise<void> {
+function selectionIndexContaining(list: string, marker: string): number {
+  const line = list.split("\n").find((candidate) => candidate.includes(marker))
+  const match = line?.match(/^(\d+)\./u)
+  if (!match) throw new Error(`selection containing ${marker} not found`)
+  return Number(match[1])
+}
+
+async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<void> {
   const context = await createContext()
   const router = new ImCommandRouter({
     conversations: context.conversations,
@@ -225,7 +236,7 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
     })
     assert(retired.includes("已合并为 /会话"))
 
-    const grant = await context.access.enableFeature({
+    await context.access.enableFeature({
       route: commandInput,
       projectId: "project-secret-id",
       featureSlug: "feature-pay"
@@ -238,16 +249,17 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
     assert(!sessions.includes(context.root))
     assert(!sessions.includes("project-secret-id"))
     assert(!sessions.includes("must-not-leak"))
+    assert(sessions.includes("（功能，新建会话）"))
 
     const bound = await router.handle({
       ...commandInput,
       command: parseImCommand("/绑定 1")!
     })
-    assert(bound.includes("支付平台 / 快捷支付"))
-    const target = context.conversations.getActiveTarget("conversation-1")
-    assert.equal(target?.kind, "feature")
-    if (target?.kind !== "feature") throw new Error("feature target expected")
-    const metadata = JSON.parse(context.threads.get(target.threadId)!.metadata!) as Record<
+    assert(bound.includes("新建会话并切换"))
+    const firstTarget = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(firstTarget?.kind, "thread")
+    if (firstTarget?.kind !== "thread") throw new Error("thread target expected")
+    const metadata = JSON.parse(context.threads.get(firstTarget.threadId)!.metadata!) as Record<
       string,
       unknown
     >
@@ -256,25 +268,59 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
       slug: "feature-pay",
       source: "autobizdevops"
     })
+    assert.deepEqual(metadata.imDeliveryContext, {
+      provider: DEFAULT_IM_CHANNEL_ID,
+      principalId: commandInput.principalId,
+      conversationKey: commandInput.conversationKey,
+      targetId: firstTarget.targetId
+    })
+    assert.equal(context.grants.getThreadGrant(firstTarget.threadId)?.state, "active")
+
+    const withFirstSession = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(withFirstSession.includes("（项目会话）"))
+    assert(withFirstSession.includes("（功能，新建会话）"))
+    const createIndex = selectionIndexContaining(withFirstSession, "（功能，新建会话）")
+
+    const secondBound = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${createIndex}`)!
+    })
+    assert(secondBound.includes("新建会话并切换"))
+    const secondTarget = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(secondTarget?.kind, "thread")
+    if (secondTarget?.kind !== "thread") throw new Error("second thread target expected")
+    assert.notEqual(secondTarget.threadId, firstTarget.threadId)
+    assert.equal(context.grants.getThreadGrant(secondTarget.threadId)?.state, "active")
     assert.equal(
-      (metadata.imDeliveryContext as Record<string, unknown>).bindingId,
-      target.bindingId
+      context.grants
+        .listThreadGrants(commandInput.conversationKey)
+        .filter((candidate) => candidate.state === "active").length,
+      2
     )
 
-    const rebound = await context.featureService.bindFeature({
-      ...commandInput,
-      projectId: "project-secret-id",
-      featureSlug: "feature-pay",
-      grantId: grant.grantId,
-      grantVersion: grant.grantVersion
-    })
-    assert.equal(rebound.threadId, target.threadId)
-    assert.equal(context.threads.size, 1)
-
-    await router.handle({ ...commandInput, command: parseImCommand("/会话")! })
     await context.access.disableFeature("project-secret-id", "feature-pay")
-    const stale = await router.handle({ ...commandInput, command: parseImCommand("/绑定 1")! })
-    assert(stale.includes("授权已变化"))
+    assert.equal(
+      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
+      "revoked"
+    )
+    assert.equal(context.grants.getThreadGrant(firstTarget.threadId)?.state, "active")
+    assert.equal(context.grants.getThreadGrant(secondTarget.threadId)?.state, "active")
+    assert.equal(
+      context.conversations
+        .listTargets(commandInput.conversationKey)
+        .find((candidate) => candidate.snapshot.targetId === secondTarget.targetId)?.state,
+      "active"
+    )
+
+    const afterCreateDisabled = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(!afterCreateDisabled.includes("（功能，新建会话）"))
+    assert.equal(afterCreateDisabled.match(/（项目会话）/gu)?.length, 2)
 
     const switched = await router.handle({
       ...commandInput,
@@ -288,8 +334,9 @@ async function testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths(): Pro
   }
 }
 
-async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
+async function testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession(): Promise<void> {
   const context = await createContext()
+  let projectModeAvailable = true
   try {
     const grant = await context.access.enableFeature({
       route: {
@@ -335,7 +382,7 @@ async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
     const guard = new ImRemoteCapabilityGuard({
       conversationState: context.conversations,
       getThread: (threadId) => context.threads.get(threadId) ?? null,
-      updateThread: context.updateLocalThread as never,
+      updateThread: context.updateLocalThread,
       getGoal: () => null,
       coordinator: {
         hasRunningWorkersForThread: () => false,
@@ -345,30 +392,58 @@ async function testFeatureRevalidationSuspendsBinding(): Promise<void> {
       workflow: { isBusyForThread: () => false },
       hasPendingApproval: () => false,
       hasPendingUserInput: () => false,
-      grants: context.grants,
-      validateFeatureTarget: async () => ({
-        valid: false,
-        reasonCode: "REMOTE_FEATURE_UNAVAILABLE",
-        message: "Feature 已归档。"
-      })
+      validateExistingFeatureThread: async () =>
+        (projectModeAvailable
+          ? {
+              valid: true,
+              project: { id: "project-secret-id", name: "支付平台" },
+              feature: {
+                projectId: "project-secret-id",
+                slug: "feature-pay",
+                title: "快捷支付",
+                status: "进行中"
+              },
+              workspacePath: context.root
+            }
+          : {
+              valid: false,
+              reasonCode: "REMOTE_FEATURE_UNAVAILABLE",
+              message: "Feature 已归档。"
+            }) as never,
+      grants: context.grants
     })
-    const decision = await guard.evaluate(event)
-    assert.equal(decision.allowed, false)
+
+    await context.access.disableFeature("project-secret-id", "feature-pay")
+    const allowed = await guard.evaluate(event)
+    assert.equal(allowed.allowed, true, JSON.stringify(allowed))
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.state, "active")
+    assert.equal(
+      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
+      "revoked"
+    )
+    assert.equal(
+      context.conversations
+        .listTargets("conversation-1")
+        .find((candidate) => candidate.snapshot.targetId === target.targetId)?.state,
+      "active"
+    )
+
+    projectModeAvailable = false
+    const unavailable = await guard.evaluate(event)
+    assert.equal(unavailable.allowed, false)
+    assert.equal(unavailable.allowed ? null : unavailable.reasonCode, "REMOTE_FEATURE_UNAVAILABLE")
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.state, "suspended")
     assert.equal(
       context.conversations
         .listTargets("conversation-1")
         .find((candidate) => candidate.snapshot.targetId === target.targetId)?.state,
       "suspended"
     )
-    const metadata = JSON.parse(context.threads.get(target.threadId)!.metadata!) as Record<
-      string,
-      unknown
-    >
-    assert.equal(metadata.remoteState, "suspended")
-    assert.equal(
-      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
-      "suspended"
-    )
+
+    await context.access.disableThread(target.threadId)
+    const revoked = await guard.evaluate(event)
+    assert.equal(revoked.allowed, false)
+    assert.equal(revoked.allowed ? null : revoked.reasonCode, "REMOTE_TARGET_INVALID")
   } finally {
     context.database.close()
     await rm(context.root, { recursive: true, force: true })
@@ -452,6 +527,30 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     })
     const allowed = await guard.evaluate(event)
     assert.equal(allowed.allowed, true, JSON.stringify(allowed))
+
+    const projectModeMetadata = {
+      title: "快捷支付 Project Mode 会话",
+      workspacePath: context.root,
+      agentMode: "normal",
+      harnessFeature: {
+        projectId: "project-secret-id",
+        slug: "feature-pay",
+        source: "autobizdevops"
+      }
+    }
+    context.makeThread("desktop-project-thread", projectModeMetadata)
+    await context.access.enableThread({ route, threadId: "desktop-project-thread" })
+    const projectModeGrant = (await context.access.listAuthorizedTargets(route)).find(
+      (candidate) =>
+        candidate.kind === "thread_grant" && candidate.threadId === "desktop-project-thread"
+    )
+    assert(projectModeGrant, "an existing Project Mode thread can be granted as a thread")
+    assert.deepEqual(
+      JSON.parse(context.threads.get("desktop-project-thread")!.metadata!),
+      projectModeMetadata,
+      "granting a Project Mode thread preserves its harness context"
+    )
+    await context.access.disableThread("desktop-project-thread")
 
     const transientlyBusyAccess = new ImRemoteAccessService({
       conversations: context.conversations,
@@ -607,10 +706,13 @@ async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<v
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
-    "testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths",
-    testFeatureBindingIsImmutableAndCommandListsDoNotLeakPaths
+    "testFeatureCreateGrantCreatesIndependentThreadGrants",
+    testFeatureCreateGrantCreatesIndependentThreadGrants
   ],
-  ["testFeatureRevalidationSuspendsBinding", testFeatureRevalidationSuspendsBinding],
+  [
+    "testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession",
+    testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession
+  ],
   [
     "testDesktopThreadGrantBindsWithoutMutatingMetadata",
     testDesktopThreadGrantBindsWithoutMutatingMetadata

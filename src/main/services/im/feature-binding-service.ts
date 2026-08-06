@@ -4,8 +4,7 @@ import { isAbsolute } from "node:path"
 import { HARNESS_SOURCE, type HarnessFeatureSummary } from "../../../shared/harness-board-types"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
-import { getLocalThreadRunLease } from "../../agent/thread-run-lease"
-import { getThread, createThread, deleteThread, updateThread, type ThreadRow } from "../../db"
+import { getThread, createThread } from "../../db"
 import { isFeatureGateEnabled } from "../../feature-gates"
 import {
   buildHarnessFeatureAgentContext,
@@ -42,6 +41,16 @@ export type ImFeatureValidationResult =
     }
   | { valid: false; reasonCode: string; message: string }
 
+export interface ImCreatedFeatureThread {
+  threadId: string
+  title: string
+  workspacePath: string
+  projectId: string
+  featureSlug: string
+  projectName: string
+  featureTitle: string
+}
+
 /** A deliberately user-safe binding failure that may be returned to IM verbatim. */
 export class ImFeatureBindingError extends Error {
   constructor(message: string) {
@@ -60,10 +69,7 @@ interface FeatureBindingDependencies {
   buildFeatureContext: typeof buildHarnessFeatureAgentContext
   getThread: typeof getThread
   createThread: typeof createThread
-  deleteThread: typeof deleteThread
-  updateThread: typeof updateThread
   createId: () => string
-  getRunLease: typeof getLocalThreadRunLease
 }
 
 function existingDirectory(path: string | null | undefined): string | null {
@@ -86,39 +92,6 @@ function settingsAllowFeatures(dependencies: FeatureBindingDependencies): boolea
   return settings.enabled
 }
 
-function bindingMetadataMatches(
-  thread: ThreadRow,
-  target: Extract<ImTargetSnapshot, { kind: "feature" }>,
-  conversationKey: string,
-  principalId: string
-): boolean {
-  const parsed = parseStandardThreadMetadata(thread.metadata)
-  const harness = parsed.metadata.harnessFeature
-  const delivery = parsed.metadata.imDeliveryContext
-  if (
-    !harness ||
-    typeof harness !== "object" ||
-    Array.isArray(harness) ||
-    !delivery ||
-    typeof delivery !== "object" ||
-    Array.isArray(delivery)
-  ) {
-    return false
-  }
-  const feature = harness as Record<string, unknown>
-  const context = delivery as Record<string, unknown>
-  return (
-    feature.projectId === target.projectId &&
-    feature.slug === target.featureSlug &&
-    context.provider === DEFAULT_IM_CHANNEL_ID &&
-    context.principalId === principalId &&
-    context.conversationKey === conversationKey &&
-    context.targetId === target.targetId &&
-    context.bindingId === target.bindingId &&
-    existingDirectory(parsed.workspacePath) === existingDirectory(target.workspacePath)
-  )
-}
-
 export class ImFeatureBindingService {
   private readonly dependencies: FeatureBindingDependencies
 
@@ -135,10 +108,7 @@ export class ImFeatureBindingService {
       buildFeatureContext: dependencies.buildFeatureContext ?? buildHarnessFeatureAgentContext,
       getThread: dependencies.getThread ?? getThread,
       createThread: dependencies.createThread ?? createThread,
-      deleteThread: dependencies.deleteThread ?? deleteThread,
-      updateThread: dependencies.updateThread ?? updateThread,
-      createId: dependencies.createId ?? randomUUID,
-      getRunLease: dependencies.getRunLease ?? getLocalThreadRunLease
+      createId: dependencies.createId ?? randomUUID
     }
   }
 
@@ -278,14 +248,56 @@ export class ImFeatureBindingService {
     }
   }
 
-  async bindFeature(input: {
+  async validateExistingFeatureThread(
+    metadata: Record<string, unknown>,
+    workspacePath: string
+  ): Promise<ImFeatureValidationResult> {
+    const harness = metadata.harnessFeature
+    if (!harness || typeof harness !== "object" || Array.isArray(harness)) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
+        message: "Project Mode 会话元数据不完整。"
+      }
+    }
+    const feature = harness as Record<string, unknown>
+    if (typeof feature.projectId !== "string" || typeof feature.slug !== "string") {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
+        message: "Project Mode 会话缺少项目或 Feature 标识。"
+      }
+    }
+    const normalizedWorkspace = existingDirectory(workspacePath)
+    if (!normalizedWorkspace) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_WORKSPACE_UNAVAILABLE",
+        message: "Project Mode 会话工作区不可用。"
+      }
+    }
+    const validation = await this.validateFeature(feature.projectId, feature.slug)
+    if (!validation.valid) return validation
+    const harnessContext = this.dependencies.buildFeatureContext(metadata, {
+      workspacePath: normalizedWorkspace
+    })
+    if (!harnessContext) {
+      return {
+        valid: false,
+        reasonCode: "REMOTE_HARNESS_CONTEXT_UNAVAILABLE",
+        message: "Project Mode 会话的插件或系统约束上下文无法加载。"
+      }
+    }
+    return { ...validation, workspacePath: normalizedWorkspace }
+  }
+
+  async createFeatureThread(input: {
     conversationKey: string
     principalId: string
     projectId: string
     featureSlug: string
-    grantId: string
-    grantVersion: number
-  }): Promise<Extract<ImTargetSnapshot, { kind: "feature" }>> {
+    targetId: string
+  }): Promise<ImCreatedFeatureThread> {
     this.dependencies.conversationState.assertConversationOwner(
       input.conversationKey,
       input.principalId
@@ -293,75 +305,27 @@ export class ImFeatureBindingService {
     const validation = await this.validateFeature(input.projectId, input.featureSlug)
     if (!validation.valid) throw new ImFeatureBindingError(validation.message)
 
-    const reusable = this.dependencies.conversationState
+    const remoteSessionCount = this.dependencies.conversationState
       .listTargets(input.conversationKey)
-      .find(
-        (candidate) =>
-          candidate.state !== "revoked" &&
-          candidate.snapshot.kind === "feature" &&
-          candidate.snapshot.projectId === input.projectId &&
-          candidate.snapshot.featureSlug === input.featureSlug
-      )
-    if (reusable?.snapshot.kind === "feature") {
-      const thread = this.dependencies.getThread(reusable.snapshot.threadId)
-      const runLease = this.dependencies.getRunLease(reusable.snapshot.threadId)
-      if (runLease) {
-        throw new ImFeatureBindingError(
-          runLease.owner === "desktop"
-            ? "该 Feature Thread 正在桌面执行，请结束后再绑定。"
-            : "该 Feature Thread 正在执行，请结束后再绑定。"
+      .filter(({ snapshot }) => {
+        if (snapshot.kind !== "thread") return false
+        const metadata = parseStandardThreadMetadata(
+          this.dependencies.getThread(snapshot.threadId)?.metadata
+        ).metadata
+        const harness = metadata.harnessFeature
+        if (!harness || typeof harness !== "object" || Array.isArray(harness)) return false
+        const feature = harness as Record<string, unknown>
+        return (
+          metadata.remoteThread === true &&
+          metadata.targetKind === "feature" &&
+          feature.projectId === input.projectId &&
+          feature.slug === input.featureSlug
         )
-      }
-      if (
-        thread &&
-        bindingMetadataMatches(
-          thread,
-          reusable.snapshot,
-          input.conversationKey,
-          input.principalId
-        ) &&
-        existingDirectory(reusable.snapshot.workspacePath) === validation.workspacePath
-      ) {
-        const refreshed = await this.dependencies.conversationState.refreshGrantTarget({
-          targetId: reusable.snapshot.targetId,
-          grantId: input.grantId,
-          grantVersion: input.grantVersion,
-          workspacePath: validation.workspacePath,
-          activate: true
-        })
-        this.dependencies.updateThread(reusable.snapshot.threadId, {
-          metadata: JSON.stringify({
-            ...parseStandardThreadMetadata(thread.metadata).metadata,
-            remoteState: "active"
-          })
-        })
-        return refreshed as Extract<ImTargetSnapshot, { kind: "feature" }>
-      }
-      await this.dependencies.conversationState.updateTargetState(
-        reusable.snapshot.targetId,
-        "suspended",
-        "Feature Thread or workspace no longer matches"
-      )
-    }
-
-    const bindingId = this.dependencies.createId()
-    const targetId = this.dependencies.createId()
+      }).length
     const threadId = this.dependencies.createId()
-    const target: Extract<ImTargetSnapshot, { kind: "feature" }> = {
-      kind: "feature",
-      targetId,
-      bindingId,
-      grantId: input.grantId,
-      grantVersion: input.grantVersion,
-      projectId: input.projectId,
-      featureSlug: input.featureSlug,
-      projectName: validation.project.name,
-      featureTitle: validation.feature.title,
-      threadId,
-      workspacePath: validation.workspacePath
-    }
+    const title = `${validation.project.name} / ${validation.feature.title} · 远程会话 ${remoteSessionCount + 1}`
     this.dependencies.createThread(threadId, {
-      title: `[远程 Feature] ${validation.project.name} / ${validation.feature.title}`,
+      title,
       workspacePath: validation.workspacePath,
       agentMode: "normal",
       targetKind: "feature",
@@ -377,24 +341,30 @@ export class ImFeatureBindingService {
         provider: DEFAULT_IM_CHANNEL_ID,
         principalId: input.principalId,
         conversationKey: input.conversationKey,
-        targetId,
-        bindingId
+        targetId: input.targetId
       }
     })
-    try {
-      await this.dependencies.conversationState.registerTarget(input.conversationKey, target, {
-        state: "active",
-        activate: true
-      })
-      return target
-    } catch (error) {
-      this.dependencies.deleteThread(threadId)
-      throw error
+    return {
+      threadId,
+      title,
+      workspacePath: validation.workspacePath,
+      projectId: input.projectId,
+      featureSlug: input.featureSlug,
+      projectName: validation.project.name,
+      featureTitle: validation.feature.title
     }
   }
 }
 
 export const imFeatureBindingService = new ImFeatureBindingService()
+
+export function validateImExistingFeatureThread(
+  metadata: Record<string, unknown>,
+  workspacePath: string,
+  service: ImFeatureBindingService = imFeatureBindingService
+): Promise<ImFeatureValidationResult> {
+  return service.validateExistingFeatureThread(metadata, workspacePath)
+}
 
 export async function validateImFeatureTarget(
   target: Extract<ImTargetSnapshot, { kind: "feature" }>,

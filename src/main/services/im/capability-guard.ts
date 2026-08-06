@@ -14,7 +14,7 @@ import {
   type ImTargetSnapshot
 } from "./conversation-state"
 import type { ImEventRecord } from "./event-store"
-import { validateImFeatureTarget } from "./feature-binding-service"
+import { validateImExistingFeatureThread, validateImFeatureTarget } from "./feature-binding-service"
 import {
   ImRemoteGrantError,
   imRemoteGrantStore,
@@ -65,6 +65,7 @@ export interface ImRemoteCapabilityGuardDependencies {
   }
   hasPendingApproval(threadId: string): boolean
   hasPendingUserInput(threadId: string): boolean
+  validateExistingFeatureThread?: typeof validateImExistingFeatureThread
   validateFeatureTarget?: typeof validateImFeatureTarget
   grants: ImRemoteGrantStore
 }
@@ -244,12 +245,46 @@ export class ImRemoteCapabilityGuard {
     }
     if (
       snapshot.kind === "thread" &&
-      (parsed.metadata.remoteThread === true || parsed.metadata.targetKind === "inbox")
+      (parsed.metadata.targetKind === "inbox" ||
+        (parsed.metadata.remoteThread === true && parsed.metadata.targetKind !== "feature"))
     ) {
       return {
         allowed: false,
         reasonCode: "REMOTE_THREAD_METADATA_MISMATCH",
-        message: "该授权目标已不再是桌面普通会话，请撤销授权后重新选择。"
+        message: "该授权目标已不再是可接入会话，请撤销授权后重新选择。"
+      }
+    }
+    if (
+      snapshot.kind === "thread" &&
+      parsed.metadata.harnessFeature &&
+      typeof parsed.metadata.harnessFeature === "object" &&
+      !Array.isArray(parsed.metadata.harnessFeature)
+    ) {
+      const validation = await (
+        this.dependencies.validateExistingFeatureThread ?? validateImExistingFeatureThread
+      )(parsed.metadata, snapshot.workspacePath)
+      if (!validation.valid) {
+        await this.dependencies.grants.suspendGrant(
+          "thread",
+          snapshot.grantId,
+          validation.reasonCode
+        )
+        await this.dependencies.conversationState.updateTargetState(
+          snapshot.targetId,
+          "suspended",
+          validation.reasonCode
+        )
+        if (parsed.metadata.remoteThread === true) {
+          const updateRemoteThread = this.dependencies.updateThread ?? updateThread
+          updateRemoteThread(snapshot.threadId, {
+            metadata: JSON.stringify({ ...parsed.metadata, remoteState: "suspended" })
+          })
+        }
+        return {
+          allowed: false,
+          reasonCode: validation.reasonCode as ImRemoteCapabilityReason,
+          message: `${validation.message} 会话授权已暂停，请修复后重新接入。`
+        }
       }
     }
     if (snapshot.kind === "feature") {

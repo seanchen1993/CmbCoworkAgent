@@ -9,14 +9,18 @@ import {
   type StandardThreadMetadata
 } from "../../agent/standard-thread-turn"
 import { workflowRunManager } from "../../agent/workflow/run-manager"
-import { getThread, type ThreadRow } from "../../db"
+import { deleteThread, getThread, type ThreadRow } from "../../db"
 import { hasPendingUserInputForThread } from "../user-input"
 import {
   imConversationStateStore,
   type ImConversationStateStore,
   type ImTargetSnapshot
 } from "./conversation-state"
-import { imFeatureBindingService, type ImFeatureBindingService } from "./feature-binding-service"
+import {
+  ImFeatureBindingError,
+  imFeatureBindingService,
+  type ImFeatureBindingService
+} from "./feature-binding-service"
 import {
   imRemoteGrantStore,
   type ImFeatureGrantRecord,
@@ -32,6 +36,7 @@ export type ImAuthorizedRemoteTarget =
       grantVersion: number
       label: string
       threadId: string
+      sessionKind: "ordinary" | "project"
     }
   | {
       kind: "feature_grant"
@@ -40,7 +45,6 @@ export type ImAuthorizedRemoteTarget =
       label: string
       projectId: string
       featureSlug: string
-      existingThreadId?: string
     }
 
 export class ImRemoteAccessError extends Error {
@@ -63,6 +67,7 @@ interface RemoteAccessDependencies {
   grants: ImRemoteGrantStore
   features: ImFeatureBindingService
   getThread: typeof getThread
+  deleteThread: typeof deleteThread
   createId: () => string
   getGoal: (threadId: string) => { status: string } | null
   coordinator: Pick<
@@ -105,6 +110,7 @@ export class ImRemoteAccessService {
       grants: dependencies.grants ?? imRemoteGrantStore,
       features: dependencies.features ?? imFeatureBindingService,
       getThread: dependencies.getThread ?? getThread,
+      deleteThread: dependencies.deleteThread ?? deleteThread,
       createId: dependencies.createId ?? randomUUID,
       getGoal: dependencies.getGoal ?? ((threadId) => goalStore.get(threadId)),
       coordinator: dependencies.coordinator ?? coordinatorWorkerManager,
@@ -172,40 +178,32 @@ export class ImRemoteAccessService {
     const targets: ImAuthorizedRemoteTarget[] = []
     for (const grant of this.dependencies.grants.listThreadGrants(route.conversationKey)) {
       if (grant.state !== "active" || !targetRouteMatches(route, grant)) continue
+      let thread: ThreadRow
       try {
-        this.validateGrantableThread(grant.threadId)
+        thread = this.validateGrantableThread(grant.threadId).thread
       } catch {
         continue
       }
+      const metadata = parseStandardThreadMetadata(thread.metadata).metadata
+      const projectMode = Boolean(metadata.harnessFeature || metadata.harnessProjectSession)
       targets.push({
         kind: "thread_grant",
         grantId: grant.grantId,
         grantVersion: grant.grantVersion,
         label: grant.titleSnapshot,
-        threadId: grant.threadId
+        threadId: grant.threadId,
+        sessionKind: projectMode ? "project" : "ordinary"
       })
     }
     for (const grant of this.dependencies.grants.listFeatureGrants(route.conversationKey)) {
       if (grant.state !== "active" || !targetRouteMatches(route, grant)) continue
-      const existing = this.dependencies.conversations
-        .listTargets(route.conversationKey)
-        .find(
-          ({ snapshot, state }) =>
-            state === "active" &&
-            snapshot.kind === "feature" &&
-            snapshot.grantId === grant.grantId &&
-            snapshot.projectId === grant.projectId &&
-            snapshot.featureSlug === grant.featureSlug &&
-            Boolean(this.dependencies.getThread(snapshot.threadId))
-        )
       targets.push({
         kind: "feature_grant",
         grantId: grant.grantId,
         grantVersion: grant.grantVersion,
         label: `${grant.projectNameSnapshot} / ${grant.featureTitleSnapshot}`,
         projectId: grant.projectId,
-        featureSlug: grant.featureSlug,
-        ...(existing ? { existingThreadId: existing.snapshot.threadId } : {})
+        featureSlug: grant.featureSlug
       })
     }
     return targets.sort((left, right) => left.label.localeCompare(right.label, "zh-CN"))
@@ -265,7 +263,7 @@ export class ImRemoteAccessService {
     route: ImGrantRouteIdentity
     grantId: string
     grantVersion: number
-  }): Promise<Extract<ImTargetSnapshot, { kind: "feature" }>> {
+  }): Promise<Extract<ImTargetSnapshot, { kind: "thread" }>> {
     const grant = this.dependencies.grants.getFeatureGrantById(input.grantId)
     if (!grant || grant.grantVersion !== input.grantVersion || grant.state !== "active") {
       throw new ImRemoteAccessError("REMOTE_GRANT_STALE", "Feature 授权已变化，请重新发送 /会话。")
@@ -277,13 +275,50 @@ export class ImRemoteAccessService {
       projectId: grant.projectId,
       featureSlug: grant.featureSlug
     })
-    return this.dependencies.features.bindFeature({
-      ...input.route,
-      projectId: grant.projectId,
-      featureSlug: grant.featureSlug,
-      grantId: grant.grantId,
-      grantVersion: grant.grantVersion
-    })
+    const targetId = this.dependencies.createId()
+    let created: Awaited<ReturnType<ImFeatureBindingService["createFeatureThread"]>>
+    try {
+      created = await this.dependencies.features.createFeatureThread({
+        ...input.route,
+        projectId: grant.projectId,
+        featureSlug: grant.featureSlug,
+        targetId
+      })
+    } catch (error) {
+      if (error instanceof ImFeatureBindingError) {
+        throw new ImRemoteAccessError("REMOTE_FEATURE_UNAVAILABLE", error.message)
+      }
+      throw error
+    }
+
+    let threadGrant: ImThreadGrantRecord | null = null
+    try {
+      threadGrant = await this.dependencies.grants.enableThreadGrant({
+        route: input.route,
+        threadId: created.threadId,
+        title: created.title
+      })
+      const target: Extract<ImTargetSnapshot, { kind: "thread" }> = {
+        kind: "thread",
+        targetId,
+        grantId: threadGrant.grantId,
+        grantVersion: threadGrant.grantVersion,
+        threadId: created.threadId,
+        title: created.title,
+        workspacePath: created.workspacePath
+      }
+      await this.dependencies.conversations.registerTarget(input.route.conversationKey, target, {
+        state: "active",
+        activate: true
+      })
+      return target
+    } catch (error) {
+      if (threadGrant) {
+        await this.dependencies.grants.revokeThreadGrant(created.threadId).catch(() => undefined)
+      }
+      this.dependencies.deleteThread(created.threadId)
+      throw error
+    }
   }
 
   getThreadGrant(threadId: string): ImThreadGrantRecord | null {
@@ -325,7 +360,7 @@ export class ImRemoteAccessService {
     if (parsed.agentMode !== "normal") {
       throw new ImRemoteAccessError(
         "REMOTE_THREAD_UNSUPPORTED",
-        "第一阶段只支持桌面创建的普通 Agent 会话。"
+        "第一阶段只支持普通 Agent 模式的会话。"
       )
     }
     const goal = this.dependencies.getGoal(threadId)
@@ -360,11 +395,11 @@ export class ImRemoteAccessService {
     if (!workspacePath) {
       throw new ImRemoteAccessError("REMOTE_THREAD_UNAVAILABLE", "会话工作区不可用。")
     }
-    if (parsed.metadata.targetKind === "inbox" || parsed.metadata.remoteThread === true) {
-      throw new ImRemoteAccessError(
-        "REMOTE_THREAD_UNSUPPORTED",
-        "远程收件箱或 IM 创建的会话不能作为桌面会话授权目标。"
-      )
+    if (
+      parsed.metadata.targetKind === "inbox" ||
+      (parsed.metadata.remoteThread === true && parsed.metadata.targetKind !== "feature")
+    ) {
+      throw new ImRemoteAccessError("REMOTE_THREAD_UNSUPPORTED", "远程收件箱不能作为会话授权目标。")
     }
     return { thread, workspacePath, parsed }
   }

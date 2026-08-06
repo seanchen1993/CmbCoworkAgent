@@ -14,14 +14,20 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
 import { getWorkspaceSelectionErrorMessage } from "@/lib/workspace-utils"
+import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import type { FileInfo } from "@/types"
 import { toast } from "sonner"
 
 export function FilesystemPanel() {
-  const { currentThreadId } = useAppStore()
+  const { currentThreadId, threads } = useAppStore()
+  const currentThread = threads.find((thread) => thread.thread_id === currentThreadId) ?? null
   const threadState = useThreadState(currentThreadId)
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
+  const concealWorkspacePath = isRemoteInboxThread(currentThread)
+  const workspaceName = concealWorkspacePath
+    ? REMOTE_INBOX_WORKSPACE_NAME
+    : workspacePath?.split(/[\\/]/).filter(Boolean).pop()
   const messages = threadState?.messages ?? []
   const setWorkspacePath = threadState?.setWorkspacePath
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
@@ -294,9 +300,9 @@ export function FilesystemPanel() {
           <div className="flex items-center gap-2">
             <span
               className="text-[10px] text-muted-foreground truncate max-w-[80px]"
-              title={workspacePath}
+              title={concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : workspacePath}
             >
-              {workspacePath.split("/").pop()}
+              {workspaceName}
             </span>
             <Button
               variant="ghost"

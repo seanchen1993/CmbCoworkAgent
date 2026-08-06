@@ -112,6 +112,7 @@ import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
+import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
@@ -2620,6 +2621,9 @@ export function ChatContainer({
   }, [setShowCustomizeView])
   const handleOpenMemorySettings = useCallback((): void => {
     setShowCustomizeView(true, "memory")
+  }, [setShowCustomizeView])
+  const handleOpenRobotSettings = useCallback((): void => {
+    setShowCustomizeView(true, "robot")
   }, [setShowCustomizeView])
 
   const canChangeAgentMode = !historyLoading && threadMessages.length === 0
@@ -7921,6 +7925,10 @@ export function ChatContainer({
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
                       <SystemPromptPreviewButton threadId={threadId} />
+                      <ThreadRemoteAccessSwitcher
+                        threadId={threadId}
+                        onOpenSettings={handleOpenRobotSettings}
+                      />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
                         <ContextUsageIndicator

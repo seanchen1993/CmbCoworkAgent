@@ -62,6 +62,7 @@ import {
 } from "@/components/ui/dialog"
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Switch } from "@/components/ui/switch"
 import {
   Select,
   SelectContent,
@@ -131,7 +132,8 @@ import type {
   HarnessWorkflow,
   PluginMetadata,
   Thread,
-  BuiltinRobotStatus
+  BuiltinRobotStatus,
+  BuiltinRobotRemoteAccessOverview
 } from "@/types"
 import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
 
@@ -5910,17 +5912,6 @@ function ProjectSessionPage({
   )
 }
 
-const REMOTE_BINDING_STATE_LABELS: Record<
-  BuiltinRobotStatus["featureBindings"][number]["state"],
-  string
-> = {
-  pending: "校验中",
-  active: "已绑定",
-  suspended: "已暂停",
-  revoked: "已解除",
-  historical: "历史会话"
-}
-
 function RemoteFeatureAccessPanel({
   projectId,
   featureSlug,
@@ -5931,17 +5922,36 @@ function RemoteFeatureAccessPanel({
   onOpenThread: (threadId: string) => void
 }): React.JSX.Element {
   const [status, setStatus] = useState<BuiltinRobotStatus | null>(null)
+  const [remoteAccess, setRemoteAccess] = useState<BuiltinRobotRemoteAccessOverview | null>(null)
+  const [busy, setBusy] = useState(false)
+  const threads = useAppStore((state) => state.threads)
 
   useEffect(() => {
     let active = true
-    void window.api.builtinRobot
-      .getStatus()
-      .then((next) => {
-        if (active) setStatus(next)
+    const refreshRemoteAccess = (): void => {
+      void window.api.builtinRobot
+        .getRemoteAccess()
+        .then((next) => {
+          if (active) setRemoteAccess(next)
+        })
+        .catch(() => {
+          if (active) setRemoteAccess(null)
+        })
+    }
+    void Promise.all([
+      window.api.builtinRobot.getStatus(),
+      window.api.builtinRobot.getRemoteAccess()
+    ])
+      .then(([nextStatus, nextAccess]) => {
+        if (!active) return
+        setStatus(nextStatus)
+        setRemoteAccess(nextAccess)
       })
       .catch(() => undefined)
     const unsubscribe = window.api.builtinRobot.onStatus((next) => {
-      if (active) setStatus(next)
+      if (!active) return
+      setStatus(next)
+      refreshRemoteAccess()
     })
     return () => {
       active = false
@@ -5949,75 +5959,102 @@ function RemoteFeatureAccessPanel({
     }
   }, [])
 
-  const bindings = (status?.featureBindings ?? []).filter(
-    (binding) => binding.projectId === projectId && binding.featureSlug === featureSlug
+  const featureGrant = remoteAccess?.featureGrants.find(
+    (grant) => grant.projectId === projectId && grant.featureSlug === featureSlug
   )
-  const available =
-    status?.settings.enabled === true &&
-    status.identityState === "verified" &&
-    status.settings.remoteAccess === "inbox-and-features"
+  const enabled = featureGrant?.state === "active"
+  const routeAvailable = remoteAccess?.routeAvailable === true
+  const relatedSessions =
+    remoteAccess?.threadGrants.filter((grant) => {
+      if (grant.state !== "active") return false
+      const thread = threads.find((candidate) => candidate.thread_id === grant.threadId)
+      const harnessFeature = thread?.metadata?.harnessFeature
+      if (!harnessFeature || typeof harnessFeature !== "object" || Array.isArray(harnessFeature)) {
+        return false
+      }
+      const binding = harnessFeature as Record<string, unknown>
+      return binding.projectId === projectId && binding.slug === featureSlug
+    }) ?? []
   const availabilityText = !status
     ? "正在读取远程访问状态…"
     : !status.settings.enabled
       ? "内置统一机器人未启用"
-      : status.identityState !== "verified"
-        ? status.identityState === "verifying"
-          ? "正在验证企业身份"
-          : "需要先完成企业身份验证"
-        : status.settings.remoteAccess !== "inbox-and-features"
-          ? "机器人管理中尚未开放 Feature"
-          : "可从招乎查看并绑定此 Feature"
+      : !routeAvailable
+        ? (remoteAccess?.routeReason ?? "招乎连接尚未就绪")
+        : enabled
+          ? "已允许从招乎在此 Feature 下新建会话"
+          : "尚未开放从招乎新建会话"
+
+  const toggleFeatureCreation = async (nextEnabled: boolean): Promise<void> => {
+    if (busy || (!nextEnabled && !enabled) || (nextEnabled && !routeAvailable)) return
+    setBusy(true)
+    try {
+      const next = await window.api.builtinRobot.setFeatureRemoteAccess(
+        projectId,
+        featureSlug,
+        nextEnabled
+      )
+      setRemoteAccess(next)
+      toast.success(
+        nextEnabled ? "已允许从招乎在此 Feature 下新建会话" : "已关闭此 Feature 的远程新建会话权限"
+      )
+    } catch (error) {
+      toast.error(cleanIpcError(error))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <section className="rounded-md border border-border bg-background">
-      <div className="flex min-w-0 items-center gap-2 border-b border-border px-3 py-3 text-sm font-semibold">
-        <Bot className="size-4 shrink-0 text-muted-foreground" />
-        <span className="truncate">招乎远程访问</span>
+      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border px-3 py-3">
+        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+          <Bot className="size-4 shrink-0 text-muted-foreground" />
+          <span className="truncate">Feature 远程新建会话</span>
+        </div>
+        <Switch
+          aria-label="允许从招乎在此 Feature 下新建会话"
+          checked={enabled}
+          disabled={busy || (!enabled && !routeAvailable)}
+          onCheckedChange={(checked) => void toggleFeatureCreation(checked)}
+        />
       </div>
       <div className="space-y-3 p-3">
         <div className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
           <span
             className={cn(
               "mt-1.5 size-2 shrink-0 rounded-full",
-              available ? "bg-emerald-500" : "bg-amber-500"
+              enabled ? "bg-emerald-500" : "bg-amber-500"
             )}
           />
           <span>{availabilityText}</span>
         </div>
-        {bindings.length === 0 ? (
+        {relatedSessions.length === 0 ? (
           <p className="rounded border border-dashed px-2.5 py-3 text-xs text-muted-foreground">
-            当前没有远程 Binding。启用后可在招乎发送 /项目、/功能 和 /绑定。
+            当前没有已接入的会话。打开上方开关后，可在招乎通过 /会话 选择此 Feature 并新建会话。
           </p>
         ) : (
           <div className="space-y-2">
-            {bindings.map((binding) => (
-              <div key={binding.bindingId} className="rounded border px-2.5 py-2">
+            {relatedSessions.map((grant) => (
+              <div key={grant.grantId} className="rounded border px-2.5 py-2">
                 <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className="font-medium">
-                    {REMOTE_BINDING_STATE_LABELS[binding.state]}
-                    {binding.activeTarget ? " · 当前目标" : ""}
-                  </span>
+                  <span className="truncate font-medium">{grant.title}</span>
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
                     className="h-7 px-2 text-xs"
-                    onClick={() => onOpenThread(binding.threadId)}
+                    onClick={() => onOpenThread(grant.threadId)}
                   >
-                    <ExternalLink className="mr-1 size-3" /> 打开 Thread
+                    <ExternalLink className="mr-1 size-3" /> 打开会话
                   </Button>
                 </div>
-                {binding.suspendReason && (
-                  <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                    {binding.suspendReason}
-                  </p>
-                )}
               </div>
             ))}
           </div>
         )}
         <p className="text-[11px] leading-4 text-muted-foreground">
-          招乎只显示项目与 Feature 名称，本地路径不会上传。
+          此开关只控制新建权限；关闭后，下方已经接入的会话仍由各自的会话开关管理。
         </p>
       </div>
     </section>

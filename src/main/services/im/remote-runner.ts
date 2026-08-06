@@ -196,9 +196,6 @@ export async function setRemoteThreadLifecycle(
 ): Promise<void> {
   const threadId = event.targetSnapshot?.threadId
   if (!threadId) return
-  // A desktop-created Thread remains a normal local Thread. Remote grant/target
-  // tables own its channel lifecycle; do not mutate its metadata as a side effect.
-  if (event.targetSnapshot?.kind === "thread") return
   const thread = getThread(threadId)
   if (!thread) return
   let metadata: Record<string, unknown> = {}
@@ -207,6 +204,9 @@ export async function setRemoteThreadLifecycle(
   } catch {
     metadata = {}
   }
+  // A desktop-created Thread remains a normal local Thread. A Feature Thread
+  // created from IM also uses a Thread grant, but keeps its remote lifecycle UI.
+  if (event.targetSnapshot?.kind === "thread" && metadata.remoteThread !== true) return
   if (metadata.remoteState === "historical") return
   if (state === "rejected" && metadata.remoteState === "suspended") {
     await flushStrict()
@@ -788,7 +788,7 @@ export class ImRemoteRunner {
         return "outcome_unknown"
       }
       if (waitingTimeoutReason) {
-        const reply = "等待桌面确认或补充输入已超时，本轮已取消；Feature Binding 保持不变。"
+        const reply = "等待桌面确认或补充输入已超时，本轮已取消；会话授权保持不变。"
         const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
           eventId: event.eventId,
           state: "cancelled",
