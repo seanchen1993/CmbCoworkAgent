@@ -90,13 +90,13 @@ describe("AI recording service", () => {
     })
     expect(session.script).toContain("await page.goto('https://example.com/login');")
     expect(session.script).toContain(
-      "await page.getByRole('button', { name: 'Login', exact: true }).click();"
+      "await page.getByRole('button', { name: 'Login' }).click();"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Email', exact: true }).fill('final@example.com');"
+      "await page.getByRole('textbox', { name: 'Email' }).fill('final@example.com');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Password', exact: true }).fill('super-secret');"
+      "await page.getByRole('textbox', { name: 'Password' }).fill('super-secret');"
     )
   })
 
@@ -171,12 +171,12 @@ describe("AI recording service", () => {
 
     expect(session.actions).toHaveLength(3)
     expect(session.script).toContain(
-      "await page.getByRole('tab', { name: 'Actions', exact: true }).click();"
+      "await page.getByRole('tab', { name: 'Actions' }).click();"
     )
-    expect(session.script.match(/getByRole\('tab', \{ name: 'Actions', exact: true \}\)/g)).toHaveLength(1)
+    expect(session.script.match(/getByRole\('tab', \{ name: 'Actions' \}\)/g)).toHaveLength(1)
     expect(session.script.match(/Branch selector/g)).toHaveLength(1)
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Search', exact: true }).press('Enter');"
+      "await page.getByRole('textbox', { name: 'Search' }).press('Enter');"
     )
   })
 
@@ -218,13 +218,13 @@ describe("AI recording service", () => {
       sensitive: true
     })
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Username', exact: true }).fill('john.doe');"
+      "await page.getByRole('textbox', { name: 'Username' }).fill('john.doe');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Email', exact: true }).fill('john@example.com');"
+      "await page.getByRole('textbox', { name: 'Email' }).fill('john@example.com');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Password', exact: true }).fill('my-secret');"
+      "await page.getByRole('textbox', { name: 'Password' }).fill('my-secret');"
     )
   })
 
@@ -261,7 +261,7 @@ describe("AI recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      "await page.getByRole('spinbutton', { name: '年龄', exact: true }).fill('11');"
+      "await page.getByRole('spinbutton', { name: '年龄' }).fill('11');"
     )
   })
 
@@ -298,7 +298,7 @@ describe("AI recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      "await page.getByRole('slider', { name: '编程经验（年）', exact: true }).fill('6');"
+      "await page.getByRole('slider', { name: '编程经验（年）' }).fill('6');"
     )
   })
 
@@ -332,7 +332,7 @@ describe("AI recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
+      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人' }).click();"
     )
     expect(session.script).not.toContain(`label:has(input[name="role"][value="designer"])`)
   })
@@ -408,10 +408,10 @@ await page.getByRole('textbox', { name: '邮箱' }).fill('test@qq.com');
       })
     })
     expect(session.script).toContain(
-      "await page.getByRole('combobox', { name: '用户名 (支持自动补全)', exact: true }).fill('mktui');"
+      "await page.getByRole('combobox', { name: '用户名 (支持自动补全)' }).fill('mktui');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: '邮箱', exact: true }).fill('test@qq.com');"
+      "await page.getByRole('textbox', { name: '邮箱' }).fill('test@qq.com');"
     )
     expect(session.script).not.toContain("TODO_SELECTOR")
   })
@@ -447,7 +447,7 @@ await page.getByText('分支选项 release', { exact: true }).click();
       })
     })
     expect(session.script).toContain(
-      "await page.getByRole('option', { name: 'release', exact: true }).click();"
+      "await page.getByRole('option', { name: 'release' }).click();"
     )
   })
 
@@ -477,7 +477,7 @@ await page.getByText('分支选项 release', { exact: true }).click();
       })
     })
     expect(session.script).toContain(
-      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
+      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang' }).click();"
     )
     expect(session.script).not.toContain('locator("button[name=\\"branch\\"]")')
   })
@@ -508,7 +508,7 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
       paths: ["/tmp/fixtures/contract.pdf"]
     })
     expect(session.script).toContain(
-      "await page.getByRole('button', { name: 'Upload document', exact: true }).click();"
+      "await page.getByRole('button', { name: 'Upload document' }).click();"
     )
     expect(session.script).toContain(
       "await page.locator('input[type=file]').setInputFiles('/tmp/fixtures/contract.pdf');"
@@ -602,10 +602,10 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
     expect(script).toContain('const 变量_用户名 = ""; // 变量-用户名')
     expect(script).toContain('const 变量_密码 = ""; // 变量-密码')
     expect(script).toContain(
-      'await page.getByRole("textbox", { name: "用户名输入框", exact: true }).fill(变量_用户名);'
+      'await page.getByRole("textbox", { name: "用户名输入框" }).fill(变量_用户名);'
     )
     expect(script).toContain(
-      'await page.getByRole("textbox", { name: "密码输入框", exact: true }).fill(变量_密码);'
+      'await page.getByRole("textbox", { name: "密码输入框" }).fill(变量_密码);'
     )
     expect(script).not.toContain("recorded@example.com")
     expect(extractAiRecordingVariableNames(script)).toEqual(["变量-用户名", "变量-密码"])
@@ -649,7 +649,7 @@ await fileChooser.setFiles(["/tmp/fixtures/contract.pdf"]);
     expect(script).toContain('const 变量_分支名 = ""; // 变量-分支名')
     expect(script).toContain("await page.getByText(变量_流水线名称, { exact: true }).click();")
     expect(script).toContain(
-      'await page.getByRole("option", { name: 变量_分支名, exact: true }).click();'
+      'await page.getByRole("option", { name: 变量_分支名 }).click();'
     )
     expect(extractAiRecordingVariableNames(script)).toEqual(["变量-流水线名称", "变量-分支名"])
   })

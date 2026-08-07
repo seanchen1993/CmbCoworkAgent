@@ -215,7 +215,7 @@ describe("manual recording service", () => {
       source: "manual"
     })
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: '邮箱' }).fill('final@example.com');"
+      "await page.getByRole('textbox', { name: '邮箱', exact: true }).fill('final@example.com');"
     )
     expect(session.script).toContain(
       "await page.getByRole('button', { name: '登录' }).click();"
@@ -312,7 +312,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人' }).click();"
+      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
     )
   })
 
@@ -388,7 +388,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('checkbox', { name: 'emailNotif' }).click();"
+      "await page.getByRole('checkbox', { name: 'emailNotif', exact: true }).click();"
     )
     expect(session.script).not.toContain("getByText('emailNotif', { exact: true }).click()")
   })
@@ -410,7 +410,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang' }).click();"
+      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
     )
     expect(session.script).not.toContain('locator("button[name=\\"branch\\"]")')
   })
@@ -457,16 +457,16 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Select branch' }).click();"
+      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).click();"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Select branch' }).fill('qyang');"
+      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).fill('qyang');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('menuitemradio', { name: 'UAT_qyang2' }).click();"
+      "await page.getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click();"
     )
     expect(session.script.indexOf('.fill("qyang")')).toBeLessThan(
-      session.script.indexOf("getByRole('menuitemradio', { name: 'UAT_qyang2' }).click()")
+      session.script.indexOf("getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click()")
     )
   })
 
@@ -666,10 +666,10 @@ describe("manual recording service", () => {
       })
     })
     expect(session.script).toContain(
-      "await page.getByRole('button', { name: 'Search' }).first().click();"
+      "await page.getByRole('button', { name: 'Search', exact: true }).first().click();"
     )
     expect(session.script).toContain(
-      "await page.getByRole('button', { name: 'Search' }).nth(1).click();"
+      "await page.getByRole('button', { name: 'Search', exact: true }).nth(1).click();"
     )
   })
 
@@ -1082,13 +1082,13 @@ test("manual recorded flow", async ({ page }) => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "page.locator('iframe').first().contentFrame().getByRole('tab', { name: '个人资料' }).click();"
+      "page.locator('iframe').first().contentFrame().getByRole('tab', { name: '个人资料', exact: true }).click();"
     )
     expect(session.script).toContain(
-      "page.locator('iframe').first().contentFrame().locator('iframe').nth(1).contentFrame().getByRole('textbox', { name: '姓名(input文本框)：' }).fill('ha');"
+      "page.locator('iframe').first().contentFrame().locator('iframe').nth(1).contentFrame().getByRole('textbox', { name: '姓名(input文本框)：', exact: true }).fill('ha');"
     )
     expect(session.script).toContain(
-      "page.locator('iframe').first().contentFrame().locator('iframe').nth(2).contentFrame().getByRole('button', { name: 'Show more' }).click();"
+      "page.locator('iframe').first().contentFrame().locator('iframe').nth(2).contentFrame().getByRole('button', { name: 'Show more', exact: true }).click();"
     )
   })
 

@@ -3,10 +3,6 @@ import {
   formatPlaywrightSelector
 } from "../common/playwright-codegen/projectLocatorAdapter"
 import { getPlaywrightRecorderSourceBundle } from "../common/playwright-codegen/projectRecorderAdapter"
-import {
-  parseSelector,
-  stringifySelector
-} from "../common/playwright-codegen/selectorParser"
 
 // Playwright 录制器动作通过这个前缀回传到 Electron 宿主。
 export const PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX = "[PlaywrightManualRecorder]"
@@ -176,44 +172,12 @@ function fileUploadLocatorForFakePathFill(
   }
 }
 
-function normalizeManualRoleSelectorExactness(selector: string | undefined): string | undefined {
-  const value = readString(selector)
-  if (!value || !value.includes("internal:role=")) return value
-
-  const normalizeRoleBody = (body: string): string =>
-    body.replace(
-      /(\[(?:name|description)=("(?:\\.|[^"])*"|\/(?:\\.|[^/])*\/[dgimsuvy]*))s\]/gu,
-      "$1i]"
-    )
-
-  try {
-    const parsed = parseSelector(value)
-    let changed = false
-    for (const part of parsed.parts) {
-      if (part.name !== "internal:role" || typeof part.body !== "string") continue
-      const normalizedBody = normalizeRoleBody(part.body)
-      if (normalizedBody === part.body) continue
-      part.body = normalizedBody
-      part.source = normalizedBody
-      changed = true
-    }
-    return changed ? stringifySelector(parsed) : value
-  } catch {
-    return value.replace(
-      /(internal:role=[^\]]*\[(?:name|description)=("(?:\\.|[^"])*"|\/(?:\\.|[^/])*\/[dgimsuvy]*))s\]/gu,
-      "$1i]"
-    )
-  }
-}
-
 function locatorForAction(
   action: PlaywrightRecorderAction,
   rawLocator: PlaywrightRecorderEnvelope["locator"],
   framePath: string[]
 ): PlaywrightManualRecorderEventLocator | undefined {
-  const selector = normalizeManualRoleSelectorExactness(
-    readString(rawLocator?.selector ?? action.selector)
-  )
+  const selector = readString(rawLocator?.selector ?? action.selector)
   if (!selector && !rawLocator) return framePath.length > 0 ? { framePath } : undefined
 
   return {
