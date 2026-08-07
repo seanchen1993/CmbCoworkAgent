@@ -221,6 +221,8 @@ import { HookLogChip, HookLogModal } from "./HookLogViews"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+// Temporary local validation switch: expose Ultra Workflow in project-mode chat.
+const PROJECT_MODE_WORKFLOW_ENABLED = true
 
 const MARKET_SKILLS_CACHE_TTL_MS = 10 * 60 * 1000
 
@@ -2199,7 +2201,7 @@ export function ChatContainer({
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
   const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
-  const disableWorkflowModeOption = isProjectModeAgentContext
+  const disableWorkflowModeOption = isProjectModeAgentContext && !PROJECT_MODE_WORKFLOW_ENABLED
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -7594,7 +7596,9 @@ export function ChatContainer({
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
-                            showWorkflow={!isProjectModeAgentContext}
+                            showWorkflow={
+                              !isProjectModeAgentContext || PROJECT_MODE_WORKFLOW_ENABLED
+                            }
                             mode={
                               (disableCoordinatorModeOption && agentMode === "coordinator") ||
                               (disableWorkflowModeOption && agentMode === "workflow")
