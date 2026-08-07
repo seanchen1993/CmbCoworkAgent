@@ -12692,11 +12692,9 @@ async function fetchDashboardEfficiency(
         total_input_tokens: { sum: { field: "totalInputTokens" } },
         total_output_tokens: { sum: { field: "totalOutputTokens" } },
         total_tokens: { sum: { field: "totalTokens" } },
-        // Flattened at trace-finish time (see summarizeTraceCacheTokens). All
-        // three are parts of the input total, not additions to it.
-        cache_read_tokens: { sum: { field: "cacheReadTokens" } },
-        cache_creation_tokens: { sum: { field: "cacheCreationTokens" } },
-        non_cached_input_tokens: { sum: { field: "nonCachedInputTokens" } }
+        // Flattened at trace-finish time (see summarizeTraceCacheTokens);
+        // a part of the input total, not an addition to it.
+        cache_read_tokens: { sum: { field: "cacheReadTokens" } }
       }
     }),
     // Traces that actually produced code, so the panel can show how much of the
@@ -12734,8 +12732,6 @@ async function fetchDashboardEfficiency(
       totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
       totalTokens: asNumber(asRecord(traceAggs.total_tokens).value),
       cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
-      cacheCreationTokens: asNumber(asRecord(traceAggs.cache_creation_tokens).value),
-      nonCachedInputTokens: asNumber(asRecord(traceAggs.non_cached_input_tokens).value),
       pushedAdoptedLines: overall.pushedAdoptedLines,
       traceCount: asNumber(asRecord(traceAggs.trace_count).value),
       codeProducingTraceCount: asNumber(asRecord(codeTraceAggs.code_traces).value)

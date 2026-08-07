@@ -77,20 +77,23 @@ export interface EfficiencyComputeData {
   totalOutputTokens: number
   totalTokens: number
   /**
-   * Subsets of `totalInputTokens`, not additions to it: the LangChain adapters
-   * fold cache reads and writes into `input_tokens`. Surfaced separately
-   * because cache reads cost roughly a tenth of a standard input token, so a
-   * high cache share inflates the raw per-line figure while lowering the bill.
+   * A subset of `totalInputTokens`, not an addition to it: the LangChain
+   * adapters fold cache reads into `input_tokens`. Surfaced separately because
+   * a cache read costs roughly a tenth of a standard input token, so a high
+   * cache share inflates the raw per-line figure while lowering the bill.
    */
   cacheReadTokens: number
-  cacheCreationTokens: number
-  nonCachedInputTokens: number
   /**
-   * True when the three input parts add up to `totalInputTokens`. False means
-   * the index's own `totalInputTokens` derivation disagrees with the
-   * client-side split, and the per-line figure should not be quoted.
+   * True when the index's token counters are internally coherent:
+   * `totalTokens ≈ totalInputTokens + totalOutputTokens`, and cache reads do
+   * not exceed input.
+   *
+   * False means the numerator was derived some other way — the known risk is a
+   * summation that adds cache counts on top of `input_tokens`, which already
+   * contains them, inflating the total. The per-line figure must not be quoted
+   * when this is false.
    */
-  inputSplitConsistent: boolean
+  tokenTotalsConsistent: boolean
   pushedAdoptedLines: number
   /** Σ tokens ÷ Σ pushed adopted lines. Null when no code landed. */
   tokensPerAdoptedLine: number | null
@@ -269,22 +272,20 @@ export interface ComputeEfficiencyInput {
   totalOutputTokens: number
   totalTokens: number
   cacheReadTokens: number
-  cacheCreationTokens: number
-  nonCachedInputTokens: number
   pushedAdoptedLines: number
   traceCount: number
   codeProducingTraceCount: number
 }
 
 /**
- * Tolerance for the input-split self-check, as a fraction of total input.
+ * Tolerance for the token self-check, as a fraction of the total.
  *
- * Not zero: traces predating the flattened fields contribute input tokens with
- * no split, so a mixed window is legitimately a little short. 1% keeps that
- * quiet while still catching a systematic double-count, which would be off by
- * tens of percent.
+ * Not zero: a handful of traces can carry a total without a matching
+ * input/output breakdown (older documents, partial provider reporting), so an
+ * exact match is too strict. 1% stays quiet for that while still catching a
+ * systematic double-count, which is off by tens of percent.
  */
-export const INPUT_SPLIT_TOLERANCE = 0.01
+export const TOKEN_TOTALS_TOLERANCE = 0.01
 
 /**
  * 指标 3. Numerator is the trace index's `totalTokens`, which already equals
@@ -298,23 +299,27 @@ export function buildComputeEfficiency(input: ComputeEfficiencyInput): Efficienc
   const traceCount = Math.max(0, input.traceCount)
   const codeProducingTraceCount = Math.max(0, input.codeProducingTraceCount)
   const cacheReadTokens = Math.max(0, input.cacheReadTokens)
-  const cacheCreationTokens = Math.max(0, input.cacheCreationTokens)
-  const nonCachedInputTokens = Math.max(0, input.nonCachedInputTokens)
+  const totalOutputTokens = Math.max(0, input.totalOutputTokens)
 
-  const splitTotal = cacheReadTokens + cacheCreationTokens + nonCachedInputTokens
-  const inputSplitConsistent =
-    totalInputTokens > 0
-      ? Math.abs(splitTotal - totalInputTokens) <= totalInputTokens * INPUT_SPLIT_TOLERANCE
-      : splitTotal === 0
+  // Checks the numerator against its own parts — needs no extra index field.
+  // A total that exceeds input + output is the signature of a summation that
+  // added cache counts on top of `input_tokens`, which already contains them.
+  const partsTotal = totalInputTokens + totalOutputTokens
+  const totalsMatch =
+    totalTokens > 0
+      ? Math.abs(totalTokens - partsTotal) <= totalTokens * TOKEN_TOTALS_TOLERANCE
+      : partsTotal === 0
+  // Cache reads come out of input, so exceeding it means the two counters were
+  // derived from different populations.
+  const cacheWithinInput = cacheReadTokens <= totalInputTokens
+  const tokenTotalsConsistent = totalsMatch && cacheWithinInput
 
   return {
     totalInputTokens,
-    totalOutputTokens: Math.max(0, input.totalOutputTokens),
+    totalOutputTokens,
     totalTokens,
     cacheReadTokens,
-    cacheCreationTokens,
-    nonCachedInputTokens,
-    inputSplitConsistent,
+    tokenTotalsConsistent,
     pushedAdoptedLines,
     tokensPerAdoptedLine: pushedAdoptedLines > 0 ? totalTokens / pushedAdoptedLines : null,
     traceCount,
@@ -398,11 +403,9 @@ export function makeMockEfficiency(): DashboardEfficiencyData {
     compute: buildComputeEfficiency({
       totalInputTokens: 2_140_000_000,
       totalOutputTokens: 96_000_000,
+      // 输入 + 输出 = 总数，让本地预览走到自检通过的分支。
       totalTokens: 2_236_000_000,
-      // 三项相加等于 totalInputTokens，让本地预览也走到自检通过的分支。
       cacheReadTokens: 1_780_000_000,
-      cacheCreationTokens: 62_000_000,
-      nonCachedInputTokens: 298_000_000,
       pushedAdoptedLines: overall.pushedAdoptedLines,
       traceCount: 18_400,
       codeProducingTraceCount: 7_120

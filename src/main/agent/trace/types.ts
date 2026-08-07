@@ -467,19 +467,14 @@ export interface AgentTrace {
   /** Ordered model-call runs (request + response) */
   modelCalls?: TraceModelCall[]
   /**
-   * Trace-level cache token split, flattened from `modelCalls[].tokenUsage` at
+   * Σ cache-hit input tokens, flattened from `modelCalls[].tokenUsage` at
    * finish time so the operations dashboard can aggregate it directly — a
    * `sum` agg cannot reach into the nested per-call array.
    *
-   * All three are subsets/complements of the trace's input tokens, never
-   * additions to them: the LangChain adapters fold cache counts into
-   * `input_tokens`. So `nonCachedInputTokens + cacheReadTokens +
-   * cacheCreationTokens` should equal total input; a mismatch means the
-   * index's own `totalInputTokens` derivation disagrees with this one.
+   * A subset of the trace's input tokens, never an addition to them: the
+   * LangChain adapters fold cache counts into `input_tokens`.
    */
   cacheReadTokens?: number
-  cacheCreationTokens?: number
-  nonCachedInputTokens?: number
   /** Unified LangSmith-style run tree nodes */
   nodes?: TraceNode[]
   /** Total number of tool calls across all steps */

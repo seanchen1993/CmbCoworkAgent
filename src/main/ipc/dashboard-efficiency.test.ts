@@ -195,8 +195,6 @@ describe("buildComputeEfficiency", () => {
       totalOutputTokens: 100_000,
       totalTokens: 1_000_000,
       cacheReadTokens: 800_000,
-      cacheCreationTokens: 40_000,
-      nonCachedInputTokens: 60_000,
       pushedAdoptedLines: 500,
       traceCount: 200,
       codeProducingTraceCount: 80
@@ -213,8 +211,6 @@ describe("buildComputeEfficiency", () => {
       totalOutputTokens: 100_000,
       totalTokens: 1_000_000,
       cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      nonCachedInputTokens: 900_000,
       pushedAdoptedLines: 1000,
       traceCount: 1,
       codeProducingTraceCount: 1
@@ -228,8 +224,6 @@ describe("buildComputeEfficiency", () => {
       totalOutputTokens: 5,
       totalTokens: 10,
       cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      nonCachedInputTokens: 5,
       pushedAdoptedLines: 0,
       traceCount: 0,
       codeProducingTraceCount: 0
@@ -244,8 +238,6 @@ describe("buildComputeEfficiency", () => {
       totalOutputTokens: -1,
       totalTokens: -1,
       cacheReadTokens: -1,
-      cacheCreationTokens: -1,
-      nonCachedInputTokens: -1,
       pushedAdoptedLines: -1,
       traceCount: -1,
       codeProducingTraceCount: -1
@@ -254,51 +246,71 @@ describe("buildComputeEfficiency", () => {
     expect(result.tokensPerAdoptedLine).toBeNull()
   })
 
-  it("flags the input split as consistent when the three parts add up", () => {
+  it("passes the self-check when the total equals input plus output", () => {
     const result = buildComputeEfficiency({
       totalInputTokens: 1_000_000,
       totalOutputTokens: 50_000,
       totalTokens: 1_050_000,
       cacheReadTokens: 820_000,
-      cacheCreationTokens: 30_000,
-      nonCachedInputTokens: 150_000,
       pushedAdoptedLines: 100,
       traceCount: 1,
       codeProducingTraceCount: 1
     })
-    expect(result.inputSplitConsistent).toBe(true)
+    expect(result.tokenTotalsConsistent).toBe(true)
   })
 
-  it("flags a mismatch when the index derives input differently", () => {
-    // Cloud-side double-counting of cache would roughly double totalInputTokens
-    // relative to the client-side split.
-    const result = buildComputeEfficiency({
-      totalInputTokens: 1_850_000,
-      totalOutputTokens: 50_000,
-      totalTokens: 1_900_000,
-      cacheReadTokens: 820_000,
-      cacheCreationTokens: 30_000,
-      nonCachedInputTokens: 150_000,
-      pushedAdoptedLines: 100,
-      traceCount: 1,
-      codeProducingTraceCount: 1
-    })
-    expect(result.inputSplitConsistent).toBe(false)
-  })
-
-  it("tolerates a small shortfall from traces predating the flattened fields", () => {
+  it("catches a total inflated by counting cache on top of input", () => {
+    // input_tokens already contains the 820k cache reads; adding them again
+    // pushes the total past input + output by exactly that much.
     const result = buildComputeEfficiency({
       totalInputTokens: 1_000_000,
-      totalOutputTokens: 0,
-      totalTokens: 1_000_000,
-      cacheReadTokens: 800_000,
-      cacheCreationTokens: 0,
-      nonCachedInputTokens: 195_000, // 0.5% short
+      totalOutputTokens: 50_000,
+      totalTokens: 1_870_000,
+      cacheReadTokens: 820_000,
       pushedAdoptedLines: 100,
       traceCount: 1,
       codeProducingTraceCount: 1
     })
-    expect(result.inputSplitConsistent).toBe(true)
+    expect(result.tokenTotalsConsistent).toBe(false)
+  })
+
+  it("catches cache reads exceeding input, which cannot happen in one population", () => {
+    const result = buildComputeEfficiency({
+      totalInputTokens: 500_000,
+      totalOutputTokens: 50_000,
+      totalTokens: 550_000,
+      cacheReadTokens: 900_000,
+      pushedAdoptedLines: 100,
+      traceCount: 1,
+      codeProducingTraceCount: 1
+    })
+    expect(result.tokenTotalsConsistent).toBe(false)
+  })
+
+  it("tolerates a sub-1% gap from documents with a partial breakdown", () => {
+    const result = buildComputeEfficiency({
+      totalInputTokens: 995_000,
+      totalOutputTokens: 0,
+      totalTokens: 1_000_000, // 0.5% over
+      cacheReadTokens: 800_000,
+      pushedAdoptedLines: 100,
+      traceCount: 1,
+      codeProducingTraceCount: 1
+    })
+    expect(result.tokenTotalsConsistent).toBe(true)
+  })
+
+  it("treats an all-zero window as consistent rather than broken", () => {
+    const result = buildComputeEfficiency({
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      pushedAdoptedLines: 0,
+      traceCount: 0,
+      codeProducingTraceCount: 0
+    })
+    expect(result.tokenTotalsConsistent).toBe(true)
   })
 })
 

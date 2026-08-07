@@ -276,9 +276,9 @@ function ComputeCard({
   const outputPerLine = pushedAdoptedLines > 0 ? totalOutputTokens / pushedAdoptedLines : null
   const inputShare = totalTokens > 0 ? totalInputTokens / totalTokens : null
   const outputShare = totalTokens > 0 ? totalOutputTokens / totalTokens : null
-  // 缓存拆分是 trace 完成时从 modelCalls 拍平上来的，早于该字段的历史 trace 没有，
-  // 所以整段为 0 时按「未采集」处理而不是当成「没命中缓存」。
-  const cacheAvailable = compute.cacheReadTokens > 0 || compute.cacheCreationTokens > 0
+  // 缓存读取是 trace 完成时从 modelCalls 拍平上来的，早于该字段的历史 trace 没有，
+  // 所以为 0 时按「未采集」处理而不是当成「没命中缓存」。
+  const cacheAvailable = compute.cacheReadTokens > 0
   const cacheShare =
     cacheAvailable && totalInputTokens > 0 ? compute.cacheReadTokens / totalInputTokens : null
 
@@ -343,8 +343,8 @@ function ComputeCard({
               缓存读取的单价约为标准输入的 1/10，但在总 token 里通常占大头，是输入 token
               的子集而非额外的量。
               {cacheAvailable
-                ? ` 缓存写入 ${formatCompact(compute.cacheCreationTokens)}，非缓存输入 ${formatCompact(compute.nonCachedInputTokens)}。`
-                : " 该拆分是 trace 完成时从 modelCalls 拍平上来的，早于此字段的历史 trace 没有这项数据。"}
+                ? ""
+                : " 该值是 trace 完成时从 modelCalls 拍平上来的，早于此字段的历史 trace 没有这项数据。"}
             </Hint>
           </dt>
           <dd className="mt-1 text-lg font-medium tabular-nums text-foreground">
@@ -379,19 +379,16 @@ function ComputeCard({
         </div>
       </dl>
 
-      {cacheAvailable && !compute.inputSplitConsistent ? (
+      {compute.tokenTotalsConsistent ? null : (
         <div className="mt-3 flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
           <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
           <span>
-            输入 token 自检未通过：缓存读取 + 缓存写入 + 非缓存输入 ={" "}
-            {formatCompact(
-              compute.cacheReadTokens + compute.cacheCreationTokens + compute.nonCachedInputTokens
-            )}
-            ，与索引上的输入 token {formatCompact(compute.totalInputTokens)} 对不上。 说明两侧的
-            token 口径不一致，上面的单行数值不要对外引用。
+            Token 自检未通过：总数 {formatCompact(totalTokens)} 与输入 + 输出{" "}
+            {formatCompact(totalInputTokens + totalOutputTokens)} 对不上。 常见原因是求和时把缓存
+            token 又加了一遍——而输入 token 本身已经含缓存。 上面的单行数值不要对外引用。
           </span>
         </div>
-      ) : null}
+      )}
     </MetricCard>
   )
 }

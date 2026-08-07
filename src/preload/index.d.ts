@@ -430,9 +430,7 @@ interface DashboardEfficiencyData {
     totalOutputTokens: number
     totalTokens: number
     cacheReadTokens: number
-    cacheCreationTokens: number
-    nonCachedInputTokens: number
-    inputSplitConsistent: boolean
+    tokenTotalsConsistent: boolean
     pushedAdoptedLines: number
     tokensPerAdoptedLine: number | null
     traceCount: number

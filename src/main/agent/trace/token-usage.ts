@@ -77,48 +77,31 @@ export function normalizeTraceTokenUsage(value: unknown): TraceTokenUsage | unde
 
 /** Trace-level cache token aggregate, flattened onto the uploaded document. */
 export interface TraceCacheTokenSummary {
-  /** Σ cache-hit input tokens. Subset of the trace's input tokens. */
-  cacheReadTokens: number
-  /** Σ tokens written into the cache (cache miss). Also a subset of input. */
-  cacheCreationTokens: number
   /**
-   * Σ input tokens that were neither read from nor written to cache.
+   * Σ cache-hit input tokens across the trace's model calls.
    *
-   * Emitted directly rather than left to be derived downstream: it makes the
-   * document self-checking. If `nonCachedInputTokens + cacheReadTokens +
-   * cacheCreationTokens` does not match the index's `totalInputTokens`, the
-   * two derivations disagree and the per-line token figure cannot be trusted.
+   * A *subset* of the trace's input tokens, not an addition to them — the
+   * adapters fold cache counts into `input_tokens`. Flattened here because a
+   * `sum` aggregation cannot reach into the nested per-call array.
    */
-  nonCachedInputTokens: number
+  cacheReadTokens: number
 }
 
 /**
- * Sum per-call usage into the trace-level cache aggregate.
+ * Sum per-call cache-read usage into the trace-level aggregate.
  *
- * Per call the non-cached remainder is clamped at zero: a provider that reports
- * `input_tokens` *excluding* cache would otherwise drive the sum negative. The
- * clamp makes the field a lower bound instead of nonsense, and the self-check
- * described above still surfaces the disagreement.
+ * Cache *writes* are deliberately not flattened: they are a small fraction of
+ * volume next to reads, and every extra top-level field costs a mapping change
+ * on a non-dynamic index. Add one later if cost modelling needs to price cache
+ * writes separately — the per-call values are already collected.
  */
 export function summarizeTraceCacheTokens(
   modelCalls: readonly TraceModelCall[] | undefined
 ): TraceCacheTokenSummary {
-  const summary: TraceCacheTokenSummary = {
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    nonCachedInputTokens: 0
-  }
-  if (!Array.isArray(modelCalls)) return summary
-
+  if (!Array.isArray(modelCalls)) return { cacheReadTokens: 0 }
+  let cacheReadTokens = 0
   for (const call of modelCalls) {
-    const usage = call?.tokenUsage
-    if (!usage) continue
-    const cacheRead = nonNegative(usage.cacheReadTokens)
-    const cacheCreation = nonNegative(usage.cacheCreationTokens)
-    const input = nonNegative(usage.inputTokens)
-    summary.cacheReadTokens += cacheRead
-    summary.cacheCreationTokens += cacheCreation
-    summary.nonCachedInputTokens += Math.max(0, input - cacheRead - cacheCreation)
+    cacheReadTokens += nonNegative(call?.tokenUsage?.cacheReadTokens)
   }
-  return summary
+  return { cacheReadTokens }
 }

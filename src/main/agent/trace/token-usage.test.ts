@@ -98,58 +98,39 @@ describe("summarizeTraceCacheTokens", () => {
         cacheCreationTokens: 0
       })
     ])
-    expect(summary).toEqual({
-      cacheReadTokens: 155_000,
-      cacheCreationTokens: 5_000,
-      // (120000-105000) + (60000-55000)
-      nonCachedInputTokens: 20_000
-    })
+    expect(summary).toEqual({ cacheReadTokens: 155_000 })
   })
 
-  it("keeps the three parts summing to total input, so the document self-checks", () => {
+  it("stays within total input, since cache reads are a subset of it", () => {
     const calls = [
       call({ inputTokens: 1_000, cacheReadTokens: 600, cacheCreationTokens: 100 }),
       call({ inputTokens: 500, cacheReadTokens: 0, cacheCreationTokens: 250 })
     ]
     const summary = summarizeTraceCacheTokens(calls)
     const totalInput = calls.reduce((acc, c) => acc + (c.tokenUsage?.inputTokens ?? 0), 0)
-    expect(
-      summary.nonCachedInputTokens + summary.cacheReadTokens + summary.cacheCreationTokens
-    ).toBe(totalInput)
+    expect(summary.cacheReadTokens).toBeLessThanOrEqual(totalInput)
   })
 
-  it("clamps at zero when a provider reports input excluding cache", () => {
-    // input < cacheRead would otherwise make the remainder negative.
+  it("reports cache reads even when a provider excludes them from input", () => {
+    // Nothing to reconcile here — the downstream self-check is what surfaces
+    // a provider whose input_tokens does not contain its cache reads.
     const summary = summarizeTraceCacheTokens([call({ inputTokens: 100, cacheReadTokens: 900 })])
-    expect(summary.nonCachedInputTokens).toBe(0)
     expect(summary.cacheReadTokens).toBe(900)
   })
 
   it("skips calls without usage and tolerates a missing list", () => {
-    expect(summarizeTraceCacheTokens(undefined)).toEqual({
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      nonCachedInputTokens: 0
-    })
+    expect(summarizeTraceCacheTokens(undefined)).toEqual({ cacheReadTokens: 0 })
     const summary = summarizeTraceCacheTokens([
       call(undefined),
       call({ inputTokens: 10, cacheReadTokens: 4 })
     ])
-    expect(summary).toEqual({
-      cacheReadTokens: 4,
-      cacheCreationTokens: 0,
-      nonCachedInputTokens: 6
-    })
+    expect(summary).toEqual({ cacheReadTokens: 4 })
   })
 
   it("ignores negative and non-finite counters", () => {
     const summary = summarizeTraceCacheTokens([
       call({ inputTokens: -5, cacheReadTokens: Number.NaN, cacheCreationTokens: -1 })
     ])
-    expect(summary).toEqual({
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      nonCachedInputTokens: 0
-    })
+    expect(summary).toEqual({ cacheReadTokens: 0 })
   })
 })
