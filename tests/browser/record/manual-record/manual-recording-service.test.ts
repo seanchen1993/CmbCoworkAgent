@@ -3,12 +3,15 @@ import type { WebFrameMain } from "electron"
 import type { BrowserLocatorMetadata } from "../../../../src/shared/browser-types"
 import { buildPlaywrightLocator } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
 import {
+  buildPlaywrightManualRecorderInjectionScript,
   PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX,
   PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER,
+  PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG,
   PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID
 } from "../../../../src/main/browser/record/manual-record/manual-recorder-playwright-adapter"
 import {
   getManualRecording,
+  installManualRecorder,
   markNextManualNavigationExplicit,
   installManualRecorderForSubtree,
   pauseManualRecording,
@@ -41,7 +44,7 @@ function createFrame(input: {
   const frame = {
     detached: input.detached ?? false,
     executeJavaScript:
-      input.executeJavaScript ?? (async () => undefined),
+      input.executeJavaScript ?? (async () => true),
     executeJavaScriptInIsolatedWorld: input.executeJavaScriptInIsolatedWorld,
     frameToken: input.frameToken ?? input.url,
     frames: input.frames ?? [],
@@ -963,7 +966,7 @@ test("manual recorded flow", async ({ page }) => {
         scripts: Array<{ code: string }>
       ) => {
         isolatedExecutions.push({ worldId, code: scripts[0]?.code ?? "" })
-        return undefined
+        return true
       }
     })
 
@@ -996,6 +999,66 @@ test("manual recorded flow", async ({ page }) => {
 
     expect(isolatedExecutions).toBe(1)
     expect(pageExecutions).toBe(1)
+  })
+
+  it("falls back to page-world injection when isolated-world execution returns undefined", async () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    let pageExecutions = 0
+    let isolatedExecutions = 0
+    const frame = createFrame({
+      url: "file:///tmp/register.html",
+      executeJavaScript: async () => {
+        pageExecutions += 1
+        return true
+      },
+      executeJavaScriptInIsolatedWorld: async () => {
+        isolatedExecutions += 1
+        return undefined
+      }
+    })
+
+    await installManualRecorderForSubtree(frame)
+
+    expect(isolatedExecutions).toBe(1)
+    expect(pageExecutions).toBe(1)
+  })
+
+  it("serializes concurrent injections for the same frame", async () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    let isolatedExecutions = 0
+    let releaseExecution: (() => void) | undefined
+    const frame = createFrame({
+      url: "https://example.com/payment",
+      executeJavaScriptInIsolatedWorld: async () => {
+        isolatedExecutions += 1
+        await new Promise<void>((resolve) => {
+          releaseExecution = resolve
+        })
+        return true
+      }
+    })
+
+    const pendingInjection = Promise.all([installManualRecorder(frame), installManualRecorder(frame)])
+    await Promise.resolve()
+    expect(isolatedExecutions).toBe(1)
+    releaseExecution?.()
+    await pendingInjection
+  })
+
+  it("marks the frame only after the recorder is initialized", () => {
+    const script = buildPlaywrightManualRecorderInjectionScript()
+    const recorderInitialization = script.indexOf("const recorder = new PollingRecorder")
+    const installedMarker = script.lastIndexOf(
+      `window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true`
+    )
+
+    expect(script).toContain(
+      `if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) return true`
+    )
+    expect(installedMarker).toBeGreaterThan(recorderInitialization)
+    expect(script.slice(installedMarker)).toContain("return true")
   })
 
   it("keeps nested iframe paths aligned with Playwright codegen order", () => {

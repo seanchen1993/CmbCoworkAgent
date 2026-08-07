@@ -681,8 +681,13 @@ export class BrowserService {
     })
     webContents.on("frame-created", (_event, details) => {
       if (!details.frame) return
-      if (getManualRecording().status !== "recording") return
-      void installManualRecorderForSubtree(details.frame)
+      // The frame tree entry can exist before the child document is ready.
+      // Wait for the frame's own dom-ready so we don't initialize against a
+      // transient document and accidentally block later retries.
+      details.frame.once("dom-ready", () => {
+        if (getManualRecording().status !== "recording") return
+        void installManualRecorderForSubtree(details.frame)
+      })
     })
     webContents.on(
       "did-frame-finish-load",

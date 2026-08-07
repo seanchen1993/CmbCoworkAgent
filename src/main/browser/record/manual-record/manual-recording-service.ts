@@ -107,6 +107,7 @@ const CONTAINER_TEST_ID_PATTERN =
 const INTERACTIVE_TAG_NAMES = new Set(["button", "a", "input", "textarea", "select", "option"])
 const MANUAL_RECORDER_DEBUG_PREFIX = "[Browser][ManualRecorderDebug]"
 const FRAME_ELEMENT_SELECTOR_CACHE = new Map<string, string>()
+const FRAME_INJECTION_PROMISES = new Map<string, Promise<void>>()
 
 function now(): string {
   return new Date().toISOString()
@@ -124,7 +125,8 @@ function supportsIsolatedWorldExecution(
     scripts: Array<{ code: string }>
   ) => Promise<unknown>
 } {
-  return typeof frame.executeJavaScriptInIsolatedWorld === "function"
+  return typeof (frame as { executeJavaScriptInIsolatedWorld?: unknown })
+    .executeJavaScriptInIsolatedWorld === "function"
 }
 
 async function executeManualRecorderScriptInIsolatedWorld(
@@ -724,6 +726,7 @@ export function startManualRecording(
     script: ""
   }
   FRAME_ELEMENT_SELECTOR_CACHE.clear()
+  FRAME_INJECTION_PROMISES.clear()
 
   const currentUrl = readString(options.currentUrl ?? undefined)
   if (!seedScript && currentUrl && currentUrl !== "about:blank") {
@@ -805,9 +808,9 @@ export function markNextManualNavigationExplicit(url?: string): void {
   setPendingExplicitNavigation(url)
 }
 
-export async function installManualRecorder(frame: WebFrameMain): Promise<void> {
+async function installManualRecorderInternal(frame: WebFrameMain): Promise<void> {
   if (!activeSession || activeSession.status !== "recording") return
-  if (frame.isDestroyed() || frame.url.startsWith("devtools:")) return
+  if (frame.detached || frame.isDestroyed() || frame.url.startsWith("devtools:")) return
 
   // 主链路只执行 Playwright 注入脚本；旧脚本保留在仓库里，但不再运行。
   const script = buildPlaywrightManualRecorderInjectionScript()
@@ -815,7 +818,9 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
   try {
     let injectionMode: "isolated" | "page" = "isolated"
     try {
-      await executeManualRecorderScriptInIsolatedWorld(frame, script)
+      const result = await executeManualRecorderScriptInIsolatedWorld(frame, script)
+      // Electron resolves with undefined when isolated-world execution throws.
+      if (result !== true) throw new Error("isolated world injection did not complete")
     } catch {
       await frame.executeJavaScript(script)
       injectionMode = "page"
@@ -830,6 +835,28 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
       `${MANUAL_RECORDER_DEBUG_PREFIX} inject-skipped frame=${frame.url || "(empty)"} token=${frame.frameToken}`
     )
   }
+}
+
+function frameInjectionKey(frame: WebFrameMain): string | undefined {
+  const sessionId = activeSession?.id
+  if (!sessionId) return undefined
+  return `${sessionId}:${frameCacheKey(frame)}`
+}
+
+export function installManualRecorder(frame: WebFrameMain): Promise<void> {
+  const key = frameInjectionKey(frame)
+  if (!key) return Promise.resolve()
+
+  const existing = FRAME_INJECTION_PROMISES.get(key)
+  if (existing) return existing
+
+  const injection = installManualRecorderInternal(frame).finally(() => {
+    if (FRAME_INJECTION_PROMISES.get(key) === injection) {
+      FRAME_INJECTION_PROMISES.delete(key)
+    }
+  })
+  FRAME_INJECTION_PROMISES.set(key, injection)
+  return injection
 }
 
 export async function installManualRecorderForFrameById(
@@ -885,4 +912,5 @@ export function resetManualRecordingForTests(): void {
   nextActionNumber = 0
   pendingExplicitNavigation = null
   FRAME_ELEMENT_SELECTOR_CACHE.clear()
+  FRAME_INJECTION_PROMISES.clear()
 }

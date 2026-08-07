@@ -303,8 +303,7 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
   )
 
   return String.raw`(() => {
-    if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) return;
-    window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true;
+    if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) return true;
 
     const EVENT_PREFIX = ${JSON.stringify(PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX)};
     const FRAME_SELECTOR_HELPER = ${JSON.stringify(
@@ -667,6 +666,10 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
 
     window.__cmbPlaywrightManualRecorder = recorder;
     window.__pw_refreshOverlay?.();
+    // Only mark the frame after all recorder hooks are installed so a transient
+    // initialization error can be retried on the next frame lifecycle event.
+    window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true;
+    return true;
   })()`
 }
 
