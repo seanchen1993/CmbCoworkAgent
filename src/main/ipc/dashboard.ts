@@ -41,6 +41,7 @@ import {
   buildNewRatioHistogramAgg,
   buildPendingScalability,
   computeUnmeasuredRatio,
+  makeMockEfficiency,
   normalizeChangeKindBuckets,
   normalizeNewRatioHistogram,
   type DashboardEfficiencyData
@@ -13462,6 +13463,7 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
   )
 
   _ipcMain.handle("dashboard:efficiency", async (_, range: TimeRange, opts?: OrgFilterOptions) => {
+    if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency() }
     try {
       requireDashboardProjectModeAccess()
       return { success: true, data: await fetchDashboardEfficiency(range, opts) }

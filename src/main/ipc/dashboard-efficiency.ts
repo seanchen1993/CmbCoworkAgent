@@ -294,3 +294,81 @@ export const SCALABILITY_PENDING_REASON =
 export function buildPendingScalability(): EfficiencyScalabilityData {
   return { slope: null, pendingReason: SCALABILITY_PENDING_REASON }
 }
+
+// ─────────────────────────────────────────────────────────
+// DEV mock
+// ─────────────────────────────────────────────────────────
+
+/**
+ * Local-preview payload. `esQuery` throws without ES_NODES, so without this the
+ * panel would only ever render an error on a dev machine — every other dashboard
+ * channel carries a DEV mock for the same reason.
+ *
+ * The numbers deliberately land on the awkward side of each target (存量 below
+ * 85%, a high unmeasured share, a large per-line token figure) so the warning
+ * states get exercised during development rather than only in production.
+ */
+export function makeMockEfficiency(): DashboardEfficiencyData {
+  const newBucket = makeDashboardCodeStats({
+    generatedLines: 128_400,
+    deletedLines: 9_200,
+    measuredGeneratedLines: 96_300,
+    effectiveGeneratedLines: 94_100,
+    adoptedLines: 88_700,
+    pushedEffectiveGeneratedLines: 90_500,
+    pushedAdoptedLines: 86_200,
+    pushedCommitCount: 1_240
+  })
+  const legacyBucket = makeDashboardCodeStats({
+    generatedLines: 61_800,
+    deletedLines: 34_500,
+    measuredGeneratedLines: 44_900,
+    effectiveGeneratedLines: 43_100,
+    adoptedLines: 35_600,
+    pushedEffectiveGeneratedLines: 41_200,
+    pushedAdoptedLines: 33_900,
+    pushedCommitCount: 780
+  })
+  const overall = makeDashboardCodeStats({
+    generatedLines: 190_200,
+    deletedLines: 43_700,
+    measuredGeneratedLines: 141_200,
+    effectiveGeneratedLines: 137_200,
+    adoptedLines: 124_300,
+    pushedEffectiveGeneratedLines: 131_700,
+    pushedAdoptedLines: 120_100,
+    pushedCommitCount: 2_020
+  })
+
+  // Mass concentrated at the extremes (pure insert / pure rewrite) with a dip
+  // around the 0.7 threshold — the shape that makes the threshold defensible.
+  const histogramShape = [
+    620, 210, 140, 110, 95, 88, 80, 76, 70, 68, 66, 71, 84, 120, 210, 380, 640, 980, 1_460, 2_310
+  ]
+
+  return {
+    scalability: buildPendingScalability(),
+    adoption: {
+      overall,
+      byChangeKind: [
+        { ...newBucket, changeKind: "new" },
+        { ...legacyBucket, changeKind: "legacy" }
+      ],
+      newRatioHistogram: histogramShape.map((docCount, index) => ({
+        from: Number((index * NEW_RATIO_HISTOGRAM_INTERVAL).toFixed(2)),
+        docCount
+      })),
+      unmeasuredRatio: computeUnmeasuredRatio(overall)
+    },
+    compute: buildComputeEfficiency({
+      totalInputTokens: 2_140_000_000,
+      totalOutputTokens: 96_000_000,
+      totalTokens: 2_236_000_000,
+      cacheReadTokens: 1_780_000_000,
+      pushedAdoptedLines: overall.pushedAdoptedLines,
+      traceCount: 18_400,
+      codeProducingTraceCount: 7_120
+    }),
+    meta: { projectCount: 23, truncated: false }
+  }
+}
