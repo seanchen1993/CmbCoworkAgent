@@ -333,6 +333,47 @@ export interface DashboardCodeStats {
   adoptionRate: number | null
 }
 
+/** 研发效能面板：改动落点分桶。unclassified 为该字段上线前的历史事件。 */
+export type DashboardEfficiencyChangeKind = "new" | "legacy" | "unclassified"
+
+export interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
+  changeKind: DashboardEfficiencyChangeKind
+}
+
+export interface DashboardEfficiencyData {
+  /** 指标 1 系统可扩展性。数据源未接入前 slope 恒为 null，由 pendingReason 说明原因。 */
+  scalability: {
+    slope: number | null
+    pendingReason: string
+  }
+  /** 指标 2 AI 编码有效性。 */
+  adoption: {
+    overall: DashboardCodeStats
+    byChangeKind: DashboardEfficiencyChangeKindStats[]
+    /** newRatio 分布，用于判断 0.7 阈值切在分布的什么位置。 */
+    newRatioHistogram: { from: number; docCount: number }[]
+    /** 未测量行占分母的比例。偏高说明采纳率被系统性低估（主因是 14 天归因窗口）。 */
+    unmeasuredRatio: number | null
+  }
+  /** 指标 3 算力产出效能。 */
+  compute: {
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalTokens: number
+    /** totalInputTokens 的子集：适配器把缓存读写折进了输入口径。 */
+    cacheReadTokens: number
+    pushedAdoptedLines: number
+    tokensPerAdoptedLine: number | null
+    traceCount: number
+    codeProducingTraceCount: number
+    codeProducingTraceRatio: number | null
+  }
+  meta: {
+    projectCount: number
+    truncated: boolean
+  }
+}
+
 export interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
@@ -2157,6 +2198,9 @@ export function useDashboard() {
   >({})
   const [projectModeLoading, setProjectModeLoading] = useState(false)
   const [projectModeError, setProjectModeError] = useState<string | null>(null)
+  const [efficiency, setEfficiency] = useState<DashboardEfficiencyData | null>(null)
+  const [efficiencyLoading, setEfficiencyLoading] = useState(false)
+  const [efficiencyError, setEfficiencyError] = useState<string | null>(null)
   // 「生产效能代码指标」source 局部筛选：当前选中的来源（null = 全部，用 projectMode 自带口径），
   // 以及按 source 换数得到的代码采纳覆盖值（仅替换该区两个子模块，不动其它面板维度）。
   const [projectModeCodeSource, setProjectModeCodeSource] = useState<string | null>(null)
@@ -2174,6 +2218,7 @@ export function useDashboard() {
   const orgOptionsFetchIdRef = useRef(0)
   const projectModeFetchIdRef = useRef(0)
   const projectModeCodeStatsFetchIdRef = useRef(0)
+  const efficiencyFetchIdRef = useRef(0)
   const projectModeProjectPageFetchIdRef = useRef<
     Record<DashboardProjectModeProjectStatus, number>
   >({ active: 0, archived: 0 })
@@ -2236,6 +2281,26 @@ export function useDashboard() {
     },
     []
   )
+
+  // 研发效能面板。范围（项目模式 + 精益项目）在后端固定，前端不传口径开关，
+  // 避免出现「关掉开关后数字含义变了但标题没变」的情况。
+  const fetchEfficiency = useCallback(async (r: TimeRange, orgList: string[]) => {
+    const id = ++efficiencyFetchIdRef.current
+    setEfficiencyLoading(true)
+    setEfficiencyError(null)
+    try {
+      const result = await window.api.dashboard.efficiency(r, { upperOrgLv1: orgList })
+      if (id !== efficiencyFetchIdRef.current) return
+      if (!result.success) throw new Error(result.error ?? "获取研发效能数据失败")
+      setEfficiency(result.data ?? null)
+    } catch (e) {
+      if (id !== efficiencyFetchIdRef.current) return
+      setEfficiencyError(e instanceof Error ? e.message : String(e))
+      setEfficiency(null)
+    } finally {
+      if (id === efficiencyFetchIdRef.current) setEfficiencyLoading(false)
+    }
+  }, [])
 
   const fetchProjectMode = useCallback(
     async (r: TimeRange, g: Granularity, orgList: string[], leanOnly = false) => {
@@ -2600,6 +2665,10 @@ export function useDashboard() {
     projectMode,
     projectModeLoading,
     projectModeError,
+    efficiency,
+    efficiencyLoading,
+    efficiencyError,
+    fetchEfficiency,
     projectModeCodeSource,
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,

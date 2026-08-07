@@ -81,6 +81,7 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { ModelPanel } from "./panels/ModelPanel"
@@ -1093,7 +1094,7 @@ type DashboardSubPage =
       projectMode?: boolean
     }
 
-type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "awards"
+type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "efficiency" | "awards"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1794,6 +1795,8 @@ function DashboardTabBar({
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
     ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
+    // 研发效能沿用项目模式的可见性：两者统计范围同源（项目模式 + 精益项目）。
+    ...(projectModeAllowed ? ([{ id: "efficiency", label: "研发效能" }] as const) : []),
     // 评奖辅助看板仅对管理员名单可见。
     ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : [])
     // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
@@ -2569,6 +2572,10 @@ export function DashboardView(): React.JSX.Element {
     projectMode,
     projectModeLoading,
     projectModeError,
+    efficiency,
+    efficiencyLoading,
+    efficiencyError,
+    fetchEfficiency,
     projectModeCodeSource,
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
@@ -2675,19 +2682,25 @@ export function DashboardView(): React.JSX.Element {
   useEffect(() => {
     let cancelled = false
 
+    // 项目模式与研发效能共用同一道权限门，失去权限时两个 tab 都要退回总览，
+    // 否则停在已经不再渲染的 tab 上会看到一片空白。
+    const leaveProjectModeGatedTabs = (): void => {
+      setActiveMainTab((current) =>
+        current === "project-mode" || current === "efficiency" ? "overview" : current
+      )
+    }
+
     window.api.dashboard
       .isProjectModeAllowed()
       .then((allowed) => {
         if (cancelled) return
         setProjectModeAllowed(allowed)
-        if (!allowed) {
-          setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
-        }
+        if (!allowed) leaveProjectModeGatedTabs()
       })
       .catch(() => {
         if (cancelled) return
         setProjectModeAllowed(false)
-        setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
+        leaveProjectModeGatedTabs()
       })
 
     return () => {
@@ -2909,6 +2922,13 @@ export function DashboardView(): React.JSX.Element {
     selectedOrgLv1List,
     fromLeanProjectsOnly
   ])
+
+  // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
+  // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
+  useEffect(() => {
+    if (activeMainTab !== "efficiency" || !projectModeAllowed) return
+    void fetchEfficiency(range, selectedOrgLv1List)
+  }, [activeMainTab, fetchEfficiency, projectModeAllowed, range, selectedOrgLv1List])
 
   // 评奖辅助看板懒加载：进入 tab + 名单可见时拉取；时间范围变化重拉。
   // 技能贡献奖需待应用市场技能（个人构建）加载完成后再查。
@@ -4972,6 +4992,12 @@ export function DashboardView(): React.JSX.Element {
                 marketSkillKeys={marketSkillKeys}
               />
             </div>
+          ) : activeMainTab === "efficiency" && projectModeAllowed ? (
+            <EfficiencyPanel
+              data={efficiency}
+              loading={efficiencyLoading}
+              error={efficiencyError}
+            />
           ) : (
             <div className="space-y-6 p-6">
               {/* Overview */}
