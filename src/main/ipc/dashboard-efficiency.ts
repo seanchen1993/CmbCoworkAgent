@@ -364,7 +364,9 @@ export function makeMockEfficiency(): DashboardEfficiencyData {
       totalInputTokens: 2_140_000_000,
       totalOutputTokens: 96_000_000,
       totalTokens: 2_236_000_000,
-      cacheReadTokens: 1_780_000_000,
+      // 0 是真实情况：trace 索引上没有顶层 cacheReadTokens，只在 modelCalls[] 里
+      // 逐次调用存。mock 保持与生产一致，否则本地看着有数、上线才发现取不到。
+      cacheReadTokens: 0,
       pushedAdoptedLines: overall.pushedAdoptedLines,
       traceCount: 18_400,
       codeProducingTraceCount: 7_120

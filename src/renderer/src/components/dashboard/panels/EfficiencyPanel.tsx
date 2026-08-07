@@ -23,8 +23,6 @@ import type {
 const NEW_ADOPTION_TARGET = 0.9
 /** 存量（棕地）迭代代码入库采纳率目标。 */
 const LEGACY_ADOPTION_TARGET = 0.85
-/** 未测量行占比超过这条线时，采纳率的可信度需要打问号。 */
-const UNMEASURED_WARN_THRESHOLD = 0.3
 
 const CHANGE_KIND_LABELS: Record<DashboardEfficiencyChangeKind, string> = {
   new: "新增功能代码",
@@ -149,7 +147,7 @@ function AdoptionBucket({
 }
 
 /**
- * newRatio 分布条形图。用来看 0.7 这条阈值是切在分布的稀疏处还是密集处——
+ * 新增行占比分布。用来看 0.7 这条阈值是切在分布的稀疏处还是密集处——
  * 切在密集处意味着两桶的划分对阈值极其敏感，微调就会大幅搬运数据。
  */
 function NewRatioHistogram({
@@ -163,9 +161,9 @@ function NewRatioHistogram({
   return (
     <div className="mt-4">
       <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-        <span>newRatio 分布</span>
+        <span>新增行占比分布</span>
         <Hint>
-          每次生成的新增行占比分布。竖线是当前 0.7 的分桶阈值。如果阈值正好落在分布密集处，
+          每次生成的新增行占比分布。0.7 是当前的分桶阈值。如果阈值正好落在分布密集处，
           说明两桶划分对阈值很敏感，微调阈值会大幅改变结果——此时应该按分布的稀疏处重新定阈值。
         </Hint>
       </div>
@@ -200,9 +198,6 @@ function AdoptionCard({
 }: {
   adoption: DashboardEfficiencyData["adoption"]
 }): React.JSX.Element {
-  const unmeasured = adoption.unmeasuredRatio
-  const unmeasuredHigh = unmeasured !== null && unmeasured > UNMEASURED_WARN_THRESHOLD
-
   return (
     <MetricCard
       title="AI 编码有效性"
@@ -213,6 +208,10 @@ function AdoptionCard({
             新增 / 存量按每次生成的新增行占比划分，阈值 0.7：净删除越多越偏存量。分桶信息在
             生成时算好并随采纳事件一起上报，不是事后按 diff 反推的。
           </div>
+          <div>
+            分母含 14 天归因窗口外未拿到采纳判定的生成行，这部分只进分母不进分子，
+            所以这里的采纳率是偏保守的下界。
+          </div>
         </div>
       }
     >
@@ -221,24 +220,6 @@ function AdoptionCard({
           <AdoptionBucket key={stats.changeKind} stats={stats} />
         ))}
       </div>
-
-      {unmeasured !== null ? (
-        <div
-          className={cn(
-            "mt-3 flex items-start gap-2 rounded-md px-3 py-2 text-xs leading-relaxed",
-            unmeasuredHigh
-              ? "bg-amber-500/10 text-amber-700 dark:text-amber-400"
-              : "bg-muted/40 text-muted-foreground"
-          )}
-        >
-          <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
-          <span>
-            未测量行占分母 {formatPercent(unmeasured)}。这部分只进分母、不进分子， 主因是 14
-            天归因窗口——超过 14 天才提交的代码拿不到采纳判定。
-            {unmeasuredHigh ? "当前占比偏高，上面的采纳率是被低估的。" : ""}
-          </span>
-        </div>
-      ) : null}
 
       <NewRatioHistogram bins={adoption.newRatioHistogram} />
     </MetricCard>
@@ -249,13 +230,57 @@ function AdoptionCard({
 // 指标 3：算力产出效能
 // ─────────────────────────────────────────────────────────
 
+/**
+ * 单行成本里输入 / 输出各占多少。用的是同一个分母（入库采纳行），
+ * 所以两条的每行数相加恰好等于卡片主数值。
+ */
+function PerLineSplit({
+  label,
+  perLine,
+  share,
+  barClassName
+}: {
+  label: string
+  perLine: number | null
+  share: number | null
+  barClassName: string
+}): React.JSX.Element {
+  return (
+    <div className="min-w-[104px]">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 text-xl font-semibold tabular-nums text-foreground">
+        {formatTokensPerLine(perLine)}
+        <span className="ml-1 text-xs font-normal text-muted-foreground">/行</span>
+      </div>
+      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn("h-full rounded-full", barClassName)}
+          style={{ width: `${Math.min(100, Math.max(0, (share ?? 0) * 100))}%` }}
+        />
+      </div>
+      <div className="mt-1 text-xs tabular-nums text-muted-foreground">
+        {formatPercent(share, 1)}
+      </div>
+    </div>
+  )
+}
+
 function ComputeCard({
   compute
 }: {
   compute: DashboardEfficiencyData["compute"]
 }): React.JSX.Element {
+  const { totalTokens, totalInputTokens, totalOutputTokens, pushedAdoptedLines } = compute
+  // 单行成本的输入/输出拆分：同一个分母，所以两条相加恰好等于上面的总数。
+  const inputPerLine = pushedAdoptedLines > 0 ? totalInputTokens / pushedAdoptedLines : null
+  const outputPerLine = pushedAdoptedLines > 0 ? totalOutputTokens / pushedAdoptedLines : null
+  const inputShare = totalTokens > 0 ? totalInputTokens / totalTokens : null
+  const outputShare = totalTokens > 0 ? totalOutputTokens / totalTokens : null
+  // trace 索引上没有顶层 cacheReadTokens（只在 modelCalls[].tokenUsage 里逐次调用存），
+  // 所以真实环境这个聚合恒为 0。0 与「确实没用缓存」不可区分，一并按未采集处理。
+  const cacheAvailable = compute.cacheReadTokens > 0
   const cacheShare =
-    compute.totalInputTokens > 0 ? compute.cacheReadTokens / compute.totalInputTokens : null
+    cacheAvailable && totalInputTokens > 0 ? compute.cacheReadTokens / totalInputTokens : null
 
   return (
     <MetricCard
@@ -271,13 +296,30 @@ function ComputeCard({
         </div>
       }
     >
-      <div className="rounded-md border border-border bg-background p-3">
-        <div className="text-xs text-muted-foreground">单行入库代码 Token 数</div>
-        <div className="mt-1 text-3xl font-semibold tabular-nums text-foreground">
-          {formatTokensPerLine(compute.tokensPerAdoptedLine)}
+      <div className="flex flex-wrap items-center gap-x-10 gap-y-4 rounded-md border border-border bg-background p-3">
+        <div>
+          <div className="text-xs text-muted-foreground">单行入库代码 Token 数</div>
+          <div className="mt-1 text-3xl font-semibold tabular-nums text-foreground">
+            {formatTokensPerLine(compute.tokensPerAdoptedLine)}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {formatCompact(totalTokens)} tokens ÷ {formatCount(pushedAdoptedLines)} 行
+          </div>
         </div>
-        <div className="mt-1 text-xs text-muted-foreground">
-          {formatCompact(compute.totalTokens)} tokens ÷ {formatCount(compute.pushedAdoptedLines)} 行
+
+        <div className="flex gap-8">
+          <PerLineSplit
+            label="其中输入"
+            perLine={inputPerLine}
+            share={inputShare}
+            barClassName="bg-sky-500"
+          />
+          <PerLineSplit
+            label="其中输出"
+            perLine={outputPerLine}
+            share={outputShare}
+            barClassName="bg-violet-500"
+          />
         </div>
       </div>
 
@@ -298,17 +340,26 @@ function ComputeCard({
           <dt className="flex items-center gap-1 text-xs text-muted-foreground">
             <span>其中缓存读取</span>
             <Hint>
-              缓存读取的单价约为标准输入的 1/10，但在总 token 里通常占大头。它是输入 token
-              的子集，不是额外的量。
+              缓存读取的单价约为标准输入的 1/10，但在总 token 里通常占大头，是输入 token
+              的子集而非额外的量。
+              {cacheAvailable
+                ? ""
+                : " 当前 trace 索引上没有该字段的顶层聚合（只逐次调用存在 modelCalls 里），所以取不到值。"}
             </Hint>
           </dt>
           <dd className="mt-1 text-lg font-medium tabular-nums text-foreground">
-            {formatCompact(compute.cacheReadTokens)}
-            {cacheShare !== null ? (
-              <span className="ml-1 text-xs font-normal text-muted-foreground">
-                {formatPercent(cacheShare, 0)}
-              </span>
-            ) : null}
+            {cacheAvailable ? (
+              <>
+                {formatCompact(compute.cacheReadTokens)}
+                {cacheShare !== null ? (
+                  <span className="ml-1 text-xs font-normal text-muted-foreground">
+                    {formatPercent(cacheShare, 0)}
+                  </span>
+                ) : null}
+              </>
+            ) : (
+              <span className="text-base font-normal text-muted-foreground">未采集</span>
+            )}
           </dd>
         </div>
         <div className="rounded-md border border-border bg-background p-3">
