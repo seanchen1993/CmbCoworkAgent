@@ -1,3 +1,4 @@
+import { webFrameMain } from "electron"
 import type { WebFrameMain } from "electron"
 import type {
   AiRecordedBrowserAction,
@@ -13,7 +14,9 @@ import {
 } from "../../../../shared/browser-ai-recording-script"
 import {
   buildPlaywrightManualRecorderInjectionScript,
-  parsePlaywrightManualRecorderEvent
+  parsePlaywrightManualRecorderEvent,
+  PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER,
+  PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID
 } from "./manual-recorder-playwright-adapter"
 
 let activeSession: AiRecordingSession | null = null
@@ -102,9 +105,39 @@ const GENERIC_SELECTOR_PATTERN = /^(?:div|span|p|section|article|main|header|foo
 const CONTAINER_TEST_ID_PATTERN =
   /(?:^|[-_])(area|container|wrapper|panel|section|group|list|content|body|header|footer|root)(?:$|[-_])/iu
 const INTERACTIVE_TAG_NAMES = new Set(["button", "a", "input", "textarea", "select", "option"])
+const MANUAL_RECORDER_DEBUG_PREFIX = "[Browser][ManualRecorderDebug]"
+const FRAME_ELEMENT_SELECTOR_CACHE = new Map<string, string>()
 
 function now(): string {
   return new Date().toISOString()
+}
+
+function frameCacheKey(frame: Pick<WebFrameMain, "processId" | "frameToken">): string {
+  return `${frame.processId}:${frame.frameToken}`
+}
+
+function supportsIsolatedWorldExecution(
+  frame: WebFrameMain
+): frame is WebFrameMain & {
+  executeJavaScriptInIsolatedWorld: (
+    worldId: number,
+    scripts: Array<{ code: string }>
+  ) => Promise<unknown>
+} {
+  return typeof frame.executeJavaScriptInIsolatedWorld === "function"
+}
+
+async function executeManualRecorderScriptInIsolatedWorld(
+  frame: WebFrameMain,
+  code: string
+): Promise<unknown> {
+  if (!supportsIsolatedWorldExecution(frame)) {
+    throw new Error("frame does not support isolated world execution")
+  }
+  return frame.executeJavaScriptInIsolatedWorld(
+    PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID,
+    [{ code }]
+  )
 }
 
 function readString(value: unknown): string | undefined {
@@ -483,11 +516,78 @@ function buildFramePath(frame: WebFrameMain): string[] {
   const chain: string[] = []
   let current: WebFrameMain | null = frame
   while (current?.parent) {
-    const frameUrl = current.url || current.origin || current.frameToken
-    chain.unshift(`iframe[src*=${JSON.stringify(frameUrl)}]`)
+    chain.unshift(
+      FRAME_ELEMENT_SELECTOR_CACHE.get(frameCacheKey(current)) ??
+        buildFrameSelectorFallback(current)
+    )
     current = current.parent
   }
   return chain
+}
+
+function buildFrameSelectorFallback(frame: WebFrameMain): string {
+  const parent = frame.parent
+  if (!parent) return "iframe"
+
+  const siblings = parent.frames
+  const index = siblings.findIndex(
+    (candidate) =>
+      candidate.processId === frame.processId && candidate.frameToken === frame.frameToken
+  )
+  if (index >= 0) {
+    if (siblings.length === 1) return "iframe"
+    return `iframe >> nth=${index}`
+  }
+
+  const frameName = readString(frame.name)
+  if (frameName) return `iframe[name=${JSON.stringify(frameName)}]`
+
+  const frameUrl = readString(frame.url) ?? readString(frame.origin) ?? frame.frameToken
+  return frameUrl ? `iframe[src*=${JSON.stringify(frameUrl)}]` : "iframe"
+}
+
+async function cacheFrameElementSelector(frame: WebFrameMain): Promise<void> {
+  if (!frame.parent) return
+
+  const parent = frame.parent
+  if (parent.isDestroyed() || frame.isDestroyed()) return
+
+  const siblings = parent.frames
+  const index = siblings.findIndex(
+    (candidate) =>
+      candidate.processId === frame.processId && candidate.frameToken === frame.frameToken
+  )
+  if (index < 0) return
+
+  const helperScript = `(() => {
+    const helper = window[${JSON.stringify(
+      PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER
+    )}];
+    if (typeof helper !== "function") return "";
+    return helper(${index});
+  })()`
+
+  try {
+    const selector = await executeManualRecorderScriptInIsolatedWorld(parent, helperScript)
+    if (typeof selector === "string" && selector.trim()) {
+      FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), selector.trim())
+      return
+    }
+  } catch {
+    // Ignore and fall back to other execution paths below.
+  }
+
+  try {
+    const selector = await parent.executeJavaScript(helperScript)
+    if (typeof selector === "string" && selector.trim()) {
+      FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), selector.trim())
+      return
+    }
+  } catch {
+    // Ignore and fall back to the heuristic selector path.
+  }
+
+  FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), buildFrameSelectorFallback(frame))
 }
 
 function buildNavigationAction(url: string): AiRecordedBrowserAction {
@@ -623,6 +723,7 @@ export function startManualRecording(
     variableActionNames: seededRecording.variableActionNames,
     script: ""
   }
+  FRAME_ELEMENT_SELECTOR_CACHE.clear()
 
   const currentUrl = readString(options.currentUrl ?? undefined)
   if (!seedScript && currentUrl && currentUrl !== "about:blank") {
@@ -712,10 +813,41 @@ export async function installManualRecorder(frame: WebFrameMain): Promise<void> 
   const script = buildPlaywrightManualRecorderInjectionScript()
 
   try {
-    await frame.executeJavaScript(script)
+    let injectionMode: "isolated" | "page" = "isolated"
+    try {
+      await executeManualRecorderScriptInIsolatedWorld(frame, script)
+    } catch {
+      await frame.executeJavaScript(script)
+      injectionMode = "page"
+    }
+    console.info(
+      `${MANUAL_RECORDER_DEBUG_PREFIX} injected mode=${injectionMode} frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${frame.parent?.url || "(root)"}`
+    )
+    await cacheFrameElementSelector(frame)
   } catch {
     // Cross-origin or transient frames may reject injection; ignore and keep recording other frames.
+    console.info(
+      `${MANUAL_RECORDER_DEBUG_PREFIX} inject-skipped frame=${frame.url || "(empty)"} token=${frame.frameToken}`
+    )
   }
+}
+
+export async function installManualRecorderForFrameById(
+  frameProcessId: number,
+  frameRoutingId: number
+): Promise<void> {
+  if (!activeSession || activeSession.status !== "recording") return
+  const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
+  if (!frame || frame.detached || frame.isDestroyed()) {
+    console.info(
+      `${MANUAL_RECORDER_DEBUG_PREFIX} frame-by-id-miss pid=${frameProcessId} rid=${frameRoutingId}`
+    )
+    return
+  }
+  console.info(
+    `${MANUAL_RECORDER_DEBUG_PREFIX} frame-by-id-hit pid=${frameProcessId} rid=${frameRoutingId} frame=${frame.url || "(empty)"} token=${frame.frameToken}`
+  )
+  await installManualRecorderForSubtree(frame)
 }
 
 export async function installManualRecorderForSubtree(frame: WebFrameMain): Promise<void> {
@@ -730,8 +862,18 @@ export function recordManualRecorderConsoleMessage(frame: WebFrameMain, message:
   const framePath = buildFramePath(frame)
   const playwrightEvent = parsePlaywrightManualRecorderEvent(message, framePath)
   if (playwrightEvent) {
+    console.info(
+      `${MANUAL_RECORDER_DEBUG_PREFIX} console-event frame=${frame?.url || "(empty)"} token=${frame?.frameToken || "(none)"} path=${JSON.stringify(framePath)} type=${playwrightEvent.type}`
+    )
     const action = normalizeManualEvent(playwrightEvent as ManualRecorderEvent, framePath)
-    if (action) appendAction(activeSession, action)
+    if (action) {
+      appendAction(activeSession, action)
+      console.info(
+        `${MANUAL_RECORDER_DEBUG_PREFIX} action-appended kind=${action.kind} target=${"target" in action ? action.target || "" : ""}`
+      )
+    } else {
+      console.info(`${MANUAL_RECORDER_DEBUG_PREFIX} action-dropped type=${playwrightEvent.type}`)
+    }
     return
   }
 }
@@ -742,4 +884,5 @@ export function resetManualRecordingForTests(): void {
   nextSessionNumber = 0
   nextActionNumber = 0
   pendingExplicitNavigation = null
+  FRAME_ELEMENT_SELECTOR_CACHE.clear()
 }

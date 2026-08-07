@@ -216,7 +216,9 @@ function pushCandidate(
 }
 
 function buildRoleSelector(role: LocatorRole, name: string): string {
-  return `internal:role=${role}[name=${escapeForAttributeSelector(name, true)}]`
+  // Align with Playwright codegen: string role names should translate back to
+  // getByRole(..., { name: "..." }) without forcing exact: true.
+  return `internal:role=${role}[name=${escapeForAttributeSelector(name, false)}]`
 }
 
 function buildRoleCandidate(

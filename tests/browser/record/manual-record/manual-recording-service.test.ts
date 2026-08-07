@@ -2,10 +2,15 @@ import { beforeEach, describe, expect, it } from "vitest"
 import type { WebFrameMain } from "electron"
 import type { BrowserLocatorMetadata } from "../../../../src/shared/browser-types"
 import { buildPlaywrightLocator } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
-import { PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX } from "../../../../src/main/browser/record/manual-record/manual-recorder-playwright-adapter"
+import {
+  PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX,
+  PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER,
+  PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID
+} from "../../../../src/main/browser/record/manual-record/manual-recorder-playwright-adapter"
 import {
   getManualRecording,
   markNextManualNavigationExplicit,
+  installManualRecorderForSubtree,
   pauseManualRecording,
   recordManualNavigation,
   recordManualRecorderConsoleMessage,
@@ -17,17 +22,40 @@ import {
 } from "../../../../src/main/browser/record/manual-record/manual-recording-service"
 
 function createFrame(input: {
+  executeJavaScript?: (code: string) => Promise<unknown>
+  executeJavaScriptInIsolatedWorld?: (
+    worldId: number,
+    scripts: Array<{ code: string }>
+  ) => Promise<unknown>
+  frames?: WebFrameMain[]
+  framesInSubtree?: WebFrameMain[]
   frameToken?: string
   origin?: string
+  processId?: number
   parent?: WebFrameMain | null
+  routingId?: number
+  detached?: boolean
+  name?: string
   url: string
 }): WebFrameMain {
-  return {
+  const frame = {
+    detached: input.detached ?? false,
+    executeJavaScript:
+      input.executeJavaScript ?? (async () => undefined),
+    executeJavaScriptInIsolatedWorld: input.executeJavaScriptInIsolatedWorld,
     frameToken: input.frameToken ?? input.url,
+    frames: input.frames ?? [],
     origin: input.origin ?? input.url,
     parent: input.parent ?? null,
-    url: input.url
+    processId: input.processId ?? 1,
+    routingId: input.routingId ?? 1,
+    name: input.name ?? "",
+    url: input.url,
+    isDestroyed: () => false
   } as WebFrameMain
+  ;(frame as WebFrameMain & { framesInSubtree: WebFrameMain[] }).framesInSubtree =
+    input.framesInSubtree ?? [frame, ...(input.frames ?? [])]
+  return frame
 }
 
 type LegacyRecorderPayload = {
@@ -187,10 +215,10 @@ describe("manual recording service", () => {
       source: "manual"
     })
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: '邮箱', exact: true }).fill('final@example.com');"
+      "await page.getByRole('textbox', { name: '邮箱' }).fill('final@example.com');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('button', { name: '登录', exact: true }).click();"
+      "await page.getByRole('button', { name: '登录' }).click();"
     )
   })
 
@@ -284,7 +312,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
+      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人' }).click();"
     )
   })
 
@@ -360,7 +388,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('checkbox', { name: 'emailNotif', exact: true }).click();"
+      "await page.getByRole('checkbox', { name: 'emailNotif' }).click();"
     )
     expect(session.script).not.toContain("getByText('emailNotif', { exact: true }).click()")
   })
@@ -382,7 +410,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
+      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang' }).click();"
     )
     expect(session.script).not.toContain('locator("button[name=\\"branch\\"]")')
   })
@@ -429,16 +457,16 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).click();"
+      "await page.getByRole('textbox', { name: 'Select branch' }).click();"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).fill('qyang');"
+      "await page.getByRole('textbox', { name: 'Select branch' }).fill('qyang');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click();"
+      "await page.getByRole('menuitemradio', { name: 'UAT_qyang2' }).click();"
     )
     expect(session.script.indexOf('.fill("qyang")')).toBeLessThan(
-      session.script.indexOf("getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click()")
+      session.script.indexOf("getByRole('menuitemradio', { name: 'UAT_qyang2' }).click()")
     )
   })
 
@@ -467,7 +495,7 @@ describe("manual recording service", () => {
       })
     ])
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: '密码', exact: true }).fill('12345678');"
+      "await page.getByRole('textbox', { name: '密码' }).fill('12345678');"
     )
   })
 
@@ -487,7 +515,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('combobox', { name: '用户名 (支持自动补全)', exact: true }).fill('你好');"
+      "await page.getByRole('combobox', { name: '用户名 (支持自动补全)' }).fill('你好');"
     )
   })
 
@@ -508,7 +536,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('spinbutton', { name: '年龄', exact: true }).fill('11');"
+      "await page.getByRole('spinbutton', { name: '年龄' }).fill('11');"
     )
   })
 
@@ -529,7 +557,7 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('slider', { name: '编程经验（年）', exact: true }).fill('6');"
+      "await page.getByRole('slider', { name: '编程经验（年）' }).fill('6');"
     )
   })
 
@@ -576,13 +604,13 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Search', exact: true }).fill('你好');"
+      "await page.getByRole('textbox', { name: 'Search' }).fill('你好');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Search', exact: true }).fill('哈哈');"
+      "await page.getByRole('textbox', { name: 'Search' }).fill('哈哈');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'Search', exact: true }).press('Enter');"
+      "await page.getByRole('textbox', { name: 'Search' }).press('Enter');"
     )
     expect(session.script.indexOf('.fill("你好")')).toBeLessThan(
       session.script.indexOf(".press('Enter')")
@@ -638,10 +666,10 @@ describe("manual recording service", () => {
       })
     })
     expect(session.script).toContain(
-      "await page.getByRole('button', { name: 'Search', exact: true }).first().click();"
+      "await page.getByRole('button', { name: 'Search' }).first().click();"
     )
     expect(session.script).toContain(
-      "await page.getByRole('button', { name: 'Search', exact: true }).nth(1).click();"
+      "await page.getByRole('button', { name: 'Search' }).nth(1).click();"
     )
   })
 
@@ -678,13 +706,13 @@ describe("manual recording service", () => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).click();"
+      "await page.getByRole('textbox', { name: 'What needs to be done?' }).click();"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).fill('buy milk');"
+      "await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('buy milk');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).press('Enter');"
+      "await page.getByRole('textbox', { name: 'What needs to be done?' }).press('Enter');"
     )
   })
 
@@ -795,10 +823,10 @@ test("manual recorded flow", async ({ page }) => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).fill('保存后的内容');"
+      "await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('保存后的内容');"
     )
     expect(session.script).toContain(
-      "await page.getByRole('textbox', { name: 'What needs to be done?', exact: true }).press('Enter');"
+      "await page.getByRole('textbox', { name: 'What needs to be done?' }).press('Enter');"
     )
     expect(session.script.indexOf('fill("保存后的内容")')).toBeLessThan(
       session.script.indexOf("press('Enter')")
@@ -825,7 +853,7 @@ test("manual recorded flow", async ({ page }) => {
     const session = stopManualRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.script).toContain(
-      "await page.getByRole('link', { name: 'Open detail', exact: true }).click();"
+      "await page.getByRole('link', { name: 'Open detail' }).click();"
     )
     expect(session.script).not.toContain("await page.goto('https://example.com/detail');")
   })
@@ -850,7 +878,7 @@ test("manual recorded flow", async ({ page }) => {
     const session = stopManualRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.script).toContain(
-      "await page.getByRole('tab', { name: 'Reposts', exact: true }).click();"
+      "await page.getByRole('tab', { name: 'Reposts' }).click();"
     )
     expect(session.script).not.toContain("await page.goto('https://medium.com/@tastejs/reposts');")
   })
@@ -862,6 +890,8 @@ test("manual recorded flow", async ({ page }) => {
       parent: topFrame,
       url: "https://pay.example.com/embedded-card"
     })
+    topFrame.frames = [childFrame]
+    topFrame.framesInSubtree = [topFrame, childFrame]
 
     emitRecorderMessage(childFrame, {
       type: "fill",
@@ -875,7 +905,190 @@ test("manual recorded flow", async ({ page }) => {
 
     const session = stopManualRecording()
     expect(session.script).toContain(
-      "page.locator('iframe[src*=\"https://pay.example.com/embedded-card\"]').contentFrame().getByRole('textbox', { name: 'Card number', exact: true }).fill('4242424242424242');"
+      "page.locator('iframe').contentFrame().getByRole('textbox', { name: 'Card number' }).fill('4242424242424242');"
+    )
+  })
+
+  it("uses the parent frame selector helper when available", async () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    const topFrame = createFrame({ url: "https://example.com/checkout" })
+    const childFrame = createFrame({
+      parent: topFrame,
+      url: "https://example.com/payment"
+    })
+    topFrame.frames = [childFrame]
+    topFrame.framesInSubtree = [topFrame, childFrame]
+    childFrame.framesInSubtree = [childFrame]
+
+    topFrame.executeJavaScript = async (code: string) => {
+      if (code.includes(PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER)) {
+        return 'iframe[name="payment"]'
+      }
+      return undefined
+    }
+    childFrame.executeJavaScript = async () => undefined
+
+    await installManualRecorderForSubtree(topFrame)
+
+    emitRecorderMessage(childFrame, {
+      type: "fill",
+      locator: {
+        role: "textbox",
+        placeholder: "Card number",
+        target: "Card number"
+      },
+      value: "4242"
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      "page.locator('iframe[name=\"payment\"]').contentFrame().getByRole('textbox', { name: 'Card number' }).fill('4242');"
+    )
+  })
+
+  it("prefers isolated-world injection before page-world execution", async () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    const pageExecutions: string[] = []
+    const isolatedExecutions: Array<{ worldId: number; code: string }> = []
+    const frame = createFrame({
+      url: "https://github.com/seanchen1993/CmbCoworkAgent/actions",
+      executeJavaScript: async (code: string) => {
+        pageExecutions.push(code)
+        return undefined
+      },
+      executeJavaScriptInIsolatedWorld: async (
+        worldId: number,
+        scripts: Array<{ code: string }>
+      ) => {
+        isolatedExecutions.push({ worldId, code: scripts[0]?.code ?? "" })
+        return undefined
+      }
+    })
+
+    await installManualRecorderForSubtree(frame)
+
+    expect(pageExecutions).toHaveLength(0)
+    expect(isolatedExecutions).toHaveLength(1)
+    expect(isolatedExecutions[0]?.worldId).toBe(PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID)
+    expect(isolatedExecutions[0]?.code).toContain("__cmbPlaywrightManualRecorderInstalled")
+  })
+
+  it("falls back to page-world injection when isolated-world execution fails", async () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    let pageExecutions = 0
+    let isolatedExecutions = 0
+    const frame = createFrame({
+      url: "https://example.com/fallback",
+      executeJavaScript: async () => {
+        pageExecutions += 1
+        return undefined
+      },
+      executeJavaScriptInIsolatedWorld: async () => {
+        isolatedExecutions += 1
+        throw new Error("isolated world unavailable")
+      }
+    })
+
+    await installManualRecorderForSubtree(frame)
+
+    expect(isolatedExecutions).toBe(1)
+    expect(pageExecutions).toBe(1)
+  })
+
+  it("keeps nested iframe paths aligned with Playwright codegen order", () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    const topFrame = createFrame({ url: "file:///Users/qiyang/Downloads/qyang-openwork/test/register.html" })
+    const topRegisterFrame = createFrame({
+      parent: topFrame,
+      url: "file:///Users/qiyang/Downloads/qyang-openwork/test/register.html"
+    })
+    const topLoginFrame = createFrame({
+      parent: topFrame,
+      url: "http://localhost:8765/login.html"
+    })
+    const topTailwindFrame = createFrame({
+      parent: topFrame,
+      url: "https://tailwindcss.com/docs/scale"
+    })
+    topFrame.frames = [topRegisterFrame, topLoginFrame, topTailwindFrame]
+    topFrame.framesInSubtree = [topFrame, topRegisterFrame, topLoginFrame, topTailwindFrame]
+
+    const nestedRegisterFrame = createFrame({
+      parent: topRegisterFrame,
+      url: "file:///Users/qiyang/Downloads/qyang-openwork/test/register.html"
+    })
+    const nestedLoginFrame = createFrame({
+      parent: topRegisterFrame,
+      url: "http://localhost:8765/login.html"
+    })
+    const nestedTailwindFrame = createFrame({
+      parent: topRegisterFrame,
+      url: "https://tailwindcss.com/docs/scale"
+    })
+    topRegisterFrame.frames = [nestedRegisterFrame, nestedLoginFrame, nestedTailwindFrame]
+    topRegisterFrame.framesInSubtree = [
+      topRegisterFrame,
+      nestedRegisterFrame,
+      nestedLoginFrame,
+      nestedTailwindFrame
+    ]
+
+    emitRecorderMessage(topFrame, {
+      type: "click",
+      locator: {
+        role: "tab",
+        accessibleName: "个人资料",
+        target: "个人资料",
+        selector: 'internal:role=tab[name="个人资料"s]',
+        tagName: "button"
+      }
+    })
+    emitRecorderMessage(topRegisterFrame, {
+      type: "click",
+      locator: {
+        role: "tab",
+        accessibleName: "个人资料",
+        target: "个人资料",
+        selector: 'internal:role=tab[name="个人资料"s]',
+        tagName: "button"
+      }
+    })
+    emitRecorderMessage(nestedLoginFrame, {
+      type: "fill",
+      locator: {
+        role: "textbox",
+        accessibleName: "姓名(input文本框)：",
+        target: "姓名(input文本框)：",
+        selector: 'internal:role=textbox[name="姓名(input文本框)："s]',
+        tagName: "input",
+        inputType: "text"
+      },
+      value: "ha"
+    })
+    emitRecorderMessage(nestedTailwindFrame, {
+      type: "click",
+      locator: {
+        role: "button",
+        accessibleName: "Show more",
+        target: "Show more",
+        selector: 'internal:role=button[name="Show more"s]',
+        tagName: "button"
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      "page.locator('iframe').first().contentFrame().getByRole('tab', { name: '个人资料' }).click();"
+    )
+    expect(session.script).toContain(
+      "page.locator('iframe').first().contentFrame().locator('iframe').nth(1).contentFrame().getByRole('textbox', { name: '姓名(input文本框)：' }).fill('ha');"
+    )
+    expect(session.script).toContain(
+      "page.locator('iframe').first().contentFrame().locator('iframe').nth(2).contentFrame().getByRole('button', { name: 'Show more' }).click();"
     )
   })
 
@@ -985,7 +1198,7 @@ test("manual recorded flow", async ({ page }) => {
 
     expect(session.script).not.toContain('page.waitForEvent("filechooser")')
     expect(session.script).not.toContain(
-      "getByRole('textbox', { name: 'avatar', exact: true }).click()"
+      "getByRole('textbox', { name: 'avatar' }).click()"
     )
     expect(session.script).not.toContain(
       "await page.locator('input[name=\"avatar\"]').click();"

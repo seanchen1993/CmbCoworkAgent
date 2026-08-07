@@ -3,11 +3,18 @@ import {
   formatPlaywrightSelector
 } from "../common/playwright-codegen/projectLocatorAdapter"
 import { getPlaywrightRecorderSourceBundle } from "../common/playwright-codegen/projectRecorderAdapter"
+import {
+  parseSelector,
+  stringifySelector
+} from "../common/playwright-codegen/selectorParser"
 
 // Playwright 录制器动作通过这个前缀回传到 Electron 宿主。
 export const PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX = "[PlaywrightManualRecorder]"
 export const PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG =
   "__cmbPlaywrightManualRecorderInstalled"
+export const PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER =
+  "__cmbPlaywrightGenerateFrameSelectorAtIndex"
+export const PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID = 10_173
 const WINDOWS_FAKEPATH_PATTERN = /^[a-z]:\\fakepath\\(.+)$/iu
 
 interface PlaywrightRecorderAction {
@@ -169,12 +176,44 @@ function fileUploadLocatorForFakePathFill(
   }
 }
 
+function normalizeManualRoleSelectorExactness(selector: string | undefined): string | undefined {
+  const value = readString(selector)
+  if (!value || !value.includes("internal:role=")) return value
+
+  const normalizeRoleBody = (body: string): string =>
+    body.replace(
+      /(\[(?:name|description)=("(?:\\.|[^"])*"|\/(?:\\.|[^/])*\/[dgimsuvy]*))s\]/gu,
+      "$1i]"
+    )
+
+  try {
+    const parsed = parseSelector(value)
+    let changed = false
+    for (const part of parsed.parts) {
+      if (part.name !== "internal:role" || typeof part.body !== "string") continue
+      const normalizedBody = normalizeRoleBody(part.body)
+      if (normalizedBody === part.body) continue
+      part.body = normalizedBody
+      part.source = normalizedBody
+      changed = true
+    }
+    return changed ? stringifySelector(parsed) : value
+  } catch {
+    return value.replace(
+      /(internal:role=[^\]]*\[(?:name|description)=("(?:\\.|[^"])*"|\/(?:\\.|[^/])*\/[dgimsuvy]*))s\]/gu,
+      "$1i]"
+    )
+  }
+}
+
 function locatorForAction(
   action: PlaywrightRecorderAction,
   rawLocator: PlaywrightRecorderEnvelope["locator"],
   framePath: string[]
 ): PlaywrightManualRecorderEventLocator | undefined {
-  const selector = readString(rawLocator?.selector ?? action.selector)
+  const selector = normalizeManualRoleSelectorExactness(
+    readString(rawLocator?.selector ?? action.selector)
+  )
   if (!selector && !rawLocator) return framePath.length > 0 ? { framePath } : undefined
 
   return {
@@ -194,8 +233,9 @@ function locatorForAction(
     matchCount: readNonNegativeInteger(rawLocator?.matchCount),
     nth: readNonNegativeInteger(rawLocator?.nth),
     playwrightLocator:
-      readString(rawLocator?.playwrightLocator) ??
-      (selector ? formatPlaywrightSelector(selector, framePath) : undefined),
+      selector
+        ? formatPlaywrightSelector(selector, framePath)
+        : readString(rawLocator?.playwrightLocator),
     framePath: framePath.length > 0 ? framePath : undefined
   }
 }
@@ -289,14 +329,25 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
     injectedScriptSource,
     pollingRecorderSource
   } = getPlaywrightRecorderSourceBundle()
+  const injectedScriptConstructor = buildPlaywrightModuleConstructorExpression(
+    injectedScriptSource,
+    "module.exports.InjectedScript()"
+  )
+  const pollingRecorderConstructor = buildPlaywrightModuleConstructorExpression(
+    pollingRecorderSource,
+    "module.exports.default()"
+  )
 
   return String.raw`(() => {
     if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) return;
     window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true;
 
     const EVENT_PREFIX = ${JSON.stringify(PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX)};
-    const INJECTED_SCRIPT_SOURCE = ${JSON.stringify(injectedScriptSource)};
-    const POLLING_RECORDER_SOURCE = ${JSON.stringify(pollingRecorderSource)};
+    const FRAME_SELECTOR_HELPER = ${JSON.stringify(
+      PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER
+    )};
+    const InjectedScriptConstructor = ${injectedScriptConstructor};
+    const PollingRecorder = ${pollingRecorderConstructor};
     const RECORDER_OPTIONS = {
       isUnderTest: false,
       sdkLanguage: "javascript",
@@ -513,6 +564,23 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
       }
     }
 
+    function generatedSimpleSelectorForElement(element) {
+      try {
+        if (typeof injectedScript.generateSelectorSimple === "function") {
+          return text(injectedScript.generateSelectorSimple(element));
+        }
+      } catch {}
+      return generatedSelectorForElement(element);
+    }
+
+    function selectorForFrameElementAtIndex(index) {
+      const numericIndex = Number(index);
+      if (!Number.isInteger(numericIndex) || numericIndex < 0) return "";
+      const frameElement = document.querySelectorAll("iframe, frame")[numericIndex];
+      if (!(frameElement instanceof Element)) return "";
+      return generatedSimpleSelectorForElement(frameElement);
+    }
+
     function cssAttributeValue(value) {
       return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     }
@@ -574,17 +642,9 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
     window.__pw_recorderSetOverlayState = async () => {};
     window.__pw_resume = async () => {};
 
-    const injectedScript = (() => {
-      const module = {};
-      eval(INJECTED_SCRIPT_SOURCE);
-      return new (module.exports.InjectedScript())(globalThis, RECORDER_OPTIONS);
-    })();
+    const injectedScript = new InjectedScriptConstructor(globalThis, RECORDER_OPTIONS);
 
-    const PollingRecorder = (() => {
-      const module = {};
-      eval(POLLING_RECORDER_SOURCE);
-      return module.exports.default();
-    })();
+    window[FRAME_SELECTOR_HELPER] = (index) => selectorForFrameElementAtIndex(index);
 
     window.__pw_recorderRecordAction = async (action) => {
       const selector = typeof action?.selector === "string" ? action.selector : "";
@@ -643,5 +703,16 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
 
     window.__cmbPlaywrightManualRecorder = recorder;
     window.__pw_refreshOverlay?.();
+  })()`
+}
+
+function buildPlaywrightModuleConstructorExpression(
+  source: string,
+  exportExpression: string
+): string {
+  return String.raw`(() => {
+    const module = { exports: {} };
+    ${source}
+    return ${exportExpression};
   })()`
 }

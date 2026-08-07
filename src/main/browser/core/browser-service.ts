@@ -16,6 +16,7 @@ import {
 } from "../../../shared/browser-types"
 import {
   getManualRecording,
+  installManualRecorderForFrameById,
   installManualRecorderForSubtree,
   markNextManualNavigationExplicit,
   recordManualRecorderConsoleMessage,
@@ -683,6 +684,13 @@ export class BrowserService {
       if (getManualRecording().status !== "recording") return
       void installManualRecorderForSubtree(details.frame)
     })
+    webContents.on(
+      "did-frame-finish-load",
+      (_event, _isMainFrame, frameProcessId, frameRoutingId) => {
+        if (getManualRecording().status !== "recording") return
+        void installManualRecorderForFrameById(frameProcessId, frameRoutingId)
+      }
+    )
     webContents.on("page-title-updated", () => {
       emit()
     })

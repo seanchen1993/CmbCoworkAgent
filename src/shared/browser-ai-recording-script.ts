@@ -1060,7 +1060,7 @@ function buildVariableizedClickLocator(
   const role = source.role ?? derivedTarget.inferredRole
   if (role) {
     return applyOccurrenceHint(
-      `${root}.getByRole(${quote(role)}, { name: ${variableIdentifier}, exact: true })`,
+      `${root}.getByRole(${quote(role)}, { name: ${variableIdentifier} })`,
       source
     )
   }
