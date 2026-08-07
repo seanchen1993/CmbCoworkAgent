@@ -409,6 +409,39 @@ interface DashboardCodeStats {
   adoptionRate: number | null
 }
 
+/** 研发效能面板：新增 (绿地) / 存量 (棕地) 分桶，unclassified 为迁移前事件。 */
+interface DashboardEfficiencyChangeKindStats extends DashboardCodeStats {
+  changeKind: "new" | "legacy" | "unclassified"
+}
+
+interface DashboardEfficiencyData {
+  scalability: {
+    slope: number | null
+    pendingReason: string
+  }
+  adoption: {
+    overall: DashboardCodeStats
+    byChangeKind: DashboardEfficiencyChangeKindStats[]
+    newRatioHistogram: { from: number; docCount: number }[]
+    unmeasuredRatio: number | null
+  }
+  compute: {
+    totalInputTokens: number
+    totalOutputTokens: number
+    totalTokens: number
+    cacheReadTokens: number
+    pushedAdoptedLines: number
+    tokensPerAdoptedLine: number | null
+    traceCount: number
+    codeProducingTraceCount: number
+    codeProducingTraceRatio: number | null
+  }
+  meta: {
+    projectCount: number
+    truncated: boolean
+  }
+}
+
 interface DashboardSkillDetail {
   stats: DashboardCodeStats
   traces: DashboardTraceDetail[]
@@ -2242,6 +2275,10 @@ interface CustomAPI {
       data?: { codeStats: DashboardCodeStats | null; skillCodeStats: DashboardCodeStats | null }
       error?: string
     }>
+    efficiency: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
     projectModeProjects: (
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions

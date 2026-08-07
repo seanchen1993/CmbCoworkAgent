@@ -36,6 +36,16 @@ import {
   type DashboardSkillCodeAdoptionStats
 } from "./dashboard-code-stats"
 import {
+  buildChangeKindAggs,
+  buildComputeEfficiency,
+  buildNewRatioHistogramAgg,
+  buildPendingScalability,
+  computeUnmeasuredRatio,
+  normalizeChangeKindBuckets,
+  normalizeNewRatioHistogram,
+  type DashboardEfficiencyData
+} from "./dashboard-efficiency"
+import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
   type DashboardEsQueryInput
@@ -12621,6 +12631,115 @@ async function fetchProjectModeProjectCommits(
   }
 }
 
+/**
+ * 研发效能面板 payload.
+ *
+ * Scope is fixed rather than user-toggleable: project mode AND bound to a Lean
+ * project. That is the premise the three metrics are defined against, so it is
+ * applied here instead of being exposed as a filter the viewer could turn off
+ * and silently change what the numbers mean.
+ */
+async function fetchDashboardEfficiency(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<DashboardEfficiencyData> {
+  const access = requireDashboardProjectModeAccess()
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+
+  // Lean project ids come from the self-healing snapshot (the sole source of
+  // truth for projectFromLean). An empty set is meaningful, not an error: it
+  // means no Lean-bound projects matched, and every terms IN [] below then
+  // aggregates to zero.
+  const { ids: leanProjectIds, truncated } = await fetchProjectModeFilteredProjectIds(
+    projectModeSnapshotFilters(orgFilterClause, true)
+  )
+
+  const codeExtraFilters = [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { exists: { field: "properties.harnessProjectId" } },
+    { terms: { "properties.harnessProjectId": leanProjectIds } }
+  ]
+
+  const [changeKindRaw, overallRaw, traceRaw, codeTraceRaw] = await Promise.all([
+    // 指标 2 — adoption split by 新增 / 存量.
+    fetchProjectModeCodeAggs(
+      null,
+      range,
+      (perBucketAggs) => ({
+        ...buildChangeKindAggs(perBucketAggs),
+        ...buildNewRatioHistogramAgg()
+      }),
+      codeExtraFilters
+    ),
+    // Unsplit totals, used for the unmeasured-share credibility indicator.
+    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, codeExtraFilters),
+    // 指标 3 numerator — tokens live on the trace index.
+    esQuery(getEsIndex("trace"), {
+      size: 0,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [
+            ...projectModeTraceFilters(range, orgFilterClause),
+            { terms: { harnessProjectId: leanProjectIds } }
+          ]
+        }
+      },
+      aggs: {
+        trace_count: { value_count: { field: "traceId" } },
+        project_count: { cardinality: { field: "harnessProjectId" } },
+        total_input_tokens: { sum: { field: "totalInputTokens" } },
+        total_output_tokens: { sum: { field: "totalOutputTokens" } },
+        total_tokens: { sum: { field: "totalTokens" } },
+        cache_read_tokens: { sum: { field: "cacheReadTokens" } }
+      }
+    }),
+    // Traces that actually produced code, so the panel can show how much of the
+    // token spend went to conversations that never wrote anything.
+    esQuery(getEsIndex("event"), {
+      size: 0,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [
+            { term: { eventName: "code_gen" } },
+            timeRangeFilter("eventTime", range),
+            ...codeExtraFilters
+          ]
+        }
+      },
+      aggs: { code_traces: { cardinality: { field: "properties.traceId" } } }
+    })
+  ])
+
+  const overall = normalizeCodeStatsFromAggs(overallRaw)
+  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
+  const codeTraceAggs = asRecord(asRecord(codeTraceRaw).aggregations)
+
+  return {
+    scalability: buildPendingScalability(),
+    adoption: {
+      overall,
+      byChangeKind: normalizeChangeKindBuckets(changeKindRaw),
+      newRatioHistogram: normalizeNewRatioHistogram(changeKindRaw),
+      unmeasuredRatio: computeUnmeasuredRatio(overall)
+    },
+    compute: buildComputeEfficiency({
+      totalInputTokens: asNumber(asRecord(traceAggs.total_input_tokens).value),
+      totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
+      totalTokens: asNumber(asRecord(traceAggs.total_tokens).value),
+      cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
+      pushedAdoptedLines: overall.pushedAdoptedLines,
+      traceCount: asNumber(asRecord(traceAggs.trace_count).value),
+      codeProducingTraceCount: asNumber(asRecord(codeTraceAggs.code_traces).value)
+    }),
+    meta: {
+      projectCount: asNumber(asRecord(traceAggs.project_count).value),
+      truncated
+    }
+  }
+}
+
 /** Overview payload: snapshot aggregates + trace usage + code adoption + first list page. */
 async function fetchProjectMode(
   range: TimeRange,
@@ -13341,6 +13460,16 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       }
     }
   )
+
+  _ipcMain.handle("dashboard:efficiency", async (_, range: TimeRange, opts?: OrgFilterOptions) => {
+    try {
+      requireDashboardProjectModeAccess()
+      return { success: true, data: await fetchDashboardEfficiency(range, opts) }
+    } catch (e) {
+      console.error("[Dashboard] efficiency error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   _ipcMain.handle(
     "dashboard:projectModeCodeStats",

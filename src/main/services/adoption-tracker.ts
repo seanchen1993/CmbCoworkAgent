@@ -54,6 +54,11 @@ import type {
 } from "../../shared/adoption-trace-types"
 import { buildEvent, getEventReporter, type CoworkEvent } from "./event-reporter"
 import { getGitRootForPath } from "./git-repository-discovery"
+import {
+  attributeChangeKind,
+  normalizeChangeKind,
+  normalizeNewRatio
+} from "./change-kind-classifier"
 import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
 import {
   cleanupAdoptionDeliveryRecords,
@@ -1189,6 +1194,10 @@ function buildCodeGenerationProperties(args: {
     skillSource,
     testMatchRule
   } = args
+  // Bucketing for the 研发效能 panel: 新增 (绿地) vs 存量迭代 (棕地). Derived here
+  // from counts this function already has, and mirrored onto the commit-time
+  // `code_adopt` event so ES can slice adoption rates without a two-step join.
+  const { newRatio, changeKind } = attributeChangeKind(lineCount, deletedLineCount)
   return {
     schemaVersion: 1,
     eventId,
@@ -1199,6 +1208,8 @@ function buildCodeGenerationProperties(args: {
     language: extname(absPath).slice(1).toLowerCase() || null,
     lineCount,
     deletedLineCount,
+    newRatio,
+    changeKind,
     usedSkills,
     ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
@@ -1333,6 +1344,9 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // the file size. Boundary-line merging (e.g. oldString ending mid-line)
     // can introduce small +/- 1 errors; acceptable for an auxiliary metric.
     const deletedLineCount = deriveDeletedLineCount(input)
+    // 新增/存量 bucket for the 研发效能 panel. Computed once here so the sqlite row
+    // and the cloud `code_gen` event can never disagree.
+    const changeAttribution = attributeChangeKind(reportedLineCount, deletedLineCount)
     const usedSkills = normalizeUsedSkills(ctx.usedSkills)
     const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
     const generationProperties = buildCodeGenerationProperties({
@@ -1406,6 +1420,10 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         harness_node_status: ctx.harnessNodeStatus ?? null,
         harness_adapter_name: ctx.harnessAdapterName ?? null,
         harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+        // Persisted so the commit-time `code_adopt` event can carry the bucket
+        // without re-deriving it from a diff that has since moved on.
+        new_ratio: changeAttribution.newRatio,
+        change_kind: changeAttribution.changeKind,
         ...observabilityColumns
       },
       toOutboxEvent(generationEvent, createdAt)
@@ -1875,6 +1893,11 @@ async function buildMeasurementsForFile(
         harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null,
+        // Carried over from gen time. The adopted/effective line counts live on
+        // this event, so the bucket has to travel with them — otherwise slicing
+        // adoption by 新增/存量 would need a join back to code_gen.
+        newRatio: normalizeNewRatio(pending.new_ratio),
+        changeKind: normalizeChangeKind(pending.change_kind),
         ...observabilityProps
       })
       const details = buildLocalAdoptLineDetailsRow({
