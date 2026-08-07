@@ -8,6 +8,40 @@ import {
 } from "../../../src/shared/browser-ai-recording-script"
 
 describe("browser ai recording script", () => {
+  it("preserves codegen contentFrame chains when round-tripping a manual draft", () => {
+    const script = `import { test } from "@playwright/test";
+
+test("manual recorded flow", async ({ page }) => {
+  await page.locator('iframe').first().contentFrame().locator('iframe').nth(3).contentFrame().getByRole('button', { name: 'Show more' }).click();
+});
+`
+
+    const parsed = parseAiRecordingScript(script, "manual")
+
+    expect(parsed.actions).toEqual([
+      expect.objectContaining({
+        kind: "click",
+        locator: expect.objectContaining({
+          role: "button",
+          accessibleName: "Show more",
+          framePath: ["iframe >> nth=0", "iframe >> nth=3"],
+          nth: undefined,
+          matchCount: undefined
+        })
+      })
+    ])
+
+    const regenerated = generateAiRecordingScript(parsed.actions, {
+      source: "manual",
+      variableActionIds: parsed.variableActionIds,
+      variableActionNames: parsed.variableActionNames
+    })
+
+    expect(regenerated).toContain(
+      "await page.locator('iframe').first().contentFrame().locator('iframe').nth(3).contentFrame().getByRole('button', { name: 'Show more' }).click();"
+    )
+  })
+
   it("preserves first occurrence hints when round-tripping parsed scripts", () => {
     const script = `import { test } from "@playwright/test";
 

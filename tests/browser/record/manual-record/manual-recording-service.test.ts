@@ -4,7 +4,9 @@ import type { BrowserLocatorMetadata } from "../../../../src/shared/browser-type
 import { buildPlaywrightLocator } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
 import {
   buildPlaywrightManualRecorderInjectionScript,
+  inspectPlaywrightManualRecorderMessage,
   PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX,
+  PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY,
   PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER,
   PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG,
   PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID
@@ -150,6 +152,44 @@ function emitRecorderMessage(frame: WebFrameMain, payload: LegacyRecorderPayload
 describe("manual recording service", () => {
   beforeEach(() => {
     resetManualRecordingForTests()
+  })
+
+  it("reports frame diagnostics without exposing recorded fill values", () => {
+    const diagnostic = inspectPlaywrightManualRecorderMessage(
+      `${PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX}${JSON.stringify({
+        type: "action",
+        action: {
+          name: "fill",
+          selector: 'internal:role=textbox[name="密码"s]',
+          text: "do-not-log-this-value"
+        },
+        frameUrl: "https://example.com/embedded",
+        frameContext: {
+          instanceId: "frame-instance-1",
+          channelId: "frame-channel-1",
+          isTop: false,
+          depth: 1,
+          frameElementIndex: 2,
+          frameElementSrc: "/embedded"
+        }
+      })}`
+    )
+
+    expect(diagnostic).toEqual({
+      actionName: "fill",
+      clickCount: undefined,
+      frameUrl: "https://example.com/embedded",
+      selector: 'internal:role=textbox[name="密码"s]',
+      frameContext: {
+        instanceId: "frame-instance-1",
+        channelId: "frame-channel-1",
+        isTop: false,
+        depth: 1,
+        frameElementIndex: 2,
+        frameElementSrc: "/embedded"
+      }
+    })
+    expect(JSON.stringify(diagnostic)).not.toContain("do-not-log-this-value")
   })
 
   it("starts with the current page and generates a manual recording draft", () => {
@@ -1048,17 +1088,70 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("marks the frame only after the recorder is initialized", () => {
-    const script = buildPlaywrightManualRecorderInjectionScript()
+    const script = buildPlaywrightManualRecorderInjectionScript("frame-channel-1")
     const recorderInitialization = script.indexOf("const recorder = new PollingRecorder")
     const installedMarker = script.lastIndexOf(
       `window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true`
     )
 
     expect(script).toContain(
-      `if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) return true`
+      `const FRAME_CHANNEL_KEY = ${JSON.stringify(
+        PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY
+      )}`
     )
+    expect(script).toContain('const RECORDER_FRAME_CHANNEL_ID = "frame-channel-1"')
+    expect(script).toContain("channelId: RECORDER_FRAME_CHANNEL_ID")
     expect(installedMarker).toBeGreaterThan(recorderInitialization)
-    expect(script.slice(installedMarker)).toContain("return true")
+    expect(script.slice(installedMarker)).toContain("return RECORDER_FRAME_CHANNEL_ID")
+  })
+
+  it("uses the injected frame channel when Electron reports a same-process iframe as root", async () => {
+    startManualRecording({ threadId: "thread-1" })
+
+    const rootFrame = createFrame({ url: "http://localhost:8000/register.html" })
+    let childInjectionScript = ""
+    const childFrame = createFrame({
+      parent: rootFrame,
+      url: "http://localhost:8000/login.html",
+      executeJavaScriptInIsolatedWorld: async (_worldId, scripts) => {
+        childInjectionScript = scripts[0]?.code ?? ""
+        return true
+      }
+    })
+    rootFrame.frames = [childFrame]
+    rootFrame.framesInSubtree = [rootFrame, childFrame]
+
+    await installManualRecorderForSubtree(rootFrame)
+
+    const channelMatch = /const RECORDER_FRAME_CHANNEL_ID = ("(?:\\.|[^"])*");/u.exec(
+      childInjectionScript
+    )
+    expect(channelMatch?.[1]).toBeTruthy()
+    const channelId = JSON.parse(channelMatch![1]!)
+
+    recordManualRecorderConsoleMessage(
+      rootFrame,
+      `${PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX}${JSON.stringify({
+        type: "action",
+        action: {
+          name: "click",
+          selector: 'internal:role=tab[name="个人资料"s]',
+          clickCount: 1
+        },
+        locator: {
+          role: "tab",
+          accessibleName: "个人资料",
+          target: "个人资料",
+          selector: 'internal:role=tab[name="个人资料"s]'
+        },
+        frameContext: { channelId }
+      })}`
+    )
+
+    const session = stopManualRecording()
+    expect(session.script).toContain(
+      "await page.locator('iframe').contentFrame().getByRole('tab', { name: '个人资料', exact: true }).click();"
+    )
   })
 
   it("keeps nested iframe paths aligned with Playwright codegen order", () => {

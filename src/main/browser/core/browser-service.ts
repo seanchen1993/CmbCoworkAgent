@@ -680,13 +680,15 @@ export class BrowserService {
       ensureManualRecorder()
     })
     webContents.on("frame-created", (_event, details) => {
-      if (!details.frame) return
+      const createdFrame = details.frame
+      if (!createdFrame) return
       // The frame tree entry can exist before the child document is ready.
       // Wait for the frame's own dom-ready so we don't initialize against a
       // transient document and accidentally block later retries.
-      details.frame.once("dom-ready", () => {
+      createdFrame.once("dom-ready", () => {
         if (getManualRecording().status !== "recording") return
-        void installManualRecorderForSubtree(details.frame)
+        if (createdFrame.detached || createdFrame.isDestroyed()) return
+        void installManualRecorderForSubtree(createdFrame)
       })
     })
     webContents.on(

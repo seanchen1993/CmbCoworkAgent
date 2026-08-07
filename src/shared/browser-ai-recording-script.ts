@@ -750,13 +750,45 @@ function parseLocatorRole(value: string | undefined): BrowserLocatorMetadata["ro
   }
 }
 
+function parseFramePath(locatorExpression: string): string[] {
+  const segments: Array<{ index: number; selector: string }> = []
+
+  for (const match of locatorExpression.matchAll(
+    /(?:^|\.)frameLocator\(\s*((?:['"])(?:\\.|.)*?['"])\s*\)/gu
+  )) {
+    const selector = parseLocatorExpressionValue(match[1])
+    if (selector) segments.push({ index: match.index ?? 0, selector })
+  }
+
+  for (const match of locatorExpression.matchAll(
+    /(?:^|\.)locator\(\s*((?:['"])(?:\\.|.)*?['"])\s*\)(?:(?:\.(first)\(\))|(?:\.nth\(\s*(\d+)\s*\)))?\.contentFrame\(\)/gu
+  )) {
+    const selector = parseLocatorExpressionValue(match[1])
+    if (!selector) continue
+    const occurrence =
+      match[2] === "first"
+        ? " >> nth=0"
+        : match[3] !== undefined
+          ? ` >> nth=${match[3]}`
+          : ""
+    segments.push({ index: match.index ?? 0, selector: `${selector}${occurrence}` })
+  }
+
+  return segments
+    .sort((left, right) => left.index - right.index)
+    .map((segment) => segment.selector)
+}
+
 function parseLocatorExpression(expression: string): BrowserLocatorMetadata {
   const locatorExpression = expression.trim()
-  const framePath = Array.from(
-    locatorExpression.matchAll(/frameLocator\(\s*(['"])(.*?)\1\s*\)/gu)
-  ).map((match) => match[2]!)
-  const nthMatch = /\.nth\(\s*(\d+)\s*\)/u.exec(locatorExpression)
-  const hasFirstHint = /\.first\(\s*\)/u.test(locatorExpression)
+  const framePath = parseFramePath(locatorExpression)
+  const contentFrameEnd = locatorExpression.lastIndexOf(".contentFrame()")
+  const targetLocatorExpression =
+    contentFrameEnd >= 0
+      ? locatorExpression.slice(contentFrameEnd + ".contentFrame()".length)
+      : locatorExpression
+  const nthMatch = /\.nth\(\s*(\d+)\s*\)/u.exec(targetLocatorExpression)
+  const hasFirstHint = /\.first\(\s*\)/u.test(targetLocatorExpression)
   const metadata: BrowserLocatorMetadata = {
     framePath: framePath.length > 0 ? framePath : undefined,
     nth: nthMatch ? Number(nthMatch[1]) : undefined,
@@ -806,8 +838,10 @@ function parseLocatorExpression(expression: string): BrowserLocatorMetadata {
     return metadata
   }
 
-  const selectorMatch =
-    /locator\(\s*(((['"])(?:\\.|.)*?\3))\s*\)/u.exec(locatorExpression)
+  const selectorMatches = Array.from(
+    locatorExpression.matchAll(/locator\(\s*((?:['"])(?:\\.|.)*?['"])\s*\)/gu)
+  )
+  const selectorMatch = selectorMatches.at(-1)
   if (selectorMatch) metadata.selector = parseLocatorExpressionValue(selectorMatch[1])
   if (!selectorMatch) metadata.playwrightLocator = locatorExpression
   return metadata

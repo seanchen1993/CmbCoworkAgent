@@ -8,6 +8,8 @@ import { getPlaywrightRecorderSourceBundle } from "../common/playwright-codegen/
 export const PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX = "[PlaywrightManualRecorder]"
 export const PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG =
   "__cmbPlaywrightManualRecorderInstalled"
+export const PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY =
+  "__cmbPlaywrightManualRecorderFrameChannelId"
 export const PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER =
   "__cmbPlaywrightGenerateFrameSelectorAtIndex"
 export const PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID = 10_173
@@ -38,6 +40,29 @@ interface PlaywrightRecorderEnvelope {
   }
   timestamp?: unknown
   frameUrl?: unknown
+  frameContext?: {
+    instanceId?: unknown
+    channelId?: unknown
+    isTop?: unknown
+    depth?: unknown
+    frameElementIndex?: unknown
+    frameElementSrc?: unknown
+  }
+}
+
+export interface PlaywrightManualRecorderMessageDiagnostic {
+  actionName?: string
+  clickCount?: number
+  frameUrl?: string
+  selector?: string
+  frameContext?: {
+    instanceId?: string
+    channelId?: string
+    isTop?: boolean
+    depth?: number
+    frameElementIndex?: number
+    frameElementSrc?: string
+  }
 }
 
 export interface PlaywrightManualRecorderEventLocator extends Pick<
@@ -216,6 +241,49 @@ function parseEnvelope(message: string): PlaywrightRecorderEnvelope | null {
   }
 }
 
+export function inspectPlaywrightManualRecorderMessage(
+  message: string
+): PlaywrightManualRecorderMessageDiagnostic | null {
+  const envelope = parseEnvelope(message)
+  if (!envelope) return null
+
+  const clickCount =
+    typeof envelope.action?.clickCount === "number" &&
+    Number.isFinite(envelope.action.clickCount)
+      ? envelope.action.clickCount
+      : undefined
+  const depth =
+    typeof envelope.frameContext?.depth === "number" &&
+    Number.isInteger(envelope.frameContext.depth)
+      ? envelope.frameContext.depth
+      : undefined
+  const frameElementIndex =
+    typeof envelope.frameContext?.frameElementIndex === "number" &&
+    Number.isInteger(envelope.frameContext.frameElementIndex)
+      ? envelope.frameContext.frameElementIndex
+      : undefined
+
+  return {
+    actionName: readActionName(envelope.action?.name),
+    clickCount,
+    frameUrl: readString(envelope.frameUrl),
+    selector: readString(envelope.locator?.selector ?? envelope.action?.selector),
+    frameContext: envelope.frameContext
+      ? {
+          instanceId: readString(envelope.frameContext.instanceId),
+          channelId: readString(envelope.frameContext.channelId),
+          isTop:
+            typeof envelope.frameContext.isTop === "boolean"
+              ? envelope.frameContext.isTop
+              : undefined,
+          depth,
+          frameElementIndex,
+          frameElementSrc: readString(envelope.frameContext.frameElementSrc)
+        }
+      : undefined
+  }
+}
+
 export function parsePlaywrightManualRecorderEvent(
   message: string,
   framePath: string[]
@@ -288,7 +356,7 @@ export function parsePlaywrightManualRecorderEvent(
   }
 }
 
-export function buildPlaywrightManualRecorderInjectionScript(): string {
+export function buildPlaywrightManualRecorderInjectionScript(frameChannelId = ""): string {
   const {
     injectedScriptSource,
     pollingRecorderSource
@@ -303,7 +371,15 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
   )
 
   return String.raw`(() => {
-    if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) return true;
+    const RECORDER_FRAME_CHANNEL_ID = ${JSON.stringify(frameChannelId)};
+    const FRAME_CHANNEL_KEY = ${JSON.stringify(
+      PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY
+    )};
+    if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) {
+      return typeof window[FRAME_CHANNEL_KEY] === "string"
+        ? window[FRAME_CHANNEL_KEY]
+        : RECORDER_FRAME_CHANNEL_ID;
+    }
 
     const EVENT_PREFIX = ${JSON.stringify(PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX)};
     const FRAME_SELECTOR_HELPER = ${JSON.stringify(
@@ -322,6 +398,10 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
     };
 
     let recorderMode = "recording";
+    const recorderFrameInstanceId =
+      typeof crypto?.randomUUID === "function"
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2) + Date.now().toString(36);
 
     function text(value) {
       return typeof value === "string" ? value.trim() : "";
@@ -575,13 +655,44 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
       };
     }
 
+    function recorderFrameContext() {
+      let depth = 0;
+      let currentWindow = window;
+      while (currentWindow !== currentWindow.top && depth < 32) {
+        depth += 1;
+        currentWindow = currentWindow.parent;
+      }
+
+      let frameElementIndex = -1;
+      let frameElementSrc = "";
+      try {
+        const frameElement = window.frameElement;
+        if (frameElement instanceof Element) {
+          frameElementIndex = Array.from(
+            frameElement.ownerDocument.querySelectorAll("iframe, frame")
+          ).indexOf(frameElement);
+          frameElementSrc = text(frameElement.getAttribute("src"));
+        }
+      } catch {}
+
+      return {
+        instanceId: recorderFrameInstanceId,
+        channelId: RECORDER_FRAME_CHANNEL_ID,
+        isTop: window === window.top,
+        depth,
+        frameElementIndex,
+        frameElementSrc
+      };
+    }
+
     function emitAction(payload) {
       try {
         console.log(EVENT_PREFIX + JSON.stringify({
           type: "action",
           ...payload,
           timestamp: new Date().toISOString(),
-          frameUrl: location.href
+          frameUrl: location.href,
+          frameContext: recorderFrameContext()
         }));
       } catch {}
     }
@@ -669,7 +780,8 @@ export function buildPlaywrightManualRecorderInjectionScript(): string {
     // Only mark the frame after all recorder hooks are installed so a transient
     // initialization error can be retried on the next frame lifecycle event.
     window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true;
-    return true;
+    window[FRAME_CHANNEL_KEY] = RECORDER_FRAME_CHANNEL_ID;
+    return RECORDER_FRAME_CHANNEL_ID;
   })()`
 }
 
