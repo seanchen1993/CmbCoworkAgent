@@ -47,6 +47,7 @@ import type {
   RoutingTrace
 } from "./types"
 import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
+import { summarizeTraceCacheTokens } from "./token-usage"
 import { app } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
@@ -821,6 +822,9 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
+      // Flattened for dashboard aggregation — `sum` cannot reach into the
+      // per-call array above.
+      ...summarizeTraceCacheTokens(this.modelCalls),
       nodes: this.finalizeNodes(
         outcome,
         endedAt,

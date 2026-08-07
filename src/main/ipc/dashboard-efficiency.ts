@@ -77,11 +77,20 @@ export interface EfficiencyComputeData {
   totalOutputTokens: number
   totalTokens: number
   /**
-   * Subset of `totalInputTokens`. The LangChain Anthropic adapter folds cache
-   * reads and cache writes into `input_tokens`, so this is surfaced separately
-   * to explain why the per-line figure is larger than intuition suggests.
+   * Subsets of `totalInputTokens`, not additions to it: the LangChain adapters
+   * fold cache reads and writes into `input_tokens`. Surfaced separately
+   * because cache reads cost roughly a tenth of a standard input token, so a
+   * high cache share inflates the raw per-line figure while lowering the bill.
    */
   cacheReadTokens: number
+  cacheCreationTokens: number
+  nonCachedInputTokens: number
+  /**
+   * True when the three input parts add up to `totalInputTokens`. False means
+   * the index's own `totalInputTokens` derivation disagrees with the
+   * client-side split, and the per-line figure should not be quoted.
+   */
+  inputSplitConsistent: boolean
   pushedAdoptedLines: number
   /** Σ tokens ÷ Σ pushed adopted lines. Null when no code landed. */
   tokensPerAdoptedLine: number | null
@@ -260,10 +269,22 @@ export interface ComputeEfficiencyInput {
   totalOutputTokens: number
   totalTokens: number
   cacheReadTokens: number
+  cacheCreationTokens: number
+  nonCachedInputTokens: number
   pushedAdoptedLines: number
   traceCount: number
   codeProducingTraceCount: number
 }
+
+/**
+ * Tolerance for the input-split self-check, as a fraction of total input.
+ *
+ * Not zero: traces predating the flattened fields contribute input tokens with
+ * no split, so a mixed window is legitimately a little short. 1% keeps that
+ * quiet while still catching a systematic double-count, which would be off by
+ * tens of percent.
+ */
+export const INPUT_SPLIT_TOLERANCE = 0.01
 
 /**
  * 指标 3. Numerator is the trace index's `totalTokens`, which already equals
@@ -273,13 +294,27 @@ export interface ComputeEfficiencyInput {
 export function buildComputeEfficiency(input: ComputeEfficiencyInput): EfficiencyComputeData {
   const pushedAdoptedLines = Math.max(0, input.pushedAdoptedLines)
   const totalTokens = Math.max(0, input.totalTokens)
+  const totalInputTokens = Math.max(0, input.totalInputTokens)
   const traceCount = Math.max(0, input.traceCount)
   const codeProducingTraceCount = Math.max(0, input.codeProducingTraceCount)
+  const cacheReadTokens = Math.max(0, input.cacheReadTokens)
+  const cacheCreationTokens = Math.max(0, input.cacheCreationTokens)
+  const nonCachedInputTokens = Math.max(0, input.nonCachedInputTokens)
+
+  const splitTotal = cacheReadTokens + cacheCreationTokens + nonCachedInputTokens
+  const inputSplitConsistent =
+    totalInputTokens > 0
+      ? Math.abs(splitTotal - totalInputTokens) <= totalInputTokens * INPUT_SPLIT_TOLERANCE
+      : splitTotal === 0
+
   return {
-    totalInputTokens: Math.max(0, input.totalInputTokens),
+    totalInputTokens,
     totalOutputTokens: Math.max(0, input.totalOutputTokens),
     totalTokens,
-    cacheReadTokens: Math.max(0, input.cacheReadTokens),
+    cacheReadTokens,
+    cacheCreationTokens,
+    nonCachedInputTokens,
+    inputSplitConsistent,
     pushedAdoptedLines,
     tokensPerAdoptedLine: pushedAdoptedLines > 0 ? totalTokens / pushedAdoptedLines : null,
     traceCount,
@@ -364,9 +399,10 @@ export function makeMockEfficiency(): DashboardEfficiencyData {
       totalInputTokens: 2_140_000_000,
       totalOutputTokens: 96_000_000,
       totalTokens: 2_236_000_000,
-      // 0 是真实情况：trace 索引上没有顶层 cacheReadTokens，只在 modelCalls[] 里
-      // 逐次调用存。mock 保持与生产一致，否则本地看着有数、上线才发现取不到。
-      cacheReadTokens: 0,
+      // 三项相加等于 totalInputTokens，让本地预览也走到自检通过的分支。
+      cacheReadTokens: 1_780_000_000,
+      cacheCreationTokens: 62_000_000,
+      nonCachedInputTokens: 298_000_000,
       pushedAdoptedLines: overall.pushedAdoptedLines,
       traceCount: 18_400,
       codeProducingTraceCount: 7_120

@@ -126,6 +126,7 @@ import {
   FORK_BOUNDARY_THREAD_METADATA_KEY
 } from "../../shared/checkpoint-forkability"
 import { TraceCollector } from "../agent/trace/collector"
+import { normalizeTraceTokenUsage } from "../agent/trace/token-usage"
 import { getSoloTaskOwnerIdFromStreamPayload, SoloTaskTraceManager } from "../agent/trace/solo-task"
 import {
   requestSkillIntent,
@@ -7189,41 +7190,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return "unknown"
         }
 
-        const normalizeTokenUsage = (
-          usage: Record<string, unknown> | null | undefined
-        ):
-          | {
-              inputTokens?: number
-              outputTokens?: number
-              totalTokens?: number
-              cacheReadTokens?: number
-              cacheCreationTokens?: number
-            }
-          | undefined => {
-          if (!usage || typeof usage !== "object") return undefined
-          const toNum = (v: unknown): number | undefined =>
-            typeof v === "number" && Number.isFinite(v) ? v : undefined
-          const inputTokens = toNum(usage.input_tokens ?? usage.inputTokens)
-          const outputTokens = toNum(usage.output_tokens ?? usage.outputTokens)
-          const totalTokens = toNum(usage.total_tokens ?? usage.totalTokens)
-          const cacheReadTokens = toNum(
-            usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens
-          )
-          const cacheCreationTokens = toNum(
-            usage.cache_creation_input_tokens ??
-              usage.cacheCreationInputTokens ??
-              usage.cacheCreationTokens
-          )
-          if (
-            inputTokens === undefined &&
-            outputTokens === undefined &&
-            totalTokens === undefined &&
-            cacheReadTokens === undefined &&
-            cacheCreationTokens === undefined
-          )
-            return undefined
-          return { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
-        }
+        const normalizeTokenUsage = normalizeTraceTokenUsage
 
         const extractTextBlocks = (raw: unknown): string => {
           if (typeof raw === "string") return raw

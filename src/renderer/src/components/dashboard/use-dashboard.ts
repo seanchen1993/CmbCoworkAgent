@@ -360,8 +360,12 @@ export interface DashboardEfficiencyData {
     totalInputTokens: number
     totalOutputTokens: number
     totalTokens: number
-    /** totalInputTokens 的子集：适配器把缓存读写折进了输入口径。 */
+    /** 以下三项是 totalInputTokens 的组成部分，不是额外的量。 */
     cacheReadTokens: number
+    cacheCreationTokens: number
+    nonCachedInputTokens: number
+    /** 三项之和是否对得上 totalInputTokens。对不上说明两侧口径不一致，数值不可对外引用。 */
+    inputSplitConsistent: boolean
     pushedAdoptedLines: number
     tokensPerAdoptedLine: number | null
     traceCount: number
