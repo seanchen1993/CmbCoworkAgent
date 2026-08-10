@@ -40,6 +40,7 @@ import {
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
 import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
+import type { TaskCardItem } from "../../../../shared/task-card-types"
 import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
 
 const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
@@ -315,12 +316,11 @@ export function GitPanelView({
   const [rejectDialogLoading, setRejectDialogLoading] = useState(false)
   const [rejectDialogSelectionSeed, setRejectDialogSelectionSeed] = useState(0)
   const {
-    cardNumber,
-    handleCardNumberChange,
-    setCardNumberLocal,
+    handleCardNumberChange: persistWorkspaceCardChange,
     persistNow: persistWorkspaceCard
   } = useWorkspaceTaskCard(workspacePath)
-  const [commitType, setCommitType] = useState<CommitType>("fix")
+  const [commitCardNumber, setCommitCardNumber] = useState("")
+  const [commitType, setCommitType] = useState<CommitType | "">("")
   const [commitMessage, setCommitMessage] = useState("")
   const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
   const [expandedFilePath, setExpandedFilePath] = useState<string | null>(null)
@@ -639,18 +639,33 @@ export function GitPanelView({
 
   const applyCommitHistoryRecord = useCallback(
     (record: GitCommitHistoryRecord): void => {
-      // Prefill the card from history only when the workspace has none yet, and
-      // keep it local — it is persisted on a successful commit, not on dialog open.
-      if (!cardNumber.trim() && record.cardNumber.trim()) {
-        setCardNumberLocal(record.cardNumber)
-      }
-      if (COMMIT_TYPE_VALUES.has(record.commitType)) {
-        setCommitType(record.commitType as CommitType)
-      }
+      setCommitCardNumber(record.cardNumber)
+      setCommitType(
+        COMMIT_TYPE_VALUES.has(record.commitType) ? (record.commitType as CommitType) : ""
+      )
       setCommitMessage(record.commitMessage)
     },
-    [cardNumber, setCardNumberLocal]
+    []
   )
+
+  const handleCommitCardNumberChange = useCallback(
+    (nextValue: string, card?: TaskCardItem | null): void => {
+      setCommitCardNumber(nextValue)
+      persistWorkspaceCardChange(nextValue, card)
+    },
+    [persistWorkspaceCardChange]
+  )
+
+  const resetCommitForm = useCallback(() => {
+    setCommitCardNumber("")
+    setCommitType("")
+    setCommitMessage("")
+  }, [])
+
+  const openCommitDialog = useCallback(() => {
+    resetCommitForm()
+    setSubmitAction("commit")
+  }, [resetCommitForm])
 
   useEffect(() => {
     if (submitAction !== "commit" || !threadId) return
@@ -916,8 +931,13 @@ export function GitPanelView({
         return
       }
 
-      if (action === "commit" && !cardNumber.trim()) {
+      if (action === "commit" && !commitCardNumber.trim()) {
         showToast("请选择任务卡片", "error")
+        return
+      }
+
+      if (action === "commit" && !commitType) {
+        showToast("请选择提交类型", "error")
         return
       }
 
@@ -942,7 +962,7 @@ export function GitPanelView({
 
       const finalMessage =
         action === "commit"
-          ? `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
+          ? `${commitCardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
           : undefined
 
       if (action === "commit") {
@@ -967,7 +987,7 @@ export function GitPanelView({
           showToast("提交成功", "success")
           insertLog("commit成功")
           // Remember the card actually committed with for this workspace.
-          persistWorkspaceCard(cardNumber.trim())
+          persistWorkspaceCard(commitCardNumber.trim())
         } else {
           const result = await window.api.workspace.pushWorktree(
             threadId,
@@ -977,7 +997,7 @@ export function GitPanelView({
           showToast("推送成功", "success")
           insertLog("push成功")
         }
-        setCommitMessage("")
+        resetCommitForm()
         setSubmitAction(null)
         if (action === "push") {
           void refresh({ meta: true, diff: true })
@@ -1001,7 +1021,7 @@ export function GitPanelView({
     },
     [
       threadId,
-      cardNumber,
+      commitCardNumber,
       commitType,
       commitMessage,
       diffState?.hasPendingDiff,
@@ -1013,7 +1033,8 @@ export function GitPanelView({
       refresh,
       showToast,
       toRepositoryRelativePaths,
-      persistWorkspaceCard
+      persistWorkspaceCard,
+      resetCommitForm
     ]
   )
 
@@ -1686,7 +1707,7 @@ export function GitPanelView({
                     {canShowSubmit && (
                       <div className="flex items-center gap-1">
                         <button
-                          onClick={() => setSubmitAction("commit")}
+                          onClick={openCommitDialog}
                           disabled={running !== null || !isDiffReady || !hasPending}
                           title={isInitialDiffLoading ? "准备中..." : "Commit 提交"}
                           aria-label={isInitialDiffLoading ? "准备中" : "Commit 提交"}
@@ -1997,16 +2018,19 @@ export function GitPanelView({
         fileCount={hasPending ? selectedTotals.fileCount : (diffState?.totals.fileCount ?? 0)}
         additions={hasPending ? selectedTotals.additions : (diffState?.totals.additions ?? 0)}
         deletions={hasPending ? selectedTotals.deletions : (diffState?.totals.deletions ?? 0)}
-        cardNumber={cardNumber}
+        cardNumber={commitCardNumber}
         commitType={commitType}
         commitMessage={commitMessage}
         commitHistory={commitHistory}
         preferredTaskText={branchName}
         onOpenChange={(open) => {
-          if (!open) setSubmitAction(null)
+          if (!open) {
+            resetCommitForm()
+            setSubmitAction(null)
+          }
         }}
-        onCardNumberChange={handleCardNumberChange}
-        onCommitTypeChange={setCommitType}
+        onCardNumberChange={handleCommitCardNumberChange}
+        onCommitTypeChange={(value) => setCommitType(value as CommitType)}
         onCommitMessageChange={setCommitMessage}
         onHistorySelect={applyCommitHistoryRecord}
         onSubmit={() => {
