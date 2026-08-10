@@ -285,7 +285,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   const sourceNewContent = newValue ?? newContent
 
   const isLargeDiff = totalLines > 100
-  const maxPreviewLines = 20
+  const maxPreviewLines = 30
 
   const getPreviewContent = (content: string, maxLines: number) => {
     const lines = content.split("\n")
@@ -441,11 +441,16 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
             width: "100%",
             minWidth: "100%",
             maxWidth: "100%",
-            maxHeight: fullscreen ? "100%" : "22rem",
-            minHeight: fullscreen ? "100%" : "80px",
+            ...(!fullscreen && {
+              "col:first-of-type": {
+                width: "2rem"
+              }
+            }),
+            maxHeight: fullscreen ? "100%" : undefined,
+            minHeight: fullscreen ? "100%" : "0",
             overflow: "auto",
             overflowX: "hidden",
-            height: fullscreen ? "100%" : undefined,
+            height: "100%",
             borderRadius: "0",
             pre: {
               width: "100%",
@@ -467,8 +472,9 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
             // fontSize: "0.75rem",
           },
           gutter: {
-            minWidth: "2.5rem",
-            padding: "0 0.5rem"
+            width: "2rem",
+            minWidth: "2rem",
+            padding: "0 0.25rem"
           }
         }}
       />
@@ -476,7 +482,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   }
 
   return (
-    <>
+    <div className="flex h-full min-h-0 w-full flex-col">
       {/* Header toolbar */}
       <div className="flex items-center justify-between gap-2 px-3 py-2 bg-muted/60 border-b border-border">
         {/* Left: icon + title + stats */}
@@ -535,7 +541,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
           <button
             type="button"
             onClick={() => setIsFullscreen(true)}
-            className="inline-flex items-center gap-1 rounded border border-amber-300/80 bg-background px-2 py-1 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-100/60 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/50"
+            className="w-[90px] inline-flex items-center gap-1 rounded border border-amber-300/80 bg-background px-2 py-1 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-100/60 dark:border-amber-700 dark:text-amber-200 dark:hover:bg-amber-900/50"
           >
             <Eye className="size-3" />
             查看全部
@@ -545,10 +551,11 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
 
       {/* Diff content */}
       <div
-        className="relative font-mono bg-white overflow-auto w-full"
-        style={{ maxHeight: "22rem", minHeight: "5rem" }}
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-white font-mono w-full"
       >
-        {makeDiffViewer(false)}
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+          {makeDiffViewer(false)}
+        </div>
       </div>
 
       {/* Fullscreen modal */}
@@ -614,7 +621,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
           </div>
         </div>
       )}
-    </>
+    </div>
   )
 })
 
