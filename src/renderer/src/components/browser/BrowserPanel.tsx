@@ -23,7 +23,6 @@ import {
   X
 } from "lucide-react"
 import { toast } from "sonner"
-import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
 import { BrowserAiRecordingControls } from "./BrowserAiRecordingControls"
@@ -34,7 +33,6 @@ import {
   type BrowserBounds,
   type BrowserConsoleEntry,
   type BrowserCdpConfig,
-  type BrowserProfileImportSkippedWebsite,
   type BrowserState
 } from "../../../../shared/browser-types"
 
@@ -127,149 +125,6 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
     (a.error ?? "") === (b.error ?? "") &&
     a.consoleEntries.length === b.consoleEntries.length &&
     getLastConsoleEntryId(a.consoleEntries) === getLastConsoleEntryId(b.consoleEntries)
-  )
-}
-
-function skippedWebsiteReasonLabel(reason: string): string {
-  switch (reason) {
-    case "browser_rejected":
-      return "浏览器拒绝"
-    case "encrypted":
-      return "加密不可解"
-    case "invalid":
-      return "格式不合法"
-    case "partitioned":
-      return "分区 Cookie"
-    case "too_large":
-      return "内容过大"
-    default:
-      return reason
-  }
-}
-
-function formatSkippedWebsite(site: BrowserProfileImportSkippedWebsite): string {
-  const url = site.url || site.domain
-  const reasons = site.reasons.map(skippedWebsiteReasonLabel).join("、")
-  return `${url}（${site.skippedCookies} 条，${reasons}）`
-}
-
-function BrowserProfileImportResultPanel({
-  disabled,
-  importing,
-  onCopy,
-  onImport,
-  sites,
-  skippedCookieCount,
-  onDismiss
-}: {
-  disabled: boolean
-  importing: boolean
-  onCopy: () => void
-  onImport: () => void
-  sites: BrowserProfileImportSkippedWebsite[]
-  skippedCookieCount: number
-  onDismiss: () => void
-}): React.JSX.Element {
-  const partitionedSites = sites.filter((s) => s.reasons.includes("partitioned"))
-  const rejectedSites = sites.filter((s) => s.reasons.includes("browser_rejected"))
-  const partitionedCount = partitionedSites.reduce((t, s) => t + s.skippedCookies, 0)
-  const rejectedCount = rejectedSites.reduce((t, s) => t + s.skippedCookies, 0)
-
-  return (
-    <div className="shrink-0 border-b border-border bg-background">
-      <div className="flex items-center justify-between border-b border-border/70 px-3 py-1.5">
-        <div className="space-y-0.5">
-          <p className="text-xs font-medium text-foreground">导入结果</p>
-          <p className="text-[11px] text-muted-foreground">
-            跳过 Cookie {skippedCookieCount} 条，其余已成功导入
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button type="button" variant="ghost" size="sm" onClick={onCopy}>
-            复制列表
-          </Button>
-          <Button type="button" size="sm" disabled={disabled} onClick={onImport}>
-            {importing ? (
-              <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
-            ) : (
-              <KeyRound className="size-3.5" strokeWidth={1.8} />
-            )}
-            重新导入
-          </Button>
-          <button
-            type="button"
-            className="inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-            onClick={onDismiss}
-          >
-            <X className="size-3.5" strokeWidth={2} />
-          </button>
-        </div>
-      </div>
-      <div className="flex divide-x divide-border/70">
-        {partitionedSites.length > 0 && (
-          <div className="flex-1 space-y-1 px-3 py-2">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="font-medium text-foreground">跳过 · 分区 Cookie</span>
-              <span className="tabular-nums text-muted-foreground">
-                {partitionedSites.length} 站 {partitionedCount} 条
-              </span>
-            </div>
-            <p className="text-[11px] leading-4 text-muted-foreground">
-              第三方追踪类 Cookie，脱离原站点上下文无法使用。
-            </p>
-            <div className="max-h-32 space-y-0.5 overflow-auto rounded-sm border border-border/70 bg-muted/20 p-1.5">
-              {partitionedSites.map((site) => (
-                <div
-                  key={`part-${site.domain}`}
-                  className="flex items-center justify-between rounded-sm px-1.5 py-0.5 text-[11px] leading-4 hover:bg-background"
-                >
-                  <span
-                    className="min-w-0 truncate text-foreground"
-                    title={site.url || site.domain}
-                  >
-                    {site.url || site.domain}
-                  </span>
-                  <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
-                    {site.skippedCookies}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {rejectedSites.length > 0 && (
-          <div className="flex-1 space-y-1 px-3 py-2">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="font-medium text-foreground">跳过 · 浏览器拒绝</span>
-              <span className="tabular-nums text-muted-foreground">
-                {rejectedSites.length} 站 {rejectedCount} 条
-              </span>
-            </div>
-            <p className="text-[11px] leading-4 text-muted-foreground">
-              Electron 内核因安全策略或格式校验不通过而拒绝写入。
-            </p>
-            <div className="max-h-32 space-y-0.5 overflow-auto rounded-sm border border-border/70 bg-muted/20 p-1.5">
-              {rejectedSites.map((site) => (
-                <div
-                  key={`rej-${site.domain}`}
-                  className="flex items-center justify-between rounded-sm px-1.5 py-0.5 text-[11px] leading-4 hover:bg-background"
-                >
-                  <span
-                    className="min-w-0 truncate text-foreground"
-                    title={site.url || site.domain}
-                  >
-                    {site.url || site.domain}
-                  </span>
-                  <span className="ml-2 shrink-0 tabular-nums text-muted-foreground">
-                    {site.skippedCookies}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
   )
 }
 
@@ -414,9 +269,6 @@ export function BrowserPanel({
   const [isResettingHome, setIsResettingHome] = useState(false)
   const [isImportingBrowserProfile, setIsImportingBrowserProfile] = useState(false)
   const [isProfileImportRuntimeEnabled, setIsProfileImportRuntimeEnabled] = useState(false)
-  const [browserProfileImportSkippedWebsites, setBrowserProfileImportSkippedWebsites] = useState<
-    BrowserProfileImportSkippedWebsite[]
-  >([])
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [aiRecordingBoxOpen, setAiRecordingBoxOpen] = useState(false)
@@ -455,12 +307,6 @@ export function BrowserPanel({
       cancelled = true
     }
   }, [reportBrowserError])
-
-  useEffect(() => {
-    if (!isAgentBrowserControlEnabled) {
-      setAiRecordingBoxOpen(false)
-    }
-  }, [isAgentBrowserControlEnabled])
 
   useEffect(() => {
     let cancelled = false
@@ -763,7 +609,6 @@ export function BrowserPanel({
       const nextState = await window.api.browser.attach({ workspacePath, visible: false })
       applyBrowserState(nextState)
       setUrlInput("")
-      setBrowserProfileImportSkippedWebsites([])
       setCopiedConsole(false)
       setConsoleOpen(false)
     } catch (error) {
@@ -842,7 +687,6 @@ export function BrowserPanel({
         importCookies: true
       })
       if (!result.success) {
-        setBrowserProfileImportSkippedWebsites([])
         if (result.cancelled) return
         if (result.errorCode === "native_host_not_registered") {
           reportBrowserError(result.error || "请重启应用")
@@ -857,8 +701,6 @@ export function BrowserPanel({
       }
 
       applyBrowserState(await window.api.browser.getState())
-      const skippedWebsites = result.skippedWebsites ?? []
-      setBrowserProfileImportSkippedWebsites(skippedWebsites)
       const importedCookies = result.importedCookies ?? 0
       const importedLocalStorage = result.importedLocalStorage ?? 0
       const skipped = (result.skippedCookies ?? 0) + (result.skippedLocalStorage ?? 0)
@@ -866,12 +708,6 @@ export function BrowserPanel({
       const profileLabel = result.profileDirectory ? `（${result.profileDirectory}）` : ""
       const message =
         skipped > 0 ? `${summary}${profileLabel}，跳过 ${skipped} 条` : `${summary}${profileLabel}`
-      if (skippedWebsites.length > 0) {
-        const fullList = skippedWebsites.map(formatSkippedWebsite).join("\n")
-        console.info(
-          `${BROWSER_PANEL_LOG_PREFIX} Browser profile import skipped websites:\n${fullList}`
-        )
-      }
       if (result.warning) {
         toast.warning(`${result.warning}（${message}）`, { duration: 12_000 })
       } else {
@@ -899,19 +735,6 @@ export function BrowserPanel({
       : !state.created
         ? "内置浏览器尚未就绪"
         : "导入浏览器数据"
-  const hasBrowserProfileImportSkippedWebsites = browserProfileImportSkippedWebsites.length > 0
-  const browserProfileImportSkippedCookieCount = browserProfileImportSkippedWebsites.reduce(
-    (total, site) => total + site.skippedCookies,
-    0
-  )
-  const copyBrowserProfileImportSkippedWebsites = useCallback(() => {
-    if (browserProfileImportSkippedWebsites.length === 0) return
-    const text = browserProfileImportSkippedWebsites.map(formatSkippedWebsite).join("\n")
-    void navigator.clipboard.writeText(text).then(() => {
-      toast.success("失败站点列表已复制")
-    })
-  }, [browserProfileImportSkippedWebsites])
-
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
   }
@@ -1029,18 +852,6 @@ export function BrowserPanel({
         </div>
       )}
 
-      {hasBrowserProfileImportSkippedWebsites && (
-        <BrowserProfileImportResultPanel
-          disabled={browserProfileImportDisabled}
-          importing={isImportingBrowserProfile}
-          onCopy={copyBrowserProfileImportSkippedWebsites}
-          onImport={() => void importBrowserProfileData()}
-          sites={browserProfileImportSkippedWebsites}
-          skippedCookieCount={browserProfileImportSkippedCookieCount}
-          onDismiss={() => setBrowserProfileImportSkippedWebsites([])}
-        />
-      )}
-
       <div className="relative min-h-0 flex-1 bg-white">
         {/* Keep the welcome panel mounted so any dialogs launched from it are not
             immediately unmounted by the BrowserView modal-hide guard. */}
@@ -1076,6 +887,7 @@ export function BrowserPanel({
           <BrowserAiRecordingControls
             browserCreated={state.created}
             currentUrl={state.url}
+            isAgentBrowserControlEnabled={isAgentBrowserControlEnabled}
             threadId={threadId}
             workspacePath={workspacePath}
           />
@@ -1132,17 +944,15 @@ export function BrowserPanel({
             disabled={isCapturing || !state.created}
             onClick={captureScreenshot}
           />
-          {isAgentBrowserControlEnabled && (
-            <IconPopoverButton
-              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-              side="left"
-              icon={<Video className="size-4" strokeWidth={1.8} />}
-              popoverContent="录制自动化脚本"
-              aria-label="录制自动化脚本"
-              aria-pressed={aiRecordingBoxOpen}
-              onClick={() => setAiRecordingBoxOpen((open) => !open)}
-            />
-          )}
+          <IconPopoverButton
+            className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+            side="left"
+            icon={<Video className="size-4" strokeWidth={1.8} />}
+            popoverContent="录制自动化脚本"
+            aria-label="录制自动化脚本"
+            aria-pressed={aiRecordingBoxOpen}
+            onClick={() => setAiRecordingBoxOpen((open) => !open)}
+          />
         </div>
       </div>
 

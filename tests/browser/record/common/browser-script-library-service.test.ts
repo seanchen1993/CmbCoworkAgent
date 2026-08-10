@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../src/shared/browser-types"
 import {
   deleteBrowserScriptLibraryEntry,
   listBrowserScriptLibraryEntries,
@@ -137,6 +138,33 @@ describe("browser script library service", () => {
     await expect(readBrowserScriptLibraryScript({ fileName: "../secret.spec.ts" })).rejects.toThrow(
       "脚本文件名无效"
     )
+  })
+
+  it("rejects new recordings after reaching the library limit", async () => {
+    const entries = Array.from({ length: MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES }, (_, index) => ({
+      createdAt: `2026-08-10T00:00:${String(index).padStart(2, "0")}.000Z`,
+      description: "",
+      displayName: `录制 ${index + 1}`,
+      fileName: `browser-recording-seeded-${index + 1}.spec.ts`,
+      recordingSource: "manual",
+      threadId: "thread-a",
+      workspacePath: "/tmp/workspace-a"
+    }))
+    await writeFile(
+      join(libraryRoot, "browser.json"),
+      `${JSON.stringify({ version: 1, entries }, null, 2)}\n`,
+      "utf8"
+    )
+
+    await expect(
+      saveBrowserScriptLibraryEntry({
+        displayName: "超出上限的录制",
+        recordingSource: "ai",
+        script: "test('too many', async ({ page }) => {})",
+        threadId: "thread-a",
+        workspacePath: "/tmp/workspace-a"
+      })
+    ).rejects.toThrow(`录制列表最多保存 ${MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES} 个录制文件`)
   })
 
   it("deletes the script file and removes its browser.json mapping", async () => {

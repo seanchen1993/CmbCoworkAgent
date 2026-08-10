@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
+import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../shared/browser-types"
 import type {
   BrowserRecordingSource,
   BrowserScriptLibraryEntry
@@ -230,6 +231,7 @@ export function BrowserRecordingListDialog({
     Boolean(selectedEntry) &&
     loadingFileName === selectedEntry?.fileName &&
     loadingAction === "saveAs"
+  const isLibraryFull = entries.length >= MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES
 
   const handleSaveDetailScript = async (): Promise<void> => {
     const displayName = detailDisplayNameValue.trim()
@@ -275,7 +277,12 @@ export function BrowserRecordingListDialog({
       <DialogContent className="max-h-[88vh] max-w-[96vw] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
         <DialogHeader className="border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <DialogTitle className="text-base">录制列表</DialogTitle>
+            <div>
+              <DialogTitle className="text-base">录制列表</DialogTitle>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                已保存 {entries.length}/{MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES} 个录制文件
+              </p>
+            </div>
             <Button
               type="button"
               size="sm"
@@ -317,6 +324,15 @@ export function BrowserRecordingListDialog({
                     placeholder="输入文件中文名筛选"
                     className="h-9 rounded-lg border-border/80 bg-background text-sm shadow-none"
                   />
+                  {isLibraryFull && (
+                    <div
+                      className="rounded-lg border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning"
+                      role="status"
+                    >
+                      已达到 {MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES}{" "}
+                      个录制文件上限。请删除不需要的文件后再新增。
+                    </div>
+                  )}
                   {filteredEntries.length === 0 ? (
                     <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
                       没有匹配当前中文名筛选的脚本。
@@ -569,7 +585,8 @@ export function BrowserRecordingListDialog({
                         detailLoading ||
                         isSaveLoading ||
                         isSaveAsLoading ||
-                        isContinueLoading
+                        isContinueLoading ||
+                        isLibraryFull
                       }
                       onClick={() => void handleSaveAsScript()}
                     >

@@ -30,6 +30,7 @@ import { BrowserScriptVariableDialog } from "./BrowserScriptVariableDialog"
 interface BrowserAiRecordingControlsProps {
   browserCreated: boolean
   currentUrl?: string | null
+  isAgentBrowserControlEnabled: boolean
   threadId?: string | null
   workspacePath?: string | null
 }
@@ -85,6 +86,7 @@ function waitForBrowserPanelRender(): Promise<void> {
 export function BrowserAiRecordingControls({
   browserCreated,
   currentUrl,
+  isAgentBrowserControlEnabled,
   threadId,
   workspacePath
 }: BrowserAiRecordingControlsProps): React.JSX.Element {
@@ -1117,6 +1119,7 @@ export function BrowserAiRecordingControls({
             browserCreated={browserCreated}
             aiRecording={aiRecording}
             manualRecording={manualRecording}
+            isAgentBrowserControlEnabled={isAgentBrowserControlEnabled}
             busySource={busySource}
             pendingUnsavedBySource={pendingUnsavedBySource}
             onOpenRecordingDialog={openRecordingDialog}

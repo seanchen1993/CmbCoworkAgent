@@ -20,6 +20,7 @@ interface BrowserAiRecordingControlProps {
   browserCreated: boolean
   aiRecording: AiRecordingSession
   manualRecording: AiRecordingSession
+  isAgentBrowserControlEnabled: boolean
   busySource: BrowserRecordingSource | null
   pendingUnsavedBySource: Record<BrowserRecordingSource, boolean>
   onOpenRecordingDialog: (source: BrowserRecordingSource) => void
@@ -40,6 +41,7 @@ export function BrowserAiRecordingControl({
   browserCreated,
   aiRecording,
   manualRecording,
+  isAgentBrowserControlEnabled,
   busySource,
   pendingUnsavedBySource,
   onOpenRecordingDialog,
@@ -184,42 +186,44 @@ export function BrowserAiRecordingControl({
         </>
       ) : (
         <>
-          <TooltipProvider delayDuration={300}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                {aiButtonDisabledReason ? (
-                  <span className="inline-flex cursor-not-allowed">
+          {isAgentBrowserControlEnabled && (
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  {aiButtonDisabledReason ? (
+                    <span className="inline-flex cursor-not-allowed">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="secondary"
+                        disabled
+                        className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+                      >
+                        <Video className="size-3.5" strokeWidth={1.8} />
+                        AI录制
+                      </Button>
+                    </span>
+                  ) : (
                     <Button
                       type="button"
                       size="sm"
                       variant="secondary"
-                      disabled
                       className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
+                      onClick={onStartAiRecording}
                     >
                       <Video className="size-3.5" strokeWidth={1.8} />
                       AI录制
                     </Button>
-                  </span>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    className="h-8 rounded-md px-2.5 text-[11px] shadow-none"
-                    onClick={onStartAiRecording}
-                  >
-                    <Video className="size-3.5" strokeWidth={1.8} />
-                    AI录制
-                  </Button>
-                )}
-              </TooltipTrigger>
-              {aiButtonDisabledReason ? (
-                <TooltipContent side="top">
-                  <p>{aiButtonDisabledReason}</p>
-                </TooltipContent>
-              ) : null}
-            </Tooltip>
-          </TooltipProvider>
+                  )}
+                </TooltipTrigger>
+                {aiButtonDisabledReason ? (
+                  <TooltipContent side="top">
+                    <p>{aiButtonDisabledReason}</p>
+                  </TooltipContent>
+                ) : null}
+              </Tooltip>
+            </TooltipProvider>
+          )}
 
           <TooltipProvider delayDuration={300}>
             <Tooltip>

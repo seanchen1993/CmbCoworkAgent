@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import { extractAiRecordingVariables } from "../../../../shared/browser-ai-recording-script"
+import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../shared/browser-types"
 import type {
   BrowserScriptLibraryDeleteInput,
   BrowserScriptLibraryEntry,
@@ -182,6 +183,14 @@ export async function saveBrowserScriptLibraryEntry(
   }
 
   return runSerializedMutation(async () => {
+    await ensureBrowserScriptLibraryRoot()
+    const manifest = await readManifest()
+    if (manifest.entries.length >= MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES) {
+      throw new Error(
+        `录制列表最多保存 ${MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES} 个录制文件，请删除不需要的文件后再新增`
+      )
+    }
+
     const createdAt = new Date().toISOString()
     const fileName = buildUniqueFileName(createdAt)
     const nextEntry: BrowserScriptLibraryEntry = {
@@ -195,8 +204,6 @@ export async function saveBrowserScriptLibraryEntry(
     }
     const scriptPath = getScriptPath(fileName)
 
-    await ensureBrowserScriptLibraryRoot()
-    const manifest = await readManifest()
     await writeFile(scriptPath, script, "utf8")
 
     try {
