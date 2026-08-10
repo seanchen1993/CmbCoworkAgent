@@ -33,6 +33,7 @@ import {
   BROWSER_SESSION_ID,
   type BrowserBounds,
   type BrowserConsoleEntry,
+  type BrowserCdpConfig,
   type BrowserProfileImportSkippedWebsite,
   type BrowserState
 } from "../../../../shared/browser-types"
@@ -64,6 +65,7 @@ const BROWSER_CONSOLE_ICON_BUTTON_CLASSNAME = "size-7 rounded transition-colors 
 const BROWSER_CONSOLE_TOGGLE_BUTTON_CLASSNAME =
   "h-8 min-w-8 shrink-0 rounded-md px-1 transition-colors hover:bg-muted"
 const BROWSER_PANEL_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserPanel]`
+const APP_DOWNLOAD_URL = import.meta.env.VITE_APP_DOWNLOAD_URL?.trim()
 
 function isInitialBrowserPage(url: string): boolean {
   return !url || url === "about:blank"
@@ -271,7 +273,11 @@ function BrowserProfileImportResultPanel({
   )
 }
 
-function BrowserWelcomePanel(): React.JSX.Element {
+function BrowserWelcomePanel({
+  onCdpConfigSaved
+}: {
+  onCdpConfigSaved: (config: BrowserCdpConfig) => void
+}): React.JSX.Element {
   return (
     <div className="absolute inset-0 z-20 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
       <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-4 py-2">
@@ -283,18 +289,18 @@ function BrowserWelcomePanel(): React.JSX.Element {
             IN-APP BROWSER
           </p>
           <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
-            从一个链接开始
+            让 AI 在网页中，完成最后一公里
           </h2>
           <p className="mt-2  text-xs leading-5 text-stone-600">
-            在上方地址栏输入：Web Url、本地服务地址、工作区中的 HTML 文件路径，按 Enter。
+            在上方地址栏输入 Web URL、本地服务地址或工作区 HTML 路径，按 Enter 即刻开始。
           </p>
         </div>
 
         <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
           <div className="border-b border-stone-100 px-4 py-3">
-            <p className="text-xs font-semibold text-stone-800">浏览器使用提示</p>
+            <p className="text-xs font-semibold text-stone-800">一个浏览器，贯通开发与验证</p>
             <p className="mt-0.5 text-[11px] text-stone-500">
-              把页面、登录态和测试流程集中到同一处。
+              预览页面、复用登录态、驱动自动化，让每次网页任务更快闭环。
             </p>
           </div>
 
@@ -304,13 +310,13 @@ function BrowserWelcomePanel(): React.JSX.Element {
                 <Terminal className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">本地开发即时预览</p>
+                <p className="text-xs font-medium text-stone-800">代码一改，效果即见</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  修改代码后运行{" "}
+                  运行{" "}
                   <code className="font-mono text-[10px] text-stone-700">npm run dev</code>
-                  ，即可直接访问{" "}
-                  <code className="font-mono text-[10px] text-stone-700">比如 localhost:8080</code>
-                  ，AI 边写，你边看 UI 效果，无需切换到 Chrome。
+                  后直接打开{" "}
+                  <code className="font-mono text-[10px] text-stone-700">localhost:8080</code>
+                  。AI 生成代码的同时，页面变化实时呈现，无需反复切换浏览器。
                 </p>
               </div>
             </div>
@@ -320,9 +326,9 @@ function BrowserWelcomePanel(): React.JSX.Element {
                 <Settings2 className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">让大模型协助操作页面</p>
+                <p className="text-xs font-medium text-stone-800">把网页操作交给 AI</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  在配置页面开启内置浏览器后，大模型即可在任务中浏览、输入、点击并验证页面结果。
+                  开启内置浏览器控制后，AI 可在任务中浏览页面、填写表单、点击操作并验证结果。
                 </p>
               </div>
             </div>
@@ -332,10 +338,24 @@ function BrowserWelcomePanel(): React.JSX.Element {
                 <KeyRound className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">导入Chrome 数据，复用登录态</p>
+                <p className="text-xs font-medium text-stone-800">登录一次，连续工作</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  点击右上角钥匙图标即可导入 Chrome 登录数据。首次使用需要安装浏览器插件，
-                  插件请联系开发人员获取。
+                  导入已有 Chrome 登录数据，减少重复扫码与登录。首次使用需安装浏览器插件，
+                  {APP_DOWNLOAD_URL ? (
+                    <a
+                      href={APP_DOWNLOAD_URL}
+                      className="text-purple-500 underline underline-offset-2 hover:text-purple-700"
+                      onClick={(event) => {
+                        event.preventDefault()
+                        void window.electron.openExternal(APP_DOWNLOAD_URL)
+                      }}
+                    >
+                      下载浏览器插件
+                    </a>
+                  ) : (
+                    <span className="text-purple-500">下载浏览器插件</span>
+                  )}
+                  。
                 </p>
               </div>
             </div>
@@ -345,10 +365,9 @@ function BrowserWelcomePanel(): React.JSX.Element {
                 <Bot className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">沉淀可复用的测试案例</p>
+                <p className="text-xs font-medium text-stone-800">每次验证，都值得复用</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  支持 [ AI 自动录制 + 人工录制 ]
-                  测试案例，方便将高频操作沉淀为后续可复用的验证流程。
+                  录制 AI 或人工操作，把高频验证沉淀为可复用的测试案例，让下次验证从已有流程开始。
                 </p>
               </div>
             </div>
@@ -357,13 +376,13 @@ function BrowserWelcomePanel(): React.JSX.Element {
 
         <BrowserCdpConfigCard
           className="mt-2"
-          title="内置浏览器配置"
-          description="在这里手动开启内置浏览器。"
+          title="开启进阶自动化能力"
+          description="在此开启 AI 浏览器操控和 Chrome 登录数据导入；保存后重启应用即可生效。"
+          onSaved={onCdpConfigSaved}
         />
 
-        <div className="mt-4 flex items-center gap-2 text-[11px] text-stone-500">
-          <span>让我们开始吧～</span>
-          <span>🤪</span>
+        <div className="mt-4 text-[11px] text-stone-500">
+          从一个链接开始，让每次网页任务更快完成。
         </div>
       </div>
     </div>
@@ -401,9 +420,47 @@ export function BrowserPanel({
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [aiRecordingBoxOpen, setAiRecordingBoxOpen] = useState(false)
+  const [isAgentBrowserControlEnabled, setIsAgentBrowserControlEnabled] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
   const showBrowserWelcome = isInitialBrowserPage(state.url)
+
+  const applyBrowserState = useCallback((nextState: BrowserState) => {
+    isSessionCreatedRef.current = nextState.created
+    isInitialBrowserPageRef.current = isInitialBrowserPage(nextState.url)
+    setState((current) => (browserStatesEqual(current, nextState) ? current : nextState))
+  }, [])
+
+  const reportBrowserError = useCallback((error: string) => {
+    setState((current) => (current.error === error ? current : { ...current, error }))
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.browser
+      .getCdpConfig()
+      .then((config) => {
+        if (!cancelled) setIsAgentBrowserControlEnabled(config.enabled)
+      })
+      .catch((error) => {
+        console.error(
+          `${BROWSER_PANEL_LOG_PREFIX} Failed to load Browser CDP config: ${formatError(error)}`
+        )
+        if (cancelled) return
+        setIsAgentBrowserControlEnabled(false)
+        reportBrowserError(formatError(error) || "读取内置浏览器配置失败")
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [reportBrowserError])
+
+  useEffect(() => {
+    if (!isAgentBrowserControlEnabled) {
+      setAiRecordingBoxOpen(false)
+    }
+  }, [isAgentBrowserControlEnabled])
 
   useEffect(() => {
     let cancelled = false
@@ -419,18 +476,13 @@ export function BrowserPanel({
         )
         if (cancelled) return
         setIsProfileImportRuntimeEnabled(false)
+        reportBrowserError(formatError(error) || "读取浏览器数据导入状态失败")
       })
 
     return () => {
       cancelled = true
     }
-  }, [])
-
-  const applyBrowserState = useCallback((nextState: BrowserState) => {
-    isSessionCreatedRef.current = nextState.created
-    isInitialBrowserPageRef.current = isInitialBrowserPage(nextState.url)
-    setState((current) => (browserStatesEqual(current, nextState) ? current : nextState))
-  }, [])
+  }, [reportBrowserError])
 
   useEffect(() => {
     console.info(
@@ -513,9 +565,10 @@ export function BrowserPanel({
         .then(applyBrowserState)
         .catch((error) => {
           console.error(`${BROWSER_PANEL_LOG_PREFIX} Bounds sync failed: ${formatError(error)}`)
+          reportBrowserError(formatError(error) || "浏览器视图同步失败")
         })
     },
-    [applyBrowserState]
+    [applyBrowserState, reportBrowserError]
   )
 
   useEffect(() => {
@@ -560,7 +613,7 @@ export function BrowserPanel({
       })
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Browser attach failed: ${formatError(error)}`)
-        toast.error("内置浏览器启动失败")
+        reportBrowserError(formatError(error) || "内置浏览器启动失败")
       })
 
     const observer = new ResizeObserver(() => scheduleSync("resize-observer"))
@@ -583,7 +636,7 @@ export function BrowserPanel({
         window.cancelAnimationFrame(frame)
       }
     }
-  }, [applyBrowserState, initialUrl, reloadToken, syncBounds, workspacePath])
+  }, [applyBrowserState, initialUrl, reloadToken, reportBrowserError, syncBounds, workspacePath])
 
   useEffect(() => {
     if (!state.created) return
@@ -666,7 +719,6 @@ export function BrowserPanel({
         applyBrowserState(nextState)
         if (nextState.error) {
           setUrlInput(target)
-          toast.error(nextState.error)
           return
         }
         if (!isUrlFocusedRef.current) {
@@ -678,9 +730,9 @@ export function BrowserPanel({
       })
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Initial URL open failed: ${formatError(error)}`)
-        toast.error("HTML 预览加载失败")
+        reportBrowserError(formatError(error) || "HTML 预览加载失败")
       })
-  }, [applyBrowserState, initialUrl, reloadToken, workspacePath])
+  }, [applyBrowserState, initialUrl, reloadToken, reportBrowserError, workspacePath])
 
   const navigate = useCallback(
     async (event?: React.FormEvent) => {
@@ -692,17 +744,16 @@ export function BrowserPanel({
         applyBrowserState(nextState)
         if (nextState.error) {
           setUrlInput(target)
-          toast.error(nextState.error)
           return
         }
         setUrlInput(nextState.url || target)
         console.info(`${BROWSER_PANEL_LOG_PREFIX} Navigated to ${nextState.url || target}.`)
       } catch (error) {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Navigation failed: ${formatError(error)}`)
-        toast.error("页面加载失败")
+        reportBrowserError(formatError(error) || "页面加载失败")
       }
     },
-    [applyBrowserState, urlInput, workspacePath]
+    [applyBrowserState, reportBrowserError, urlInput, workspacePath]
   )
 
   const resetToHome = useCallback(async () => {
@@ -717,18 +768,18 @@ export function BrowserPanel({
       setConsoleOpen(false)
     } catch (error) {
       console.error(`${BROWSER_PANEL_LOG_PREFIX} Return home failed: ${formatError(error)}`)
-      toast.error("返回欢迎页失败")
+      reportBrowserError(formatError(error) || "返回欢迎页失败")
     } finally {
       setIsResettingHome(false)
     }
-  }, [applyBrowserState, workspacePath])
+  }, [applyBrowserState, reportBrowserError, workspacePath])
 
   const captureScreenshot = useCallback(async () => {
     setIsCapturing(true)
     try {
       const result = await window.api.browser.captureScreenshot()
       if (!result.success || !result.dataUrl) {
-        toast.error(result.error || "截图失败")
+        reportBrowserError(result.error || "截图失败")
         return
       }
       const link = document.createElement("a")
@@ -738,11 +789,11 @@ export function BrowserPanel({
       toast.success("截图已生成")
     } catch (error) {
       console.error(`${BROWSER_PANEL_LOG_PREFIX} Screenshot failed: ${formatError(error)}`)
-      toast.error("截图失败")
+      reportBrowserError(formatError(error) || "截图失败")
     } finally {
       setIsCapturing(false)
     }
-  }, [])
+  }, [reportBrowserError])
 
   const copyConsole = useCallback(async () => {
     if (state.consoleEntries.length === 0) return
@@ -763,9 +814,9 @@ export function BrowserPanel({
       toast.success("Console 内容已复制")
     } catch (error) {
       console.error(`${BROWSER_PANEL_LOG_PREFIX} Copy console failed: ${formatError(error)}`)
-      toast.error("复制 Console 内容失败")
+      reportBrowserError(formatError(error) || "复制 Console 内容失败")
     }
-  }, [state.consoleEntries])
+  }, [reportBrowserError, state.consoleEntries])
 
   const clearConsole = useCallback(() => {
     void window.api.browser
@@ -773,13 +824,13 @@ export function BrowserPanel({
       .then(applyBrowserState)
       .catch((error) => {
         console.error(`${BROWSER_PANEL_LOG_PREFIX} Clear console failed: ${formatError(error)}`)
-        toast.error("清空控制台失败")
+        reportBrowserError(formatError(error) || "清空控制台失败")
       })
-  }, [applyBrowserState])
+  }, [applyBrowserState, reportBrowserError])
 
   const importBrowserProfileData = useCallback(async () => {
     if (!isProfileImportRuntimeEnabled) {
-      toast.error("浏览器数据导入功能在当前会话未生效，请保存配置后重启应用")
+      reportBrowserError("浏览器数据导入功能在当前会话未生效，请保存配置后重启应用")
       return
     }
     if (!state.created) return
@@ -794,20 +845,13 @@ export function BrowserPanel({
         setBrowserProfileImportSkippedWebsites([])
         if (result.cancelled) return
         if (result.errorCode === "native_host_not_registered") {
-          toast.error(result.error || "请重启应用", {
-            duration: 15_000
-          })
+          reportBrowserError(result.error || "请重启应用")
         } else if (result.errorCode === "extension_not_connected") {
-          toast.error(
-            `Chrome插件未连接！`,
-            { duration: 15_000 }
-          )
+          reportBrowserError("Chrome插件未连接！")
         } else if (result.errorCode === "permission_required") {
-          toast.error("Chrome插件未授权！", {
-            duration: 15_000
-          })
+          reportBrowserError("Chrome插件未授权！")
         } else {
-          toast.error(result.error || "浏览器数据导入失败", { duration: 15_000 })
+          reportBrowserError(result.error || "浏览器数据导入失败")
         }
         return
       }
@@ -837,11 +881,11 @@ export function BrowserPanel({
       console.error(
         `${BROWSER_PANEL_LOG_PREFIX} Browser profile import failed: ${formatError(error)}`
       )
-      toast.error("浏览器数据导入失败", { duration: 15_000 })
+      reportBrowserError(formatError(error) || "浏览器数据导入失败")
     } finally {
       setIsImportingBrowserProfile(false)
     }
-  }, [applyBrowserState, isProfileImportRuntimeEnabled, state.created])
+  }, [applyBrowserState, isProfileImportRuntimeEnabled, reportBrowserError, state.created])
 
   const consoleCount = state.consoleEntries.length
   const latestConsoleEntry = consoleCount > 0 ? state.consoleEntries[consoleCount - 1] : null
@@ -1000,7 +1044,11 @@ export function BrowserPanel({
       <div className="relative min-h-0 flex-1 bg-white">
         {/* Keep the welcome panel mounted so any dialogs launched from it are not
             immediately unmounted by the BrowserView modal-hide guard. */}
-        {showBrowserWelcome && <BrowserWelcomePanel />}
+        {showBrowserWelcome && (
+          <BrowserWelcomePanel
+            onCdpConfigSaved={(config) => setIsAgentBrowserControlEnabled(config.enabled)}
+          />
+        )}
         {isHiddenByModalDialog && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
             <div className="max-w-xs text-center">
@@ -1084,15 +1132,17 @@ export function BrowserPanel({
             disabled={isCapturing || !state.created}
             onClick={captureScreenshot}
           />
-          <IconPopoverButton
-            className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
-            side="left"
-            icon={<Video className="size-4" strokeWidth={1.8} />}
-            popoverContent="录制自动化脚本"
-            aria-label="录制自动化脚本"
-            aria-pressed={aiRecordingBoxOpen}
-            onClick={() => setAiRecordingBoxOpen((open) => !open)}
-          />
+          {isAgentBrowserControlEnabled && (
+            <IconPopoverButton
+              className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
+              side="left"
+              icon={<Video className="size-4" strokeWidth={1.8} />}
+              popoverContent="录制自动化脚本"
+              aria-label="录制自动化脚本"
+              aria-pressed={aiRecordingBoxOpen}
+              onClick={() => setAiRecordingBoxOpen((open) => !open)}
+            />
+          )}
         </div>
       </div>
 

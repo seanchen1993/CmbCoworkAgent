@@ -136,7 +136,13 @@ export function BrowserRecordingListDialog({
     currentEntries.find((entry) => entry.fileName === selectedFileName) ?? currentEntries[0] ?? null
 
   useEffect(() => {
-    if (!selectedEntry || error || isLoading) return
+    // A continued recording can update the same file while this component stays mounted.
+    // Scope drafts to the current list snapshot and open dialog session.
+    detailDraftsRef.current = {}
+  }, [entries, open])
+
+  useEffect(() => {
+    if (!open || !selectedEntry || error || isLoading) return
 
     const cachedDraft = detailDraftsRef.current[selectedEntry.fileName]
     let cancelled = false
@@ -190,7 +196,7 @@ export function BrowserRecordingListDialog({
       cancelled = true
       window.clearTimeout(loadingTimer)
     }
-  }, [error, isLoading, onReadScript, saveDetailDraft, selectedEntry])
+  }, [error, entries, isLoading, onReadScript, open, saveDetailDraft, selectedEntry])
 
   const handleCopyDetailScript = async (): Promise<void> => {
     if (!detailScriptValue.trim()) return
@@ -207,7 +213,8 @@ export function BrowserRecordingListDialog({
   const detailViewActive = Boolean(selectedEntry && !error && !isLoading)
   const detailScriptValue = detailViewActive ? detailScript : ""
   const detailDisplayNameValue = detailViewActive ? detailDisplayName : ""
-  const detailScriptLineCount = detailScriptValue.trim().length > 0 ? detailScriptValue.split(/\r?\n/u).length : 0
+  const detailScriptLineCount =
+    detailScriptValue.trim().length > 0 ? detailScriptValue.split(/\r?\n/u).length : 0
   const detailDirty =
     detailViewActive &&
     (detailScript !== detailInitialScript || detailDisplayName !== detailInitialDisplayName)

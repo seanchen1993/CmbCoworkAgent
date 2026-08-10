@@ -365,6 +365,30 @@ function actionTargetKey(action: AiRecordedBrowserAction): string {
   })
 }
 
+function actionLocatorKey(action: AiRecordedBrowserAction): string {
+  const locator = action.locator
+  return JSON.stringify({
+    target: "target" in action ? (action.target ?? null) : null,
+    locator: locator
+      ? {
+          target: locator.target,
+          role: locator.role,
+          label: locator.label,
+          placeholder: locator.placeholder,
+          testId: locator.testId,
+          accessibleName: locator.accessibleName,
+          textContent: locator.textContent,
+          selector: locator.selector,
+          playwrightLocator: locator.playwrightLocator,
+          framePath: locator.framePath,
+          isTarget: locator.isTarget,
+          matchCount: locator.matchCount,
+          nth: locator.nth
+        }
+      : null
+  })
+}
+
 function normalizeNavigationUrl(value: string): string {
   try {
     return new URL(value).href
@@ -414,6 +438,23 @@ function appendAction(session: AiRecordingSession, action: AiRecordedBrowserActi
 
   if (previous.kind === "fill" && action.kind === "fill" && sameTarget) {
     session.actions[session.actions.length - 1] = action
+    return
+  }
+
+  const beforePrevious = session.actions[session.actions.length - 2]
+  if (
+    beforePrevious?.kind === "fill" &&
+    previous.kind === "press" &&
+    previous.key === "Enter" &&
+    action.kind === "fill" &&
+    beforePrevious.value === action.value &&
+    actionLocatorKey(beforePrevious) === actionLocatorKey(previous) &&
+    actionLocatorKey(previous) === actionLocatorKey(action)
+  ) {
+    // API mode reports framework-replayed input on both sides of Enter. The later
+    // fill is the stable post-submit value, so keep the same script shape as codegen.
+    session.actions.splice(session.actions.length - 2, 1)
+    session.actions.push(action)
     return
   }
 

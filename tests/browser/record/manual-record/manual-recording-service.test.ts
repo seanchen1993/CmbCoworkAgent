@@ -663,6 +663,61 @@ describe("manual recording service", () => {
     )
   })
 
+  it("supersedes a fill replayed with the same value after Enter", () => {
+    startManualRecording({ threadId: "thread-1" })
+    const frame = createFrame({ url: "https://example.com/branches" })
+    const branchFilter = {
+      role: "textbox" as const,
+      accessibleName: "Select branch",
+      placeholder: "Select branch",
+      target: "Select branch",
+      selector: 'internal:role=textbox[name="Select branch"s]',
+      tagName: "input",
+      inputType: "text"
+    }
+
+    emitRecorderMessage(frame, {
+      type: "fill",
+      locator: branchFilter,
+      value: "record"
+    })
+    emitRecorderMessage(frame, {
+      type: "press",
+      locator: branchFilter,
+      key: "Enter"
+    })
+    emitRecorderMessage(frame, {
+      type: "fill",
+      locator: branchFilter,
+      value: "record"
+    })
+    emitRecorderMessage(frame, {
+      type: "click",
+      locator: {
+        role: "menuitemradio",
+        accessibleName: "codex/recover-in-app-browser-",
+        target: "codex/recover-in-app-browser-",
+        selector: 'internal:role=menuitemradio[name="codex/recover-in-app-browser-"s]',
+        tagName: "button"
+      }
+    })
+
+    const session = stopManualRecording()
+    expect(session.actions.map((action) => action.kind)).toEqual(["press", "fill", "click"])
+    expect(session.script).toContain(
+      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).press('Enter');"
+    )
+    expect(session.script).toContain(
+      "await page.getByRole('textbox', { name: 'Select branch', exact: true }).fill('record');"
+    )
+    expect(session.script).toContain(
+      "await page.getByRole('menuitemradio', { name: 'codex/recover-in-app-browser-', exact: true }).click();"
+    )
+    expect(session.script.indexOf(".press('Enter')")).toBeLessThan(
+      session.script.indexOf(".fill('record')")
+    )
+  })
+
   it("keeps duplicate role targets distinct by recording their occurrence index", () => {
     startManualRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/search" })
