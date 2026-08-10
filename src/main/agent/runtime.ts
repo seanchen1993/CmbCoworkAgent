@@ -6,7 +6,6 @@ import {
   createPatchToolCallsMiddleware,
   createSkillsMiddleware,
   createMemoryMiddleware,
-  createSummarizationMiddleware,
   GENERAL_PURPOSE_SUBAGENT,
   StateBackend
 } from "deepagents"
@@ -31,12 +30,15 @@ import {
   getGlobalRoutingMode
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
+import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
+import { getProjectThreadDataDirectory } from "./context-history-path"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
 import {
   LocalSandbox,
+  agentFileWriteContext,
   readOnlyShellExecutionContext,
   type SkillHookContextProvider
 } from "./local-sandbox"
@@ -54,6 +56,11 @@ import type {
   HarnessRequestUserInputConfig
 } from "../../shared/harness-board-types"
 import {
+  calculateModelInputBudgetTokens,
+  calculateSummarizationKeepTokens,
+  calculateSummarizationTriggerTokens
+} from "../../shared/model-token-budget"
+import {
   createAgent,
   createMiddleware,
   MiddlewareError,
@@ -67,7 +74,7 @@ import {
 } from "langchain"
 import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { Runnable } from "@langchain/core/runnables"
-import { isGraphBubbleUp } from "@langchain/langgraph"
+import { Command, isGraphBubbleUp } from "@langchain/langgraph"
 import { z } from "zod"
 
 import type * as _lcTypes from "langchain"
@@ -1001,50 +1008,37 @@ export function getCapturedSystemPromptPreview(
   return systemPromptPreviewByThread.get(threadId) ?? null
 }
 
-const SUMMARY_KEEP_RATIO = 0.1
-const SUMMARY_INPUT_RATIO = 0.65
-const SUMMARY_INPUT_TOKEN_CAP = 700_000
+export { calculateSummarizationTriggerTokens }
+export const CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS = 20_000
+// Used only after the summary request itself reports context overflow. Normal compaction
+// sends the complete old history so user intent is not discarded before summarization.
+const SUMMARY_OVERFLOW_RETRY_TARGET_RATIO = 0.65
+const SUMMARY_OVERFLOW_RETRY_TOKEN_CAP = 700_000
 
-const CMB_COWORK_SUMMARY_PROMPT = `Your task is to create a detailed continuation summary for an ongoing CmbCowork coding-agent conversation.
+export function calculateSummaryOverflowRetryTargetTokens(
+  contextWindowTokens: number,
+  summaryMaxOutputTokens: number
+): number {
+  return Math.min(
+    SUMMARY_OVERFLOW_RETRY_TOKEN_CAP,
+    Math.floor(contextWindowTokens * SUMMARY_OVERFLOW_RETRY_TARGET_RATIO),
+    calculateModelInputBudgetTokens(contextWindowTokens, summaryMaxOutputTokens)
+  )
+}
 
-The next model call will use your summary to continue the work. Write a dense, practical engineering handoff that preserves details that would be hard or costly to recover. Do not include private reasoning or analysis scratchpad.
+const CMB_COWORK_SUMMARY_PROMPT = `Create a compact continuation handoff from the structured conversation messages above. The next agent must be able to continue without redoing completed work.
 
-Cover these sections:
+Use these exact headings:
+## Goal
+## Constraints
+## Completed
+## Current State
+## Blockers
+## Key Decisions
+## Next Step
+## Critical Evidence
 
-1. Primary Request and Intent
-   - Capture the user's explicit requests, corrections, decisions, and current expectations.
-   - Preserve exact dates, branch names, commit hashes, model names, file paths, config values, and quoted user wording when they matter.
-
-2. Current Work State
-   - Describe what was being worked on immediately before compaction.
-   - Separate completed work, in-progress work, and remaining work.
-   - Include whether changes are committed, pushed, only in the worktree, or not yet made.
-
-3. Files and Code Sections
-   - List files inspected, modified, or created.
-   - For each important file, include the relevant symbols, constants, functions, or code paths and why they matter.
-   - Include short code snippets only when exact behavior would otherwise be ambiguous.
-
-4. Commands, Tests, and Outputs
-   - Record meaningful commands run and their results.
-   - Include test/typecheck failures, known unrelated failures, and any verification already completed.
-
-5. Technical Decisions and Constraints
-   - Capture assumptions, tradeoffs, rejected approaches, provider/model limitations, routing/summary/token-budget reasoning, and compatibility constraints.
-
-6. Errors, Fixes, and Warnings
-   - Record bugs encountered, root causes, fixes or mitigations, and anything the next model should avoid repeating.
-
-7. Pending Next Step
-   - List concrete next actions only if they directly follow from the latest user request.
-   - If the latest user request was already completed, say so and do not invent unrelated next steps.
-
-Prefer concise bullet points with high information density. Be thorough about technical state, but avoid generic narrative. If the user used Chinese, preserve Chinese wording for user-facing details and reply-context details.
-
-Conversation to summarize:
-{conversation}
-
-Summary:`
+Use concise, high-information bullets. Preserve exact user corrections, file paths, symbols, commands, test results, errors, identifiers, configuration values, Git state, and unresolved decisions when they matter. Explicitly preserve unresolved contradictions between user requirements, current source code, tests, compiled artifacts, workflow reports, and claimed verification results. Do not let a later conclusion hide conflicting evidence. Treat any <previous-summary> as authoritative context: retain facts that are still true, update changed facts, and remove stale facts. If the latest request is complete, say so under Next Step instead of inventing work. Preserve the user's language for user-facing details. Do not include private reasoning, generic narrative, a verbatim transcript, or full code unless exact code is essential.`
 
 function createEagerMcpTools(
   capabilityService: McpCapabilityService,
@@ -1655,6 +1649,49 @@ function appendRegistrySubagentAccessDescription(
  */
 export const SUBAGENT_OWNER_METADATA_KEY = SOLO_TASK_OWNER_METADATA_KEY
 export const ACTION_STATIONARITY_OWNER_CONFIG_KEY = "cmb_action_stationarity_owner"
+export const SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY = "cmb_subagent_summarization_owner"
+
+const TASK_SUBAGENT_SUMMARIZATION_STATE_KEYS = new Set([
+  "_summarizationEvent",
+  "_summarizationSessionId",
+  "_cmbSummarizationOwner"
+])
+
+/**
+ * Task subagents are isolated conversations. DeepAgents copies arbitrary parent
+ * state into the child and returns arbitrary child state to the parent, which
+ * would otherwise leak its cutoff-based summarization event across the task
+ * boundary. Strip only those private lifecycle fields from the returned Command.
+ */
+function stripTaskSubagentSummarizationState(result: unknown): unknown {
+  if (!(result instanceof Command) || result.update == null) return result
+
+  const update = result.update
+  if (Array.isArray(update)) {
+    const sanitized = update.filter(
+      ([key]) => typeof key !== "string" || !TASK_SUBAGENT_SUMMARIZATION_STATE_KEYS.has(key)
+    )
+    if (sanitized.length === update.length) return result
+    return new Command({
+      graph: result.graph,
+      resume: result.resume,
+      goto: result.goto,
+      update: sanitized
+    })
+  }
+
+  if (typeof update !== "object") return result
+  const sanitized = Object.fromEntries(
+    Object.entries(update).filter(([key]) => !TASK_SUBAGENT_SUMMARIZATION_STATE_KEYS.has(key))
+  )
+  if (Object.keys(sanitized).length === Object.keys(update).length) return result
+  return new Command({
+    graph: result.graph,
+    resume: result.resume,
+    goto: result.goto,
+    update: sanitized
+  })
+}
 
 let idlessTaskInvocationSequence = 0
 
@@ -1708,6 +1745,7 @@ export function wrapTaskToolWithOwnerMetadata(
         configurable: {
           ...(config?.configurable ?? {}),
           [ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
+          [SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity,
           ...(ownerId ? { [SUBAGENT_OWNER_METADATA_KEY]: ownerId } : {})
         }
       }
@@ -1726,10 +1764,11 @@ export function wrapTaskToolWithOwnerMetadata(
       }
       try {
         // Pass the ToolCall as input so the original re-derives config.toolCall.id
-        // and returns its Command (state update + task ToolMessage) unchanged.
+        // and preserves its Command/task-ToolMessage contract.
         const result = await taskTool.invoke(config?.toolCall ?? input, patchedConfig)
-        if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", result)
-        return result
+        const sanitizedResult = stripTaskSubagentSummarizationState(result)
+        if (ownerId) soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)
+        return sanitizedResult
       } catch (error) {
         if (ownerId) {
           soloTaskTraceManager?.finishTask(
@@ -1768,9 +1807,40 @@ function stampSubagentOwnerMetadata<T>(
 }
 
 /**
+ * Keep a model-requested write_file distinguishable from DeepAgents' automatic
+ * large-tool-result spill. Both eventually call Backend.write(), but only the
+ * latter is allowed to use the app-managed internal artifact channel.
+ */
+function markFilesystemWriteToolAsUserInitiated(middleware: {
+  tools?: DynamicStructuredTool[]
+}): void {
+  const tools = middleware.tools
+  const index = tools?.findIndex((candidate) => candidate?.name === "write_file") ?? -1
+  if (index < 0 || !tools?.[index]) {
+    console.warn("[Runtime] write_file tool origin patch skipped: tool not found")
+    return
+  }
+
+  const original = tools[index]
+  tools[index] = tool(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async (input: Record<string, unknown>, config: any) =>
+      agentFileWriteContext.run(true, () => original.invoke(config?.toolCall ?? input, config)),
+    {
+      name: original.name,
+      description: original.description,
+      // DynamicStructuredTool keeps its schema public, but the generic type is
+      // intentionally broader than the tool() helper accepts.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      schema: (original as any).schema
+    }
+  ) as unknown as DynamicStructuredTool
+}
+
+/**
  * Custom version of deepagents' createDeepAgent.
  *
- * Aligned with official 1.8.1 except:
+ * Aligned with the lockfile-pinned DeepAgents 1.8.5 except:
  *   - Accepts `summarizationTrigger` / `summarizationKeep` for explicit overrides
  *     (useful for custom models without a profile).
  *   - Accepts a custom summarization prompt tuned for coding-agent handoffs.
@@ -1782,6 +1852,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   const {
     model = "claude-sonnet-4-5-20250929",
     summarizationModel = model,
+    summarizationFallbackModel,
     tools = [],
     systemPrompt,
     middleware: customMiddleware = [],
@@ -1800,7 +1871,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     summarizationKeep,
     toolTokenLimitBeforeEvict,
     trimTokensToSummarize,
+    summarizationMaxInputTokens,
+    summarizationPostCompactionInputBudgetTokens,
     summarizationSummaryPrompt,
+    summarizationHistoryPathPrefix,
+    summarizationLegacyHistoryPathPrefix,
     summarizationTruncateArgsSettings,
     onContextCompaction,
     subagentExtraSystemPrompt,
@@ -1893,12 +1968,21 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   })
 
   // Summarization options: pass explicit trigger/keep if provided, otherwise let
-  // createSummarizationMiddleware auto-compute from the model profile.
+  // the CmbCowork summarization middleware compute them from the model profile.
   const summarizationBaseOptions = {
     backend: filesystemBackend,
-    historyPathPrefix: ".cmbdevclaw/conversation_history",
+    historyPathPrefix: summarizationHistoryPathPrefix ?? "/conversation_history",
+    ...(summarizationLegacyHistoryPathPrefix && {
+      legacyHistoryPathPrefix: summarizationLegacyHistoryPathPrefix
+    }),
     ...(summarizationSummaryPrompt && { summaryPrompt: summarizationSummaryPrompt }),
     ...(trimTokensToSummarize != null && { trimTokensToSummarize }),
+    ...(summarizationMaxInputTokens != null && {
+      maxInputTokens: summarizationMaxInputTokens
+    }),
+    ...(summarizationPostCompactionInputBudgetTokens != null && {
+      postCompactionInputBudgetTokens: summarizationPostCompactionInputBudgetTokens
+    }),
     ...(summarizationTrigger != null && { trigger: summarizationTrigger }),
     ...(summarizationKeep != null && { keep: summarizationKeep }),
     ...(summarizationTruncateArgsSettings && {
@@ -1907,11 +1991,21 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   }
   const mainSummarizationOptions = {
     ...summarizationBaseOptions,
-    model: configureContextCompactionModel(summarizationModel, onContextCompaction)
+    model: configureContextCompactionModel(summarizationModel, onContextCompaction),
+    ...(summarizationFallbackModel && {
+      fallbackModel: configureContextCompactionModel(
+        summarizationFallbackModel,
+        onContextCompaction
+      )
+    })
   }
   const subagentSummarizationOptions = {
     ...summarizationBaseOptions,
-    model: configureContextCompactionModel(summarizationModel)
+    stateOwnerConfigKey: SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY,
+    model: configureContextCompactionModel(summarizationModel),
+    ...(summarizationFallbackModel && {
+      fallbackModel: configureContextCompactionModel(summarizationFallbackModel)
+    })
   }
 
   // Create filesystem middleware and patch upstream tool defaults/descriptions.
@@ -1935,6 +2029,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(effectiveFsPrompt && { systemPrompt: effectiveFsPrompt }),
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
+    markFilesystemWriteToolAsUserInitiated(mw)
     patchRuntimeReadFileTool({ middleware: mw, filesystemBackend, toolTokenLimitBeforeEvict })
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2316,7 +2411,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     subagentToolConcurrencyMiddleware,
     ...(toolHookMiddleware ? [toolHookMiddleware] : []),
     toolErrorMiddleware,
-    createSummarizationMiddleware(subagentSummarizationOptions),
+    createCmbSummarizationMiddleware(subagentSummarizationOptions),
     anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
     // Same malformed tool-call recovery as the main agent — task subagents call
     // the same OpenAI-compatible endpoint and can be handed truncated JSON too.
@@ -2529,7 +2624,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // and BEFORE humanInTheLoop (a steered message must never race a pending
       // tool-approval interrupt). See createCurrentRunMessageQueueMiddleware.
       createCurrentRunMessageQueueMiddleware(currentRunMessageQueueOwnerToken),
-      createSummarizationMiddleware(mainSummarizationOptions),
+      createCmbSummarizationMiddleware(mainSummarizationOptions),
       anthropicPromptCachingMiddleware({ unsupportedModelBehavior: "ignore" }),
       // Recover from malformed/truncated tool-call JSON (deepseek et al.): promote
       // invalid_tool_calls into normalized tool_calls (the guard middleware above
@@ -3751,12 +3846,20 @@ export function getModelInstance(
     throw new Error("Custom model name is empty. Please configure a valid model name in Settings.")
   }
   console.log("[Runtime] Custom model:", resolvedModel, "baseUrl:", customConfig.baseUrl)
-  const maxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const configuredMaxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const maxOutputTokens =
+    purpose === "context-compaction"
+      ? Math.min(configuredMaxOutputTokens, CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS)
+      : configuredMaxOutputTokens
   const temperature = customConfig.temperature ?? DEFAULT_TEMPERATURE
   const topP = customConfig.topP ?? DEFAULT_TOP_P
   const topK = customConfig.topK ?? DEFAULT_TOP_K
   const thinkingEffort = customConfig.thinkingEffort ?? DEFAULT_THINKING_EFFORT
-  const enableThinking = customConfig.enableThinking === true
+  const thinkingConfigured = customConfig.enableThinking === true
+  // Compaction needs a final-text handoff, not a reasoning trace. Allowing a
+  // thinking model here can spend the entire output budget on reasoning and
+  // return empty content, so keep thinking exclusive to normal agent calls.
+  const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
 
   const baseFields = {
@@ -4154,7 +4257,20 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     maxRetryAttempts,
     "context-compaction"
   )
+  const projectThreadDataDirectory = await getProjectThreadDataDirectory(workspacePath, threadId)
+  const conversationHistoryPathPrefix = path.join(
+    projectThreadDataDirectory,
+    "conversation_history"
+  )
+  const legacyConversationHistoryPathPrefix = path.join(
+    workspacePath,
+    ".cmbdevclaw",
+    "conversation_history"
+  )
+  const largeToolResultsDir = path.join(projectThreadDataDirectory, "large_tool_results")
   console.log("[Runtime] Model instance created")
+  console.log("[Runtime] Conversation history directory:", conversationHistoryPathPrefix)
+  console.log("[Runtime] Large tool results directory:", largeToolResultsDir)
 
   // Open agent-type registry → deepagents task-tool subagents for the Solo main
   // agent. Gated to the Solo main agent ONLY: coordinator (agentMode
@@ -4205,6 +4321,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
 
   const maxTokens = customConfig?.maxTokens ?? DEFAULT_MAX_TOKENS
+  const configuredMaxOutputTokens = customConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   // Tune shell output cap for 32K~64K context windows to reduce context pressure.
   const maxOutputBytes = Math.max(30_000, Math.min(80_000, Math.floor(maxTokens * 4 * 0.2)))
 
@@ -4281,6 +4398,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
+    largeToolResultsDir,
+    internalArtifactRoots: [conversationHistoryPathPrefix, largeToolResultsDir],
     skillHookKeys,
     skillUseTracker
   })
@@ -5126,8 +5245,7 @@ The workspace root is: ${workspacePath}`
   }
 
   const coordinatorWorkerRunner: CoordinatorWorkerRunner = async (workerInput) => {
-    const workerActionStationarityTurnId =
-      `${workerInput.workerThreadId}:turn:${workerInput.workerTurn}`
+    const workerActionStationarityTurnId = `${workerInput.workerThreadId}:turn:${workerInput.workerTurn}`
     const workerSubagent = buildCoordinatorWorkerSubagents(
       coordinatorWorkerProjectInstructions || undefined,
       undefined,
@@ -5659,10 +5777,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       workerTraceError = describeToolError(error)
       throw error
     } finally {
-      clearActionStationarityTurn(
-        workerInput.workerThreadId,
-        workerActionStationarityTurnId
-      )
+      clearActionStationarityTurn(workerInput.workerThreadId, workerActionStationarityTurnId)
       if (workerTracer) {
         const tracerToFinish = workerTracer
         runTraceSideEffect("CoordinatorWorker", () => {
@@ -5863,24 +5978,38 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     agentMode,
     deferredToolIds: deferredToolIds.length
   })
-  const triggerTokens = Math.floor(maxTokens * 0.75)
-  const keepTokens = Math.max(Math.floor(maxTokens * SUMMARY_KEEP_RATIO), 4_000)
+  const triggerTokens = calculateSummarizationTriggerTokens(maxTokens, configuredMaxOutputTokens)
+  const mainModelInputBudget = calculateModelInputBudgetTokens(maxTokens, configuredMaxOutputTokens)
+  const summaryMaxOutputTokens = Math.min(
+    configuredMaxOutputTokens,
+    CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS
+  )
+  const summaryInputBudget = calculateModelInputBudgetTokens(maxTokens, summaryMaxOutputTokens)
+  const keepTokens = calculateSummarizationKeepTokens(maxTokens)
   const toolEvictLimit = Math.min(20_000, Math.max(Math.floor(maxTokens * 0.08), 6_000))
-  const trimForSummary = Math.min(
-    SUMMARY_INPUT_TOKEN_CAP,
-    Math.floor(maxTokens * SUMMARY_INPUT_RATIO)
+  const summaryOverflowRetryTarget = calculateSummaryOverflowRetryTargetTokens(
+    maxTokens,
+    summaryMaxOutputTokens
   )
   console.log(
     "[Runtime] Context window:",
     maxTokens,
     "→ summarization trigger:",
     triggerTokens,
+    "→ reserved model output:",
+    configuredMaxOutputTokens,
+    "→ model input budget:",
+    mainModelInputBudget,
+    "→ summary max output:",
+    summaryMaxOutputTokens,
+    "→ summary input budget:",
+    summaryInputBudget,
     "→ keep:",
     keepTokens,
     "→ tool evict limit:",
     toolEvictLimit,
-    "→ trim for summary:",
-    trimForSummary,
+    "→ summary overflow retry target:",
+    summaryOverflowRetryTarget,
     "→ max output bytes:",
     maxOutputBytes
   )
@@ -5971,8 +6100,12 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     summarizationTrigger: { type: "tokens", value: triggerTokens },
     summarizationKeep: { type: "tokens", value: keepTokens },
     toolTokenLimitBeforeEvict: toolEvictLimit,
-    trimTokensToSummarize: trimForSummary,
+    trimTokensToSummarize: summaryOverflowRetryTarget,
+    summarizationMaxInputTokens: maxTokens,
+    summarizationPostCompactionInputBudgetTokens: mainModelInputBudget,
     summarizationSummaryPrompt: CMB_COWORK_SUMMARY_PROMPT,
+    summarizationHistoryPathPrefix: conversationHistoryPathPrefix,
+    summarizationLegacyHistoryPathPrefix: legacyConversationHistoryPathPrefix,
     summarizationTruncateArgsSettings: {
       trigger: { type: "tokens", value: triggerTokens },
       keep: { type: "tokens", value: keepTokens },

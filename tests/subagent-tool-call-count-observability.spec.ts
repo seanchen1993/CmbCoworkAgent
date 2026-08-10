@@ -9,10 +9,12 @@ import { readFileSync } from "fs"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 import { tool } from "@langchain/core/tools"
+import { Command } from "@langchain/langgraph"
 import { z } from "zod"
 import {
   ACTION_STATIONARITY_OWNER_CONFIG_KEY,
   SUBAGENT_OWNER_METADATA_KEY,
+  SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY,
   wrapTaskToolWithOwnerMetadata
 } from "../src/main/agent/runtime.ts"
 
@@ -228,7 +230,7 @@ function testSoloTaskTracePartitioning(): void {
   )
   assertIncludes(
     runtimeSource,
-    'soloTaskTraceManager?.finishTask(ownerId, "success", result)',
+    'soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)',
     "Solo task trace should finish alongside the owning task invocation"
   )
   assertIncludes(
@@ -290,6 +292,11 @@ function testIdlessTaskStationarityOwnerWiring(): void {
     runtimeSource,
     "[ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity",
     "the invocation-specific owner should reach subagent stationarity runtime config"
+  )
+  assertIncludes(
+    runtimeSource,
+    "[SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity",
+    "the invocation-specific owner should isolate subagent summarization state"
   )
 }
 
@@ -371,6 +378,46 @@ async function testTaskWrapperPreservesStationarityOwnerConfig(): Promise<void> 
     explicitMetadata?.[SUBAGENT_OWNER_METADATA_KEY] === "task-real-id",
     "a real task id should remain available for renderer attribution"
   )
+  assert(
+    explicitConfigurable?.[SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY] === "task-real-id",
+    "a real task id should scope its own summarization lifecycle"
+  )
+}
+
+async function testTaskWrapperDoesNotReturnSubagentSummarizationState(): Promise<void> {
+  const rawTask = tool(
+    async () =>
+      new Command({
+        update: {
+          _summarizationEvent: { cutoffIndex: 4 },
+          _summarizationSessionId: "child-session",
+          _cmbSummarizationOwner: "task-real-id",
+          stableResult: "keep this"
+        }
+      }),
+    {
+      name: "task",
+      description: "fake task",
+      schema: z.object({ description: z.string() })
+    }
+  )
+  const wrappedTask = wrapTaskToolWithOwnerMetadata(rawTask)
+  const result = await wrappedTask.invoke({
+    name: "task",
+    args: { description: "explicit" },
+    id: "task-real-id",
+    type: "tool_call"
+  })
+
+  assert(result instanceof Command, "wrapped task should preserve the task Command contract")
+  const update = result.update as Record<string, unknown>
+  assert(update.stableResult === "keep this", "unrelated child state should remain intact")
+  assert(
+    !("_summarizationEvent" in update) &&
+      !("_summarizationSessionId" in update) &&
+      !("_cmbSummarizationOwner" in update),
+    "a child summarization lifecycle must not overwrite parent summarization state"
+  )
 }
 
 function testGuardNoticesAreNotPresentedAsHooks(): void {
@@ -446,6 +493,8 @@ async function run(): Promise<void> {
   console.log("PASS task-subagent stationarity halt propagation wiring")
   await testTaskWrapperPreservesStationarityOwnerConfig()
   console.log("PASS task wrapper stationarity owner propagation")
+  await testTaskWrapperDoesNotReturnSubagentSummarizationState()
+  console.log("PASS task wrapper isolates child summarization state")
   testGuardNoticesAreNotPresentedAsHooks()
   console.log("PASS guard notices use dedicated non-Hook presentation")
   testLoopGuardEmergencySwitchCoversAllRuntimeEntryPoints()
