@@ -114,7 +114,8 @@ describe("browser script library service", () => {
     await updateBrowserScriptLibraryEntry({
       fileName: entry.fileName,
       displayName: "新名称",
-      script: "new script"
+      script: "new script",
+      isEdited: true
     })
 
     await expect(readBrowserScriptLibraryScript({ fileName: entry.fileName })).resolves.toBe(
@@ -126,9 +127,48 @@ describe("browser script library service", () => {
       expect.objectContaining({
         fileName: entry.fileName,
         displayName: "新名称",
+        isEdited: true,
         recordingSource: "manual"
       })
     ])
+  })
+
+  it("preserves the edited marker and marks newly saved entries when requested", async () => {
+    const entry = await saveBrowserScriptLibraryEntry({
+      displayName: "未编辑脚本",
+      recordingSource: "manual",
+      script: "recorded script",
+      threadId: "thread-a",
+      workspacePath: "/tmp/workspace-a"
+    })
+
+    await updateBrowserScriptLibraryEntry({
+      fileName: entry.fileName,
+      script: "continued script",
+      isEdited: false
+    })
+    await expect(
+      listBrowserScriptLibraryEntries({ workspacePath: "/tmp/workspace-a" })
+    ).resolves.toEqual([expect.objectContaining({ fileName: entry.fileName, isEdited: false })])
+
+    await updateBrowserScriptLibraryEntry({
+      fileName: entry.fileName,
+      script: "edited script",
+      isEdited: true
+    })
+    await expect(
+      listBrowserScriptLibraryEntries({ workspacePath: "/tmp/workspace-a" })
+    ).resolves.toEqual([expect.objectContaining({ fileName: entry.fileName, isEdited: true })])
+
+    const explicitlyEditedEntry = await saveBrowserScriptLibraryEntry({
+      displayName: "已编辑脚本",
+      isEdited: true,
+      recordingSource: "ai",
+      script: "edited from the result dialog",
+      threadId: "thread-a",
+      workspacePath: "/tmp/workspace-a"
+    })
+    expect(explicitlyEditedEntry.isEdited).toBe(true)
   })
 
   it("rejects unsafe script file names", async () => {

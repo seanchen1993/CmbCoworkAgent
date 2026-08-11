@@ -167,8 +167,7 @@ function BrowserWelcomePanel({
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">代码一改，效果即见</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  运行{" "}
-                  <code className="font-mono text-[10px] text-stone-700">npm run dev</code>
+                  运行 <code className="font-mono text-[10px] text-stone-700">npm run dev</code>
                   后直接打开{" "}
                   <code className="font-mono text-[10px] text-stone-700">localhost:8080</code>
                   。AI 生成代码的同时，页面变化实时呈现，无需反复切换浏览器。
@@ -183,7 +182,8 @@ function BrowserWelcomePanel({
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">把网页操作交给 AI</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  开启内置浏览器控制后，AI 可在任务中浏览页面、填写表单、点击操作并验证结果。并且支持Iframe。
+                  开启内置浏览器控制后，AI
+                  可在任务中浏览页面、填写表单、点击操作并验证结果。并且支持Iframe。
                 </p>
               </div>
             </div>
@@ -222,7 +222,8 @@ function BrowserWelcomePanel({
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">每次验证，都值得复用</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  录制 AI 或人工操作，把高频验证沉淀为可复用的测试案例，让下次验证从已有流程开始。
+                  录制（ AI
+                  或人工）操作，把高频验证沉淀为可复用的测试案例，让下次验证从已有流程开始。
                 </p>
               </div>
             </div>

@@ -101,6 +101,12 @@ export function BrowserAiRecordingControls({
   const [recordingDialogSource, setRecordingDialogSource] = useState<BrowserRecordingSource>("ai")
   const [draftScript, setDraftScript] = useState("")
   const [isDraftScriptDirty, setIsDraftScriptDirty] = useState(false)
+  const [editedBySource, setEditedBySource] = useState<
+    Record<BrowserRecordingSource, boolean>
+  >({
+    ai: false,
+    manual: false
+  })
   const [selectedActionIds, setSelectedActionIds] = useState<string[]>([])
   const [variableActionIds, setVariableActionIds] = useState<string[]>([])
   const [variableActionNames, setVariableActionNames] = useState<Record<string, string>>({})
@@ -316,6 +322,16 @@ export function BrowserAiRecordingControls({
     []
   )
 
+  const markCurrentRecordingEdited = useCallback((source: BrowserRecordingSource) => {
+    setEditedBySource((current) => {
+      if (current[source]) return current
+      return {
+        ...current,
+        [source]: true
+      }
+    })
+  }, [])
+
   const openRecordingDialog = useCallback((source: BrowserRecordingSource) => {
     setRecordingDialogSource(source)
     setAiRecordingDialogOpen(true)
@@ -393,6 +409,7 @@ export function BrowserAiRecordingControls({
       })
       setAiRecording(nextSession)
       setRecordingDialogSource("ai")
+      setEditedBySource((current) => ({ ...current, ai: false }))
       setPendingUnsavedForSource("ai", false)
       toast.success("AI录制已开始。让 Agent 在任意会话中操作页面即可。")
     } catch (error) {
@@ -419,6 +436,7 @@ export function BrowserAiRecordingControls({
       })
       setManualRecording(nextSession)
       setRecordingDialogSource("manual")
+      setEditedBySource((current) => ({ ...current, manual: false }))
       setPendingUnsavedForSource("manual", false)
       toast.success("人工录制已开始。请直接在内置浏览器里手动操作页面。")
     } catch (error) {
@@ -629,12 +647,18 @@ export function BrowserAiRecordingControls({
       if (currentRecordingLibraryTarget) {
         await window.api.browser.updateScriptLibraryEntry({
           fileName: currentRecordingLibraryTarget.fileName,
-          script: draftScript
+          script: draftScript,
+          isEdited:
+            editedBySource[recordingDialogSource] ||
+            extractAiRecordingVariables(draftScript).length > 0
         })
         toast.success(`已保存到原脚本：${currentRecordingLibraryTarget.displayName}`)
       } else {
         await window.api.browser.saveScriptLibraryEntry({
           displayName,
+          isEdited:
+            editedBySource[recordingDialogSource] ||
+            extractAiRecordingVariables(draftScript).length > 0,
           recordingSource: recordingDialogSource,
           script: draftScript,
           threadId,
@@ -661,6 +685,7 @@ export function BrowserAiRecordingControls({
     }
   }, [
     draftScript,
+    editedBySource,
     hasUnnamedVariableActions,
     loadScriptLibraryEntries,
     currentRecordingLibraryTarget,
@@ -875,7 +900,8 @@ export function BrowserAiRecordingControls({
         await window.api.browser.updateScriptLibraryEntry({
           fileName: entry.fileName,
           script,
-          displayName
+          displayName,
+          isEdited: true
         })
         setScriptLibraryEntries((current) =>
           current.map((item) =>
@@ -883,6 +909,7 @@ export function BrowserAiRecordingControls({
               ? {
                   ...item,
                   displayName,
+                  isEdited: true,
                   hasVariables: extractAiRecordingVariables(script).length > 0
                 }
               : item
@@ -915,6 +942,7 @@ export function BrowserAiRecordingControls({
         const savedEntry = await window.api.browser.saveScriptLibraryEntry({
           description: entry.description,
           displayName,
+          isEdited: true,
           recordingSource: entry.recordingSource,
           script,
           threadId: threadId ?? entry.threadId ?? undefined,
@@ -922,6 +950,7 @@ export function BrowserAiRecordingControls({
         })
         const savedEntryWithVariableState = {
           ...savedEntry,
+          isEdited: true,
           hasVariables: extractAiRecordingVariables(script).length > 0
         }
         setScriptLibraryEntries((current) => [savedEntryWithVariableState, ...current])
@@ -977,6 +1006,7 @@ export function BrowserAiRecordingControls({
           setAiRecording(nextSession)
         }
         setRecordingDialogSource(entry.recordingSource)
+        setEditedBySource((current) => ({ ...current, [entry.recordingSource]: false }))
         setPendingUnsavedForSource(entry.recordingSource, false)
         setScriptLibraryOpen(false)
         setAiRecordingDialogOpen(false)
@@ -1019,6 +1049,7 @@ export function BrowserAiRecordingControls({
         setDraftScript(
           buildDraftScript(nextSelectedActionIds, nextVariableActionIds, variableActionNames)
         )
+        markCurrentRecordingEdited(recordingDialogSource)
         setIsDraftScriptDirty(false)
         return nextSelectedActionIds
       })
@@ -1027,6 +1058,8 @@ export function BrowserAiRecordingControls({
       buildDraftScript,
       currentRecording.actions,
       isDraftScriptDirty,
+      markCurrentRecordingEdited,
+      recordingDialogSource,
       variableActionIds,
       variableActionNames
     ]
@@ -1052,6 +1085,7 @@ export function BrowserAiRecordingControls({
         setDraftScript(
           buildDraftScript(selectedActionIds, nextVariableActionIds, variableActionNames)
         )
+        markCurrentRecordingEdited(recordingDialogSource)
         setIsDraftScriptDirty(false)
         return nextVariableActionIds
       })
@@ -1060,6 +1094,8 @@ export function BrowserAiRecordingControls({
       buildDraftScript,
       currentRecording.actions,
       isDraftScriptDirty,
+      markCurrentRecordingEdited,
+      recordingDialogSource,
       selectedActionIds,
       variableActionNames
     ]
@@ -1080,11 +1116,19 @@ export function BrowserAiRecordingControls({
         setDraftScript(
           buildDraftScript(selectedActionIds, variableActionIds, nextVariableActionNames)
         )
+        markCurrentRecordingEdited(recordingDialogSource)
         setIsDraftScriptDirty(false)
         return nextVariableActionNames
       })
     },
-    [buildDraftScript, isDraftScriptDirty, selectedActionIds, variableActionIds]
+    [
+      buildDraftScript,
+      isDraftScriptDirty,
+      markCurrentRecordingEdited,
+      recordingDialogSource,
+      selectedActionIds,
+      variableActionIds
+    ]
   )
 
   const canSaveCurrentDraft = currentRecording.status === "paused"
@@ -1156,6 +1200,7 @@ export function BrowserAiRecordingControls({
         draftScript={draftScript}
         onDraftScriptChange={(value) => {
           setDraftScript(value)
+          markCurrentRecordingEdited(recordingDialogSource)
           setIsDraftScriptDirty(true)
         }}
         isDraftDirty={isDraftScriptDirty}
