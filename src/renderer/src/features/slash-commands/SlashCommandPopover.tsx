@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef } from "react"
-import { Flag, Package2 } from "lucide-react"
+import { Flag, Globe2, Package2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { normalizeSkillId } from "@/lib/skill-ids"
 import type { SkillMetadata } from "@/types"
+import { isBuiltinBrowserSlashCommand } from "@/features/builtin-browser/builtin-browser"
 import type { PopoverMode, SlashCommandItem } from "./useSlashCommands"
 import {
   computeDuplicateSkillNames,
@@ -86,6 +87,7 @@ export function SlashCommandPopover({
           <div className="py-1">
             {mode.commands.map((command, idx) => {
               const isSelected = idx === selectedIdx
+              const CommandIcon = isBuiltinBrowserSlashCommand(command) ? Globe2 : Flag
               return (
                 <button
                   key={command.id}
@@ -100,7 +102,7 @@ export function SlashCommandPopover({
                     isSelected ? "bg-muted" : "hover:bg-muted/60"
                   )}
                 >
-                  <Flag className="size-4 text-muted-foreground shrink-0" />
+                  <CommandIcon className="size-4 text-muted-foreground shrink-0" />
                   <span className="text-sm font-medium text-foreground shrink-0">
                     {command.title}
                   </span>

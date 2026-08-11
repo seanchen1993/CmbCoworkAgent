@@ -530,6 +530,8 @@ export interface ThreadState {
    * matching how draftInput already behaves.
    */
   draftSkill: SkillMetadata | null
+  /** Whether the built-in browser mode is selected for the next send. */
+  draftBuiltinBrowser: boolean
   scheduledTaskLoading: boolean
   historyLoading: boolean
   scheduledTaskId: string | null
@@ -623,6 +625,7 @@ export interface ThreadActions {
   setDraftInput: (input: string) => void
   setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
+  setDraftBuiltinBrowser: (selected: boolean) => void
 }
 
 // Context value
@@ -683,6 +686,7 @@ const createDefaultThreadState = (): ThreadState => ({
   draftInput: "",
   harnessNextActionDialogTips: null,
   draftSkill: null,
+  draftBuiltinBrowser: false,
   scheduledTaskLoading: false,
   historyLoading: false,
   scheduledTaskId: null,
@@ -875,6 +879,7 @@ function normalizeThreadState(state: ThreadState): ThreadState {
       : []
   return {
     ...state,
+    draftBuiltinBrowser: state.draftBuiltinBrowser ?? false,
     toolCallStates: state.toolCallStates || {},
     ...buildPendingApprovalState(pendingQueue)
   }
@@ -3516,6 +3521,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftSkill: (skill: SkillMetadata | null) => {
           updateThreadState(threadId, () => ({ draftSkill: skill }))
+        },
+        setDraftBuiltinBrowser: (selected: boolean) => {
+          updateThreadState(threadId, () => ({ draftBuiltinBrowser: selected }))
         }
       }
 

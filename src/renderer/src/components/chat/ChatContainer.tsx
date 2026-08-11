@@ -136,6 +136,12 @@ import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import {
+  BUILTIN_BROWSER_PROMPT_PREFIX,
+  formatBuiltinBrowserPrompt,
+  isBuiltinBrowserSlashCommand,
+  parseBuiltinBrowserPrompt
+} from "@/features/builtin-browser/builtin-browser"
+import {
   isBareGoalSlashCommandInput,
   isGoalSlashControlCommandInput,
   isGoalSlashResumeCommandInput,
@@ -158,6 +164,7 @@ import {
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
@@ -2327,7 +2334,9 @@ export function ChatContainer({
     setContextReminder,
     setDraftInput: setInput,
     setHarnessNextActionDialogTips,
-    setDraftSkill: setSelectedSkill
+    setDraftSkill: setSelectedSkill,
+    draftBuiltinBrowser: selectedBuiltinBrowser,
+    setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
@@ -3508,7 +3517,7 @@ export function ChatContainer({
       return
     }
     if (historyLoading) return
-    if (threadMessages.length > 0 || input.trim() || selectedSkill) {
+    if (threadMessages.length > 0 || input.trim() || selectedSkill || selectedBuiltinBrowser) {
       consumePendingHarnessNextAction(threadId)
       return
     }
@@ -3538,6 +3547,8 @@ export function ChatContainer({
     selectedSkill,
     setInput,
     setSelectedSkill,
+    selectedBuiltinBrowser,
+    setSelectedBuiltinBrowser,
     skillsHarnessPreferredPlugin,
     skillsHarnessProjectId,
     skillsLoadTargetProjectId,
@@ -3549,7 +3560,8 @@ export function ChatContainer({
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
-    skillSelected: selectedSkill !== null
+    skillSelected: selectedSkill !== null,
+    browserSelected: selectedBuiltinBrowser
   })
   const atFileMentions = useAtFileMentions({
     input,
@@ -3558,7 +3570,8 @@ export function ChatContainer({
     disabled: slash.mode.kind === "slash" || !workspacePath
   })
   const slashPopoverKind = slash.mode.kind
-  const hasPendingGoalTransportPayload = hasPendingFilePayload || selectedSkill !== null
+  const hasPendingGoalTransportPayload =
+    hasPendingFilePayload || selectedSkill !== null || selectedBuiltinBrowser
   const hasActiveGoalRunning = goalUi.goal?.status === "active"
   const goalControlAllowedWhileLoading =
     streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning
@@ -3651,14 +3664,23 @@ export function ChatContainer({
   const applySkillSelection = useCallback(
     (s: SkillMetadata) => {
       setSelectedSkill(s)
+      setSelectedBuiltinBrowser(false)
       setInput("")
       slashResetSelection()
     },
-    [setInput, slashResetSelection, setSelectedSkill]
+    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
   const applySlashCommand = useCallback(
     (command: SlashCommandItem) => {
+      if (isBuiltinBrowserSlashCommand(command)) {
+        setSelectedSkill(null)
+        setSelectedBuiltinBrowser(true)
+        setInput("")
+        slashResetSelection()
+        return
+      }
+
       const nextInput = command.insertText
       setInput(nextInput)
       slashResetSelection()
@@ -3669,7 +3691,7 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [setInput, slashResetSelection]
+    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
   const applyAtFileMention = useCallback(
@@ -3964,7 +3986,7 @@ export function ChatContainer({
     if (readOnly) return
     if (contextReminderPending) return
     if (
-      (!trimmedInput && !hasPendingFilePayload && !selectedSkill) ||
+      (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
       (isLoading && !allowSubmitWhileLoading) ||
       !stream
@@ -3976,7 +3998,7 @@ export function ChatContainer({
       isGoalSlashTransportSensitiveControlCommandInput(trimmedInput)
     if (goalControlWithPendingTransport) {
       setError(
-        "附件和显式技能不会用于 /goal 控制命令。请先移除附件/技能，或改成 /goal <目标/完成条件>。"
+        "附件、显式技能和内置浏览器模式不会用于 /goal 控制命令。请先移除它们，或改成 /goal <目标/完成条件>。"
       )
       return
     }
@@ -4102,6 +4124,7 @@ export function ChatContainer({
       // Snapshot the skill selection before we clear it — synchronous path, no
       // async gap, so no token/stillOurs needed.
       const skill = selectedSkill
+      const browser = selectedBuiltinBrowser
       let rawMessage = trimmedInput
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
@@ -4134,6 +4157,11 @@ export function ChatContainer({
       }
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
+      const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
+      const visibleUserText = browser ? rawMessage : rawMessage || fallbackUserText
+      if (browser) {
+        rawMessage = formatBuiltinBrowserPrompt(rawMessage)
+      }
       // If user only uploaded files without text, add a default prompt.
       // skill-only sends (text empty, no attachments) still fall into this branch
       // because the default prompt requires attachments — for skill-only we let
@@ -4141,15 +4169,16 @@ export function ChatContainer({
       // When a skill is active we also skip the default prompt: the skill's own
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
-      const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
+      const userText = rawMessage || fallbackUserText
       setInput("")
       setAttachments([])
       setMentionedFiles([])
       if (skill) setSelectedSkill(null)
+      if (browser) setSelectedBuiltinBrowser(false)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
       }
-      insertLog("send: " + (userText || (skill ? `[skill-only: ${skill.name}]` : "")))
+      insertLog("send: " + (visibleUserText || (skill ? `[skill-only: ${skill.name}]` : "")))
 
       const isFirstMessage = threadMessages.length === 0
       // Keep real user intent visible in the transcript. Goal status/pause/clear
@@ -4195,10 +4224,13 @@ export function ChatContainer({
       // therefore renders chip + raw attachment XML instead of chip + 📎 names.
       // That replay-vs-live divergence is a pre-existing limitation of the
       // attachment pipeline and is not introduced by the slash-command code.
-      let displayContent: string = userText
+      let displayContent: string = visibleUserText
       if (attachmentPayload && attachmentPayload.length > 0) {
         const fileNames = attachmentPayload.map((a) => `📎 ${a.filename}`).join("\n")
-        displayContent = `${fileNames}\n\n${userText}`
+        displayContent = `${fileNames}\n\n${visibleUserText}`
+      }
+      if (browser) {
+        displayContent = `${BUILTIN_BROWSER_PROMPT_PREFIX}${displayContent}`
       }
       displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
       if (
@@ -4274,7 +4306,8 @@ export function ChatContainer({
                 .trim()
             : ""
           const titleSource =
-            (isGoalSlashInput ? goalTitleSource : userText) || (skill ? `使用 ${skill.name}` : "")
+            (isGoalSlashInput ? goalTitleSource : visibleUserText) ||
+            (skill ? `使用 ${skill.name}` : browser ? "使用内置浏览器" : "")
           if (titleSource) {
             generateTitleForFirstMessage(threadId, titleSource)
           }
@@ -4392,7 +4425,7 @@ export function ChatContainer({
       }
     }
 
-    // Backspace at start of empty input removes the skill chip.
+    // Backspace at start of empty input removes the selected skill/browser chip.
     // Skip while IME is composing — there Backspace edits the pinyin buffer,
     // not the textarea, and the user doesn't intend to drop the chip.
     if (e.key === "Backspace" && !isComposing && input.length === 0 && mentionedFiles.length > 0) {
@@ -4404,6 +4437,12 @@ export function ChatContainer({
     if (e.key === "Backspace" && !isComposing && selectedSkill && input.length === 0) {
       e.preventDefault()
       setSelectedSkill(null)
+      return
+    }
+
+    if (e.key === "Backspace" && !isComposing && selectedBuiltinBrowser && input.length === 0) {
+      e.preventDefault()
+      setSelectedBuiltinBrowser(false)
       return
     }
 
@@ -5368,6 +5407,8 @@ export function ChatContainer({
       // name as text is never useful.
       const skillParsed = parseSkillUseBlock(original)
       const bodyAfterSkill = skillParsed ? skillParsed.rest : original
+      const browserParsed = parseBuiltinBrowserPrompt(bodyAfterSkill)
+      const bodyAfterBrowser = browserParsed.visibleText
       let missingSkillName: string | null = null
       // Only touch selectedSkill when the edited message itself carried a skill
       // ref. Editing an unrelated old message must NOT silently wipe whatever
@@ -5387,7 +5428,13 @@ export function ChatContainer({
           missingSkillName = skillParsed.skillName
         }
       }
-      const withoutAttachmentPreview = bodyAfterSkill.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "").trim()
+      if (browserParsed.browserSelected) {
+        setSelectedSkill(null)
+        setSelectedBuiltinBrowser(true)
+      }
+      const withoutAttachmentPreview = bodyAfterBrowser
+        .replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "")
+        .trim()
       // For attachment-only messages (no real text), `withoutAttachmentPreview`
       // is empty. Fallback to "" rather than `bodyAfterSkill` — refilling the
       // 📎 line previews into the composer would have them re-sent as literal
@@ -5408,7 +5455,7 @@ export function ChatContainer({
         toast.success("已填充到输入框，编辑后可重新发送")
       }
     },
-    [extractMessageText, setInput, skills, setSelectedSkill]
+    [extractMessageText, setInput, setSelectedBuiltinBrowser, skills, setSelectedSkill]
   )
 
   const handleSetGoalFromMessage = useCallback(
@@ -6406,6 +6453,11 @@ export function ChatContainer({
                           />
                         </div>
                       )}
+                      {selectedBuiltinBrowser && (
+                        <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                          <BuiltinBrowserChip onRemove={() => setSelectedBuiltinBrowser(false)} />
+                        </div>
+                      )}
                       {glowVisible && !pendingUserInput && (
                         <div
                           className={cn(
@@ -6646,7 +6698,10 @@ export function ChatContainer({
                                 type="submit"
                                 disabled={
                                   effectiveInputDisabled ||
-                                  (!input.trim() && !hasPendingFilePayload && !selectedSkill) ||
+                                  (!input.trim() &&
+                                    !hasPendingFilePayload &&
+                                    !selectedSkill &&
+                                    !selectedBuiltinBrowser) ||
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }

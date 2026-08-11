@@ -26,8 +26,10 @@ import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { stripLegacyGoalTransportSummary } from "@/lib/goal-transport-summary"
 import { MessageFeedbackDialog, type DislikeFeedbackPayload } from "./MessageFeedbackDialog"
+import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import { parseBuiltinBrowserPrompt } from "@/features/builtin-browser/builtin-browser"
 import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
@@ -60,6 +62,13 @@ function parseUserVisibleSkillContent(content: string): {
   }
   const legacy = stripLegacyGoalTransportSummary(content)
   return { visibleText: legacy.text, skillName: legacy.skillName }
+}
+
+function parseUserVisibleBrowserContent(content: string): {
+  visibleText: string
+  browserSelected: boolean
+} {
+  return parseBuiltinBrowserPrompt(content)
 }
 
 function parseGoalUserSetMessage(text: string): {
@@ -125,16 +134,19 @@ function parseGoalUserControlMessage(text: string): {
 
 function extractMessagePlainText(
   content: Message["content"],
-  options: { stripSkillUse?: boolean } = {}
+  options: { stripSkillUse?: boolean; stripBuiltinBrowser?: boolean } = {}
 ): string {
   const maybeStrip = options.stripSkillUse ? stripSkillUseBlock : (s: string): string => s
-  if (typeof content === "string") return maybeStrip(content)
+  const stripBrowser = options.stripBuiltinBrowser
+    ? (s: string): string => parseBuiltinBrowserPrompt(s).visibleText
+    : (s: string): string => s
+  if (typeof content === "string") return stripBrowser(maybeStrip(content))
   if (!Array.isArray(content)) return ""
 
   return content
     .map((block) => {
-      if (block.type === "text") return maybeStrip(block.text ?? "")
-      if (typeof block.content === "string") return maybeStrip(block.content)
+      if (block.type === "text") return stripBrowser(maybeStrip(block.text ?? ""))
+      if (typeof block.content === "string") return stripBrowser(maybeStrip(block.content))
       return ""
     })
     .filter(Boolean)
@@ -722,7 +734,10 @@ function MessageBubbleImpl({
 
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
+  const plainTextForCopy = extractMessagePlainText(message.content, {
+    stripSkillUse: isUser,
+    stripBuiltinBrowser: isUser
+  })
   const goalUserSetMessage = isUser ? parseGoalUserSetMessage(plainTextForCopy) : null
   const goalUserControlMessage = isUser ? parseGoalUserControlMessage(plainTextForCopy) : null
 
@@ -789,11 +804,15 @@ function MessageBubbleImpl({
         // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
-        const { visibleText, skillName } = parseUserVisibleSkillContent(displayContent)
+        const skillContent = parseUserVisibleSkillContent(displayContent)
+        const browserContent = parseUserVisibleBrowserContent(skillContent.visibleText)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
-            {skillName && <SkillChip label={skillName} compact className="mr-2" />}
-            {visibleText}
+            {skillContent.skillName && (
+              <SkillChip label={skillContent.skillName} compact className="mr-2" />
+            )}
+            {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
+            {browserContent.visibleText}
           </div>
         )
       }
@@ -809,14 +828,18 @@ function MessageBubbleImpl({
           if (!displayText.trim()) return null
           // Use streaming markdown for assistant text blocks
           if (isUser) {
-            const { visibleText, skillName } = parseUserVisibleSkillContent(displayText)
+            const skillContent = parseUserVisibleSkillContent(displayText)
+            const browserContent = parseUserVisibleBrowserContent(skillContent.visibleText)
             return (
               <div
                 key={index}
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
-                {skillName && <SkillChip label={skillName} compact className="mr-2" />}
-                {visibleText}
+                {skillContent.skillName && (
+                  <SkillChip label={skillContent.skillName} compact className="mr-2" />
+                )}
+                {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
+                {browserContent.visibleText}
               </div>
             )
           }
