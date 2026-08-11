@@ -186,6 +186,7 @@ export interface BrowserScriptLibraryEntry {
   displayName: string
   fileName: string
   hasVariables?: boolean
+  isEdited?: boolean
   recordingSource: BrowserRecordingSource
   threadId: string
   workspacePath: string
@@ -203,6 +204,7 @@ export interface BrowserScriptLibraryUpdateInput {
   fileName: string
   script: string
   displayName?: string | null
+  isEdited?: boolean
 }
 
 export interface BrowserRecordingDraftUpdateInput {
@@ -229,6 +231,7 @@ export interface BrowserScriptExecutionState {
 export interface BrowserScriptLibrarySaveInput {
   description?: string | null
   displayName: string
+  isEdited?: boolean
   recordingSource: BrowserRecordingSource
   script: string
   threadId?: string | null

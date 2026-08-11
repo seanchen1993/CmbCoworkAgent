@@ -177,7 +177,7 @@ export function BrowserAiRecordingResultDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] max-w-5xl gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
+      <DialogContent className="max-h-[88vh] max-w-[1300px] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
         <DialogHeader className="gap-3 border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_9%,transparent),transparent)] px-5 py-4">
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div className="min-w-0">

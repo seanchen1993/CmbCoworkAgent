@@ -74,6 +74,7 @@ function normalizeEntry(value: unknown): BrowserScriptLibraryEntry | null {
     description,
     displayName,
     fileName,
+    isEdited: value.isEdited === true,
     recordingSource,
     threadId,
     workspacePath: resolve(workspacePath)
@@ -198,6 +199,7 @@ export async function saveBrowserScriptLibraryEntry(
       description,
       displayName,
       fileName,
+      isEdited: input.isEdited === true,
       recordingSource,
       threadId,
       workspacePath
@@ -292,11 +294,16 @@ export async function updateBrowserScriptLibraryEntry(
       throw new Error("读取脚本内容失败，请稍后重试")
     }
 
-    const nextEntry =
+    const shouldUpdateDisplayName = Boolean(
       displayName && displayName !== currentEntry.displayName
+    )
+    const shouldMarkEdited = input.isEdited === true && currentEntry.isEdited !== true
+    const nextEntry =
+      shouldUpdateDisplayName || shouldMarkEdited
         ? {
             ...currentEntry,
-            displayName
+            ...(shouldUpdateDisplayName ? { displayName } : {}),
+            ...(shouldMarkEdited ? { isEdited: true } : {})
           }
         : currentEntry
 

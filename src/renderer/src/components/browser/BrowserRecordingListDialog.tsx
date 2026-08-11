@@ -274,7 +274,7 @@ export function BrowserRecordingListDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] max-w-[96vw] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
+      <DialogContent className="max-h-[88vh] max-w-[1300px] gap-0 overflow-hidden border-border/70 p-0 shadow-2xl">
         <DialogHeader className="border-b border-border/70 bg-[linear-gradient(180deg,color-mix(in_srgb,var(--primary)_7%,transparent),transparent)] px-5 pt-2 pb-1">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
@@ -345,6 +345,7 @@ export function BrowserRecordingListDialog({
                             <col />
                             <col className="w-[76px]" />
                             <col className="w-[72px]" />
+                            <col className="w-[72px]" />
                             <col className="w-[120px]" />
                             <col className="w-[80px]" />
                           </colgroup>
@@ -354,6 +355,9 @@ export function BrowserRecordingListDialog({
                               <th className="border-b border-border/70 px-2 py-2.5">录制类型</th>
                               <th className="border-b border-border/70 px-2 py-2.5 text-center">
                                 存在变量
+                              </th>
+                              <th className="border-b border-border/70 px-2 py-2.5 text-center">
+                                是否编辑
                               </th>
                               <th className="border-b border-border/70 px-2 py-2.5">时间</th>
                               <th className="border-b border-border/70 px-2 py-2.5 text-right">
@@ -368,6 +372,7 @@ export function BrowserRecordingListDialog({
                                 isEntryLoading && loadingAction === "execution"
                               const isDeleteLoading = isEntryLoading && loadingAction === "delete"
                               const isSelected = selectedFileName === entry.fileName
+                              const isEdited = entry.isEdited === true || entry.hasVariables === true
 
                               return (
                                 <tr
@@ -406,6 +411,16 @@ export function BrowserRecordingListDialog({
                                       <span className="text-emerald-500">有</span>
                                     ) : (
                                       <span className="text-muted-foreground">无</span>
+                                    )}
+                                  </td>
+                                  <td
+                                    className="px-2 py-3 text-center align-middle text-[11px]"
+                                    title={isEdited ? "用户编辑过脚本或设置过变量" : "未编辑"}
+                                  >
+                                    {isEdited ? (
+                                      <span className="text-emerald-500">是</span>
+                                    ) : (
+                                      <span className="text-muted-foreground">否</span>
                                     )}
                                   </td>
                                   <td
