@@ -20,7 +20,10 @@ export default defineConfig({
       "src/renderer/src/components/dashboard/project-mode-export.test.ts",
       "src/renderer/src/components/update/release-notes.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",
-      "tests/close-to-tray.spec.ts"
+      "tests/close-to-tray.spec.ts",
+      "tests/browser/**/*.test.ts",
+      "src/renderer/src/components/panels/git-panel-file-tree.test.ts",
+      "src/renderer/src/lib/**/*.test.ts"
     ]
   }
 })

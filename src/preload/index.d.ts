@@ -116,6 +116,8 @@ import type {
   BrowserPanelRequest,
   BrowserProfileImportOptions,
   BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
   BrowserRecordingDraftUpdateInput,
   BrowserScreenshotResult,
   ManualRecordingStartOptions,
@@ -1722,6 +1724,9 @@ interface CustomAPI {
     readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
     updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
     deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
+    executeRecordingScript: (input: BrowserScriptExecutionInput) => Promise<void>
+    getScriptExecutionState: () => Promise<BrowserScriptExecutionState>
+    cancelRecordingScriptExecution: () => Promise<boolean>
     getCdpConfig: () => Promise<BrowserCdpConfig>
     isProfileImportRuntimeEnabled: () => Promise<boolean>
     saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
@@ -1730,6 +1735,7 @@ interface CustomAPI {
     disposeAllForRendererUnload: () => void
     onState: (callback: (state: BrowserState) => void) => () => void
     onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
+    onScriptExecutionState: (callback: (state: BrowserScriptExecutionState) => void) => () => void
   }
   lsp: {
     getConfig: () => Promise<LspConfig>

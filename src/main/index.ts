@@ -355,6 +355,12 @@ function schedulePetStartupAfterMainLoad(window: BrowserWindow): void {
 }
 
 function disposeBrowserServiceForMainWindow(reason: string): void {
+  if (isAppQuitting()) {
+    console.info(
+      `${MAIN_BROWSER_LOG_PREFIX} Deferred BrowserView disposal because the app is quitting; reason=${reason}.`
+    )
+    return
+  }
   const disposedSessionId = browserService?.disposeAll() ?? null
   if (disposedSessionId) {
     console.info(`${MAIN_BROWSER_LOG_PREFIX} Disposed BrowserView session ${disposedSessionId} because ${reason}.`)
@@ -1254,7 +1260,7 @@ if (browserNativeMessagingHostLaunch) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
-    browserService?.disposeAll()
+    const browserServiceToDispose = browserService
     browserService = null
     setGlobalBrowserService(null)
     stopBrowserProfileImportRuntime()
@@ -1278,7 +1284,14 @@ if (browserNativeMessagingHostLaunch) {
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
-    ])
+    ]).finally(() => {
+      const disposedSessionId = browserServiceToDispose?.disposeAll() ?? null
+      if (disposedSessionId) {
+        console.info(
+          `${MAIN_BROWSER_LOG_PREFIX} Disposed BrowserView session ${disposedSessionId} after MCP/runtime cleanup.`
+        )
+      }
+    })
 
     const CLEANUP_TIMEOUT_MS = 10_000
     const FORCE_FLUSH_GRACE_MS = 2_000

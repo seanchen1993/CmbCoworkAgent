@@ -29,6 +29,17 @@ function copyResources(): { name: string; closeBundle: () => void } {
       if (existsSync(srcSkills)) {
         copyDirRecursive(srcSkills, destSkills)
       }
+
+      // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
+      // require("./generated/*.js") 加载，因此这里把源码副本同步到
+      // out/main/generated，保证开发和构建产物都能命中相对路径。
+      const srcPlaywrightGenerated = resolve(
+        "src/main/browser/record/common/playwright-codegen/generated"
+      )
+      const destPlaywrightGenerated = resolve("out/main/generated")
+      if (existsSync(srcPlaywrightGenerated)) {
+        copyDirRecursive(srcPlaywrightGenerated, destPlaywrightGenerated)
+      }
     }
   }
 }

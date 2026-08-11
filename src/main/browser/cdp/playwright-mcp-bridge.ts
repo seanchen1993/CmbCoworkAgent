@@ -5,7 +5,7 @@ import type {
 } from "../../mcp/capability-types"
 import { getCurrentBrowserCdpPort } from "./browser-cdp"
 import { getGlobalBrowserService } from "../core/browser-service-registry"
-import { recordSuccessfulAiBrowserToolCall } from "../recording/ai-recording-service"
+import { recordSuccessfulAiBrowserToolCall } from "../record/ai-record/ai-recording-service"
 import {
   BUILTIN_BROWSER_LOG_PREFIX,
   BROWSER_SESSION_ID,

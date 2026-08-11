@@ -9,7 +9,7 @@ import {
   startAiRecording,
   stopAiRecording,
   updateAiRecordingDraft
-} from "../browser/recording/ai-recording-service"
+} from "../browser/record/ai-record/ai-recording-service"
 import {
   getManualRecording,
   installManualRecorderForSubtree,
@@ -18,25 +18,36 @@ import {
   startManualRecording,
   stopManualRecording,
   updateManualRecordingDraft
-} from "../browser/recording/manual-recording-service"
+} from "../browser/record/manual-record/manual-recording-service"
 import {
   deleteBrowserScriptLibraryEntry,
   listBrowserScriptLibraryEntries,
   readBrowserScriptLibraryScript,
   saveBrowserScriptLibraryEntry,
   updateBrowserScriptLibraryEntry
-} from "../browser/recording/browser-script-library-service"
+} from "../browser/record/common/browser-script-library-service"
+import {
+  cancelRecordingScriptExecutionInBuiltinBrowser,
+  executeRecordingScriptInBuiltinBrowser,
+  getBrowserScriptExecutionState,
+  isBrowserScriptExecutionCancelledError,
+  onBrowserScriptExecutionStateChange
+} from "../browser/record/common/browser-script-execution-service"
 import type {
   BrowserRecordingDraftUpdateInput,
   BrowserScriptLibraryDeleteInput,
   BrowserScriptLibraryListOptions,
   BrowserScriptLibraryReadInput,
+  BrowserScriptExecutionInput,
   BrowserScriptLibrarySaveInput,
   BrowserScriptLibraryUpdateInput
 } from "../../shared/browser-types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { getBrowserCdpConfigAsync, saveBrowserCdpConfigAsync } from "../storage"
-import { BUILTIN_BROWSER_LOG_PREFIX } from "../../shared/browser-types"
+import {
+  BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL,
+  BUILTIN_BROWSER_LOG_PREFIX
+} from "../../shared/browser-types"
 import type {
   BrowserAttachOptions,
   AiRecordingStartOptions,
@@ -55,6 +66,11 @@ export function registerBrowserHandlers(
 ): BrowserService {
   const browserService = new BrowserService(getMainWindow)
   setGlobalBrowserService(browserService)
+  const disposeScriptExecutionStateForwarder = onBrowserScriptExecutionStateChange((state) => {
+    const window = getMainWindow()
+    if (!window || window.isDestroyed()) return
+    window.webContents.send(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, state)
+  })
 
   ipcMain.handle("browser:attach", (_event, options?: BrowserAttachOptions) => {
     return browserService.attach(options)
@@ -191,6 +207,24 @@ export function registerBrowserHandlers(
   )
 
   ipcMain.handle(
+    "browser:executeRecordingScript",
+    async (_event, input: BrowserScriptExecutionInput): Promise<void> => {
+      try {
+        await executeRecordingScriptInBuiltinBrowser(input)
+      } catch (error) {
+        if (isBrowserScriptExecutionCancelledError(error)) return
+        throw error
+      }
+    }
+  )
+
+  ipcMain.handle("browser:getScriptExecutionState", () => getBrowserScriptExecutionState())
+
+  ipcMain.handle("browser:cancelRecordingScriptExecution", async () => {
+    return cancelRecordingScriptExecutionInBuiltinBrowser()
+  })
+
+  ipcMain.handle(
     "browser:saveCdpConfig",
     async (_event, updates?: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> => {
       const sanitized: Partial<BrowserCdpConfig> = {}
@@ -217,5 +251,6 @@ export function registerBrowserHandlers(
 
   ipcMain.handle("browser:captureScreenshot", () => browserService.captureScreenshot())
 
+  void disposeScriptExecutionStateForwarder
   return browserService
 }

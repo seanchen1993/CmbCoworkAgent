@@ -16,11 +16,12 @@ import {
 } from "../../../shared/browser-types"
 import {
   getManualRecording,
+  installManualRecorderForFrameById,
   installManualRecorderForSubtree,
   markNextManualNavigationExplicit,
   recordManualRecorderConsoleMessage,
   recordManualNavigation
-} from "../recording/manual-recording-service"
+} from "../record/manual-record/manual-recording-service"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -679,10 +680,24 @@ export class BrowserService {
       ensureManualRecorder()
     })
     webContents.on("frame-created", (_event, details) => {
-      if (!details.frame) return
-      if (getManualRecording().status !== "recording") return
-      void installManualRecorderForSubtree(details.frame)
+      const createdFrame = details.frame
+      if (!createdFrame) return
+      // The frame tree entry can exist before the child document is ready.
+      // Wait for the frame's own dom-ready so we don't initialize against a
+      // transient document and accidentally block later retries.
+      createdFrame.once("dom-ready", () => {
+        if (getManualRecording().status !== "recording") return
+        if (createdFrame.detached || createdFrame.isDestroyed()) return
+        void installManualRecorderForSubtree(createdFrame)
+      })
     })
+    webContents.on(
+      "did-frame-finish-load",
+      (_event, _isMainFrame, frameProcessId, frameRoutingId) => {
+        if (getManualRecording().status !== "recording") return
+        void installManualRecorderForFrameById(frameProcessId, frameRoutingId)
+      }
+    )
     webContents.on("page-title-updated", () => {
       emit()
     })
