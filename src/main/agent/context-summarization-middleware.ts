@@ -1056,6 +1056,61 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     return countTokensApproximately(countedMessages, toolsArray)
   }
 
+  function reportedUsageTokens(message: AIMessage): number | null {
+    const responseMetadata = message.response_metadata as Record<string, unknown> | undefined
+    const candidates = [
+      message.usage_metadata,
+      responseMetadata?.token_usage,
+      responseMetadata?.usage,
+      message.additional_kwargs?.usage_metadata
+    ]
+
+    const finiteNonNegative = (value: unknown): number | null =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object") continue
+      const usage = candidate as Record<string, unknown>
+      const total = finiteNonNegative(usage.total_tokens ?? usage.totalTokens)
+      if (total != null && total > 0) return total
+
+      const input = finiteNonNegative(
+        usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens ?? usage.promptTokens
+      )
+      const output = finiteNonNegative(
+        usage.output_tokens ??
+          usage.outputTokens ??
+          usage.completion_tokens ??
+          usage.completionTokens
+      )
+      if (input != null && input > 0) return input + (output ?? 0)
+    }
+    return null
+  }
+
+  /**
+   * Anchor proactive compaction to the latest provider-reported context size,
+   * then estimate only messages appended after that response. The full local
+   * estimate remains a fallback for providers that omit usage metadata and a
+   * guard for changed system prompts or tool schemas.
+   */
+  function countTokensForTrigger(
+    messages: BaseMessage[],
+    systemMessage?: SystemMessage | unknown,
+    tools?: (ServerTool | ClientTool)[] | unknown[]
+  ): number {
+    const approximateTotal = countTotalTokens(messages, systemMessage, tools)
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (!AIMessage.isInstance(message)) continue
+      const reportedTokens = reportedUsageTokens(message)
+      if (reportedTokens == null) continue
+      const appendedTokens = countTokensApproximately(messages.slice(index + 1))
+      return Math.max(approximateTotal, Math.ceil(reportedTokens + appendedTokens))
+    }
+    return approximateTotal
+  }
+
   function compactToolResults(
     messages: BaseMessage[],
     maxInputTokens: number,
@@ -1740,8 +1795,13 @@ ${summary}
         request.tools
       )
       const totalTokens = countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
+      const triggerTokens = countTokensForTrigger(
+        truncatedMessages,
+        request.systemMessage,
+        request.tools
+      )
 
-      if (!shouldSummarize(truncatedMessages, totalTokens, maxInputTokens)) {
+      if (!shouldSummarize(truncatedMessages, triggerTokens, maxInputTokens)) {
         try {
           return await handler({ ...request, messages: truncatedMessages })
         } catch (error) {

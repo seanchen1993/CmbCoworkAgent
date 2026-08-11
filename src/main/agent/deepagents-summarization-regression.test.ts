@@ -266,6 +266,85 @@ describe("CmbCowork context compaction middleware", () => {
     expect(handler).toHaveBeenCalledTimes(1)
   })
 
+  it("uses provider-reported usage as a lower bound for proactive compaction", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("reported usage trigger")))
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1_000 },
+      keepTokens: 1
+    })
+
+    await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("short earlier request"),
+          new AIMessage({
+            content: "short earlier response",
+            usage_metadata: { input_tokens: 1_200, output_tokens: 100, total_tokens: 1_300 }
+          }),
+          new HumanMessage("continue")
+        ],
+        state: {},
+        tools: []
+      },
+      handler
+    )
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("adds messages after the latest reported usage when checking the trigger", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("reported usage tail")))
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1_000 },
+      keepTokens: 1
+    })
+
+    await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("short earlier request"),
+          new AIMessage({
+            content: "short earlier response",
+            response_metadata: {
+              usage: { prompt_tokens: 700, completion_tokens: 100 }
+            }
+          }),
+          new HumanMessage(`new content after the response ${"x".repeat(1_600)}`)
+        ],
+        state: {},
+        tools: []
+      },
+      handler
+    )
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps approximate counting when the provider omits usage metadata", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("unused")))
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1_000 },
+      keepTokens: 1
+    })
+
+    await middleware.wrapModelCall(
+      {
+        messages: [new HumanMessage("short request without usage metadata")],
+        state: {},
+        tools: []
+      },
+      handler
+    )
+
+    expect(invoke).not.toHaveBeenCalled()
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
   it("enters compaction when a compatible gateway reports a known unbranded overflow", async () => {
     const invoke = vi.fn(async () => new AIMessage(validSummary("MiniMax overflow recovery")))
     const handler = vi
