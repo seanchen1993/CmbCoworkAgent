@@ -1,6 +1,5 @@
 export const MODEL_INPUT_SAFETY_BUFFER_TOKENS = 1_000
 export const SUMMARIZATION_KEEP_RATIO = 0.1
-export const MIN_SUMMARIZATION_KEEP_TOKENS = 4_000
 
 export function calculateSummarizationKeepTokens(contextWindowTokens: number): number {
   const contextWindow = Math.floor(contextWindowTokens)
@@ -8,10 +7,7 @@ export function calculateSummarizationKeepTokens(contextWindowTokens: number): n
     throw new Error("Context window must be positive.")
   }
 
-  return Math.max(
-    Math.floor(contextWindow * SUMMARIZATION_KEEP_RATIO),
-    MIN_SUMMARIZATION_KEEP_TOKENS
-  )
+  return Math.max(1, Math.floor(contextWindow * SUMMARIZATION_KEEP_RATIO))
 }
 
 export function calculateMaxCompatibleOutputTokens(contextWindowTokens: number): number {
