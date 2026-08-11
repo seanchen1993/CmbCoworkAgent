@@ -94,7 +94,7 @@ function testMiddlewareBeforeSummarizationAndHITL(): void {
   // context management): the queue middleware immediately precedes it in the array.
   assertMatches(
     after,
-    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createSummarizationMiddleware\(mainSummarizationOptions\)/,
+    /createCurrentRunMessageQueueMiddleware\(currentRunMessageQueueOwnerToken\),\s*\n\s*createCmbSummarizationMiddleware\(mainSummarizationOptions\)/,
     "queue middleware immediately precedes summarization on the main stack"
   )
   // afterModel must sit before HITL in the array so an approval interrupt preempts
@@ -2193,12 +2193,6 @@ function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   const submitBody = chat.slice(submitStart, submitStart + 9000)
   assertSourceOrder(
     submitBody,
-    "projectSubagentsAvailable === null",
-    "canClaimQueuedMessage(queued, currentQueued)",
-    "pump waits for project subagent policy before claiming the queued draft"
-  )
-  assertSourceOrder(
-    submitBody,
     "await loadResolvedAgentMode()",
     "canClaimQueuedMessage(queued, currentQueued)",
     "pump revalidates the authoritative draft after asynchronous mode hydration"
@@ -2214,12 +2208,6 @@ function testPumpClaimsCurrentVersionAndWaitsForHandoff(): void {
   )
   const pumpStart = chat.indexOf("// Auto-drain the queue head once the thread is idle")
   const pumpBody = chat.slice(pumpStart, pumpStart + 3000)
-  assertSourceOrder(
-    pumpBody,
-    "isProjectModeAgentContext && projectSubagentsAvailable === null",
-    "tryAcquireSubmitInFlightLock",
-    "auto-drain waits for project subagent policy before acquiring the submit lock"
-  )
   assertIncludes(
     pumpBody,
     "if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return",

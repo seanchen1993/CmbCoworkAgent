@@ -36,6 +36,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessProjectModeSubagentConfig,
+  HarnessRequestUserInputConfig,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
@@ -447,22 +448,19 @@ function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): bool
 function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
   if (adapter.type !== "plugin") return null
   const plugins = getPlugins().filter(pluginHasBoardConfig)
+  const adapterId = normalizeText(adapter.id).trim()
+  if (adapterId) {
+    const plugin = plugins.find((item) => pluginAdapterId(item) === adapterId)
+    if (plugin) return plugin
+  }
+
   const adapterName = normalizeText(adapter.name).trim()
   if (adapterName) {
     const plugin = plugins.find((item) => item.name === adapterName)
     if (plugin) return plugin
   }
 
-  const adapterId = normalizeText(adapter.id).trim()
-  if (!adapterId) return null
-  return plugins.find((item) => pluginMatchesAdapterId(item, adapterId)) ?? null
-}
-
-function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
-  if (adapter.type !== "plugin") return null
-  const adapterName = normalizeText(adapter.name).trim()
-  if (!adapterName) return null
-  return getPlugins().find((item) => item.name === adapterName) ?? null
+  return null
 }
 
 function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
@@ -559,7 +557,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
-  return findPluginByAdapterName(adapter)
+  return findPluginForAdapterSnapshot(adapter)
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -897,11 +895,6 @@ function readBoardConfigInspectCommand(
 function boardConfigPublicAgentmdDeployUnits(cwd: string): string[] {
   const parsed = readBoardConfig(cwd)
   return parsed ? uniqueStringsInOrder(parsed.supported_deploy_units) : []
-}
-
-function boardConfigEnableTaskTool(cwd: string): boolean | undefined {
-  const parsed = readBoardConfig(cwd)
-  return typeof parsed?.enable_task_tool === "boolean" ? parsed.enable_task_tool : undefined
 }
 
 function boardConfigSupportsSessionContextInjection(cwd: string): boolean {
@@ -2318,6 +2311,7 @@ export function saveHarnessLeanTokenConfig(input: HarnessLeanTokenConfig): Harne
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
   const harnessAdapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
+  const resolvedAdapter = plugin ? pluginToHarnessAdapterSnapshot(plugin) : harnessAdapter
   const boardCompatibility = evaluateBoardPluginCompatibility(
     plugin,
     harnessAdapter.name || harnessAdapter.id
@@ -2340,9 +2334,9 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     sessionWorkspacePath: project.sessionWorkspacePath,
     systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     harnessAdapter: {
-      id: harnessAdapter.id,
-      name: harnessAdapter.name,
-      type: harnessAdapter.type
+      id: resolvedAdapter.id,
+      name: resolvedAdapter.name,
+      type: resolvedAdapter.type
     },
     creator: project.creator,
     boardCompatibility,
@@ -2708,7 +2702,6 @@ export function readHarnessFeatureMetadata(
 export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   enableAgentsPrompt?: boolean
-  enableTaskTool?: boolean
   agentConfig?: HarnessAgentConfig
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
@@ -2734,6 +2727,8 @@ export interface HarnessFeatureAgentContext {
 
 export interface HarnessFeatureAgentContextOptions {
   workspacePath?: string
+  /** Resolve tool policy from the plugin while a project feature session is created. */
+  requestUserInputConfigSource?: "plugin" | "session_snapshot"
 }
 
 function isHarnessSessionContextOk(value: unknown): boolean {
@@ -2744,11 +2739,56 @@ export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
 
 export interface HarnessAgentConfig {
   agentMode?: HarnessRuntimeAgentMode
-  toolConfig?: Record<string, { enabled?: boolean }>
   subagentConfig?: HarnessProjectModeSubagentConfig
+  toolConfig?: {
+    requestUserInput?: HarnessRequestUserInputConfig
+  }
 }
 
-const HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS = new Set(["task"])
+export const DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: HarnessRequestUserInputConfig = {
+  allowAutoResolution: false,
+  autoResolutionType: "select_first"
+}
+
+const REQUEST_USER_INPUT_TIMEOUT_MIN_MS = 30_000
+const REQUEST_USER_INPUT_TIMEOUT_MAX_MS = 240_000
+const REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS = 1_000
+
+function normalizeHarnessRequestUserInputConfig(
+  value: unknown
+): HarnessRequestUserInputConfig | undefined {
+  if (!isObject(value)) return undefined
+
+  if (value.allowAutoResolution !== true) {
+    return { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+  }
+
+  const defaultTimeoutMs =
+    typeof value.defaultTimeoutMs === "number" &&
+    Number.isInteger(value.defaultTimeoutMs) &&
+    value.defaultTimeoutMs >= REQUEST_USER_INPUT_TIMEOUT_MIN_MS &&
+    value.defaultTimeoutMs <= REQUEST_USER_INPUT_TIMEOUT_MAX_MS
+      ? value.defaultTimeoutMs
+      : undefined
+  const userMessage = normalizeText(value.userMessage).trim()
+  const autoResolutionType = value.autoResolutionType === "user_message" && userMessage
+    ? "user_message"
+    : "select_first"
+
+  return {
+    allowAutoResolution: true,
+    ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+    autoResolutionType,
+    ...(autoResolutionType === "user_message"
+      ? { userMessage: userMessage.slice(0, REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS) }
+      : {})
+  }
+}
+
+function resolveHarnessRequestUserInputConfig(value: unknown): HarnessRequestUserInputConfig {
+  const normalized = normalizeHarnessRequestUserInputConfig(value)
+  return normalized ?? { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+}
 
 function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undefined {
   if (!isObject(value)) return undefined
@@ -2759,16 +2799,6 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
     value.agentMode === "agent_team"
       ? value.agentMode
       : undefined
-  const toolConfig: Record<string, { enabled?: boolean }> = {}
-  if (isObject(value.toolConfig)) {
-    for (const [toolName, config] of Object.entries(value.toolConfig)) {
-      if (!HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS.has(toolName) || !isObject(config)) continue
-      if (typeof config.enabled === "boolean") {
-        toolConfig[toolName] = { enabled: config.enabled }
-      }
-    }
-  }
-
   const normalizeStringList = (input: unknown): string[] => {
     if (!Array.isArray(input)) return []
     return [
@@ -2789,11 +2819,17 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
       }
     : undefined
 
-  if (!agentMode && Object.keys(toolConfig).length === 0 && !subagentConfig) return undefined
+  const requestUserInputConfig = isObject(value.toolConfig)
+    ? normalizeHarnessRequestUserInputConfig(value.toolConfig.requestUserInput)
+    : undefined
+
+  if (!agentMode && !subagentConfig && !requestUserInputConfig) return undefined
   return {
     ...(agentMode ? { agentMode } : {}),
-    ...(Object.keys(toolConfig).length > 0 ? { toolConfig } : {}),
-    ...(subagentConfig ? { subagentConfig } : {})
+    ...(subagentConfig ? { subagentConfig } : {}),
+    ...(requestUserInputConfig
+      ? { toolConfig: { requestUserInput: requestUserInputConfig } }
+      : {})
   }
 }
 
@@ -2897,7 +2933,6 @@ export function buildHarnessFeatureAgentContext(
   const plugin = findAdapterPlugin(project)
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  const boardConfigTaskToolEnabled = boardConfigEnableTaskTool(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const featureBinding = findFeatureDeployUnitBinding(project.projectId, feature.slug)
   const sessionContextInjectionSource =
@@ -2918,9 +2953,18 @@ export function buildHarnessFeatureAgentContext(
   const sessionContextInjectResult = usePluginAgentsPrompt
     ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, { sessionWorkspacePath })
     : undefined
-  const agentConfig = sessionContextInjectResult?.agentConfig
-  const enableTaskTool =
-    agentConfig?.toolConfig?.task?.enabled ?? boardConfigTaskToolEnabled
+  const pluginAgentConfig = sessionContextInjectResult?.agentConfig
+  const persistedToolConfig = isObject(metadata) && isObject(metadata.harnessFeature)
+    ? metadata.harnessFeature.requestUserInputConfig
+    : undefined
+  const requestUserInputConfig =
+    options.requestUserInputConfigSource === "plugin"
+      ? resolveHarnessRequestUserInputConfig(pluginAgentConfig?.toolConfig?.requestUserInput)
+      : resolveHarnessRequestUserInputConfig(persistedToolConfig)
+  const agentConfig: HarnessAgentConfig = {
+    ...(pluginAgentConfig ?? {}),
+    toolConfig: { requestUserInput: requestUserInputConfig }
+  }
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
   const additionalWorkspaceRootMappings = resolveHarnessAdditionalWorkspaceRootMappings(
@@ -2940,7 +2984,6 @@ export function buildHarnessFeatureAgentContext(
   return {
     systemPromptInject,
     enableAgentsPrompt: !pluginPromptLoaded,
-    ...(enableTaskTool !== undefined ? { enableTaskTool } : {}),
     ...(agentConfig ? { agentConfig } : {}),
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
@@ -3050,13 +3093,6 @@ export function getHarnessProjectPublicAgentmdDeployUnits(projectId: string): st
   )
   if (!boardCompatibility.compatible) return []
   return boardConfigPublicAgentmdDeployUnits(plugin.path)
-}
-
-export function resolveHarnessProjectTaskToolEnabled(projectId: string): boolean | undefined {
-  const normalizedProjectId = normalizeText(projectId).trim()
-  if (!normalizedProjectId) return undefined
-  const project = requireProject(normalizedProjectId)
-  return boardConfigEnableTaskTool(adapterPluginDir(project))
 }
 
 export function getHarnessLocalAgentmdDeployUnitMappings(

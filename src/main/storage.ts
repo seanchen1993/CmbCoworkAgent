@@ -63,6 +63,11 @@ import {
 import { getBundledBuiltinModelApiKey } from "./models/builtin-credential"
 import type { BrowserCdpConfig } from "../shared/browser-types"
 import { DEFAULT_BROWSER_CDP_PORT } from "../shared/browser-types"
+import {
+  calculateMaxCompatibleOutputTokens,
+  calculateSummarizationTriggerTokens
+} from "../shared/model-token-budget"
+
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
@@ -1179,6 +1184,18 @@ function normalizeMaxOutputTokens(value: unknown): number {
   return Math.min(MAX_MAX_OUTPUT_TOKENS, Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(value)))
 }
 
+function normalizeStoredModelTokenBudget(
+  maxTokensValue: unknown,
+  maxOutputTokensValue: unknown
+): { maxTokens: number; maxOutputTokens: number } {
+  const maxTokens = normalizeMaxTokens(maxTokensValue)
+  const maxOutputTokens = Math.min(
+    normalizeMaxOutputTokens(maxOutputTokensValue),
+    calculateMaxCompatibleOutputTokens(maxTokens)
+  )
+  return { maxTokens, maxOutputTokens }
+}
+
 function normalizeTemperature(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_TEMPERATURE
@@ -1567,6 +1584,7 @@ function toPublicConfig(
   config: StoredCustomModelRecord,
   env?: Record<string, string>
 ): CustomModelPublicConfig {
+  const tokenBudget = normalizeStoredModelTokenBudget(config.maxTokens, config.maxOutputTokens)
   const enableThinking = resolveEnableThinkingSetting(
     config.enableThinking,
     config.interleavedThinking
@@ -1577,8 +1595,8 @@ function toPublicConfig(
     baseUrl: config.baseUrl,
     model: config.model,
     hasApiKey: !!getCustomModelApiKey(config.id, env),
-    maxTokens: normalizeMaxTokens(config.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(config.maxOutputTokens),
+    maxTokens: tokenBudget.maxTokens,
+    maxOutputTokens: tokenBudget.maxOutputTokens,
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
@@ -1598,6 +1616,7 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
   migrateLegacyCustomModel()
   const env = parseEnvFile()
   return readCustomModelsRaw().map((item) => {
+    const tokenBudget = normalizeStoredModelTokenBudget(item.maxTokens, item.maxOutputTokens)
     const enableThinking = resolveEnableThinkingSetting(
       item.enableThinking,
       item.interleavedThinking
@@ -1608,8 +1627,8 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
       baseUrl: item.baseUrl,
       model: item.model,
       apiKey: getCustomModelApiKey(item.id, env),
-      maxTokens: normalizeMaxTokens(item.maxTokens),
-      maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
+      maxTokens: tokenBudget.maxTokens,
+      maxOutputTokens: tokenBudget.maxOutputTokens,
       temperature: normalizeTemperature(item.temperature),
       topP: normalizeTopP(item.topP),
       topK: normalizeTopK(item.topK),
@@ -1630,6 +1649,7 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
   migrateLegacyCustomModel()
   const record = readCustomModelsRaw().find((item) => item.id === id)
   if (!record) return null
+  const tokenBudget = normalizeStoredModelTokenBudget(record.maxTokens, record.maxOutputTokens)
   const enableThinking = resolveEnableThinkingSetting(
     record.enableThinking,
     record.interleavedThinking
@@ -1640,8 +1660,8 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     baseUrl: record.baseUrl,
     model: record.model,
     apiKey: getCustomModelApiKey(record.id),
-    maxTokens: normalizeMaxTokens(record.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(record.maxOutputTokens),
+    maxTokens: tokenBudget.maxTokens,
+    maxOutputTokens: tokenBudget.maxOutputTokens,
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
@@ -1672,6 +1692,7 @@ export function upsertCustomModelConfig(
 
   const validatedMaxTokens = assertValidMaxTokens(config.maxTokens)
   const validatedMaxOutputTokens = assertValidMaxOutputTokens(config.maxOutputTokens)
+  calculateSummarizationTriggerTokens(validatedMaxTokens, validatedMaxOutputTokens)
   const validatedTemperature = assertValidTemperature(config.temperature)
   const validatedTopP = assertValidTopP(config.topP)
   const validatedTopK = assertValidTopK(config.topK)

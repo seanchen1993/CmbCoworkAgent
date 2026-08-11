@@ -11,6 +11,11 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import {
+  calculateSummarizationKeepTokens,
+  calculateSummarizationTriggerTokens,
+  MODEL_INPUT_SAFETY_BUFFER_TOKENS
+} from "../../../../shared/model-token-budget"
 
 interface CustomModelDialogProps {
   open: boolean
@@ -230,6 +235,24 @@ function getMaxOutputTokensError(value: string, limits: TokenLimits): string | n
   return null
 }
 
+function getTokenBudgetError(maxTokensValue: string, maxOutputTokensValue: string): string | null {
+  const maxTokens = parseMaxTokens(maxTokensValue)
+  const maxOutputTokens = parseMaxOutputTokens(maxOutputTokensValue)
+  if (maxTokens === null || maxOutputTokens === null) return null
+
+  try {
+    calculateSummarizationTriggerTokens(maxTokens, maxOutputTokens)
+    return null
+  } catch {
+    const keepTokens = calculateSummarizationKeepTokens(maxTokens)
+    const maxAllowedOutput = Math.max(
+      maxTokens - MODEL_INPUT_SAFETY_BUFFER_TOKENS - keepTokens - 1,
+      0
+    )
+    return `最大 Tokens 过大：当前上下文窗口下最多为 ${maxAllowedOutput.toLocaleString()}，需预留 ${keepTokens.toLocaleString()} Tokens 的近期上下文及 ${MODEL_INPUT_SAFETY_BUFFER_TOKENS.toLocaleString()} Tokens 的安全空间`
+  }
+}
+
 function parseTemperature(value: string): number | null {
   const trimmed = value.trim()
   if (!trimmed) return null
@@ -373,6 +396,10 @@ export function CustomModelDialog({
 
   const maxTokensError = getMaxTokensError(config.maxTokensInput, tokenLimits)
   const maxOutputTokensError = getMaxOutputTokensError(config.maxOutputTokensInput, tokenLimits)
+  const tokenBudgetError =
+    maxTokensError || maxOutputTokensError
+      ? null
+      : getTokenBudgetError(config.maxTokensInput, config.maxOutputTokensInput)
   const temperatureError = getTemperatureError(config.temperatureInput, tokenLimits)
   const topPError = getTopPError(config.topPInput, tokenLimits)
   const topKError = getTopKError(config.topKInput, tokenLimits)
@@ -393,6 +420,7 @@ export function CustomModelDialog({
     (hasExistingKey || config.apiKey.trim()) &&
     !maxTokensError &&
     !maxOutputTokensError &&
+    !tokenBudgetError &&
     !temperatureError &&
     !topPError &&
     !topKError &&
@@ -465,6 +493,7 @@ export function CustomModelDialog({
     if (!canSave) {
       if (maxTokensError) setFormError(maxTokensError)
       else if (maxOutputTokensError) setFormError(maxOutputTokensError)
+      else if (tokenBudgetError) setFormError(tokenBudgetError)
       else if (temperatureError) setFormError(temperatureError)
       else if (topPError) setFormError(topPError)
       else if (topKError) setFormError(topKError)
@@ -835,6 +864,9 @@ export function CustomModelDialog({
                   />
                   {maxOutputTokensError && (
                     <p className="text-xs text-destructive">{maxOutputTokensError}</p>
+                  )}
+                  {tokenBudgetError && (
+                    <p className="text-xs text-destructive">{tokenBudgetError}</p>
                   )}
                 </div>
 

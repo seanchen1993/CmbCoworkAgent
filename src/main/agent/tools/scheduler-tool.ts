@@ -10,7 +10,11 @@ import {
   getTaskRunHistory
 } from "../../storage"
 import { runTaskNow, isTaskRunning } from "../../services/scheduler"
-import { runHeartbeatNow, isHeartbeatRunning } from "../../services/heartbeat"
+import {
+  runHeartbeatNow,
+  isHeartbeatRunning,
+  assertHeartbeatCanStart
+} from "../../services/heartbeat"
 import { getCheckpointer } from "../runtime"
 
 function notifyRenderer(channel: string): void {
@@ -357,8 +361,10 @@ export function createSchedulerTool(context: SchedulerToolContext) {
         }
 
         case "wake": {
-          if (isHeartbeatRunning()) {
-            return "Error: heartbeat is already running"
+          try {
+            assertHeartbeatCanStart()
+          } catch (error) {
+            return `Error: ${error instanceof Error ? error.message : String(error)}`
           }
           const hbConfig = getHeartbeatConfig()
           if (!hbConfig.enabled) {

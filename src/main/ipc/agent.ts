@@ -86,7 +86,8 @@ import {
   didHarnessSystemConstraintsLoadSuccessfully,
   type HarnessAgentmdLoadStatusItem,
   type HarnessDeployUnitMapping,
-  type HarnessProjectModeSubagentConfig
+  type HarnessProjectModeSubagentConfig,
+  type HarnessRequestUserInputConfig
 } from "../../shared/harness-board-types"
 import {
   checkpointHasInterrupt,
@@ -222,6 +223,12 @@ import {
   type FailureFuseDecision,
   type FailureFuseHaltError
 } from "../agent/failure-fuse"
+import {
+  clearActionStationarityState,
+  clearActionStationarityTurn,
+  getActionStationarityHaltError,
+  type ActionStationarityHaltError
+} from "../agent/action-stationarity"
 import { activateSkillLifecycle, formatSkillHookContext } from "../agent/skill-lifecycle/activation"
 import {
   formatSkillUseBlock,
@@ -287,9 +294,9 @@ import {
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import {
   buildHarnessFeatureAgentContext,
+  DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG,
   markHarnessProjectSystemConstraintsLoaded,
   readHarnessFeatureMetadata,
-  resolveHarnessProjectTaskToolEnabled,
   resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
@@ -724,8 +731,8 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
-  enableTaskTool?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig
+  requestUserInputConfig?: HarnessRequestUserInputConfig
   isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
@@ -807,22 +814,14 @@ function getHarnessAgentContext(
       : undefined
   const isHarnessProjectSession = Boolean(harnessProjectSession)
   const harnessFeature = readHarnessFeatureMetadata(metadata)
-  const isHarnessProjectContext = isHarnessProjectSession || Boolean(harnessFeature)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const projectSessionTaskToolEnabled =
-      typeof harnessProjectSession?.projectId === "string"
-        ? resolveHarnessProjectTaskToolEnabled(harnessProjectSession.projectId)
-        : undefined
     const featureContext = buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
       return {
         ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-        ...(projectSessionTaskToolEnabled !== undefined
-          ? { enableTaskTool: projectSessionTaskToolEnabled }
-          : {}),
         ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
       }
     }
@@ -840,8 +839,8 @@ function getHarnessAgentContext(
     return {
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
-      enableTaskTool: featureContext.enableTaskTool,
       subagentConfig: featureContext.agentConfig?.subagentConfig,
+      requestUserInputConfig: featureContext.agentConfig?.toolConfig?.requestUserInput,
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
       additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
@@ -866,9 +865,12 @@ function getHarnessAgentContext(
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
     return {
       ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-      ...(isHarnessProjectContext ? { enableTaskTool: false } : {}),
       ...(harnessFeature
-        ? { featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }
+        ? {
+            featureId: harnessFeature.slug,
+            harnessProjectId: harnessFeature.projectId,
+            requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+          }
         : {}),
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
     }
@@ -1282,6 +1284,26 @@ function sendFailureFuseNotice(
   })
 }
 
+function sendActionStationarityHalt(
+  window: BrowserWindow,
+  channel: string,
+  error: ActionStationarityHaltError
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "action_stationarity_tripped",
+      action: "halt",
+      reason: error.decision.reason,
+      toolName: error.decision.toolName,
+      fingerprint: error.decision.fingerprint,
+      count: error.decision.count,
+      threshold: error.decision.threshold
+    }
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
 /**
  * Thread-scoped hook state shared across IPC handler boundaries. A new
  * `agent:invoke` starts a fresh turn, but keeps the thread-level persistent
@@ -1328,6 +1350,7 @@ function resetTurnStateForNewInvoke(
   initialUserMessage?: string,
   turnId?: string
 ): void {
+  if (state.turnId) clearActionStationarityTurn(threadId, state.turnId)
   const snapshot = state.hookScope.snapshot()
   state.hookScope = createPersistentThreadHookScope(threadId)
   state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
@@ -1370,6 +1393,8 @@ function ensureTurnId(turnState: TurnState, threadId: string, label: string): st
 }
 
 function disposeTurnState(threadId: string): void {
+  const state = turnStates.get(threadId)
+  if (state?.turnId) clearActionStationarityTurn(threadId, state.turnId)
   turnStates.delete(threadId)
   clearAdoptionContext(threadId)
   discardAgentAutoCommitTracking(threadId)
@@ -1392,9 +1417,11 @@ export function disposeAllAgentThreadStates(): void {
     clearAdoptionContext(threadId)
   }
   turnStates.clear()
+  clearActionStationarityState()
 }
 
 function disposeTurnRuntimeState(threadId: string, state: TurnState): void {
+  if (state.turnId) clearActionStationarityTurn(threadId, state.turnId)
   state.skillUseTracker = createSkillUseTracker()
   state.skillHookKeys = new Set<string>()
   state.stopContextCollector = new StopHookContextCollector()
@@ -8760,6 +8787,30 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
+        const actionStationarityHalt = getActionStationarityHaltError(error)
+        if (actionStationarityHalt) {
+          clearCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn(
+            "[Agent] Repeated identical tool calls halted turn:",
+            actionStationarityHalt.decision.reason
+          )
+          pauseActiveGoalForRuntimeStop(actionStationarityHalt.decision.reason)
+          sendActionStationarityHalt(window, channel, actionStationarityHalt)
+          syncUsedSkillsContext()
+          tracer.finish("cancelled", actionStationarityHalt.decision.reason).catch(() => {})
+          if (invokeRoutingResult) {
+            rememberRoutingFeedback(threadId, {
+              resolvedTier: invokeRoutingResult.resolvedTier,
+              resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+              outcome: "cancelled",
+              toolCallCount: toolCallCounter.getCount(),
+              toolErrorCount,
+              lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+            })
+          }
+          turnStateShouldDispose = true
+          return
+        }
         const failureFuseHalt = getFailureFuseHaltError(error)
         if (failureFuseHalt) {
           clearCoordinatorNotificationSelectedSkillsOnExit = true
@@ -9956,6 +10007,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
+        const actionStationarityHalt = getActionStationarityHaltError(error)
+        if (actionStationarityHalt) {
+          clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn(
+            "[Agent] Resume repeated identical tool calls halted turn:",
+            actionStationarityHalt.decision.reason
+          )
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            actionStationarityHalt.decision.reason,
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
+          sendActionStationarityHalt(window, channel, actionStationarityHalt)
+          turnStateShouldDispose = true
+          return
+        }
         const failureFuseHalt = getFailureFuseHaltError(error)
         if (failureFuseHalt) {
           clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
@@ -10992,6 +11062,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           boundaryGoalActiveWindowId
         )
         sendHookHalt(window, channel, error)
+        turnStateShouldDispose = true
+        return
+      }
+      const actionStationarityHalt = getActionStationarityHaltError(error)
+      if (actionStationarityHalt) {
+        console.warn(
+          "[Agent] Interrupt repeated identical tool calls halted turn:",
+          actionStationarityHalt.decision.reason
+        )
+        pauseActiveGoalAfterBoundary(
+          threadId,
+          window,
+          channel,
+          actionStationarityHalt.decision.reason,
+          boundaryGoalId,
+          boundaryGoalActiveWindowId
+        )
+        sendActionStationarityHalt(window, channel, actionStationarityHalt)
         turnStateShouldDispose = true
         return
       }

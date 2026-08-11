@@ -24,14 +24,17 @@ import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
 import { emitAppAttention } from "../app-attention-events"
 import { trackEvent } from "./event-reporter"
-
-/** Fixed thread ID for heartbeat (aligns with Nanobot session_key="heartbeat"). Resets won't orphan it. */
-const HEARTBEAT_THREAD_ID = "heartbeat"
+import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
 
 let tickTimer: ReturnType<typeof setTimeout> | null = null
+// A cleared timeout may already have a callback queued in the event loop. Each
+// scheduled callback captures this generation so stop/restart can invalidate it
+// permanently instead of relying on clearTimeout alone.
+let tickTimerGeneration = 0
 let running = false
 let abortController: AbortController | null = null
 let shuttingDown = false
+let workspaceResetInProgress = false
 
 function notifyRenderer(channel: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -153,6 +156,7 @@ export function startHeartbeat(): void {
 }
 
 export function stopHeartbeat(): void {
+  tickTimerGeneration += 1
   if (tickTimer) {
     clearTimeout(tickTimer)
     tickTimer = null
@@ -170,6 +174,7 @@ export function stopHeartbeat(): void {
 
 /** Restart the timer without aborting a running execution */
 export function restartHeartbeat(): void {
+  tickTimerGeneration += 1
   if (tickTimer) {
     clearTimeout(tickTimer)
     tickTimer = null
@@ -178,7 +183,7 @@ export function restartHeartbeat(): void {
 }
 
 function scheduleNext(compensate = false): void {
-  if (shuttingDown) return
+  if (shuttingDown || workspaceResetInProgress) return
   const config = getHeartbeatConfig()
   if (!config.enabled) {
     console.log("[Heartbeat] Disabled, not scheduling")
@@ -190,7 +195,9 @@ function scheduleNext(compensate = false): void {
     const elapsed = Date.now() - new Date(config.lastRunAt).getTime()
     delay = Math.max(0, fullMs - elapsed)
   }
+  const scheduledGeneration = ++tickTimerGeneration
   tickTimer = setTimeout(() => {
+    if (scheduledGeneration !== tickTimerGeneration) return
     tickTimer = null
     tick()
   }, delay)
@@ -199,6 +206,9 @@ function scheduleNext(compensate = false): void {
 }
 
 function tick(): void {
+  // A timeout callback may already be queued when stopHeartbeat clears its
+  // handle. The service-level gate closes that last race with workspace reset.
+  if (workspaceResetInProgress) return
   if (running) {
     console.log("[Heartbeat] Already running, skipping this tick")
     scheduleNext()
@@ -210,9 +220,36 @@ function tick(): void {
 }
 
 export async function runHeartbeatNow(): Promise<void> {
-  if (shuttingDown) throw new Error("The application is quitting; heartbeat cannot start.")
-  if (running) throw new Error("Heartbeat is already running")
+  assertHeartbeatCanStart()
   await executeHeartbeat()
+}
+
+/** Synchronous preflight for fire-and-forget heartbeat entry points. */
+export function assertHeartbeatCanStart(): void {
+  if (shuttingDown) throw new Error("The application is quitting; heartbeat cannot start.")
+  if (workspaceResetInProgress) {
+    throw new Error("Heartbeat workspace is being changed; heartbeat cannot start.")
+  }
+  if (running) throw new Error("Heartbeat is already running")
+}
+
+/**
+ * Reserve the fixed heartbeat id while its previous workspace incarnation is
+ * removed. The returned release must be called after cleanup and config persist
+ * finish; direct scheduler-tool wakeups are rejected for the whole interval.
+ */
+export function beginHeartbeatWorkspaceReset(): () => void {
+  if (running) {
+    throw new Error("Heartbeat 正在运行，无法切换工作目录。请等待运行结束或先取消运行。")
+  }
+  if (workspaceResetInProgress) {
+    throw new Error("Heartbeat 工作目录正在切换，请稍后重试。")
+  }
+  workspaceResetInProgress = true
+  stopHeartbeat()
+  return () => {
+    workspaceResetInProgress = false
+  }
 }
 
 export function cancelHeartbeat(): void {

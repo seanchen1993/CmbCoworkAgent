@@ -304,6 +304,14 @@ export interface LocalSandboxOptions {
   abortSignal?: AbortSignal
   /** Unique run/thread identifier used for ACL ref-counting across concurrent runs. */
   runId?: string
+  /** Absolute app-managed directory backing DeepAgents' logical /large_tool_results path. */
+  largeToolResultsDir?: string
+  /**
+   * App-managed roots for automatic artifacts such as compaction history. Writes
+   * through the dedicated internal API are constrained to these roots and do
+   * not participate in user tool approval or Hook lifecycles.
+   */
+  internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
@@ -419,6 +427,14 @@ interface WorkspaceSwitchPreparationResult {
  */
 export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
 
+/**
+ * Marks a write issued by the public write_file tool. DeepAgents spills large
+ * tool results through the same backend method, so this distinguishes that
+ * automatic bookkeeping path from a model-requested write to the reserved
+ * logical /large_tool_results directory.
+ */
+export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+
 export class LocalSandbox
   extends FilesystemBackend
   implements SandboxBackendProtocol, SkillHookContextProvider
@@ -452,6 +468,10 @@ export class LocalSandbox
   private readonly _onHookResult?: HookResultCallback
   private readonly _onFailureFuseNotice?: FailureFuseNoticeCallback
   private readonly _hookTurnId?: string
+  /** Physical directory backing DeepAgents' logical /large_tool_results files. */
+  private readonly _largeToolResultsDir: string
+  /** Canonical app-owned roots accepted by the internal artifact writer. */
+  private readonly _internalArtifactRoots: readonly string[]
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
   private readonly _sandboxCacheRootPromise: Promise<string>
@@ -1743,6 +1763,12 @@ export class LocalSandbox
     }
     this.env = baseEnv
     this.workingDir = options.rootDir ?? process.cwd()
+    this._largeToolResultsDir = options.largeToolResultsDir
+      ? path.resolve(options.largeToolResultsDir)
+      : path.join(this.workingDir, ".cmbdevclaw", "large_tool_results")
+    this._internalArtifactRoots = (options.internalArtifactRoots ?? [this._largeToolResultsDir])
+      .map((root) => path.resolve(root))
+      .filter((root, index, roots) => roots.indexOf(root) === index)
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.pluginOutputDir = options.pluginOutputDir
     this.pluginRoot = pluginRoot || undefined
@@ -1787,7 +1813,7 @@ export class LocalSandbox
     LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
-    // to workspace-local dirs, since virtualMode=false treats "/" as absolute
+    // to app-managed storage, since virtualMode=false treats "/" as absolute
     // and writing to system root fails on macOS (SIP) and Windows (permissions).
     // MUST run before caching _resolvePath below, so the cache captures the patched version.
     this.patchResolvePath()
@@ -2667,17 +2693,32 @@ export class LocalSandbox
     }
     const original = (this as any).resolvePath.bind(this)
     const workingDir = this.workingDir
-    const redirects: Record<string, string> = {
-      "/large_tool_results/": ".cmbdevclaw/large_tool_results"
-    }
     ;(this as any).resolvePath = (key: string): string => {
-      for (const [prefix, localDir] of Object.entries(redirects)) {
-        if (key.startsWith(prefix)) {
-          const redirected = path.join(workingDir, localDir, key.slice(prefix.length))
-          console.log("[LocalSandbox] Redirecting path:", key, "→", redirected)
-          key = redirected
-          break
+      const prefix = "/large_tool_results/"
+      if (key.startsWith(prefix)) {
+        const suffix = key.slice(prefix.length)
+        const managedCandidate = path.resolve(this._largeToolResultsDir, suffix)
+        const managedRelative = path.relative(this._largeToolResultsDir, managedCandidate)
+        if (
+          !managedRelative ||
+          managedRelative.startsWith("..") ||
+          path.isAbsolute(managedRelative)
+        ) {
+          throw new Error(`Invalid large tool result path outside managed storage: ${key}`)
         }
+        const managedPath = managedCandidate
+        const legacyPath = path.join(
+          workingDir,
+          ".cmbdevclaw",
+          "large_tool_results",
+          path.basename(managedRelative)
+        )
+        const redirected =
+          managedPath !== legacyPath && !existsSync(managedPath) && existsSync(legacyPath)
+            ? legacyPath
+            : managedPath
+        console.log("[LocalSandbox] Redirecting path:", key, "→", redirected)
+        key = redirected
       }
       return original(key)
     }
@@ -4039,10 +4080,124 @@ export class LocalSandbox
       : `只读沙箱模式下禁止${action}文件 '${filePath}'。如需${action}请以管理员身份运行或切换沙箱模式。`
   }
 
+  private resolveInternalArtifactPath(filePath: string): string | null {
+    let resolvedPath: string
+    try {
+      resolvedPath = this._resolvePath(filePath)
+    } catch {
+      return null
+    }
+
+    return this._internalArtifactRoots.some((root) => {
+      const relative = path.relative(root, resolvedPath)
+      return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative)
+    })
+      ? resolvedPath
+      : null
+  }
+
+  private async validateInternalArtifactPath(filePath: string): Promise<string | null> {
+    const resolvedPath = this.resolveInternalArtifactPath(filePath)
+    if (!resolvedPath) return null
+
+    const root = this._internalArtifactRoots.find((candidate) => {
+      const relative = path.relative(candidate, resolvedPath)
+      return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative)
+    })
+    if (!root) return null
+
+    try {
+      await fs.mkdir(path.dirname(resolvedPath), { recursive: true })
+      const [realRoot, realParent] = await Promise.all([
+        fs.realpath(root),
+        fs.realpath(path.dirname(resolvedPath))
+      ])
+      const parentRelative = path.relative(realRoot, realParent)
+      if (parentRelative.startsWith("..") || path.isAbsolute(parentRelative)) return null
+
+      try {
+        if ((await fs.lstat(resolvedPath)).isSymbolicLink()) return null
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null
+      }
+      return resolvedPath
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Write an app-managed artifact without presenting it as a user-requested
+   * write_file operation. The caller cannot escape the explicitly configured
+   * artifact roots, and these writes deliberately skip tool approvals, Hooks,
+   * mutation tracking, and read-only workspace policy.
+   */
+  async writeInternalArtifact(
+    filePath: string,
+    content: string,
+    options: { createOnly?: boolean } = {}
+  ): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+
+    return this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) return { error: "文件写入已取消。" }
+      try {
+        await fs.writeFile(resolvedPath, content, {
+          encoding: "utf8",
+          flag: options.createOnly ? "wx" : "w"
+        })
+        return {}
+      } catch (error) {
+        if (options.createOnly && (error as NodeJS.ErrnoException).code === "EEXIST") {
+          return {
+            error: `Cannot write to ${filePath} because it already exists. Read and then make an edit, or write to a new path.`
+          }
+        }
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
+  /** Check an app-managed artifact without reading its contents into memory. */
+  async internalArtifactExists(filePath: string): Promise<boolean> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return false
+
+    try {
+      return (await fs.stat(resolvedPath)).isFile()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+      return false
+    }
+  }
+
+  /** Append to an app-managed artifact under the same path and symlink checks. */
+  async appendInternalArtifact(filePath: string, content: string): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+
+    return this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) return { error: "文件写入已取消。" }
+      try {
+        await fs.appendFile(resolvedPath, content, "utf8")
+        return {}
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
   /**
    * Override write to enforce readonly sandbox restrictions.
    */
   async write(filePath: string, content: string): Promise<WriteResult> {
+    // DeepAgents' automatic result eviction writes to this reserved logical
+    // path after the public tool call completes. A model-issued write_file is
+    // marked by the runtime and continues through the regular approval flow.
+    if (filePath.startsWith("/large_tool_results/") && !agentFileWriteContext.getStore()) {
+      return this.writeInternalArtifact(filePath, content, { createOnly: true })
+    }
     if (this.isBlockedBySandbox(filePath)) {
       return { error: `Access denied — '${filePath}' is restricted by sandbox policy.` }
     }

@@ -73,6 +73,7 @@ All file paths should use fully qualified absolute system paths.
 
 ### request_user_input
 Only call this tool when explicitly requested by the user or when an active Skill explicitly requires it. Otherwise do not call this tool.
+Each option must be a complete, directly selectable answer. Do not add options such as "Other", "I want to add more", "Custom answer", or "None of the above" that require the user to provide additional text; the client provides one built-in custom-text option automatically.
 
 ### Shell Tool
 - execute: Run shell commands in the workspace directory, or in execute.cwd when provided

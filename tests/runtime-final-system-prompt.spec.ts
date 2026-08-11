@@ -225,7 +225,7 @@ async function buildRuntimePromptFromHarnessContext(
 ): Promise<RuntimePromptBuildResult> {
   let runtimePrompt = buildBaseRuntimePrompt(workspacePath, harnessContext.systemPromptInject, {
     includeBackgroundExec: true,
-    includeSubagents: harnessContext.featureId ? (harnessContext.enableTaskTool ?? true) : true
+    includeSubagents: true
   })
   const normalizedHarnessAgentsPrompt = harnessContext.harnessAgentsPrompt?.trim()
   const enableAgentsPrompt = harnessContext.enableAgentsPrompt !== false

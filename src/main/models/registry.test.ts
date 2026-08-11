@@ -331,6 +331,17 @@ describe("builtin model registry", () => {
     ).toThrow("true 或 false")
   })
 
+  it("rejects builtin overrides whose output budget prevents compaction", async () => {
+    await refreshBuiltinModelCatalog(true)
+
+    expect(() =>
+      updateBuiltinModelOverride("minimax-m2p5-229b-w8a8", {
+        maxTokens: 32_000,
+        maxOutputTokens: 28_000
+      })
+    ).toThrow("compaction trigger 3000 must exceed retained context 4000")
+  })
+
   it("keeps the last good remote catalog when a refresh is malformed", async () => {
     state.manifest = {
       modelCatalog: {
