@@ -183,7 +183,7 @@ function BrowserWelcomePanel({
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">把网页操作交给 AI</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  开启内置浏览器控制后，AI 可在任务中浏览页面、填写表单、点击操作并验证结果。
+                  开启内置浏览器控制后，AI 可在任务中浏览页面、填写表单、点击操作并验证结果。并且支持Iframe。
                 </p>
               </div>
             </div>
