@@ -49,6 +49,11 @@ interface FactProject {
   approvedDate: string | null
 }
 
+interface FactSummaryGroups {
+  devclaw: ProjectMetricSummaryGroup
+  nonDevclaw: ProjectMetricSummaryGroup
+}
+
 interface EsHit {
   _source?: Record<string, unknown>
 }
@@ -298,27 +303,37 @@ function summaryAggs(): Record<string, unknown> {
         sum_function_points: { sum: { field: "notAdjustFuns" } }
       }
     },
-    avg_test_lead_seconds: { avg: { field: "testLeadSeconds" } },
-    test_lead_sample_count: { value_count: { field: "testLeadSeconds" } },
-    avg_delivery_seconds: { avg: { field: "deliverySeconds" } },
-    delivery_sample_count: { value_count: { field: "deliverySeconds" } }
+    test_lead_valid: durationAgg("createDate", "firstStStartDate"),
+    delivery_valid: durationAgg("approvedDate", "firstOnlineDate")
   }
 }
 
-function runtimeMappings(): Record<string, unknown> {
+function durationAgg(startField: string, endField: string): Record<string, unknown> {
   return {
-    testLeadSeconds: {
-      type: "double",
-      script: {
-        source:
-          "if (doc['createDate'].size() != 0 && doc['firstStStartDate'].size() != 0) { long start = doc['createDate'].value.toInstant().toEpochMilli(); long end = doc['firstStStartDate'].value.toInstant().toEpochMilli(); if (end >= start) emit((end - start) / 1000.0); }"
+    filter: {
+      bool: {
+        filter: [
+          { exists: { field: startField } },
+          { exists: { field: endField } },
+          {
+            script: {
+              script: {
+                lang: "painless",
+                source: `return !doc['${endField}'].value.isBefore(doc['${startField}'].value);`
+              }
+            }
+          }
+        ]
       }
     },
-    deliverySeconds: {
-      type: "double",
-      script: {
-        source:
-          "if (doc['approvedDate'].size() != 0 && doc['firstOnlineDate'].size() != 0) { long start = doc['approvedDate'].value.toInstant().toEpochMilli(); long end = doc['firstOnlineDate'].value.toInstant().toEpochMilli(); if (end >= start) emit((end - start) / 1000.0); }"
+    aggs: {
+      avg_seconds: {
+        avg: {
+          script: {
+            lang: "painless",
+            source: `return ChronoUnit.MILLIS.between(doc['${startField}'].value, doc['${endField}'].value) / 1000.0;`
+          }
+        }
       }
     }
   }
@@ -363,8 +378,10 @@ function parseSummaryGroup(
   const density = nestedRecord(bucket, "defect_density_valid")
   const densityBug = asNumber(nestedRecord(density, "sum_bug_count").value)
   const densityFp = asNumber(nestedRecord(density, "sum_function_points").value)
-  const testLeadSeconds = nullableAggValue(bucket, "avg_test_lead_seconds")
-  const deliverySeconds = nullableAggValue(bucket, "avg_delivery_seconds")
+  const testLead = nestedRecord(bucket, "test_lead_valid")
+  const delivery = nestedRecord(bucket, "delivery_valid")
+  const testLeadSeconds = nullableAggValue(testLead, "avg_seconds")
+  const deliverySeconds = nullableAggValue(delivery, "avg_seconds")
   return {
     developmentMode,
     projectCount: asNumber(bucket.doc_count),
@@ -384,8 +401,8 @@ function parseSummaryGroup(
       functionPoint: asNumber(nestedRecord(bucket, "function_point_sample_count").value),
       defectDensity: asNumber(density.doc_count),
       defectRate: 0,
-      testLead: asNumber(nestedRecord(bucket, "test_lead_sample_count").value),
-      delivery: asNumber(nestedRecord(bucket, "delivery_sample_count").value),
+      testLead: asNumber(testLead.doc_count),
+      delivery: asNumber(delivery.doc_count),
       token: 0,
       codeLines: 0,
       tokensPerLine: 0
@@ -398,11 +415,10 @@ async function fetchFactSummary(
   filters: ProjectMetricFilters,
   allDevclawCodes: string[],
   selectedDevclawCodes: string[]
-): Promise<{ devclaw: ProjectMetricSummaryGroup; nonDevclaw: ProjectMetricSummaryGroup }> {
+): Promise<FactSummaryGroups> {
   const raw = (await queryProjectMetricEs(deps, "总体事实聚合", deps.factIndex, {
     size: 0,
     track_total_hits: false,
-    runtime_mappings: runtimeMappings(),
     query: { bool: { filter: buildFactBaseFilters(filters) } },
     aggs: {
       by_project_type: {
@@ -712,7 +728,7 @@ async function enrichProjectFacts(
   const [codeResult, tokenResult] = await Promise.allSettled([
     fetchPushedAdoptedLinesByHarnessProject(deps, harnessProjectIds),
     fetchTokensByHarnessProject(deps, harnessProjectIds)
-  ])
+  ] as const)
   return facts.map((fact) =>
     buildProjectItem(
       fact,
@@ -729,9 +745,15 @@ export async function fetchProjectMetricSummary(
 ): Promise<ProjectMetricSummaryData> {
   const snapshot = await fetchLeanSnapshotState(deps)
   const selectedCodes = selectedDevclawPrjCodes(snapshot, filters.adapterName)
-  const [factSummary, devclawFacts] = await Promise.all([
-    fetchFactSummary(deps, filters, snapshot.prjCodes, selectedCodes),
-    fetchSelectedDevclawFacts(deps, filters, selectedCodes)
+  let factSummary!: FactSummaryGroups
+  let devclawFacts!: FactProject[]
+  await Promise.all([
+    fetchFactSummary(deps, filters, snapshot.prjCodes, selectedCodes).then((value) => {
+      factSummary = value
+    }),
+    fetchSelectedDevclawFacts(deps, filters, selectedCodes).then((value) => {
+      devclawFacts = value
+    })
   ])
   const harnessProjectIds = harnessIdsForProjects(
     snapshot,
@@ -740,7 +762,7 @@ export async function fetchProjectMetricSummary(
   const [codeResult, tokenResult] = await Promise.allSettled([
     fetchPushedAdoptedLinesByHarnessProject(deps, harnessProjectIds),
     fetchTokensByHarnessProject(deps, harnessProjectIds)
-  ])
+  ] as const)
 
   const devclaw = factSummary.devclaw
   const devclawProjectCount = devclawFacts.length
