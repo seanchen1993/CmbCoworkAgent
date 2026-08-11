@@ -339,7 +339,7 @@ describe("builtin model registry", () => {
         maxTokens: 32_000,
         maxOutputTokens: 28_000
       })
-    ).toThrow("compaction trigger 3000 must exceed retained context 4000")
+    ).toThrow("compaction trigger 3000 must exceed retained context 3200")
   })
 
   it("keeps the last good remote catalog when a refresh is malformed", async () => {

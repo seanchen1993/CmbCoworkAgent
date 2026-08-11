@@ -43,7 +43,7 @@ describe("stored model token budgets", () => {
         topP: 0.95,
         topK: 40
       })
-    ).toThrow("compaction trigger 3000 must exceed retained context 4000")
+    ).toThrow("compaction trigger 3000 must exceed retained context 3200")
   })
 
   it("clamps an existing invalid output budget instead of breaking runtime creation", async () => {
@@ -68,11 +68,11 @@ describe("stored model token budgets", () => {
 
     expect(storage.getCustomModelConfigById("legacy-budget")).toMatchObject({
       maxTokens: 32_000,
-      maxOutputTokens: 26_999
+      maxOutputTokens: 27_799
     })
     expect(storage.getCustomModelPublicConfigById("legacy-budget")).toMatchObject({
       maxTokens: 32_000,
-      maxOutputTokens: 26_999
+      maxOutputTokens: 27_799
     })
   })
 })

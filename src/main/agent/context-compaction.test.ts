@@ -39,7 +39,7 @@ describe("context compaction model binding", () => {
       "must leave more than 1000 tokens"
     )
     expect(() => calculateSummarizationTriggerTokens(32_000, 28_000)).toThrow(
-      "compaction trigger 3000 must exceed retained context 4000"
+      "compaction trigger 3000 must exceed retained context 3200"
     )
   })
 
