@@ -17,6 +17,7 @@ interface ImportMetaEnv {
   readonly VITE_LEANSTAR_PERSONAL_TOKEN_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_MOCK?: string
   readonly VITE_ES_INDEX_SKILL_EVAL?: string
+  readonly VITE_ES_INDEX_PROJECT_INFO?: string
   readonly VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS?: string
   readonly VITE_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS?: string

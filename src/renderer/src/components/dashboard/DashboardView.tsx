@@ -2597,6 +2597,7 @@ export function DashboardView(): React.JSX.Element {
   } = useDashboard()
 
   const [exporting, setExporting] = useState(false)
+  const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
@@ -3496,10 +3497,15 @@ export function DashboardView(): React.JSX.Element {
     if (activeMainTab === "project-mode") {
       void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
     }
+    if (activeMainTab === "efficiency") {
+      void fetchEfficiency(range, selectedOrgLv1List)
+      setProjectMetricRefreshKey((current) => current + 1)
+    }
   }, [
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
+    fetchEfficiency,
     granularity,
     range,
     refresh,
@@ -4997,6 +5003,9 @@ export function DashboardView(): React.JSX.Element {
               data={efficiency}
               loading={efficiencyLoading}
               error={efficiencyError}
+              range={range}
+              upperOrgLv1={selectedOrgLv1List}
+              projectMetricRefreshKey={projectMetricRefreshKey}
             />
           ) : (
             <div className="space-y-6 p-6">

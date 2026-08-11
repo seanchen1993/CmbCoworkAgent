@@ -14,6 +14,7 @@ import type {
   DashboardEfficiencyChangeKindStats,
   DashboardEfficiencyData
 } from "../use-dashboard"
+import { ProjectMetricsSection } from "./ProjectMetricsSection"
 
 // ─────────────────────────────────────────────────────────
 // 目标线
@@ -400,68 +401,72 @@ function ComputeCard({
 export function EfficiencyPanel({
   data,
   loading,
-  error
+  error,
+  range,
+  upperOrgLv1,
+  projectMetricRefreshKey
 }: {
   data: DashboardEfficiencyData | null
   loading: boolean
   error: string | null
+  range: { from: string; to: string }
+  upperOrgLv1: string[]
+  projectMetricRefreshKey: number
 }): React.JSX.Element {
-  if (loading && !data) {
-    return (
-      <div className="flex min-h-[320px] items-center justify-center text-sm text-muted-foreground">
-        <Loader2 className="mr-2 size-4 animate-spin" />
-        加载中
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="mx-6 my-4 flex items-start gap-2 rounded-md bg-destructive/10 px-4 py-3 text-sm text-destructive">
-        <AlertCircle className="mt-0.5 size-4 shrink-0" />
-        <span>{error}</span>
-      </div>
-    )
-  }
-
-  if (!data) {
-    return (
-      <div className="flex min-h-[320px] items-center justify-center text-sm text-muted-foreground">
-        暂无数据
-      </div>
-    )
-  }
-
   return (
     <div className="space-y-4 px-6 py-4">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        <span>统计范围：项目模式 · 已绑定精益项目</span>
-        <span>·</span>
-        <span>{formatCount(data.meta.projectCount)} 个项目</span>
-        {data.meta.truncated ? (
-          <>
-            <span>·</span>
-            <span className="text-amber-600">项目数超过上限，以下为截断后的子集</span>
-          </>
-        ) : null}
-      </div>
+      <ProjectMetricsSection
+        range={range}
+        upperOrgLv1={upperOrgLv1}
+        refreshKey={projectMetricRefreshKey}
+      />
 
-      <MetricCard
-        title="系统可扩展性"
-        hint="交付周期变化量 ÷ 系统规模变化量。目标是斜率 ≈ 0，即系统规模增长不拖慢单位交付。"
-      >
-        <EmptyValue reason={data.scalability.pendingReason} />
-        <div className="mt-3 flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-          <TrendingUp className="mt-0.5 size-3.5 shrink-0" />
-          <span>
-            待接入两项数据：内网项目管理平台的需求特性（提出时间 / 交付时间，先走手工导入），
-            以及仓库规模的客户端采集。两项齐备后此处出两点差分斜率，并在样本足够时附回归斜率与置信区间。
-          </span>
+      {loading && !data ? (
+        <div className="flex min-h-40 items-center justify-center rounded-lg border border-border text-sm text-muted-foreground">
+          <Loader2 className="mr-2 size-4 animate-spin" />
+          加载现有研发效能指标
         </div>
-      </MetricCard>
+      ) : error ? (
+        <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <AlertCircle className="mt-0.5 size-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      ) : !data ? (
+        <div className="flex min-h-40 items-center justify-center rounded-lg border border-border text-sm text-muted-foreground">
+          暂无现有研发效能数据
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span>统计范围：项目模式 · 已绑定精益项目</span>
+            <span>·</span>
+            <span>{formatCount(data.meta.projectCount)} 个项目</span>
+            {data.meta.truncated ? (
+              <>
+                <span>·</span>
+                <span className="text-amber-600">项目数超过上限，以下为截断后的子集</span>
+              </>
+            ) : null}
+          </div>
 
-      <AdoptionCard adoption={data.adoption} />
-      <ComputeCard compute={data.compute} />
+          <MetricCard
+            title="系统可扩展性"
+            hint="交付周期变化量 ÷ 系统规模变化量。目标是斜率 ≈ 0，即系统规模增长不拖慢单位交付。"
+          >
+            <EmptyValue reason={data.scalability.pendingReason} />
+            <div className="mt-3 flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+              <TrendingUp className="mt-0.5 size-3.5 shrink-0" />
+              <span>
+                待接入两项数据：内网项目管理平台的需求特性（提出时间 / 交付时间，先走手工导入），
+                以及仓库规模的客户端采集。两项齐备后此处出两点差分斜率，并在样本足够时附回归斜率与置信区间。
+              </span>
+            </div>
+          </MetricCard>
+
+          <AdoptionCard adoption={data.adoption} />
+          <ComputeCard compute={data.compute} />
+        </>
+      )}
     </div>
   )
 }

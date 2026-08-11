@@ -62,6 +62,13 @@ import {
   isHarnessDevStageNodeName,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
+import type { ProjectMetricFilters, ProjectMetricListOptions } from "../../shared/project-metrics"
+import {
+  fetchProjectMetricProjects,
+  fetchProjectMetricSummary,
+  makeMockProjectMetricProjects,
+  makeMockProjectMetricSummary
+} from "./dashboard-project-metrics"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -83,8 +90,11 @@ function getEsAuth(): { username: string; password: string } | null {
   return { username, password }
 }
 
-function getEsIndex(type: "trace" | "event" | "skillEval"): string {
+function getEsIndex(type: "trace" | "event" | "skillEval" | "projectFact"): string {
   if (type === "trace") return (import.meta.env.VITE_ES_INDEX_TRACE as string) || "devclaw_trace"
+  if (type === "projectFact") {
+    return (import.meta.env.VITE_ES_INDEX_PROJECT_INFO as string) || "devclaw_project_info"
+  }
   if (type === "skillEval") {
     return (import.meta.env.VITE_ES_INDEX_SKILL_EVAL as string) || "devclaw_skill_eval_record"
   }
@@ -13474,6 +13484,51 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   })
+
+  _ipcMain.handle("dashboard:projectMetricSummary", async (_, filters: ProjectMetricFilters) => {
+    if (import.meta.env.DEV) {
+      return { success: true, data: makeMockProjectMetricSummary(filters) }
+    }
+    try {
+      requireDashboardProjectModeAccess()
+      return {
+        success: true,
+        data: await fetchProjectMetricSummary(filters, {
+          query: esQuery,
+          eventIndex: getEsIndex("event"),
+          traceIndex: getEsIndex("trace"),
+          factIndex: getEsIndex("projectFact")
+        })
+      }
+    } catch (e) {
+      console.error("[Dashboard] projectMetricSummary error:", e)
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  _ipcMain.handle(
+    "dashboard:projectMetricProjects",
+    async (_, filters: ProjectMetricFilters, options?: ProjectMetricListOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricProjects(filters, options) }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricProjects(filters, options ?? {}, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact")
+          })
+        }
+      } catch (e) {
+        console.error("[Dashboard] projectMetricProjects error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
 
   _ipcMain.handle(
     "dashboard:projectModeCodeStats",

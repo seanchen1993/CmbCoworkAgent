@@ -93,6 +93,12 @@ import type {
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
 import type {
+  ProjectMetricFilters,
+  ProjectMetricListOptions,
+  ProjectMetricProjectsData,
+  ProjectMetricSummaryData
+} from "../shared/project-metrics"
+import type {
   FeatureGateCheckOptions,
   FeatureGateCheckResult,
   FeatureGateKey
@@ -2280,6 +2286,13 @@ interface CustomAPI {
       range: { from: string; to: string },
       opts?: { upperOrgLv1?: string | string[] | null }
     ) => Promise<{ success: boolean; data?: DashboardEfficiencyData; error?: string }>
+    projectMetricSummary: (
+      filters: ProjectMetricFilters
+    ) => Promise<{ success: boolean; data?: ProjectMetricSummaryData; error?: string }>
+    projectMetricProjects: (
+      filters: ProjectMetricFilters,
+      options?: ProjectMetricListOptions
+    ) => Promise<{ success: boolean; data?: ProjectMetricProjectsData; error?: string }>
     projectModeProjects: (
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions
