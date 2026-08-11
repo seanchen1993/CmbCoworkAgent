@@ -133,7 +133,7 @@ const HOOK_EVENTS: { value: HookEvent; label: string; description: string }[] = 
     value: "SubagentStart",
     label: "子 Agent 启动（SubagentStart）",
     description:
-      "父 Agent 决定派发任务、子 Agent 即将开始时触发。payload 含 agent_id / agent_type / task_description"
+      "父 Agent 决定派发任务、子 Agent 即将开始时触发。payload 顶层含 agent_id，任务信息位于 tool_input"
   },
   {
     value: "PostToolUseFailure",
@@ -1065,14 +1065,95 @@ Write-Output "已发送审批提醒：$command"
 exit 0
 `
   },
+  SubagentStart: {
+    inputDescription:
+      "当前事件发生在子 Agent 启动前；顶层 agent_id 是稳定归属 ID，任务类型与描述位于 tool_input。",
+    inputFields: [
+      "hook_event_name",
+      "session_id",
+      "cwd",
+      "workspace",
+      "workspace_path",
+      "agent_id",
+      "tool_name",
+      "tool_input",
+      "subagent"
+    ],
+    envFields: [
+      "HOOK_EVENT",
+      "SESSION_ID",
+      "WORKSPACE_PATH",
+      "AGENT_ID",
+      "TOOL_NAME",
+      "TOOL_ARGS"
+    ],
+    stdinExample: `{
+  "hook_event_name": "SubagentStart",
+  "session_id": "thread-123",
+  "cwd": "C:\\\\ai\\\\demo",
+  "workspace": "C:\\\\ai\\\\demo",
+  "workspace_path": "C:\\\\ai\\\\demo",
+  "agent_id": "call_abc123",
+  "tool_name": "task",
+  "tool_input": {
+    "agent_id": "call_abc123",
+    "agent_type": "code-reviewer",
+    "tool_call_id": "call_abc123",
+    "task_description": "review hook changes"
+  },
+  "subagent": {
+    "id": "call_abc123",
+    "name": "code-reviewer",
+    "status": "started"
+  }
+}`,
+    outputDescription:
+      "当前事件属于 fire-and-forget，适合记录派发、建立外部任务或发送启动通知。",
+    outputNotes: [
+      "stdin 的 agent_id 与环境变量 AGENT_ID 表示同一个子 Agent。",
+      "完整任务参数优先读取 stdin 的 tool_input；TOOL_ARGS 只适合较小 payload。"
+    ],
+    outputExample: `subagent call_abc123 started`,
+    pythonExample: `import json
+import sys
+
+payload = json.load(sys.stdin)
+agent_id = str(payload.get("agent_id", ""))
+agent_type = str(payload.get("tool_input", {}).get("agent_type", ""))
+
+print(f"[hook] subagent start id={agent_id} type={agent_type}", file=sys.stderr)
+print(f"subagent {agent_id} started", end="")
+sys.exit(0)
+`,
+    shellExample: `$raw = [Console]::In.ReadToEnd()
+$payload = $raw | ConvertFrom-Json -Depth 20
+$agentId = [string]$payload.agent_id
+$agentType = [string]$payload.tool_input.agent_type
+
+[Console]::Error.WriteLine("[hook] subagent start id=$agentId type=$agentType")
+Write-Output "subagent $agentId started"
+exit 0
+`
+  },
   SubagentStop: {
     inputDescription: "当前事件发生在子 Agent 结束时，输入重点是 `subagent` 对象。",
-    inputFields: ["hook_event_name", "session_id", "cwd", "subagent"],
-    envFields: ["HOOK_EVENT", "SESSION_ID", "WORKSPACE_PATH"],
+    inputFields: [
+      "hook_event_name",
+      "session_id",
+      "cwd",
+      "workspace",
+      "workspace_path",
+      "agent_id",
+      "subagent"
+    ],
+    envFields: ["HOOK_EVENT", "SESSION_ID", "WORKSPACE_PATH", "AGENT_ID"],
     stdinExample: `{
   "hook_event_name": "SubagentStop",
   "session_id": "thread-123",
   "cwd": "C:\\\\ai\\\\demo",
+  "workspace": "C:\\\\ai\\\\demo",
+  "workspace_path": "C:\\\\ai\\\\demo",
+  "agent_id": "call_abc123",
   "subagent": {
     "id": "call_abc123",
     "status": "completed"
@@ -1219,6 +1300,18 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
         "当前命令实际执行目录，等于 Hook 来源默认目录；全局 / 工作区 / 插件 / 技能 Hook 会分别指向各自来源根目录。"
     },
     {
+      key: "workspace",
+      description: "当前会话工作区根目录；它不随 Hook 来源目录变化。"
+    },
+    {
+      key: "workspace_path",
+      description: "workspace 的等价别名，方便兼容既有 Hook 脚本。"
+    },
+    {
+      key: "agent_id",
+      description: "子 Agent / worker 的稳定归属 ID；父 Agent 或无 Agent 上下文时省略。"
+    },
+    {
       key: "hook_source_type",
       description: "当前 Hook 来源类型：global、workspace、plugin 或 skill。"
     },
@@ -1237,6 +1330,10 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     { key: "HOOK_EVENT", description: "当前 Hook 事件名，对应 stdin 里的 hook_event_name。" },
     { key: "SESSION_ID", description: "当前线程 / 会话 ID，对应 stdin 里的 session_id。" },
     { key: "WORKSPACE_PATH", description: "当前工作区路径，方便脚本拼接相对路径。" },
+    {
+      key: "AGENT_ID",
+      description: "对应 stdin 的 agent_id；父 Agent 或无 Agent 上下文时不会下发。"
+    },
     {
       key: "CLAUDE_PROJECT_DIR",
       description: "WORKSPACE_PATH 的兼容别名，方便直接复用 Claude Code 社区脚本。"
@@ -1267,7 +1364,8 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     event === "PostToolUse" ||
     event === "PreSkillUse" ||
     event === "PostSkillUse" ||
-    event === "Notification"
+    event === "Notification" ||
+    event === "SubagentStart"
   ) {
     stdinFields.push(
       {
@@ -1390,15 +1488,15 @@ export function getCommandHookReadableContextDocs(event: HookEvent): CommandHook
     })
   }
 
-  if (event === "SubagentStop") {
+  if (event === "SubagentStart" || event === "SubagentStop") {
     stdinFields.push({
       key: "subagent",
-      description: "当前结束的子 Agent 信息，可用于审计、通知或外部同步。"
+      description: "当前启动或结束的子 Agent 信息，可用于审计、通知或外部同步。"
     })
     extraObjects.push({
       key: "subagent",
       fields: ["id", "name", "status"],
-      description: "描述当前结束的子 Agent；常见字段包括 ID、名称和完成状态。",
+      description: "描述当前子 Agent；常见字段包括 ID、名称和生命周期状态。",
       note: "subagent 目前只在 stdin JSON 中提供，没有对应的专用环境变量。"
     })
   }

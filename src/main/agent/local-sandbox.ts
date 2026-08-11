@@ -324,6 +324,8 @@ export interface LocalSandboxOptions {
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
   systemId?: string
+  /** Optional subagent identifier exposed to hooks as AGENT_ID. */
+  agentId?: string
   /** Optional harness plugin root exposed to child processes as PLUGIN_ROOT. */
   pluginRoot?: string
   /** Optional harness plugin identifier exposed to child processes as PLUGIN_ID. */
@@ -452,6 +454,7 @@ export class LocalSandbox
   private readonly pluginOutputDir?: string
   private readonly pluginRoot?: string
   private readonly systemId?: string
+  private readonly agentId?: string
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
   private readonly harnessProjectId?: string
@@ -1731,6 +1734,7 @@ export class LocalSandbox
     baseEnv.SESSION_ID = this.runId
     const systemId = options.systemId?.trim()
     if (systemId) baseEnv.SYSTEM_ID = systemId
+    const agentId = options.agentId?.trim()
     const pluginRoot = options.pluginRoot?.trim()
     if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
     const pluginId = options.pluginId?.trim()
@@ -1773,6 +1777,7 @@ export class LocalSandbox
     this.pluginOutputDir = options.pluginOutputDir
     this.pluginRoot = pluginRoot || undefined
     this.systemId = systemId || undefined
+    this.agentId = agentId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
     this.harnessProjectId = harnessProjectId || undefined
@@ -2485,6 +2490,7 @@ export class LocalSandbox
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
       ...(this.systemId && !context.systemId ? { systemId: this.systemId } : {}),
+      ...(this.agentId && !context.agentId ? { agentId: this.agentId } : {}),
       ...(this.pluginWorkspace && !context.pluginWorkspace
         ? { pluginWorkspace: this.pluginWorkspace }
         : {}),

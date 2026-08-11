@@ -12,7 +12,13 @@
  *   npx tsx tests/hook-phase2-followup.spec.ts
  */
 
-import { existsSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync as _read,
+  rmSync,
+  writeFileSync
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -42,8 +48,15 @@ function assert(cond: unknown, msg: string): void {
 import { executeHttpHook } from "../src/main/hooks/http-runner.ts"
 import { createServer } from "node:http"
 import { runHooks, hookMatchesRunCriteria } from "../src/main/hooks/runner.ts"
-import type { HookConfig } from "../src/main/hooks/types.ts"
-import { readFileSync as _read } from "node:fs"
+import { buildHookResultRecordForConfig } from "../src/main/hooks/log-record.ts"
+import type { HookConfig, HookResult } from "../src/main/hooks/types.ts"
+import { runWithHookAgentId } from "../src/main/hooks/execution-context.ts"
+import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
+
+function nodeCommand(script: string): string {
+  const encoded = Buffer.from(script, "utf8").toString("base64")
+  return `node -e "eval(Buffer.from('${encoded}','base64').toString('utf8'))"`
+}
 
 async function main(): Promise<void> {
 // ─── P1-1 — CC import preserves type:"http" (code-level check) ─────────────
@@ -115,6 +128,468 @@ assert(
 )
 // fallback defaults to "allow" — decision should NOT be "block".
 assertEqual(result.blocked, false, "P1-2c default fallback=allow → not blocked")
+
+// ─── P1-2d — structured HTTP output is protocol, not read_file content ─────
+
+let capturedHttpPayload: Record<string, unknown> | undefined
+const largeProtocolPadding = "x".repeat(20_000)
+const oversizedHttpBody = "x".repeat(1_000_001)
+const protocolBodies: Record<string, string> = {
+  "/neutral": JSON.stringify({
+    decision: null,
+    reason: null,
+    additionalContext: null,
+    systemMessage: null,
+    continue: null,
+    stopReason: null
+  }),
+  "/context": JSON.stringify({ decision: null, additionalContext: "kept HTTP context" }),
+  "/block": JSON.stringify({ decision: "block", reason: "HTTP review required" }),
+  "/plain": "plain HTTP hook note",
+  "/business": JSON.stringify({ status: "ok", diagnostics: [] }),
+  "/capture": JSON.stringify({ decision: "approve" }),
+  "/large-neutral": JSON.stringify({ decision: null, padding: largeProtocolPadding }),
+  "/large-block": JSON.stringify({
+    decision: "block",
+    reason: "large HTTP review required",
+    padding: largeProtocolPadding
+  })
+}
+const protocolServer = createServer(async (req, res) => {
+  let requestBody = ""
+  for await (const chunk of req) requestBody += chunk.toString()
+  if (req.url === "/capture") {
+    capturedHttpPayload = JSON.parse(requestBody) as Record<string, unknown>
+  }
+  if (req.url === "/oversize") {
+    res.writeHead(200, { "Content-Type": "application/json" })
+    res.end(oversizedHttpBody)
+    return
+  }
+  const responseBody = protocolBodies[req.url ?? ""] ?? "not found"
+  res.writeHead(responseBody === "not found" ? 404 : 200, {
+    "Content-Type": req.url === "/plain" ? "text/plain" : "application/json"
+  })
+  res.end(responseBody)
+})
+await new Promise<void>((resolve) => protocolServer.listen(0, "127.0.0.1", resolve))
+const protocolAddress = protocolServer.address()
+const protocolPort =
+  protocolAddress && typeof protocolAddress === "object" ? protocolAddress.port : 0
+const makeHttpHook = (path: string): HookConfig => ({
+  id: `http-output-${path.slice(1)}`,
+  event: "PostToolUse",
+  matcher: "read_file",
+  type: "http",
+  url: `http://127.0.0.1:${protocolPort}${path}`,
+  enabled: true,
+  timeout: 5_000,
+  createdAt: "",
+  updatedAt: ""
+})
+const httpContext = {
+  toolName: "read_file",
+  toolArgs: { file_path: "note.txt" },
+  toolResult: "     1\tfile body",
+  workspacePath: tmpdir(),
+  sessionId: "http-output-thread"
+}
+
+try {
+  const neutralResult = await runHooks(
+    [makeHttpHook("/neutral")],
+    "PostToolUse",
+    httpContext
+  )
+  assertEqual(neutralResult?.stdout, "", "P1-2d structured HTTP JSON is consumed")
+  assert(
+    !neutralResult?.stdout.includes("decision"),
+    "P1-2e neutral decision JSON does not leak into read_file feedback"
+  )
+
+  let loggedStructuredStdout: string | undefined
+  let loggedHttpType: string | undefined
+  let loggedHttpLabel: string | undefined
+  await runHooks([makeHttpHook("/neutral")], "PostToolUse", httpContext, (event, hook, hookResult) => {
+    const record = buildHookResultRecordForConfig(
+      event,
+      hook,
+      hookResult,
+      { enabled: true, diagnostic: false }
+    )
+    loggedStructuredStdout = record?.stdout
+    loggedHttpType = record?.hookType
+    loggedHttpLabel = record?.label
+  })
+  assertEqual(
+    loggedStructuredStdout,
+    protocolBodies["/neutral"],
+    "P1-2e0 Hook execution record retains consumed structured stdout"
+  )
+  assertEqual(loggedHttpType, "http", "P1-2e0a HTTP execution record keeps its hook type")
+  assertEqual(
+    loggedHttpLabel,
+    `http://127.0.0.1:${protocolPort}/neutral`,
+    "P1-2e0b HTTP execution record labels the configured URL"
+  )
+
+  const readWorkspace = mkdtempSync(join(tmpdir(), "http-hook-read-result-"))
+  try {
+    const readTarget = join(readWorkspace, "note.txt")
+    writeFileSync(readTarget, "original file body\n", "utf8")
+    const sandbox = new LocalSandbox({
+      rootDir: readWorkspace,
+      windowsSandbox: "none",
+      hooks: [makeHttpHook("/large-neutral")]
+    })
+    const readOutput = await sandbox.read("note.txt")
+    assert(readOutput.includes("original file body"), "P1-2e1 read_file still returns file content")
+    assert(
+      !readOutput.includes('"decision"') && !readOutput.includes("[Hook output]"),
+      "P1-2e2 large structured HTTP control JSON is absent from final read_file output"
+    )
+    assertEqual(
+      _read(readTarget, "utf8"),
+      "original file body\n",
+      "P1-2e3 HTTP hook leaves the file on disk unchanged"
+    )
+  } finally {
+    rmSync(readWorkspace, { recursive: true, force: true })
+  }
+
+  const contextResult = await runHooks(
+    [makeHttpHook("/context")],
+    "PostToolUse",
+    httpContext
+  )
+  assertEqual(contextResult?.stdout, "", "P1-2f context JSON raw stdout is consumed")
+  assertEqual(
+    contextResult?.additionalContext,
+    "kept HTTP context",
+    "P1-2g structured HTTP additionalContext is preserved"
+  )
+
+  const blockResult = await runHooks(
+    [makeHttpHook("/block")],
+    "PostToolUse",
+    httpContext
+  )
+  assertEqual(blockResult?.stdout, "", "P1-2h blocking HTTP JSON raw stdout is consumed")
+  assertEqual(blockResult?.decision, "block", "P1-2i structured HTTP block is preserved")
+  assertEqual(
+    blockResult?.reason,
+    "HTTP review required",
+    "P1-2j structured HTTP block reason is preserved"
+  )
+
+  const largeBlockResult = await runHooks(
+    [{ ...makeHttpHook("/large-block"), event: "PreToolUse" }],
+    "PreToolUse",
+    httpContext
+  )
+  assertEqual(largeBlockResult?.blocked, true, "P1-2j1 large HTTP decision still blocks")
+  assertEqual(
+    largeBlockResult?.reason,
+    "large HTTP review required",
+    "P1-2j2 large HTTP block reason is preserved"
+  )
+  assert(
+    !largeBlockResult?.stdout.includes(largeProtocolPadding),
+    "P1-2j3 large protocol JSON is not downgraded to plain stdout"
+  )
+
+  const plainResult = await runHooks(
+    [makeHttpHook("/plain")],
+    "PostToolUse",
+    httpContext
+  )
+  assertEqual(plainResult?.stdout, "plain HTTP hook note", "P1-2k plain HTTP text still passes through")
+
+  const businessResult = await runHooks(
+    [makeHttpHook("/business")],
+    "PostToolUse",
+    httpContext
+  )
+  assertEqual(
+    businessResult?.stdout,
+    protocolBodies["/business"],
+    "P1-2k1 JSON without Hook protocol keys still passes through"
+  )
+
+  const oversizedBlockResult = await executeHttpHook(
+    { ...makeHttpHook("/oversize"), fallback: "block" },
+    "{}",
+    5_000
+  )
+  assertEqual(
+    oversizedBlockResult.blocked,
+    true,
+    "P1-2k2 oversized HTTP response honours fallback=block"
+  )
+  assert(
+    /exceeded 1000000 bytes/i.test(oversizedBlockResult.stderr),
+    "P1-2k3 oversized HTTP response reports the output limit"
+  )
+
+  const oversizedAllowResult = await executeHttpHook(
+    { ...makeHttpHook("/oversize"), fallback: "allow" },
+    "{}",
+    5_000
+  )
+  assertEqual(
+    oversizedAllowResult.blocked,
+    false,
+    "P1-2k4 oversized HTTP response honours fallback=allow"
+  )
+  assertEqual(
+    oversizedAllowResult.decision,
+    "approve",
+    "P1-2k5 oversized HTTP allow fallback is explicit"
+  )
+
+  await runWithHookAgentId("http-worker-agent", () =>
+    runHooks([makeHttpHook("/capture")], "PostToolUse", httpContext)
+  )
+  assertEqual(
+    capturedHttpPayload?.agent_id,
+    "http-worker-agent",
+    "P1-2l HTTP payload inherits the active agent id"
+  )
+  assertEqual(
+    capturedHttpPayload?.workspace,
+    tmpdir(),
+    "P1-2m HTTP payload exposes workspace"
+  )
+  assertEqual(
+    capturedHttpPayload?.workspace_path,
+    tmpdir(),
+    "P1-2n HTTP payload exposes workspace_path alias"
+  )
+} finally {
+  await new Promise<void>((resolve, reject) =>
+    protocolServer.close((error) => (error ? reject(error) : resolve()))
+  )
+}
+
+// ─── P1-2o — command hook stdin/env use invocation context only ────────────
+
+const invocationContextEnvNames = new Set([
+  "AGENT_ID",
+  "WORKSPACE_PATH",
+  "CLAUDE_PROJECT_DIR"
+])
+const previousInvocationContextEnv = Object.entries(process.env).filter(([name]) =>
+  invocationContextEnvNames.has(name.toUpperCase())
+)
+const clearProcessInvocationContextEnv = (): void => {
+  for (const name of Object.keys(process.env)) {
+    if (invocationContextEnvNames.has(name.toUpperCase())) delete process.env[name]
+  }
+}
+const restoreProcessInvocationContextEnv = (): void => {
+  clearProcessInvocationContextEnv()
+  for (const [name, value] of previousInvocationContextEnv) process.env[name] = value
+}
+
+clearProcessInvocationContextEnv()
+process.env.AGENT_ID = "stale-host-agent"
+process.env.WORKSPACE_PATH = "stale-host-workspace"
+process.env.CLAUDE_PROJECT_DIR = "stale-host-project-dir"
+
+const captureCommand = nodeCommand(`
+let input = ""
+process.stdin.setEncoding("utf8")
+process.stdin.on("data", (chunk) => { input += chunk })
+process.stdin.on("end", () => {
+  process.stdout.write(JSON.stringify({
+    additionalContext: JSON.stringify({
+      payload: JSON.parse(input),
+      cwd: process.cwd(),
+      env: {
+        agentId: process.env.AGENT_ID ?? null,
+        workspacePath: process.env.WORKSPACE_PATH ?? null,
+        claudeProjectDir: process.env.CLAUDE_PROJECT_DIR ?? null
+      }
+    })
+  }))
+})
+`)
+const captureCommandHook: HookConfig = {
+  id: "capture-command-context",
+  event: "PreToolUse",
+  matcher: "read_file",
+  type: "command",
+  command: captureCommand,
+  hookSourceRoot: process.cwd(),
+  enabled: true,
+  timeout: 5_000,
+  createdAt: "",
+  updatedAt: ""
+}
+
+try {
+  const commandResult = await runWithHookAgentId("command-worker-agent", () =>
+    runHooks([captureCommandHook], "PreToolUse", {
+      toolName: "read_file",
+      toolArgs: { file_path: "note.txt" },
+      workspacePath: tmpdir(),
+      sessionId: "command-context-thread"
+    })
+  )
+  const capturedCommand = JSON.parse(commandResult?.additionalContext ?? "{}") as {
+    payload?: Record<string, unknown>
+    cwd?: string
+    env?: Record<string, unknown>
+  }
+  assertEqual(
+    capturedCommand.payload?.agent_id,
+    "command-worker-agent",
+    "P1-2o command stdin inherits the active agent id"
+  )
+  assertEqual(
+    capturedCommand.payload?.workspace,
+    tmpdir(),
+    "P1-2p command stdin exposes workspace"
+  )
+  assertEqual(
+    capturedCommand.payload?.workspace_path,
+    tmpdir(),
+    "P1-2q command stdin exposes workspace_path alias"
+  )
+  assertEqual(
+    capturedCommand.payload?.cwd,
+    process.cwd(),
+    "P1-2r command stdin cwd remains the hook source root"
+  )
+  assertEqual(
+    capturedCommand.cwd,
+    process.cwd(),
+    "P1-2s command process cwd remains the hook source root"
+  )
+  assertEqual(
+    capturedCommand.env?.agentId,
+    "command-worker-agent",
+    "P1-2t command env exposes the active agent id"
+  )
+  assertEqual(
+    capturedCommand.env?.workspacePath,
+    tmpdir(),
+    "P1-2u command env exposes WORKSPACE_PATH"
+  )
+  assertEqual(
+    capturedCommand.env?.claudeProjectDir,
+    tmpdir(),
+    "P1-2v command env exposes CLAUDE_PROJECT_DIR"
+  )
+
+  const unscopedResult = await runHooks([captureCommandHook], "PreToolUse", {
+    toolName: "read_file",
+    toolArgs: { file_path: "note.txt" },
+    sessionId: "unscoped-command-thread"
+  })
+  const unscopedCommand = JSON.parse(unscopedResult?.additionalContext ?? "{}") as {
+    payload?: Record<string, unknown>
+    env?: Record<string, unknown>
+  }
+  assert(
+    !("agent_id" in (unscopedCommand.payload ?? {})),
+    "P1-2w unscoped command stdin does not inherit host AGENT_ID"
+  )
+  assert(
+    !("workspace" in (unscopedCommand.payload ?? {})) &&
+      !("workspace_path" in (unscopedCommand.payload ?? {})),
+    "P1-2x unscoped command stdin does not invent a workspace"
+  )
+  assertEqual(unscopedCommand.env?.agentId, null, "P1-2y command env clears host AGENT_ID")
+  assertEqual(
+    unscopedCommand.env?.workspacePath,
+    null,
+    "P1-2z command env clears host WORKSPACE_PATH"
+  )
+  assertEqual(
+    unscopedCommand.env?.claudeProjectDir,
+    null,
+    "P1-2aa command env clears host CLAUDE_PROJECT_DIR"
+  )
+
+  if (process.platform === "win32") {
+    clearProcessInvocationContextEnv()
+    process.env.Agent_Id = "stale-mixed-agent"
+    process.env.Workspace_Path = "stale-mixed-workspace"
+    process.env.Claude_Project_Dir = "stale-mixed-project-dir"
+
+    const mixedCaseResult = await runHooks([captureCommandHook], "PreToolUse", {
+      toolName: "read_file",
+      toolArgs: { file_path: "note.txt" },
+      sessionId: "mixed-case-command-thread"
+    })
+    const mixedCaseCommand = JSON.parse(mixedCaseResult?.additionalContext ?? "{}") as {
+      env?: Record<string, unknown>
+    }
+    assertEqual(
+      mixedCaseCommand.env?.agentId,
+      null,
+      "P1-2ab Windows command env clears mixed-case AGENT_ID"
+    )
+    assertEqual(
+      mixedCaseCommand.env?.workspacePath,
+      null,
+      "P1-2ac Windows command env clears mixed-case WORKSPACE_PATH"
+    )
+    assertEqual(
+      mixedCaseCommand.env?.claudeProjectDir,
+      null,
+      "P1-2ad Windows command env clears mixed-case CLAUDE_PROJECT_DIR"
+    )
+  }
+} finally {
+  restoreProcessInvocationContextEnv()
+}
+
+// ─── P1-2ae — command output limit is explicit for stdout and stderr ────────
+
+for (const stream of ["stdout", "stderr"] as const) {
+  const oversizedCommandHook: HookConfig = {
+    id: `oversized-command-${stream}`,
+    event: "PostToolUse",
+    matcher: "read_file",
+    type: "command",
+    command: nodeCommand(`process.${stream}.write("x".repeat(1_000_001))`),
+    hookSourceRoot: process.cwd(),
+    enabled: true,
+    timeout: 5_000,
+    createdAt: "",
+    updatedAt: ""
+  }
+  let observedOversizedCommand: HookResult | undefined
+  const oversizedCommandResult = await runHooks(
+    [oversizedCommandHook],
+    "PostToolUse",
+    httpContext,
+    (_event, _hook, hookResult) => {
+      observedOversizedCommand = hookResult
+    }
+  )
+  assertEqual(
+    observedOversizedCommand?.exitCode,
+    1,
+    `P1-2ae ${stream} over 1 MB is an explicit command-hook failure`
+  )
+  assertEqual(
+    observedOversizedCommand?.stdout,
+    "",
+    `P1-2af ${stream} over 1 MB never exposes partial stdout`
+  )
+  assert(
+    observedOversizedCommand?.stderr.includes("output truncated at 1000000 bytes"),
+    `P1-2ag ${stream} over 1 MB reports the output limit`
+  )
+  assertEqual(
+    oversizedCommandResult?.stdout,
+    "",
+    `P1-2ah ${stream} over 1 MB is not injected into tool feedback`
+  )
+}
 
 // ─── P1-3 — Setup branch of runHooks awaits hook completion ────────────────
 

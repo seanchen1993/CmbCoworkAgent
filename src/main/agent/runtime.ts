@@ -1096,6 +1096,7 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
+    agentId?: string
     turnId?: string
     pluginOutputDir?: string
     systemId?: string
@@ -1331,6 +1332,7 @@ export function createScopedMcpCapabilityService(
         toolArgs: args,
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
+        agentId: baseContext.agentId,
         turnId: baseContext.turnId,
         pluginOutputDir: baseContext.pluginOutputDir,
         systemId: baseContext.systemId,
@@ -3666,12 +3668,14 @@ function buildWorkerStopRevisionPrompt(result: HookResult, attempt: number): str
 async function applyWorkerPromptSubmitHooks({
   prompt,
   sessionId,
+  agentId,
   workspacePath,
   onHookResult,
   metadata
 }: {
   prompt: string
   sessionId: string
+  agentId: string
   workspacePath: string
   onHookResult?: HookResultCallback
   metadata?: Record<string, unknown>
@@ -3684,7 +3688,8 @@ async function applyWorkerPromptSubmitHooks({
       toolArgs: { message: prompt, ...(metadata ?? {}) },
       userPrompt: prompt,
       workspacePath,
-      sessionId
+      sessionId,
+      agentId
     },
     onHookResult
   )
@@ -3723,6 +3728,7 @@ function observeWorkerSkillUsage(
 
 async function runWorkerStopHooksWithRevision({
   sessionId,
+  agentId,
   workspacePath,
   abortSignal,
   getStopContext,
@@ -3732,6 +3738,7 @@ async function runWorkerStopHooksWithRevision({
   onHookResult
 }: {
   sessionId: string
+  agentId: string
   workspacePath: string
   abortSignal: AbortSignal
   getStopContext: () => {
@@ -3753,6 +3760,7 @@ async function runWorkerStopHooksWithRevision({
       {
         workspacePath,
         sessionId,
+        agentId,
         stopContext: getStopContext()
       },
       onHookResult
@@ -3955,6 +3963,8 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 export interface CreateAgentRuntimeOptions {
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
+  /** Stable identity exposed to hooks for subagent/worker attribution. */
+  agentId?: string
   /** Physical foreground run token allowed to drain the current-run steer queue. */
   currentRunMessageQueueOwnerToken?: string
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
@@ -4124,6 +4134,7 @@ export type AgentRuntime = ReturnType<typeof createAgent>
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
   const {
     threadId,
+    agentId,
     approvalThreadId: requestedApprovalThreadId,
     workspacePath,
     modelId,
@@ -4371,6 +4382,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   const backend = new LocalSandbox({
     rootDir: workspacePath,
+    agentId,
     virtualMode: false,
     timeout: 60_000,
     maxOutputBytes,
@@ -4517,6 +4529,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: approvalThreadId,
+        agentId,
         turnId: hookTurnId,
         pluginOutputDir,
         systemId,
@@ -4782,6 +4795,7 @@ The workspace root is: ${workspacePath}`
     {
       workspacePath,
       threadId,
+      agentId,
       pluginOutputDir,
       systemId,
       pluginWorkspace,
@@ -4998,6 +5012,7 @@ The workspace root is: ${workspacePath}`
               subagentOptions.shellAccess === "read_only" || subagentOptions.shellAccess === "none"
             const subagentRuntime = await createAgentRuntime({
               threadId: subagentOptions.threadId,
+              agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
               approvalThreadId: threadId,
               workspacePath,
@@ -5132,6 +5147,7 @@ The workspace root is: ${workspacePath}`
   const toolHookMiddleware = createToolHookMiddleware({
     workspacePath,
     threadId: options.threadId,
+    agentId,
     hookScope,
     resolveHooksForContext,
     onHookResult,
@@ -5359,6 +5375,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     // derive from these LocalSandbox/runtime options). SESSION_ID intentionally
     // stays the worker thread id and is not part of this bundle.
     const workerHarnessContext = {
+      agentId: workerInput.workerId,
       systemId,
       pluginRoot,
       pluginId,
@@ -5384,6 +5401,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       const effectiveWorkerPrompt = await applyWorkerPromptSubmitHooks({
         prompt: workerInput.prompt,
         sessionId: workerInput.workerThreadId,
+        agentId: workerInput.workerId,
         workspacePath,
         onHookResult: workerOnHookResult,
         metadata: {
@@ -5720,6 +5738,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       let workerStopHookFailure: string | undefined
       const stopPassed = await runWorkerStopHooksWithRevision({
         sessionId: workerInput.workerThreadId,
+        agentId: workerInput.workerId,
         workspacePath,
         abortSignal: workerInput.abortSignal,
         getStopContext: () => ({
@@ -6142,6 +6161,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       const context: HookContext = {
         workspacePath,
         sessionId: threadId,
+        agentId,
         turnId: hookTurnId,
         pluginOutputDir,
         systemId,

@@ -23,7 +23,7 @@ import { join, resolve } from "path"
 const PROJECT_ROOT = resolve(__dirname, "..")
 
 function read(rel: string): string {
-  return readFileSync(join(PROJECT_ROOT, rel), "utf8")
+  return readFileSync(join(PROJECT_ROOT, rel), "utf8").replace(/\r\n/g, "\n")
 }
 
 function assert(condition: unknown, message: string): void {
@@ -204,9 +204,9 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     4,
     "invoke, resume, and interrupt each register the shared preparer"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    '"UserPromptSubmit",\n    promptSubmitContext,',
+    /"UserPromptSubmit",\r?\n\s*promptSubmitContext,/,
     "shared preparation executes UserPromptSubmit hooks"
   )
   assertIncludes(
@@ -1203,13 +1203,18 @@ function testInjectionPayloadHasNoRedundantIdsField(): void {
     "messageIds: messages.map",
     "runtime's injection notifier payload no longer carries a redundant messageIds field"
   )
+  const listenerStart = threadContext.indexOf(
+    "window.api.agent.onQueuedMessagesInjected"
+  )
+  assert(listenerStart >= 0, "queued-message injection listener not found")
+  const listenerBody = threadContext.slice(listenerStart, listenerStart + 2400)
   assertNotIncludes(
-    threadContext,
+    listenerBody,
     "fallbackMessages",
     "the unreachable content-fallback branch was removed, not just left dead"
   )
   assertIncludes(
-    threadContext,
+    listenerBody,
     "const injectedIds = new Set(messages.map((message) => message.id))",
     "injectedIds is derived directly from messages, not a separate wire field"
   )

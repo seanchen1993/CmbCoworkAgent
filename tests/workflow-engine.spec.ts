@@ -76,6 +76,7 @@ import {
   createRuntimeWithModelFallback,
   extractWorkflowTraceToolDetails,
   isModelUnavailableError,
+  runWorkflowSubagent,
   type WorkflowSubagentDeps
 } from "../src/main/agent/workflow/subagent.ts"
 import {
@@ -3996,28 +3997,46 @@ async function testModelFallbackOnlyOnUnavailable(): Promise<void> {
     "a checkpointer fault is NOT model-unavailable"
   )
 
-  const mkDeps = (firstError: Error): WorkflowSubagentDeps =>
+  type RuntimeCall = { agentId: string; modelId?: string }
+  const mkDeps = (firstError: Error, calls: RuntimeCall[] = []): WorkflowSubagentDeps =>
     ({
       defaultModelId: "custom:default",
       cleanupThread: async () => {},
-      createRuntime: async ({ modelId }: { modelId?: string }) => {
+      createRuntime: async ({
+        agentId,
+        modelId
+      }: {
+        agentId: string
+        modelId?: string
+      }) => {
+        calls.push({ agentId, modelId })
         if (modelId === "custom:wanted") throw firstError
         return {} as never
       }
     }) as unknown as WorkflowSubagentDeps
   const opts = {
     threadId: "t",
+    agentId: "wf_run:agent:4",
     extraSystemPrompt: "",
     abortSignal: new AbortController().signal,
     label: "L",
     model: "wanted"
   }
 
+  const fallbackCalls: RuntimeCall[] = []
   const fellBack = await createRuntimeWithModelFallback(
-    mkDeps(new Error("Custom model not configured. Please configure a model in Settings.")),
+    mkDeps(
+      new Error("Custom model not configured. Please configure a model in Settings."),
+      fallbackCalls
+    ),
     opts
   )
   assert(fellBack.modelFellBack === true, "an unavailable model falls back to the default")
+  assert(fallbackCalls.length === 2, "model fallback creates the requested and default runtimes")
+  assert(
+    fallbackCalls.every((call) => call.agentId === opts.agentId),
+    "model fallback preserves the workflow agent identity"
+  )
 
   let propagated = false
   try {
@@ -4026,6 +4045,48 @@ async function testModelFallbackOnlyOnUnavailable(): Promise<void> {
     propagated = true
   }
   assert(propagated, "a non-model init fault propagates instead of silently downgrading")
+}
+
+async function testWorkflowAgentIdentityStableAcrossRetry(): Promise<void> {
+  const runtimeCalls: Array<{ threadId: string; agentId: string }> = []
+  const deps = {
+    parentThreadId: "parent",
+    cleanupThread: async () => {},
+    isRetryableApiError: (error: unknown) =>
+      error instanceof Error && error.message === "retryable runtime init",
+    createRuntime: async (options: {
+      threadId: string
+      agentId: string
+    }): Promise<{ stream: () => Promise<AsyncIterable<unknown>> }> => {
+      runtimeCalls.push({ threadId: options.threadId, agentId: options.agentId })
+      if (runtimeCalls.length === 1) throw new Error("retryable runtime init")
+      return {
+        stream: async () =>
+          (async function* (): AsyncIterable<unknown> {
+            yield ["values", { messages: [{ type: "ai", content: "done" }] }]
+          })()
+      }
+    }
+  } as unknown as WorkflowSubagentDeps
+
+  const result = await runWorkflowSubagent(deps, {
+    prompt: "retry identity",
+    agentIndex: 7,
+    label: "retry-agent",
+    runId: "wf_retry_identity",
+    signal: new AbortController().signal
+  })
+
+  assert(result.text === "done", "workflow retry returns the successful second-attempt output")
+  assert(runtimeCalls.length === 2, "retryable runtime failure creates a fresh runtime")
+  assert(
+    runtimeCalls[0]?.threadId !== runtimeCalls[1]?.threadId,
+    "workflow retry uses a fresh checkpoint thread"
+  )
+  assert(
+    runtimeCalls.every((call) => call.agentId === "wf_retry_identity:agent:7"),
+    "workflow retry preserves one stable agent identity across checkpoint threads"
+  )
 }
 
 async function testGlobCapStreamEarlyStop(): Promise<void> {
@@ -4147,21 +4208,32 @@ return "WROTE"`,
     const outsideTarget = join(dirname(dir), `wf-escape-${basename(dir)}.txt`)
     writeFileSync(outsideTarget, "original")
     try {
-      symlinkSync(outsideTarget, join(dir, "link.txt"))
-      const symEscape = await createHarness(dir).run(
-        `export const meta = { name: "js", description: "d" }
+      let symlinkAvailable = true
+      try {
+        symlinkSync(outsideTarget, join(dir, "link.txt"))
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? error.code : undefined
+        if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES")) throw error
+        symlinkAvailable = false
+        console.log("SKIP workflow file-symlink jail check: Windows symlink privilege unavailable")
+      }
+
+      if (symlinkAvailable) {
+        const symEscape = await createHarness(dir).run(
+          `export const meta = { name: "js", description: "d" }
 await writeFile("link.txt", "HACKED")
 return "WROTE"`,
-        echoRunner
-      )
-      assert(
-        symEscape.status === "error" && /workspace/.test(symEscape.error ?? ""),
-        `writeFile via a workspace symlink pointing out must be rejected, got ${symEscape.status}: ${symEscape.error}`
-      )
-      assert(
-        readFileSync(outsideTarget, "utf-8") === "original",
-        "the outside target must be left untouched"
-      )
+          echoRunner
+        )
+        assert(
+          symEscape.status === "error" && /workspace/.test(symEscape.error ?? ""),
+          `writeFile via a workspace symlink pointing out must be rejected, got ${symEscape.status}: ${symEscape.error}`
+        )
+        assert(
+          readFileSync(outsideTarget, "utf-8") === "original",
+          "the outside target must be left untouched"
+        )
+      }
     } finally {
       rmSync(outsideTarget, { force: true })
     }
@@ -4321,6 +4393,7 @@ async function main(): Promise<void> {
     testReconcileHydratedRun()
     await testGlobCapStreamEarlyStop()
     await testModelFallbackOnlyOnUnavailable()
+    await testWorkflowAgentIdentityStableAcrossRetry()
     testNotificationTurnPromptInSync()
     testRendererNotificationFullMatch()
     testWorkflowNotificationTurnMessageFullMatch()
@@ -4328,7 +4401,7 @@ async function main(): Promise<void> {
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (83 tests)")
+    console.log("PASS workflow-engine (84 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome
