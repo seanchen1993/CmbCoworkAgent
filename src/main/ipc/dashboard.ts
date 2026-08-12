@@ -1077,6 +1077,12 @@ function buildProjectModeOrgFilter(
   return { bool: { filter: filters } }
 }
 
+function projectMetricAllowedRoomNames(access: DashboardAccessContext): string[] | null {
+  if (isDashboardProjectModeAdmin(access)) return null
+  const roomName = access.upperOrgLv1.trim()
+  return roomName ? [roomName] : []
+}
+
 function getDashboardEsIndexByAlias(): Record<DashboardEsIndexAlias, string> {
   return {
     event: getEsIndex("event"),
@@ -13490,14 +13496,15 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
       return { success: true, data: makeMockProjectMetricSummary(filters) }
     }
     try {
-      requireDashboardProjectModeAccess()
+      const access = requireDashboardProjectModeAccess()
       return {
         success: true,
         data: await fetchProjectMetricSummary(filters, {
           query: esQuery,
           eventIndex: getEsIndex("event"),
           traceIndex: getEsIndex("trace"),
-          factIndex: getEsIndex("projectFact")
+          factIndex: getEsIndex("projectFact"),
+          allowedRoomNames: projectMetricAllowedRoomNames(access)
         })
       }
     } catch (e) {
@@ -13513,14 +13520,15 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: makeMockProjectMetricProjects(filters, options) }
       }
       try {
-        requireDashboardProjectModeAccess()
+        const access = requireDashboardProjectModeAccess()
         return {
           success: true,
           data: await fetchProjectMetricProjects(filters, options ?? {}, {
             query: esQuery,
             eventIndex: getEsIndex("event"),
             traceIndex: getEsIndex("trace"),
-            factIndex: getEsIndex("projectFact")
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
           })
         }
       } catch (e) {

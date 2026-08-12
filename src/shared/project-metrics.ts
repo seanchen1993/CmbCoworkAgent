@@ -6,6 +6,8 @@ export interface ProjectMetricFilters {
   phaseStatuses?: string[]
   functionPointMin?: number | null
   functionPointMax?: number | null
+  tokenConsumptionMin?: number | null
+  tokenConsumptionMax?: number | null
   adapterName?: string | null
 }
 
