@@ -143,8 +143,13 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(chat, "AgentModeSwitcher", "ChatContainer imports mode switcher")
   assertIncludes(
     chat,
-    "showWorkflow={!isProjectModeAgentContext}",
-    "project mode hides Workflow while normal chat keeps it"
+    "const disableWorkflowModeOption = false",
+    "project mode does not disable Workflow"
+  )
+  assertMatches(
+    chat,
+    /<AgentModeSwitcher\s+showWorkflow\b/,
+    "project mode and normal chat both show Workflow"
   )
   assertIncludes(
     chat,
