@@ -30,7 +30,7 @@ describe("browser script library service", () => {
     const first = await saveBrowserScriptLibraryEntry({
       displayName: "登录流程",
       description: "验证用户名登录",
-      recordingSource: "ai",
+      recordingSource: "script",
       script: "test('login', async ({ page }) => {})",
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
@@ -38,7 +38,7 @@ describe("browser script library service", () => {
     const second = await saveBrowserScriptLibraryEntry({
       displayName: "登录流程副本",
       description: "第二条记录",
-      recordingSource: "manual",
+      recordingSource: "script",
       script: "test('login again', async ({ page }) => {})",
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
@@ -48,8 +48,8 @@ describe("browser script library service", () => {
     expect(second.fileName).toMatch(/^browser-recording-.+\.spec\.ts$/)
     expect(second.fileName).not.toBe(first.fileName)
     expect(first.workspacePath).toBe(resolve("/tmp/workspace-a"))
-    expect(first.recordingSource).toBe("ai")
-    expect(second.recordingSource).toBe("manual")
+    expect(first.recordingSource).toBe("script")
+    expect(second.recordingSource).toBe("script")
     await expect(readBrowserScriptLibraryScript({ fileName: first.fileName })).resolves.toBe(
       "test('login', async ({ page }) => {})"
     )
@@ -66,7 +66,7 @@ describe("browser script library service", () => {
     await saveBrowserScriptLibraryEntry({
       displayName: "工作区 A",
       description: "A 描述",
-      recordingSource: "manual",
+      recordingSource: "script",
       script: `const 变量_目标地址 = ""; // 变量-目标地址`,
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
@@ -74,7 +74,7 @@ describe("browser script library service", () => {
     await saveBrowserScriptLibraryEntry({
       displayName: "工作区 B",
       description: "B 描述",
-      recordingSource: "ai",
+      recordingSource: "script",
       script: "B",
       threadId: "thread-b",
       workspacePath: "/tmp/workspace-b"
@@ -86,7 +86,7 @@ describe("browser script library service", () => {
       expect.objectContaining({
         displayName: "工作区 B",
         description: "B 描述",
-        recordingSource: "ai",
+        recordingSource: "script",
         threadId: "thread-b",
         hasVariables: false,
         workspacePath: resolve("/tmp/workspace-b")
@@ -94,7 +94,7 @@ describe("browser script library service", () => {
       expect.objectContaining({
         displayName: "工作区 A",
         description: "A 描述",
-        recordingSource: "manual",
+        recordingSource: "script",
         threadId: "thread-a",
         hasVariables: true,
         workspacePath: resolve("/tmp/workspace-a")
@@ -105,7 +105,7 @@ describe("browser script library service", () => {
   it("updates the script and display name in the existing library entry", async () => {
     const entry = await saveBrowserScriptLibraryEntry({
       displayName: "旧名称",
-      recordingSource: "manual",
+      recordingSource: "script",
       script: "old script",
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
@@ -128,7 +128,7 @@ describe("browser script library service", () => {
         fileName: entry.fileName,
         displayName: "新名称",
         isEdited: true,
-        recordingSource: "manual"
+        recordingSource: "script"
       })
     ])
   })
@@ -136,7 +136,7 @@ describe("browser script library service", () => {
   it("preserves the edited marker and marks newly saved entries when requested", async () => {
     const entry = await saveBrowserScriptLibraryEntry({
       displayName: "未编辑脚本",
-      recordingSource: "manual",
+      recordingSource: "script",
       script: "recorded script",
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
@@ -163,7 +163,7 @@ describe("browser script library service", () => {
     const explicitlyEditedEntry = await saveBrowserScriptLibraryEntry({
       displayName: "已编辑脚本",
       isEdited: true,
-      recordingSource: "ai",
+      recordingSource: "script",
       script: "edited from the result dialog",
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
@@ -186,7 +186,7 @@ describe("browser script library service", () => {
       description: "",
       displayName: `录制 ${index + 1}`,
       fileName: `browser-recording-seeded-${index + 1}.spec.ts`,
-      recordingSource: "manual",
+      recordingSource: "script",
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
     }))
@@ -199,7 +199,7 @@ describe("browser script library service", () => {
     await expect(
       saveBrowserScriptLibraryEntry({
         displayName: "超出上限的录制",
-        recordingSource: "ai",
+        recordingSource: "script",
         script: "test('too many', async ({ page }) => {})",
         threadId: "thread-a",
         workspacePath: "/tmp/workspace-a"
@@ -211,7 +211,7 @@ describe("browser script library service", () => {
     const entry = await saveBrowserScriptLibraryEntry({
       displayName: "待删除脚本",
       description: "删除验证",
-      recordingSource: "ai",
+      recordingSource: "script",
       script: "test('delete me', async ({ page }) => {})",
       threadId: "thread-a",
       workspacePath: "/tmp/workspace-a"
@@ -234,7 +234,7 @@ describe("browser script library service", () => {
     expect(manifest.entries).toEqual([])
   })
 
-  it("defaults legacy manifest entries without recordingSource to ai", async () => {
+  it("normalizes legacy manifest entries without recordingSource to script", async () => {
     const manifestPath = join(libraryRoot, "browser.json")
     const legacyManifest = {
       version: 1,
@@ -258,7 +258,7 @@ describe("browser script library service", () => {
     expect(entries).toEqual([
       expect.objectContaining({
         displayName: "历史录制",
-        recordingSource: "ai"
+        recordingSource: "script"
       })
     ])
   })

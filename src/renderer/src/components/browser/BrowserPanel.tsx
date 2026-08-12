@@ -25,7 +25,7 @@ import {
 import { toast } from "sonner"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
-import { BrowserAiRecordingControls } from "./BrowserAiRecordingControls"
+import { BrowserScriptRecordingControls } from "./BrowserScriptRecordingControls"
 import { BrowserCdpConfigCard } from "./BrowserCdpConfigCard"
 import {
   BUILTIN_BROWSER_LOG_PREFIX,
@@ -222,8 +222,7 @@ function BrowserWelcomePanel({
               <div className="min-w-0">
                 <p className="text-xs font-medium text-stone-800">每次验证，都值得复用</p>
                 <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  录制（ AI
-                  或人工）操作，把高频验证沉淀为可复用的测试案例，让下次验证从已有流程开始。
+                  录制人工操作，把高频验证沉淀为可复用的测试案例，让下次验证从已有流程开始。
                 </p>
               </div>
             </div>
@@ -272,8 +271,7 @@ export function BrowserPanel({
   const [isProfileImportRuntimeEnabled, setIsProfileImportRuntimeEnabled] = useState(false)
   const [copiedConsole, setCopiedConsole] = useState(false)
   const [consoleOpen, setConsoleOpen] = useState(false)
-  const [aiRecordingBoxOpen, setAiRecordingBoxOpen] = useState(false)
-  const [isAgentBrowserControlEnabled, setIsAgentBrowserControlEnabled] = useState(false)
+  const [recordingBoxOpen, setRecordingBoxOpen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isHiddenByModalDialog, setIsHiddenByModalDialog] = useState(false)
   const showBrowserWelcome = isInitialBrowserPage(state.url)
@@ -287,27 +285,6 @@ export function BrowserPanel({
   const reportBrowserError = useCallback((error: string) => {
     setState((current) => (current.error === error ? current : { ...current, error }))
   }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    window.api.browser
-      .getCdpConfig()
-      .then((config) => {
-        if (!cancelled) setIsAgentBrowserControlEnabled(config.enabled)
-      })
-      .catch((error) => {
-        console.error(
-          `${BROWSER_PANEL_LOG_PREFIX} Failed to load Browser CDP config: ${formatError(error)}`
-        )
-        if (cancelled) return
-        setIsAgentBrowserControlEnabled(false)
-        reportBrowserError(formatError(error) || "读取内置浏览器配置失败")
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [reportBrowserError])
 
   useEffect(() => {
     let cancelled = false
@@ -856,11 +833,7 @@ export function BrowserPanel({
       <div className="relative min-h-0 flex-1 bg-white">
         {/* Keep the welcome panel mounted so any dialogs launched from it are not
             immediately unmounted by the BrowserView modal-hide guard. */}
-        {showBrowserWelcome && (
-          <BrowserWelcomePanel
-            onCdpConfigSaved={(config) => setIsAgentBrowserControlEnabled(config.enabled)}
-          />
-        )}
+        {showBrowserWelcome && <BrowserWelcomePanel onCdpConfigSaved={() => undefined} />}
         {isHiddenByModalDialog && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
             <div className="max-w-xs text-center">
@@ -883,12 +856,11 @@ export function BrowserPanel({
         <div ref={viewportRef} className="pointer-events-none absolute inset-0" />
       </div>
 
-      {aiRecordingBoxOpen && (
+      {recordingBoxOpen && (
         <div className="shrink-0 border-t border-border bg-background px-2 py-1">
-          <BrowserAiRecordingControls
+          <BrowserScriptRecordingControls
             browserCreated={state.created}
             currentUrl={state.url}
-            isAgentBrowserControlEnabled={isAgentBrowserControlEnabled}
             threadId={threadId}
             workspacePath={workspacePath}
           />
@@ -949,10 +921,10 @@ export function BrowserPanel({
             className={BROWSER_TOOLBAR_ICON_BUTTON_CLASSNAME}
             side="left"
             icon={<Video className="size-4" strokeWidth={1.8} />}
-            popoverContent="录制自动化脚本"
-            aria-label="录制自动化脚本"
-            aria-pressed={aiRecordingBoxOpen}
-            onClick={() => setAiRecordingBoxOpen((open) => !open)}
+            popoverContent="录制脚本"
+            aria-label="录制脚本"
+            aria-pressed={recordingBoxOpen}
+            onClick={() => setRecordingBoxOpen((open) => !open)}
           />
         </div>
       </div>

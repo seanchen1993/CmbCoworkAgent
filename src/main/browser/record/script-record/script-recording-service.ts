@@ -1,41 +1,41 @@
 import { webFrameMain } from "electron"
 import type { WebFrameMain } from "electron"
 import type {
-  AiRecordedBrowserAction,
-  AiRecordingSession,
+  BrowserRecordedAction,
+  BrowserRecordingSession,
   BrowserLocatorMetadata,
   BrowserNavigationSource,
-  ManualRecordingStartOptions,
+  ScriptRecordingStartOptions,
   BrowserRecordingDraftUpdateInput
 } from "../../../../shared/browser-types"
 import {
-  generateAiRecordingScript,
-  parseAiRecordingScript
-} from "../../../../shared/browser-ai-recording-script"
+  generateScriptRecording,
+  parseScriptRecordingScript
+} from "../../../../shared/browser-script-recording"
 import {
-  buildPlaywrightManualRecorderInjectionScript,
-  inspectPlaywrightManualRecorderMessage,
-  parsePlaywrightManualRecorderEvent,
-  PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER,
-  PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID
-} from "./manual-recorder-playwright-adapter"
+  buildPlaywrightScriptRecorderInjectionScript,
+  inspectPlaywrightScriptRecorderMessage,
+  parsePlaywrightScriptRecorderEvent,
+  PLAYWRIGHT_SCRIPT_RECORDER_FRAME_SELECTOR_HELPER,
+  PLAYWRIGHT_SCRIPT_RECORDER_ISOLATED_WORLD_ID
+} from "./script-recorder-playwright-adapter"
 
-let activeSession: AiRecordingSession | null = null
-let lastSession: AiRecordingSession | null = null
+let activeSession: BrowserRecordingSession | null = null
+let lastSession: BrowserRecordingSession | null = null
 let nextSessionNumber = 0
 let nextActionNumber = 0
 let pendingExplicitNavigation: { expiresAt: number; url?: string } | null = null
 
 const EXPLICIT_NAVIGATION_TTL_MS = 10_000
 
-interface ManualRecorderEventBase {
+interface ScriptRecorderEventBase {
   type: string
   timestamp?: string
   frameUrl?: string
   frameHref?: string
 }
 
-interface ManualRecorderLocatorPayload {
+interface ScriptRecorderLocatorPayload {
   target?: string
   role?: string
   label?: string
@@ -53,60 +53,62 @@ interface ManualRecorderLocatorPayload {
   nth?: number
 }
 
-interface ManualRecorderClickEvent extends ManualRecorderEventBase {
+interface ScriptRecorderClickEvent extends ScriptRecorderEventBase {
   type: "click"
-  locator?: ManualRecorderLocatorPayload
-  locatorCandidates?: ManualRecorderLocatorPayload[]
+  locator?: ScriptRecorderLocatorPayload
+  locatorCandidates?: ScriptRecorderLocatorPayload[]
   doubleClick?: boolean
   button?: number
   toggle?: "check" | "uncheck"
 }
 
-interface ManualRecorderFillEvent extends ManualRecorderEventBase {
+interface ScriptRecorderFillEvent extends ScriptRecorderEventBase {
   type: "fill"
-  locator?: ManualRecorderLocatorPayload
+  locator?: ScriptRecorderLocatorPayload
   value?: string
 }
 
-interface ManualRecorderSelectEvent extends ManualRecorderEventBase {
+interface ScriptRecorderSelectEvent extends ScriptRecorderEventBase {
   type: "select"
-  locator?: ManualRecorderLocatorPayload
+  locator?: ScriptRecorderLocatorPayload
   values?: string[]
 }
 
-interface ManualRecorderPressEvent extends ManualRecorderEventBase {
+interface ScriptRecorderPressEvent extends ScriptRecorderEventBase {
   type: "press"
-  locator?: ManualRecorderLocatorPayload
+  locator?: ScriptRecorderLocatorPayload
   key?: string
 }
 
-interface ManualRecorderNavigateEvent extends ManualRecorderEventBase {
+interface ScriptRecorderNavigateEvent extends ScriptRecorderEventBase {
   type: "navigate"
   url?: string
 }
 
-interface ManualRecorderFileUploadEvent extends ManualRecorderEventBase {
+interface ScriptRecorderFileUploadEvent extends ScriptRecorderEventBase {
   type: "fileUpload"
-  locator?: ManualRecorderLocatorPayload
+  locator?: ScriptRecorderLocatorPayload
   paths?: string[]
 }
 
-type ManualRecorderEvent =
-  | ManualRecorderClickEvent
-  | ManualRecorderFillEvent
-  | ManualRecorderSelectEvent
-  | ManualRecorderPressEvent
-  | ManualRecorderNavigateEvent
-  | ManualRecorderFileUploadEvent
+type ScriptRecorderEvent =
+  | ScriptRecorderClickEvent
+  | ScriptRecorderFillEvent
+  | ScriptRecorderSelectEvent
+  | ScriptRecorderPressEvent
+  | ScriptRecorderNavigateEvent
+  | ScriptRecorderFileUploadEvent
 
 const SENSITIVE_TARGET_PATTERN = /pass(word|code)?|secret|token|密码|口令/i
 const DECORATIVE_ROLE_PATTERN = /^(?:img|presentation|none)$/iu
-const DECORATIVE_TAG_PATTERN = /^(?:svg|path|g|use|defs|symbol|rect|circle|ellipse|line|polyline|polygon)$/iu
-const GENERIC_SELECTOR_PATTERN = /^(?:div|span|p|section|article|main|header|footer|aside|label|ul|ol|li)$/iu
+const DECORATIVE_TAG_PATTERN =
+  /^(?:svg|path|g|use|defs|symbol|rect|circle|ellipse|line|polyline|polygon)$/iu
+const GENERIC_SELECTOR_PATTERN =
+  /^(?:div|span|p|section|article|main|header|footer|aside|label|ul|ol|li)$/iu
 const CONTAINER_TEST_ID_PATTERN =
   /(?:^|[-_])(area|container|wrapper|panel|section|group|list|content|body|header|footer|root)(?:$|[-_])/iu
 const INTERACTIVE_TAG_NAMES = new Set(["button", "a", "input", "textarea", "select", "option"])
-const MANUAL_RECORDER_DEBUG_PREFIX = "[Browser][ManualRecorderDebug]"
+const SCRIPT_RECORDER_DEBUG_PREFIX = "[Browser][ScriptRecorderDebug]"
 const FRAME_ELEMENT_SELECTOR_CACHE = new Map<string, string>()
 const FRAME_INJECTION_PROMISES = new Map<string, Promise<void>>()
 const FRAME_CHANNEL_FRAME_CACHE = new Map<string, WebFrameMain>()
@@ -119,29 +121,28 @@ function frameCacheKey(frame: Pick<WebFrameMain, "processId" | "frameToken">): s
   return `${frame.processId}:${frame.frameToken}`
 }
 
-function supportsIsolatedWorldExecution(
-  frame: WebFrameMain
-): frame is WebFrameMain & {
+function supportsIsolatedWorldExecution(frame: WebFrameMain): frame is WebFrameMain & {
   executeJavaScriptInIsolatedWorld: (
     worldId: number,
     scripts: Array<{ code: string }>
   ) => Promise<unknown>
 } {
-  return typeof (frame as { executeJavaScriptInIsolatedWorld?: unknown })
-    .executeJavaScriptInIsolatedWorld === "function"
+  return (
+    typeof (frame as { executeJavaScriptInIsolatedWorld?: unknown })
+      .executeJavaScriptInIsolatedWorld === "function"
+  )
 }
 
-async function executeManualRecorderScriptInIsolatedWorld(
+async function executeScriptRecorderScriptInIsolatedWorld(
   frame: WebFrameMain,
   code: string
 ): Promise<unknown> {
   if (!supportsIsolatedWorldExecution(frame)) {
     throw new Error("frame does not support isolated world execution")
   }
-  return frame.executeJavaScriptInIsolatedWorld(
-    PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID,
-    [{ code }]
-  )
+  return frame.executeJavaScriptInIsolatedWorld(PLAYWRIGHT_SCRIPT_RECORDER_ISOLATED_WORLD_ID, [
+    { code }
+  ])
 }
 
 function readString(value: unknown): string | undefined {
@@ -186,7 +187,7 @@ function normalizeRole(value: unknown): BrowserLocatorMetadata["role"] {
 }
 
 function inferRoleFromLocatorPayload(
-  payload: Pick<ManualRecorderLocatorPayload, "tagName" | "inputType">
+  payload: Pick<ScriptRecorderLocatorPayload, "tagName" | "inputType">
 ): BrowserLocatorMetadata["role"] {
   const tagName = readString(payload.tagName)?.toLowerCase()
   const inputType = readString(payload.inputType)?.toLowerCase()
@@ -204,7 +205,7 @@ function inferRoleFromLocatorPayload(
 }
 
 function normalizeLocatorPayload(
-  payload: ManualRecorderLocatorPayload | undefined,
+  payload: ScriptRecorderLocatorPayload | undefined,
   framePath: string[]
 ): BrowserLocatorMetadata | undefined {
   if (!payload) return framePath.length > 0 ? { framePath } : undefined
@@ -221,8 +222,7 @@ function normalizeLocatorPayload(
     tagName: readString(payload.tagName),
     inputType: readString(payload.inputType),
     isTarget: payload.isTarget === true,
-    isVisible:
-      typeof payload.isVisible === "boolean" ? payload.isVisible : undefined,
+    isVisible: typeof payload.isVisible === "boolean" ? payload.isVisible : undefined,
     playwrightLocator: readString(payload.playwrightLocator),
     framePath: framePath.length > 0 ? framePath : undefined,
     matchCount: (() => {
@@ -241,7 +241,7 @@ function normalizeLocatorPayload(
 }
 
 function locatorPayloadScore(
-  payload: ManualRecorderLocatorPayload | undefined,
+  payload: ScriptRecorderLocatorPayload | undefined,
   candidateIndex: number
 ): number {
   if (!payload) return Number.NEGATIVE_INFINITY
@@ -296,20 +296,16 @@ function locatorPayloadScore(
   return score
 }
 
-function selectManualLocatorPayload(
-  fallback: ManualRecorderLocatorPayload | undefined,
-  candidates: ManualRecorderLocatorPayload[] | undefined
-): ManualRecorderLocatorPayload | undefined {
+function selectScriptLocatorPayload(
+  fallback: ScriptRecorderLocatorPayload | undefined,
+  candidates: ScriptRecorderLocatorPayload[] | undefined
+): ScriptRecorderLocatorPayload | undefined {
   const pool =
-    Array.isArray(candidates) && candidates.length > 0
-      ? candidates
-      : fallback
-        ? [fallback]
-        : []
+    Array.isArray(candidates) && candidates.length > 0 ? candidates : fallback ? [fallback] : []
 
   if (pool.length === 0) return fallback
 
-  let bestPayload: ManualRecorderLocatorPayload | undefined
+  let bestPayload: ScriptRecorderLocatorPayload | undefined
   let bestScore = Number.NEGATIVE_INFINITY
   for (const [index, payload] of pool.entries()) {
     const score = locatorPayloadScore(payload, index)
@@ -337,14 +333,14 @@ function isSensitiveTarget(locator: BrowserLocatorMetadata | undefined): boolean
   )
 }
 
-function actionTargetKey(action: AiRecordedBrowserAction): string {
+function actionTargetKey(action: BrowserRecordedAction): string {
   const target = "target" in action ? action.target : undefined
   const locator = action.locator
   return JSON.stringify({
     kind: action.kind,
     target: target ?? null,
     key: "key" in action ? action.key : null,
-    toggle: "toggle" in action ? action.toggle ?? null : null,
+    toggle: "toggle" in action ? (action.toggle ?? null) : null,
     locator: locator
       ? {
           target: locator.target,
@@ -365,7 +361,7 @@ function actionTargetKey(action: AiRecordedBrowserAction): string {
   })
 }
 
-function actionLocatorKey(action: AiRecordedBrowserAction): string {
+function actionLocatorKey(action: BrowserRecordedAction): string {
   const locator = action.locator
   return JSON.stringify({
     target: "target" in action ? (action.target ?? null) : null,
@@ -422,7 +418,7 @@ function takePendingExplicitNavigation(url: string): boolean {
   return true
 }
 
-function appendAction(session: AiRecordingSession, action: AiRecordedBrowserAction): void {
+function appendAction(session: BrowserRecordingSession, action: BrowserRecordedAction): void {
   const previous = session.actions[session.actions.length - 1]
   if (!previous) {
     session.actions.push(action)
@@ -510,7 +506,7 @@ function appendAction(session: AiRecordingSession, action: AiRecordedBrowserActi
   session.actions.push(action)
 }
 
-function cloneAction(action: AiRecordedBrowserAction): AiRecordedBrowserAction {
+function cloneAction(action: BrowserRecordedAction): BrowserRecordedAction {
   return {
     ...action,
     locator: action.locator
@@ -522,13 +518,13 @@ function cloneAction(action: AiRecordedBrowserAction): AiRecordedBrowserAction {
   }
 }
 
-function toView(session: AiRecordingSession | null): AiRecordingSession {
+function toView(session: BrowserRecordingSession | null): BrowserRecordingSession {
   if (!session) {
     return {
-      source: "manual",
+      source: "script",
       status: "idle",
       actions: [],
-      script: generateAiRecordingScript([], { source: "manual" })
+      script: generateScriptRecording([], { source: "script" })
     }
   }
 
@@ -544,8 +540,8 @@ function toView(session: AiRecordingSession | null): AiRecordingSession {
       session.scriptPrefixActionCount === session.actions.length &&
       session.scriptPrefix.trim().length > 0
         ? session.scriptPrefix
-        : generateAiRecordingScript(session.actions, {
-            source: "manual",
+        : generateScriptRecording(session.actions, {
+            source: "script",
             variableActionIds: session.variableActionIds,
             variableActionNames: session.variableActionNames
           })
@@ -554,7 +550,7 @@ function toView(session: AiRecordingSession | null): AiRecordingSession {
 
 function nextActionId(): string {
   nextActionNumber += 1
-  return `manual-action-${nextActionNumber}`
+  return `script-action-${nextActionNumber}`
 }
 
 function buildFramePath(frame: WebFrameMain): string[] {
@@ -621,19 +617,17 @@ async function cacheFrameElementSelector(frame: WebFrameMain): Promise<void> {
   if (index < 0) return
 
   const helperScript = `(() => {
-    const helper = window[${JSON.stringify(
-      PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER
-    )}];
+    const helper = window[${JSON.stringify(PLAYWRIGHT_SCRIPT_RECORDER_FRAME_SELECTOR_HELPER)}];
     if (typeof helper !== "function") return "";
     return helper(${index});
   })()`
 
   try {
-    const selector = await executeManualRecorderScriptInIsolatedWorld(parent, helperScript)
+    const selector = await executeScriptRecorderScriptInIsolatedWorld(parent, helperScript)
     if (typeof selector === "string" && selector.trim()) {
       FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), selector.trim())
       console.info(
-        `${MANUAL_RECORDER_DEBUG_PREFIX} frame-selector-cached source=isolated frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(selector.trim())}`
+        `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-selector-cached source=isolated frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(selector.trim())}`
       )
       return
     }
@@ -646,7 +640,7 @@ async function cacheFrameElementSelector(frame: WebFrameMain): Promise<void> {
     if (typeof selector === "string" && selector.trim()) {
       FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), selector.trim())
       console.info(
-        `${MANUAL_RECORDER_DEBUG_PREFIX} frame-selector-cached source=page frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(selector.trim())}`
+        `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-selector-cached source=page frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(selector.trim())}`
       )
       return
     }
@@ -657,32 +651,32 @@ async function cacheFrameElementSelector(frame: WebFrameMain): Promise<void> {
   const fallbackSelector = buildFrameSelectorFallback(frame)
   FRAME_ELEMENT_SELECTOR_CACHE.set(frameCacheKey(frame), fallbackSelector)
   console.info(
-    `${MANUAL_RECORDER_DEBUG_PREFIX} frame-selector-cached source=fallback frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(fallbackSelector)}`
+    `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-selector-cached source=fallback frame=${frame.url || "(empty)"} token=${frame.frameToken} parent=${parent.url || "(empty)"} index=${index} selector=${JSON.stringify(fallbackSelector)}`
   )
 }
 
-function buildNavigationAction(url: string): AiRecordedBrowserAction {
+function buildNavigationAction(url: string): BrowserRecordedAction {
   return buildNavigationActionWithSource(url, "explicit")
 }
 
 function buildNavigationActionWithSource(
   url: string,
   navigationSource: BrowserNavigationSource
-): AiRecordedBrowserAction {
+): BrowserRecordedAction {
   return {
     id: nextActionId(),
     kind: "navigate",
-    source: "manual",
+    source: "script",
     timestamp: now(),
     url,
     navigationSource
   }
 }
 
-function normalizeManualEvent(
-  event: ManualRecorderEvent,
+function normalizeScriptEvent(
+  event: ScriptRecorderEvent,
   framePath: string[]
-): AiRecordedBrowserAction | null {
+): BrowserRecordedAction | null {
   const timestamp = readString(event.timestamp) ?? now()
   switch (event.type) {
     case "navigate": {
@@ -692,13 +686,13 @@ function normalizeManualEvent(
     }
     case "click": {
       const locator = normalizeLocatorPayload(
-        selectManualLocatorPayload(event.locator, event.locatorCandidates),
+        selectScriptLocatorPayload(event.locator, event.locatorCandidates),
         framePath
       )
       return {
         id: nextActionId(),
         kind: "click",
-        source: "manual",
+        source: "script",
         timestamp,
         target: locator?.target,
         doubleClick: event.doubleClick === true,
@@ -712,7 +706,7 @@ function normalizeManualEvent(
       return {
         id: nextActionId(),
         kind: "fill",
-        source: "manual",
+        source: "script",
         timestamp,
         target: locator?.target,
         value: readString(event.value) ?? "",
@@ -725,7 +719,7 @@ function normalizeManualEvent(
       return {
         id: nextActionId(),
         kind: "selectOption",
-        source: "manual",
+        source: "script",
         timestamp,
         target: locator?.target,
         values: readStringArray(event.values),
@@ -739,7 +733,7 @@ function normalizeManualEvent(
       return {
         id: nextActionId(),
         kind: "press",
-        source: "manual",
+        source: "script",
         timestamp,
         key,
         target: locator?.target,
@@ -753,7 +747,7 @@ function normalizeManualEvent(
       return {
         id: nextActionId(),
         kind: "fileUpload",
-        source: "manual",
+        source: "script",
         timestamp,
         paths,
         locator
@@ -764,24 +758,24 @@ function normalizeManualEvent(
   }
 }
 
-export function startManualRecording(
-  options: ManualRecordingStartOptions = {}
-): AiRecordingSession {
+export function startScriptRecording(
+  options: ScriptRecordingStartOptions = {}
+): BrowserRecordingSession {
   if (activeSession && activeSession.status !== "completed") return toView(activeSession)
 
   const seedScript = typeof options.seedScript === "string" ? options.seedScript.trim() : ""
   const seededRecording = seedScript
-    ? parseAiRecordingScript(seedScript, "manual")
+    ? parseScriptRecordingScript(seedScript, "script")
     : {
-        actions: [] as AiRecordedBrowserAction[],
+        actions: [] as BrowserRecordedAction[],
         variableActionIds: [] as string[],
         variableActionNames: {} as Record<string, string>
       }
 
   nextSessionNumber += 1
   activeSession = {
-    id: `manual-recording-${Date.now()}-${nextSessionNumber}`,
-    source: "manual",
+    id: `script-recording-${Date.now()}-${nextSessionNumber}`,
+    source: "script",
     status: "recording",
     threadId: readString(options.threadId),
     startedAt: now(),
@@ -808,7 +802,7 @@ export function startManualRecording(
   return toView(activeSession)
 }
 
-export function pauseManualRecording(): AiRecordingSession {
+export function pauseScriptRecording(): BrowserRecordingSession {
   if (!activeSession || activeSession.status !== "recording")
     return toView(activeSession ?? lastSession)
   activeSession.status = "paused"
@@ -816,9 +810,9 @@ export function pauseManualRecording(): AiRecordingSession {
   return toView(activeSession)
 }
 
-export function updateManualRecordingDraft(
+export function updateScriptRecordingDraft(
   input: BrowserRecordingDraftUpdateInput
-): AiRecordingSession {
+): BrowserRecordingSession {
   if (!activeSession || activeSession.status === "completed") {
     throw new Error("当前没有可保存的录制会话")
   }
@@ -828,7 +822,7 @@ export function updateManualRecordingDraft(
     throw new Error("当前没有可保存的脚本内容")
   }
 
-  const parsed = parseAiRecordingScript(script, "manual")
+  const parsed = parseScriptRecordingScript(script, "script")
   activeSession.actions = parsed.actions
   activeSession.variableActionIds = parsed.variableActionIds
   activeSession.variableActionNames = parsed.variableActionNames
@@ -838,7 +832,7 @@ export function updateManualRecordingDraft(
   return toView(activeSession)
 }
 
-export function resumeManualRecording(): AiRecordingSession {
+export function resumeScriptRecording(): BrowserRecordingSession {
   if (!activeSession || activeSession.status !== "paused")
     return toView(activeSession ?? lastSession)
   activeSession.status = "recording"
@@ -846,13 +840,13 @@ export function resumeManualRecording(): AiRecordingSession {
   return toView(activeSession)
 }
 
-export function stopManualRecording(): AiRecordingSession {
+export function stopScriptRecording(): BrowserRecordingSession {
   if (!activeSession) return toView(lastSession)
 
   activeSession.status = "completed"
   activeSession.stoppedAt = now()
   console.info(
-    `${MANUAL_RECORDER_DEBUG_PREFIX} session-stopped actions=${JSON.stringify(
+    `${SCRIPT_RECORDER_DEBUG_PREFIX} session-stopped actions=${JSON.stringify(
       activeSession.actions.map((action) => ({
         kind: action.kind,
         framePath: action.locator?.framePath ?? [],
@@ -868,11 +862,11 @@ export function stopManualRecording(): AiRecordingSession {
   return toView(lastSession)
 }
 
-export function getManualRecording(): AiRecordingSession {
+export function getScriptRecording(): BrowserRecordingSession {
   return toView(activeSession ?? lastSession)
 }
 
-export function recordManualNavigation(
+export function recordScriptNavigation(
   url: string,
   source: BrowserNavigationSource = "explicit"
 ): void {
@@ -884,24 +878,24 @@ export function recordManualNavigation(
   appendAction(activeSession, buildNavigationAction(nextUrl))
 }
 
-export function markNextManualNavigationExplicit(url?: string): void {
+export function markNextScriptNavigationExplicit(url?: string): void {
   if (!activeSession || activeSession.status !== "recording") return
   setPendingExplicitNavigation(url)
 }
 
-async function installManualRecorderInternal(frame: WebFrameMain): Promise<void> {
+async function installScriptRecorderInternal(frame: WebFrameMain): Promise<void> {
   if (!activeSession || activeSession.status !== "recording") return
   if (frame.detached || frame.isDestroyed() || frame.url.startsWith("devtools:")) return
 
   // 主链路只执行 Playwright 注入脚本；旧脚本保留在仓库里，但不再运行。
   const channelId = `${activeSession.id}:${frameCacheKey(frame)}`
-  const script = buildPlaywrightManualRecorderInjectionScript(channelId)
+  const script = buildPlaywrightScriptRecorderInjectionScript(channelId)
 
   try {
     let injectionMode: "isolated" | "page" = "isolated"
     let injectionResult: unknown
     try {
-      injectionResult = await executeManualRecorderScriptInIsolatedWorld(frame, script)
+      injectionResult = await executeScriptRecorderScriptInIsolatedWorld(frame, script)
       // Electron resolves with undefined when isolated-world execution throws.
       if (injectionResult !== true && typeof injectionResult !== "string") {
         throw new Error("isolated world injection did not complete")
@@ -916,13 +910,13 @@ async function installManualRecorderInternal(frame: WebFrameMain): Promise<void>
         : channelId
     FRAME_CHANNEL_FRAME_CACHE.set(resolvedChannelId, frame)
     console.info(
-      `${MANUAL_RECORDER_DEBUG_PREFIX} injected mode=${injectionMode} frame=${frame.url || "(empty)"} token=${frame.frameToken} channel=${resolvedChannelId} parent=${frame.parent?.url || "(root)"}`
+      `${SCRIPT_RECORDER_DEBUG_PREFIX} injected mode=${injectionMode} frame=${frame.url || "(empty)"} token=${frame.frameToken} channel=${resolvedChannelId} parent=${frame.parent?.url || "(root)"}`
     )
     await cacheFrameElementSelector(frame)
   } catch {
     // Cross-origin or transient frames may reject injection; ignore and keep recording other frames.
     console.info(
-      `${MANUAL_RECORDER_DEBUG_PREFIX} inject-skipped frame=${frame.url || "(empty)"} token=${frame.frameToken}`
+      `${SCRIPT_RECORDER_DEBUG_PREFIX} inject-skipped frame=${frame.url || "(empty)"} token=${frame.frameToken}`
     )
   }
 }
@@ -933,14 +927,14 @@ function frameInjectionKey(frame: WebFrameMain): string | undefined {
   return `${sessionId}:${frameCacheKey(frame)}`
 }
 
-export function installManualRecorder(frame: WebFrameMain): Promise<void> {
+export function installScriptRecorder(frame: WebFrameMain): Promise<void> {
   const key = frameInjectionKey(frame)
   if (!key) return Promise.resolve()
 
   const existing = FRAME_INJECTION_PROMISES.get(key)
   if (existing) return existing
 
-  const injection = installManualRecorderInternal(frame).finally(() => {
+  const injection = installScriptRecorderInternal(frame).finally(() => {
     if (FRAME_INJECTION_PROMISES.get(key) === injection) {
       FRAME_INJECTION_PROMISES.delete(key)
     }
@@ -949,7 +943,7 @@ export function installManualRecorder(frame: WebFrameMain): Promise<void> {
   return injection
 }
 
-export async function installManualRecorderForFrameById(
+export async function installScriptRecorderForFrameById(
   frameProcessId: number,
   frameRoutingId: number
 ): Promise<void> {
@@ -957,26 +951,26 @@ export async function installManualRecorderForFrameById(
   const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
   if (!frame || frame.detached || frame.isDestroyed()) {
     console.info(
-      `${MANUAL_RECORDER_DEBUG_PREFIX} frame-by-id-miss pid=${frameProcessId} rid=${frameRoutingId}`
+      `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-by-id-miss pid=${frameProcessId} rid=${frameRoutingId}`
     )
     return
   }
   console.info(
-    `${MANUAL_RECORDER_DEBUG_PREFIX} frame-by-id-hit pid=${frameProcessId} rid=${frameRoutingId} frame=${frame.url || "(empty)"} token=${frame.frameToken}`
+    `${SCRIPT_RECORDER_DEBUG_PREFIX} frame-by-id-hit pid=${frameProcessId} rid=${frameRoutingId} frame=${frame.url || "(empty)"} token=${frame.frameToken}`
   )
-  await installManualRecorderForSubtree(frame)
+  await installScriptRecorderForSubtree(frame)
 }
 
-export async function installManualRecorderForSubtree(frame: WebFrameMain): Promise<void> {
+export async function installScriptRecorderForSubtree(frame: WebFrameMain): Promise<void> {
   const frames = frame.framesInSubtree
   for (const child of frames) {
-    await installManualRecorder(child)
+    await installScriptRecorder(child)
   }
 }
 
-export function recordManualRecorderConsoleMessage(frame: WebFrameMain, message: string): void {
+export function recordScriptRecorderConsoleMessage(frame: WebFrameMain, message: string): void {
   if (!activeSession || activeSession.status !== "recording") return
-  const diagnostic = inspectPlaywrightManualRecorderMessage(message)
+  const diagnostic = inspectPlaywrightScriptRecorderMessage(message)
   if (!diagnostic) return
   const channelId = diagnostic.frameContext?.channelId
   const mappedFrame = channelId ? FRAME_CHANNEL_FRAME_CACHE.get(channelId) : undefined
@@ -984,30 +978,30 @@ export function recordManualRecorderConsoleMessage(frame: WebFrameMain, message:
     mappedFrame && !mappedFrame.isDestroyed() && !mappedFrame.detached ? mappedFrame : frame
   const framePath = buildFramePath(resolvedFrame)
   console.info(
-    `${MANUAL_RECORDER_DEBUG_PREFIX} console-message-received electronFrame=${frame.url || "(empty)"} electronToken=${frame.frameToken || "(none)"} resolvedFrame=${resolvedFrame.url || "(empty)"} resolvedToken=${resolvedFrame.frameToken || "(none)"} resolvedFrom=${mappedFrame ? "channel" : "electron"} ancestry=${JSON.stringify(describeFrameAncestry(resolvedFrame))} computedPath=${JSON.stringify(framePath)} payload=${JSON.stringify(diagnostic)}`
+    `${SCRIPT_RECORDER_DEBUG_PREFIX} console-message-received electronFrame=${frame.url || "(empty)"} electronToken=${frame.frameToken || "(none)"} resolvedFrame=${resolvedFrame.url || "(empty)"} resolvedToken=${resolvedFrame.frameToken || "(none)"} resolvedFrom=${mappedFrame ? "channel" : "electron"} ancestry=${JSON.stringify(describeFrameAncestry(resolvedFrame))} computedPath=${JSON.stringify(framePath)} payload=${JSON.stringify(diagnostic)}`
   )
-  const playwrightEvent = parsePlaywrightManualRecorderEvent(message, framePath)
+  const playwrightEvent = parsePlaywrightScriptRecorderEvent(message, framePath)
   if (playwrightEvent) {
     console.info(
-      `${MANUAL_RECORDER_DEBUG_PREFIX} console-event frame=${resolvedFrame.url || "(empty)"} token=${resolvedFrame.frameToken || "(none)"} path=${JSON.stringify(framePath)} type=${playwrightEvent.type}`
+      `${SCRIPT_RECORDER_DEBUG_PREFIX} console-event frame=${resolvedFrame.url || "(empty)"} token=${resolvedFrame.frameToken || "(none)"} path=${JSON.stringify(framePath)} type=${playwrightEvent.type}`
     )
-    const action = normalizeManualEvent(playwrightEvent as ManualRecorderEvent, framePath)
+    const action = normalizeScriptEvent(playwrightEvent as ScriptRecorderEvent, framePath)
     if (action) {
       appendAction(activeSession, action)
       console.info(
-        `${MANUAL_RECORDER_DEBUG_PREFIX} action-appended kind=${action.kind} target=${"target" in action ? action.target || "" : ""} framePath=${JSON.stringify(action.locator?.framePath ?? [])} selector=${JSON.stringify(action.locator?.selector ?? "")} playwrightLocator=${JSON.stringify(action.locator?.playwrightLocator ?? "")} actionCount=${activeSession.actions.length}`
+        `${SCRIPT_RECORDER_DEBUG_PREFIX} action-appended kind=${action.kind} target=${"target" in action ? action.target || "" : ""} framePath=${JSON.stringify(action.locator?.framePath ?? [])} selector=${JSON.stringify(action.locator?.selector ?? "")} playwrightLocator=${JSON.stringify(action.locator?.playwrightLocator ?? "")} actionCount=${activeSession.actions.length}`
       )
     } else {
-      console.info(`${MANUAL_RECORDER_DEBUG_PREFIX} action-dropped type=${playwrightEvent.type}`)
+      console.info(`${SCRIPT_RECORDER_DEBUG_PREFIX} action-dropped type=${playwrightEvent.type}`)
     }
     return
   }
   console.info(
-    `${MANUAL_RECORDER_DEBUG_PREFIX} console-message-dropped action=${diagnostic.actionName ?? "(unknown)"} clickCount=${diagnostic.clickCount ?? "(none)"} reason=${diagnostic.actionName === "click" && diagnostic.clickCount === 0 ? "synthetic-click" : "unsupported-or-invalid-action"}`
+    `${SCRIPT_RECORDER_DEBUG_PREFIX} console-message-dropped action=${diagnostic.actionName ?? "(unknown)"} clickCount=${diagnostic.clickCount ?? "(none)"} reason=${diagnostic.actionName === "click" && diagnostic.clickCount === 0 ? "synthetic-click" : "unsupported-or-invalid-action"}`
   )
 }
 
-export function resetManualRecordingForTests(): void {
+export function resetScriptRecordingForTests(): void {
   activeSession = null
   lastSession = null
   nextSessionNumber = 0

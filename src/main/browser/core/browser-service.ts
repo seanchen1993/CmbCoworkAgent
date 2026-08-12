@@ -15,13 +15,13 @@ import {
   BROWSER_SESSION_ID
 } from "../../../shared/browser-types"
 import {
-  getManualRecording,
-  installManualRecorderForFrameById,
-  installManualRecorderForSubtree,
-  markNextManualNavigationExplicit,
-  recordManualRecorderConsoleMessage,
-  recordManualNavigation
-} from "../record/manual-record/manual-recording-service"
+  getScriptRecording,
+  installScriptRecorderForFrameById,
+  installScriptRecorderForSubtree,
+  markNextScriptNavigationExplicit,
+  recordScriptRecorderConsoleMessage,
+  recordScriptNavigation
+} from "../record/script-record/script-recording-service"
 import type {
   BrowserAttachOptions,
   BrowserBounds,
@@ -430,7 +430,7 @@ export class BrowserService {
 
     try {
       session.error = undefined
-      markNextManualNavigationExplicit(url)
+      markNextScriptNavigationExplicit(url)
       await session.view.webContents.loadURL(url)
     } catch (error) {
       const message = formatError(error)
@@ -447,7 +447,7 @@ export class BrowserService {
   goBack(): BrowserState {
     const session = this.getActiveSession()
     if (session?.view.webContents.canGoBack()) {
-      markNextManualNavigationExplicit()
+      markNextScriptNavigationExplicit()
       session.view.webContents.goBack()
     }
     return this.getState()
@@ -456,7 +456,7 @@ export class BrowserService {
   goForward(): BrowserState {
     const session = this.getActiveSession()
     if (session?.view.webContents.canGoForward()) {
-      markNextManualNavigationExplicit()
+      markNextScriptNavigationExplicit()
       session.view.webContents.goForward()
     }
     return this.getState()
@@ -465,7 +465,7 @@ export class BrowserService {
   reload(): BrowserState {
     const session = this.getActiveSession()
     if (session) {
-      markNextManualNavigationExplicit()
+      markNextScriptNavigationExplicit()
       session.view.webContents.reload()
     }
     return this.getState()
@@ -660,9 +660,9 @@ export class BrowserService {
   private bindWebContentsEvents(session: BrowserSession): void {
     const webContents = session.view.webContents
     const emit = (): void => this.emitState(session.id)
-    const ensureManualRecorder = (): void => {
-      if (getManualRecording().status !== "recording") return
-      void installManualRecorderForSubtree(webContents.mainFrame)
+    const ensureScriptRecorder = (): void => {
+      if (getScriptRecording().status !== "recording") return
+      void installScriptRecorderForSubtree(webContents.mainFrame)
     }
 
     webContents.on("did-start-loading", () => {
@@ -672,12 +672,12 @@ export class BrowserService {
     })
     webContents.on("did-stop-loading", () => {
       this.invalidateSession(session)
-      ensureManualRecorder()
+      ensureScriptRecorder()
       emit()
       console.info(`${BROWSER_SERVICE_LOG_PREFIX} Loaded Browser session ${session.id}.`)
     })
     webContents.on("dom-ready", () => {
-      ensureManualRecorder()
+      ensureScriptRecorder()
     })
     webContents.on("frame-created", (_event, details) => {
       const createdFrame = details.frame
@@ -686,23 +686,23 @@ export class BrowserService {
       // Wait for the frame's own dom-ready so we don't initialize against a
       // transient document and accidentally block later retries.
       createdFrame.once("dom-ready", () => {
-        if (getManualRecording().status !== "recording") return
+        if (getScriptRecording().status !== "recording") return
         if (createdFrame.detached || createdFrame.isDestroyed()) return
-        void installManualRecorderForSubtree(createdFrame)
+        void installScriptRecorderForSubtree(createdFrame)
       })
     })
     webContents.on(
       "did-frame-finish-load",
       (_event, _isMainFrame, frameProcessId, frameRoutingId) => {
-        if (getManualRecording().status !== "recording") return
-        void installManualRecorderForFrameById(frameProcessId, frameRoutingId)
+        if (getScriptRecording().status !== "recording") return
+        void installScriptRecorderForFrameById(frameProcessId, frameRoutingId)
       }
     )
     webContents.on("page-title-updated", () => {
       emit()
     })
     webContents.on("console-message", (details, level, message, line, sourceId) => {
-      recordManualRecorderConsoleMessage(details.frame, details.message)
+      recordScriptRecorderConsoleMessage(details.frame, details.message)
       session.consoleEntries = appendBrowserConsoleEntry(session.consoleEntries, {
         id: `${session.id}:${session.nextConsoleEntryId++}`,
         timestamp: new Date().toISOString(),
@@ -719,14 +719,14 @@ export class BrowserService {
       if (permissionError) {
         session.error = permissionError
       }
-      recordManualNavigation(url, "implicit")
-      ensureManualRecorder()
+      recordScriptNavigation(url, "implicit")
+      ensureScriptRecorder()
       emit()
       console.info(`${BROWSER_SERVICE_LOG_PREFIX} Browser session ${session.id} reached ${url}.`)
     })
     webContents.on("did-navigate-in-page", (_event, _url, isMainFrame) => {
       if (isMainFrame) {
-        recordManualNavigation(webContents.getURL(), "implicit")
+        recordScriptNavigation(webContents.getURL(), "implicit")
         emit()
       }
     })

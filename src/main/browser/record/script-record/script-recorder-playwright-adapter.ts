@@ -1,18 +1,15 @@
 import type { BrowserLocatorMetadata } from "../../../../shared/browser-types"
-import {
-  formatPlaywrightSelector
-} from "../common/playwright-codegen/projectLocatorAdapter"
+import { formatPlaywrightSelector } from "../common/playwright-codegen/projectLocatorAdapter"
 import { getPlaywrightRecorderSourceBundle } from "../common/playwright-codegen/projectRecorderAdapter"
 
 // Playwright 录制器动作通过这个前缀回传到 Electron 宿主。
-export const PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX = "[PlaywrightManualRecorder]"
-export const PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG =
-  "__cmbPlaywrightManualRecorderInstalled"
-export const PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY =
-  "__cmbPlaywrightManualRecorderFrameChannelId"
-export const PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER =
+export const PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX = "[PlaywrightScriptRecorder]"
+export const PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG = "__cmbPlaywrightScriptRecorderInstalled"
+export const PLAYWRIGHT_SCRIPT_RECORDER_FRAME_CHANNEL_KEY =
+  "__cmbPlaywrightScriptRecorderFrameChannelId"
+export const PLAYWRIGHT_SCRIPT_RECORDER_FRAME_SELECTOR_HELPER =
   "__cmbPlaywrightGenerateFrameSelectorAtIndex"
-export const PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID = 10_173
+export const PLAYWRIGHT_SCRIPT_RECORDER_ISOLATED_WORLD_ID = 10_173
 const WINDOWS_FAKEPATH_PATTERN = /^[a-z]:\\fakepath\\(.+)$/iu
 
 interface PlaywrightRecorderAction {
@@ -28,7 +25,7 @@ interface PlaywrightRecorderAction {
 interface PlaywrightRecorderEnvelope {
   type?: unknown
   action?: PlaywrightRecorderAction
-  locator?: PlaywrightManualRecorderEventLocator & {
+  locator?: PlaywrightScriptRecorderEventLocator & {
     target?: unknown
     role?: unknown
     label?: unknown
@@ -50,7 +47,7 @@ interface PlaywrightRecorderEnvelope {
   }
 }
 
-export interface PlaywrightManualRecorderMessageDiagnostic {
+export interface PlaywrightScriptRecorderMessageDiagnostic {
   actionName?: string
   clickCount?: number
   frameUrl?: string
@@ -65,7 +62,7 @@ export interface PlaywrightManualRecorderMessageDiagnostic {
   }
 }
 
-export interface PlaywrightManualRecorderEventLocator extends Pick<
+export interface PlaywrightScriptRecorderEventLocator extends Pick<
   BrowserLocatorMetadata,
   | "target"
   | "role"
@@ -86,36 +83,36 @@ export interface PlaywrightManualRecorderEventLocator extends Pick<
   isVisible?: boolean
 }
 
-export type PlaywrightManualRecorderEvent =
+export type PlaywrightScriptRecorderEvent =
   | {
       type: "click"
       timestamp?: string
-      locator?: PlaywrightManualRecorderEventLocator
+      locator?: PlaywrightScriptRecorderEventLocator
       doubleClick?: boolean
       toggle?: "check" | "uncheck"
     }
   | {
       type: "fill"
       timestamp?: string
-      locator?: PlaywrightManualRecorderEventLocator
+      locator?: PlaywrightScriptRecorderEventLocator
       value?: string
     }
   | {
       type: "select"
       timestamp?: string
-      locator?: PlaywrightManualRecorderEventLocator
+      locator?: PlaywrightScriptRecorderEventLocator
       values?: string[]
     }
   | {
       type: "press"
       timestamp?: string
-      locator?: PlaywrightManualRecorderEventLocator
+      locator?: PlaywrightScriptRecorderEventLocator
       key?: string
     }
   | {
       type: "fileUpload"
       timestamp?: string
-      locator?: PlaywrightManualRecorderEventLocator
+      locator?: PlaywrightScriptRecorderEventLocator
       paths?: string[]
     }
 
@@ -145,9 +142,7 @@ function extractFakePathFileName(value: string | undefined): string | undefined 
   return WINDOWS_FAKEPATH_PATTERN.exec(value)?.[1]
 }
 
-function isFileInputLocator(
-  locator: PlaywrightManualRecorderEventLocator | undefined
-): boolean {
+function isFileInputLocator(locator: PlaywrightScriptRecorderEventLocator | undefined): boolean {
   const tagName = locator?.tagName?.trim().toLowerCase() ?? ""
   const inputType = locator?.inputType?.trim().toLowerCase() ?? ""
   const selector = locator?.selector?.trim().toLowerCase() ?? ""
@@ -158,7 +153,7 @@ function isFileInputLocator(
 }
 
 function shouldTreatFakePathFillAsFileUpload(
-  locator: PlaywrightManualRecorderEventLocator | undefined,
+  locator: PlaywrightScriptRecorderEventLocator | undefined,
   value: string | undefined
 ): boolean {
   if (!extractFakePathFileName(value)) return false
@@ -178,8 +173,8 @@ function shouldTreatFakePathFillAsFileUpload(
 }
 
 function fileUploadLocatorForFakePathFill(
-  locator: PlaywrightManualRecorderEventLocator | undefined
-): PlaywrightManualRecorderEventLocator | undefined {
+  locator: PlaywrightScriptRecorderEventLocator | undefined
+): PlaywrightScriptRecorderEventLocator | undefined {
   if (!locator) return { selector: 'input[type="file"]', tagName: "input", inputType: "file" }
   if (isFileInputLocator(locator)) return locator
 
@@ -201,7 +196,7 @@ function locatorForAction(
   action: PlaywrightRecorderAction,
   rawLocator: PlaywrightRecorderEnvelope["locator"],
   framePath: string[]
-): PlaywrightManualRecorderEventLocator | undefined {
+): PlaywrightScriptRecorderEventLocator | undefined {
   const selector = readString(rawLocator?.selector ?? action.selector)
   if (!selector && !rawLocator) return framePath.length > 0 ? { framePath } : undefined
 
@@ -216,40 +211,37 @@ function locatorForAction(
     selector,
     tagName: readString(rawLocator?.tagName),
     inputType: readString(rawLocator?.inputType),
-    isVisible:
-      typeof rawLocator?.isVisible === "boolean" ? rawLocator.isVisible : undefined,
+    isVisible: typeof rawLocator?.isVisible === "boolean" ? rawLocator.isVisible : undefined,
     isTarget: rawLocator?.isTarget === true,
     matchCount: readNonNegativeInteger(rawLocator?.matchCount),
     nth: readNonNegativeInteger(rawLocator?.nth),
-    playwrightLocator:
-      selector
-        ? formatPlaywrightSelector(selector, framePath)
-        : readString(rawLocator?.playwrightLocator),
+    playwrightLocator: selector
+      ? formatPlaywrightSelector(selector, framePath)
+      : readString(rawLocator?.playwrightLocator),
     framePath: framePath.length > 0 ? framePath : undefined
   }
 }
 
 function parseEnvelope(message: string): PlaywrightRecorderEnvelope | null {
-  if (!message.startsWith(PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX)) return null
+  if (!message.startsWith(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX)) return null
 
   try {
     return JSON.parse(
-      message.slice(PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX.length)
+      message.slice(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX.length)
     ) as PlaywrightRecorderEnvelope
   } catch {
     return null
   }
 }
 
-export function inspectPlaywrightManualRecorderMessage(
+export function inspectPlaywrightScriptRecorderMessage(
   message: string
-): PlaywrightManualRecorderMessageDiagnostic | null {
+): PlaywrightScriptRecorderMessageDiagnostic | null {
   const envelope = parseEnvelope(message)
   if (!envelope) return null
 
   const clickCount =
-    typeof envelope.action?.clickCount === "number" &&
-    Number.isFinite(envelope.action.clickCount)
+    typeof envelope.action?.clickCount === "number" && Number.isFinite(envelope.action.clickCount)
       ? envelope.action.clickCount
       : undefined
   const depth =
@@ -284,10 +276,10 @@ export function inspectPlaywrightManualRecorderMessage(
   }
 }
 
-export function parsePlaywrightManualRecorderEvent(
+export function parsePlaywrightScriptRecorderEvent(
   message: string,
   framePath: string[]
-): PlaywrightManualRecorderEvent | null {
+): PlaywrightScriptRecorderEvent | null {
   const envelope = parseEnvelope(message)
   if (!envelope || envelope.type !== "action" || !envelope.action) return null
 
@@ -356,11 +348,8 @@ export function parsePlaywrightManualRecorderEvent(
   }
 }
 
-export function buildPlaywrightManualRecorderInjectionScript(frameChannelId = ""): string {
-  const {
-    injectedScriptSource,
-    pollingRecorderSource
-  } = getPlaywrightRecorderSourceBundle()
+export function buildPlaywrightScriptRecorderInjectionScript(frameChannelId = ""): string {
+  const { injectedScriptSource, pollingRecorderSource } = getPlaywrightRecorderSourceBundle()
   const injectedScriptConstructor = buildPlaywrightModuleConstructorExpression(
     injectedScriptSource,
     "module.exports.InjectedScript()"
@@ -372,18 +361,16 @@ export function buildPlaywrightManualRecorderInjectionScript(frameChannelId = ""
 
   return String.raw`(() => {
     const RECORDER_FRAME_CHANNEL_ID = ${JSON.stringify(frameChannelId)};
-    const FRAME_CHANNEL_KEY = ${JSON.stringify(
-      PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY
-    )};
-    if (window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG}) {
+    const FRAME_CHANNEL_KEY = ${JSON.stringify(PLAYWRIGHT_SCRIPT_RECORDER_FRAME_CHANNEL_KEY)};
+    if (window.${PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG}) {
       return typeof window[FRAME_CHANNEL_KEY] === "string"
         ? window[FRAME_CHANNEL_KEY]
         : RECORDER_FRAME_CHANNEL_ID;
     }
 
-    const EVENT_PREFIX = ${JSON.stringify(PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX)};
+    const EVENT_PREFIX = ${JSON.stringify(PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX)};
     const FRAME_SELECTOR_HELPER = ${JSON.stringify(
-      PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER
+      PLAYWRIGHT_SCRIPT_RECORDER_FRAME_SELECTOR_HELPER
     )};
     const InjectedScriptConstructor = ${injectedScriptConstructor};
     const PollingRecorder = ${pollingRecorderConstructor};
@@ -775,11 +762,11 @@ export function buildPlaywrightManualRecorderInjectionScript(frameChannelId = ""
       (document.head || document.documentElement).appendChild(style);
     } catch {}
 
-    window.__cmbPlaywrightManualRecorder = recorder;
+    window.__cmbPlaywrightScriptRecorder = recorder;
     window.__pw_refreshOverlay?.();
     // Only mark the frame after all recorder hooks are installed so a transient
     // initialization error can be retried on the next frame lifecycle event.
-    window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true;
+    window.${PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG} = true;
     window[FRAME_CHANNEL_KEY] = RECORDER_FRAME_CHANNEL_ID;
     return RECORDER_FRAME_CHANNEL_ID;
   })()`

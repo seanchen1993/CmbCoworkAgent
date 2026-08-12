@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest"
 import {
-  applyAiRecordingVariableValues,
-  buildAiRecordingExecutableScript,
-  extractAiRecordingVariables,
-  generateAiRecordingScript,
-  parseAiRecordingScript
-} from "../../../src/shared/browser-ai-recording-script"
+  applyScriptRecordingVariableValues,
+  buildScriptExecutableScript,
+  extractScriptRecordingVariables,
+  generateScriptRecording,
+  parseScriptRecordingScript
+} from "../../../src/shared/browser-script-recording"
 
-describe("browser ai recording script", () => {
-  it("preserves codegen contentFrame chains when round-tripping a manual draft", () => {
+describe("browser script recording", () => {
+  it("preserves codegen contentFrame chains when round-tripping a recorded script draft", () => {
     const script = `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.locator('iframe').first().contentFrame().locator('iframe').nth(3).contentFrame().getByRole('button', { name: 'Show more' }).click();
 });
 `
 
-    const parsed = parseAiRecordingScript(script, "manual")
+    const parsed = parseScriptRecordingScript(script, "script")
 
     expect(parsed.actions).toEqual([
       expect.objectContaining({
@@ -31,8 +31,8 @@ test("manual recorded flow", async ({ page }) => {
       })
     ])
 
-    const regenerated = generateAiRecordingScript(parsed.actions, {
-      source: "manual",
+    const regenerated = generateScriptRecording(parsed.actions, {
+      source: "script",
       variableActionIds: parsed.variableActionIds,
       variableActionNames: parsed.variableActionNames
     })
@@ -45,13 +45,13 @@ test("manual recorded flow", async ({ page }) => {
   it("preserves first occurrence hints when round-tripping parsed scripts", () => {
     const script = `import { test } from "@playwright/test";
 
-test("AI recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   // Review generated locators before committing this test.
   await page.getByRole("button", { name: "Save" }).first().click();
 });
 `
 
-    const parsed = parseAiRecordingScript(script, "ai")
+    const parsed = parseScriptRecordingScript(script, "script")
 
     expect(parsed.actions).toEqual([
       expect.objectContaining({
@@ -64,14 +64,14 @@ test("AI recorded flow", async ({ page }) => {
       })
     ])
 
-    const regenerated = generateAiRecordingScript(parsed.actions, {
-      source: "ai",
+    const regenerated = generateScriptRecording(parsed.actions, {
+      source: "script",
       variableActionIds: parsed.variableActionIds,
       variableActionNames: parsed.variableActionNames
     })
 
     expect(regenerated).toContain(
-      "await page.getByRole('button', { name: 'Save', exact: true }).first().click();"
+      "await page.getByRole('button', { name: 'Save' }).first().click();"
     )
   })
 
@@ -80,13 +80,13 @@ test("AI recorded flow", async ({ page }) => {
 
 const username = "alice";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.goto("https://example.com");
   await page.getByRole("button", { name: "Save" }).click();
 });
 `
 
-    expect(buildAiRecordingExecutableScript(script)).toBe(
+    expect(buildScriptExecutableScript(script)).toBe(
       `const username = "alice";
 
   await page.goto("https://example.com");
@@ -99,12 +99,12 @@ test("manual recorded flow", async ({ page }) => {
 
 const 变量_上传文件路径: string[] = []; // 变量-上传文件路径
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.locator("input[type=\\"file\\"]").setInputFiles(变量_上传文件路径);
 });
 `
 
-    const executableScript = buildAiRecordingExecutableScript(script)
+    const executableScript = buildScriptExecutableScript(script)
 
     expect(executableScript).toContain("const 变量_上传文件路径 = []; // 变量-上传文件路径")
     expect(executableScript).not.toContain(": string[]")
@@ -113,19 +113,19 @@ test("manual recorded flow", async ({ page }) => {
   it("drops a redundant legacy choice click before the visible label click", () => {
     const script = `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.getByLabel("🎨 设计师 做设计的人").click();
   await page.locator("label:has(input[name=\\"role\\"][value=\\"designer\\"])").click();
 });
 `
 
-    expect(buildAiRecordingExecutableScript(script)).toBe(
+    expect(buildScriptExecutableScript(script)).toBe(
       'await page.locator("label:has(input[name=\\"role\\"][value=\\"designer\\"])").click();'
     )
   })
 
   it("prefers href selectors for duplicate links", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "workflow-link",
@@ -144,7 +144,7 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
     expect(script).toContain(
@@ -154,7 +154,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("collapses file-input clicks into direct setInputFiles calls", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "upload-trigger",
@@ -185,7 +185,7 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
     expect(script).not.toContain('page.waitForEvent("filechooser")')
@@ -199,13 +199,13 @@ test("manual recorded flow", async ({ page }) => {
   it("migrates legacy fakepath fills on choose-file buttons into file uploads", () => {
     const script = `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.getByRole("button", { name: "Choose File" }).click();
   await page.getByRole("button", { name: "Choose File" }).fill("C:\\\\fakepath\\\\think.webp");
 });
 `
 
-    const parsed = parseAiRecordingScript(script, "manual")
+    const parsed = parseScriptRecordingScript(script, "script")
 
     expect(parsed.actions).toEqual([
       expect.objectContaining({
@@ -218,14 +218,14 @@ test("manual recorded flow", async ({ page }) => {
       })
     ])
 
-    const regenerated = generateAiRecordingScript(parsed.actions, {
-      source: "manual",
+    const regenerated = generateScriptRecording(parsed.actions, {
+      source: "script",
       variableActionIds: parsed.variableActionIds,
       variableActionNames: parsed.variableActionNames
     })
 
     expect(regenerated).toContain(
-      "await page.getByRole('button', { name: 'Choose File', exact: true }).click();"
+      "await page.getByRole('button', { name: 'Choose File' }).click();"
     )
     expect(regenerated).toContain(
       "await page.locator('input[type=file]').setInputFiles('think.webp');"
@@ -237,12 +237,12 @@ test("manual recorded flow", async ({ page }) => {
   it("preserves file-input locators when round-tripping setInputFiles scripts", () => {
     const script = `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.locator("input[name=\\"avatar\\"]").setInputFiles("think.webp");
 });
 `
 
-    const parsed = parseAiRecordingScript(script, "manual")
+    const parsed = parseScriptRecordingScript(script, "script")
 
     expect(parsed.actions).toEqual([
       expect.objectContaining({
@@ -255,8 +255,8 @@ test("manual recorded flow", async ({ page }) => {
       })
     ])
 
-    const regenerated = generateAiRecordingScript(parsed.actions, {
-      source: "manual",
+    const regenerated = generateScriptRecording(parsed.actions, {
+      source: "script",
       variableActionIds: parsed.variableActionIds,
       variableActionNames: parsed.variableActionNames
     })
@@ -267,7 +267,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("renders numeric fills with the spinbutton role", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "age-fill",
@@ -284,16 +284,14 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
-    expect(script).toContain(
-      "await page.getByRole('spinbutton', { name: '年龄', exact: true }).fill('11');"
-    )
+    expect(script).toContain("await page.getByRole('spinbutton', { name: '年龄' }).fill('11');")
   })
 
   it("renders range fills with the slider role", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "experience-fill",
@@ -310,16 +308,16 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
     expect(script).toContain(
-      "await page.getByRole('slider', { name: '编程经验（年）', exact: true }).fill('6');"
+      "await page.getByRole('slider', { name: '编程经验（年）' }).fill('6');"
     )
   })
 
   it("supports marking navigation URLs as variables", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "navigate-home",
@@ -329,7 +327,7 @@ test("manual recorded flow", async ({ page }) => {
         }
       ],
       {
-        source: "manual",
+        source: "script",
         variableActionIds: ["navigate-home"],
         variableActionNames: {
           "navigate-home": "目标地址"
@@ -346,12 +344,12 @@ test("manual recorded flow", async ({ page }) => {
 
 const 变量_目标地址 = ""; // 变量-目标地址
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.goto(变量_目标地址);
 });
 `
 
-    const parsed = parseAiRecordingScript(script, "manual")
+    const parsed = parseScriptRecordingScript(script, "script")
     expect(parsed.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
@@ -359,17 +357,17 @@ test("manual recorded flow", async ({ page }) => {
       })
     ])
     expect(parsed.variableActionNames).toEqual({
-      "manual-seed-action-1": "目标地址"
+      "script-seed-action-1": "目标地址"
     })
 
-    const regenerated = generateAiRecordingScript(parsed.actions, {
-      source: "manual",
+    const regenerated = generateScriptRecording(parsed.actions, {
+      source: "script",
       variableActionIds: parsed.variableActionIds,
       variableActionNames: parsed.variableActionNames
     })
     expect(regenerated).toContain("await page.goto(变量_目标地址);")
 
-    expect(extractAiRecordingVariables(script)).toEqual([
+    expect(extractScriptRecordingVariables(script)).toEqual([
       {
         identifier: "变量_目标地址",
         displayName: "目标地址",
@@ -377,7 +375,7 @@ test("manual recorded flow", async ({ page }) => {
       }
     ])
     expect(
-      applyAiRecordingVariableValues(script, { 变量_目标地址: "https://example.com/login" })
+      applyScriptRecordingVariableValues(script, { 变量_目标地址: "https://example.com/login" })
     ).toContain('const 变量_目标地址 = "https://example.com/login"; // 变量-目标地址')
   })
 
@@ -386,12 +384,12 @@ test("manual recorded flow", async ({ page }) => {
 
 const 变量_目标地址 = ""
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.goto(变量_目标地址);
 });
 `
 
-    const parsed = parseAiRecordingScript(script, "manual")
+    const parsed = parseScriptRecordingScript(script, "script")
     expect(parsed.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
@@ -399,10 +397,10 @@ test("manual recorded flow", async ({ page }) => {
       })
     ])
     expect(parsed.variableActionNames).toEqual({
-      "manual-seed-action-1": "目标地址"
+      "script-seed-action-1": "目标地址"
     })
 
-    expect(extractAiRecordingVariables(script)).toEqual([
+    expect(extractScriptRecordingVariables(script)).toEqual([
       {
         identifier: "变量_目标地址",
         displayName: "目标地址",
@@ -410,12 +408,12 @@ test("manual recorded flow", async ({ page }) => {
       }
     ])
     expect(
-      applyAiRecordingVariableValues(script, { 变量_目标地址: "https://example.com/login" })
+      applyScriptRecordingVariableValues(script, { 变量_目标地址: "https://example.com/login" })
     ).toContain('const 变量_目标地址 = "https://example.com/login"; // 变量-目标地址')
   })
 
   it("clicks radio-card choices with their semantic role", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "role-designer",
@@ -434,17 +432,17 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
     expect(script).toContain(
-      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
+      "await page.getByRole('radio', { name: '🎨 设计师 做设计的人' }).click();"
     )
     expect(script).not.toContain(`page.locator('label:has(input[name="role"][value="designer"])')`)
   })
 
   it("uses the semantic radio locator even when the label is externally associated", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "role-designer",
@@ -463,16 +461,14 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
-    expect(script).toContain(
-      "await page.getByRole('radio', { name: '设计师', exact: true }).click();"
-    )
+    expect(script).toContain("await page.getByRole('radio', { name: '设计师' }).click();")
   })
 
   it("clicks switch-style checkboxes with their semantic role", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "email-notif-toggle",
@@ -489,17 +485,15 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
-    expect(script).toContain(
-      "await page.getByRole('checkbox', { name: 'emailNotif', exact: true }).click();"
-    )
+    expect(script).toContain("await page.getByRole('checkbox', { name: 'emailNotif' }).click();")
     expect(script).not.toContain('getByText("emailNotif", { exact: true }).click()')
   })
 
   it("clicks menuitem radio options with their semantic role", () => {
-    const script = generateAiRecordingScript(
+    const script = generateScriptRecording(
       [
         {
           id: "branch-option",
@@ -516,11 +510,11 @@ test("manual recorded flow", async ({ page }) => {
           }
         }
       ],
-      { source: "manual" }
+      { source: "script" }
     )
 
     expect(script).toContain(
-      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
+      "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang' }).click();"
     )
     expect(script).not.toContain('locator("button[name=\\"branch\\"]")')
   })

@@ -7,7 +7,7 @@ import {
   type LocatorRole,
   type LocatorSource
 } from "./projectLocatorAdapter"
-import type { AiRecordedBrowserAction } from "../../../../../shared/browser-types"
+import type { BrowserRecordedAction } from "../../../../../shared/browser-types"
 
 const PLAYWRIGHT_CODEGEN_OPTIONS: LanguageGeneratorOptions = {
   browserName: "chromium",
@@ -17,7 +17,7 @@ const PLAYWRIGHT_CODEGEN_OPTIONS: LanguageGeneratorOptions = {
 
 const ACTION_GENERATOR = new JavaScriptLanguageGenerator(true)
 
-function toLocatorSource(action: AiRecordedBrowserAction): LocatorSource {
+function toLocatorSource(action: BrowserRecordedAction): LocatorSource {
   const locator = action.locator
   return {
     target: locator?.target ?? ("target" in action ? action.target : undefined),
@@ -38,11 +38,11 @@ function toLocatorSource(action: AiRecordedBrowserAction): LocatorSource {
   }
 }
 
-function resolveActionSelector(action: AiRecordedBrowserAction): string | undefined {
-  // 手动录制：recorder 的 selector 就是 codegen 生成的内部选择器，直接复用，
-  // 让脚本输出与 Playwright codegen CLI 完全一致；AI 录制或选择器缺失时
+function resolveActionSelector(action: BrowserRecordedAction): string | undefined {
+  // 脚本录制：recorder 的 selector 就是 codegen 生成的内部选择器，直接复用，
+  // 让脚本输出与 Playwright codegen CLI 完全一致；选择器缺失时
   // 回退到元数据管线。
-  if (action.source === "manual" && action.locator?.selector) {
+  if (action.source === "script" && action.locator?.selector) {
     return buildFullSelector(action.locator.framePath, action.locator.selector)
   }
   switch (action.kind) {
@@ -70,7 +70,7 @@ function resolveActionSelector(action: AiRecordedBrowserAction): string | undefi
   }
 }
 
-function toActionInContext(action: AiRecordedBrowserAction): actions.ActionInContext | null {
+function toActionInContext(action: BrowserRecordedAction): actions.ActionInContext | null {
   switch (action.kind) {
     case "navigate":
       return {
@@ -169,12 +169,17 @@ function trimGeneratedAction(text: string): string {
     .join("\n")
 }
 
-export function generatePlaywrightCodegenActionLines(actionsList: AiRecordedBrowserAction[]): string[] {
+export function generatePlaywrightCodegenActionLines(
+  actionsList: BrowserRecordedAction[]
+): string[] {
   ACTION_GENERATOR.reset()
   return actionsList.flatMap((action) => {
     const actionInContext = toActionInContext(action)
     if (!actionInContext) return []
-    const generated = ACTION_GENERATOR.generateAction(actionInContext, PLAYWRIGHT_CODEGEN_OPTIONS).trim()
+    const generated = ACTION_GENERATOR.generateAction(
+      actionInContext,
+      PLAYWRIGHT_CODEGEN_OPTIONS
+    ).trim()
     if (!generated) return []
     return trimGeneratedAction(generated).split(/\r?\n/u)
   })

@@ -76,7 +76,7 @@ describe("browser script execution service", () => {
 
 const baseUrl = "https://example.com";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.goto(baseUrl);
   await page.getByRole("button", { name: "Save" }).click();
 });
@@ -135,7 +135,7 @@ test("manual recorded flow", async ({ page }) => {
     await executeRecordingScriptInBuiltinBrowser({
       script: `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.getByRole("button", { name: "Search" }).nth(1).click();
 });
 `
@@ -173,7 +173,7 @@ test("manual recorded flow", async ({ page }) => {
     await executeRecordingScriptInBuiltinBrowser({
       script: `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.getByRole("button", { name: "Save" }).click();
 });
 `
@@ -205,7 +205,7 @@ test("manual recorded flow", async ({ page }) => {
 
 const 变量_目标地址 = ""; // 变量-目标地址
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.goto(变量_目标地址);
 });
 `,
@@ -241,7 +241,7 @@ test("manual recorded flow", async ({ page }) => {
 
 const 变量_上传文件路径: string[] = ["/tmp/first.txt", "/tmp/second.txt"]; // 变量-上传文件路径
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.locator("input[type=\\"file\\"]").setInputFiles(变量_上传文件路径);
 });
 `
@@ -275,7 +275,7 @@ test("manual recorded flow", async ({ page }) => {
     const executionPromise = executeRecordingScriptInBuiltinBrowser({
       script: `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.waitForTimeout(100000);
 });
 `
@@ -312,7 +312,7 @@ test("manual recorded flow", async ({ page }) => {
     await executeRecordingScriptInBuiltinBrowser({
       script: `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   await page.locator("#avatar").setInputFiles("think.webp");
 });
 `,

@@ -11,11 +11,6 @@ import {
 } from "../../../src/shared/browser-types"
 import { configureBrowserCdpEndpoint } from "../../../src/main/browser/cdp/browser-cdp"
 import {
-  getAiRecording,
-  resetAiRecordingForTests,
-  startAiRecording
-} from "../../../src/main/browser/record/ai-record/ai-recording-service"
-import {
   autoSelectPlaywrightInAppBrowserTab,
   invokeMcpToolWithPlaywrightInAppBrowserSupport,
   preparePlaywrightInAppBrowser,
@@ -57,13 +52,6 @@ const inAppBrowserTabsTool: McpCapabilityTool = {
   toolName: "browser_tabs"
 }
 
-const inAppBrowserFileUploadTool: McpCapabilityTool = {
-  ...inAppBrowserTool,
-  capabilityId: "connector:inAppBrowser:browser_file_upload",
-  toolId: "mcp__inAppBrowser__browser_file_upload",
-  toolName: "browser_file_upload"
-}
-
 function browserState(visible: boolean, created = true): BrowserState {
   return {
     sessionId: BROWSER_SESSION_ID,
@@ -95,7 +83,6 @@ function createCapabilityInvoker(
 
 describe("Playwright MCP in-app browser bridge", () => {
   beforeEach(() => {
-    resetAiRecordingForTests()
     configureBrowserCdpEndpoint(
       { appendSwitch: vi.fn() },
       { enabled: true, port: DEFAULT_BROWSER_CDP_PORT }
@@ -330,54 +317,6 @@ describe("Playwright MCP in-app browser bridge", () => {
     expect(invoke).toHaveBeenCalledTimes(1)
     expect(requestPanel).toHaveBeenCalledWith("thread-1")
     expect(result).toEqual(mcpResult("ok"))
-  })
-
-  it("records successful in-app browser tool calls for the active AI recording session", async () => {
-    startAiRecording({ threadId: "thread-1" })
-    const getState = vi.fn().mockReturnValue(browserState(true))
-    const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
-    const requestPanel = vi.fn()
-    const invoke = vi.fn().mockResolvedValue(mcpResult("ok"))
-
-    await invokeMcpToolWithPlaywrightInAppBrowserSupport({
-      tool: inAppBrowserTool,
-      workspacePath: "/workspace",
-      threadId: "thread-2",
-      args: { url: "https://example.com/dashboard" },
-      invoke,
-      browserService: { getState, prepareTarget, requestPanel }
-    })
-
-    expect(getAiRecording().actions).toEqual([
-      expect.objectContaining({
-        kind: "navigate",
-        url: "https://example.com/dashboard"
-      })
-    ])
-  })
-
-  it("records successful in-app browser file uploads for the active AI recording session", async () => {
-    startAiRecording({ threadId: "thread-1" })
-    const getState = vi.fn().mockReturnValue(browserState(true))
-    const prepareTarget = vi.fn().mockResolvedValue(browserState(true))
-    const requestPanel = vi.fn()
-    const invoke = vi.fn().mockResolvedValue(mcpResult("uploaded"))
-
-    await invokeMcpToolWithPlaywrightInAppBrowserSupport({
-      tool: inAppBrowserFileUploadTool,
-      workspacePath: "/workspace",
-      threadId: "thread-1",
-      args: { paths: ["/tmp/fixtures/report.csv"] },
-      invoke,
-      browserService: { getState, prepareTarget, requestPanel }
-    })
-
-    expect(getAiRecording().actions).toEqual([
-      expect.objectContaining({
-        kind: "fileUpload",
-        paths: ["/tmp/fixtures/report.csv"]
-      })
-    ])
   })
 
   it("can skip dedicated pre-prepare when the browser was already prepared upstream", async () => {
