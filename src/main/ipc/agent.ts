@@ -78,6 +78,11 @@ import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
 import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
+import { AgentStreamDisplayGate } from "./agent-stream-display-gate"
+import {
+  isAgentStreamDisplayInterest,
+  type AgentStreamDisplayInterest
+} from "../../shared/agent-stream-display-interest"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
@@ -357,6 +362,11 @@ function canPreviewSystemPrompt(): boolean {
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
 const streamChannelByRunController = new WeakMap<AbortController, string>()
+const agentStreamDisplayGate = new AgentStreamDisplayGate({
+  isThreadRunActive: (threadId) => activeRuns.has(threadId),
+  send: safeSendToWindow
+})
+
 let agentTaskShutdownStarted = false
 const goalStore = new SqlGoalStore()
 const goalManager = new GoalManager(goalStore)
@@ -3929,6 +3939,7 @@ function releaseAbandonedPhysicalStreamRunSetup(
   discardStreamTranscriptToolCallAccumulators(threadId, runToken)
   invalidateCurrentRunMessagePreparer(threadId, runToken)
   clearCurrentRunMessageQueue(threadId, runToken)
+  agentStreamDisplayGate.clearThread(threadId, runToken)
   if (activeRuns.get(threadId) === controller) activeRuns.delete(threadId)
   if (activeRunSettled.get(threadId) === settledPromise) activeRunSettled.delete(threadId)
   resolveSettled()
@@ -3972,11 +3983,15 @@ function persistAndForwardPhysicalRunStreamChunk(
   const messageId = persistStreamTranscriptChunk(threadId, runToken, mode, payload, {
     deferFlush: true
   })
-  safeSendToWindow(window, channel, {
-    type: "stream",
-    mode,
-    data: sanitizeStreamDataForRenderer(mode, payload)
-  })
+  const data = sanitizeStreamDataForRenderer(mode, payload)
+  agentStreamDisplayGate.remember(window, threadId, runToken, channel, mode, data)
+  if (agentStreamDisplayGate.shouldSendImmediately(window, threadId)) {
+    safeSendToWindow(window, channel, {
+      type: "stream",
+      mode,
+      data
+    })
+  }
   return messageId
 }
 
@@ -4918,6 +4933,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   // Let the runtime's checkpointer LRU avoid evicting threads with a live run.
   setCheckpointerBusyGuard(hasActiveAgentRun)
 
+  ipcMain.handle(
+    "agent:set-stream-display-interest",
+    (
+      event,
+      payload: {
+        threadId?: string
+        interest?: AgentStreamDisplayInterest
+      }
+    ): boolean => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const threadId = payload.threadId?.trim()
+      const interest = payload.interest
+      if (!window || window.isDestroyed() || !threadId || !isAgentStreamDisplayInterest(interest)) {
+        return false
+      }
+      agentStreamDisplayGate.trackWindow(window)
+      return agentStreamDisplayGate.setInterest(window, threadId, interest)
+    }
+  )
+
   // Steer a queued draft into the RUNNING turn on this thread. Rejected (so the
   // renderer keeps it in its draft queue and can retry) when the thread has no
   // active foreground run — background workflow/coordinator-worker/scheduler/chatx
@@ -5432,6 +5467,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.error("[Agent] No window found")
         return
       }
+      agentStreamDisplayGate.trackWindow(window)
 
       const hasCoordinatorNotificationPrefixAtInvoke = message
         .trimStart()
@@ -9055,6 +9091,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (currentController === abortController) {
           activeRuns.delete(threadId)
         }
+        agentStreamDisplayGate.clearThread(threadId, runToken)
         if (!replacedByNewRun) {
           LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
             console.warn("[Agent] ACL cleanup error:", err)
@@ -9114,6 +9151,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.error("[Agent] No window found for resume")
         return
       }
+      agentStreamDisplayGate.trackWindow(window)
       if (rejectAgentStartDuringShutdown(window, channel)) return
 
       // Get workspace path from thread metadata
@@ -10174,6 +10212,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (currentController === abortController) {
           activeRuns.delete(threadId)
         }
+        agentStreamDisplayGate.clearThread(threadId, runToken)
         if (!replacedByNewRun) {
           LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
             console.warn("[Agent] ACL cleanup error:", err)
@@ -10226,6 +10265,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.error("[Agent] No window found for interrupt response")
       return
     }
+    agentStreamDisplayGate.trackWindow(window)
     if (rejectAgentStartDuringShutdown(window, channel)) return
     if (
       rejectRuntimeRestoredCheckpointResume(
@@ -11234,6 +11274,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (currentController === abortController) {
         activeRuns.delete(threadId)
       }
+      agentStreamDisplayGate.clearThread(threadId, runToken)
       if (!replacedByNewRun) {
         LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
           console.warn("[Agent] ACL cleanup error:", err)

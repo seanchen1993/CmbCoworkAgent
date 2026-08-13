@@ -123,7 +123,6 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
-  HITLRequest,
   Message,
   SkillMetadata,
   Thread,
@@ -132,9 +131,15 @@ import type {
   ToolCallStatus,
   UserInputResponse
 } from "@/types"
-import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { ChatSearchOverlay } from "./ChatSearchOverlay"
+import {
+  ChatMessageList,
+  type ChatTimelineListRef,
+  type VirtualChatTimelineItem,
+  VIRTUAL_CHAT_TIMELINE_THRESHOLD,
+  VirtualChatTimeline
+} from "./ChatTimeline"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -1731,158 +1736,6 @@ function ChatErrorCard({
   )
 }
 
-type ChatApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-
-interface ChatToolResultInfo {
-  content: string | unknown
-  is_error?: boolean
-}
-
-interface ChatMessageFlags {
-  showAssistantMeta: boolean[]
-  hasUserAfterHead: boolean[]
-}
-
-interface ChatMessageListProps {
-  messages: Message[]
-  perMessageFlags: ChatMessageFlags
-  hookLoggingEnabled: boolean
-  hookLogBucketByTurnId: Map<string, HookLogBucket>
-  detachedHookLogBuckets: HookLogBucket[]
-  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: (messageId: string, role: Message["role"]) => (node: HTMLDivElement | null) => void
-  isLoading: boolean
-  toolResults: Map<string, ChatToolResultInfo>
-  toolCallStates: Map<string, ToolCallState>
-  pendingApprovalToolCallKeys: Set<string>
-  pendingApproval: HITLRequest | null
-  autoApproveGitPush: boolean
-  onApprovalDecision: (decision: ChatApprovalDecision) => void
-  onEditUserMessage: (message: Message) => void
-  onSetGoalFromMessage: (text: string) => void
-  onForkFromMessage: (message: Message) => void
-  forkingMessageId: string | null
-  onOpenHookLogBucket: (turnId: string) => void
-  threadId: string
-  assistantDurationMsById: Map<string, number>
-  userSendTimeLabelById: Map<string, string>
-}
-
-const ChatMessageList = React.memo(function ChatMessageList({
-  messages,
-  perMessageFlags,
-  hookLoggingEnabled,
-  hookLogBucketByTurnId,
-  detachedHookLogBuckets,
-  contentMessageRefs,
-  setMessageRef,
-  isLoading,
-  toolResults,
-  toolCallStates,
-  pendingApprovalToolCallKeys,
-  pendingApproval,
-  autoApproveGitPush,
-  onApprovalDecision,
-  onEditUserMessage,
-  onSetGoalFromMessage,
-  onForkFromMessage,
-  forkingMessageId,
-  onOpenHookLogBucket,
-  threadId,
-  assistantDurationMsById,
-  userSendTimeLabelById
-}: ChatMessageListProps): React.JSX.Element {
-  const visibleMessageLayout = useMemo(
-    () =>
-      buildVisibleMessageLayout(messages, (message) => {
-        const hasHookLogChip =
-          hookLoggingEnabled &&
-          message.role === "user" &&
-          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-        return messageHasVisibleRow(message, hasHookLogChip)
-      }),
-    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
-  )
-
-  return (
-    <>
-      {messages.map((message, index) => {
-        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
-        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
-        const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
-        const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
-
-        const hookLogBucketForTurn =
-          hookLoggingEnabled && message.role === "user"
-            ? hookLogBucketByTurnId.get(message.id)
-            : undefined
-        const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
-
-        const navigatorRef = setMessageRef(message.id, message.role)
-        const combinedRef = (node: HTMLDivElement | null): void => {
-          navigatorRef(node)
-          if (node && message.role !== "tool") {
-            contentMessageRefs.current.set(message.id, node)
-            return
-          }
-          contentMessageRefs.current.delete(message.id)
-        }
-
-        return (
-          <div
-            key={`${message.role}:${message.id}`}
-            ref={combinedRef}
-            data-message-role={message.role}
-          >
-            <MessageBubble
-              message={message}
-              previousMessage={previousMessage}
-              isStreaming={isLastMessage && isLoading}
-              showAssistantMeta={showAssistantMeta}
-              toolResults={toolResults}
-              toolCallStates={toolCallStates}
-              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-              pendingApproval={pendingApproval}
-              autoApproveGitPush={autoApproveGitPush}
-              onApprovalDecision={onApprovalDecision}
-              onEditUserMessage={onEditUserMessage}
-              onSetGoalFromMessage={onSetGoalFromMessage}
-              onForkFromMessage={onForkFromMessage}
-              forkingMessageId={forkingMessageId}
-              threadId={threadId}
-              isLoading={isLoading}
-              hasUserAfterHead={hasUserAfterHead}
-              assistantDurationMs={assistantDurationMsById.get(message.id)}
-              userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-            />
-            {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-              <div className="mt-1 ml-12">
-                <HookLogChip
-                  bucket={hookLogBucketForTurn}
-                  onClick={() => onOpenHookLogBucket(hookLogBucketForTurn.turnId)}
-                />
-              </div>
-            )}
-          </div>
-        )
-      })}
-
-      {hookLoggingEnabled && detachedHookLogBuckets.length > 0 && (
-        <div className="flex flex-wrap justify-start gap-2 mt-1">
-          {detachedHookLogBuckets.map((bucket) => (
-            <HookLogChip
-              key={bucket.turnId}
-              bucket={bucket}
-              onClick={() => onOpenHookLogBucket(bucket.turnId)}
-            />
-          ))}
-        </div>
-      )}
-    </>
-  )
-})
-
 function SystemPromptPreviewButton({
   threadId
 }: {
@@ -2014,6 +1867,7 @@ export function ChatContainer({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const virtualListRef = useRef<ChatTimelineListRef>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -3325,9 +3179,43 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [isLoading])
 
+  const historyDisplayMessages = useMemo(() => {
+    const cleanedMessages = threadMessages
+      .filter(isVisibleCheckpointTranscriptMessage)
+      .map((msg) => {
+        if (
+          msg.role !== "user" ||
+          typeof msg.content !== "string" ||
+          !msg.content.includes("<attachment ")
+        ) {
+          return msg
+        }
+        // Extract filenames and user text separately, then reorder: filenames first.
+        const fileNames: string[] = []
+        const textOnly = msg.content
+          .replace(
+            /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
+            (_match, name) => {
+              const decoded = name
+                .replace(/&amp;/g, "&")
+                .replace(/&lt;/g, "<")
+                .replace(/&gt;/g, ">")
+                .replace(/&quot;/g, '"')
+              fileNames.push(`📎 ${decoded}`)
+              return ""
+            }
+          )
+          .trim()
+        const cleaned =
+          fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
+        return { ...msg, content: cleaned }
+      })
+    return filterCoordinatorNoiseMessages(cleanedMessages)
+  }, [threadMessages])
+
   const displayMessages = useMemo(() => {
     const normalizedLiveMessages = normalizeLiveStreamMessageIds(
-      threadMessages.map((message) => ({
+      historyDisplayMessages.map((message) => ({
         id: message.id,
         type:
           message.role === "user"
@@ -3338,7 +3226,7 @@ export function ChatContainer({
       })),
       streamData.liveMessages || []
     )
-    const threadMessageIds = new Set(threadMessages.map((m) => m.id))
+    const threadMessageIds = new Set(historyDisplayMessages.map((m) => m.id))
     const liveReasoningById = new Map<string, string>()
     for (const liveMessage of normalizedLiveMessages) {
       if (
@@ -3350,11 +3238,22 @@ export function ChatContainer({
         liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
       }
     }
-    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
-      if (message.role !== "assistant" || message.reasoning) return message
+    let historyWithLiveReasoning = historyDisplayMessages
+    for (const messageId of liveReasoningById.keys()) {
+      const index = historyWithLiveReasoning.findIndex(
+        (message) => message.id === messageId && message.role === "assistant" && !message.reasoning
+      )
+      if (index < 0) continue
+      if (historyWithLiveReasoning === historyDisplayMessages) {
+        historyWithLiveReasoning = [...historyDisplayMessages]
+      }
+      const message = historyWithLiveReasoning[index]
+      if (message.role !== "assistant" || message.reasoning) continue
       const liveReasoning = liveReasoningById.get(message.id)
-      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
-    })
+      if (liveReasoning) {
+        historyWithLiveReasoning[index] = { ...message, reasoning: liveReasoning }
+      }
+    }
     const streamingMsgs: Message[] = normalizedLiveMessages
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
@@ -3380,42 +3279,16 @@ export function ChatContainer({
         }
       })
 
-    // Clean up attachment XML tags in user messages for display
-    const allMessages = reconcileMessageDisplayOrder(
-      [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
-        isVisibleCheckpointTranscriptMessage
-      ),
-      streamData.messages
-    )
-    const cleanedMessages = allMessages.map((msg) => {
-      if (
-        msg.role !== "user" ||
-        typeof msg.content !== "string" ||
-        !msg.content.includes("<attachment ")
+    // The durable transcript is already in display order. While a run is active,
+    // only the current-turn live tail changes, so avoid re-sorting/cleaning every
+    // historical message on every token.
+    return [
+      ...historyWithLiveReasoning,
+      ...filterCoordinatorNoiseMessages(
+        reconcileMessageDisplayOrder(streamingMsgs, streamData.messages)
       )
-        return msg
-      // Extract filenames and user text separately, then reorder: filenames first
-      const fileNames: string[] = []
-      const textOnly = msg.content
-        .replace(
-          /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
-          (_match, name) => {
-            const decoded = name
-              .replace(/&amp;/g, "&")
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .replace(/&quot;/g, '"')
-            fileNames.push(`📎 ${decoded}`)
-            return ""
-          }
-        )
-        .trim()
-      const cleaned =
-        fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
-      return { ...msg, content: cleaned }
-    })
-    return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages, streamData.messages])
+    ]
+  }, [historyDisplayMessages, streamData.liveMessages, streamData.messages])
 
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
@@ -3575,12 +3448,44 @@ export function ChatContainer({
     }
   }, [isLoading, pendingApproval, toolCallStates, toolDerivationMessages, toolResults])
 
-  // Get the actual scrollable viewport element from Radix ScrollArea
+  const isVirtualizedChat =
+    displayMessages.length >= VIRTUAL_CHAT_TIMELINE_THRESHOLD && !searchOpen
+
+  // Get the actual scrollable viewport element. Long conversations use the
+  // react-window list itself; short conversations keep the existing Radix
+  // viewport so all existing scroll behavior remains unchanged.
   const getViewport = useCallback((): HTMLDivElement | null => {
+    if (isVirtualizedChat) return virtualListRef.current?.element ?? null
     return scrollRef.current?.querySelector(
       "[data-radix-scroll-area-viewport]"
     ) as HTMLDivElement | null
-  }, [])
+  }, [isVirtualizedChat])
+
+  const scrollToMessage = useCallback(
+    (messageId: string): boolean => {
+      if (!isVirtualizedChat) return false
+      const index = displayMessages.findIndex((message) => message.id === messageId)
+      if (index < 0) return false
+      const visibleIndex = displayMessages
+        .slice(0, index + 1)
+        .filter((message) => {
+          const hasHookLogChip = Boolean(
+            hookLogConfig.enabled &&
+              message.role === "user" &&
+              hookLogBucketByTurnId.get(message.id)?.entries.length
+          )
+          return messageHasVisibleRow(message, hasHookLogChip)
+        }).length - 1
+      if (visibleIndex < 0) return false
+      virtualListRef.current?.scrollToRow({
+        index: visibleIndex,
+        align: "center",
+        behavior: "smooth"
+      })
+      return true
+    },
+    [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled, isVirtualizedChat]
+  )
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
@@ -6641,6 +6546,198 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const hasVirtualTimelineTail =
+    Boolean(userInputScrollPadding) ||
+    (hookLogConfig.enabled && detachedHookLogBuckets.length > 0) ||
+    Boolean(contextCompaction) ||
+    Boolean(modelRetry) ||
+    isLoading ||
+    Boolean(workflowRun) ||
+    isWorkflowModeMetadata(currentThread?.metadata) ||
+    Boolean(hookInterruption && !isLoading) ||
+    Boolean(threadError && !isLoading)
+  const chatMessageListProps = {
+    hookLoggingEnabled: hookLogConfig.enabled,
+    hookLogBucketByTurnId,
+    detachedHookLogBuckets,
+    contentMessageRefs,
+    isLoading,
+    toolResults,
+    toolCallStates: toolCallDisplayStates,
+    pendingApprovalToolCallKeys,
+    pendingApproval,
+    autoApproveGitPush: !yoloModeLoaded || yoloMode,
+    onApprovalDecision: handleApprovalDecision,
+    onEditUserMessage: handleEditUserMessage,
+    onSetGoalFromMessage: handleSetGoalFromMessage,
+    onForkFromMessage: handleForkFromMessage,
+    forkingMessageId,
+    onOpenHookLogBucket: handleOpenHookLogBucket,
+    threadId,
+    assistantDurationMsById,
+    userSendTimeLabelById
+  }
+  const visibleMessageLayout = useMemo(
+    () =>
+      buildVisibleMessageLayout(displayMessages, (message) => {
+        const hasHookLogChip =
+          hookLogConfig.enabled &&
+          message.role === "user" &&
+          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+        return messageHasVisibleRow(message, hasHookLogChip)
+      }),
+    [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled]
+  )
+  const virtualTimelineItems = useMemo<readonly VirtualChatTimelineItem[]>(() => {
+    const messageItems = displayMessages.flatMap((message, index) => {
+      const hasHookLogChip =
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+      return messageHasVisibleRow(message, hasHookLogChip)
+        ? [{ id: `message:${message.role}:${message.id}`, messageIndex: index }]
+        : []
+    })
+
+    return hasVirtualTimelineTail
+      ? [
+          ...messageItems,
+          {
+        id: "timeline-tail",
+        node: (
+          <div
+            className="space-y-4"
+            style={
+              userInputScrollPadding
+                ? { paddingBottom: `${userInputScrollPadding}px` }
+                : undefined
+            }
+          >
+            {hookLogConfig.enabled && detachedHookLogBuckets.length > 0 && (
+              <div className="flex flex-wrap justify-start gap-2 mt-1">
+                {detachedHookLogBuckets.map((bucket) => (
+                  <HookLogChip
+                    key={bucket.turnId}
+                    bucket={bucket}
+                    onClick={() => handleOpenHookLogBucket(bucket.turnId)}
+                  />
+                ))}
+              </div>
+            )}
+            {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
+            {modelRetry && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 dark:border-amber-500/40 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
+                <span className="inline-block size-3 mt-0.5 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <span>
+                    模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+                    {modelRetry.maxRetries}
+                    {modelRetry.delayMs > 0 && (
+                      <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
+                    )}
+                    …
+                  </span>
+                </div>
+              </div>
+            )}
+            {isLoading && (
+              <div className="space-y-3">
+                {contextCompaction?.phase !== "started" && (
+                  <div className="flex items-center gap-2 text-sm">
+                    <div className="rainbow-spinner" />
+                    <span
+                      className="thinking-shimmer-text"
+                      data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+                    >
+                      {THINKING_MESSAGES[thinkingMessageIndex]}
+                    </span>
+                    {streamData.isLoading && (
+                      <ProcessingDuration
+                        key={threadId}
+                        startTime={activeTurnStartTime}
+                        text="已处理"
+                      />
+                    )}
+                  </div>
+                )}
+                {todos.length > 0 && <ChatTodos todos={todos} />}
+              </div>
+            )}
+            {workflowRun ? (
+              <WorkflowRunPanel threadId={threadId} run={workflowRun} />
+            ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
+              <WorkflowHistoryButton threadId={threadId} />
+            ) : null}
+            {hookInterruption && !isLoading && (
+              <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+                <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
+                    {interruptionNotice?.title}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+                    <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                      {hookInterruption.event}
+                    </span>
+                    <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+                  </div>
+                  <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
+                    {hookInterruption.reason}
+                  </div>
+                  {hookInterruption.systemMessage && (
+                    <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
+                      {hookInterruption.systemMessage}
+                    </div>
+                  )}
+                  <div className="text-xs text-muted-foreground mt-2">
+                    {interruptionNotice?.explanation}
+                  </div>
+                </div>
+                <button
+                  onClick={clearHookInterruption}
+                  className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
+                  aria-label="Dismiss hook notice"
+                >
+                  <X className="size-4 text-muted-foreground" />
+                </button>
+              </div>
+            )}
+            {threadError && !isLoading && (
+              <ChatErrorCard
+                error={threadError}
+                detail={errorDetail}
+                onDismiss={handleDismissError}
+              />
+            )}
+          </div>
+        )
+          }
+        ]
+      : messageItems
+  }, [
+    activeTurnStartTime,
+    contextCompaction,
+    currentThread?.metadata,
+    detachedHookLogBuckets,
+    displayMessages,
+    errorDetail,
+    handleDismissError,
+    handleOpenHookLogBucket,
+    hookInterruption,
+    hookLogBucketByTurnId,
+    hookLogConfig.enabled,
+    hasVirtualTimelineTail,
+    interruptionNotice?.explanation,
+    interruptionNotice?.title,
+    isLoading,
+    modelRetry,
+    streamData.isLoading,
+    thinkingMessageIndex,
+    threadError,
+    threadId,
+    todos,
+    workflowRun
+  ])
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -6780,10 +6877,23 @@ export function ChatContainer({
         messages={displayMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
+        getViewport={getViewport}
+        scrollToMessage={scrollToMessage}
       >
         {({ reserveRightSpace, setMessageRef }) => (
           <>
-            <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
+            {isVirtualizedChat ? (
+              <VirtualChatTimeline
+                items={virtualTimelineItems}
+                messages={displayMessages}
+                perMessageFlags={perMessageFlags}
+                visibleMessageLayout={visibleMessageLayout}
+                reserveRightSpace={reserveRightSpace}
+                listRef={virtualListRef}
+                chatMessageListProps={{ ...chatMessageListProps, setMessageRef }}
+              />
+            ) : (
+              <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
                 className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}
                 style={
@@ -6945,7 +7055,8 @@ export function ChatContainer({
                   )}
                 </div>
               </div>
-            </ScrollArea>
+              </ScrollArea>
+            )}
             {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
             {pendingApproval &&
               Boolean(
@@ -7775,6 +7886,22 @@ export function ChatContainer({
                           YOLO
                         </button>
                       )}
+                      <div
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium",
+                          isVirtualizedChat
+                            ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                            : "bg-muted text-muted-foreground"
+                        )}
+                        title={`当前展示 ${displayMessages.length} 条消息；达到 ${VIRTUAL_CHAT_TIMELINE_THRESHOLD} 条时自动启用虚拟列表。`}
+                        aria-label={`当前展示 ${displayMessages.length} 条消息${
+                          isVirtualizedChat ? "，虚拟列表已启用" : ""
+                        }`}
+                      >
+                        <Layers className="size-3" />
+                        <span>展示 {displayMessages.length} 条</span>
+                        {isVirtualizedChat && <span>虚拟列表</span>}
+                      </div>
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
                       <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />

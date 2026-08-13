@@ -60,6 +60,7 @@ import {
   classifyAgentStreamDelivery,
   resolveAgentStreamRequestChannel
 } from "../shared/agent-stream-channel"
+import type { AgentStreamDisplayInterest } from "../shared/agent-stream-display-interest"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -296,6 +297,15 @@ function listenForAgentStreamRequest(
 // Custom APIs for renderer
 const api = {
   agent: {
+    setStreamDisplayInterest: (
+      threadId: string,
+      interest: AgentStreamDisplayInterest
+    ): Promise<boolean> => {
+      return ipcRenderer.invoke("agent:set-stream-display-interest", {
+        threadId,
+        interest
+      }) as Promise<boolean>
+    },
     // Send message and receive events via callback
     invoke: (
       threadId: string,

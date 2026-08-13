@@ -5448,6 +5448,19 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       // Add to active threads (this will render a ThreadStreamHolder)
       setActiveThreadIds((prev) => new Set([...prev, threadId]))
+      if (useAppStore.getState().currentThreadId !== threadId) {
+        // A panel can initialize a thread without selecting it. Mark it
+        // background immediately so a concurrent run never inherits the
+        // default foreground per-chunk display path.
+        void window.api.agent
+          .setStreamDisplayInterest(threadId, "background")
+          .catch((error: unknown) => {
+            console.warn(
+              "[ThreadProvider] Failed to mark newly initialized background thread:",
+              error
+            )
+          })
+      }
 
       setThreadStates((prev) => {
         if (prev[threadId]) return prev
@@ -5737,6 +5750,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const previousThreadId = previousCurrentThreadIdRef.current
     if (previousThreadId && previousThreadId !== currentThreadId) {
+      void window.api.agent
+        .setStreamDisplayInterest(previousThreadId, "background")
+        .catch((error: unknown) => {
+          console.warn(
+            "[ThreadProvider] Failed to pause background stream display:",
+            error
+          )
+        })
       void window.api.agent.unbindCoordinatorWorkers(previousThreadId).catch((error: unknown) => {
         console.warn(
           "[ThreadProvider] Failed to unbind inactive coordinator worker updates:",
@@ -5745,6 +5766,28 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
     }
     previousCurrentThreadIdRef.current = currentThreadId
+
+    const updateStreamDisplayInterest = (): void => {
+      if (!currentThreadId) return
+      const interest = document.visibilityState === "visible" ? "foreground" : "hidden"
+      void window.api.agent
+        .setStreamDisplayInterest(currentThreadId, interest)
+        .then((snapshotSent) => {
+          if (!snapshotSent || interest !== "foreground") return
+          // The snapshot is display-only. The durable transcript remains the
+          // authority for any chunks skipped while another thread was visible.
+          void getThreadActions(currentThreadId).syncDurableTranscript().catch(() => {})
+        })
+        .catch((error: unknown) => {
+          console.warn(
+            "[ThreadProvider] Failed to update stream display interest:",
+            error
+          )
+        })
+    }
+
+    updateStreamDisplayInterest()
+    document.addEventListener("visibilitychange", updateStreamDisplayInterest)
 
     // Tell the main process which thread is in the foreground so the workspace
     // watcher LRU never evicts it (and re-arm it if it was previously evicted).
@@ -5763,7 +5806,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       })
       .catch(() => {})
 
-    if (!currentThreadId) return
+    if (!currentThreadId) {
+      return () => {
+        document.removeEventListener("visibilitychange", updateStreamDisplayInterest)
+      }
+    }
 
     let cancelled = false
     void window.api.agent
@@ -5784,8 +5831,14 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true
+      document.removeEventListener("visibilitychange", updateStreamDisplayInterest)
     }
-  }, [currentThreadId, loadWorkspaceFilesInBackground, updateThreadState])
+  }, [
+    currentThreadId,
+    getThreadActions,
+    loadWorkspaceFilesInBackground,
+    updateThreadState
+  ])
 
   const cleanupThread = useCallback(
     (threadId: string) => {

@@ -1,0 +1,180 @@
+/**
+ * Cross-layer contracts for thread-aware stream display backpressure and the
+ * chat timeline virtualization boundary.
+ *
+ * Run:
+ *   npx tsx tests/thread-stream-display-performance.spec.ts
+ */
+
+import { readFileSync } from "fs"
+import { join, resolve } from "path"
+
+const PROJECT_ROOT = resolve(__dirname, "..")
+
+function read(relativePath: string): string {
+  return readFileSync(join(PROJECT_ROOT, relativePath), "utf8").replace(/\r\n/g, "\n")
+}
+
+function assert(condition: unknown, message: string): void {
+  if (!condition) throw new Error(message)
+}
+
+function assertIncludes(value: string, expected: string, label: string): void {
+  assert(value.includes(expected), `${label}: expected to include ${JSON.stringify(expected)}`)
+}
+
+function assertSourceOrder(value: string, before: string, after: string, label: string): void {
+  const beforeIndex = value.indexOf(before)
+  const afterIndex = value.indexOf(after)
+  assert(beforeIndex >= 0, `${label}: missing ${JSON.stringify(before)}`)
+  assert(afterIndex >= 0, `${label}: missing ${JSON.stringify(after)}`)
+  assert(
+    beforeIndex < afterIndex,
+    `${label}: expected ${JSON.stringify(before)} before ${JSON.stringify(after)}`
+  )
+}
+
+const agentIpc = read("src/main/ipc/agent.ts")
+const displayGate = read("src/main/ipc/agent-stream-display-gate.ts")
+const preload = read("src/preload/index.ts")
+const threadContext = read("src/renderer/src/lib/thread-context.tsx")
+const chat = read("src/renderer/src/components/chat/ChatContainer.tsx")
+const timeline = read("src/renderer/src/components/chat/ChatTimeline.tsx")
+const mainWindow = read("src/main/index.ts")
+
+function testBackgroundChunksAreDisplayGatedAfterPersistence(): void {
+  const functionStart = agentIpc.indexOf("function persistAndForwardPhysicalRunStreamChunk(")
+  const functionBody = agentIpc.slice(functionStart, functionStart + 1800)
+  assert(functionStart >= 0, "stream forwarding helper exists")
+  assertSourceOrder(
+    functionBody,
+    "persistStreamTranscriptChunk",
+    "agentStreamDisplayGate.remember",
+    "a stream chunk is persisted before its display snapshot is retained"
+  )
+  assertSourceOrder(
+    functionBody,
+    "agentStreamDisplayGate.remember",
+    "if (agentStreamDisplayGate.shouldSendImmediately(window, threadId))",
+    "background delivery is gated only after the latest renderer snapshot is retained"
+  )
+  assertIncludes(
+    functionBody,
+    'type: "stream"',
+    "the display gate preserves the existing renderer stream event format"
+  )
+}
+
+function testForegroundRecoveryUsesAuthoritativeValuesSnapshots(): void {
+  assertIncludes(
+    agentIpc,
+    'import { AgentStreamDisplayGate } from "./agent-stream-display-gate"',
+    "main depends on the isolated display gate"
+  )
+  assertIncludes(
+    displayGate,
+    'const valuesSnapshot = snapshotsByMode.get("values")',
+    "foreground recovery prefers a complete values snapshot"
+  )
+  assertIncludes(
+    displayGate,
+    "if (!this.options.isThreadRunActive(threadId)) return false",
+    "completed runs do not replay stale live snapshots"
+  )
+  assertIncludes(
+    agentIpc,
+    '"agent:set-stream-display-interest"',
+    "main exposes the display-only interest IPC"
+  )
+  assertIncludes(
+    preload,
+    "setStreamDisplayInterest:",
+    "preload exposes stream display interest without changing normal stream APIs"
+  )
+}
+
+function testThreadSwitchAndVisibilityDriveInterest(): void {
+  assertIncludes(
+    threadContext,
+    '.setStreamDisplayInterest(previousThreadId, "background")',
+    "switching away from a thread pauses its renderer display stream"
+  )
+  assertIncludes(
+    threadContext,
+    'document.visibilityState === "visible" ? "foreground" : "hidden"',
+    "hidden windows stop requesting foreground display delivery"
+  )
+  assertIncludes(
+    threadContext,
+    'document.addEventListener("visibilitychange", updateStreamDisplayInterest)',
+    "visibility changes update the main-process display interest"
+  )
+  assertIncludes(
+    threadContext,
+    "Failed to mark newly initialized background thread",
+    "threads initialized outside the selected chat are immediately background-gated"
+  )
+}
+
+function testLongChatsUseDynamicVirtualRows(): void {
+  assertIncludes(
+    timeline,
+    "export const VIRTUAL_CHAT_TIMELINE_THRESHOLD = 80",
+    "long-chat virtualization has an explicit threshold"
+  )
+  assertIncludes(
+    timeline,
+    "useDynamicRowHeight",
+    "virtual chat rows measure Markdown and tool cards dynamically"
+  )
+  assertIncludes(
+    chat,
+    "const historyDisplayMessages = useMemo",
+    "history-only display work is separated from live tail updates"
+  )
+  assertIncludes(
+    chat,
+    "const isVirtualizedChat =",
+    "chat chooses the virtual path only for long non-searching transcripts"
+  )
+  assertIncludes(
+    chat,
+    "<VirtualChatTimeline",
+    "the long-chat render path mounts the virtual timeline"
+  )
+  assertIncludes(
+    chat,
+    'from "./ChatTimeline"',
+    "ChatContainer composes the isolated timeline instead of owning list internals"
+  )
+  assertIncludes(
+    chat,
+    "展示 {displayMessages.length} 条",
+    "the chat status bar exposes the display-message count for manual verification"
+  )
+}
+
+function testHiddenWindowTimersRemainResponsive(): void {
+  assertIncludes(
+    mainWindow,
+    "backgroundThrottling: false",
+    "Electron does not throttle renderer lifecycle timers while the window is hidden"
+  )
+}
+
+function main(): void {
+  const tests = [
+    testBackgroundChunksAreDisplayGatedAfterPersistence,
+    testForegroundRecoveryUsesAuthoritativeValuesSnapshots,
+    testThreadSwitchAndVisibilityDriveInterest,
+    testLongChatsUseDynamicVirtualRows,
+    testHiddenWindowTimersRemainResponsive
+  ]
+  for (const test of tests) {
+    test()
+    console.log(`✓ ${test.name}`)
+  }
+  console.log(`\n${tests.length} passed`)
+}
+
+main()

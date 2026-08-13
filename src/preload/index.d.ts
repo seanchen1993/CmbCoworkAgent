@@ -1,4 +1,5 @@
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import type { AgentStreamDisplayInterest } from "../shared/agent-stream-display-interest"
 import type {
   Thread,
   Message,
@@ -802,6 +803,10 @@ interface DashboardPluginAggregate {
 
 interface CustomAPI {
   agent: {
+    setStreamDisplayInterest: (
+      threadId: string,
+      interest: AgentStreamDisplayInterest
+    ) => Promise<boolean>
     invoke: (
       threadId: string,
       message: string,
