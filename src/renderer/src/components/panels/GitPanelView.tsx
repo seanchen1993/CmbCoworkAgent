@@ -333,7 +333,10 @@ export function GitPanelView({
   const [currentFileDiff, setCurrentFileDiff] = useState<string | null>(null)
   const [diffLoadingPath, setDiffLoadingPath] = useState<string | null>(null)
   const [diffFileError, setDiffFileError] = useState<string | null>(null)
+  const diffLoadingPathRef = useRef<string | null>(null)
+  const pendingRefreshRef = useRef<{ meta: boolean; diff: boolean } | null>(null)
   const loadedDiffPathRef = useRef<string | null>(null)
+  const [diffReloadVersion, setDiffReloadVersion] = useState(0)
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pendingRevertFile, setPendingRevertFile] = useState<GitPanelDiffFile | null>(null)
   const [pulling, setPulling] = useState(false)
@@ -377,7 +380,10 @@ export function GitPanelView({
     setCurrentFileDiff(null)
     setDiffLoadingPath(null)
     setDiffFileError(null)
+    diffLoadingPathRef.current = null
+    pendingRefreshRef.current = null
     loadedDiffPathRef.current = null
+    setDiffReloadVersion(0)
     setPendingRevertFile(null)
     setPushMetaState(null)
     setPushMetaLoading(false)
@@ -398,6 +404,14 @@ export function GitPanelView({
       const shouldRefreshMeta = options?.meta ?? false
       const shouldRefreshDiff = options?.diff ?? true
       if (!shouldRefreshMeta && !shouldRefreshDiff) return
+      if (diffLoadingPathRef.current) {
+        const pendingRefresh = pendingRefreshRef.current
+        pendingRefreshRef.current = {
+          meta: Boolean(pendingRefresh?.meta || shouldRefreshMeta),
+          diff: Boolean(pendingRefresh?.diff || shouldRefreshDiff)
+        }
+        return
+      }
 
       let toastShown = false
       setError(null)
@@ -451,7 +465,9 @@ export function GitPanelView({
               setCurrentFileDiff(null)
               setDiffLoadingPath(null)
               setDiffFileError(null)
+              diffLoadingPathRef.current = null
               loadedDiffPathRef.current = null
+              setDiffReloadVersion((version) => version + 1)
             } catch (e) {
               if (requestId !== diffRequestIdRef.current) return
               reportRefreshError(e instanceof Error ? e.message : "加载 Git 文件变更失败")
@@ -697,6 +713,7 @@ export function GitPanelView({
         setCurrentFileDiff(null)
         setDiffFileError(null)
         setDiffLoadingPath(null)
+        diffLoadingPathRef.current = null
         loadedDiffPathRef.current = filePath
         return
       }
@@ -704,6 +721,7 @@ export function GitPanelView({
       // 清除旧缓存，开始加载新文件
       setCurrentFileDiff(null)
       setDiffFileError(null)
+      diffLoadingPathRef.current = filePath
       setDiffLoadingPath(filePath)
 
       try {
@@ -727,11 +745,19 @@ export function GitPanelView({
         setDiffFileError(e instanceof Error ? e.message : "加载文件 diff 失败")
       } finally {
         if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
-          setDiffLoadingPath(null)
+          if (diffLoadingPathRef.current === filePath) {
+            diffLoadingPathRef.current = null
+            setDiffLoadingPath(null)
+            const pendingRefresh = pendingRefreshRef.current
+            pendingRefreshRef.current = null
+            if (pendingRefresh) {
+              void refresh(pendingRefresh)
+            }
+          }
         }
       }
     },
-    [threadId, diffLoadingPath, repositories]
+    [threadId, diffLoadingPath, repositories, refresh]
   )
 
   const toggleFileExpanded = useCallback((filePath: string): void => {
@@ -744,7 +770,7 @@ export function GitPanelView({
     if (!expandedFilePath) return
     if (loadedDiffPathRef.current === expandedFilePath && !diffFileError) return
     void loadFileDiff(expandedFilePath)
-  }, [expandedFilePath, loadFileDiff, diffFileError])
+  }, [expandedFilePath, loadFileDiff, diffFileError, diffReloadVersion])
 
   const toggleFileSelected = useCallback((filePath: string): void => {
     setSelectedFilePaths((prev) => {
@@ -1108,6 +1134,9 @@ export function GitPanelView({
   const isInitialMetaLoading = metaLoading && metaState === null && !error
   const isInitialDiffLoading = diffLoading && diffState === null && !error
   const isDiffReady = Boolean(diffState?.success)
+  const shouldExpandEmptyDiffState = Boolean(
+    diffState?.success && hasGitRepo && visibleDiffFiles.length === 0
+  )
   // Keep the submit entry visible for git repos so users can push right after commit,
   // even if pushability detection lags or temporarily reports false.
   const canShowSubmit = hasGitRepo
@@ -1812,7 +1841,14 @@ export function GitPanelView({
       </div>
       <div className="flex min-h-0 flex-1" aria-busy={loading}>
         {/* 左侧：变更文件 tree 列表 */}
-        <div className="flex min-h-0 w-[min(340px,42%)] shrink-0 flex-col border-r border-border/70 bg-white dark:bg-background">
+        <div
+          className={cn(
+            "flex min-h-0 flex-col bg-white dark:bg-background",
+            shouldExpandEmptyDiffState
+              ? "min-w-0 flex-1"
+              : "w-[min(340px,42%)] shrink-0 border-r border-border/70"
+          )}
+        >
           <div className="shrink-0 border-b border-border/70 px-3 py-2">
             {combinedError && (
               <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
@@ -1883,41 +1919,94 @@ export function GitPanelView({
                   </div>
                 )}
                 {visibleDiffFiles.length === 0 ? (
-                  <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8">
-                    <div className="mx-auto max-w-[420px]">
-                      <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10">
-                        <CheckCircle2 className="size-4.5 text-emerald-600 dark:text-emerald-400" />
+                  <div className="rounded-2xl border border-emerald-500/20 bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.10),_transparent_50%),linear-gradient(180deg,rgba(255,255,255,0.92),rgba(248,250,252,0.92))] px-5 py-8 dark:bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.12),_transparent_42%),linear-gradient(180deg,rgba(10,16,24,0.96),rgba(10,16,24,0.88))]">
+                    <div className="mx-auto max-w-[620px]">
+                      <div className="inline-flex items-center rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+                        工作区状态正常
                       </div>
-                      <div className="text-center text-sm font-medium text-foreground">
-                        没有待审批改动
-                      </div>
-                      <p className="mt-1 text-center text-xs leading-5 text-muted-foreground">
-                        当前工作区与基线一致，暂时没有可展示的净变更。
-                      </p>
-                      <div className="mt-3 rounded-lg border border-border/70 bg-background/70 p-3">
-                        <div className="mb-2 inline-flex items-center rounded-full border border-border/70 bg-muted/60 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                          可能原因
+
+                      <div className="mt-4 text-center">
+                        <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 shadow-sm">
+                          <CheckCircle2 className="size-5 text-emerald-600 dark:text-emerald-400" />
                         </div>
-                        <ul className="space-y-1.5 text-xs leading-5 text-muted-foreground">
-                          <li className="flex items-start gap-2">
-                            <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
-                            文件被{" "}
-                            <code className="rounded bg-muted px-1 py-0.5 text-[11px]">.gitignore</code>{" "}
-                            忽略
-                          </li>
-                          <li className="flex items-start gap-2">
-                            <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
-                            文件改动后又恢复为原内容，最终净变更为 0
-                          </li>
-                          <li className="flex items-start gap-2">
-                            <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
-                            当前修改仅影响未纳入 Git 跟踪的内容
-                          </li>
-                        </ul>
+                        <div className="text-base font-semibold text-foreground">没有待审批改动</div>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                          Git 已完成本次扫描，在当前查看范围内没有发现需要展示的净变更。
+                        </p>
                       </div>
-                      <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">
-                        后续出现可跟踪的净变更时，这里会自动显示最新 diff。
-                      </p>
+
+                      <div className="mt-5 grid gap-2 sm:grid-cols-3">
+                        <div className="rounded-xl border border-border/70 bg-background/80 px-3 py-3 text-left">
+                          <div className="text-[11px] font-medium text-muted-foreground">可展示净变更</div>
+                          <div className="mt-1 text-base font-semibold text-foreground">0 个文件</div>
+                        </div>
+                        <div className="rounded-xl border border-border/70 bg-background/80 px-3 py-3 text-left">
+                          <div className="text-[11px] font-medium text-muted-foreground">当前查看范围</div>
+                          <div className="mt-1 truncate font-mono text-sm font-semibold text-foreground">
+                            {activeRepositoryLabel}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-border/70 bg-background/80 px-3 py-3 text-left">
+                          <div className="text-[11px] font-medium text-muted-foreground">下次出现改动时</div>
+                          <div className="mt-1 text-sm font-semibold text-foreground">这里会自动恢复 diff 列表</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid gap-3 lg:grid-cols-[1.15fr,0.85fr]">
+                        <div className="rounded-xl border border-border/70 bg-background/75 p-4">
+                          <div className="text-sm font-medium text-foreground">为什么会这样</div>
+                          <ul className="mt-3 space-y-2 text-xs leading-5 text-muted-foreground">
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                              文件被{" "}
+                              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">.gitignore</code>{" "}
+                              或工作区规则忽略，因此不会进入审批列表
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                              文件改动后又恢复为原内容，最终相对基线的净变更为 0
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                              当前改动发生在别的子仓库或查看范围之外，可切换“操作仓库”再确认
+                            </li>
+                          </ul>
+                        </div>
+
+                        <div className="rounded-xl border border-border/70 bg-background/75 p-4">
+                          <div className="text-sm font-medium text-foreground">接下来可以做什么</div>
+                          <ul className="mt-3 space-y-2 text-xs leading-5 text-muted-foreground">
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-500/70" />
+                              继续编辑文件，新的可跟踪净变更会在这里自动出现
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-500/70" />
+                              点击右上角“刷新”立即重新扫描当前工作区状态
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-500/70" />
+                              如果当前工作区是多仓库结构，先切换“操作仓库”再查看更精确的范围
+                            </li>
+                          </ul>
+                          <div className="mt-4 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void refresh()
+                              }}
+                              disabled={loading}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-border/80 bg-background/90 px-3 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-background-interactive disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+                              重新刷新
+                            </button>
+                            <div className="inline-flex items-center rounded-lg border border-border/70 bg-muted/30 px-3 py-1.5 text-[11px] text-muted-foreground">
+                              {hasMultipleRepositories ? "可切换子仓库缩小范围" : "当前范围已是完整工作区"}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -2005,10 +2094,11 @@ export function GitPanelView({
             )}
           </div>
         </div>
-        {/* 右侧：选中文件的 diff 内容 */}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-background">
-          {renderDiffPane()}
-        </div>
+        {!shouldExpandEmptyDiffState && (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-background">
+            {visibleDiffFiles.length > 0 && renderDiffPane()}
+          </div>
+        )}
       </div>
 
       <GitCommitDialog
