@@ -32,7 +32,6 @@ import {
   BROWSER_SESSION_ID,
   type BrowserBounds,
   type BrowserConsoleEntry,
-  type BrowserCdpConfig,
   type BrowserState
 } from "../../../../shared/browser-types"
 
@@ -128,11 +127,7 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
   )
 }
 
-function BrowserWelcomePanel({
-  onCdpConfigSaved
-}: {
-  onCdpConfigSaved: (config: BrowserCdpConfig) => void
-}): React.JSX.Element {
+function BrowserWelcomePanel(): React.JSX.Element {
   return (
     <div className="absolute inset-0 z-20 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
       <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-4 py-2">
@@ -233,7 +228,6 @@ function BrowserWelcomePanel({
           className="mt-2"
           title="开启进阶自动化能力"
           description="在此开启 AI 浏览器操控和 Chrome 登录数据导入；保存后重启应用即可生效。"
-          onSaved={onCdpConfigSaved}
         />
 
         <div className="mt-4 text-[11px] text-stone-500">
@@ -833,7 +827,7 @@ export function BrowserPanel({
       <div className="relative min-h-0 flex-1 bg-white">
         {/* Keep the welcome panel mounted so any dialogs launched from it are not
             immediately unmounted by the BrowserView modal-hide guard. */}
-        {showBrowserWelcome && <BrowserWelcomePanel onCdpConfigSaved={() => undefined} />}
+        {showBrowserWelcome && <BrowserWelcomePanel />}
         {isHiddenByModalDialog && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
             <div className="max-w-xs text-center">

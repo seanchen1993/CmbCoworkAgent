@@ -60,7 +60,6 @@ import {
   readPluginManifest
 } from "./plugins/manifest"
 import type { BrowserCdpConfig } from "../shared/browser-types"
-import { DEFAULT_BROWSER_CDP_PORT } from "../shared/browser-types"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
@@ -2297,23 +2296,8 @@ const BROWSER_CDP_CONFIG_FILE = join(OPENWORK_DIR, "browser-cdp-config.json")
 function defaultBrowserCdpConfig(): BrowserCdpConfig {
   return {
     enabled: false,
-    profileImportEnabled: false,
-    port: DEFAULT_BROWSER_CDP_PORT
+    profileImportEnabled: false
   }
-}
-
-function parseBrowserCdpConfigPort(value: unknown): number | null {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) return null
-  if (value < 1 || value > 65_535) return null
-  return value
-}
-
-function assertBrowserCdpConfigPort(value: number): number {
-  const port = parseBrowserCdpConfigPort(value)
-  if (port === null) {
-    throw new Error("CDP 端口必须是 1 到 65535 之间的整数")
-  }
-  return port
 }
 
 function parseBrowserCdpConfigRecord(parsed: Record<string, unknown>): BrowserCdpConfig {
@@ -2323,8 +2307,7 @@ function parseBrowserCdpConfigRecord(parsed: Record<string, unknown>): BrowserCd
     profileImportEnabled:
       typeof parsed.profileImportEnabled === "boolean"
         ? parsed.profileImportEnabled
-        : defaults.profileImportEnabled,
-    port: parseBrowserCdpConfigPort(parsed.port) ?? defaults.port
+        : defaults.profileImportEnabled
   }
 }
 
@@ -2359,8 +2342,7 @@ export function saveBrowserCdpConfig(updates: Partial<BrowserCdpConfig>): Browse
     profileImportEnabled:
       typeof updates.profileImportEnabled === "boolean"
         ? updates.profileImportEnabled
-        : current.profileImportEnabled,
-    port: updates.port === undefined ? current.port : assertBrowserCdpConfigPort(updates.port)
+        : current.profileImportEnabled
   }
   writeFileSync(BROWSER_CDP_CONFIG_FILE, JSON.stringify(next, null, 2))
   return next
@@ -2376,8 +2358,7 @@ export async function saveBrowserCdpConfigAsync(
     profileImportEnabled:
       typeof updates.profileImportEnabled === "boolean"
         ? updates.profileImportEnabled
-        : current.profileImportEnabled,
-    port: updates.port === undefined ? current.port : assertBrowserCdpConfigPort(updates.port)
+        : current.profileImportEnabled
   }
   await writeFile(BROWSER_CDP_CONFIG_FILE, JSON.stringify(next, null, 2))
   return next

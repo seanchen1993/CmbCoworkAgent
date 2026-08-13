@@ -212,12 +212,6 @@ export function registerBrowserHandlers(
       if (updates && typeof updates.profileImportEnabled === "boolean") {
         sanitized.profileImportEnabled = updates.profileImportEnabled
       }
-      if (updates && updates.port !== undefined) {
-        if (typeof updates.port !== "number" || !Number.isSafeInteger(updates.port)) {
-          throw new Error("CDP 端口必须是 1 到 65535 之间的整数")
-        }
-        sanitized.port = updates.port
-      }
       const saved = await saveBrowserCdpConfigAsync(sanitized)
       const { invalidateCapabilities } = await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
       if (invalidateCapabilities) {

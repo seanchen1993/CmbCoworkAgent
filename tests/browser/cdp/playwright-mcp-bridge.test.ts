@@ -6,7 +6,6 @@ import type {
 } from "../../../src/main/mcp/capability-types"
 import {
   BROWSER_SESSION_ID,
-  DEFAULT_BROWSER_CDP_PORT,
   type BrowserState
 } from "../../../src/shared/browser-types"
 import { configureBrowserCdpEndpoint } from "../../../src/main/browser/cdp/browser-cdp"
@@ -85,7 +84,7 @@ describe("Playwright MCP in-app browser bridge", () => {
   beforeEach(() => {
     configureBrowserCdpEndpoint(
       { appendSwitch: vi.fn() },
-      { enabled: true, port: DEFAULT_BROWSER_CDP_PORT }
+      { enabled: true }
     )
   })
 

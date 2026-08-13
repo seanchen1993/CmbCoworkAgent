@@ -12,16 +12,11 @@ import {
 } from "@/components/ui/dialog"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
-import {
-  BUILTIN_BROWSER_LOG_PREFIX,
-  DEFAULT_BROWSER_CDP_PORT,
-  type BrowserCdpConfig
-} from "../../../../shared/browser-types"
+import { BUILTIN_BROWSER_LOG_PREFIX, type BrowserCdpConfig } from "../../../../shared/browser-types"
 
 interface BrowserCdpConfigCardProps {
   className?: string
   description?: string
-  onSaved?: (config: BrowserCdpConfig) => void
   title?: string
 }
 
@@ -31,27 +26,12 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function parseBrowserCdpPortInput(value: string): number {
-  const normalized = value.trim()
-  if (!/^\d+$/.test(normalized)) {
-    throw new Error("CDP 端口必须是 1 到 65535 之间的整数")
-  }
-
-  const port = Number(normalized)
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("CDP 端口必须是 1 到 65535 之间的整数")
-  }
-  return port
-}
-
 export function BrowserCdpConfigCard({
   className,
   description = "在这里手动开启内置浏览器",
-  onSaved,
   title = "控制配置"
 }: BrowserCdpConfigCardProps): React.JSX.Element {
   const [cdpConfig, setCdpConfig] = useState<BrowserCdpConfig | null>(null)
-  const [cdpPortInput, setCdpPortInput] = useState(String(DEFAULT_BROWSER_CDP_PORT))
   const [isSavingCdpConfig, setIsSavingCdpConfig] = useState(false)
   const [restartDialogOpen, setRestartDialogOpen] = useState(false)
   const [isRestartingApp, setIsRestartingApp] = useState(false)
@@ -64,7 +44,6 @@ export function BrowserCdpConfigCard({
       .then((nextConfig) => {
         if (cancelled) return
         setCdpConfig(nextConfig)
-        setCdpPortInput(String(nextConfig.port))
       })
       .catch((error) => {
         console.error(
@@ -73,11 +52,9 @@ export function BrowserCdpConfigCard({
         if (cancelled) return
         const fallbackConfig: BrowserCdpConfig = {
           enabled: true,
-          profileImportEnabled: false,
-          port: DEFAULT_BROWSER_CDP_PORT
+          profileImportEnabled: false
         }
         setCdpConfig(fallbackConfig)
-        setCdpPortInput(String(fallbackConfig.port))
         toast.error("读取浏览器 配置失败，已回退默认值")
       })
 
@@ -99,25 +76,13 @@ export function BrowserCdpConfigCard({
   const handleSaveCdpConfig = useCallback(async () => {
     if (!cdpConfig) return
 
-    let port: number
-    try {
-      port = parseBrowserCdpPortInput(cdpPortInput)
-    } catch (error) {
-      const message = formatError(error)
-      toast.error(message)
-      return
-    }
-
     setIsSavingCdpConfig(true)
     try {
       const saved = await window.api.browser.saveCdpConfig({
         enabled: cdpConfig.enabled,
-        profileImportEnabled: cdpConfig.profileImportEnabled,
-        port
+        profileImportEnabled: cdpConfig.profileImportEnabled
       })
       setCdpConfig(saved)
-      setCdpPortInput(String(saved.port))
-      onSaved?.(saved)
       setIsRestartingApp(false)
       setRestartDialogOpen(true)
     } catch (error) {
@@ -128,7 +93,7 @@ export function BrowserCdpConfigCard({
     } finally {
       setIsSavingCdpConfig(false)
     }
-  }, [cdpConfig, cdpPortInput, onSaved])
+  }, [cdpConfig])
 
   const handleRestartDialogOpenChange = useCallback(
     (open: boolean) => {
@@ -197,30 +162,6 @@ export function BrowserCdpConfigCard({
               onCheckedChange={handleProfileImportEnabledChange}
             />
           </div>
-
-          {/*暂不支持用户配置*/}
-          {/*<div className="space-y-2">*/}
-          {/*  <div className="flex items-center justify-between gap-3">*/}
-          {/*    <label className="text-xs font-medium text-stone-800"> 端口</label>*/}
-          {/*    <span className="text-[11px] text-stone-500">默认 {DEFAULT_BROWSER_CDP_PORT}</span>*/}
-          {/*  </div>*/}
-          {/*  <Input*/}
-          {/*    value={cdpPortInput}*/}
-          {/*    inputMode="numeric"*/}
-          {/*    placeholder={String(DEFAULT_BROWSER_CDP_PORT)}*/}
-          {/*    disabled={!cdpConfig || isSavingCdpConfig}*/}
-          {/*    onChange={(event) => handleCdpPortChange(event.target.value)}*/}
-          {/*  />*/}
-          {/*  {cdpPortError ? (*/}
-          {/*    <p className="text-[11px] text-rose-600">{cdpPortError}</p>*/}
-          {/*  ) : (*/}
-          {/*    <p className="text-[11px] text-stone-500">*/}
-          {/*      {cdpConfig?.enabled*/}
-          {/*        ? `保存后将监听 http://127.0.0.1:${cdpPortInput.trim() || DEFAULT_BROWSER_CDP_PORT}`*/}
-          {/*        : "关闭后，Playwright MCP 将不再自动接管内置浏览器。"}*/}
-          {/*    </p>*/}
-          {/*  )}*/}
-          {/*</div>*/}
 
           <div className="flex items-center justify-between gap-3" ref={saveButtonRef}>
             <p className="text-[11px] leading-4 text-stone-500">保存后需重启应用生效。</p>
