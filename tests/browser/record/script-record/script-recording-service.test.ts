@@ -3,28 +3,28 @@ import type { WebFrameMain } from "electron"
 import type { BrowserLocatorMetadata } from "../../../../src/shared/browser-types"
 import { buildPlaywrightLocator } from "../../../../src/main/browser/record/common/playwright-codegen/projectLocatorAdapter"
 import {
-  buildPlaywrightManualRecorderInjectionScript,
-  inspectPlaywrightManualRecorderMessage,
-  PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX,
-  PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY,
-  PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER,
-  PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG,
-  PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID
-} from "../../../../src/main/browser/record/manual-record/manual-recorder-playwright-adapter"
+  buildPlaywrightScriptRecorderInjectionScript,
+  inspectPlaywrightScriptRecorderMessage,
+  PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX,
+  PLAYWRIGHT_SCRIPT_RECORDER_FRAME_CHANNEL_KEY,
+  PLAYWRIGHT_SCRIPT_RECORDER_FRAME_SELECTOR_HELPER,
+  PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG,
+  PLAYWRIGHT_SCRIPT_RECORDER_ISOLATED_WORLD_ID
+} from "../../../../src/main/browser/record/script-record/script-recorder-playwright-adapter"
 import {
-  getManualRecording,
-  installManualRecorder,
-  markNextManualNavigationExplicit,
-  installManualRecorderForSubtree,
-  pauseManualRecording,
-  recordManualNavigation,
-  recordManualRecorderConsoleMessage,
-  resetManualRecordingForTests,
-  resumeManualRecording,
-  startManualRecording,
-  stopManualRecording,
-  updateManualRecordingDraft
-} from "../../../../src/main/browser/record/manual-record/manual-recording-service"
+  getScriptRecording,
+  installScriptRecorder,
+  markNextScriptNavigationExplicit,
+  installScriptRecorderForSubtree,
+  pauseScriptRecording,
+  recordScriptNavigation,
+  recordScriptRecorderConsoleMessage,
+  resetScriptRecordingForTests,
+  resumeScriptRecording,
+  startScriptRecording,
+  stopScriptRecording,
+  updateScriptRecordingDraft
+} from "../../../../src/main/browser/record/script-record/script-recording-service"
 
 function createFrame(input: {
   executeJavaScript?: (code: string) => Promise<unknown>
@@ -45,8 +45,7 @@ function createFrame(input: {
 }): WebFrameMain {
   const frame = {
     detached: input.detached ?? false,
-    executeJavaScript:
-      input.executeJavaScript ?? (async () => true),
+    executeJavaScript: input.executeJavaScript ?? (async () => true),
     executeJavaScriptInIsolatedWorld: input.executeJavaScriptInIsolatedWorld,
     frameToken: input.frameToken ?? input.url,
     frames: input.frames ?? [],
@@ -63,7 +62,7 @@ function createFrame(input: {
   return frame
 }
 
-type LegacyRecorderPayload = {
+type ScriptRecorderPayload = {
   type: "click" | "fill" | "select" | "press" | "fileUpload"
   locator?: BrowserLocatorMetadata
   locatorCandidates?: BrowserLocatorMetadata[]
@@ -104,7 +103,7 @@ function buildTestLocatorPayload(
   }
 }
 
-function emitRecorderMessage(frame: WebFrameMain, payload: LegacyRecorderPayload): void {
+function emitRecorderMessage(frame: WebFrameMain, payload: ScriptRecorderPayload): void {
   const locator = buildTestLocatorPayload(frame, payload.locator)
   const selector = typeof locator?.selector === "string" ? locator.selector : undefined
 
@@ -139,9 +138,9 @@ function emitRecorderMessage(frame: WebFrameMain, payload: LegacyRecorderPayload
                 files: payload.paths ?? []
               }
 
-  recordManualRecorderConsoleMessage(
+  recordScriptRecorderConsoleMessage(
     frame,
-    `${PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX}${JSON.stringify({
+    `${PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX}${JSON.stringify({
       type: "action",
       action,
       locator
@@ -149,14 +148,14 @@ function emitRecorderMessage(frame: WebFrameMain, payload: LegacyRecorderPayload
   )
 }
 
-describe("manual recording service", () => {
+describe("script recording service", () => {
   beforeEach(() => {
-    resetManualRecordingForTests()
+    resetScriptRecordingForTests()
   })
 
   it("reports frame diagnostics without exposing recorded fill values", () => {
-    const diagnostic = inspectPlaywrightManualRecorderMessage(
-      `${PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX}${JSON.stringify({
+    const diagnostic = inspectPlaywrightScriptRecorderMessage(
+      `${PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX}${JSON.stringify({
         type: "action",
         action: {
           name: "fill",
@@ -192,29 +191,29 @@ describe("manual recording service", () => {
     expect(JSON.stringify(diagnostic)).not.toContain("do-not-log-this-value")
   })
 
-  it("starts with the current page and generates a manual recording draft", () => {
-    const session = startManualRecording({
+  it("starts with the current page and generates a script recording draft", () => {
+    const session = startScriptRecording({
       currentUrl: "https://example.com/dashboard",
       threadId: "thread-1"
     })
 
-    expect(session.source).toBe("manual")
+    expect(session.source).toBe("script")
     expect(session.status).toBe("recording")
     expect(session.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
-        source: "manual",
+        source: "script",
         url: "https://example.com/dashboard"
       })
     ])
 
-    const stopped = stopManualRecording()
-    expect(stopped.script).toContain('test("manual recorded flow", async ({ page }) => {')
+    const stopped = stopScriptRecording()
+    expect(stopped.script).toContain('test("recorded script flow", async ({ page }) => {')
     expect(stopped.script).toContain("await page.goto('https://example.com/dashboard');")
   })
 
-  it("records manual fill and click actions and dedupes repeated fills", () => {
-    startManualRecording({ threadId: "thread-1" })
+  it("records script fill and click actions and dedupes repeated fills", () => {
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/login" })
 
     emitRecorderMessage(frame, {
@@ -246,27 +245,25 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(2)
     expect(session.actions[0]).toMatchObject({
       kind: "fill",
-      source: "manual",
+      source: "script",
       value: "final@example.com"
     })
     expect(session.actions[1]).toMatchObject({
       kind: "click",
-      source: "manual"
+      source: "script"
     })
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: '邮箱', exact: true }).fill('final@example.com');"
     )
-    expect(session.script).toContain(
-      "await page.getByRole('button', { name: '登录' }).click();"
-    )
+    expect(session.script).toContain("await page.getByRole('button', { name: '登录' }).click();")
   })
 
   it("uses the recorded href selector with its embedded codegen nth", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://github.com/seanchen1993/CmbCoworkAgent/actions" })
 
     emitRecorderMessage(frame, {
@@ -281,7 +278,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       `await page.locator('a[href="/seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml"]').nth(1).click();`
     )
@@ -289,7 +286,7 @@ describe("manual recording service", () => {
   })
 
   it("uses the codegen label-text selector to click hidden radio cards", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -305,7 +302,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByText('🎨 设计师 做设计的人', { exact: true }).click();"
     )
@@ -314,7 +311,7 @@ describe("manual recording service", () => {
   })
 
   it("falls back to the visible label text when a hidden radio has no codegen selector", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -329,7 +326,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByText('🎨 设计师 做设计的人', { exact: true }).click();"
     )
@@ -338,7 +335,7 @@ describe("manual recording service", () => {
   })
 
   it("keeps the codegen radio role selector for visible radio inputs", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -353,14 +350,14 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('radio', { name: '🎨 设计师 做设计的人', exact: true }).click();"
     )
   })
 
   it("keeps check semantics when the recorder targets a checkbox directly", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -376,7 +373,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions[0]).toMatchObject({
       kind: "click",
       toggle: "check"
@@ -388,7 +385,7 @@ describe("manual recording service", () => {
   })
 
   it("keeps uncheck semantics when unchecking a checkbox", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -404,7 +401,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions[0]).toMatchObject({
       kind: "click",
       toggle: "uncheck"
@@ -415,7 +412,7 @@ describe("manual recording service", () => {
   })
 
   it("clicks switch-style checkboxes through their label wrapper", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -429,7 +426,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('checkbox', { name: 'emailNotif', exact: true }).click();"
     )
@@ -437,7 +434,7 @@ describe("manual recording service", () => {
   })
 
   it("clicks menuitem radio options through their semantic role", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -451,7 +448,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('menuitemradio', { name: 'fix/bug-doc-qyang', exact: true }).click();"
     )
@@ -459,7 +456,7 @@ describe("manual recording service", () => {
   })
 
   it("keeps the committed branch filter fill before selecting a menuitem radio option", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/branches" })
 
     emitRecorderMessage(frame, {
@@ -498,7 +495,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'Select branch', exact: true }).click();"
     )
@@ -509,12 +506,14 @@ describe("manual recording service", () => {
       "await page.getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click();"
     )
     expect(session.script.indexOf('.fill("qyang")')).toBeLessThan(
-      session.script.indexOf("getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click()")
+      session.script.indexOf(
+        "getByRole('menuitemradio', { name: 'UAT_qyang2', exact: true }).click()"
+      )
     )
   })
 
-  it("keeps literal values for sensitive manual fills", () => {
-    startManualRecording({ threadId: "thread-1" })
+  it("keeps literal values for sensitive script fills", () => {
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -527,11 +526,11 @@ describe("manual recording service", () => {
       value: "12345678"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toEqual([
       expect.objectContaining({
         kind: "fill",
-        source: "manual",
+        source: "script",
         target: "密码",
         value: "12345678",
         sensitive: true
@@ -543,7 +542,7 @@ describe("manual recording service", () => {
   })
 
   it("renders combobox fills for datalist-backed inputs", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -556,14 +555,14 @@ describe("manual recording service", () => {
       value: "你好"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('combobox', { name: '用户名 (支持自动补全)' }).fill('你好');"
     )
   })
 
   it("renders spinbutton fills for numeric inputs", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -577,14 +576,14 @@ describe("manual recording service", () => {
       value: "11"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('spinbutton', { name: '年龄' }).fill('11');"
     )
   })
 
   it("renders slider fills for range inputs", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/register" })
 
     emitRecorderMessage(frame, {
@@ -598,14 +597,14 @@ describe("manual recording service", () => {
       value: "6"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('slider', { name: '编程经验（年）' }).fill('6');"
     )
   })
 
   it("keeps alternating fill and enter actions in the generated script", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/search" })
 
     emitRecorderMessage(frame, {
@@ -645,7 +644,7 @@ describe("manual recording service", () => {
       key: "Enter"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'Search' }).fill('你好');"
     )
@@ -664,7 +663,7 @@ describe("manual recording service", () => {
   })
 
   it("supersedes a fill replayed with the same value after Enter", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/branches" })
     const branchFilter = {
       role: "textbox" as const,
@@ -702,7 +701,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions.map((action) => action.kind)).toEqual(["press", "fill", "click"])
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'Select branch', exact: true }).press('Enter');"
@@ -719,7 +718,7 @@ describe("manual recording service", () => {
   })
 
   it("keeps duplicate role targets distinct by recording their occurrence index", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/search" })
 
     emitRecorderMessage(frame, {
@@ -747,7 +746,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(2)
     expect(session.actions[0]).toMatchObject({
       kind: "click",
@@ -772,7 +771,7 @@ describe("manual recording service", () => {
   })
 
   it("records typed text between focusing a textbox and pressing Enter", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://demo.playwright.dev/todomvc/#/" })
 
     emitRecorderMessage(frame, {
@@ -802,7 +801,7 @@ describe("manual recording service", () => {
       key: "Enter"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'What needs to be done?' }).click();"
     )
@@ -815,7 +814,7 @@ describe("manual recording service", () => {
   })
 
   it("prefers the nearest meaningful ancestor when clicking inside decorative icons", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/detail" })
 
     emitRecorderMessage(frame, {
@@ -829,7 +828,7 @@ describe("manual recording service", () => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "click",
@@ -845,7 +844,7 @@ describe("manual recording service", () => {
   })
 
   it("keeps svg targets when ancestor text is volatile", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/detail" })
 
     emitRecorderMessage(frame, {
@@ -875,7 +874,7 @@ describe("manual recording service", () => {
       ]
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "click",
@@ -890,24 +889,24 @@ describe("manual recording service", () => {
   })
 
   it("persists paused draft edits before continuing recording", () => {
-    startManualRecording({ threadId: "thread-1" })
-    pauseManualRecording()
+    startScriptRecording({ threadId: "thread-1" })
+    pauseScriptRecording()
 
     const editedScript = `import { test } from "@playwright/test";
 
-test("manual recorded flow", async ({ page }) => {
+test("recorded script flow", async ({ page }) => {
   // Review generated locators before committing this test.
   await page.goto('https://demo.playwright.dev/todomvc/#/');
   await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('保存后的内容');
 });
 `
 
-    const pausedSession = updateManualRecordingDraft({
+    const pausedSession = updateScriptRecordingDraft({
       script: editedScript
     })
     expect(pausedSession.script).toBe(editedScript)
 
-    resumeManualRecording()
+    resumeScriptRecording()
     const frame = createFrame({ url: "https://demo.playwright.dev/todomvc/#/" })
     emitRecorderMessage(frame, {
       type: "press",
@@ -919,7 +918,7 @@ test("manual recorded flow", async ({ page }) => {
       key: "Enter"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.getByRole('textbox', { name: 'What needs to be done?' }).fill('保存后的内容');"
     )
@@ -932,7 +931,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("does not record implicit navigation after link clicks", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/list" })
 
     emitRecorderMessage(frame, {
@@ -948,7 +947,7 @@ test("manual recorded flow", async ({ page }) => {
       url: "https://example.com/detail"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.script).toContain(
       "await page.getByRole('link', { name: 'Open detail' }).click();"
@@ -957,7 +956,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("does not record implicit navigation after tab clicks", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://todomvc.com/" })
 
     emitRecorderMessage(frame, {
@@ -973,16 +972,14 @@ test("manual recorded flow", async ({ page }) => {
       url: "https://medium.com/@tastejs/reposts"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(1)
-    expect(session.script).toContain(
-      "await page.getByRole('tab', { name: 'Reposts' }).click();"
-    )
+    expect(session.script).toContain("await page.getByRole('tab', { name: 'Reposts' }).click();")
     expect(session.script).not.toContain("await page.goto('https://medium.com/@tastejs/reposts');")
   })
 
-  it("builds frame locators for manually recorded iframe actions", () => {
-    startManualRecording({ threadId: "thread-1" })
+  it("builds frame locators for script-recorded iframe actions", () => {
+    startScriptRecording({ threadId: "thread-1" })
     const topFrame = createFrame({ url: "https://example.com/checkout" })
     const childFrame = createFrame({
       parent: topFrame,
@@ -1001,14 +998,14 @@ test("manual recorded flow", async ({ page }) => {
       value: "4242424242424242"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "page.locator('iframe').contentFrame().getByRole('textbox', { name: 'Card number' }).fill('4242424242424242');"
     )
   })
 
   it("uses the parent frame selector helper when available", async () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
     const topFrame = createFrame({ url: "https://example.com/checkout" })
     const childFrame = createFrame({
@@ -1020,14 +1017,14 @@ test("manual recorded flow", async ({ page }) => {
     childFrame.framesInSubtree = [childFrame]
 
     topFrame.executeJavaScript = async (code: string) => {
-      if (code.includes(PLAYWRIGHT_MANUAL_RECORDER_FRAME_SELECTOR_HELPER)) {
+      if (code.includes(PLAYWRIGHT_SCRIPT_RECORDER_FRAME_SELECTOR_HELPER)) {
         return 'iframe[name="payment"]'
       }
       return undefined
     }
     childFrame.executeJavaScript = async () => undefined
 
-    await installManualRecorderForSubtree(topFrame)
+    await installScriptRecorderForSubtree(topFrame)
 
     emitRecorderMessage(childFrame, {
       type: "fill",
@@ -1039,14 +1036,14 @@ test("manual recorded flow", async ({ page }) => {
       value: "4242"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "page.locator('iframe[name=\"payment\"]').contentFrame().getByRole('textbox', { name: 'Card number' }).fill('4242');"
     )
   })
 
   it("prefers isolated-world injection before page-world execution", async () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
     const pageExecutions: string[] = []
     const isolatedExecutions: Array<{ worldId: number; code: string }> = []
@@ -1065,16 +1062,16 @@ test("manual recorded flow", async ({ page }) => {
       }
     })
 
-    await installManualRecorderForSubtree(frame)
+    await installScriptRecorderForSubtree(frame)
 
     expect(pageExecutions).toHaveLength(0)
     expect(isolatedExecutions).toHaveLength(1)
-    expect(isolatedExecutions[0]?.worldId).toBe(PLAYWRIGHT_MANUAL_RECORDER_ISOLATED_WORLD_ID)
-    expect(isolatedExecutions[0]?.code).toContain("__cmbPlaywrightManualRecorderInstalled")
+    expect(isolatedExecutions[0]?.worldId).toBe(PLAYWRIGHT_SCRIPT_RECORDER_ISOLATED_WORLD_ID)
+    expect(isolatedExecutions[0]?.code).toContain("__cmbPlaywrightScriptRecorderInstalled")
   })
 
   it("falls back to page-world injection when isolated-world execution fails", async () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
     let pageExecutions = 0
     let isolatedExecutions = 0
@@ -1090,14 +1087,14 @@ test("manual recorded flow", async ({ page }) => {
       }
     })
 
-    await installManualRecorderForSubtree(frame)
+    await installScriptRecorderForSubtree(frame)
 
     expect(isolatedExecutions).toBe(1)
     expect(pageExecutions).toBe(1)
   })
 
   it("falls back to page-world injection when isolated-world execution returns undefined", async () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
     let pageExecutions = 0
     let isolatedExecutions = 0
@@ -1113,14 +1110,14 @@ test("manual recorded flow", async ({ page }) => {
       }
     })
 
-    await installManualRecorderForSubtree(frame)
+    await installScriptRecorderForSubtree(frame)
 
     expect(isolatedExecutions).toBe(1)
     expect(pageExecutions).toBe(1)
   })
 
   it("serializes concurrent injections for the same frame", async () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
     let isolatedExecutions = 0
     let releaseExecution: (() => void) | undefined
@@ -1135,7 +1132,10 @@ test("manual recorded flow", async ({ page }) => {
       }
     })
 
-    const pendingInjection = Promise.all([installManualRecorder(frame), installManualRecorder(frame)])
+    const pendingInjection = Promise.all([
+      installScriptRecorder(frame),
+      installScriptRecorder(frame)
+    ])
     await Promise.resolve()
     expect(isolatedExecutions).toBe(1)
     releaseExecution?.()
@@ -1143,16 +1143,14 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("marks the frame only after the recorder is initialized", () => {
-    const script = buildPlaywrightManualRecorderInjectionScript("frame-channel-1")
+    const script = buildPlaywrightScriptRecorderInjectionScript("frame-channel-1")
     const recorderInitialization = script.indexOf("const recorder = new PollingRecorder")
     const installedMarker = script.lastIndexOf(
-      `window.${PLAYWRIGHT_MANUAL_RECORDER_INJECTION_FLAG} = true`
+      `window.${PLAYWRIGHT_SCRIPT_RECORDER_INJECTION_FLAG} = true`
     )
 
     expect(script).toContain(
-      `const FRAME_CHANNEL_KEY = ${JSON.stringify(
-        PLAYWRIGHT_MANUAL_RECORDER_FRAME_CHANNEL_KEY
-      )}`
+      `const FRAME_CHANNEL_KEY = ${JSON.stringify(PLAYWRIGHT_SCRIPT_RECORDER_FRAME_CHANNEL_KEY)}`
     )
     expect(script).toContain('const RECORDER_FRAME_CHANNEL_ID = "frame-channel-1"')
     expect(script).toContain("channelId: RECORDER_FRAME_CHANNEL_ID")
@@ -1161,7 +1159,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("uses the injected frame channel when Electron reports a same-process iframe as root", async () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
     const rootFrame = createFrame({ url: "http://localhost:8000/register.html" })
     let childInjectionScript = ""
@@ -1176,7 +1174,7 @@ test("manual recorded flow", async ({ page }) => {
     rootFrame.frames = [childFrame]
     rootFrame.framesInSubtree = [rootFrame, childFrame]
 
-    await installManualRecorderForSubtree(rootFrame)
+    await installScriptRecorderForSubtree(rootFrame)
 
     const channelMatch = /const RECORDER_FRAME_CHANNEL_ID = ("(?:\\.|[^"])*");/u.exec(
       childInjectionScript
@@ -1184,9 +1182,9 @@ test("manual recorded flow", async ({ page }) => {
     expect(channelMatch?.[1]).toBeTruthy()
     const channelId = JSON.parse(channelMatch![1]!)
 
-    recordManualRecorderConsoleMessage(
+    recordScriptRecorderConsoleMessage(
       rootFrame,
-      `${PLAYWRIGHT_MANUAL_RECORDER_EVENT_PREFIX}${JSON.stringify({
+      `${PLAYWRIGHT_SCRIPT_RECORDER_EVENT_PREFIX}${JSON.stringify({
         type: "action",
         action: {
           name: "click",
@@ -1203,16 +1201,18 @@ test("manual recorded flow", async ({ page }) => {
       })}`
     )
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "await page.locator('iframe').contentFrame().getByRole('tab', { name: '个人资料', exact: true }).click();"
     )
   })
 
   it("keeps nested iframe paths aligned with Playwright codegen order", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
-    const topFrame = createFrame({ url: "file:///Users/qiyang/Downloads/qyang-openwork/test/register.html" })
+    const topFrame = createFrame({
+      url: "file:///Users/qiyang/Downloads/qyang-openwork/test/register.html"
+    })
     const topRegisterFrame = createFrame({
       parent: topFrame,
       url: "file:///Users/qiyang/Downloads/qyang-openwork/test/register.html"
@@ -1291,7 +1291,7 @@ test("manual recorded flow", async ({ page }) => {
       }
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.script).toContain(
       "page.locator('iframe').first().contentFrame().getByRole('tab', { name: '个人资料', exact: true }).click();"
     )
@@ -1304,7 +1304,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("records file uploads as direct setInputFiles calls", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/upload" })
 
     emitRecorderMessage(frame, {
@@ -1325,12 +1325,12 @@ test("manual recorded flow", async ({ page }) => {
       paths: ["/tmp/fixtures/contract.pdf"]
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
 
     expect(session.actions).toHaveLength(2)
     expect(session.actions[1]).toMatchObject({
       kind: "fileUpload",
-      source: "manual",
+      source: "script",
       paths: ["/tmp/fixtures/contract.pdf"]
     })
     expect(session.script).not.toContain("Upload document")
@@ -1341,7 +1341,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("normalizes Playwright fakepath fills on file inputs into setInputFiles", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/profile" })
     const locator: BrowserLocatorMetadata = {
       target: "avatar",
@@ -1360,12 +1360,12 @@ test("manual recorded flow", async ({ page }) => {
       value: "C:\\fakepath\\think.webp"
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
 
     expect(session.actions).toHaveLength(2)
     expect(session.actions[1]).toMatchObject({
       kind: "fileUpload",
-      source: "manual",
+      source: "script",
       paths: ["think.webp"],
       locator: expect.objectContaining({
         selector: 'internal:role=button[name="Choose File"i]',
@@ -1380,7 +1380,7 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("replays direct file-input uploads without clicking a textbox locator first", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
     const frame = createFrame({ url: "https://example.com/profile" })
 
     emitRecorderMessage(frame, {
@@ -1405,29 +1405,25 @@ test("manual recorded flow", async ({ page }) => {
       paths: ["think.webp"]
     })
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
 
     expect(session.script).not.toContain('page.waitForEvent("filechooser")')
-    expect(session.script).not.toContain(
-      "getByRole('textbox', { name: 'avatar' }).click()"
-    )
-    expect(session.script).not.toContain(
-      "await page.locator('input[name=\"avatar\"]').click();"
-    )
+    expect(session.script).not.toContain("getByRole('textbox', { name: 'avatar' }).click()")
+    expect(session.script).not.toContain("await page.locator('input[name=\"avatar\"]').click();")
     expect(session.script).toContain(
       "await page.locator('input[name=\"avatar\"]').setInputFiles('think.webp');"
     )
   })
 
-  it("records manual navigation updates only while recording", () => {
-    recordManualNavigation("https://should-not-record.test")
-    expect(getManualRecording().actions).toHaveLength(0)
+  it("records script navigation updates only while recording", () => {
+    recordScriptNavigation("https://should-not-record.test")
+    expect(getScriptRecording().actions).toHaveLength(0)
 
-    startManualRecording({ threadId: "thread-1" })
-    recordManualNavigation("https://example.com/first")
-    recordManualNavigation("https://example.com/second")
+    startScriptRecording({ threadId: "thread-1" })
+    recordScriptNavigation("https://example.com/first")
+    recordScriptNavigation("https://example.com/second")
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toEqual([
       expect.objectContaining({
         kind: "navigate",
@@ -1437,13 +1433,13 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("records implicit navigation only after an explicit navigation mark", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
-    recordManualNavigation("https://should-not-record.test", "implicit")
-    markNextManualNavigationExplicit("https://example.com/dashboard")
-    recordManualNavigation("https://example.com/dashboard", "implicit")
+    recordScriptNavigation("https://should-not-record.test", "implicit")
+    markNextScriptNavigationExplicit("https://example.com/dashboard")
+    recordScriptNavigation("https://example.com/dashboard", "implicit")
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "navigate",
@@ -1452,12 +1448,12 @@ test("manual recorded flow", async ({ page }) => {
   })
 
   it("records implicit navigation after an untargeted explicit navigation mark", () => {
-    startManualRecording({ threadId: "thread-1" })
+    startScriptRecording({ threadId: "thread-1" })
 
-    markNextManualNavigationExplicit()
-    recordManualNavigation("https://example.com/history-entry", "implicit")
+    markNextScriptNavigationExplicit()
+    recordScriptNavigation("https://example.com/history-entry", "implicit")
 
-    const session = stopManualRecording()
+    const session = stopScriptRecording()
     expect(session.actions).toHaveLength(1)
     expect(session.actions[0]).toMatchObject({
       kind: "navigate",

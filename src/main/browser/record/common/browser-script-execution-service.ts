@@ -3,9 +3,9 @@ import path from "node:path"
 import { getCurrentBrowserCdpPort } from "../../cdp/browser-cdp"
 import { getGlobalBrowserService } from "../../core/browser-service-registry"
 import {
-  applyAiRecordingVariableValues,
-  buildAiRecordingExecutableScript
-} from "../../../../shared/browser-ai-recording-script"
+  applyScriptRecordingVariableValues,
+  buildScriptExecutableScript
+} from "../../../../shared/browser-script-recording"
 import type {
   BrowserScriptExecutionInput,
   BrowserScriptExecutionState,
@@ -344,8 +344,8 @@ function buildExecutionScript(
   script: string,
   variableValues?: BrowserScriptExecutionInput["variableValues"]
 ): { source: string; totalSteps: number } {
-  const executableSource = buildAiRecordingExecutableScript(
-    applyAiRecordingVariableValues(script, variableValues)
+  const executableSource = buildScriptExecutableScript(
+    applyScriptRecordingVariableValues(script, variableValues)
   )
   const instrumented = buildInstrumentedExecutionScript(executableSource)
   return {

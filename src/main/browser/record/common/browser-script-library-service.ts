@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
-import { extractAiRecordingVariables } from "../../../../shared/browser-ai-recording-script"
+import { extractScriptRecordingVariables } from "../../../../shared/browser-script-recording"
 import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../shared/browser-types"
 import type {
+  BrowserRecordingSource,
   BrowserScriptLibraryDeleteInput,
   BrowserScriptLibraryEntry,
   BrowserScriptLibraryListOptions,
@@ -62,10 +63,7 @@ function normalizeEntry(value: unknown): BrowserScriptLibraryEntry | null {
   const displayName = normalizeText(typeof value.displayName === "string" ? value.displayName : "")
   const description = normalizeText(typeof value.description === "string" ? value.description : "")
   const createdAt = normalizeText(typeof value.createdAt === "string" ? value.createdAt : "")
-  const recordingSource =
-    value.recordingSource === "manual" || value.recordingSource === "ai"
-      ? value.recordingSource
-      : "ai"
+  const recordingSource: BrowserRecordingSource = "script"
 
   if (!fileName || !workspacePath || !displayName || !createdAt) return null
 
@@ -172,7 +170,7 @@ export async function saveBrowserScriptLibraryEntry(
   const workspacePath = ensureWorkspacePath(input.workspacePath)
   const displayName = normalizeText(input.displayName)
   const description = normalizeText(input.description)
-  const recordingSource = input.recordingSource === "manual" ? "manual" : "ai"
+  const recordingSource: BrowserRecordingSource = "script"
   const script = typeof input.script === "string" ? input.script : ""
   const threadId = normalizeText(input.threadId)
 
@@ -234,7 +232,7 @@ export async function listBrowserScriptLibraryEntries(
         const script = await readFile(getScriptPath(entry.fileName), "utf8")
         return {
           ...entry,
-          hasVariables: extractAiRecordingVariables(script).length > 0
+          hasVariables: extractScriptRecordingVariables(script).length > 0
         }
       } catch {
         return entry
@@ -294,9 +292,7 @@ export async function updateBrowserScriptLibraryEntry(
       throw new Error("读取脚本内容失败，请稍后重试")
     }
 
-    const shouldUpdateDisplayName = Boolean(
-      displayName && displayName !== currentEntry.displayName
-    )
+    const shouldUpdateDisplayName = Boolean(displayName && displayName !== currentEntry.displayName)
     const shouldMarkEdited = input.isEdited === true && currentEntry.isEdited !== true
     const nextEntry =
       shouldUpdateDisplayName || shouldMarkEdited

@@ -13,10 +13,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { MAX_BROWSER_SCRIPT_LIBRARY_ENTRIES } from "../../../../shared/browser-types"
-import type {
-  BrowserRecordingSource,
-  BrowserScriptLibraryEntry
-} from "../../../../shared/browser-types"
+import type { BrowserScriptLibraryEntry } from "../../../../shared/browser-types"
 import { BrowserScriptEditor } from "./BrowserScriptEditor"
 
 export interface BrowserRecordingListDialogProps {
@@ -43,10 +40,6 @@ export interface BrowserRecordingListDialogProps {
   onContinueRecording: (entry: BrowserScriptLibraryEntry, script: string) => Promise<void>
   onExecuteScript: (entry: BrowserScriptLibraryEntry, script: string) => Promise<void>
   onDelete: (entry: BrowserScriptLibraryEntry) => void
-}
-
-function formatRecordingSource(source: BrowserRecordingSource): string {
-  return source === "manual" ? "人工录制" : "AI录制"
 }
 
 function formatRecordingTime(createdAt: string): string {
@@ -347,12 +340,10 @@ export function BrowserRecordingListDialog({
                             <col className="w-[72px]" />
                             <col className="w-[72px]" />
                             <col className="w-[120px]" />
-                            <col className="w-[80px]" />
                           </colgroup>
                           <thead className="sticky top-0 z-10 bg-muted/95 text-[11px] font-medium text-muted-foreground backdrop-blur supports-[backdrop-filter]:bg-muted/85">
                             <tr>
                               <th className="border-b border-border/70 px-2 py-2.5">中文名称</th>
-                              <th className="border-b border-border/70 px-2 py-2.5">录制类型</th>
                               <th className="border-b border-border/70 px-2 py-2.5 text-center">
                                 存在变量
                               </th>
@@ -372,7 +363,8 @@ export function BrowserRecordingListDialog({
                                 isEntryLoading && loadingAction === "execution"
                               const isDeleteLoading = isEntryLoading && loadingAction === "delete"
                               const isSelected = selectedFileName === entry.fileName
-                              const isEdited = entry.isEdited === true || entry.hasVariables === true
+                              const isEdited =
+                                entry.isEdited === true || entry.hasVariables === true
 
                               return (
                                 <tr
@@ -388,12 +380,6 @@ export function BrowserRecordingListDialog({
                                     title={entry.displayName}
                                   >
                                     <span className="block truncate">{entry.displayName}</span>
-                                  </td>
-                                  <td
-                                    className="truncate px-2 py-3 align-middle text-[11px] text-foreground"
-                                    title={formatRecordingSource(entry.recordingSource)}
-                                  >
-                                    {formatRecordingSource(entry.recordingSource)}
                                   </td>
                                   <td
                                     className="px-2 py-3 text-center align-middle text-[11px]"

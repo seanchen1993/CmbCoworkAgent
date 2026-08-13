@@ -106,8 +106,7 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
 import type {
-  AiRecordingStartOptions,
-  AiRecordingSession,
+  BrowserRecordingSession,
   BrowserAttachOptions,
   BrowserBounds,
   BrowserCdpConfig,
@@ -120,7 +119,7 @@ import type {
   BrowserScriptExecutionState,
   BrowserRecordingDraftUpdateInput,
   BrowserScreenshotResult,
-  ManualRecordingStartOptions,
+  ScriptRecordingStartOptions,
   BrowserScriptLibraryEntry,
   BrowserScriptLibraryListOptions,
   BrowserScriptLibraryReadInput,
@@ -1701,20 +1700,16 @@ interface CustomAPI {
     stop: () => Promise<BrowserState>
     clearConsole: () => Promise<BrowserState>
     getState: () => Promise<BrowserState>
-    startAiRecording: (options?: AiRecordingStartOptions) => Promise<AiRecordingSession>
-    pauseAiRecording: () => Promise<AiRecordingSession>
-    updateAiRecordingDraft: (input: BrowserRecordingDraftUpdateInput) => Promise<AiRecordingSession>
-    resumeAiRecording: () => Promise<AiRecordingSession>
-    stopAiRecording: () => Promise<AiRecordingSession>
-    getAiRecording: () => Promise<AiRecordingSession>
-    startManualRecording: (options?: ManualRecordingStartOptions) => Promise<AiRecordingSession>
-    pauseManualRecording: () => Promise<AiRecordingSession>
-    updateManualRecordingDraft: (
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ) => Promise<BrowserRecordingSession>
+    pauseScriptRecording: () => Promise<BrowserRecordingSession>
+    updateScriptRecordingDraft: (
       input: BrowserRecordingDraftUpdateInput
-    ) => Promise<AiRecordingSession>
-    resumeManualRecording: () => Promise<AiRecordingSession>
-    stopManualRecording: () => Promise<AiRecordingSession>
-    getManualRecording: () => Promise<AiRecordingSession>
+    ) => Promise<BrowserRecordingSession>
+    resumeScriptRecording: () => Promise<BrowserRecordingSession>
+    stopScriptRecording: () => Promise<BrowserRecordingSession>
+    getScriptRecording: () => Promise<BrowserRecordingSession>
     saveScriptLibraryEntry: (
       input: BrowserScriptLibrarySaveInput
     ) => Promise<BrowserScriptLibraryEntry>

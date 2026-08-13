@@ -9,11 +9,11 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import type { AiRecordingScriptVariable } from "../../../../shared/browser-ai-recording-script"
+import type { ScriptRecordingVariable } from "../../../../shared/browser-script-recording"
 
 interface BrowserScriptVariableDialogProps {
   open: boolean
-  variables: AiRecordingScriptVariable[]
+  variables: ScriptRecordingVariable[]
   values: Record<string, string>
   isSubmitting: boolean
   onOpenChange: (open: boolean) => void

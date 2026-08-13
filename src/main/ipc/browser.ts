@@ -3,22 +3,14 @@ import { BrowserService } from "../browser/core/browser-service"
 import { syncPlaywrightMcpConnectorForBrowserCdpConfig } from "../browser/cdp/browser-playwright-mcp-connector"
 import { setGlobalBrowserService } from "../browser/core/browser-service-registry"
 import {
-  getAiRecording,
-  pauseAiRecording,
-  resumeAiRecording,
-  startAiRecording,
-  stopAiRecording,
-  updateAiRecordingDraft
-} from "../browser/record/ai-record/ai-recording-service"
-import {
-  getManualRecording,
-  installManualRecorderForSubtree,
-  pauseManualRecording,
-  resumeManualRecording,
-  startManualRecording,
-  stopManualRecording,
-  updateManualRecordingDraft
-} from "../browser/record/manual-record/manual-recording-service"
+  getScriptRecording,
+  installScriptRecorderForSubtree,
+  pauseScriptRecording,
+  resumeScriptRecording,
+  startScriptRecording,
+  stopScriptRecording,
+  updateScriptRecordingDraft
+} from "../browser/record/script-record/script-recording-service"
 import {
   deleteBrowserScriptLibraryEntry,
   listBrowserScriptLibraryEntries,
@@ -50,11 +42,10 @@ import {
 } from "../../shared/browser-types"
 import type {
   BrowserAttachOptions,
-  AiRecordingStartOptions,
-  AiRecordingSession,
+  BrowserRecordingSession,
   BrowserBounds,
   BrowserCdpConfig,
-  ManualRecordingStartOptions,
+  ScriptRecordingStartOptions,
   BrowserNavigateOptions
 } from "../../shared/browser-types"
 
@@ -120,56 +111,43 @@ export function registerBrowserHandlers(
 
   ipcMain.handle("browser:getCdpConfig", () => getBrowserCdpConfigAsync())
   ipcMain.handle(
-    "browser:startAiRecording",
-    (_event, options?: AiRecordingStartOptions): AiRecordingSession => startAiRecording(options)
-  )
-
-  ipcMain.handle("browser:pauseAiRecording", (): AiRecordingSession => pauseAiRecording())
-
-  ipcMain.handle(
-    "browser:updateAiRecordingDraft",
-    (_event, input: BrowserRecordingDraftUpdateInput): AiRecordingSession =>
-      updateAiRecordingDraft(input)
-  )
-
-  ipcMain.handle("browser:resumeAiRecording", (): AiRecordingSession => resumeAiRecording())
-
-  ipcMain.handle("browser:stopAiRecording", (): AiRecordingSession => stopAiRecording())
-
-  ipcMain.handle("browser:getAiRecording", (): AiRecordingSession => getAiRecording())
-
-  ipcMain.handle(
-    "browser:startManualRecording",
-    async (_event, options?: ManualRecordingStartOptions): Promise<AiRecordingSession> => {
-      const session = startManualRecording(options)
+    "browser:startScriptRecording",
+    async (_event, options?: ScriptRecordingStartOptions): Promise<BrowserRecordingSession> => {
+      const session = startScriptRecording(options)
       const webContents = browserService.getWebContents()
       if (webContents) {
-        await installManualRecorderForSubtree(webContents.mainFrame)
+        await installScriptRecorderForSubtree(webContents.mainFrame)
       }
       return session
     }
   )
 
-  ipcMain.handle("browser:pauseManualRecording", (): AiRecordingSession => pauseManualRecording())
-
   ipcMain.handle(
-    "browser:updateManualRecordingDraft",
-    (_event, input: BrowserRecordingDraftUpdateInput): AiRecordingSession =>
-      updateManualRecordingDraft(input)
+    "browser:pauseScriptRecording",
+    (): BrowserRecordingSession => pauseScriptRecording()
   )
 
-  ipcMain.handle("browser:resumeManualRecording", async (): Promise<AiRecordingSession> => {
-    const session = resumeManualRecording()
+  ipcMain.handle(
+    "browser:updateScriptRecordingDraft",
+    (_event, input: BrowserRecordingDraftUpdateInput): BrowserRecordingSession =>
+      updateScriptRecordingDraft(input)
+  )
+
+  ipcMain.handle("browser:resumeScriptRecording", async (): Promise<BrowserRecordingSession> => {
+    const session = resumeScriptRecording()
     const webContents = browserService.getWebContents()
     if (webContents) {
-      await installManualRecorderForSubtree(webContents.mainFrame)
+      await installScriptRecorderForSubtree(webContents.mainFrame)
     }
     return session
   })
 
-  ipcMain.handle("browser:stopManualRecording", (): AiRecordingSession => stopManualRecording())
+  ipcMain.handle(
+    "browser:stopScriptRecording",
+    (): BrowserRecordingSession => stopScriptRecording()
+  )
 
-  ipcMain.handle("browser:getManualRecording", (): AiRecordingSession => getManualRecording())
+  ipcMain.handle("browser:getScriptRecording", (): BrowserRecordingSession => getScriptRecording())
 
   ipcMain.handle(
     "browser:saveScriptLibraryEntry",

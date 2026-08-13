@@ -1,20 +1,24 @@
-import type { AiRecordingSession, BrowserRecordingSource } from "../../../../shared/browser-types"
+import type {
+  BrowserRecordingSession,
+  BrowserRecordingSource
+} from "../../../../shared/browser-types"
 
 export function getRecordingLabel(source: BrowserRecordingSource): string {
-  return source === "manual" ? "人工录制" : "AI录制"
+  void source
+  return "录制脚本"
 }
 
-export function isRecordingSessionActive(session: AiRecordingSession): boolean {
+export function isRecordingSessionActive(session: BrowserRecordingSession): boolean {
   return session.status === "recording" || session.status === "paused"
 }
 
-export function recordingSessionHasOutput(session: AiRecordingSession): boolean {
+export function recordingSessionHasOutput(session: BrowserRecordingSession): boolean {
   return session.status !== "idle" || session.actions.length > 0 || session.script.trim().length > 0
 }
 
 export function getRecordingStatusText(
   source: BrowserRecordingSource,
-  session: AiRecordingSession
+  session: BrowserRecordingSession
 ): string {
   const label = getRecordingLabel(source)
   if (session.status === "recording") {
@@ -28,7 +32,7 @@ export function getRecordingStatusText(
 
 export function getRecordingStatusDotClassName(
   browserCreated: boolean,
-  session: AiRecordingSession
+  session: BrowserRecordingSession
 ): string {
   if (session.status === "recording") {
     return "bg-status-info animate-tactical-pulse"

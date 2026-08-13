@@ -15,6 +15,11 @@ import {
   isGoalTerminatingControlCommandInput,
   resolveGoalRuntimeComposerState
 } from "../src/renderer/src/features/slash-commands/useSlashCommands.ts"
+import {
+  BUILTIN_BROWSER_COMMAND_ID,
+  formatBuiltinBrowserPrompt,
+  parseBuiltinBrowserPrompt
+} from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
@@ -51,6 +56,11 @@ function testRootSlashShowsGoalAboveSkills(): void {
   if (mode.kind !== "slash") return
 
   assertEqual(mode.commands[0]?.id, "goal", "goal should be the first general command")
+  assertEqual(
+    mode.commands[1]?.id,
+    BUILTIN_BROWSER_COMMAND_ID,
+    "built-in browser should be listed after goal"
+  )
   assertEqual(mode.skills.length, 2, "skills should still be shown")
 }
 
@@ -76,7 +86,12 @@ function testSkillNameFilteringStillWorks(): void {
   assertEqual(mode.kind, "slash", "skill filter should keep popover open")
   if (mode.kind !== "slash") return
 
-  assertEqual(mode.commands.length, 0, "skill-only filter should not show unrelated commands")
+  assertEqual(mode.commands.length, 1, "browser filter should match the built-in browser command")
+  assertEqual(
+    mode.commands[0]?.id,
+    BUILTIN_BROWSER_COMMAND_ID,
+    "browser filter should match the built-in browser command"
+  )
   assertArrayEqual(
     mode.skills.map((skill) => skill.name),
     ["Browser"],
@@ -130,6 +145,35 @@ function testUnknownSlashKeepsOpenWithNoMatches(): void {
 function testSelectedSkillKeepsPopoverClosed(): void {
   const mode = buildSlashPopoverMode({ input: "/", skills, skillSelected: true })
   assertEqual(mode.kind, "closed", "selected skill chip should keep popover closed")
+}
+
+function testSelectedBrowserKeepsPopoverClosed(): void {
+  const mode = buildSlashPopoverMode({
+    input: "/",
+    skills,
+    skillSelected: false,
+    browserSelected: true
+  })
+  assertEqual(mode.kind, "closed", "selected browser chip should keep popover closed")
+}
+
+function testBuiltinBrowserPromptFormatting(): void {
+  const formatted = formatBuiltinBrowserPrompt("打开百度并搜索 CMB")
+  assertEqual(
+    formatted,
+    "使用内置浏览器 browser_*工具：打开百度并搜索 CMB",
+    "built-in browser prompt should use the exact transport prefix"
+  )
+  assertEqual(
+    parseBuiltinBrowserPrompt(formatted).visibleText,
+    "打开百度并搜索 CMB",
+    "built-in browser prompt should restore the visible user text"
+  )
+  assertEqual(
+    parseBuiltinBrowserPrompt(formatted).browserSelected,
+    true,
+    "built-in browser prompt should expose the browser tag state"
+  )
 }
 
 function testGoalSlashInputDetectionForRuntimeControls(): void {
@@ -506,6 +550,8 @@ function main(): void {
     testWhitespaceClosesPopoverForCommandSubmission,
     testUnknownSlashKeepsOpenWithNoMatches,
     testSelectedSkillKeepsPopoverClosed,
+    testSelectedBrowserKeepsPopoverClosed,
+    testBuiltinBrowserPromptFormatting,
     testGoalSlashInputDetectionForRuntimeControls,
     testGoalSlashControlCommandDetectionForValidationBypass,
     testRuntimeComposerStateBlocksPlainTextWhileLoading,

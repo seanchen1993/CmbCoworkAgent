@@ -72,9 +72,9 @@ export interface BrowserLocatorMetadata {
 
 export type BrowserNavigationSource = "explicit" | "implicit"
 
-export type BrowserRecordingSource = "ai" | "manual"
+export type BrowserRecordingSource = "script"
 
-interface AiRecordedBrowserActionBase {
+interface BrowserRecordedActionBase {
   id: string
   timestamp: string
   source?: BrowserRecordingSource
@@ -101,54 +101,44 @@ export interface BrowserScreenshotResult {
   error?: string
 }
 
-export type AiRecordedBrowserAction =
-  | (AiRecordedBrowserActionBase & {
+export type BrowserRecordedAction =
+  | (BrowserRecordedActionBase & {
       kind: "navigate"
       url: string
       navigationSource?: BrowserNavigationSource
     })
-  | (AiRecordedBrowserActionBase & {
+  | (BrowserRecordedActionBase & {
       kind: "click"
       target?: string
       doubleClick: boolean
       /** 由 codegen recorder 记录的 check/uncheck 语义（点击 checkbox/radio 本体时产生）。 */
       toggle?: "check" | "uncheck"
     })
-  | (AiRecordedBrowserActionBase & {
+  | (BrowserRecordedActionBase & {
       kind: "fill"
       target?: string
       value: string
       sensitive: boolean
     })
-  | (AiRecordedBrowserActionBase & {
+  | (BrowserRecordedActionBase & {
       kind: "selectOption"
       target?: string
       values: string[]
     })
-  | (AiRecordedBrowserActionBase & {
+  | (BrowserRecordedActionBase & {
       kind: "fileUpload"
       paths: string[]
     })
-  | (AiRecordedBrowserActionBase & {
+  | (BrowserRecordedActionBase & {
       kind: "press"
       key: string
       target?: string
     })
 
-export type AiRecordingStatus = "idle" | "recording" | "paused" | "completed"
+export type BrowserRecordingStatus = "idle" | "recording" | "paused" | "completed"
 
-export interface AiRecordingStartOptions {
-  /** The task that started the global recording session. */
-  threadId?: string
-  /** Seed the recording from an existing Playwright script. */
-  seedScript?: string | null
-  /** Continue recording from an existing browser script file. */
-  libraryFileName?: string | null
-  libraryDisplayName?: string | null
-}
-
-export interface ManualRecordingStartOptions {
-  /** The task that started the manual recording session. */
+export interface ScriptRecordingStartOptions {
+  /** The task that started the script recording session. */
   threadId?: string
   /** Seed the generated script with the current page when available. */
   currentUrl?: string | null
@@ -159,10 +149,10 @@ export interface ManualRecordingStartOptions {
   libraryDisplayName?: string | null
 }
 
-export interface AiRecordingSession {
+export interface BrowserRecordingSession {
   id?: string
   source: BrowserRecordingSource
-  status: AiRecordingStatus
+  status: BrowserRecordingStatus
   threadId?: string
   startedAt?: string
   stoppedAt?: string
@@ -172,13 +162,9 @@ export interface AiRecordingSession {
   libraryDisplayName?: string
   variableActionIds?: string[]
   variableActionNames?: Record<string, string>
-  actions: AiRecordedBrowserAction[]
+  actions: BrowserRecordedAction[]
   script: string
 }
-
-export type BrowserRecordedAction = AiRecordedBrowserAction
-export type BrowserRecordingStatus = AiRecordingStatus
-export type BrowserRecordingSession = AiRecordingSession
 
 export interface BrowserScriptLibraryEntry {
   createdAt: string

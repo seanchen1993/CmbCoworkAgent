@@ -1,5 +1,5 @@
 import type {
-  AiRecordedBrowserAction,
+  BrowserRecordedAction,
   BrowserLocatorMetadata,
   BrowserRecordingSource
 } from "./browser-types"
@@ -46,7 +46,7 @@ interface LocatorBuildOptions {
   defaultRole?: LocatorRole
 }
 
-export interface AiRecordingScriptOptions {
+export interface ScriptRecordingOptions {
   variableActionIds?: Iterable<string>
   variableActionNames?: Record<string, string>
   source?: BrowserRecordingSource
@@ -58,13 +58,13 @@ interface VariableDescriptor {
   declaration: string
 }
 
-export interface AiRecordingScriptVariable {
+export interface ScriptRecordingVariable {
   displayName: string
   identifier: string
   isArray: boolean
 }
 
-export type AiRecordingScriptVariableValue = string | string[]
+export type ScriptRecordingVariableValue = string | string[]
 
 type ParsedRecordedActionInput =
   | { kind: "navigate"; url: string }
@@ -269,7 +269,7 @@ export function buildPlaywrightLocator(
   return buildCodegenPlaywrightLocator(source as LocatorSource, options)
 }
 
-function toLocatorSource(action: AiRecordedBrowserAction): LocatorSource {
+function toLocatorSource(action: BrowserRecordedAction): LocatorSource {
   const locator = action.locator
   return {
     target: locator?.target ?? ("target" in action ? action.target : undefined),
@@ -291,7 +291,7 @@ function toLocatorSource(action: AiRecordedBrowserAction): LocatorSource {
 }
 
 function getLocator(
-  action: Extract<AiRecordedBrowserAction, { target?: string }>,
+  action: Extract<BrowserRecordedAction, { target?: string }>,
   defaultRole?: LocatorRole
 ): string {
   return buildPlaywrightLocator(toLocatorSource(action), { defaultRole })
@@ -304,7 +304,10 @@ function buildChoiceInputClickLocator(
   const root = buildFrameRoot(source.framePath)
   const selector = source.selector ? normalizeText(source.selector) : undefined
   if (isLikelyUniqueChoiceInputSelector(selector)) {
-    return applyOccurrenceHint(`${root}.locator(${quote(buildChoiceLabelSelector(selector!))})`, source)
+    return applyOccurrenceHint(
+      `${root}.locator(${quote(buildChoiceLabelSelector(selector!))})`,
+      source
+    )
   }
 
   const visibleText =
@@ -324,7 +327,7 @@ function buildChoiceInputClickLocator(
 }
 
 function getClickLocator(
-  action: Extract<AiRecordedBrowserAction, { kind: "click" }>,
+  action: Extract<BrowserRecordedAction, { kind: "click" }>,
   variableDescriptor?: VariableDescriptor
 ): string {
   const source = toLocatorSource(action)
@@ -341,7 +344,7 @@ function getClickLocator(
 }
 
 function getFileUploadLocator(
-  action: Extract<AiRecordedBrowserAction, { kind: "fileUpload" }>
+  action: Extract<BrowserRecordedAction, { kind: "fileUpload" }>
 ): string {
   const locator = action.locator
   if (locator) {
@@ -375,15 +378,15 @@ function sameFramePath(
 }
 
 function shouldSkipClickBeforeFileUpload(
-  clickAction: Extract<AiRecordedBrowserAction, { kind: "click" }>,
-  fileUploadAction: Extract<AiRecordedBrowserAction, { kind: "fileUpload" }>
+  clickAction: Extract<BrowserRecordedAction, { kind: "click" }>,
+  fileUploadAction: Extract<BrowserRecordedAction, { kind: "fileUpload" }>
 ): boolean {
   if (!fileUploadAction.locator) return false
   if (!sameFramePath(clickAction.locator, fileUploadAction.locator)) return false
   return isFileInputLocatorSource(toLocatorSource(fileUploadAction))
 }
 
-function canVariableizeClick(action: Extract<AiRecordedBrowserAction, { kind: "click" }>): boolean {
+function canVariableizeClick(action: Extract<BrowserRecordedAction, { kind: "click" }>): boolean {
   const locator = action.locator
   return Boolean(
     locator?.textContent ??
@@ -396,10 +399,10 @@ function canVariableizeClick(action: Extract<AiRecordedBrowserAction, { kind: "c
 }
 
 function supportsVariablePlaceholder(
-  action: AiRecordedBrowserAction
+  action: BrowserRecordedAction
 ): action is
-  | Extract<AiRecordedBrowserAction, { kind: "navigate" | "fill" | "selectOption" }>
-  | Extract<AiRecordedBrowserAction, { kind: "click" | "fileUpload" }> {
+  | Extract<BrowserRecordedAction, { kind: "navigate" | "fill" | "selectOption" }>
+  | Extract<BrowserRecordedAction, { kind: "click" | "fileUpload" }> {
   if (
     action.kind === "navigate" ||
     action.kind === "fill" ||
@@ -423,8 +426,8 @@ function stripVariableFieldWords(value: string): string {
 
 function deriveVariableBaseName(
   action:
-    | Extract<AiRecordedBrowserAction, { kind: "navigate" | "fill" | "selectOption" }>
-    | Extract<AiRecordedBrowserAction, { kind: "click" | "fileUpload" }>
+    | Extract<BrowserRecordedAction, { kind: "navigate" | "fill" | "selectOption" }>
+    | Extract<BrowserRecordedAction, { kind: "click" | "fileUpload" }>
 ): string {
   if (action.kind === "navigate") return "页面地址"
   const locator = action.locator
@@ -473,10 +476,7 @@ function normalizeVariableDisplayName(value: string | undefined): string {
   return value?.trim() ?? ""
 }
 
-function deriveVariableDisplayName(
-  identifier: string,
-  rawDisplayName?: string
-): string {
+function deriveVariableDisplayName(identifier: string, rawDisplayName?: string): string {
   const normalizedCommentDisplayName = normalizeVariableDisplayName(
     rawDisplayName?.replace(/^变量[-_]/u, "")
   )
@@ -488,7 +488,7 @@ function deriveVariableDisplayName(
 }
 
 function buildVariableDescriptorMap(
-  actions: AiRecordedBrowserAction[],
+  actions: BrowserRecordedAction[],
   variableActionIds?: Iterable<string>,
   variableActionNames?: Record<string, string>
 ): Map<string, VariableDescriptor> {
@@ -608,7 +608,7 @@ function parseScriptLiteralExpression(value: string): ParsedScriptLiteral {
   return { kind: "unknown" }
 }
 
-function parseVariableDeclarationLine(line: string): AiRecordingScriptVariable | null {
+function parseVariableDeclarationLine(line: string): ScriptRecordingVariable | null {
   const match =
     /^const\s+(变量_[\p{L}\p{N}_]+)\s*(?::\s*(string\[\]))?\s*=\s*(.+?)(?:\s*;)?(?:\s*\/\/\s*(.+))?\s*$/u.exec(
       line
@@ -630,8 +630,8 @@ function parseVariableDeclarationLine(line: string): AiRecordingScriptVariable |
 }
 
 function buildScriptVariableDeclaration(
-  variable: AiRecordingScriptVariable,
-  value?: AiRecordingScriptVariableValue
+  variable: ScriptRecordingVariable,
+  value?: ScriptRecordingVariableValue
 ): string {
   const serializedValue =
     value === undefined ? (variable.isArray ? "[]" : '""') : JSON.stringify(value)
@@ -766,17 +766,11 @@ function parseFramePath(locatorExpression: string): string[] {
     const selector = parseLocatorExpressionValue(match[1])
     if (!selector) continue
     const occurrence =
-      match[2] === "first"
-        ? " >> nth=0"
-        : match[3] !== undefined
-          ? ` >> nth=${match[3]}`
-          : ""
+      match[2] === "first" ? " >> nth=0" : match[3] !== undefined ? ` >> nth=${match[3]}` : ""
     segments.push({ index: match.index ?? 0, selector: `${selector}${occurrence}` })
   }
 
-  return segments
-    .sort((left, right) => left.index - right.index)
-    .map((segment) => segment.selector)
+  return segments.sort((left, right) => left.index - right.index).map((segment) => segment.selector)
 }
 
 function parseLocatorExpression(expression: string): BrowserLocatorMetadata {
@@ -851,11 +845,11 @@ function parseRecordedScriptActions(
   script: string,
   source: BrowserRecordingSource
 ): {
-  actions: AiRecordedBrowserAction[]
+  actions: BrowserRecordedAction[]
   variableActionIds: string[]
   variableActionNames: Record<string, string>
 } {
-  const variableDeclarations = new Map<string, AiRecordingScriptVariable>()
+  const variableDeclarations = new Map<string, ScriptRecordingVariable>()
   const lines = script.split(/\r?\n/u).map((line) => line.trim())
 
   for (const line of lines) {
@@ -864,7 +858,7 @@ function parseRecordedScriptActions(
     variableDeclarations.set(declaration.identifier, declaration)
   }
 
-  const actions: AiRecordedBrowserAction[] = []
+  const actions: BrowserRecordedAction[] = []
   const variableActionIds: string[] = []
   const variableActionNames: Record<string, string> = {}
   let parsedActionNumber = 0
@@ -872,12 +866,12 @@ function parseRecordedScriptActions(
   const pushAction = (action: ParsedRecordedActionInput, variableIdentifier?: string): void => {
     parsedActionNumber += 1
     const id = `${source}-seed-action-${parsedActionNumber}`
-    const recordedAction: AiRecordedBrowserAction = {
+    const recordedAction: BrowserRecordedAction = {
       ...action,
       id,
       source,
       timestamp: now()
-    } as AiRecordedBrowserAction
+    } as BrowserRecordedAction
     if (variableIdentifier) {
       const displayName =
         variableDeclarations.get(variableIdentifier)?.displayName ?? variableIdentifier
@@ -1085,7 +1079,7 @@ function parseRecordedScriptActions(
 }
 
 function buildVariableizedClickLocator(
-  action: Extract<AiRecordedBrowserAction, { kind: "click" }>,
+  action: Extract<BrowserRecordedAction, { kind: "click" }>,
   variableIdentifier: string
 ): string {
   const source = toLocatorSource(action)
@@ -1106,7 +1100,7 @@ function buildVariableizedClickLocator(
 }
 
 function generateActionLine(
-  action: AiRecordedBrowserAction,
+  action: BrowserRecordedAction,
   variableDescriptor?: VariableDescriptor
 ): string {
   switch (action.kind) {
@@ -1141,7 +1135,7 @@ function generateActionLine(
 }
 
 function formatFileUploadPaths(
-  action: Extract<AiRecordedBrowserAction, { kind: "fileUpload" }>,
+  action: Extract<BrowserRecordedAction, { kind: "fileUpload" }>,
   variableDescriptor?: VariableDescriptor
 ): string {
   if (variableDescriptor) return variableDescriptor.identifier
@@ -1193,8 +1187,8 @@ function collapseRedundantChoiceClickLines(source: string): string {
   return collapsed.join("\n")
 }
 
-function generateAiRecordingActionLines(
-  actions: AiRecordedBrowserAction[],
+function generateScriptRecordingActionLines(
+  actions: BrowserRecordedAction[],
   variableDescriptorMap: Map<string, VariableDescriptor>
 ): string[] {
   const lines: string[] = []
@@ -1227,9 +1221,9 @@ function generateAiRecordingActionLines(
   return lines
 }
 
-export function extractAiRecordingVariableNames(script: string): string[] {
+export function extractScriptRecordingVariableNames(script: string): string[] {
   const variableNames = new Set<string>(
-    extractAiRecordingVariables(script).map((variable) => `变量-${variable.displayName}`)
+    extractScriptRecordingVariables(script).map((variable) => `变量-${variable.displayName}`)
   )
 
   for (const match of script.matchAll(/变量(?:_[\p{L}\p{N}_]+|\d+)/gu)) {
@@ -1242,8 +1236,8 @@ export function extractAiRecordingVariableNames(script: string): string[] {
   return Array.from(variableNames)
 }
 
-export function extractAiRecordingVariables(script: string): AiRecordingScriptVariable[] {
-  const variables: AiRecordingScriptVariable[] = []
+export function extractScriptRecordingVariables(script: string): ScriptRecordingVariable[] {
+  const variables: ScriptRecordingVariable[] = []
   const seenIdentifiers = new Set<string>()
 
   for (const line of script.split(/\r?\n/u)) {
@@ -1256,9 +1250,9 @@ export function extractAiRecordingVariables(script: string): AiRecordingScriptVa
   return variables
 }
 
-export function applyAiRecordingVariableValues(
+export function applyScriptRecordingVariableValues(
   script: string,
-  variableValues?: Record<string, AiRecordingScriptVariableValue>
+  variableValues?: Record<string, ScriptRecordingVariableValue>
 ): string {
   if (!variableValues || Object.keys(variableValues).length === 0) return script
 
@@ -1286,22 +1280,22 @@ export function applyAiRecordingVariableValues(
     .join("\n")
 }
 
-export function parseAiRecordingScript(
+export function parseScriptRecordingScript(
   script: string,
-  source: BrowserRecordingSource = "ai"
+  source: BrowserRecordingSource = "script"
 ): {
-  actions: AiRecordedBrowserAction[]
+  actions: BrowserRecordedAction[]
   variableActionIds: string[]
   variableActionNames: Record<string, string>
 } {
   return parseRecordedScriptActions(script, source)
 }
 
-export function generateAiRecordingScript(
-  actions: AiRecordedBrowserAction[],
-  options: AiRecordingScriptOptions = {}
+export function generateScriptRecording(
+  actions: BrowserRecordedAction[],
+  options: ScriptRecordingOptions = {}
 ): string {
-  const source = options.source ?? actions[0]?.source ?? "ai"
+  const source = options.source ?? actions[0]?.source ?? "script"
   const scriptedActions = actions
   const variableDescriptorMap = buildVariableDescriptorMap(
     scriptedActions,
@@ -1318,12 +1312,12 @@ export function generateAiRecordingScript(
   )
     .map((descriptor) => descriptor.declaration)
     .join("\n")
-  const lines = generateAiRecordingActionLines(scriptedActions, variableDescriptorMap)
+  const lines = generateScriptRecordingActionLines(scriptedActions, variableDescriptorMap)
   const body =
     lines.length > 0
       ? lines.map((line) => `  ${line}`).join("\n")
       : "  // No supported Playwright browser actions were recorded."
-  const testName = source === "manual" ? "manual recorded flow" : "AI recorded flow"
+  const testName = source === "script" ? "recorded script flow" : "legacy recorded flow"
 
   return `import { test } from "@playwright/test";
 
@@ -1336,7 +1330,7 @@ ${body}
 `
 }
 
-export function buildAiRecordingExecutableScript(script: string): string {
+export function buildScriptExecutableScript(script: string): string {
   const normalizedScript = script.replace(
     /^(\s*const\s+变量_[\p{L}\p{N}_]+)\s*:\s*string\[\](\s*=\s*.+;\s*\/\/\s*变量[-_].*)$/gmu,
     "$1$2"

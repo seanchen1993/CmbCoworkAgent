@@ -121,8 +121,7 @@ import {
   BROWSER_SESSION_ID
 } from "../shared/browser-types"
 import type {
-  AiRecordingStartOptions,
-  AiRecordingSession,
+  BrowserRecordingSession,
   BrowserAttachOptions,
   BrowserBounds,
   BrowserCdpConfig,
@@ -134,7 +133,7 @@ import type {
   BrowserScriptExecutionInput,
   BrowserScriptExecutionState,
   BrowserScreenshotResult,
-  ManualRecordingStartOptions,
+  ScriptRecordingStartOptions,
   BrowserScriptLibraryEntry,
   BrowserScriptLibraryListOptions,
   BrowserScriptLibraryReadInput,
@@ -2255,37 +2254,28 @@ const api = {
       ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
     getState: (): Promise<BrowserState> =>
       ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
-    startAiRecording: (options?: AiRecordingStartOptions): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:startAiRecording", options) as Promise<AiRecordingSession>,
-    pauseAiRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:pauseAiRecording") as Promise<AiRecordingSession>,
-    updateAiRecordingDraft: (
-      input: BrowserRecordingDraftUpdateInput
-    ): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:updateAiRecordingDraft", input) as Promise<AiRecordingSession>,
-    resumeAiRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:resumeAiRecording") as Promise<AiRecordingSession>,
-    stopAiRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:stopAiRecording") as Promise<AiRecordingSession>,
-    getAiRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:getAiRecording") as Promise<AiRecordingSession>,
-    startManualRecording: (options?: ManualRecordingStartOptions): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:startManualRecording", options) as Promise<AiRecordingSession>,
-    pauseManualRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:pauseManualRecording") as Promise<AiRecordingSession>,
-    updateManualRecordingDraft: (
-      input: BrowserRecordingDraftUpdateInput
-    ): Promise<AiRecordingSession> =>
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ): Promise<BrowserRecordingSession> =>
       ipcRenderer.invoke(
-        "browser:updateManualRecordingDraft",
+        "browser:startScriptRecording",
+        options
+      ) as Promise<BrowserRecordingSession>,
+    pauseScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:pauseScriptRecording") as Promise<BrowserRecordingSession>,
+    updateScriptRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke(
+        "browser:updateScriptRecordingDraft",
         input
-      ) as Promise<AiRecordingSession>,
-    resumeManualRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:resumeManualRecording") as Promise<AiRecordingSession>,
-    stopManualRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:stopManualRecording") as Promise<AiRecordingSession>,
-    getManualRecording: (): Promise<AiRecordingSession> =>
-      ipcRenderer.invoke("browser:getManualRecording") as Promise<AiRecordingSession>,
+      ) as Promise<BrowserRecordingSession>,
+    resumeScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:resumeScriptRecording") as Promise<BrowserRecordingSession>,
+    stopScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:stopScriptRecording") as Promise<BrowserRecordingSession>,
+    getScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:getScriptRecording") as Promise<BrowserRecordingSession>,
     saveScriptLibraryEntry: (
       input: BrowserScriptLibrarySaveInput
     ): Promise<BrowserScriptLibraryEntry> =>
