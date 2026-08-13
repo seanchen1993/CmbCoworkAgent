@@ -1252,7 +1252,11 @@ export function getCommandHookToolInputDocs(event: HookEvent, matcher?: string):
   if (event === "UserPromptSubmit") return [USER_PROMPT_TOOL_INPUT_DOC]
   if (event === "Notification") return [NOTIFICATION_TOOL_INPUT_DOC]
   if (event === "PreSkillUse" || event === "PostSkillUse") return [SKILL_USE_TOOL_INPUT_DOC]
-  if (event === "PreToolUse" || event === "PostToolUse") {
+  if (
+    event === "PreToolUse" ||
+    event === "PostToolUse" ||
+    event === "PostToolUseFailure"
+  ) {
     const commonDocs = [
       TOOL_INPUT_DOCS.execute,
       TOOL_INPUT_DOCS.write_file,
@@ -1275,7 +1279,11 @@ export function getCommandHookToolInputSummary(event: HookEvent, matcher?: strin
   if (event === "PreSkillUse" || event === "PostSkillUse") {
     return "当前 matcher 命中技能名；技能信息在 skill_name、skill_path、skill_root，触发方式在 tool_input。"
   }
-  if (event === "PreToolUse" || event === "PostToolUse") {
+  if (
+    event === "PreToolUse" ||
+    event === "PostToolUse" ||
+    event === "PostToolUseFailure"
+  ) {
     if (!matcher || matcher === "*") {
       return "当前 matcher 会命中多个工具，tool_input 会随实际工具变化。下面是目前已接入的常见字段。"
     }
@@ -1659,7 +1667,11 @@ export function AddHookDialog(props: {
     [event]
   )
   const isSkillMatcherEvent = event === "PreSkillUse" || event === "PostSkillUse"
-  const showMatcher = event === "PreToolUse" || event === "PostToolUse" || isSkillMatcherEvent
+  const showMatcher =
+    event === "PreToolUse" ||
+    event === "PostToolUse" ||
+    event === "PostToolUseFailure" ||
+    isSkillMatcherEvent
   const skillMatcherOptions = useMemo(
     () => [
       { value: "*", label: "所有技能（*）", description: "匹配任意技能读取" },
