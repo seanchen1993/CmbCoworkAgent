@@ -13,7 +13,9 @@ const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
 
 const browserCdpPort = configureBrowserCdpEndpoint(app.commandLine)
 if (browserCdpPort !== null) {
-  console.info(`${MAIN_BROWSER_LOG_PREFIX} Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`)
+  console.info(
+    `${MAIN_BROWSER_LOG_PREFIX} Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`
+  )
 }
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"

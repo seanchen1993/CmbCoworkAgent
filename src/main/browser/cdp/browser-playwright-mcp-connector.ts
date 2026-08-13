@@ -3,7 +3,7 @@ import {
   BUILTIN_BROWSER_LOG_PREFIX,
   type BrowserCdpConfig
 } from "../../../shared/browser-types"
-import { getCurrentBrowserCdpPort, resolveBrowserCdpPort } from "./browser-cdp"
+import { getCurrentBrowserCdpPort } from "./browser-cdp"
 
 const PLAYWRIGHT_MCP_NAME = "In-app-browser"
 const BROWSER_MAIN_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[Main]`
@@ -81,10 +81,9 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
   config: BrowserCdpConfig
 ): Promise<{ invalidateCapabilities: boolean }> {
   const existing = findManagedPlaywrightMcpConnector()
-  const desiredPort = resolveBrowserCdpPort(config)
   const runtimePort = getCurrentBrowserCdpPort()
 
-  if (desiredPort === null) {
+  if (config.enabled === false) {
     if (!existing) {
       return { invalidateCapabilities: false }
     }
@@ -109,8 +108,13 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
     return { invalidateCapabilities: true }
   }
 
-  const connectorPort = runtimePort ?? desiredPort
-  const nextArgs = buildPlaywrightMcpArgs(connectorPort)
+  // A changed setting takes effect only after restart. Do not publish a
+  // connector endpoint unless this process actually started CDP on that port.
+  if (runtimePort === null) {
+    return { invalidateCapabilities: false }
+  }
+
+  const nextArgs = buildPlaywrightMcpArgs(runtimePort)
   if (!isManagedPlaywrightMcpConnectorSynced(existing, { enabled: true, args: nextArgs })) {
     upsertMcpConnector({
       id: existing?.id,
@@ -123,7 +127,7 @@ export async function syncPlaywrightMcpConnectorForBrowserCdpConfig(
       lazyLoad: MANAGED_PLAYWRIGHT_MCP_LAZY_LOAD
     })
     console.info(
-      `${BROWSER_MAIN_LOG_PREFIX} Synced Playwright MCP connector enabled state from Browser CDP config; runtimePort=${connectorPort}, desiredPort=${desiredPort}.`
+      `${BROWSER_MAIN_LOG_PREFIX} Synced Playwright MCP connector enabled state from Browser CDP config; runtimePort=${runtimePort}.`
     )
   }
 

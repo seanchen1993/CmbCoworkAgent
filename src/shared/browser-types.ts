@@ -233,12 +233,9 @@ export interface BrowserScriptExecutionInput {
   variableValues?: Record<string, string | string[]>
 }
 
-export const DEFAULT_BROWSER_CDP_PORT = 38127
-
 export interface BrowserCdpConfig {
   enabled: boolean
   profileImportEnabled: boolean
-  port: number
 }
 
 export type BrowserProfileImportSource = "chrome"
