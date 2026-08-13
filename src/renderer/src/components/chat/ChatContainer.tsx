@@ -152,7 +152,6 @@ import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import {
-  BUILTIN_BROWSER_PROMPT_PREFIX,
   formatBuiltinBrowserPrompt,
   isBuiltinBrowserSlashCommand,
   parseBuiltinBrowserPrompt
@@ -4474,9 +4473,6 @@ export function ChatContainer({
         modelId: currentModel,
         created_at: new Date(),
         updated_at: new Date()
-      }
-      if (browser) {
-        displayContent = `${BUILTIN_BROWSER_PROMPT_PREFIX}${displayContent}`
       }
 
       // Busy → park the draft and stop. The auto-drain effect sends it once the
