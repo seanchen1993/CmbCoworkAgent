@@ -40,7 +40,6 @@ const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
 const chat = read("src/renderer/src/components/chat/ChatContainer.tsx")
 const timeline = read("src/renderer/src/components/chat/ChatTimeline.tsx")
-const mainWindow = read("src/main/index.ts")
 
 function testBackgroundChunksAreDisplayGatedAfterPersistence(): void {
   const functionStart = agentIpc.indexOf("function persistAndForwardPhysicalRunStreamChunk(")
@@ -154,21 +153,12 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
 }
 
-function testHiddenWindowTimersRemainResponsive(): void {
-  assertIncludes(
-    mainWindow,
-    "backgroundThrottling: false",
-    "Electron does not throttle renderer lifecycle timers while the window is hidden"
-  )
-}
-
 function main(): void {
   const tests = [
     testBackgroundChunksAreDisplayGatedAfterPersistence,
     testForegroundRecoveryUsesAuthoritativeValuesSnapshots,
     testThreadSwitchAndVisibilityDriveInterest,
-    testLongChatsUseDynamicVirtualRows,
-    testHiddenWindowTimersRemainResponsive
+    testLongChatsUseDynamicVirtualRows
   ]
   for (const test of tests) {
     test()

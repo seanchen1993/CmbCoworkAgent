@@ -33,46 +33,48 @@ export function buildMessageBubbleTimingMeta(messages: Message[]): {
 } {
   const assistantDurationMsById = new Map<string, number>()
   const userSendTimeLabelById = new Map<string, string>()
+  let activeTurn:
+    | {
+        userCreatedAt: number
+        firstAssistantId: string | null
+        lastMessageEndAt: number | null
+      }
+    | undefined
+
+  const finishActiveTurn = (): void => {
+    if (!activeTurn?.firstAssistantId || activeTurn.lastMessageEndAt === null) return
+    assistantDurationMsById.set(
+      activeTurn.firstAssistantId,
+      Math.max(0, activeTurn.lastMessageEndAt - activeTurn.userCreatedAt)
+    )
+  }
 
   for (const message of messages) {
-    if (message.role !== "user") continue
-    const createdAt = getCreatedTime(message)
-    if (createdAt === null) continue
-    userSendTimeLabelById.set(message.id, hourMinuteFormatter.format(new Date(createdAt)))
-  }
+    if (message.role === "user") {
+      finishActiveTurn()
 
-  for (let userIndex = 0; userIndex < messages.length; userIndex += 1) {
-    const userMessage = messages[userIndex]
-    if (userMessage.role !== "user") continue
-
-    const userCreatedAt = getCreatedTime(userMessage)
-    if (userCreatedAt === null) continue
-
-    let nextUserIndex = -1
-    for (let index = userIndex + 1; index < messages.length; index += 1) {
-      if (messages[index].role === "user") {
-        nextUserIndex = index
-        break
+      const createdAt = getCreatedTime(message)
+      if (createdAt === null) {
+        activeTurn = undefined
+        continue
       }
+
+      userSendTimeLabelById.set(message.id, hourMinuteFormatter.format(new Date(createdAt)))
+      activeTurn = {
+        userCreatedAt: createdAt,
+        firstAssistantId: null,
+        lastMessageEndAt: getEndTime(message)
+      }
+      continue
     }
 
-    const turnEndIndex = nextUserIndex === -1 ? messages.length - 1 : nextUserIndex - 1
-    if (turnEndIndex < userIndex) continue
-
-    const turnEndTime = getEndTime(messages[turnEndIndex])
-    if (turnEndTime === null) continue
-
-    let firstAssistantId: string | null = null
-    for (let index = userIndex + 1; index <= turnEndIndex; index += 1) {
-      if (messages[index].role === "assistant") {
-        firstAssistantId = messages[index].id
-        break
-      }
+    if (!activeTurn) continue
+    activeTurn.lastMessageEndAt = getEndTime(message)
+    if (message.role === "assistant" && activeTurn.firstAssistantId === null) {
+      activeTurn.firstAssistantId = message.id
     }
-
-    if (!firstAssistantId) continue
-    assistantDurationMsById.set(firstAssistantId, Math.max(0, turnEndTime - userCreatedAt))
   }
 
+  finishActiveTurn()
   return { assistantDurationMsById, userSendTimeLabelById }
 }

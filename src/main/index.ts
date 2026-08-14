@@ -510,12 +510,7 @@ function createWindow(): void {
     trafficLightPosition: { x: 16, y: 11 },
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
-      sandbox: false,
-      // Long-running agent work must not be throttled just because the window
-      // is hidden. Renderer delivery is gated per thread at the stream IPC
-      // boundary, so this keeps lifecycle/timers responsive without allowing
-      // background chat chunks to repaint the whole UI.
-      backgroundThrottling: false
+      sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
     autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99"].some((ip) =>
