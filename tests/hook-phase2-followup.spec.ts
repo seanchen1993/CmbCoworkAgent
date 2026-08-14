@@ -798,6 +798,16 @@ const dialogSrc = _read(
   ),
   "utf-8"
 )
+assert(
+  /event === "PostToolUseFailure"/.test(dialogSrc),
+  "P-Editor f1 PostToolUseFailure exposes a tool matcher"
+)
+assert(
+  /const matcherOptions = isSkillMatcherEvent \? skillMatcherOptions : COMMON_TOOLS/.test(
+    dialogSrc
+  ),
+  "P-Editor f2 PostToolUseFailure uses the common tool matcher options"
+)
 for (const stateName of [
   "matcherPreserve",
   "passthroughIf",
