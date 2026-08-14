@@ -86,7 +86,7 @@ const LEFT_DEFAULT = 280
 const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
-const RIGHT_PREVIEW_EXPAND_VW = 0.35
+const RIGHT_PREVIEW_EXPAND_VW = 0.4
 
 interface WorkerSplitHandleProps {
   onDrag: (totalDelta: number) => void

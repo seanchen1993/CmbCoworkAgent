@@ -2971,13 +2971,12 @@ async function buildMultiRepositoryGitPanelDiffState(
   for (const { repo, state } of repoStates) {
     changedFilesTotal += state.changedFilesTotal
     changedFiles.push(...(state.changedFiles ?? []).map((file) => prefixRepositoryPath(repo, file)))
-    fileGroups.push(
-      state.files.map((file) => ({
-        ...file,
-        path: prefixRepositoryPath(repo, file.path),
-        previousPath: file.previousPath ? prefixRepositoryPath(repo, file.previousPath) : undefined
-      }))
-    )
+    const visibleRepoFiles = state.files.map((file) => ({
+      ...file,
+      path: prefixRepositoryPath(repo, file.path),
+      previousPath: file.previousPath ? prefixRepositoryPath(repo, file.previousPath) : undefined
+    }))
+    fileGroups.push(visibleRepoFiles)
   }
 
   const files = takeVisibleFilesRoundRobin(fileGroups, visibleFileLimit)
