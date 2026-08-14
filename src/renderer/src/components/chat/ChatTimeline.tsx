@@ -1,5 +1,10 @@
-import React, { useMemo } from "react"
-import { List, type ListImperativeAPI, type RowComponentProps, useDynamicRowHeight } from "react-window"
+import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react"
+import {
+  List,
+  type ListImperativeAPI,
+  type RowComponentProps,
+  useDynamicRowHeight
+} from "react-window"
 import type { HITLRequest, Message, ToolCallState } from "@/types"
 import type { HookLogBucket } from "@/lib/thread-context"
 import { MessageBubble } from "./MessageBubble"
@@ -143,12 +148,17 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
 })
 
 export const VIRTUAL_CHAT_TIMELINE_THRESHOLD = 80
-export type ChatTimelineListRef = ListImperativeAPI
+const INITIAL_SCROLL_CORRECTION_LIMIT = 8
 
-export interface VirtualChatTimelineItem {
+interface VirtualChatTimelineItem {
   id: string
   messageIndex?: number
-  node?: React.ReactNode
+}
+
+export interface ChatVirtualTimelineHandle {
+  readonly element: HTMLDivElement | null
+  scrollToEnd(): void
+  scrollToMessage(messageId: string): boolean
 }
 
 interface VirtualChatTimelineRowProps {
@@ -157,6 +167,8 @@ interface VirtualChatTimelineRowProps {
   perMessageFlags: ChatMessageFlags
   visibleMessageLayout: VisibleMessageLayout<Message>
   reserveRightSpace: boolean
+  tail: React.ReactNode
+  scrollEndRef: React.RefObject<HTMLSpanElement | null>
   chatMessageListProps: Omit<
     ChatMessageListProps,
     "messages" | "perMessageFlags" | "detachedHookLogBuckets"
@@ -172,13 +184,20 @@ function VirtualChatTimelineRow({
   perMessageFlags,
   visibleMessageLayout,
   reserveRightSpace,
+  tail,
+  scrollEndRef,
   chatMessageListProps
 }: RowComponentProps<VirtualChatTimelineRowProps>): React.JSX.Element {
   const item = items[index]
   const messageIndex = item.messageIndex
   let content: React.ReactNode
   if (messageIndex === undefined) {
-    content = item.node ?? null
+    content = (
+      <>
+        {tail}
+        <span ref={scrollEndRef} aria-hidden="true" />
+      </>
+    )
   } else {
     const message = messages[messageIndex]
     content = message ? (
@@ -205,26 +224,89 @@ function VirtualChatTimelineRow({
   )
 }
 
-export function VirtualChatTimeline({
-  items,
-  messages,
-  perMessageFlags,
-  visibleMessageLayout,
-  reserveRightSpace,
-  listRef,
-  chatMessageListProps
-}: {
-  items: readonly VirtualChatTimelineItem[]
+interface VirtualChatTimelineProps {
   messages: readonly Message[]
   perMessageFlags: ChatMessageFlags
-  visibleMessageLayout: VisibleMessageLayout<Message>
   reserveRightSpace: boolean
-  listRef: React.Ref<ListImperativeAPI>
   chatMessageListProps: Omit<
     ChatMessageListProps,
-    "messages" | "perMessageFlags" | "detachedHookLogBuckets"
+    "messages" | "perMessageFlags" | "detachedHookLogBuckets" | "setMessageRef"
   >
-}): React.JSX.Element {
+  setMessageRef: ChatMessageListProps["setMessageRef"]
+  tail?: React.ReactNode
+  threadId: string
+  historyLoading: boolean
+}
+
+export const VirtualChatTimeline = React.forwardRef<
+  ChatVirtualTimelineHandle,
+  VirtualChatTimelineProps
+>(function VirtualChatTimeline(
+  {
+    messages,
+    perMessageFlags,
+    reserveRightSpace,
+    chatMessageListProps,
+    setMessageRef,
+    tail = null,
+    threadId,
+    historyLoading
+  },
+  ref
+): React.JSX.Element {
+  const listRef = useRef<ListImperativeAPI>(null)
+  const lastRowIndexRef = useRef(0)
+  const initialScrollActiveRef = useRef(false)
+  const initialScrollCorrectionsRef = useRef(0)
+  const initialScrollFrameRef = useRef<number | null>(null)
+  const initialScrollSettledFrameRef = useRef<number | null>(null)
+  const scrollEndFrameRef = useRef<number | null>(null)
+  const scrollEndRef = useRef<HTMLSpanElement>(null)
+  const pendingAssistantScrollFromMessageIdRef = useRef<string | null>(null)
+  const lastMessageIdRef = useRef<string | null>(null)
+  lastMessageIdRef.current = messages[messages.length - 1]?.id ?? null
+  const { items, visibleMessageLayout, messageRowIndexById } = useMemo(() => {
+    const layout = buildVisibleMessageLayout(messages, (message) => {
+      const hasHookLogChip =
+        chatMessageListProps.hookLoggingEnabled &&
+        message.role === "user" &&
+        Boolean(chatMessageListProps.hookLogBucketByTurnId.get(message.id)?.entries.length)
+      return messageHasVisibleRow(message, hasHookLogChip)
+    })
+    const nextItems: VirtualChatTimelineItem[] = []
+    const nextMessageRowIndexById = new Map<string, number>()
+
+    messages.forEach((message, messageIndex) => {
+      const hasHookLogChip =
+        chatMessageListProps.hookLoggingEnabled &&
+        message.role === "user" &&
+        Boolean(chatMessageListProps.hookLogBucketByTurnId.get(message.id)?.entries.length)
+      if (!messageHasVisibleRow(message, hasHookLogChip)) return
+
+      nextMessageRowIndexById.set(message.id, nextItems.length)
+      nextItems.push({
+        id: `message:${message.role}:${message.id}`,
+        messageIndex
+      })
+    })
+
+    // Keep a concrete end anchor mounted for explicit user-initiated scrolling.
+    nextItems.push({
+      id: "timeline-tail"
+    })
+
+    return {
+      items: nextItems,
+      visibleMessageLayout: layout,
+      messageRowIndexById: nextMessageRowIndexById
+    }
+  }, [
+    chatMessageListProps.hookLogBucketByTurnId,
+    chatMessageListProps.hookLoggingEnabled,
+    messages
+  ])
+  lastRowIndexRef.current = Math.max(0, items.length - 1)
+
   const dynamicRowHeight = useDynamicRowHeight({
     defaultRowHeight: 180,
     key: items.map((item) => item.id).join("\u0000")
@@ -236,23 +318,191 @@ export function VirtualChatTimeline({
       perMessageFlags,
       visibleMessageLayout,
       reserveRightSpace,
-      chatMessageListProps
+      tail,
+      scrollEndRef,
+      chatMessageListProps: {
+        ...chatMessageListProps,
+        setMessageRef
+      }
     }),
     [
       chatMessageListProps,
       items,
       messages,
       perMessageFlags,
+      tail,
       reserveRightSpace,
+      setMessageRef,
+      scrollEndRef,
       visibleMessageLayout
     ]
   )
+  const scrollToLastRow = useCallback((): void => {
+    listRef.current?.scrollToRow({
+      index: lastRowIndexRef.current,
+      align: "end",
+      behavior: "instant"
+    })
+  }, [])
+  const queueScrollEndAnchor = useCallback((): void => {
+    if (scrollEndFrameRef.current !== null) {
+      cancelAnimationFrame(scrollEndFrameRef.current)
+    }
+    scrollEndFrameRef.current = requestAnimationFrame(() => {
+      scrollEndFrameRef.current = null
+      // Mount the tail row without reading layout, then use its concrete anchor.
+      scrollToLastRow()
+      scrollEndFrameRef.current = requestAnimationFrame(() => {
+        scrollEndFrameRef.current = null
+        scrollEndRef.current?.scrollIntoView({ block: "end", inline: "nearest" })
+      })
+    })
+  }, [scrollToLastRow])
+  const queueInitialScrollCorrection = useCallback((): void => {
+    if (
+      !initialScrollActiveRef.current ||
+      initialScrollCorrectionsRef.current >= INITIAL_SCROLL_CORRECTION_LIMIT ||
+      initialScrollFrameRef.current !== null
+    ) {
+      return
+    }
+
+    if (initialScrollSettledFrameRef.current !== null) {
+      cancelAnimationFrame(initialScrollSettledFrameRef.current)
+      initialScrollSettledFrameRef.current = null
+    }
+    initialScrollFrameRef.current = requestAnimationFrame(() => {
+      initialScrollFrameRef.current = null
+      if (!initialScrollActiveRef.current) return
+
+      initialScrollCorrectionsRef.current += 1
+      scrollToLastRow()
+      if (initialScrollCorrectionsRef.current >= INITIAL_SCROLL_CORRECTION_LIMIT) {
+        initialScrollActiveRef.current = false
+        return
+      }
+
+      initialScrollSettledFrameRef.current = requestAnimationFrame(() => {
+        if (!initialScrollActiveRef.current) return
+        scrollToLastRow()
+        initialScrollSettledFrameRef.current = requestAnimationFrame(() => {
+          initialScrollSettledFrameRef.current = null
+          if (!initialScrollActiveRef.current) return
+          scrollToLastRow()
+          initialScrollActiveRef.current = false
+        })
+      })
+    })
+  }, [scrollToLastRow])
+  const startInitialScrollCorrection = useCallback((): void => {
+    if (initialScrollFrameRef.current !== null) {
+      cancelAnimationFrame(initialScrollFrameRef.current)
+      initialScrollFrameRef.current = null
+    }
+    if (initialScrollSettledFrameRef.current !== null) {
+      cancelAnimationFrame(initialScrollSettledFrameRef.current)
+      initialScrollSettledFrameRef.current = null
+    }
+    initialScrollActiveRef.current = true
+    initialScrollCorrectionsRef.current = 0
+    queueInitialScrollCorrection()
+  }, [queueInitialScrollCorrection])
+  const scrollToEnd = useCallback((): void => {
+    pendingAssistantScrollFromMessageIdRef.current = lastMessageIdRef.current
+    queueScrollEndAnchor()
+  }, [queueScrollEndAnchor])
+  const handleListResize = useCallback((): void => {
+    queueInitialScrollCorrection()
+  }, [queueInitialScrollCorrection])
+  const scrollToMessage = useCallback(
+    (messageId: string): boolean => {
+      const messageRowIndex = messageRowIndexById.get(messageId)
+      if (messageRowIndex === undefined) return false
+      listRef.current?.scrollToRow({
+        index: messageRowIndex,
+        align: "center",
+        behavior: "smooth"
+      })
+      return true
+    },
+    [messageRowIndexById]
+  )
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      get element(): HTMLDivElement | null {
+        return listRef.current?.element ?? null
+      },
+      scrollToEnd,
+      scrollToMessage
+    }),
+    [scrollToEnd, scrollToMessage]
+  )
+
+  useEffect(() => {
+    const pendingMessageId = pendingAssistantScrollFromMessageIdRef.current
+    const lastMessage = messages[messages.length - 1]
+    if (
+      !pendingMessageId ||
+      !lastMessage ||
+      lastMessage.id === pendingMessageId ||
+      lastMessage.role !== "assistant"
+    ) {
+      return
+    }
+
+    pendingAssistantScrollFromMessageIdRef.current = null
+    queueScrollEndAnchor()
+  }, [messages, queueScrollEndAnchor])
+
+  useEffect(() => {
+    if (historyLoading) return undefined
+    startInitialScrollCorrection()
+    return () => {
+      initialScrollActiveRef.current = false
+      initialScrollCorrectionsRef.current = 0
+      if (initialScrollFrameRef.current !== null) {
+        cancelAnimationFrame(initialScrollFrameRef.current)
+        initialScrollFrameRef.current = null
+      }
+      if (initialScrollSettledFrameRef.current !== null) {
+        cancelAnimationFrame(initialScrollSettledFrameRef.current)
+        initialScrollSettledFrameRef.current = null
+      }
+      if (scrollEndFrameRef.current !== null) {
+        cancelAnimationFrame(scrollEndFrameRef.current)
+        scrollEndFrameRef.current = null
+      }
+    }
+  }, [historyLoading, startInitialScrollCorrection, threadId])
+
+  // Dynamic row measurements replace react-window's estimated heights after
+  // the list reaches the tail, so re-align only during initial entry.
+  useEffect(() => {
+    queueInitialScrollCorrection()
+  }, [dynamicRowHeight, queueInitialScrollCorrection])
+
+  useEffect(() => {
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState === "visible" && initialScrollActiveRef.current) {
+        if (initialScrollFrameRef.current !== null) {
+          cancelAnimationFrame(initialScrollFrameRef.current)
+          initialScrollFrameRef.current = null
+        }
+        queueInitialScrollCorrection()
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange)
+  }, [queueInitialScrollCorrection])
 
   return (
     <List
       className="flex-1 min-h-0"
       defaultHeight={720}
       listRef={listRef}
+      onResize={handleListResize}
       overscanCount={8}
       rowComponent={VirtualChatTimelineRow}
       rowCount={items.length}
@@ -261,7 +511,7 @@ export function VirtualChatTimeline({
       style={{ height: "100%", width: "100%" }}
     />
   )
-}
+})
 
 export const ChatMessageList = React.memo(function ChatMessageList({
   messages,

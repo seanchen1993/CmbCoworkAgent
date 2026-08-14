@@ -1,0 +1,96 @@
+import { ChevronDown } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+
+const BOTTOM_DISTANCE_THRESHOLD = 32
+
+interface ChatScrollToBottomButtonProps {
+  getViewport: () => HTMLDivElement | null
+  onScrollToBottom: () => void
+}
+
+export function ChatScrollToBottomButton({
+  getViewport,
+  onScrollToBottom
+}: ChatScrollToBottomButtonProps): React.JSX.Element | null {
+  const [visible, setVisible] = useState(false)
+  const frameRef = useRef<number | null>(null)
+
+  const updateVisibility = useCallback((): void => {
+    if (frameRef.current !== null) return
+
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = null
+      const viewport = getViewport()
+      if (!viewport) {
+        setVisible(false)
+        return
+      }
+
+      const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      const nextVisible = distanceToBottom > BOTTOM_DISTANCE_THRESHOLD
+      setVisible((current) => (current === nextVisible ? current : nextVisible))
+    })
+  }, [getViewport])
+
+  useEffect(() => {
+    let viewport: HTMLDivElement | null = null
+    let retryFrame: number | null = null
+    let resizeObserver: ResizeObserver | null = null
+
+    const observeContent = (): void => {
+      if (!viewport || !resizeObserver) return
+      resizeObserver.disconnect()
+      resizeObserver.observe(viewport)
+
+      // Once the indicator is visible, streamed content cannot change its state.
+      // Continue observing only the viewport so a resize can still hide it.
+      if (visible) return
+
+      const virtualSpacer = Array.from(viewport.children).find(
+        (element) => element.getAttribute("aria-hidden") === "true"
+      )
+      const content = virtualSpacer ?? viewport.firstElementChild
+      if (content instanceof HTMLElement) resizeObserver.observe(content)
+    }
+
+    const attach = (): void => {
+      viewport = getViewport()
+      if (!viewport) {
+        retryFrame = requestAnimationFrame(attach)
+        return
+      }
+
+      resizeObserver = new ResizeObserver(updateVisibility)
+      viewport.addEventListener("scroll", updateVisibility, { passive: true })
+      observeContent()
+      updateVisibility()
+    }
+
+    attach()
+    return () => {
+      if (retryFrame !== null) cancelAnimationFrame(retryFrame)
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current)
+        frameRef.current = null
+      }
+      viewport?.removeEventListener("scroll", updateVisibility)
+      resizeObserver?.disconnect()
+    }
+  }, [getViewport, updateVisibility, visible])
+
+  if (!visible) return null
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        onScrollToBottom()
+      }}
+      className="absolute bottom-full left-1/2 z-30 mb-3 flex size-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-background/95 text-muted-foreground shadow-md backdrop-blur transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      aria-label="回到会话底部"
+      title="回到会话底部"
+    >
+      <ChevronDown className="size-4" />
+    </button>
+  )
+}

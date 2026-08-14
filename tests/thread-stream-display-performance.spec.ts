@@ -40,6 +40,7 @@ const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
 const chat = read("src/renderer/src/components/chat/ChatContainer.tsx")
 const timeline = read("src/renderer/src/components/chat/ChatTimeline.tsx")
+const scrollToBottomButton = read("src/renderer/src/components/chat/ChatScrollToBottomButton.tsx")
 
 function testBackgroundChunksAreDisplayGatedAfterPersistence(): void {
   const functionStart = agentIpc.indexOf("function persistAndForwardPhysicalRunStreamChunk(")
@@ -126,6 +127,20 @@ function testLongChatsUseDynamicVirtualRows(): void {
     "useDynamicRowHeight",
     "virtual chat rows measure Markdown and tool cards dynamically"
   )
+  assert(
+    !timeline.includes("viewport.scrollTop = viewport.scrollHeight"),
+    "virtual end scrolling does not synchronously read and write scroll geometry"
+  )
+  assertIncludes(
+    timeline,
+    "scrollToLastRow()",
+    "virtual end scrolling mounts the tail row before using the end anchor"
+  )
+  assertIncludes(
+    scrollToBottomButton,
+    "if (visible) return",
+    "the scroll-to-bottom indicator stops observing streamed content while it is already visible"
+  )
   assertIncludes(
     chat,
     "const historyDisplayMessages = useMemo",
@@ -140,6 +155,41 @@ function testLongChatsUseDynamicVirtualRows(): void {
     chat,
     "<VirtualChatTimeline",
     "the long-chat render path mounts the virtual timeline"
+  )
+  assertIncludes(
+    timeline,
+    "onResize={handleListResize}",
+    "the isolated timeline corrects initial placement after the list viewport is measured"
+  )
+  assertIncludes(
+    timeline,
+    "queueInitialScrollCorrection()",
+    "dynamic row-height updates schedule bounded initial-tail corrections"
+  )
+  assertIncludes(
+    timeline,
+    'document.addEventListener("visibilitychange", handleVisibilityChange)',
+    "initial tail correction resumes after a hidden window becomes visible"
+  )
+  assertIncludes(
+    timeline,
+    "scrollToMessage(messageId: string): boolean",
+    "the isolated timeline owns virtual row lookup for message navigation"
+  )
+  assertIncludes(
+    timeline,
+    "useImperativeHandle",
+    "the timeline exposes only viewport and message-navigation capabilities"
+  )
+  assertIncludes(
+    chat,
+    "ref={virtualTimelineRef}",
+    "ChatContainer holds the timeline capability rather than react-window internals"
+  )
+  assertIncludes(
+    chat,
+    "<ChatTimelineTail",
+    "the chat container composes an isolated tail instead of duplicating tail rendering"
   )
   assertIncludes(
     chat,
