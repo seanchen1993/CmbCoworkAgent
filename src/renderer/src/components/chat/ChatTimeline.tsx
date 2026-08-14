@@ -166,7 +166,7 @@ interface VirtualChatTimelineRowProps {
   messages: readonly Message[]
   perMessageFlags: ChatMessageFlags
   visibleMessageLayout: VisibleMessageLayout<Message>
-  reserveRightSpace: boolean
+  reserveLeftSpace: boolean
   tail: React.ReactNode
   scrollEndRef: React.RefObject<HTMLSpanElement | null>
   chatMessageListProps: Omit<
@@ -183,7 +183,7 @@ function VirtualChatTimelineRow({
   messages,
   perMessageFlags,
   visibleMessageLayout,
-  reserveRightSpace,
+  reserveLeftSpace,
   tail,
   scrollEndRef,
   chatMessageListProps
@@ -217,7 +217,7 @@ function VirtualChatTimelineRow({
 
   return (
     <div style={style} {...ariaAttributes}>
-      <div className={cn("px-4 py-2", reserveRightSpace && "md:pr-[20px]")}>
+      <div className={cn("px-4 py-2", reserveLeftSpace && "md:pl-[20px]")}>
         <div className="max-w-3xl mx-auto">{content}</div>
       </div>
     </div>
@@ -227,7 +227,7 @@ function VirtualChatTimelineRow({
 interface VirtualChatTimelineProps {
   messages: readonly Message[]
   perMessageFlags: ChatMessageFlags
-  reserveRightSpace: boolean
+  reserveLeftSpace: boolean
   chatMessageListProps: Omit<
     ChatMessageListProps,
     "messages" | "perMessageFlags" | "detachedHookLogBuckets" | "setMessageRef"
@@ -245,7 +245,7 @@ export const VirtualChatTimeline = React.forwardRef<
   {
     messages,
     perMessageFlags,
-    reserveRightSpace,
+    reserveLeftSpace,
     chatMessageListProps,
     setMessageRef,
     tail = null,
@@ -317,7 +317,7 @@ export const VirtualChatTimeline = React.forwardRef<
       messages,
       perMessageFlags,
       visibleMessageLayout,
-      reserveRightSpace,
+      reserveLeftSpace,
       tail,
       scrollEndRef,
       chatMessageListProps: {
@@ -331,7 +331,7 @@ export const VirtualChatTimeline = React.forwardRef<
       messages,
       perMessageFlags,
       tail,
-      reserveRightSpace,
+      reserveLeftSpace,
       setMessageRef,
       scrollEndRef,
       visibleMessageLayout

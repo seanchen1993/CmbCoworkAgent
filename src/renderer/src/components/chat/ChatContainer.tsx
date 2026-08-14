@@ -6765,14 +6765,14 @@ export function ChatContainer({
         getViewport={getViewport}
         scrollToMessage={scrollToMessage}
       >
-        {({ reserveRightSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef }) => (
           <>
             {isVirtualizedChat ? (
               <VirtualChatTimeline
                 ref={virtualTimelineRef}
                 messages={displayMessages}
                 perMessageFlags={perMessageFlags}
-                reserveRightSpace={reserveRightSpace}
+                reserveLeftSpace={reserveLeftSpace}
                 chatMessageListProps={chatMessageListProps}
                 setMessageRef={setMessageRef}
                 tail={virtualTimelineTail}
@@ -6781,7 +6781,7 @@ export function ChatContainer({
               />
             ) : (
               <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-              <div className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}>
+              <div className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
                     <div
@@ -6828,7 +6828,7 @@ export function ChatContainer({
                 (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
-                <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
+                <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-20")}>
                   {(() => {
                     const approval = pendingApproval as unknown as Record<string, unknown>
                     const operation = approval.operation
@@ -7103,11 +7103,11 @@ export function ChatContainer({
               workspacePath={workspacePath}
               currentThreadMetadata={currentThread?.metadata}
               createThread={createThread}
-              reserveRightSpace={reserveRightSpace}
+              reserveLeftSpace={reserveLeftSpace}
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
             {goalUi.goal && (
-              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-[20px]")}>
+              <div className={cn("px-4 pb-1", reserveLeftSpace && "md:pl-[20px]")}>
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
@@ -7122,7 +7122,7 @@ export function ChatContainer({
               className={cn(
                 "px-4 pb-4",
                 goalUi.goal ? "pt-1" : "pt-4",
-                reserveRightSpace && "md:pr-[20px]"
+                reserveLeftSpace && "md:pl-[20px]"
               )}
             >
               {showGitChangeNotice && (
