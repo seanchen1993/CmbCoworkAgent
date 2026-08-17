@@ -155,6 +155,26 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
   assertIncludes(
     timeline,
+    "const INITIAL_SCROLL_CORRECTION_LIMIT = 2",
+    "entering a long chat limits forced first-frame scroll corrections"
+  )
+  assertIncludes(
+    timeline,
+    "const INITIAL_SCROLL_SETTLE_TIMEOUT_MS = 500",
+    "initial tail alignment stays available while async row measurements arrive"
+  )
+  assertIncludes(
+    timeline,
+    "window.setTimeout(() => {",
+    "initial tail alignment does not consume consecutive animation frames while waiting for measurements"
+  )
+  assertIncludes(
+    timeline,
+    "overscanCount={chatMessageListProps.isLoading ? 3 : 8}",
+    "streaming long chats reduce offscreen row mounting during recovery"
+  )
+  assertIncludes(
+    timeline,
     "key: threadId",
     "streaming row appends keep existing dynamic row measurements stable"
   )
@@ -186,6 +206,11 @@ function testLongChatsUseDynamicVirtualRows(): void {
     chat,
     "const isVirtualizedChat =",
     "chat chooses the virtual path only for long non-searching transcripts"
+  )
+  assertIncludes(
+    chat,
+    "messages={historyDisplayMessages}",
+    "streaming assistant text does not rebuild the full scroll navigator while persisted tool details remain available"
   )
   assertIncludes(
     chat,

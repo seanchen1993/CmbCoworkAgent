@@ -172,7 +172,8 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
 }, areChatMessageRowPropsEqual)
 
 export const VIRTUAL_CHAT_TIMELINE_THRESHOLD = 80
-const INITIAL_SCROLL_CORRECTION_LIMIT = 8
+const INITIAL_SCROLL_CORRECTION_LIMIT = 2
+const INITIAL_SCROLL_SETTLE_TIMEOUT_MS = 500
 const SCROLL_POSITION_PRESERVE_DISTANCE = 32
 
 interface VirtualChatTimelineItem {
@@ -284,7 +285,7 @@ export const VirtualChatTimeline = React.forwardRef<
   const initialScrollActiveRef = useRef(false)
   const initialScrollCorrectionsRef = useRef(0)
   const initialScrollFrameRef = useRef<number | null>(null)
-  const initialScrollSettledFrameRef = useRef<number | null>(null)
+  const initialScrollSettleTimeoutRef = useRef<number | null>(null)
   const scrollEndFrameRef = useRef<number | null>(null)
   const scrollEndRef = useRef<HTMLSpanElement>(null)
   const completionScrollTopRef = useRef<number | null>(null)
@@ -391,9 +392,9 @@ export const VirtualChatTimeline = React.forwardRef<
       return
     }
 
-    if (initialScrollSettledFrameRef.current !== null) {
-      cancelAnimationFrame(initialScrollSettledFrameRef.current)
-      initialScrollSettledFrameRef.current = null
+    if (initialScrollSettleTimeoutRef.current !== null) {
+      window.clearTimeout(initialScrollSettleTimeoutRef.current)
+      initialScrollSettleTimeoutRef.current = null
     }
     initialScrollFrameRef.current = requestAnimationFrame(() => {
       initialScrollFrameRef.current = null
@@ -406,16 +407,14 @@ export const VirtualChatTimeline = React.forwardRef<
         return
       }
 
-      initialScrollSettledFrameRef.current = requestAnimationFrame(() => {
-        if (!initialScrollActiveRef.current) return
-        scrollToLastRow()
-        initialScrollSettledFrameRef.current = requestAnimationFrame(() => {
-          initialScrollSettledFrameRef.current = null
-          if (!initialScrollActiveRef.current) return
-          scrollToLastRow()
+      // Keep the bounded correction window open for async row measurements
+      // without scheduling extra scrolls in consecutive animation frames.
+      initialScrollSettleTimeoutRef.current = window.setTimeout(() => {
+        initialScrollSettleTimeoutRef.current = null
+        if (document.visibilityState === "visible") {
           initialScrollActiveRef.current = false
-        })
-      })
+        }
+      }, INITIAL_SCROLL_SETTLE_TIMEOUT_MS)
     })
   }, [scrollToLastRow])
   const startInitialScrollCorrection = useCallback((): void => {
@@ -423,9 +422,9 @@ export const VirtualChatTimeline = React.forwardRef<
       cancelAnimationFrame(initialScrollFrameRef.current)
       initialScrollFrameRef.current = null
     }
-    if (initialScrollSettledFrameRef.current !== null) {
-      cancelAnimationFrame(initialScrollSettledFrameRef.current)
-      initialScrollSettledFrameRef.current = null
+    if (initialScrollSettleTimeoutRef.current !== null) {
+      window.clearTimeout(initialScrollSettleTimeoutRef.current)
+      initialScrollSettleTimeoutRef.current = null
     }
     initialScrollActiveRef.current = true
     initialScrollCorrectionsRef.current = 0
@@ -495,9 +494,9 @@ export const VirtualChatTimeline = React.forwardRef<
         cancelAnimationFrame(initialScrollFrameRef.current)
         initialScrollFrameRef.current = null
       }
-      if (initialScrollSettledFrameRef.current !== null) {
-        cancelAnimationFrame(initialScrollSettledFrameRef.current)
-        initialScrollSettledFrameRef.current = null
+      if (initialScrollSettleTimeoutRef.current !== null) {
+        window.clearTimeout(initialScrollSettleTimeoutRef.current)
+        initialScrollSettleTimeoutRef.current = null
       }
       if (scrollEndFrameRef.current !== null) {
         cancelAnimationFrame(scrollEndFrameRef.current)
@@ -532,7 +531,9 @@ export const VirtualChatTimeline = React.forwardRef<
       defaultHeight={720}
       listRef={listRef}
       onResize={handleListResize}
-      overscanCount={8}
+      // Returning to an actively streaming long thread can otherwise mount
+      // many offscreen Markdown/tool rows before the visible tail is usable.
+      overscanCount={chatMessageListProps.isLoading ? 3 : 8}
       rowComponent={VirtualChatTimelineRow}
       rowCount={items.length}
       rowHeight={dynamicRowHeight}

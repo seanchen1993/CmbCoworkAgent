@@ -6724,7 +6724,9 @@ export function ChatContainer({
       {nuxDialog}
 
       <ChatScrollNavigator
-        messages={displayMessages}
+        // Keep persisted request_user_input details in the navigator, but do
+        // not let the currently streaming turn invalidate it on every token.
+        messages={historyDisplayMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
         getViewport={getViewport}

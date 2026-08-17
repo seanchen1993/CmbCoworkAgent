@@ -33,7 +33,7 @@ export interface ChatScrollNavigatorRenderProps {
 }
 
 interface ChatScrollNavigatorProps {
-  messages: Message[]
+  messages: readonly Message[]
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   rightPanelCollapsed: boolean
   onScrollToQuestion?: () => void
@@ -127,7 +127,7 @@ function parseUserInputRequestResponse(
   }
 }
 
-function getChatScrollQuestions(messages: Message[]): ChatScrollQuestion[] {
+function getChatScrollQuestions(messages: readonly Message[]): ChatScrollQuestion[] {
   const questions: ChatScrollQuestion[] = []
   const userInputResponses = new Map<
     string,
