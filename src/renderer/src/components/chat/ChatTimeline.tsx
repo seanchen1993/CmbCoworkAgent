@@ -197,10 +197,10 @@ interface VirtualChatTimelineRowProps {
   >
 }
 
-interface VirtualChatTimelineRowRange {
-  startIndex: number
-  stopIndex: number
-}
+// interface VirtualChatTimelineRowRange {
+//   startIndex: number
+//   stopIndex: number
+// }
 
 function VirtualChatTimelineRow({
   ariaAttributes,
@@ -391,30 +391,30 @@ export const VirtualChatTimeline = React.forwardRef<
   const scrollToEnd = useCallback((): void => {
     queueScrollEndAnchor()
   }, [queueScrollEndAnchor])
-  const handleRowsRendered = useCallback(
-    (
-      _visibleRows: VirtualChatTimelineRowRange,
-      allRows: VirtualChatTimelineRowRange
-    ): void => {
-      if (!initialTailAnchorPendingRef.current) return
-
-      const lastRowIndex = lastRowIndexRef.current
-      if (allRows.stopIndex < lastRowIndex) {
-        scrollToLastRow()
-        return
-      }
-
-      const tail = scrollEndRef.current
-      if (!tail) {
-        scrollToLastRow()
-        return
-      }
-
-      initialTailAnchorPendingRef.current = false
-      tail.scrollIntoView({ block: "end", inline: "nearest" })
-    },
-    [scrollToLastRow]
-  )
+  // const handleRowsRendered = useCallback(
+  //   (
+  //     _visibleRows: VirtualChatTimelineRowRange,
+  //     allRows: VirtualChatTimelineRowRange
+  //   ): void => {
+  //     if (!initialTailAnchorPendingRef.current) return
+  //
+  //     const lastRowIndex = lastRowIndexRef.current
+  //     if (allRows.stopIndex < lastRowIndex) {
+  //       scrollToLastRow()
+  //       return
+  //     }
+  //
+  //     const tail = scrollEndRef.current
+  //     if (!tail) {
+  //       scrollToLastRow()
+  //       return
+  //     }
+  //
+  //     initialTailAnchorPendingRef.current = false
+  //     tail.scrollIntoView({ block: "end", inline: "nearest" })
+  //   },
+  //   [scrollToLastRow]
+  // )
   const scrollToMessage = useCallback(
     (messageId: string): boolean => {
       const messageRowIndex =
@@ -481,10 +481,9 @@ export const VirtualChatTimeline = React.forwardRef<
       className="flex-1 min-h-0"
       defaultHeight={720}
       listRef={listRef}
-      onRowsRendered={handleRowsRendered}
-      // Returning to an actively streaming long thread can otherwise mount
-      // many offscreen Markdown/tool rows before the visible tail is usable.
-      overscanCount={chatMessageListProps.isLoading ? 3 : 8}
+      // onRowsRendered={handleRowsRendered}
+      // Keep enough rows mounted to avoid blank space during fast scrolling.
+      overscanCount={8}
       rowComponent={VirtualChatTimelineRow}
       rowCount={rowCount}
       rowHeight={dynamicRowHeight}
