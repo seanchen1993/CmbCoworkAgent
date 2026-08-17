@@ -40,6 +40,7 @@ const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
 const chat = read("src/renderer/src/components/chat/ChatContainer.tsx")
 const timeline = read("src/renderer/src/components/chat/ChatTimeline.tsx")
+const chatTimelineScroll = read("src/renderer/src/components/chat/useChatTimelineScroll.ts")
 const scrollToBottomButton = read("src/renderer/src/components/chat/ChatScrollToBottomButton.tsx")
 
 function testBackgroundChunksAreDisplayGatedAfterPersistence(): void {
@@ -222,8 +223,18 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
   assertIncludes(
     chat,
-    "pendingUserMessageScrollIdRef",
+    "useChatTimelineScroll({",
+    "ChatContainer delegates timeline scrolling to an isolated hook"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    "pendingUserMessageScrollRef",
     "sending records one user-message anchor instead of following every stream chunk"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    "pending.threadId !== threadId",
+    "a previous thread's pending scroll cannot affect the active thread"
   )
   assertIncludes(
     chat,

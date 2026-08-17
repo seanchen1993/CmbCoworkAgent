@@ -129,14 +129,15 @@ import type {
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { ChatSearchOverlay } from "./ChatSearchOverlay"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
+import { ChatVirtualizationStatus } from "./ChatVirtualizationStatus"
 import {
   ChatMessageList,
-  type ChatVirtualTimelineHandle,
   VIRTUAL_CHAT_TIMELINE_THRESHOLD,
   VirtualChatTimeline
 } from "./ChatTimeline"
 import { ChatTimelineTail } from "./ChatTimelineTail"
 import { hasChatTimelineTailContent } from "./ChatTimelineTailState"
+import { useChatTimelineScroll } from "./useChatTimelineScroll"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -1861,14 +1862,8 @@ export function ChatContainer({
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const textareaResizeFrameRef = useRef<number | null>(null)
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const virtualTimelineRef = useRef<ChatVirtualTimelineHandle>(null)
-  const scrollEndRef = useRef<HTMLSpanElement>(null)
-  const pendingUserMessageScrollIdRef = useRef<string | null>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const [searchOpen, setSearchOpen] = useState(false)
-  const [conversationBottomPadding, setConversationBottomPadding] = useState<number>()
-  const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
   // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
   // declaration above for why this must survive ChatContainer remounts.
@@ -2540,14 +2535,6 @@ export function ChatContainer({
       updateThread
     ]
   )
-  const userInputScrollPadding = pendingUserInput
-    ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
-    : undefined
-  const timelineBottomPadding = Math.max(
-    userInputScrollPadding ?? 0,
-    conversationBottomPadding ?? 0
-  )
-
   const handleUserInputDialogLayoutChange = useCallback(
     (layout: UserInputRequestDialogLayout | null): void => {
       setUserInputDialogLayout((prev) => {
@@ -3453,62 +3440,34 @@ export function ChatContainer({
   const isVirtualizedChat =
     displayMessages.length >= VIRTUAL_CHAT_TIMELINE_THRESHOLD && !searchOpen
 
-  // Get the actual scrollable viewport element. Long conversations use the
-  // react-window list itself; short conversations keep the existing Radix
-  // viewport so all existing scroll behavior remains unchanged.
-  const getViewport = useCallback((): HTMLDivElement | null => {
-    if (isVirtualizedChat) return virtualTimelineRef.current?.element ?? null
-    return scrollRef.current?.querySelector(
-      "[data-radix-scroll-area-viewport]"
-    ) as HTMLDivElement | null
-  }, [isVirtualizedChat])
-
-  const scrollToMessage = useCallback(
-    (messageId: string): boolean => {
-      if (!isVirtualizedChat) return false
-      return virtualTimelineRef.current?.scrollToMessage(messageId) ?? false
-    },
-    [isVirtualizedChat]
+  const {
+    scrollRef,
+    virtualTimelineRef,
+    scrollEndRef,
+    contentMessageRefs,
+    conversationBottomPadding,
+    getViewport,
+    scrollToMessage,
+    scrollToConversationBottom,
+    requestUserMessageScroll,
+    handleScrollToConversationBottom
+  } = useChatTimelineScroll({
+    threadId,
+    isVirtualized: isVirtualizedChat,
+    messageCount: displayMessages.length,
+    historyLoading,
+    pendingApproval,
+    pendingUserInput,
+    userInputDialogLayout,
+    lastContentMessageId
+  })
+  const userInputScrollPadding = pendingUserInput
+    ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
+    : undefined
+  const timelineBottomPadding = Math.max(
+    userInputScrollPadding ?? 0,
+    conversationBottomPadding ?? 0
   )
-  const scrollToConversationBottom = useCallback((): boolean => {
-    if (isVirtualizedChat) {
-      const timeline = virtualTimelineRef.current
-      if (!timeline) return false
-      timeline.scrollToEnd()
-      return true
-    }
-    const scrollEnd = scrollEndRef.current
-    if (!scrollEnd) return false
-    scrollEnd.scrollIntoView({ block: "end" })
-    return true
-  }, [isVirtualizedChat])
-
-  const requestUserMessageScroll = useCallback((messageId: string): void => {
-    pendingUserMessageScrollIdRef.current = messageId
-    setConversationBottomPadding(Math.max(280, Math.round(window.innerHeight * 0.45)))
-  }, [])
-
-  // 发送后在留白提交后回底一次，让用户消息位于可视区上方。
-  useEffect(() => {
-    const messageId = pendingUserMessageScrollIdRef.current
-    if (!messageId) return
-
-    const frame = requestAnimationFrame(() => {
-      if (scrollToConversationBottom()) pendingUserMessageScrollIdRef.current = null
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [conversationBottomPadding, displayMessages, scrollToConversationBottom])
-
-  const handleScrollToConversationBottom = useCallback((): void => {
-    pendingUserMessageScrollIdRef.current = null
-    setConversationBottomPadding(undefined)
-    requestAnimationFrame(scrollToConversationBottom)
-  }, [scrollToConversationBottom])
-
-  useEffect(() => {
-    pendingUserMessageScrollIdRef.current = null
-    setConversationBottomPadding(undefined)
-  }, [threadId])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
@@ -3526,55 +3485,6 @@ export function ChatContainer({
     window.addEventListener("keydown", handleKeyDown, true)
     return () => window.removeEventListener("keydown", handleKeyDown, true)
   }, [])
-
-  useEffect(() => {
-    if (!pendingApproval) return
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [pendingApproval, getViewport])
-
-  useEffect(() => {
-    if (!pendingUserInput || !userInputDialogLayout) return
-    const viewport = getViewport()
-    if (!viewport) return
-
-    const frame = requestAnimationFrame(() => {
-      const targetElement = lastContentMessageId
-        ? contentMessageRefs.current.get(lastContentMessageId)
-        : null
-      const viewportRect = viewport.getBoundingClientRect()
-      const targetBottom = Math.max(viewportRect.top + 24, userInputDialogLayout.top - 12)
-
-      if (targetElement) {
-        const targetRect = targetElement.getBoundingClientRect()
-        const scrollDelta = targetRect.bottom - targetBottom
-        if (Math.abs(scrollDelta) > 1) {
-          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
-        }
-      } else {
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-      }
-    })
-
-    return () => cancelAnimationFrame(frame)
-  }, [
-    getViewport,
-    lastContentMessageId,
-    pendingUserInput,
-    userInputDialogLayout?.height,
-    userInputDialogLayout?.top
-  ])
-
-  //  滚动到底部
-  // 1.初始化
-  // 2.切换thread
-  useEffect(() => {
-    if (historyLoading || isVirtualizedChat) return undefined
-    scrollEndRef.current?.scrollIntoView({ block: "end" })
-    return undefined
-  }, [historyLoading, isVirtualizedChat, threadId])
 
   // Focus input on mount
   useEffect(() => {
@@ -3873,7 +3783,7 @@ export function ChatContainer({
       }
       return userMessage
     },
-    [appendMessage, getViewport, threadId]
+    [appendMessage, threadId]
   )
 
   const showGoalControlNotice = useCallback((rawMessage?: string): void => {
@@ -4377,8 +4287,7 @@ export function ChatContainer({
         // viewport — re-pin it to the bottom (mirrors the send path) so the last
         // message isn't left visually cut off above the panel.
         requestAnimationFrame(() => {
-          const viewport = getViewport()
-          if (viewport) viewport.scrollTop = viewport.scrollHeight
+          scrollToConversationBottom()
           inputRef.current?.focus()
         })
         return
@@ -7694,6 +7603,11 @@ export function ChatContainer({
                           YOLO
                         </button>
                       )}
+                      <ChatVirtualizationStatus
+                        isVirtualized={isVirtualizedChat}
+                        messageCount={displayMessages.length}
+                        threshold={VIRTUAL_CHAT_TIMELINE_THRESHOLD}
+                      />
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
                       <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
