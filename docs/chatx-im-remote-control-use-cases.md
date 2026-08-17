@@ -70,10 +70,10 @@ flowchart LR
 
 授权对象有两类，范围不同，文案要区分：
 
-| 授权对象 | 位置 | 含义 | 范围 |
-| --- | --- | --- | --- |
-| 会话 | 会话上的开关 | 驱动这一个已有会话并接收其结果 | 一次性 |
-| Feature | Feature 详情里的开关 | 允许从招乎在该 Feature 下新建会话 | 常设创建权限 |
+| 授权对象 | 位置                 | 含义                                          | 范围                         |
+| -------- | -------------------- | --------------------------------------------- | ---------------------------- |
+| 会话     | 会话上的开关         | 驱动这一个已有会话并接收其结果                | 一次性                       |
+| Feature  | Feature 详情里的开关 | 允许当前企业主体从招乎在该 Feature 下新建会话 | `principalId` 级常设创建权限 |
 
 从 Feature 新建成功的 Thread 会自动打开自己的“接入招乎”开关。之后 Feature 开关和会话开关互不继承：关闭 Feature 只阻止继续新建，关闭会话只撤销这一条 Thread。
 
@@ -121,12 +121,13 @@ sequenceDiagram
   participant Z as 招乎
 
   U->>D: 在 Feature 详情里允许远程新建会话
-  Note over D: 常设授权：之后可反复新建
+  Note over D: 常设授权：只绑定 principalId<br/>不预选 conversationKey，之后可反复新建
 
   U->>Z: "/会话"
   D-->>Z: 2. 支付网关改造 / 对账单导出（功能，新建会话）
   U->>Z: "/绑定 2"
 
+  D->>D: 采用当前招乎消息的 conversationKey
   D->>D: validateImFeatureTarget<br/>项目 active、目录存在、adapter 兼容<br/>Feature 未归档、工作区可安全解析
   alt 校验不通过
     D-->>Z: 拒绝并说明原因（不含绝对路径）

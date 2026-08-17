@@ -506,11 +506,12 @@ export interface BuiltinRobotFeatureGrantStatus {
   featureTitle: string
   state: "active" | "suspended" | "revoked"
   grantVersion: number
-  conversationKey: string
   suspendReason: string | null
 }
 
 export interface BuiltinRobotRemoteAccessOverview {
+  principalAvailable: boolean
+  principalReason: string | null
   routeAvailable: boolean
   routeReason: string | null
   activeRoute: BuiltinRobotRouteStatus | null

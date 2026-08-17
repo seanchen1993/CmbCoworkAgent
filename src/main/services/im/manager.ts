@@ -240,11 +240,14 @@ export class BuiltinRobotManager {
   }
 
   getRemoteAccessOverview(): BuiltinRobotRemoteAccessOverview {
-    const resolved = this.resolveGrantRoute(false)
+    const resolvedPrincipal = this.resolveGrantPrincipal(false)
+    const resolvedRoute = this.resolveGrantRoute(false)
     return {
-      routeAvailable: Boolean(resolved.route),
-      routeReason: resolved.reason,
-      activeRoute: resolved.status,
+      principalAvailable: Boolean(resolvedPrincipal.principalId),
+      principalReason: resolvedPrincipal.reason,
+      routeAvailable: Boolean(resolvedRoute.route),
+      routeReason: resolvedRoute.reason,
+      activeRoute: resolvedRoute.status,
       threadGrants: imRemoteAccessService.listThreadGrants().map((grant) => ({
         kind: "thread",
         grantId: grant.grantId,
@@ -255,7 +258,10 @@ export class BuiltinRobotManager {
         conversationKey: grant.conversationKey,
         suspendReason: grant.suspendReason
       })),
-      featureGrants: imRemoteAccessService.listFeatureGrants().map((grant) => ({
+      featureGrants: (resolvedPrincipal.principalId
+        ? imRemoteAccessService.listFeatureGrants(resolvedPrincipal.principalId)
+        : []
+      ).map((grant) => ({
         kind: "feature",
         grantId: grant.grantId,
         projectId: grant.projectId,
@@ -264,7 +270,6 @@ export class BuiltinRobotManager {
         featureTitle: grant.featureTitleSnapshot,
         state: grant.state,
         grantVersion: grant.grantVersion,
-        conversationKey: grant.conversationKey,
         suspendReason: grant.suspendReason
       }))
     }
@@ -296,7 +301,7 @@ export class BuiltinRobotManager {
     return this.enqueue(async () => {
       if (enabled) {
         await imRemoteAccessService.enableFeature({
-          route: this.requireGrantRoute(),
+          principalId: this.requireGrantPrincipal(),
           projectId,
           featureSlug
         })
@@ -310,19 +315,22 @@ export class BuiltinRobotManager {
 
   listGrantableFeatures(): Promise<BuiltinRobotGrantableFeature[]> {
     return this.enqueue(async () => {
+      const principalId = this.gatewayStatus.principalId
       const projects = await imFeatureBindingService.listRemoteProjects()
       const result: BuiltinRobotGrantableFeature[] = []
       for (const project of projects) {
         const features = await imFeatureBindingService.listRemoteFeatures(project.id)
         for (const feature of features) {
+          const grant = imRemoteAccessService.getFeatureGrant(project.id, feature.slug)
           result.push({
             projectId: project.id,
             projectName: project.name,
             featureSlug: feature.slug,
             featureTitle: feature.title,
             featureStatus: feature.status,
-            granted:
-              imRemoteAccessService.getFeatureGrant(project.id, feature.slug)?.state === "active"
+            granted: Boolean(
+              principalId && grant?.state === "active" && grant.principalId === principalId
+            )
           })
         }
       }
@@ -446,18 +454,36 @@ export class BuiltinRobotManager {
     return resolved.route
   }
 
+  private requireGrantPrincipal(): string {
+    const resolved = this.resolveGrantPrincipal(true)
+    if (!resolved.principalId) {
+      throw new Error(resolved.reason ?? "当前没有可用的登录身份")
+    }
+    return resolved.principalId
+  }
+
+  private resolveGrantPrincipal(requireOnline: boolean): {
+    principalId: string | null
+    reason: string | null
+  } {
+    if (requireOnline && this.gatewayStatus.connectionState !== "online") {
+      return { principalId: null, reason: "统一机器人尚未连接。" }
+    }
+    const principalId = this.gatewayStatus.principalId
+    if (!principalId) {
+      return { principalId: null, reason: "登录验证尚未完成。" }
+    }
+    return { principalId, reason: null }
+  }
+
   private resolveGrantRoute(requireOnline: boolean): {
     route: ImGrantRouteIdentity | null
     status: BuiltinRobotRouteStatus | null
     reason: string | null
   } {
-    if (requireOnline && this.gatewayStatus.connectionState !== "online") {
-      return { route: null, status: null, reason: "统一机器人尚未连接。" }
-    }
-    const principalId = this.gatewayStatus.principalId
-    if (!principalId) {
-      return { route: null, status: null, reason: "登录验证尚未完成。" }
-    }
+    const resolvedPrincipal = this.resolveGrantPrincipal(requireOnline)
+    const principalId = resolvedPrincipal.principalId
+    if (!principalId) return { route: null, status: null, reason: resolvedPrincipal.reason }
     const candidates = this.gatewayStatus.routes.filter(
       (route) => route.principalId === principalId && route.state === "active"
     )

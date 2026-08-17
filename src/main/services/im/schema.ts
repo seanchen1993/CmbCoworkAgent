@@ -148,7 +148,6 @@ function createFeatureGrantsTable(database: SqlJsDatabase): void {
     CREATE TABLE IF NOT EXISTS im_feature_grants (
       grant_id TEXT PRIMARY KEY,
       principal_id TEXT NOT NULL,
-      conversation_key TEXT NOT NULL,
       project_id TEXT NOT NULL,
       feature_slug TEXT NOT NULL,
       project_name_snapshot TEXT NOT NULL,
@@ -162,6 +161,30 @@ function createFeatureGrantsTable(database: SqlJsDatabase): void {
       UNIQUE(project_id, feature_slug)
     )
   `)
+}
+
+function ensureFeatureGrantsPrincipalScope(database: SqlJsDatabase): void {
+  if (
+    !tableHasColumn(database, "im_feature_grants", "conversation_key") &&
+    !tableHasColumn(database, "im_feature_grants", "device_epoch")
+  ) {
+    return
+  }
+  database.run("ALTER TABLE im_feature_grants RENAME TO im_feature_grants_before_principal_scope")
+  createFeatureGrantsTable(database)
+  database.run(`
+    INSERT INTO im_feature_grants (
+      grant_id, principal_id, project_id, feature_slug,
+      project_name_snapshot, feature_title_snapshot, state, grant_version,
+      suspend_reason, created_at, updated_at, revoked_at
+    )
+    SELECT
+      grant_id, principal_id, project_id, feature_slug,
+      project_name_snapshot, feature_title_snapshot, state, grant_version,
+      suspend_reason, created_at, updated_at, revoked_at
+    FROM im_feature_grants_before_principal_scope
+  `)
+  database.run("DROP TABLE im_feature_grants_before_principal_scope")
 }
 
 function createRemoteApprovalAuditTable(database: SqlJsDatabase): void {
@@ -384,27 +407,7 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
   })
 
   createFeatureGrantsTable(database)
-  rebuildWithoutLegacyColumn({
-    database,
-    table: "im_feature_grants",
-    legacyColumn: "device_epoch",
-    columns: [
-      "grant_id",
-      "principal_id",
-      "conversation_key",
-      "project_id",
-      "feature_slug",
-      "project_name_snapshot",
-      "feature_title_snapshot",
-      "state",
-      "grant_version",
-      "suspend_reason",
-      "created_at",
-      "updated_at",
-      "revoked_at"
-    ],
-    create: createFeatureGrantsTable
-  })
+  ensureFeatureGrantsPrincipalScope(database)
 
   createRemoteApprovalAuditTable(database)
   rebuildWithoutLegacyColumn({
@@ -446,7 +449,7 @@ export function ensureImServiceSchema(database: SqlJsDatabase): void {
     "CREATE INDEX IF NOT EXISTS idx_im_thread_grants_route ON im_thread_grants(conversation_key, state)"
   )
   database.run(
-    "CREATE INDEX IF NOT EXISTS idx_im_feature_grants_route ON im_feature_grants(conversation_key, state)"
+    "CREATE INDEX IF NOT EXISTS idx_im_feature_grants_principal ON im_feature_grants(principal_id, state)"
   )
   database.run(
     "CREATE INDEX IF NOT EXISTS idx_im_remote_approval_audit_thread ON im_remote_approval_audit(thread_id, created_at DESC)"

@@ -50,7 +50,7 @@
 
 **会话授权**：允许从招乎驱动这一个已有会话，并接收它的结果。开关在会话上。
 
-**Feature 新建授权**：允许从招乎在这个 Feature 下新建会话。开关在 Feature 详情里（实施规格 §6.5 已规划该位置）。新会话创建成功后自动获得独立的会话授权，后续完全由自己的会话开关管理。
+**Feature 新建授权**：允许当前企业主体从招乎在这个 Feature 下新建会话。开关在 Feature 详情里（实施规格 §6.5 已规划该位置）。该授权只绑定 `principalId`，不预先绑定任何 `conversationKey`；新会话创建成功后，才绑定到发起 `/绑定` 的招乎聊天，并自动获得独立的会话授权，后续完全由自己的会话开关管理。
 
 两者范围不同，UI 文案必须区分，不能都写成"允许远程访问"：会话授权只作用于一条已有 Thread；Feature 新建授权是常设的创建能力，意味着 IM 之后可以在该项目工作区里反复开新会话。关闭 Feature 新建授权不撤销已经创建的会话。
 
@@ -73,13 +73,16 @@
 
 **统一的是选择界面，不是执行语义。** 线程是不是项目模式由它自己的 metadata 决定，`getHarnessAgentContext` 本来就从 metadata 推导。项目模式会话仍须获得完整 harness context、插件注入、额外工作区、当前流程节点，并且仍然不注册 scheduler tool。不得以"不区分项目模式"为由简化执行侧。
 
-### 2.4 桌面会话如何知道推给谁
+### 2.4 授权范围与消息回传路由
 
-IM 建的线程有 `imDeliveryContext`，桌面自建的没有。需要"本机当前用户的推送目标"这一概念：
+Feature 新建授权只是创建权限，不会主动向招乎推送内容，因此不需要在打开开关时选择聊天路由：
 
-- 来源是网关为该 `principalId` 建立的 conversation route，也就是用户至少和机器人说过一次话；
-- 未建立路由时开关置灰，提示先在招乎向机器人发一条消息；
-- 按 route 当前的 `conversationKey` 与 `deviceEpoch` 投递，沿用现有 `expectedDeviceEpoch` 校验；设备被接管后旧设备的推送必须被网关拒绝，与定时提醒规则一致。
+- 桌面只记录 `principalId + projectId + featureSlug`；
+- 任一属于该 `principalId` 的招乎聊天发送 `/会话` 时都能看到该 Feature；
+- 用户选择 Feature 后，以这条入站消息自带的 `conversationKey` 创建 Project Mode Thread、Thread grant 和 `imDeliveryContext`；
+- 多个活动 `conversationKey` 不得阻止 Feature 新建开关。
+
+已有会话的“接入招乎”开关还包含桌面完成结果的主动推送，因此仍需一个明确的 conversation route 作为回传目标。路由不存在或不唯一时，只限制已有会话开关，不影响 Feature 新建授权。
 
 从 IM 侧创建的会话天然已接入，开关默认打开。
 
@@ -102,7 +105,7 @@ Clean cut 删掉的旧 `chatxRobotChatId` 隐式外发不得以任何形式复�
 
 沿用 `capability-guard` 的模式，每次执行前重新校验，任一不满足则 suspend 而不是静默降级：
 
-1. 该会话或 Feature 的接入授权仍然打开；
+1. 该会话授权仍属于当前 route，或 Feature 新建授权仍属于当前 `principalId`；
 2. 工作区目录仍存在且可访问；
 3. Thread 仍存在且元数据与 target snapshot 一致；
 4. conversation route 仍固定在本设备与当前 `deviceEpoch`；

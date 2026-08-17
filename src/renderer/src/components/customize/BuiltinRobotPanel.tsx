@@ -448,16 +448,15 @@ export function BuiltinRobotPanel(): React.JSX.Element {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
-            {!remoteAccess?.routeAvailable && (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
-                {remoteAccess?.routeReason ?? "正在读取招乎路由…"}
-              </div>
-            )}
-
             <section className="space-y-2">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <MessageSquareText className="size-4" /> 已有桌面会话
               </div>
+              {!remoteAccess?.routeAvailable && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
+                  {remoteAccess?.routeReason ?? "正在读取招乎路由…"}
+                </div>
+              )}
               {grantableThreads.length === 0 ? (
                 <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
                   暂无带有效工作区的可接入会话。普通会话和 Project Mode 会话均支持；
@@ -513,6 +512,11 @@ export function BuiltinRobotPanel(): React.JSX.Element {
               <div className="flex items-center gap-2 text-sm font-medium">
                 <FolderKanban className="size-4" /> Feature 远程新建会话
               </div>
+              {!remoteAccess?.principalAvailable && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
+                  {remoteAccess?.principalReason ?? "正在读取登录状态…"}
+                </div>
+              )}
               {grantableFeatures.length === 0 ? (
                 <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
                   暂无可开放远程新建会话的 Feature。
@@ -542,7 +546,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                           aria-label={`允许从招乎在 ${feature.featureTitle} 下新建会话`}
                           checked={enabled}
                           disabled={
-                            busyAction !== null || (!enabled && !remoteAccess?.routeAvailable)
+                            busyAction !== null || (!enabled && !remoteAccess?.principalAvailable)
                           }
                           onCheckedChange={(checked) =>
                             void performRemoteAccess(

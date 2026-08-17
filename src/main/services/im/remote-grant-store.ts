@@ -10,6 +10,10 @@ export interface ImGrantRouteIdentity {
   conversationKey: string
 }
 
+export interface ImFeatureGrantIdentity {
+  principalId: string
+}
+
 export interface ImThreadGrantRecord extends ImGrantRouteIdentity {
   kind: "thread"
   grantId: string
@@ -23,7 +27,7 @@ export interface ImThreadGrantRecord extends ImGrantRouteIdentity {
   revokedAt: number | null
 }
 
-export interface ImFeatureGrantRecord extends ImGrantRouteIdentity {
+export interface ImFeatureGrantRecord extends ImFeatureGrantIdentity {
   kind: "feature"
   grantId: string
   projectId: string
@@ -55,7 +59,6 @@ interface ThreadGrantRow {
 interface FeatureGrantRow {
   grant_id: string
   principal_id: string
-  conversation_key: string
   project_id: string
   feature_slug: string
   project_name_snapshot: string
@@ -95,6 +98,10 @@ function route(input: ImGrantRouteIdentity): ImGrantRouteIdentity {
   }
 }
 
+function featureIdentity(input: ImFeatureGrantIdentity): ImFeatureGrantIdentity {
+  return { principalId: required(input.principalId, "principalId") }
+}
+
 function hydrateThread(row: ThreadGrantRow): ImThreadGrantRecord {
   return {
     kind: "thread",
@@ -117,7 +124,6 @@ function hydrateFeature(row: FeatureGrantRow): ImFeatureGrantRecord {
     kind: "feature",
     grantId: row.grant_id,
     principalId: row.principal_id,
-    conversationKey: row.conversation_key,
     projectId: row.project_id,
     featureSlug: row.feature_slug,
     projectNameSnapshot: row.project_name_snapshot,
@@ -188,14 +194,14 @@ export class ImRemoteGrantStore {
     ).map(hydrateThread)
   }
 
-  listFeatureGrants(conversationKey?: string): ImFeatureGrantRecord[] {
+  listFeatureGrants(principalId?: string): ImFeatureGrantRecord[] {
     const database = this.dependencies.getDatabase()
     return readAll<FeatureGrantRow>(
       database,
-      conversationKey
-        ? "SELECT * FROM im_feature_grants WHERE conversation_key = ? ORDER BY updated_at DESC, grant_id ASC"
+      principalId
+        ? "SELECT * FROM im_feature_grants WHERE principal_id = ? ORDER BY updated_at DESC, grant_id ASC"
         : "SELECT * FROM im_feature_grants ORDER BY updated_at DESC, grant_id ASC",
-      conversationKey ? [required(conversationKey, "conversationKey")] : []
+      principalId ? [required(principalId, "principalId")] : []
     ).map(hydrateFeature)
   }
 
@@ -234,13 +240,13 @@ export class ImRemoteGrantStore {
   }
 
   async enableFeatureGrant(input: {
-    route: ImGrantRouteIdentity
+    principalId: string
     projectId: string
     featureSlug: string
     projectName: string
     featureTitle: string
   }): Promise<ImFeatureGrantRecord> {
-    const identity = route(input.route)
+    const identity = featureIdentity(input)
     const projectId = required(input.projectId, "projectId")
     const featureSlug = required(input.featureSlug, "featureSlug")
     const projectName = required(input.projectName, "projectName")
@@ -251,14 +257,13 @@ export class ImRemoteGrantStore {
     if (!existing) {
       database.run(
         `INSERT INTO im_feature_grants (
-           grant_id, principal_id, conversation_key, project_id, feature_slug,
+           grant_id, principal_id, project_id, feature_slug,
            project_name_snapshot, feature_title_snapshot, state, grant_version,
            suspend_reason, created_at, updated_at, revoked_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 1, NULL, ?, ?, NULL)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, 'active', 1, NULL, ?, ?, NULL)`,
         [
           this.createId(),
           identity.principalId,
-          identity.conversationKey,
           projectId,
           featureSlug,
           projectName,
@@ -270,19 +275,11 @@ export class ImRemoteGrantStore {
     } else {
       database.run(
         `UPDATE im_feature_grants
-         SET principal_id = ?, conversation_key = ?,
-             project_name_snapshot = ?, feature_title_snapshot = ?, state = 'active',
+         SET principal_id = ?, project_name_snapshot = ?, feature_title_snapshot = ?, state = 'active',
              grant_version = grant_version + 1, suspend_reason = NULL,
              updated_at = ?, revoked_at = NULL
          WHERE grant_id = ?`,
-        [
-          identity.principalId,
-          identity.conversationKey,
-          projectName,
-          featureTitle,
-          now,
-          existing.grantId
-        ]
+        [identity.principalId, projectName, featureTitle, now, existing.grantId]
       )
     }
     this.dependencies.markDirty()
@@ -328,7 +325,10 @@ export class ImRemoteGrantStore {
     threadId: string
   }): ImThreadGrantRecord {
     const grant = this.getThreadGrantById(input.grantId)
-    this.assertActive(grant, input.grantVersion, input.route)
+    this.assertActive(grant, input.grantVersion)
+    if (!sameRoute(grant!, route(input.route))) {
+      throw new ImRemoteGrantError("GRANT_ROUTE_MISMATCH", "Remote grant route changed")
+    }
     if (grant!.threadId !== input.threadId) {
       throw new ImRemoteGrantError("GRANT_ROUTE_MISMATCH", "Thread grant target differs")
     }
@@ -338,12 +338,15 @@ export class ImRemoteGrantStore {
   assertActiveFeatureGrant(input: {
     grantId: string
     grantVersion: number
-    route: ImGrantRouteIdentity
+    principalId: string
     projectId: string
     featureSlug: string
   }): ImFeatureGrantRecord {
     const grant = this.getFeatureGrantById(input.grantId)
-    this.assertActive(grant, input.grantVersion, input.route)
+    this.assertActive(grant, input.grantVersion)
+    if (grant!.principalId !== required(input.principalId, "principalId")) {
+      throw new ImRemoteGrantError("GRANT_ROUTE_MISMATCH", "Feature grant principal changed")
+    }
     if (grant!.projectId !== input.projectId || grant!.featureSlug !== input.featureSlug) {
       throw new ImRemoteGrantError("GRANT_ROUTE_MISMATCH", "Feature grant target differs")
     }
@@ -352,8 +355,7 @@ export class ImRemoteGrantStore {
 
   private assertActive(
     grant: ImThreadGrantRecord | ImFeatureGrantRecord | null,
-    expectedVersion: number,
-    expectedRoute: ImGrantRouteIdentity
+    expectedVersion: number
   ): void {
     if (!grant) throw new ImRemoteGrantError("GRANT_NOT_FOUND", "Remote grant is missing")
     if (grant.state !== "active") {
@@ -361,9 +363,6 @@ export class ImRemoteGrantStore {
     }
     if (grant.grantVersion !== expectedVersion) {
       throw new ImRemoteGrantError("GRANT_VERSION_MISMATCH", "Remote grant version changed")
-    }
-    if (!sameRoute(grant, route(expectedRoute))) {
-      throw new ImRemoteGrantError("GRANT_ROUTE_MISMATCH", "Remote grant route changed")
     }
   }
 

@@ -33,6 +33,7 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   const rightPanel = source("src/renderer/src/components/panels/RightPanel.tsx")
   const remoteDisplay = source("src/renderer/src/lib/remote-thread-display.ts")
   const robotPanel = source("src/renderer/src/components/customize/BuiltinRobotPanel.tsx")
+  const robotManager = source("src/main/services/im/manager.ts")
   const remoteAccessSwitcher = source(
     "src/renderer/src/components/chat/ThreadRemoteAccessSwitcher.tsx"
   )
@@ -86,8 +87,16 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(robotPanel.includes("普通会话和 Project Mode 会话均支持"))
   assert(robotPanel.includes("Feature 开关只控制能否从招乎"))
   assert(robotPanel.includes("Feature 远程新建会话"))
+  assert(robotPanel.includes("!remoteAccess?.principalAvailable"))
+  const featureSetter = robotManager.slice(
+    robotManager.indexOf("setFeatureRemoteAccess("),
+    robotManager.indexOf("listGrantableFeatures()")
+  )
+  assert(featureSetter.includes("requireGrantPrincipal()"))
+  assert(!featureSetter.includes("requireGrantRoute()"))
   assert(harnessBoard.includes("Feature 远程新建会话"))
   assert(harnessBoard.includes("window.api.builtinRobot.setFeatureRemoteAccess"))
+  assert(harnessBoard.includes("const principalAvailable = remoteAccess?.principalAvailable"))
   assert(harnessBoard.includes("关闭后，下方已经接入的会话仍由各自的会话开关管理"))
 }
 

@@ -201,7 +201,7 @@ export class ImRemoteCapabilityGuard {
         this.dependencies.grants.assertActiveFeatureGrant({
           grantId: snapshot.grantId,
           grantVersion: snapshot.grantVersion,
-          route,
+          principalId: event.principalId,
           projectId: snapshot.projectId,
           featureSlug: snapshot.featureSlug
         })

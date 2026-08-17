@@ -107,10 +107,7 @@ async function queueEvent(context: Context, index: number) {
 
 async function queueFeatureEvent(context: Context, index: number) {
   await context.grants.enableFeatureGrant({
-    route: {
-      principalId: "principal-1",
-      conversationKey: "conversation-1"
-    },
+    principalId: "principal-1",
     projectId: featureTarget.projectId,
     featureSlug: featureTarget.featureSlug,
     projectName: featureTarget.projectName ?? "Project",

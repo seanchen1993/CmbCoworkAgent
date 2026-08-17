@@ -5963,7 +5963,7 @@ function RemoteFeatureAccessPanel({
     (grant) => grant.projectId === projectId && grant.featureSlug === featureSlug
   )
   const enabled = featureGrant?.state === "active"
-  const routeAvailable = remoteAccess?.routeAvailable === true
+  const principalAvailable = remoteAccess?.principalAvailable === true
   const relatedSessions =
     remoteAccess?.threadGrants.filter((grant) => {
       if (grant.state !== "active") return false
@@ -5979,14 +5979,14 @@ function RemoteFeatureAccessPanel({
     ? "正在读取远程访问状态…"
     : !status.settings.enabled
       ? "内置统一机器人未启用"
-      : !routeAvailable
-        ? (remoteAccess?.routeReason ?? "招乎连接尚未就绪")
+      : !principalAvailable
+        ? (remoteAccess?.principalReason ?? "登录验证尚未完成")
         : enabled
           ? "已允许从招乎在此 Feature 下新建会话"
           : "尚未开放从招乎新建会话"
 
   const toggleFeatureCreation = async (nextEnabled: boolean): Promise<void> => {
-    if (busy || (!nextEnabled && !enabled) || (nextEnabled && !routeAvailable)) return
+    if (busy || (!nextEnabled && !enabled) || (nextEnabled && !principalAvailable)) return
     setBusy(true)
     try {
       const next = await window.api.builtinRobot.setFeatureRemoteAccess(
@@ -6015,7 +6015,7 @@ function RemoteFeatureAccessPanel({
         <Switch
           aria-label="允许从招乎在此 Feature 下新建会话"
           checked={enabled}
-          disabled={busy || (!enabled && !routeAvailable)}
+          disabled={busy || (!enabled && !principalAvailable)}
           onCheckedChange={(checked) => void toggleFeatureCreation(checked)}
         />
       </div>

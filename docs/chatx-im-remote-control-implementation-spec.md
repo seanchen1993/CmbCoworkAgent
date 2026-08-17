@@ -64,14 +64,18 @@ Thread metadata 可以保存非权威的 UI 展示信息，但以下行为只允
 
 #### `im_feature_grants`
 
-| 字段                                             | 约束与语义                 |
-| ------------------------------------------------ | -------------------------- |
-| `grant_id`                                       | UUID，主键                 |
-| `principal_id / conversation_key / device_epoch` | 同上                       |
-| `project_id / feature_slug`                      | Feature 权威身份；组合唯一 |
-| `project_name_snapshot / feature_title_snapshot` | 授权时标题快照             |
-| `state / grant_version / suspend_reason`         | 同上                       |
-| `created_at / updated_at / revoked_at`           | 同上                       |
+| 字段                                             | 约束与语义                         |
+| ------------------------------------------------ | ---------------------------------- |
+| `grant_id`                                       | UUID，主键                         |
+| `principal_id`                                   | 获准远程新建会话的 opaque 企业主体 |
+| `project_id / feature_slug`                      | Feature 权威身份；组合唯一         |
+| `project_name_snapshot / feature_title_snapshot` | 授权时标题快照                     |
+| `state / grant_version / suspend_reason`         | 同上                               |
+| `created_at / updated_at / revoked_at`           | 同上                               |
+
+Feature grant 不保存 `conversation_key`：它只表达某个 `principalId` 的创建权限。具体
+`conversationKey` 在招乎用户执行 `/绑定` 时由当前入站消息确定，并写入新建 Thread 的独立
+Thread grant 与 `imDeliveryContext`。
 
 每次变更必须先写 SQL.js 内存库、`markDirty()`，再 `flushStrict()`，成功后才向 UI 或 IM
 确认。登录主体变化、route 被其他设备接管、项目/Feature 失效时授权进入 `suspended`，
@@ -84,7 +88,7 @@ Gateway 的 `WELCOME` 和每个 `SYNC_STATE.routes[]` 都必须返回 `principal
 1. `WELCOME.principalId` 非空；
 2. route 的 `principalId` 与 WELCOME 相同；
 3. route 的 `conversationKey + deviceEpoch + deviceId` 仍指向本设备；
-4. 一个授权只能绑定一条明确的 active route；不存在或存在多个无法消歧的 route 时，桌面开关禁用。
+4. Thread grant 只能绑定一条明确的 active route；不存在或存在多个无法消歧的 route 时，仅禁用已有会话开关；Feature 新建开关只要求 `principalId` 已验证。
 
 `principalId` 只能来自 Gateway 对 `ystIdToken` 的验签结果，不能由 HELLO payload 或桌面
 自行声明。Gateway 仍使用现有 `REMOTE_REPLY` 处理主动消息，`eventId` 为空表示 proactive delivery。
@@ -111,15 +115,14 @@ type ImTargetSnapshot =
 - `thread` 只表示桌面已存在的普通 Thread；
 - `feature` 表示从 Feature grant 创建或复用的远程 Thread；
 - Target snapshot 固化消息入站时的选择；切换目标不改变已排队事件；
-- 每轮执行前必须重新读取 grant 并核对 `grantId + grantVersion + principalId +
-conversationKey + deviceEpoch`；编号列表本身不构成授权。
+- 每轮执行前必须重新读取 grant：Thread grant 核对 `grantId + grantVersion + principalId + conversationKey`，Feature grant 核对 `grantId + grantVersion + principalId`；编号列表本身不构成授权。
 
 ### 2.5 `/会话` 选择上下文
 
 `/会话` 一次列出：
 
 1. active thread grants；
-2. active feature grants；若该 Feature 已有 active 远程会话，则显示该会话并复用；
+2. 当前 `principalId` 的 active feature grants，始终作为“新建会话”入口；
 3. 不列收件箱，收件箱由 `/收件箱` 返回。
 
 一级 selection context 的候选项必须保存：
@@ -194,8 +197,9 @@ desktop-turn:<threadId>:<finalAssistantMessageId>
 - `agentMode: "normal"`；
 - Project Mode 不注册 scheduler tool。
 
-同一 `conversationKey + projectId + featureSlug` 最多保留一个 active 远程 Thread。
-Thread 被删除、标记 historical 或 Target suspended 后，下一次绑定才创建新 Thread。
+每次选择 Feature 条目都在发起操作的 `conversationKey` 下创建一条新的 Project Mode
+Thread，并自动创建独立的 Thread grant。关闭 Feature grant 只阻止后续新建，不撤销已经
+创建的 Thread grant。
 
 ### 3.4 每轮 capability guard
 

@@ -481,8 +481,7 @@ export class ImRemoteApprovalService {
           !grant ||
           grant.state !== "active" ||
           grant.grantVersion !== target.snapshot.grantVersion ||
-          grant.principalId !== conversation.principalId ||
-          grant.conversationKey !== conversation.conversationKey
+          grant.principalId !== conversation.principalId
         ) {
           continue
         }

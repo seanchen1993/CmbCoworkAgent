@@ -335,6 +335,61 @@ async function testRemoteControlSchemaMigrationPreservesV1Rows(): Promise<void> 
   }
 }
 
+async function testFeatureGrantPrincipalScopeMigration(): Promise<void> {
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  try {
+    database.run(`
+      CREATE TABLE im_feature_grants (
+        grant_id TEXT PRIMARY KEY,
+        principal_id TEXT NOT NULL,
+        conversation_key TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        feature_slug TEXT NOT NULL,
+        project_name_snapshot TEXT NOT NULL,
+        feature_title_snapshot TEXT NOT NULL,
+        state TEXT NOT NULL,
+        grant_version INTEGER NOT NULL,
+        suspend_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        revoked_at INTEGER,
+        UNIQUE(project_id, feature_slug)
+      )
+    `)
+    database.run(
+      "CREATE INDEX idx_im_feature_grants_route ON im_feature_grants(conversation_key, state)"
+    )
+    database.run(
+      `INSERT INTO im_feature_grants VALUES (
+        'feature-grant-current', 'principal-1', 'conversation-1', 'project-1', 'feature-1',
+        '项目一', '功能一', 'active', 3, NULL, 10, 11, NULL
+      )`
+    )
+
+    ensureImServiceSchema(database)
+    ensureImServiceSchema(database)
+
+    const columns = database
+      .exec("PRAGMA table_info(im_feature_grants)")
+      .flatMap((result) => result.values.map((row) => String(row[1])))
+    assert(!columns.includes("conversation_key"))
+    assert.deepEqual(
+      database.exec(
+        "SELECT grant_id, principal_id, project_id, feature_slug, state, grant_version FROM im_feature_grants"
+      )[0]?.values[0],
+      ["feature-grant-current", "principal-1", "project-1", "feature-1", "active", 3]
+    )
+    const indexes = database
+      .exec("PRAGMA index_list(im_feature_grants)")
+      .flatMap((result) => result.values.map((row) => String(row[1])))
+    assert(indexes.includes("idx_im_feature_grants_principal"))
+    assert(!indexes.includes("idx_im_feature_grants_route"))
+  } finally {
+    database.close()
+  }
+}
+
 async function testSingleDesktopSchemaMigrationPreservesLegacyRows(): Promise<void> {
   const SQL = await initSqlJs()
   const database = new SQL.Database()
@@ -442,6 +497,16 @@ async function testSingleDesktopSchemaMigrationPreservesLegacyRows(): Promise<vo
         "SELECT principal_id, state, last_received_seq FROM im_conversations WHERE conversation_key = 'conversation-legacy'"
       )[0]?.values[0],
       ["principal-1", "active", 1]
+    )
+    assert(
+      !columns("im_feature_grants").includes("conversation_key"),
+      "Feature grants must migrate from conversation scope to principal scope"
+    )
+    assert.deepEqual(
+      database.exec(
+        "SELECT principal_id, project_id, feature_slug, state FROM im_feature_grants WHERE grant_id = 'feature-grant-legacy'"
+      )[0]?.values[0],
+      ["principal-1", "project-1", "feature-1", "active"]
     )
   } finally {
     database.close()
@@ -885,6 +950,7 @@ async function main(): Promise<void> {
     testImArchitectureBoundaries,
     testSchemaAndTargetLifecycle,
     testRemoteControlSchemaMigrationPreservesV1Rows,
+    testFeatureGrantPrincipalScopeMigration,
     testSingleDesktopSchemaMigrationPreservesLegacyRows,
     testDurableDedupAndImmutableSnapshot,
     testPermitStateMachineAndAtomicOutbox,

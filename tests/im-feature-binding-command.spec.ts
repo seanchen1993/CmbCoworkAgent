@@ -237,7 +237,7 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
     assert(retired.includes("已合并为 /会话"))
 
     await context.access.enableFeature({
-      route: commandInput,
+      principalId: commandInput.principalId,
       projectId: "project-secret-id",
       featureSlug: "feature-pay"
     })
@@ -334,15 +334,81 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
   }
 }
 
+async function testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation(): Promise<void> {
+  const context = await createContext()
+  const firstRoute = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  }
+  const secondRoute = {
+    conversationKey: "conversation-2",
+    principalId: "principal-1"
+  }
+  const foreignRoute = {
+    conversationKey: "conversation-foreign",
+    principalId: "principal-2"
+  }
+  try {
+    await context.conversations.ensureConversation(secondRoute)
+    await context.conversations.ensureConversation(foreignRoute)
+    const grant = await context.access.enableFeature({
+      principalId: firstRoute.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+
+    assert(!("conversationKey" in grant), "Feature grant must not retain a chat route")
+    for (const route of [firstRoute, secondRoute]) {
+      const targets = await context.access.listAuthorizedTargets(route)
+      assert(
+        targets.some(
+          (target) => target.kind === "feature_grant" && target.grantId === grant.grantId
+        ),
+        `Feature grant must be visible from ${route.conversationKey}`
+      )
+    }
+    assert.equal(
+      (await context.access.listAuthorizedTargets(foreignRoute)).some(
+        (target) => target.kind === "feature_grant"
+      ),
+      false,
+      "Feature grant must not cross principals"
+    )
+    await assert.rejects(() =>
+      context.access.bindFeatureGrant({
+        route: foreignRoute,
+        grantId: grant.grantId,
+        grantVersion: grant.grantVersion
+      })
+    )
+
+    const target = await context.access.bindFeatureGrant({
+      route: secondRoute,
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.conversationKey, "conversation-2")
+    assert.equal(context.conversations.getActiveTarget("conversation-2")?.targetId, target.targetId)
+    const metadata = JSON.parse(context.threads.get(target.threadId)!.metadata!) as Record<
+      string,
+      unknown
+    >
+    assert.equal(
+      (metadata.imDeliveryContext as Record<string, unknown>).conversationKey,
+      "conversation-2"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession(): Promise<void> {
   const context = await createContext()
   let projectModeAvailable = true
   try {
     const grant = await context.access.enableFeature({
-      route: {
-        conversationKey: "conversation-1",
-        principalId: "principal-1"
-      },
+      principalId: "principal-1",
       projectId: "project-secret-id",
       featureSlug: "feature-pay"
     })
@@ -708,6 +774,10 @@ const tests: Array<[string, () => Promise<void>]> = [
   [
     "testFeatureCreateGrantCreatesIndependentThreadGrants",
     testFeatureCreateGrantCreatesIndependentThreadGrants
+  ],
+  [
+    "testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation",
+    testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation
   ],
   [
     "testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession",

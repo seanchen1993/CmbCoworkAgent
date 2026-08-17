@@ -92,11 +92,12 @@ function existingDirectory(path: string | undefined): string | null {
   }
 }
 
-function targetRouteMatches(
-  route: ImGrantRouteIdentity,
-  grant: ImThreadGrantRecord | ImFeatureGrantRecord
-): boolean {
+function threadGrantRouteMatches(route: ImGrantRouteIdentity, grant: ImThreadGrantRecord): boolean {
   return grant.principalId === route.principalId && grant.conversationKey === route.conversationKey
+}
+
+function featureGrantPrincipalMatches(principalId: string, grant: ImFeatureGrantRecord): boolean {
+  return grant.principalId === principalId
 }
 
 const goalStore = new SqlGoalStore()
@@ -140,11 +141,10 @@ export class ImRemoteAccessService {
   }
 
   async enableFeature(input: {
-    route: ImGrantRouteIdentity
+    principalId: string
     projectId: string
     featureSlug: string
   }): Promise<ImFeatureGrantRecord> {
-    await this.dependencies.conversations.ensureConversation(input.route)
     const validation = await this.dependencies.features.validateFeature(
       input.projectId,
       input.featureSlug
@@ -153,7 +153,7 @@ export class ImRemoteAccessService {
       throw new ImRemoteAccessError("REMOTE_FEATURE_UNAVAILABLE", validation.message)
     }
     return this.dependencies.grants.enableFeatureGrant({
-      route: input.route,
+      principalId: input.principalId,
       projectId: input.projectId,
       featureSlug: input.featureSlug,
       projectName: validation.project.name,
@@ -177,7 +177,7 @@ export class ImRemoteAccessService {
     )
     const targets: ImAuthorizedRemoteTarget[] = []
     for (const grant of this.dependencies.grants.listThreadGrants(route.conversationKey)) {
-      if (grant.state !== "active" || !targetRouteMatches(route, grant)) continue
+      if (grant.state !== "active" || !threadGrantRouteMatches(route, grant)) continue
       let thread: ThreadRow
       try {
         thread = this.validateGrantableThread(grant.threadId).thread
@@ -195,8 +195,9 @@ export class ImRemoteAccessService {
         sessionKind: projectMode ? "project" : "ordinary"
       })
     }
-    for (const grant of this.dependencies.grants.listFeatureGrants(route.conversationKey)) {
-      if (grant.state !== "active" || !targetRouteMatches(route, grant)) continue
+    for (const grant of this.dependencies.grants.listFeatureGrants(route.principalId)) {
+      if (grant.state !== "active" || !featureGrantPrincipalMatches(route.principalId, grant))
+        continue
       targets.push({
         kind: "feature_grant",
         grantId: grant.grantId,
@@ -271,7 +272,7 @@ export class ImRemoteAccessService {
     this.dependencies.grants.assertActiveFeatureGrant({
       grantId: input.grantId,
       grantVersion: input.grantVersion,
-      route: input.route,
+      principalId: input.route.principalId,
       projectId: grant.projectId,
       featureSlug: grant.featureSlug
     })
@@ -333,8 +334,8 @@ export class ImRemoteAccessService {
     return this.dependencies.grants.listThreadGrants()
   }
 
-  listFeatureGrants(): ImFeatureGrantRecord[] {
-    return this.dependencies.grants.listFeatureGrants()
+  listFeatureGrants(principalId?: string): ImFeatureGrantRecord[] {
+    return this.dependencies.grants.listFeatureGrants(principalId)
   }
 
   validateThreadForRemoteAccess(threadId: string): {
