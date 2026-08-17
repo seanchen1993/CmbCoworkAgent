@@ -2,6 +2,7 @@ import type { BrowserWindow } from "electron"
 import type { AgentStreamDisplayInterest } from "../../shared/agent-stream-display-interest"
 
 // 主进程的流式显示门控：后台或隐藏线程只保留最新快照，恢复可见时补发，避免逐 chunk 压垮渲染层。
+// 解决的问题是：Agent 仍然持续执行、流式数据仍然持续落盘，但对于当前不可见的线程，不要每个 token/chunk 都推给 renderer，避免渲染层被大量 IPC 消息压垮。等线程重新可见时，再补发一个最新快照。
 interface AgentStreamDisplaySnapshot {
   runToken: string
   sequence: number
@@ -44,6 +45,7 @@ export class AgentStreamDisplayGate {
     mode: string,
     data: unknown
   ): void {
+    this.trackWindow(window)
     let snapshotsByThread = this.snapshotsByWindow.get(window.id)
     if (!snapshotsByThread) {
       snapshotsByThread = new Map()
@@ -80,6 +82,7 @@ export class AgentStreamDisplayGate {
     threadId: string,
     interest: AgentStreamDisplayInterest
   ): boolean {
+    this.trackWindow(window)
     let interests = this.interestByWindow.get(window.id)
     if (!interests) {
       interests = new Map()
@@ -90,7 +93,7 @@ export class AgentStreamDisplayGate {
     return this.sendLatestSnapshot(window, threadId)
   }
 
-  trackWindow(window: BrowserWindow): void {
+  private trackWindow(window: BrowserWindow): void {
     if (this.trackedWindows.has(window.id)) return
     this.trackedWindows.add(window.id)
     window.once("closed", () => {

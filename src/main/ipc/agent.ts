@@ -4948,7 +4948,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!window || window.isDestroyed() || !threadId || !isAgentStreamDisplayInterest(interest)) {
         return false
       }
-      agentStreamDisplayGate.trackWindow(window)
       return agentStreamDisplayGate.setInterest(window, threadId, interest)
     }
   )
@@ -5467,8 +5466,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.error("[Agent] No window found")
         return
       }
-      agentStreamDisplayGate.trackWindow(window)
-
       const hasCoordinatorNotificationPrefixAtInvoke = message
         .trimStart()
         .startsWith(COORDINATOR_NOTIFICATION_PROMPT_PREFIX)
@@ -9093,9 +9090,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         agentStreamDisplayGate.clearThread(threadId, runToken)
         if (!replacedByNewRun) {
-          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-            console.warn("[Agent] ACL cleanup error:", err)
-          })
+          revokeSandboxAclsForRun(threadId)
           // Replacement clears the old queue before installing its controller;
           // this branch owns the non-replaced run's final cleanup.
           clearCurrentRunMessageQueue(threadId, runToken)
@@ -9151,7 +9146,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         console.error("[Agent] No window found for resume")
         return
       }
-      agentStreamDisplayGate.trackWindow(window)
       if (rejectAgentStartDuringShutdown(window, channel)) return
 
       // Get workspace path from thread metadata
@@ -10214,9 +10208,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         agentStreamDisplayGate.clearThread(threadId, runToken)
         if (!replacedByNewRun) {
-          LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-            console.warn("[Agent] ACL cleanup error:", err)
-          })
+          revokeSandboxAclsForRun(threadId)
           // A continuation handoff suppresses the prior controller's cleanup;
           // the terminal controller owns the queue's final cleanup.
           clearCurrentRunMessageQueue(threadId, runToken)
@@ -10265,7 +10257,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       console.error("[Agent] No window found for interrupt response")
       return
     }
-    agentStreamDisplayGate.trackWindow(window)
     if (rejectAgentStartDuringShutdown(window, channel)) return
     if (
       rejectRuntimeRestoredCheckpointResume(
@@ -11276,9 +11267,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }
       agentStreamDisplayGate.clearThread(threadId, runToken)
       if (!replacedByNewRun) {
-        LocalSandbox.revokeGrantedAclsForRun(threadId).catch((err) => {
-          console.warn("[Agent] ACL cleanup error:", err)
-        })
+        revokeSandboxAclsForRun(threadId)
         // A continuation handoff suppresses the prior controller's cleanup;
         // the terminal controller owns the queue's final cleanup.
         clearCurrentRunMessageQueue(threadId, runToken)

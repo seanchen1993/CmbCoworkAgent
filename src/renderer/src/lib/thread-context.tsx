@@ -63,6 +63,7 @@ import type {
 } from "@/types"
 import { useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
+import type { AgentStreamDisplayInterest } from "../../../shared/agent-stream-display-interest"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
@@ -5472,6 +5473,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     ]
   )
 
+  const setThreadStreamDisplayInterest = useCallback(
+    (threadId: string, interest: AgentStreamDisplayInterest): void => {
+      void window.api.agent
+        .setStreamDisplayInterest(threadId, interest)
+        .then((snapshotSent) => {
+          if (!snapshotSent || interest !== "foreground") return
+          // The snapshot is display-only. The durable transcript remains the
+          // authority for any chunks skipped while another thread was visible.
+          void getThreadActions(threadId).syncDurableTranscript().catch(() => {})
+        })
+        .catch((error: unknown) => {
+          console.warn("[ThreadProvider] Failed to update stream display interest:", error)
+        })
+    },
+    [getThreadActions]
+  )
+
   const initializeThread = useCallback(
     (threadId: string) => {
       if (initializedThreadsRef.current.has(threadId)) return
@@ -5484,14 +5502,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         // A panel can initialize a thread without selecting it. Mark it
         // background immediately so a concurrent run never inherits the
         // default foreground per-chunk display path.
-        void window.api.agent
-          .setStreamDisplayInterest(threadId, "background")
-          .catch((error: unknown) => {
-            console.warn(
-              "[ThreadProvider] Failed to mark newly initialized background thread:",
-              error
-            )
-          })
+        setThreadStreamDisplayInterest(threadId, "background")
       }
 
       setThreadStates((prev) => {
@@ -5775,21 +5786,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       updateThreadState,
       handleCustomEvent,
       scheduleWorkflowNotificationTurn,
-      getThreadActions
+      getThreadActions,
+      setThreadStreamDisplayInterest
     ]
   )
 
   useEffect(() => {
     const previousThreadId = previousCurrentThreadIdRef.current
     if (previousThreadId && previousThreadId !== currentThreadId) {
-      void window.api.agent
-        .setStreamDisplayInterest(previousThreadId, "background")
-        .catch((error: unknown) => {
-          console.warn(
-            "[ThreadProvider] Failed to pause background stream display:",
-            error
-          )
-        })
+      setThreadStreamDisplayInterest(previousThreadId, "background")
       void window.api.agent.unbindCoordinatorWorkers(previousThreadId).catch((error: unknown) => {
         console.warn(
           "[ThreadProvider] Failed to unbind inactive coordinator worker updates:",
@@ -5802,20 +5807,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     const updateStreamDisplayInterest = (): void => {
       if (!currentThreadId) return
       const interest = document.visibilityState === "visible" ? "foreground" : "hidden"
-      void window.api.agent
-        .setStreamDisplayInterest(currentThreadId, interest)
-        .then((snapshotSent) => {
-          if (!snapshotSent || interest !== "foreground") return
-          // The snapshot is display-only. The durable transcript remains the
-          // authority for any chunks skipped while another thread was visible.
-          void getThreadActions(currentThreadId).syncDurableTranscript().catch(() => {})
-        })
-        .catch((error: unknown) => {
-          console.warn(
-            "[ThreadProvider] Failed to update stream display interest:",
-            error
-          )
-        })
+      setThreadStreamDisplayInterest(currentThreadId, interest)
     }
 
     updateStreamDisplayInterest()
@@ -5867,8 +5859,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [
     currentThreadId,
-    getThreadActions,
     loadWorkspaceFilesInBackground,
+    setThreadStreamDisplayInterest,
     updateThreadState
   ])
 

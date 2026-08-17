@@ -29,7 +29,6 @@ function testBackgroundThreadsKeepOnlyTheLatestDisplaySnapshot(): void {
   })
   const window = makeWindow(1)
 
-  gate.trackWindow(window as never)
   gate.setInterest(window as never, "thread-a", "background")
   gate.remember(window as never, "thread-a", "run-a", "agent:stream:thread-a", "messages", {
     delta: "old"

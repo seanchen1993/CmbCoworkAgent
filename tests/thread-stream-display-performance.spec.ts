@@ -97,7 +97,7 @@ function testForegroundRecoveryUsesAuthoritativeValuesSnapshots(): void {
 function testThreadSwitchAndVisibilityDriveInterest(): void {
   assertIncludes(
     threadContext,
-    '.setStreamDisplayInterest(previousThreadId, "background")',
+    'setThreadStreamDisplayInterest(previousThreadId, "background")',
     "switching away from a thread pauses its renderer display stream"
   )
   assertIncludes(
@@ -112,7 +112,7 @@ function testThreadSwitchAndVisibilityDriveInterest(): void {
   )
   assertIncludes(
     threadContext,
-    "Failed to mark newly initialized background thread",
+    'setThreadStreamDisplayInterest(threadId, "background")',
     "threads initialized outside the selected chat are immediately background-gated"
   )
 }
