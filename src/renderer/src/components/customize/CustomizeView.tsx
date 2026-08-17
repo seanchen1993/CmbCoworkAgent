@@ -85,7 +85,6 @@ type MenuItem = {
   tab: CustomizeTab
   label: string
   icon: LucideIcon
-  beta?: boolean
   truncate?: boolean
 }
 
@@ -106,7 +105,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "plugins", label: "插件", icon: Puzzle },
       { tab: "scheduled", label: "定时任务", icon: Clock },
       { tab: "market", label: "应用市场", icon: ShoppingBag },
-      { tab: "sandbox", label: "沙盒环境", icon: Shield, beta: true }
+      { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
   {
@@ -116,9 +115,9 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "expertTeam", label: "专家团", icon: Users },
       { tab: "heartbeat", label: "心跳监控", icon: HeartPulse },
       { tab: "memory", label: "记忆管理", icon: Brain },
-      { tab: "taskMmd", label: "任务画布", icon: Network, beta: true },
-      { tab: "lsp", label: "Java LSP", icon: Code2, beta: true },
-      { tab: "evolution", label: "自优化", icon: GitBranch, beta: true },
+      { tab: "taskMmd", label: "任务画布", icon: Network },
+      { tab: "lsp", label: "Java LSP", icon: Code2 },
+      { tab: "evolution", label: "自优化", icon: GitBranch },
       { tab: "chatx", label: "机器人管理", icon: Cpu },
       { tab: "hooks", label: "钩子", icon: Webhook },
       { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true }
@@ -208,20 +207,9 @@ export function CustomizeView(): React.JSX.Element {
       >
         <Icon className="size-3 shrink-0" />
         <span className="min-w-0 flex-1 truncate whitespace-nowrap text-left">{item.label}</span>
-        {item.tab === "evolution" ? (
-          <div className="ml-auto flex items-center gap-1.5 shrink-0">
-            {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-            {item.beta && (
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-                Beta
-              </span>
-            )}
-          </div>
-        ) : item.beta ? (
-          <span className="ml-auto shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-            Beta
-          </span>
-        ) : null}
+        {item.tab === "evolution" && pendingEvolution && (
+          <span className="ml-auto size-2 shrink-0 rounded-full bg-orange-500" />
+        )}
       </button>
     )
   }

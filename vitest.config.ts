@@ -20,6 +20,7 @@ export default defineConfig({
       "src/renderer/src/components/dashboard/project-mode-export.test.ts",
       "src/renderer/src/components/update/release-notes.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",
+      "src/renderer/src/lib/apple-intelligence-glow.test.ts",
       "tests/close-to-tray.spec.ts"
     ]
   }

@@ -80,6 +80,10 @@ import {
   subscribePendingHarnessNextActions
 } from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
+import {
+  getAppleIntelligenceGlowEnabled,
+  subscribeAppleIntelligenceGlow
+} from "@/lib/apple-intelligence-glow"
 import { useShallow } from "zustand/react/shallow"
 import {
   useCurrentThread,
@@ -1901,6 +1905,11 @@ export function ChatContainer({
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
+  const appleIntelligenceGlowEnabled = useSyncExternalStore(
+    subscribeAppleIntelligenceGlow,
+    getAppleIntelligenceGlowEnabled,
+    () => false
+  )
   // NUX (first-run sandbox setup)
   const [showNux, setShowNux] = useState<boolean>(false)
   const [nuxLoading, setNuxLoading] = useState(false)
@@ -3159,6 +3168,10 @@ export function ChatContainer({
 
   // Apple Intelligence glow: loading 时显示，淡出由 CSS animation + onAnimationEnd 控制
   useEffect(() => {
+    if (!appleIntelligenceGlowEnabled) {
+      setGlowVisible(false)
+      return
+    }
     if (isLoading) {
       setGlowVisible(true)
       return
@@ -3166,7 +3179,7 @@ export function ChatContainer({
     // 兜底：如果 transitionEnd 未触发（快速切换等边界情况），3s 后强制隐藏
     const timer = setTimeout(() => setGlowVisible(false), 3000)
     return () => clearTimeout(timer)
-  }, [isLoading])
+  }, [appleIntelligenceGlowEnabled, isLoading])
 
   const historyDisplayMessages = useMemo(() => {
     const cleanedMessages = threadMessages
@@ -7284,7 +7297,7 @@ export function ChatContainer({
                         "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
                         pendingUserInput
                           ? "border-primary/25 bg-background"
-                          : glowVisible
+                          : appleIntelligenceGlowEnabled && glowVisible
                             ? "bg-white/80"
                             : "bg-white",
                         dragOver && "border-primary"
@@ -7302,7 +7315,7 @@ export function ChatContainer({
                           />
                         </div>
                       )}
-                      {glowVisible && !pendingUserInput && (
+                      {appleIntelligenceGlowEnabled && glowVisible && !pendingUserInput && (
                         <div
                           className={cn(
                             "siri-bg-glow rounded-xl",
