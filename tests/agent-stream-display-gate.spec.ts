@@ -75,10 +75,31 @@ function testCompletedRunsDoNotReplayStaleSnapshots(): void {
   assert(sent.length === 0, "no stale snapshot is delivered after completion")
 }
 
+function testBackgroundDeltasStayLiveUntilACompleteSnapshotExists(): void {
+  const activeRuns = new Set(["thread-a"])
+  const gate = new AgentStreamDisplayGate({
+    isThreadRunActive: (threadId) => activeRuns.has(threadId),
+    send: () => undefined
+  })
+  const window = makeWindow(3)
+
+  gate.setInterest(window as never, "thread-a", "hidden")
+  assert(
+    gate.shouldSendImmediately(window as never, "thread-a"),
+    "background deltas remain live until a complete values snapshot exists"
+  )
+  gate.remember(window as never, "thread-a", "run-a", "agent:stream:thread-a", "values", {})
+  assert(
+    !gate.shouldSendImmediately(window as never, "thread-a"),
+    "display backpressure starts after a complete values snapshot exists"
+  )
+}
+
 function main(): void {
   const tests = [
     testBackgroundThreadsKeepOnlyTheLatestDisplaySnapshot,
-    testCompletedRunsDoNotReplayStaleSnapshots
+    testCompletedRunsDoNotReplayStaleSnapshots,
+    testBackgroundDeltasStayLiveUntilACompleteSnapshotExists
   ]
   for (const test of tests) {
     test()

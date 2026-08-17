@@ -116,6 +116,31 @@ function testThreadSwitchAndVisibilityDriveInterest(): void {
   )
 }
 
+function testForegroundTokensAreFrameCoalesced(): void {
+  const holderStart = threadContext.indexOf("function ThreadStreamHolder(")
+  const holderBody = threadContext.slice(holderStart, holderStart + 8_000)
+  assert(holderStart >= 0, "thread stream holder exists")
+  assertIncludes(
+    holderBody,
+    "const pendingStreamUpdateRef",
+    "foreground tokens retain only the latest renderer snapshot"
+  )
+  assertIncludes(
+    holderBody,
+    "requestAnimationFrame(() => {",
+    "foreground token updates are committed at most once per animation frame"
+  )
+  assertIncludes(
+    holderBody,
+    "const immediate = loadingChanged || !hasSyncedStreamRef.current",
+    "initial and terminal loading transitions flush without a frame delay"
+  )
+  assert(
+    !holderBody.includes("}, [scheduleStreamUpdate, stream])"),
+    "the SDK stream wrapper identity does not bypass frame coalescing"
+  )
+}
+
 function testLongChatsUseDynamicVirtualRows(): void {
   assertIncludes(
     timeline,
@@ -126,6 +151,16 @@ function testLongChatsUseDynamicVirtualRows(): void {
     timeline,
     "useDynamicRowHeight",
     "virtual chat rows measure Markdown and tool cards dynamically"
+  )
+  assertIncludes(
+    timeline,
+    "key: threadId",
+    "streaming row appends keep existing dynamic row measurements stable"
+  )
+  assertIncludes(
+    timeline,
+    "completionScrollTopRef",
+    "finishing a response preserves the position of users reading history"
   )
   assert(
     !timeline.includes("viewport.scrollTop = viewport.scrollHeight"),
@@ -171,10 +206,9 @@ function testLongChatsUseDynamicVirtualRows(): void {
     'document.addEventListener("visibilitychange", handleVisibilityChange)',
     "initial tail correction resumes after a hidden window becomes visible"
   )
-  assertIncludes(
-    timeline,
-    "scrollToMessage(messageId: string): boolean",
-    "the isolated timeline owns virtual row lookup for message navigation"
+  assert(
+    !timeline.includes("pendingAssistantScrollFromMessageIdRef"),
+    "a completed assistant response never forces users reading history back to the bottom"
   )
   assertIncludes(
     timeline,
@@ -188,6 +222,11 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
   assertIncludes(
     chat,
+    "pendingUserMessageScrollIdRef",
+    "sending records one user-message anchor instead of following every stream chunk"
+  )
+  assertIncludes(
+    chat,
     "<ChatTimelineTail",
     "the chat container composes an isolated tail instead of duplicating tail rendering"
   )
@@ -196,11 +235,6 @@ function testLongChatsUseDynamicVirtualRows(): void {
     'from "./ChatTimeline"',
     "ChatContainer composes the isolated timeline instead of owning list internals"
   )
-  assertIncludes(
-    chat,
-    "展示 {displayMessages.length} 条",
-    "the chat status bar exposes the display-message count for manual verification"
-  )
 }
 
 function main(): void {
@@ -208,6 +242,7 @@ function main(): void {
     testBackgroundChunksAreDisplayGatedAfterPersistence,
     testForegroundRecoveryUsesAuthoritativeValuesSnapshots,
     testThreadSwitchAndVisibilityDriveInterest,
+    testForegroundTokensAreFrameCoalesced,
     testLongChatsUseDynamicVirtualRows
   ]
   for (const test of tests) {

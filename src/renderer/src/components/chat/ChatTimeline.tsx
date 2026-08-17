@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react"
+import React, {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef
+} from "react"
 import {
   List,
   type ListImperativeAPI,
@@ -67,6 +74,23 @@ type ChatMessageRowProps = Omit<
   isStreaming: boolean
   showAssistantMeta: boolean
   hasUserAfterHead: boolean
+}
+
+function areChatMessageRowPropsEqual(
+  previous: Readonly<ChatMessageRowProps>,
+  next: Readonly<ChatMessageRowProps>
+): boolean {
+  for (const key of Object.keys(previous) as Array<keyof ChatMessageRowProps>) {
+    if (key === "assistantDurationMsById" || key === "userSendTimeLabelById") continue
+    if (previous[key] !== next[key]) return false
+  }
+  const messageId = previous.message.id
+  return (
+    previous.assistantDurationMsById.get(messageId) ===
+      next.assistantDurationMsById.get(messageId) &&
+    previous.userSendTimeLabelById.get(messageId) ===
+      next.userSendTimeLabelById.get(messageId)
+  )
 }
 
 const ChatMessageRow = React.memo(function ChatMessageRow({
@@ -145,10 +169,11 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
       )}
     </div>
   )
-})
+}, areChatMessageRowPropsEqual)
 
 export const VIRTUAL_CHAT_TIMELINE_THRESHOLD = 80
 const INITIAL_SCROLL_CORRECTION_LIMIT = 8
+const SCROLL_POSITION_PRESERVE_DISTANCE = 32
 
 interface VirtualChatTimelineItem {
   id: string
@@ -262,9 +287,7 @@ export const VirtualChatTimeline = React.forwardRef<
   const initialScrollSettledFrameRef = useRef<number | null>(null)
   const scrollEndFrameRef = useRef<number | null>(null)
   const scrollEndRef = useRef<HTMLSpanElement>(null)
-  const pendingAssistantScrollFromMessageIdRef = useRef<string | null>(null)
-  const lastMessageIdRef = useRef<string | null>(null)
-  lastMessageIdRef.current = messages[messages.length - 1]?.id ?? null
+  const completionScrollTopRef = useRef<number | null>(null)
   const { items, visibleMessageLayout, messageRowIndexById } = useMemo(() => {
     const layout = buildVisibleMessageLayout(messages, (message) => {
       const hasHookLogChip =
@@ -309,7 +332,8 @@ export const VirtualChatTimeline = React.forwardRef<
 
   const dynamicRowHeight = useDynamicRowHeight({
     defaultRowHeight: 180,
-    key: items.map((item) => item.id).join("\u0000")
+    // Keep measured history rows stable while streaming appends new rows.
+    key: threadId
   })
   const rowProps = useMemo(
     () => ({
@@ -408,7 +432,6 @@ export const VirtualChatTimeline = React.forwardRef<
     queueInitialScrollCorrection()
   }, [queueInitialScrollCorrection])
   const scrollToEnd = useCallback((): void => {
-    pendingAssistantScrollFromMessageIdRef.current = lastMessageIdRef.current
     queueScrollEndAnchor()
   }, [queueScrollEndAnchor])
   const handleListResize = useCallback((): void => {
@@ -440,21 +463,27 @@ export const VirtualChatTimeline = React.forwardRef<
     [scrollToEnd, scrollToMessage]
   )
 
-  useEffect(() => {
-    const pendingMessageId = pendingAssistantScrollFromMessageIdRef.current
-    const lastMessage = messages[messages.length - 1]
-    if (
-      !pendingMessageId ||
-      !lastMessage ||
-      lastMessage.id === pendingMessageId ||
-      lastMessage.role !== "assistant"
-    ) {
-      return
+  // 回复完成会收缩 tail；用户正在阅读历史时，保持其当前 viewport 位置。
+  useLayoutEffect(() => {
+    if (chatMessageListProps.isLoading) {
+      completionScrollTopRef.current = null
+      return () => {
+        const viewport = listRef.current?.element
+        if (!viewport) return
+        const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        if (distanceToBottom > SCROLL_POSITION_PRESERVE_DISTANCE) {
+          completionScrollTopRef.current = viewport.scrollTop
+        }
+      }
     }
 
-    pendingAssistantScrollFromMessageIdRef.current = null
-    queueScrollEndAnchor()
-  }, [messages, queueScrollEndAnchor])
+    const scrollTop = completionScrollTopRef.current
+    if (scrollTop === null) return undefined
+    completionScrollTopRef.current = null
+    const viewport = listRef.current?.element
+    if (viewport) viewport.scrollTop = scrollTop
+    return undefined
+  }, [chatMessageListProps.isLoading])
 
   useEffect(() => {
     if (historyLoading) return undefined

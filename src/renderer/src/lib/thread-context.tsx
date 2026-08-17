@@ -1318,37 +1318,69 @@ function ThreadStreamHolder({
     onStreamUpdateRef.current = onStreamUpdate
   })
 
+  const pendingStreamUpdateRef = useRef<StreamData | null>(null)
+  const streamUpdateFrameRef = useRef<number | null>(null)
+  const flushStreamUpdate = useCallback((): void => {
+    const update = pendingStreamUpdateRef.current
+    pendingStreamUpdateRef.current = null
+    if (update) onStreamUpdateRef.current(update)
+  }, [])
+  const scheduleStreamUpdate = useCallback(
+    (update: StreamData, immediate = false): void => {
+      pendingStreamUpdateRef.current = update
+      if (immediate) {
+        if (streamUpdateFrameRef.current !== null) {
+          cancelAnimationFrame(streamUpdateFrameRef.current)
+          streamUpdateFrameRef.current = null
+        }
+        flushStreamUpdate()
+        return
+      }
+      if (streamUpdateFrameRef.current === null) {
+        streamUpdateFrameRef.current = requestAnimationFrame(() => {
+          streamUpdateFrameRef.current = null
+          flushStreamUpdate()
+        })
+      }
+    },
+    [flushStreamUpdate]
+  )
+  useEffect(
+    () => () => {
+      if (streamUpdateFrameRef.current !== null) {
+        cancelAnimationFrame(streamUpdateFrameRef.current)
+      }
+    },
+    []
+  )
+
   // Track previous values to detect actual changes
   const prevMessagesRef = useRef(stream.messages)
   const prevIsLoadingRef = useRef(stream.isLoading)
+  const hasSyncedStreamRef = useRef(false)
 
-  // Always sync on mount and when values actually change
+  // 正文 token 仅保留最新快照，每帧通知一次，终态立即提交。
   useEffect(() => {
     const messagesChanged = prevMessagesRef.current !== stream.messages
     const loadingChanged = prevIsLoadingRef.current !== stream.isLoading
 
-    if (messagesChanged || loadingChanged || !prevMessagesRef.current) {
+    if (messagesChanged || loadingChanged || !hasSyncedStreamRef.current) {
       prevMessagesRef.current = stream.messages
       prevIsLoadingRef.current = stream.isLoading
+      const immediate = loadingChanged || !hasSyncedStreamRef.current
+      hasSyncedStreamRef.current = true
 
-      onStreamUpdateRef.current({
-        messages: stream.messages,
-        liveMessages: [],
-        isLoading: stream.isLoading,
-        stream
-      })
+      scheduleStreamUpdate(
+        {
+          messages: stream.messages,
+          liveMessages: [],
+          isLoading: stream.isLoading,
+          stream
+        },
+        immediate
+      )
     }
   })
-
-  // Also sync immediately when stream instance changes
-  useEffect(() => {
-    onStreamUpdateRef.current({
-      messages: stream.messages,
-      liveMessages: [],
-      isLoading: stream.isLoading,
-      stream
-    })
-  }, [stream])
 
   return null
 }

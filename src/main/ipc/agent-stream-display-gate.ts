@@ -1,6 +1,7 @@
 import type { BrowserWindow } from "electron"
 import type { AgentStreamDisplayInterest } from "../../shared/agent-stream-display-interest"
 
+// 主进程的流式显示门控：后台或隐藏线程只保留最新快照，恢复可见时补发，避免逐 chunk 压垮渲染层。
 interface AgentStreamDisplaySnapshot {
   runToken: string
   sequence: number
@@ -29,7 +30,10 @@ export class AgentStreamDisplayGate {
 
   shouldSendImmediately(window: BrowserWindow, threadId: string): boolean {
     const interest = this.interestByWindow.get(window.id)?.get(threadId)
-    return interest !== "background" && interest !== "hidden"
+    if (interest !== "background" && interest !== "hidden") return true
+    // Without a complete values frame, replaying only the latest delta cannot
+    // reconstruct the renderer state safely.
+    return !this.snapshotsByWindow.get(window.id)?.get(threadId)?.has("values")
   }
 
   remember(

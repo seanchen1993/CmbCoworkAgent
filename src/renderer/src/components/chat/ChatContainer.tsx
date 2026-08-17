@@ -1864,8 +1864,10 @@ export function ChatContainer({
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualTimelineRef = useRef<ChatVirtualTimelineHandle>(null)
   const scrollEndRef = useRef<HTMLSpanElement>(null)
+  const pendingUserMessageScrollIdRef = useRef<string | null>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [conversationBottomPadding, setConversationBottomPadding] = useState<number>()
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
   // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
@@ -2541,6 +2543,10 @@ export function ChatContainer({
   const userInputScrollPadding = pendingUserInput
     ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
     : undefined
+  const timelineBottomPadding = Math.max(
+    userInputScrollPadding ?? 0,
+    conversationBottomPadding ?? 0
+  )
 
   const handleUserInputDialogLayoutChange = useCallback(
     (layout: UserInputRequestDialogLayout | null): void => {
@@ -3464,13 +3470,45 @@ export function ChatContainer({
     },
     [isVirtualizedChat]
   )
-  const scrollToConversationBottom = useCallback((): void => {
+  const scrollToConversationBottom = useCallback((): boolean => {
     if (isVirtualizedChat) {
-      virtualTimelineRef.current?.scrollToEnd()
-      return
+      const timeline = virtualTimelineRef.current
+      if (!timeline) return false
+      timeline.scrollToEnd()
+      return true
     }
-    scrollEndRef.current?.scrollIntoView({ block: "end" })
+    const scrollEnd = scrollEndRef.current
+    if (!scrollEnd) return false
+    scrollEnd.scrollIntoView({ block: "end" })
+    return true
   }, [isVirtualizedChat])
+
+  const requestUserMessageScroll = useCallback((messageId: string): void => {
+    pendingUserMessageScrollIdRef.current = messageId
+    setConversationBottomPadding(Math.max(280, Math.round(window.innerHeight * 0.45)))
+  }, [])
+
+  // 发送后在留白提交后回底一次，让用户消息位于可视区上方。
+  useEffect(() => {
+    const messageId = pendingUserMessageScrollIdRef.current
+    if (!messageId) return
+
+    const frame = requestAnimationFrame(() => {
+      if (scrollToConversationBottom()) pendingUserMessageScrollIdRef.current = null
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [conversationBottomPadding, displayMessages, scrollToConversationBottom])
+
+  const handleScrollToConversationBottom = useCallback((): void => {
+    pendingUserMessageScrollIdRef.current = null
+    setConversationBottomPadding(undefined)
+    requestAnimationFrame(scrollToConversationBottom)
+  }, [scrollToConversationBottom])
+
+  useEffect(() => {
+    pendingUserMessageScrollIdRef.current = null
+    setConversationBottomPadding(undefined)
+  }, [threadId])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
@@ -4431,8 +4469,11 @@ export function ChatContainer({
         }
       }
 
-      // 发送消息，滚动到底部
-      scrollToConversationBottom()
+      if (visibleUserMessage?.id) {
+        requestUserMessageScroll(visibleUserMessage.id)
+      } else {
+        scrollToConversationBottom()
+      }
 
       const startTime = Date.now()
       setActiveTurnStartTime(startTime)
@@ -4859,6 +4900,7 @@ export function ChatContainer({
         persistTiming: true,
         id: queued.id
       })
+      requestUserMessageScroll(visibleUserMessage.id)
       if (isFirstMessage) {
         const currentThread = threads.find((t) => t.thread_id === threadId)
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
@@ -4902,6 +4944,7 @@ export function ChatContainer({
       getQueuedMessage,
       loadResolvedAgentMode,
       models,
+      requestUserMessageScroll,
       setActiveTurnStartTime,
       setError,
       stream,
@@ -6564,7 +6607,7 @@ export function ChatContainer({
   )
   const timelineTailProps = useMemo(
     () => ({
-      bottomPadding: userInputScrollPadding,
+      bottomPadding: timelineBottomPadding || undefined,
       hookLoggingEnabled: hookLogConfig.enabled,
       detachedHookLogBuckets,
       onOpenHookLogBucket: handleOpenHookLogBucket,
@@ -6605,7 +6648,7 @@ export function ChatContainer({
       threadError,
       threadId,
       todos,
-      userInputScrollPadding,
+      timelineBottomPadding,
       workflowRun
     ]
   )
@@ -7156,7 +7199,7 @@ export function ChatContainer({
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
                   getViewport={getViewport}
-                  onScrollToBottom={scrollToConversationBottom}
+                  onScrollToBottom={handleScrollToConversationBottom}
                 />
                 <SlashCommandPopover
                   mode={slash.mode}
@@ -7651,22 +7694,6 @@ export function ChatContainer({
                           YOLO
                         </button>
                       )}
-                      <div
-                        className={cn(
-                          "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[11px] font-medium",
-                          isVirtualizedChat
-                            ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
-                            : "bg-muted text-muted-foreground"
-                        )}
-                        title={`当前展示 ${displayMessages.length} 条消息；达到 ${VIRTUAL_CHAT_TIMELINE_THRESHOLD} 条时自动启用虚拟列表。`}
-                        aria-label={`当前展示 ${displayMessages.length} 条消息${
-                          isVirtualizedChat ? "，虚拟列表已启用" : ""
-                        }`}
-                      >
-                        <Layers className="size-3" />
-                        <span>展示 {displayMessages.length} 条</span>
-                        {isVirtualizedChat && <span>虚拟列表</span>}
-                      </div>
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
                       <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
