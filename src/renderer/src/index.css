@@ -412,9 +412,8 @@
   display: inline;
   word-break: break-all;
   padding: 0.08em 0.35em;
-  border: 1px solid #c9c6c6;
   border-radius: 4px;
-  background: rgba(232, 232, 232, 0.68);
+  background: rgba(232, 232, 232, 1);
   color: #333333;
   font-family: "SF Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
   font-size: 0.86em;
