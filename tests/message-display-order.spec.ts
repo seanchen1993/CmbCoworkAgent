@@ -7,6 +7,7 @@ import {
   messageVisibleReasoningLength,
   shouldAutoCollapseReasoning
 } from "../src/renderer/src/lib/message-display-visibility.ts"
+import { buildVirtualChatTimelineSegment } from "../src/renderer/src/lib/virtual-chat-timeline-segment.ts"
 import {
   areMessageRenderFieldsEqual,
   areMessageToolRenderInputsEqual,
@@ -1003,6 +1004,104 @@ function testMessageVisibilityMatchesMessageBubbleBranches(): void {
   )
 }
 
+function testVirtualTimelineSegmentsPreserveOrderAndAnchors(): void {
+  const createdAt = new Date("2026-07-20T00:00:00.000Z")
+  const history: Message[] = [
+    { id: "user", role: "user", content: "question", created_at: createdAt },
+    {
+      id: "assistant-call",
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call-1", name: "read_file", args: {} }],
+      created_at: createdAt
+    },
+    {
+      id: "tool-result",
+      role: "tool",
+      content: "result",
+      tool_call_id: "call-1",
+      created_at: createdAt
+    },
+    { id: "system", role: "system", content: "notice", created_at: createdAt }
+  ]
+  const live: Message[] = [
+    {
+      id: "thinking",
+      role: "assistant",
+      content: "",
+      reasoning: "thinking",
+      created_at: createdAt
+    },
+    {
+      id: "live-tool",
+      role: "tool",
+      content: "result",
+      tool_call_id: "call-2",
+      created_at: createdAt
+    },
+    { id: "final", role: "assistant", content: "answer", created_at: createdAt }
+  ]
+  const isVisible = (message: Message): boolean => messageHasVisibleRow(message)
+  const historySegment = buildVirtualChatTimelineSegment(history, {
+    messageIndexOffset: 0,
+    rowIndexOffset: 0,
+    previousVisibleMessage: null,
+    isVisible
+  })
+  const liveSegment = buildVirtualChatTimelineSegment(live, {
+    messageIndexOffset: history.length,
+    rowIndexOffset: historySegment.items.length,
+    previousVisibleMessage: historySegment.lastVisibleMessage,
+    isVisible
+  })
+
+  assertEqual(
+    historySegment.items.map((item) => item.message?.id).join(","),
+    "user,assistant-call,system",
+    "hidden tool results must not create virtual rows or change message order"
+  )
+  assertEqual(
+    liveSegment.items.map((item) => item.message?.id).join(","),
+    "thinking,final",
+    "hidden live tool results must not create virtual rows"
+  )
+  assertEqual(
+    historySegment.items[1]?.previousMessage?.id,
+    "user",
+    "a history row should point to the previous visible history message"
+  )
+  assertEqual(
+    liveSegment.items[0]?.previousMessage?.id,
+    "system",
+    "the first live row should keep the previous visible history message"
+  )
+  assertEqual(
+    liveSegment.items[1]?.previousMessage?.id,
+    "thinking",
+    "a live row should point to the previous visible live message"
+  )
+  assertEqual(
+    historySegment.lastVisibleMessageIndex,
+    3,
+    "history last visible index should use the source message index"
+  )
+  assertEqual(
+    liveSegment.lastVisibleMessageIndex,
+    6,
+    "live last visible index should include the history offset"
+  )
+  assertEqual(
+    historySegment.messageRowIndexById.get("assistant-call"),
+    1,
+    "history jump index should use the visible row index"
+  )
+  assertEqual(
+    liveSegment.messageRowIndexById.get("final"),
+    4,
+    "live jump index should include the history visible row offset"
+  )
+}
+
 function testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable(): void {
   const createdAt = new Date("2026-07-20T00:00:00.000Z")
   const toolCallMessage: Message = {
@@ -1381,6 +1480,10 @@ const tests: Array<[string, () => void]> = [
   [
     "testMessageVisibilityMatchesMessageBubbleBranches",
     testMessageVisibilityMatchesMessageBubbleBranches
+  ],
+  [
+    "testVirtualTimelineSegmentsPreserveOrderAndAnchors",
+    testVirtualTimelineSegmentsPreserveOrderAndAnchors
   ],
   [
     "testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable",

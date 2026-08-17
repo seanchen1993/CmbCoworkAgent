@@ -3214,8 +3214,7 @@ export function ChatContainer({
       })
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages])
-
-  const displayMessages = useMemo(() => {
+  const displayMessageSegments = useMemo(() => {
     const normalizedLiveMessages = normalizeLiveStreamMessageIds(
       historyDisplayMessages.map((message) => ({
         id: message.id,
@@ -3284,13 +3283,16 @@ export function ChatContainer({
     // The durable transcript is already in display order. While a run is active,
     // only the current-turn live tail changes, so avoid re-sorting/cleaning every
     // historical message on every token.
-    return [
-      ...historyWithLiveReasoning,
-      ...filterCoordinatorNoiseMessages(
-        reconcileMessageDisplayOrder(streamingMsgs, streamData.messages)
-      )
-    ]
+    const liveDisplayMessages = filterCoordinatorNoiseMessages(
+      reconcileMessageDisplayOrder(streamingMsgs, streamData.messages)
+    )
+    return {
+      historyMessages: historyWithLiveReasoning,
+      liveMessages: liveDisplayMessages,
+      messages: [...historyWithLiveReasoning, ...liveDisplayMessages]
+    }
   }, [historyDisplayMessages, streamData.liveMessages, streamData.messages])
+  const displayMessages = displayMessageSegments.messages
 
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
@@ -6737,7 +6739,8 @@ export function ChatContainer({
             {isVirtualizedChat ? (
               <VirtualChatTimeline
                 ref={virtualTimelineRef}
-                messages={displayMessages}
+                historyMessages={displayMessageSegments.historyMessages}
+                liveMessages={displayMessageSegments.liveMessages}
                 perMessageFlags={perMessageFlags}
                 reserveLeftSpace={reserveLeftSpace}
                 chatMessageListProps={chatMessageListProps}

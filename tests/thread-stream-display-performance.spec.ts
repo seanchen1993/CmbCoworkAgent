@@ -155,18 +155,13 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
   assertIncludes(
     timeline,
-    "const INITIAL_SCROLL_CORRECTION_LIMIT = 2",
-    "entering a long chat limits forced first-frame scroll corrections"
+    "onRowsRendered={handleRowsRendered}",
+    "thread entry waits for the virtual tail row to enter the rendered range"
   )
   assertIncludes(
     timeline,
-    "const INITIAL_SCROLL_SETTLE_TIMEOUT_MS = 500",
-    "initial tail alignment stays available while async row measurements arrive"
-  )
-  assertIncludes(
-    timeline,
-    "window.setTimeout(() => {",
-    "initial tail alignment does not consume consecutive animation frames while waiting for measurements"
+    "allRows.stopIndex < lastRowIndex",
+    "virtual entry scrolls to the tail before anchoring the mounted tail element"
   )
   assertIncludes(
     timeline,
@@ -219,18 +214,23 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
   assertIncludes(
     timeline,
-    "onResize={handleListResize}",
-    "the isolated timeline corrects initial placement after the list viewport is measured"
+    "buildVirtualChatTimelineSegment(historyMessages",
+    "virtual rows cache the durable history segment across live stream updates"
   )
   assertIncludes(
     timeline,
-    "queueInitialScrollCorrection()",
-    "dynamic row-height updates schedule bounded initial-tail corrections"
+    "buildVirtualChatTimelineSegment(liveMessages",
+    "virtual rows rebuild only the live tail while streaming"
   )
   assertIncludes(
-    timeline,
-    'document.addEventListener("visibilitychange", handleVisibilityChange)',
-    "initial tail correction resumes after a hidden window becomes visible"
+    chat,
+    "const displayMessageSegments = useMemo",
+    "chat keeps stable history and live tail display segments separate"
+  )
+  assertIncludes(
+    chat,
+    "historyMessages={displayMessageSegments.historyMessages}",
+    "the virtual timeline receives the stable history segment directly"
   )
   assert(
     !timeline.includes("pendingAssistantScrollFromMessageIdRef"),
