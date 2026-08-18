@@ -88,9 +88,15 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import { isMemoryStoragePath } from "../memory/paths"
 import {
+  isCodeFile,
   recordGen as recordAdoptionGen,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  getHarnessStageAttributionForCodeGeneration,
+  markHarnessStageAttributionDirty,
+  type HarnessStageAttribution
+} from "../services/harness-stage-attribution"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
@@ -2484,6 +2490,23 @@ export class LocalSandbox
     return `Memory storage is managed by the background summarizer. Direct ${action} to '${filePath}' is blocked; use the Memory panel or let the conversation summary persist it.`
   }
 
+  private markHarnessStageAttributionDirty(): void {
+    markHarnessStageAttributionDirty(this.harnessProjectId, this.featureId)
+  }
+
+  private async captureHarnessStageForCodeGeneration(
+    filePath: string
+  ): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId || !isCodeFile(filePath)) return undefined
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
+  }
+
+  private commandMayMutateHarnessState(command: string, cwd: string): boolean {
+    const windowsShell =
+      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+    return !isReadOnlyShellCommand(command, cwd, windowsShell)
+  }
+
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     const hookContext: HookContext = {
       ...context,
@@ -2518,6 +2541,18 @@ export class LocalSandbox
 
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+    const hasHarnessOwnedHook = hooks.some(
+      (hook) =>
+        hook.hookSourceType === "plugin" ||
+        hook.hookSourceType === "skill" ||
+        Boolean(hook.pluginRoot)
+    )
+    if (hasHarnessOwnedHook && (result || (event !== "PreToolUse" && hooks.length > 0))) {
+      // Plugin lifecycle hooks may advance the workflow without going through
+      // LocalSandbox.execute(). Invalidation is cheap; the next code mutation
+      // performs the actual adapter refresh.
+      this.markHarnessStageAttributionDirty()
+    }
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -4269,7 +4304,12 @@ export class LocalSandbox
     // file ⇒ prior content is empty and deletedLineCount = 0. We skip the
     // old pre-read entirely (it was wasted I/O on success and would also
     // bypass isCodeFile / size guards on failure).
+    let harnessStage: HarnessStageAttribution | undefined
     const result = await this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) {
+        return { error: "文件写入已取消。" }
+      }
+      harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
       if (this.isAborted) {
         return { error: "文件写入已取消。" }
       }
@@ -4281,6 +4321,7 @@ export class LocalSandbox
     })
     if (!result.error) {
       this._onFileMutation?.(effectiveFilePath, "write")
+      if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
@@ -4291,7 +4332,8 @@ export class LocalSandbox
           workspacePath: this.workingDir,
           // write_file only succeeds when creating a new file (see above) —
           // no prior lines could have been deleted.
-          deletedLineCount: 0
+          deletedLineCount: 0,
+          ...(harnessStage ? { harnessStage } : {})
         })
       } catch {
         // tracker must not affect tool result
@@ -4308,6 +4350,7 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
+      this.markHarnessStageAttributionDirty()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
@@ -4444,7 +4487,12 @@ export class LocalSandbox
     }
     try {
       const resolvedPath = this._resolvePath(effectiveFilePath)
+      let harnessStage: HarnessStageAttribution | undefined
       const result = await this.withFileLock(resolvedPath, async () => {
+        if (this.isAborted) {
+          return { error: "文件编辑已取消。" }
+        }
+        harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
         if (this.isAborted) {
           return { error: "文件编辑已取消。" }
         }
@@ -4477,6 +4525,7 @@ export class LocalSandbox
       })
       if (!result.error) {
         this._onFileMutation?.(effectiveFilePath, "edit")
+        if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
         // Adoption tracking (side-effect only, never throws).
         // Only successful edits should be counted as generated code adoption.
         try {
@@ -4494,7 +4543,8 @@ export class LocalSandbox
             // avoiding any full-file scan or retention of editor buffers.
             oldString: effectiveOldString,
             newString: effectiveNewString,
-            occurrences: result.occurrences
+            occurrences: result.occurrences,
+            ...(harnessStage ? { harnessStage } : {})
           })
         } catch {
           // tracker must not affect tool result
@@ -4516,6 +4566,7 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
+        this.markHarnessStageAttributionDirty()
         if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
@@ -5820,6 +5871,9 @@ export class LocalSandbox
         shellSyntax,
         outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
@@ -5840,6 +5894,9 @@ export class LocalSandbox
       result: undefined as LocalExecuteResponse | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
@@ -5899,6 +5956,9 @@ export class LocalSandbox
           : rawResult
         if (task.completed) return
         task.result = result
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         // Append final output to chunks for completeness
         if (result.output) task.outputChunks.push(result.output)
         task.completed = true
@@ -5918,6 +5978,9 @@ export class LocalSandbox
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         task.result = {
           output: `Error: ${err instanceof Error ? err.message : String(err)}`,
           exitCode: 1,
@@ -6129,6 +6192,9 @@ export class LocalSandbox
         shellSyntax,
         outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
       recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
@@ -6145,6 +6211,9 @@ export class LocalSandbox
     const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
       cwd: effectiveCwd
     })
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
     recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
