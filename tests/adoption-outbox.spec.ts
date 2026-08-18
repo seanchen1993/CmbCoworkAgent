@@ -21,6 +21,7 @@ import {
   initializeAdoptionTracker,
   measureForCommit,
   recordGen,
+  setAdoptionContext,
   shutdownAdoptionTracker
 } from "../src/main/services/adoption-tracker.ts"
 import {
@@ -430,6 +431,58 @@ async function testCodeGenUsesDurableBatchedOutbox(): Promise<void> {
   console.log("PASS code_gen batches persistence and retries the durable envelope")
 }
 
+async function testCodeGenUsesMutationTimeHarnessStage(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    const reporter = new AdoptionReporter()
+    setEventReporter(reporter)
+    await initializeAdoptionTracker()
+
+    await withTempRepo("code-gen-harness-stage", async (repo) => {
+      const threadId = "code-gen-harness-stage"
+      const filePath = join(repo, "stage.ts")
+      const generatedContent = "export const stage = true\n"
+      await writeFile(filePath, generatedContent)
+      setAdoptionContext(threadId, {
+        harnessProjectId: "project-1",
+        harnessFeatureSlug: "feature-1",
+        harnessNodeName: "Dev-旧节点",
+        harnessNodeStatus: "进行中"
+      })
+
+      recordGen({
+        threadId,
+        workspacePath: repo,
+        filePath,
+        tool: "write_file",
+        generatedContent,
+        harnessStage: {
+          nodeName: "Test-新节点",
+          nodeStatus: "已完成"
+        }
+      })
+
+      const event = await waitForGenerationCall(reporter)
+      assert(
+        event.properties?.harnessNodeName === "Test-新节点" &&
+          event.properties?.harnessNodeStatus === "已完成",
+        "code_gen should use the stage snapshot captured at mutation time"
+      )
+      assert(
+        event.properties?.harnessProjectId === "project-1" &&
+          event.properties?.harnessFeatureSlug === "feature-1",
+        "mutation-time stage override should preserve the remaining Harness context"
+      )
+
+      const row = getGenRowByEventId(String(event.properties?.eventId ?? ""))
+      assert(
+        row?.harness_node_name === "Test-新节点" && row.harness_node_status === "已完成",
+        "the persisted baseline should carry the same stage into code_adopt"
+      )
+    })
+  })
+  console.log("PASS code_gen uses the mutation-time Harness stage snapshot")
+}
+
 async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
   await withIsolatedAdoptionStore(async () => {
     const reporter = new AdoptionReporter()
@@ -687,6 +740,7 @@ async function main(): Promise<void> {
   await testTestGenerationUsesSeparateDurableOutbox()
   await testCodeGenRequiresAnIndexedBaseline()
   await testCodeGenUsesDurableBatchedOutbox()
+  await testCodeGenUsesMutationTimeHarnessStage()
   await testOversizeEditReportsNetGeneratedLines()
   await testStableOutboxRetryAcrossRestart()
   await testCommitJobRecoveryFromRepoAndSha()

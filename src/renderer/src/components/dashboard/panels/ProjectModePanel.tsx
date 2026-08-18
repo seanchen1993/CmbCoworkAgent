@@ -691,7 +691,7 @@ function isStageBucketsEmpty(buckets: DashboardStageBuckets): boolean {
 function StageBucketCaliberHint(): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div>按每轮对话开始时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
+      <div>对话按每轮开始时、代码按实际生成时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
       {STAGE_BUCKET_VIEW.map(({ bucket }) => (
         <div key={bucket}>
           <span className="font-medium">{STAGE_BUCKET_LABELS[bucket]}</span>：
