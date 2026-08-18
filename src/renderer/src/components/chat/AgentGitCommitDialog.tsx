@@ -14,6 +14,15 @@ import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
 import { VirtualList } from "@/components/ui/virtual-list"
 import { cn } from "@/lib/utils"
 import { parseUnifiedDiffRows, type DiffRow } from "@/lib/diff-utils"
+import {
+  AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE,
+  buildInitialSelectedPaths,
+  normalizeCommitPath,
+  pathMatchesSelection,
+  pathsForCommitSelectionFile,
+  resolveCommitWorktreePath,
+  shouldAutoDismissEmptyAgentCommitSelection
+} from "@/lib/agent-git-commit-selection"
 import type { TaskCardItem } from "../../../../shared/task-card-types"
 
 const COMMIT_TYPES = [
@@ -60,101 +69,6 @@ function basename(filePath: string): string {
   return parts[parts.length - 1] || filePath
 }
 
-function normalizeCommitPath(filePath: string): string {
-  const normalized = filePath.trim().replace(/\\/g, "/")
-  if (normalized === ".") return normalized
-  return normalized.replace(/^\.\//, "").replace(/\/+$/, "")
-}
-
-function collapseFsPath(filePath: string): string {
-  const normalized = filePath.trim().replace(/\\/g, "/")
-  const driveMatch = normalized.match(/^([A-Za-z]:)(?:\/|$)/)
-  const root = driveMatch ? `${driveMatch[1]}/` : normalized.startsWith("/") ? "/" : ""
-  const rest = driveMatch ? normalized.slice(driveMatch[0].length) : normalized.replace(/^\/+/, "")
-  const segments: string[] = []
-  for (const part of rest.split("/")) {
-    if (!part || part === ".") continue
-    if (part === ".." && segments.length > 0 && segments[segments.length - 1] !== "..") {
-      segments.pop()
-      continue
-    }
-    if (part !== ".." || !root) segments.push(part)
-  }
-  const collapsed = `${root}${segments.join("/")}`
-  return collapsed || root.replace(/\/$/, "")
-}
-
-function isAbsoluteFsPath(filePath: string): boolean {
-  const normalized = filePath.trim().replace(/\\/g, "/")
-  return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith("/")
-}
-
-function resolveFsPath(basePath: string, filePath: string): string {
-  if (isAbsoluteFsPath(filePath)) return collapseFsPath(filePath)
-  return collapseFsPath(`${basePath.replace(/\\/g, "/").replace(/\/+$/, "")}/${filePath}`)
-}
-
-function fsPathParts(filePath: string): { root: string; segments: string[] } {
-  const collapsed = collapseFsPath(filePath)
-  const driveMatch = collapsed.match(/^([A-Za-z]:)(?:\/|$)/)
-  const root = driveMatch ? driveMatch[1].toLowerCase() : collapsed.startsWith("/") ? "/" : ""
-  const rest = driveMatch ? collapsed.slice(driveMatch[0].length) : collapsed.replace(/^\/+/, "")
-  return { root, segments: rest.split("/").filter(Boolean) }
-}
-
-function relativePathWithin(basePath: string, targetPath: string): string | null {
-  const base = fsPathParts(basePath)
-  const target = fsPathParts(targetPath)
-  if (base.root !== target.root) return null
-  let common = 0
-  while (
-    common < base.segments.length &&
-    common < target.segments.length &&
-    base.segments[common].toLowerCase() === target.segments[common].toLowerCase()
-  ) {
-    common += 1
-  }
-  if (common < base.segments.length) return null
-  return target.segments.slice(common).join("/") || "."
-}
-
-function normalizeSuggestedCommitPath(
-  filePath: string,
-  basePath?: string,
-  workspacePath?: string | null,
-  targetWorktreePath?: string
-): string {
-  const normalized = normalizeCommitPath(filePath)
-  if (!normalized) return ""
-  if (normalized.startsWith(":/")) return normalizeCommitPath(normalized.slice(2))
-  if (!workspacePath && !targetWorktreePath) return normalized
-  const absolutePath = isAbsoluteFsPath(normalized)
-    ? collapseFsPath(normalized)
-    : basePath
-      ? resolveFsPath(basePath, normalized)
-      : null
-  if (!absolutePath) return normalized
-  if (targetWorktreePath) {
-    const targetRelative = relativePathWithin(targetWorktreePath, absolutePath)
-    if (targetRelative) return normalizeCommitPath(targetRelative)
-  }
-  return normalizeCommitPath(
-    workspacePath ? relativePathWithin(workspacePath, absolutePath) ?? normalized : normalized
-  )
-}
-
-function pathMatchesSelection(file: DiffFile, selectedPath: string): boolean {
-  const normalizedSelected = normalizeCommitPath(selectedPath)
-  if (!normalizedSelected) return false
-  if (normalizedSelected === ".") return true
-  const candidates = [file.path, file.previousPath]
-    .filter((item): item is string => Boolean(item))
-    .map(normalizeCommitPath)
-  return candidates.some(
-    (candidate) => candidate === normalizedSelected || candidate.startsWith(`${normalizedSelected}/`)
-  )
-}
-
 function isDiffFileSelected(file: DiffFile, selectedPaths: Set<string>): boolean {
   for (const selectedPath of selectedPaths) {
     if (pathMatchesSelection(file, selectedPath)) return true
@@ -163,50 +77,7 @@ function isDiffFileSelected(file: DiffFile, selectedPaths: Set<string>): boolean
 }
 
 function pathsForDiffFile(file: DiffFile): string[] {
-  return [file.previousPath, file.path]
-    .filter((item): item is string => Boolean(item))
-    .map(normalizeCommitPath)
-    .filter(Boolean)
-}
-
-function buildInitialSelectedPaths(
-  files: DiffFile[],
-  suggestedFilePaths?: string[],
-  allChangedFiles?: string[],
-  options?: { suggestedBasePath?: string; workspacePath?: string | null; targetWorktreePath?: string }
-): Set<string> {
-  const suggested = Array.from(
-    new Set(
-      (suggestedFilePaths ?? [])
-        .map((filePath) =>
-          normalizeSuggestedCommitPath(
-            filePath,
-            options?.suggestedBasePath,
-            options?.workspacePath,
-            options?.targetWorktreePath
-          )
-        )
-        .filter(Boolean)
-    )
-  )
-  if (suggested.length === 0) {
-    const fallbackFiles = allChangedFiles?.length
-      ? allChangedFiles
-      : files.map((file) => file.path)
-    return new Set(fallbackFiles.map(normalizeCommitPath).filter(Boolean))
-  }
-
-  const selected = new Set<string>()
-  for (const suggestedPath of suggested) {
-    let matched = false
-    for (const file of files) {
-      if (!pathMatchesSelection(file, suggestedPath)) continue
-      for (const filePath of pathsForDiffFile(file)) selected.add(filePath)
-      matched = true
-    }
-    if (!matched) selected.add(suggestedPath)
-  }
-  return selected
+  return pathsForCommitSelectionFile(file)
 }
 
 /** Fixed row height for virtualized diff (matched to leading-5 = 20px). */
@@ -292,7 +163,7 @@ interface AgentGitCommitDialogProps {
   suggestedFilePaths?: string[]
   /** Base cwd for explicit pathspecs after applying git -C. */
   suggestedFileBasePath?: string
-  /** Git cwd resolved from cd / git -C. */
+  /** Preferred Git operation target, normally the repository root. */
   suggestedGitWorktreePath?: string
   /** Where suggestedFilePaths came from. */
   suggestedFileSelectionSource?: "pathspec" | "staged"
@@ -322,7 +193,12 @@ export function AgentGitCommitDialog({
 }: AgentGitCommitDialogProps): React.JSX.Element {
   const activeThreadIdRef = useRef(threadId)
   const diffListRequestIdRef = useRef(0)
+  const emptySelectionResolvedRef = useRef(false)
   const { cardNumber, handleCardNumberChange, persistNow } = useWorkspaceTaskCard(workspacePath)
+  const commitWorktreePath = resolveCommitWorktreePath(
+    workspacePath,
+    suggestedGitWorktreePath
+  )
   // Seed type + message from the agent's suggestion. The parent remounts this dialog
   // (via a key tied to the approval id) for each new commit, so lazy initializers give
   // fresh state per commit without a state-resetting effect.
@@ -357,8 +233,10 @@ export function AgentGitCommitDialog({
     () =>
       buildInitialSelectedPaths([], initialSuggestedFilePaths, undefined, {
         suggestedBasePath: initialSuggestedFileBasePath,
+        repositoryRootPath: suggestedGitWorktreePath,
+        suggestedPathKind: initialFileSelectionSource,
         workspacePath,
-        targetWorktreePath: suggestedGitWorktreePath
+        targetWorktreePath: commitWorktreePath
       })
   )
 
@@ -378,7 +256,7 @@ export function AgentGitCommitDialog({
         includeDiffs: false,
         includeChangedFiles: true,
         statusUntrackedMode: "normal",
-        worktreePath: suggestedGitWorktreePath
+        worktreePath: commitWorktreePath
       })
       .then((res) => {
         if (cancelled || requestId !== diffListRequestIdRef.current) return
@@ -397,8 +275,10 @@ export function AgentGitCommitDialog({
         setSelectedCommitPaths(
           buildInitialSelectedPaths(res.files ?? [], initialSuggestedFilePaths, res.changedFiles ?? [], {
             suggestedBasePath: initialSuggestedFileBasePath,
+            repositoryRootPath: suggestedGitWorktreePath,
+            suggestedPathKind: initialFileSelectionSource,
             workspacePath,
-            targetWorktreePath: suggestedGitWorktreePath
+            targetWorktreePath: commitWorktreePath
           })
         )
       })
@@ -411,7 +291,16 @@ export function AgentGitCommitDialog({
     return () => {
       cancelled = true
     }
-  }, [open, threadId, initialSuggestedFilePaths, initialSuggestedFileBasePath, workspacePath, suggestedGitWorktreePath])
+  }, [
+    open,
+    threadId,
+    initialSuggestedFilePaths,
+    initialSuggestedFileBasePath,
+    initialFileSelectionSource,
+    suggestedGitWorktreePath,
+    workspacePath,
+    commitWorktreePath
+  ])
 
   const selectedFile = useMemo(
     () => diff?.files.find((f) => f.path === selectedFilePath) ?? diff?.files[0],
@@ -435,7 +324,7 @@ export function AgentGitCommitDialog({
 
       try {
         const res = await window.api.workspace.getGitPanelFileDiff(threadId, filePath, {
-          worktreePath: suggestedGitWorktreePath
+          worktreePath: commitWorktreePath
         })
         if (requestId !== diffListRequestIdRef.current || res.taskId !== activeThreadIdRef.current) return
         if (!res.success || !res.file) {
@@ -486,7 +375,7 @@ export function AgentGitCommitDialog({
         }
       }
     },
-    [threadId, diff?.files, fileDiffLoadingPaths, suggestedGitWorktreePath]
+    [threadId, diff?.files, fileDiffLoadingPaths, commitWorktreePath]
   )
 
   useEffect(() => {
@@ -512,12 +401,8 @@ export function AgentGitCommitDialog({
       const normalized = normalizeCommitPath(filePath)
       if (normalized) selected.add(normalized)
     }
-    for (const file of diff?.files ?? []) {
-      if (!isDiffFileSelected(file, selectedCommitPaths)) continue
-      for (const filePath of pathsForDiffFile(file)) selected.add(filePath)
-    }
     return Array.from(selected)
-  }, [diff, selectedCommitPaths])
+  }, [selectedCommitPaths])
 
   const selectedVisibleFileCount = useMemo(
     () => (diff?.files ?? []).filter((file) => isDiffFileSelected(file, selectedCommitPaths)).length,
@@ -543,6 +428,32 @@ export function AgentGitCommitDialog({
   const fileSelectionMissing =
     !fileSelectionPending && !fileSelectionFailed && selectedCommitFilePaths.length === 0
   const fileSelectionBlocked = fileSelectionPending || fileSelectionFailed || fileSelectionMissing
+
+  useEffect(() => {
+    if (emptySelectionResolvedRef.current || !diff) return
+    if (
+      !shouldAutoDismissEmptyAgentCommitSelection({
+        selectionSource: initialFileSelectionSource,
+        suggestedPathCount: suggestedFilePathCount,
+        selectedPathCount: selectedCommitFilePaths.length,
+        loading: fileSelectionPending,
+        failed: fileSelectionFailed
+      })
+    ) {
+      return
+    }
+    emptySelectionResolvedRef.current = true
+    onCommitted({ success: false, error: AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE })
+  }, [
+    diff,
+    fileSelectionFailed,
+    fileSelectionPending,
+    initialFileSelectionSource,
+    onCommitted,
+    selectedCommitFilePaths.length,
+    suggestedFilePathCount
+  ])
+
   const finalMessage = useMemo(
     () => (cardValue ? `${cardValue} #comment ${commitType}:${messageValue} #CMBDevClaw` : ""),
     [cardValue, commitType, messageValue]
@@ -557,7 +468,7 @@ export function AgentGitCommitDialog({
         threadId,
         finalMessage,
         selectedCommitFilePaths,
-        { worktreePath: suggestedGitWorktreePath }
+        { worktreePath: commitWorktreePath, agentInitiated: true }
       )
       if (!result.success) {
         setError(result.error || "提交失败")

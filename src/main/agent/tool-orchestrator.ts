@@ -10,25 +10,23 @@
  */
 
 import { randomUUID } from "crypto"
-import { execFile } from "child_process"
 import { realpath } from "fs/promises"
 import path from "path"
-import { promisify } from "util"
 import { ApprovalStore } from "./approval-store"
 import {
   assessCommandSafety,
   derivePermanentApprovalPattern,
   extractGitCommitPathspecs,
   extractGitCommitMessage,
+  hasUnsupportedGitCommitScope,
   isAmendOrFixupCommit,
   isChainedShellCommand,
   isForcePushCommand,
   isGitCommitCommand,
   isGitPushCommand,
-  normalizeCdPrefixedGitCommitCommand,
-  normalizeGitAddPrefixedGitCommitCommand,
   resolveGitCommandCwd,
-  resolveGitPushCommandCwd
+  resolveGitPushCommandCwd,
+  type CommandShellSyntax
 } from "./exec-policy"
 import { LocalSandbox } from "./local-sandbox"
 import type {
@@ -42,8 +40,6 @@ import {
   getGitRootForPath
 } from "../services/git-repository-discovery"
 import type { ExecuteResponse } from "deepagents"
-
-const execFileAsync = promisify(execFile)
 
 /** Raw execution function signature (no approval logic). */
 export type RawExecuteFn = (
@@ -63,23 +59,8 @@ export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecisi
 const SANDBOX_BYPASS_PROMPT_REASON =
   "命令在沙箱内执行失败，疑似受沙箱限制。是否允许我在沙箱外重试同一命令？"
 
-async function readStagedGitFilePaths(cwd: string): Promise<string[]> {
-  try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "diff", "--cached", "--name-only", "-z"], {
-      maxBuffer: 2 * 1024 * 1024
-    })
-    return Array.from(
-      new Set(
-        String(stdout)
-          .split("\0")
-          .map((item) => item.trim().replace(/\\/g, "/"))
-          .filter(Boolean)
-      )
-    )
-  } catch {
-    return []
-  }
-}
+const AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE =
+  "Agent 指定的文件均被 Git ignore，未发起提交。"
 
 function normalizeDirBoundaryKey(dir: string): string {
   const resolved = path.resolve(dir)
@@ -103,6 +84,78 @@ async function resolveExistingDirForBoundary(dir: string): Promise<{ path: strin
   } catch {
     return { path: path.resolve(dir), exists: false }
   }
+}
+
+async function representExistingPathWithinWorkspace(
+  workspacePath: string,
+  candidatePath: string
+): Promise<string> {
+  const [realWorkspace, realCandidate] = await Promise.all([
+    resolveExistingDirForBoundary(workspacePath),
+    resolveExistingDirForBoundary(candidatePath)
+  ])
+  if (
+    realWorkspace.exists &&
+    realCandidate.exists &&
+    isPathInsideOrSame(realCandidate.path, realWorkspace.path)
+  ) {
+    const relative = path.relative(realWorkspace.path, realCandidate.path)
+    return relative ? path.resolve(workspacePath, relative) : path.resolve(workspacePath)
+  }
+  return candidatePath
+}
+
+function isUnsupportedProjectedPathspec(filePath: string): boolean {
+  const normalized = process.platform === "win32" ? filePath.replace(/\\/g, "/") : filePath
+  const withoutTopMagic = normalized.startsWith(":/") ? normalized.slice(2) : normalized
+  if (!normalized.startsWith(":/") && normalized.startsWith(":")) return true
+  if (normalized.startsWith(":/") && /^[/!^:]/.test(withoutTopMagic)) return true
+  return ["*", "?", "["].some((marker) => withoutTopMagic.includes(marker))
+}
+
+async function projectExplicitPathsToTarget(
+  gitRoot: string,
+  gitCommandCwd: string,
+  targetPath: string,
+  filePaths: string[],
+  shellSyntax: CommandShellSyntax
+): Promise<string[] | null> {
+  const [realRoot, realGitCwd, realTarget] = await Promise.all([
+    resolveExistingDirForBoundary(gitRoot),
+    resolveExistingDirForBoundary(gitCommandCwd),
+    resolveExistingDirForBoundary(targetPath)
+  ])
+  if (!realRoot.exists || !realGitCwd.exists || !realTarget.exists) return null
+
+  const projected: string[] = []
+  for (const filePath of filePaths) {
+    if (isUnsupportedProjectedPathspec(filePath)) {
+      projected.push(filePath)
+      continue
+    }
+    const repositoryRelative = filePath.startsWith(":/")
+    const rawPathWithoutMagic = repositoryRelative ? filePath.slice(2) || "." : filePath
+    const msysDrivePath =
+      process.platform === "win32" && shellSyntax === "posix"
+        ? rawPathWithoutMagic.match(/^\/([A-Za-z])(?:\/(.*))?$/)
+        : null
+    const pathWithoutMagic = msysDrivePath
+      ? `${msysDrivePath[1]}:/${msysDrivePath[2] || ""}`
+      : rawPathWithoutMagic
+    const basePath = repositoryRelative ? realRoot.path : realGitCwd.path
+    const absolutePath = path.isAbsolute(pathWithoutMagic)
+      ? path.resolve(pathWithoutMagic)
+      : path.resolve(basePath, pathWithoutMagic)
+    const relativeToTarget = path.relative(realTarget.path, absolutePath)
+    const insideTarget =
+      relativeToTarget === "" ||
+      (relativeToTarget !== ".." &&
+        !relativeToTarget.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relativeToTarget))
+    const result = insideTarget ? relativeToTarget || "." : absolutePath
+    projected.push(process.platform === "win32" ? result.replace(/\\/g, "/") : result)
+  }
+  return projected
 }
 
 type GitOperationKind = "commit" | "push"
@@ -186,7 +239,9 @@ export class ToolOrchestrator {
      * editing many files must not re-prompt per file (the official acceptEdits
      * semantics). Shell `execute` stays gated — it's the more dangerous op.
      */
-    private autoApproveFileEdits: boolean = false
+    private autoApproveFileEdits: boolean = false,
+    /** Thread workspace boundary; execute() cwd may be a nested shell directory. */
+    private workspacePath?: string
   ) {}
 
   /**
@@ -200,7 +255,13 @@ export class ToolOrchestrator {
    * @param cwd          Working directory
    * @param sandboxMode  Current sandbox mode (none/unelevated/elevated/readonly)
    */
-  async execute(command: string, cwd: string, sandboxMode: string): Promise<ExecuteResponse> {
+  async execute(
+    command: string,
+    cwd: string,
+    sandboxMode: string,
+    shellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix",
+    outsideShellSyntax: CommandShellSyntax = shellSyntax
+  ): Promise<ExecuteResponse> {
     {
       console.log(
         `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`
@@ -209,7 +270,8 @@ export class ToolOrchestrator {
       // 1. Assess command safety — always check, even in YOLO mode
       const safety = assessCommandSafety(command, cwd, {
         windowsShell:
-          process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown"
+          process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown",
+        shellSyntax
       })
       console.log(
         `[Orchestrator] safety: ${safety.level}${safety.reason ? ` (${safety.reason})` : ""}`
@@ -229,38 +291,23 @@ export class ToolOrchestrator {
       // workspace:commitWorktree (the same path as the Git Panel), and reports the result
       // back. This applies even in YOLO mode: a commit must always carry a task card and
       // the CMB message format, so it is the one operation YOLO still prompts for.
-      if (isGitCommitCommand(command)) {
-        let commitCommand = command
-        let commitCwd = cwd
-        let preselectedFilePaths: string[] | undefined
+      if (isGitCommitCommand(command, shellSyntax)) {
         // The dialog only performs the commit; a chained command (e.g.
         // `git commit -m x && git push`) would have its tail silently dropped. Refuse it
         // and tell the agent to run the commit on its own.
-        if (isChainedShellCommand(command)) {
-          const preparedCommit =
-            normalizeGitAddPrefixedGitCommitCommand(command, cwd) ||
-            normalizeCdPrefixedGitCommitCommand(command, cwd)
-          if (preparedCommit) {
-            commitCommand = preparedCommit.command
-            commitCwd = preparedCommit.cwd
-            preselectedFilePaths =
-              "filePaths" in preparedCommit && Array.isArray(preparedCommit.filePaths)
-                ? preparedCommit.filePaths
-                : undefined
-          } else {
-            return {
-              output:
-                "检测到 `git commit` 与其他命令串联执行，提交对话框只会执行提交本身，其余命令会被丢弃。" +
-                "请单独执行 `git commit`（会弹出任务卡片对话框完成提交），再单独执行其余命令（如 git push）。",
-              exitCode: 1,
-              truncated: false
-            }
+        if (isChainedShellCommand(command, shellSyntax)) {
+          return {
+            output:
+              "检测到 `git commit` 与其他命令串联执行，任务卡片流程无法安全保留各段命令的路径和短路语义。" +
+              "请直接使用 `git commit -m \"摘要\" -- <明确文件路径>`；如需切换目录，请单独执行 cd 或使用 git -C。",
+            exitCode: 1,
+            truncated: false
           }
         }
         // The dialog only ever creates a fresh commit, so --amend/--fixup/--squash would be
         // silently turned into a new commit (losing the amend/fixup/squash intent). Refuse
         // rather than mislead the agent with a "提交成功".
-        if (isAmendOrFixupCommit(commitCommand)) {
+        if (isAmendOrFixupCommit(command, shellSyntax)) {
           return {
             output:
               "检测到 `git commit --amend/--fixup/--squash`，但任务卡片提交流程只会新建一条普通提交，" +
@@ -269,7 +316,16 @@ export class ToolOrchestrator {
             truncated: false
           }
         }
-        return this.requestCardCommit(commitCommand, commitCwd, preselectedFilePaths)
+        if (hasUnsupportedGitCommitScope(command, shellSyntax)) {
+          return {
+            output:
+              "检测到任务卡片提交流程无法安全复现的 Git 文件范围选项（如 -a、--patch 或 " +
+              "--pathspec-from-file）。请先运行 git status，再使用 `git commit -m \"摘要\" -- <明确文件路径>` 重试。",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        return this.requestCardCommit(command, cwd, shellSyntax)
       }
 
       // 2.6 git push → route a plain (non-force) push through workspace:pushWorktree — the
@@ -282,11 +338,11 @@ export class ToolOrchestrator {
       // the current cwd — a `git -C <other>` push to a different repo would otherwise be
       // silently redirected to the thread's worktree.
       if (
-        isGitPushCommand(command) &&
-        !isForcePushCommand(command) &&
-        !isChainedShellCommand(command)
+        isGitPushCommand(command, shellSyntax) &&
+        !isForcePushCommand(command, shellSyntax) &&
+        !isChainedShellCommand(command, shellSyntax)
       ) {
-        const gitCommandCwd = resolveGitPushCommandCwd(command, cwd)
+        const gitCommandCwd = resolveGitPushCommandCwd(command, cwd, shellSyntax)
         if (isPathInsideOrSame(gitCommandCwd, cwd)) {
           return this.requestWorktreePush(command, cwd, gitCommandCwd)
         }
@@ -296,14 +352,26 @@ export class ToolOrchestrator {
       // commands, but still require explicit approval before escaping the sandbox.
       if (this.yoloMode) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
+        return this.maybeRetryOutsideSandbox(
+          command,
+          cwd,
+          sandboxMode,
+          result,
+          outsideShellSyntax
+        )
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
+        return this.maybeRetryOutsideSandbox(
+          command,
+          cwd,
+          sandboxMode,
+          result,
+          outsideShellSyntax
+        )
       }
 
       // 5. Needs approval → check cache, then ask user
@@ -353,7 +421,13 @@ export class ToolOrchestrator {
       // looks sandbox-induced.
       try {
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return await this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result)
+        return await this.maybeRetryOutsideSandbox(
+          command,
+          cwd,
+          sandboxMode,
+          result,
+          outsideShellSyntax
+        )
       } catch (err) {
         // 7. Sandbox denial → block and inform user
         if (sandboxMode !== "none" && this.isSandboxDenialError(err)) {
@@ -379,11 +453,16 @@ export class ToolOrchestrator {
   private async requestCardCommit(
     command: string,
     cwd: string,
-    preselectedFilePaths?: string[]
+    shellSyntax: CommandShellSyntax
   ): Promise<ExecuteResponse> {
-    const suggestedCommitMessage = extractGitCommitMessage(command)
-    const gitCommandCwd = resolveGitCommandCwd(command, cwd)
-    const gitCommandCwdError = await validateGitOperationCwd(cwd, gitCommandCwd, "commit")
+    const suggestedCommitMessage = extractGitCommitMessage(command, shellSyntax)
+    const gitCommandCwd = resolveGitCommandCwd(command, cwd, shellSyntax)
+    const workspaceBoundary = this.workspacePath ?? cwd
+    const gitCommandCwdError = await validateGitOperationCwd(
+      workspaceBoundary,
+      gitCommandCwd,
+      "commit"
+    )
     if (gitCommandCwdError) {
       return {
         output: gitCommandCwdError,
@@ -391,19 +470,50 @@ export class ToolOrchestrator {
         truncated: false
       }
     }
-    let suggestedCommitFilePaths = Array.from(
-      new Set([...(preselectedFilePaths ?? []), ...extractGitCommitPathspecs(command)])
+    const gitRoot = await getGitRootForPath(gitCommandCwd)
+    if (!gitRoot) {
+      return {
+        output: "Git 仓库根目录在提交前发生变化；为避免提交到错误仓库，本次操作已取消。",
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    const [representedGitRoot, realWorkspace, realGitRoot] =
+      await Promise.all([
+        representExistingPathWithinWorkspace(workspaceBoundary, gitRoot),
+        resolveExistingDirForBoundary(workspaceBoundary),
+        resolveExistingDirForBoundary(gitRoot)
+      ])
+    const operationTarget =
+      realWorkspace.exists &&
+      realGitRoot.exists &&
+      isPathInsideOrSame(realGitRoot.path, realWorkspace.path)
+        ? representedGitRoot
+        : path.resolve(workspaceBoundary)
+    const extractedPathspecs = Array.from(
+      new Set(extractGitCommitPathspecs(command, shellSyntax))
     )
-    let suggestedCommitFileSelectionSource: "pathspec" | "staged" | undefined =
-      suggestedCommitFilePaths.length > 0 ? "pathspec" : undefined
-    let suggestedCommitFileBasePath: string | undefined =
-      suggestedCommitFilePaths.length > 0 ? gitCommandCwd : undefined
-    if (suggestedCommitFilePaths.length === 0) {
-      const stagedFilePaths = await readStagedGitFilePaths(gitCommandCwd)
-      if (stagedFilePaths.length > 0) {
-        suggestedCommitFilePaths = stagedFilePaths
-        suggestedCommitFileSelectionSource = "staged"
-        suggestedCommitFileBasePath = undefined
+    if (extractedPathspecs.length === 0) {
+      return {
+        output:
+          "任务卡片提交流程必须指定明确文件路径，不能安全复现裸 `git commit` 的暂存区/未暂存片段语义。" +
+          "请先运行 git status，再使用 `git commit -m \"摘要\" -- <明确文件路径>` 重试。",
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    const suggestedCommitFilePaths = await projectExplicitPathsToTarget(
+      gitRoot,
+      gitCommandCwd,
+      operationTarget,
+      extractedPathspecs,
+      shellSyntax
+    )
+    if (!suggestedCommitFilePaths) {
+      return {
+        output: "无法可靠映射 Git 提交路径；为避免提交到错误范围，本次操作已取消。",
+        exitCode: 1,
+        truncated: false
       }
     }
     console.log(`[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`)
@@ -416,9 +526,9 @@ export class ToolOrchestrator {
       cwd,
       suggestedCommitMessage,
       suggestedCommitFilePaths,
-      suggestedCommitFileBasePath,
-      suggestedGitWorktreePath: gitCommandCwd,
-      suggestedCommitFileSelectionSource,
+      suggestedCommitFileBasePath: operationTarget,
+      suggestedGitWorktreePath: operationTarget,
+      suggestedCommitFileSelectionSource: "pathspec",
       reason: "Git 提交需要选择任务卡片并确认",
       allowed_decisions: ["approve", "reject"],
       allowed_approval_types: ["approve", "reject"]
@@ -436,6 +546,13 @@ export class ToolOrchestrator {
     if (result?.success) {
       const detail = result.commitMessage ? `：${result.commitMessage}` : ""
       return { output: `提交成功${detail}`, exitCode: 0, truncated: false }
+    }
+    if (result?.error === AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE) {
+      return {
+        output: AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE,
+        exitCode: 1,
+        truncated: false
+      }
     }
     return {
       output: `提交失败：${result?.error || "未知错误"}`,
@@ -511,12 +628,19 @@ export class ToolOrchestrator {
     command: string,
     cwd: string,
     sandboxMode: string,
-    result: ExecuteResponse
+    result: ExecuteResponse,
+    outsideShellSyntax: CommandShellSyntax = process.platform === "win32" ? "powershell" : "posix"
   ): Promise<ExecuteResponse> {
     if (sandboxMode === "none") return result
     // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
     // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
-    return this.maybeRequestSandboxBypass(command, cwd, sandboxMode, result)
+    return this.maybeRequestSandboxBypass(
+      command,
+      cwd,
+      sandboxMode,
+      result,
+      outsideShellSyntax
+    )
   }
 
   /**
@@ -535,7 +659,8 @@ export class ToolOrchestrator {
     command: string,
     cwd: string,
     sandboxMode: string,
-    sandboxResult: ExecuteResponse
+    sandboxResult: ExecuteResponse,
+    outsideShellSyntax: CommandShellSyntax
   ): Promise<ExecuteResponse> {
     const output = sandboxResult.output ?? ""
     if (!LocalSandbox.isLikelySandboxDenied(sandboxResult.exitCode, output, command)) {
@@ -571,6 +696,23 @@ export class ToolOrchestrator {
     console.warn(
       `[Orchestrator] sandbox bypass approved for "${command}" — retrying outside sandbox`
     )
+    const outsideSafety = assessCommandSafety(command, cwd, {
+      shellSyntax: outsideShellSyntax,
+      windowsShell: outsideShellSyntax === "powershell" ? "powershell" : "unknown"
+    })
+    if (outsideSafety.level === "forbidden") {
+      return {
+        output: `Command retry forbidden after shell change: ${outsideSafety.reason}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    if (
+      isGitCommitCommand(command, outsideShellSyntax) ||
+      isGitPushCommand(command, outsideShellSyntax)
+    ) {
+      return this.execute(command, cwd, "none", outsideShellSyntax, outsideShellSyntax)
+    }
     return this.rawExecute(command, "none", cwd)
   }
 

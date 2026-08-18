@@ -4578,7 +4578,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     rawExecute,
     requestApproval,
     yoloMode,
-    options.autoApproveFileEdits === true
+    options.autoApproveFileEdits === true,
+    workspacePath
   )
   backend.setOrchestrator(orchestrator)
 
