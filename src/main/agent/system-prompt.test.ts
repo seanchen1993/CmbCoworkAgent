@@ -4,11 +4,14 @@ import { BASE_SYSTEM_PROMPT } from "./system-prompt"
 
 describe("Agent Git commit guidance", () => {
   it("uses Git-reported paths and leaves staging to the task-card dialog", () => {
+    expect(BASE_SYSTEM_PROMPT).toContain("only when the user explicitly requests it")
     expect(BASE_SYSTEM_PROMPT).toContain("`git status --short`")
     expect(BASE_SYSTEM_PROMPT).toContain(
       "For ordinary new commits, do not run `git add` separately"
     )
     expect(BASE_SYSTEM_PROMPT).toContain("ignored untracked files")
+    expect(BASE_SYSTEM_PROMPT).toContain("Never bypass")
+    expect(BASE_SYSTEM_PROMPT).toContain("do not select unrelated files")
     expect(BASE_SYSTEM_PROMPT).toMatch(
       /During\s+rebase\/merge conflict resolution, still use `git add`/
     )
@@ -21,8 +24,10 @@ describe("Agent Git commit guidance", () => {
     expect(GIT_MASTER_PROFILE.systemPrompt).toContain(
       "for ordinary new commits, do not run `git add` separately"
     )
-    expect(GIT_MASTER_PROFILE.systemPrompt).toContain(
-      "During rebase/merge conflict resolution, still use `git add`"
+    expect(GIT_MASTER_PROFILE.systemPrompt).toContain("Never bypass Git ignore rules")
+    expect(GIT_MASTER_PROFILE.systemPrompt).toContain("do not select unrelated files or retry")
+    expect(GIT_MASTER_PROFILE.systemPrompt).toMatch(
+      /During rebase\/merge conflict resolution,\s+still use `git add`/
     )
   })
 })

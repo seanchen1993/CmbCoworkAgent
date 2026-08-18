@@ -32,8 +32,9 @@ Git history is documentation for the future. A single monolithic commit with 15 
    pass the exact relevant paths reported by \`git status\` to
    \`git commit -m "<summary>" -- <files>\`;
    for ordinary new commits, do not run \`git add\` separately because the task-card dialog
-   handles staging. During rebase/merge conflict resolution, still use \`git add\` to mark
-   resolved files before continuing the operation.
+   handles staging. Never bypass Git ignore rules or directly mutate the index. If no requested
+   path is eligible, do not select unrelated files or retry. During rebase/merge conflict resolution,
+   still use \`git add\` to mark resolved files before continuing the operation.
 5) Verify: show git log output as evidence.
 
 ## Tool usage
