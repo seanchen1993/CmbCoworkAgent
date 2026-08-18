@@ -276,12 +276,13 @@ export function ChatScrollNavigator({
     (index: number): void => {
       if (index < 0 || index >= userMessageIds.length) return
 
+      const messageId = userMessageIds[index]
       const viewport = resolveViewport()
       if (!viewport) return
 
-      const messageId = userMessageIds[index]
       const targetElement = userMessageRefs.current.get(messageId)
       if (!targetElement) {
+        onScrollToQuestion?.()
         if (!scrollToMessage?.(messageId)) return
         requestedUserQuestionIndexRef.current = index
         if (requestedUserQuestionTimerRef.current) {
@@ -290,12 +291,14 @@ export function ChatScrollNavigator({
         requestedUserQuestionTimerRef.current = setTimeout(() => {
           requestedUserQuestionIndexRef.current = null
         }, 700)
-        onScrollToQuestion?.()
         setActiveQuestionIndex(index)
         return
       }
 
-      const targetTop = Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
+      const targetTop = Math.min(
+        Math.max(0, viewport.scrollHeight - viewport.clientHeight),
+        Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
+      )
       requestedUserQuestionIndexRef.current = index
       if (requestedUserQuestionTimerRef.current) {
         clearTimeout(requestedUserQuestionTimerRef.current)
@@ -303,8 +306,8 @@ export function ChatScrollNavigator({
       requestedUserQuestionTimerRef.current = setTimeout(() => {
         requestedUserQuestionIndexRef.current = null
       }, 700)
-      viewport.scrollTo({ top: targetTop, behavior: "smooth" })
       onScrollToQuestion?.()
+      viewport.scrollTop = targetTop
       setActiveQuestionIndex(index)
     },
     [onScrollToQuestion, resolveViewport, scrollToMessage, userMessageIds]

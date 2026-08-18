@@ -163,7 +163,7 @@ export function ChatSearchOverlay({
         // Scroll the parent element (not the Range) — with content-visibility
         // the offscreen Range may report a zero rect, but the element box exists.
         const anchor = activeRange.startContainer.parentElement
-        anchor?.scrollIntoView({ block: "center", behavior: "smooth" })
+        anchor?.scrollIntoView({ block: "center" })
       }
     } else {
       registry.delete(ACTIVE_HIGHLIGHT_NAME)

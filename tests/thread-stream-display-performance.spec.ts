@@ -42,6 +42,8 @@ const chat = read("src/renderer/src/components/chat/ChatContainer.tsx")
 const timeline = read("src/renderer/src/components/chat/ChatTimeline.tsx")
 const chatTimelineScroll = read("src/renderer/src/components/chat/useChatTimelineScroll.ts")
 const scrollToBottomButton = read("src/renderer/src/components/chat/ChatScrollToBottomButton.tsx")
+const scrollNavigator = read("src/renderer/src/components/chat/ChatScrollNavigator.tsx")
+const chatSearchOverlay = read("src/renderer/src/components/chat/ChatSearchOverlay.tsx")
 
 function testBackgroundChunksAreDisplayGatedAfterPersistence(): void {
   const functionStart = agentIpc.indexOf("function persistAndForwardPhysicalRunStreamChunk(")
@@ -155,18 +157,13 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
   assertIncludes(
     timeline,
-    "onRowsRendered={handleRowsRendered}",
-    "thread entry waits for the virtual tail row to enter the rendered range"
+    "const VIRTUAL_CHAT_OVERSCAN_COUNT = 20",
+    "long chats use a larger overscan buffer for dynamic-height rows"
   )
   assertIncludes(
     timeline,
-    "allRows.stopIndex < lastRowIndex",
-    "virtual entry scrolls to the tail before anchoring the mounted tail element"
-  )
-  assertIncludes(
-    timeline,
-    "overscanCount={chatMessageListProps.isLoading ? 3 : 8}",
-    "streaming long chats reduce offscreen row mounting during recovery"
+    "overscanCount={VIRTUAL_CHAT_OVERSCAN_COUNT}",
+    "the virtual list applies the dynamic-height overscan buffer"
   )
   assertIncludes(
     timeline,
@@ -186,6 +183,39 @@ function testLongChatsUseDynamicVirtualRows(): void {
     timeline,
     "scrollToLastRow()",
     "virtual end scrolling mounts the tail row before using the end anchor"
+  )
+  assertIncludes(
+    timeline,
+    "stickyToBottomRef",
+    "virtual scrolling tracks whether the user is still following the bottom"
+  )
+  assertIncludes(
+    timeline,
+    "stickyToBottomRef.current = false",
+    "jumping to a message breaks the bottom sticky state"
+  )
+  assertIncludes(
+    timeline,
+    "if (historyLoading || rowCount <= 1 || !stickyToBottomRef.current) return",
+    "content growth only follows the bottom while the sticky flag is still set"
+  )
+  assertIncludes(
+    timeline,
+    "viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)",
+    "bottom scrolling uses the concrete post-measurement viewport geometry"
+  )
+  assertIncludes(
+    timeline,
+    "new ResizeObserver",
+    "streaming height changes re-run bottom settling while sticky"
+  )
+  assert(
+    !timeline.includes("initialTailAnchorPendingRef"),
+    "the old render-range initialization anchor is removed"
+  )
+  assert(
+    !timeline.includes("onRowsRendered={handleRowsRendered}"),
+    "initial bottom placement is no longer coupled to the old rows-rendered handler"
   )
   assertIncludes(
     scrollToBottomButton,
@@ -248,18 +278,93 @@ function testLongChatsUseDynamicVirtualRows(): void {
   )
   assertIncludes(
     chat,
+    "key={threadId}",
+    "switching virtualized threads rebuilds the scroll container instead of reusing its old scrollTop"
+  )
+  assertIncludes(
+    chat,
     "useChatTimelineScroll({",
     "ChatContainer delegates timeline scrolling to an isolated hook"
   )
   assertIncludes(
     chatTimelineScroll,
-    "pendingUserMessageScrollRef",
-    "sending records one user-message anchor instead of following every stream chunk"
+    "viewport.scrollTop = maxScroll",
+    "thread and history transitions repin the virtual viewport to the true bottom"
   )
   assertIncludes(
     chatTimelineScroll,
-    "pending.threadId !== threadId",
-    "a previous thread's pending scroll cannot affect the active thread"
+    "virtualInitialRepinPendingRef",
+    "virtual thread-boundary repin is gated to initialization instead of every message append"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    "const NON_VIRTUAL_STICKY_DISTANCE = 32",
+    "regular threads use the same explicit bottom threshold as the sticky scroll button"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    "useLayoutEffect",
+    "regular threads follow rendered tail changes before the next paint"
+  )
+  assertIncludes(
+    chat,
+    "contentFollowKey: timelineScrollFollowKey",
+    "ChatContainer passes the streaming tail version into regular-thread sticky follow"
+  )
+  assertIncludes(
+    scrollNavigator,
+    "viewport.scrollTop = targetTop",
+    "navigator clicks use a reliable direct viewport jump"
+  )
+  assertIncludes(
+    chat,
+    "onScrollToQuestion={pauseStickyFollow}",
+    "navigator jumps pause sticky follow before the target position can be overwritten"
+  )
+  assertIncludes(
+    timeline,
+    'behavior: "instant"',
+    "virtual navigator jumps do not depend on smooth scrolling"
+  )
+  assert(
+    !scrollNavigator.includes('behavior: "smooth"') &&
+      !timeline.includes('behavior: "smooth"') &&
+      !chatSearchOverlay.includes('behavior: "smooth"'),
+    "chat message navigation uses direct positioning instead of smooth animation"
+  )
+  assert(
+    !scrollNavigator.includes("console.info") &&
+      !timeline.includes("console.info") &&
+      !chatTimelineScroll.includes("console.info"),
+    "temporary scroll diagnostics are removed from production chat code"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    "nonVirtualStickyRef.current = nextSticky",
+    "regular thread scrolling restores sticky state when the user returns to the bottom"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    'viewport.addEventListener("scroll", handleScroll',
+    "regular threads break or restore sticky state from user scroll"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    "mutationObserver.observe(viewport, { childList: true, subtree: true })",
+    "regular threads notice streamed DOM growth while sticky"
+  )
+  assertIncludes(
+    chatTimelineScroll,
+    "new ResizeObserver",
+    "regular threads follow dynamic height changes while sticky"
+  )
+  assert(
+    !chat.includes("requestUserMessageScroll"),
+    "sending no longer uses the old blank-bottom scroll helper"
+  )
+  assert(
+    !chat.includes("conversationBottomPadding"),
+    "sending no longer reserves a temporary blank bottom"
   )
   assertIncludes(
     chat,

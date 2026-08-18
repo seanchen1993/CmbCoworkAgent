@@ -3303,6 +3303,22 @@ export function ChatContainer({
     const lastTextLength = last ? getMessageText(last.content).length : 0
     return `${displayMessages.length}:${isLoading}:${lastTextLength}`
   }, [displayMessages, isLoading])
+  const timelineScrollFollowKey = useMemo(() => {
+    const last = displayMessages[displayMessages.length - 1]
+    const lastTextLength = last ? getMessageText(last.content).length : 0
+    const lastReasoningLength =
+      last && typeof last.reasoning === "string" ? last.reasoning.length : 0
+    const lastToolCallCount = Array.isArray(last?.tool_calls) ? last.tool_calls.length : 0
+    return [
+      displayMessages.length,
+      isLoading ? 1 : 0,
+      last?.id ?? "",
+      last?.role ?? "",
+      lastTextLength,
+      lastReasoningLength,
+      lastToolCallCount
+    ].join(":")
+  }, [displayMessages, isLoading])
 
   const detachedHookLogBuckets = useMemo(() => {
     const userMessageIds = new Set(
@@ -3460,11 +3476,10 @@ export function ChatContainer({
     virtualTimelineRef,
     scrollEndRef,
     contentMessageRefs,
-    conversationBottomPadding,
     getViewport,
     scrollToMessage,
     scrollToConversationBottom,
-    requestUserMessageScroll,
+    pauseStickyFollow,
     handleScrollToConversationBottom
   } = useChatTimelineScroll({
     threadId,
@@ -3474,15 +3489,13 @@ export function ChatContainer({
     pendingApproval,
     pendingUserInput,
     userInputDialogLayout,
-    lastContentMessageId
+    lastContentMessageId,
+    contentFollowKey: timelineScrollFollowKey
   })
   const userInputScrollPadding = pendingUserInput
     ? Math.ceil((userInputDialogLayout?.height ?? 320) + 24)
     : undefined
-  const timelineBottomPadding = Math.max(
-    userInputScrollPadding ?? 0,
-    conversationBottomPadding ?? 0
-  )
+  const timelineBottomPadding = userInputScrollPadding ?? 0
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
@@ -4394,7 +4407,7 @@ export function ChatContainer({
       }
 
       if (visibleUserMessage?.id) {
-        requestUserMessageScroll(visibleUserMessage.id)
+        handleScrollToConversationBottom()
       } else {
         scrollToConversationBottom()
       }
@@ -4824,7 +4837,7 @@ export function ChatContainer({
         persistTiming: true,
         id: queued.id
       })
-      requestUserMessageScroll(visibleUserMessage.id)
+      handleScrollToConversationBottom()
       if (isFirstMessage) {
         const currentThread = threads.find((t) => t.thread_id === threadId)
         const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
@@ -4868,7 +4881,7 @@ export function ChatContainer({
       getQueuedMessage,
       loadResolvedAgentMode,
       models,
-      requestUserMessageScroll,
+      handleScrollToConversationBottom,
       setActiveTurnStartTime,
       setError,
       stream,
@@ -6731,6 +6744,7 @@ export function ChatContainer({
         messages={historyDisplayMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
+        onScrollToQuestion={pauseStickyFollow}
         getViewport={getViewport}
         scrollToMessage={scrollToMessage}
       >
@@ -6738,6 +6752,7 @@ export function ChatContainer({
           <>
             {isVirtualizedChat ? (
               <VirtualChatTimeline
+                key={threadId}
                 ref={virtualTimelineRef}
                 historyMessages={displayMessageSegments.historyMessages}
                 liveMessages={displayMessageSegments.liveMessages}
@@ -7127,6 +7142,7 @@ export function ChatContainer({
                 <ChatScrollToBottomButton
                   getViewport={getViewport}
                   onScrollToBottom={handleScrollToConversationBottom}
+                  resetKey={threadId}
                 />
                 <SlashCommandPopover
                   mode={slash.mode}

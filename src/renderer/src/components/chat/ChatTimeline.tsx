@@ -1,5 +1,6 @@
 import React, {
   useCallback,
+  useEffect,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
@@ -16,10 +17,7 @@ import type { HookLogBucket } from "@/lib/thread-context"
 import { MessageBubble } from "./MessageBubble"
 import { HookLogChip } from "./HookLogViews"
 import { cn } from "@/lib/utils"
-import {
-  buildVisibleMessageLayout,
-  messageHasVisibleRow
-} from "@/lib/message-display-visibility"
+import { buildVisibleMessageLayout, messageHasVisibleRow } from "@/lib/message-display-visibility"
 import {
   buildVirtualChatTimelineSegment,
   type VirtualChatTimelineItem,
@@ -91,8 +89,7 @@ function areChatMessageRowPropsEqual(
   return (
     previous.assistantDurationMsById.get(messageId) ===
       next.assistantDurationMsById.get(messageId) &&
-    previous.userSendTimeLabelById.get(messageId) ===
-      next.userSendTimeLabelById.get(messageId)
+    previous.userSendTimeLabelById.get(messageId) === next.userSendTimeLabelById.get(messageId)
   )
 }
 
@@ -176,6 +173,11 @@ const ChatMessageRow = React.memo(function ChatMessageRow({
 
 export const VIRTUAL_CHAT_TIMELINE_THRESHOLD = 80
 const SCROLL_POSITION_PRESERVE_DISTANCE = 32
+const BOTTOM_SETTLE_DISTANCE = 32
+const BOTTOM_SETTLE_MAX_FRAMES = 60
+const BOTTOM_SETTLE_STABLE_FRAMES = 2
+const VIRTUAL_CHAT_DEFAULT_ROW_HEIGHT = 120
+const VIRTUAL_CHAT_OVERSCAN_COUNT = 20
 
 export interface ChatVirtualTimelineHandle {
   readonly element: HTMLDivElement | null
@@ -196,11 +198,6 @@ interface VirtualChatTimelineRowProps {
     "messages" | "perMessageFlags" | "detachedHookLogBuckets"
   >
 }
-
-// interface VirtualChatTimelineRowRange {
-//   startIndex: number
-//   stopIndex: number
-// }
 
 function VirtualChatTimelineRow({
   ariaAttributes,
@@ -236,10 +233,7 @@ function VirtualChatTimelineRow({
         {...chatMessageListProps}
         message={item.message}
         previousMessage={item.previousMessage ?? null}
-        isStreaming={
-          messageIndex === lastVisibleMessageIndex &&
-          chatMessageListProps.isLoading
-        }
+        isStreaming={messageIndex === lastVisibleMessageIndex && chatMessageListProps.isLoading}
         showAssistantMeta={perMessageFlags.showAssistantMeta[messageIndex]}
         hasUserAfterHead={perMessageFlags.hasUserAfterHead[messageIndex]}
       />
@@ -289,8 +283,9 @@ export const VirtualChatTimeline = React.forwardRef<
 ): React.JSX.Element {
   const listRef = useRef<ListImperativeAPI>(null)
   const lastRowIndexRef = useRef(0)
-  const initialTailAnchorPendingRef = useRef(false)
-  const scrollEndFrameRef = useRef<number | null>(null)
+  const bottomSettleFrameRef = useRef<number | null>(null)
+  const bottomSettleTokenRef = useRef(0)
+  const stickyToBottomRef = useRef(true)
   const scrollEndRef = useRef<HTMLSpanElement>(null)
   const completionScrollTopRef = useRef<number | null>(null)
   const isVisibleVirtualMessage = useCallback(
@@ -337,7 +332,10 @@ export const VirtualChatTimeline = React.forwardRef<
   lastRowIndexRef.current = Math.max(0, rowCount - 1)
 
   const dynamicRowHeight = useDynamicRowHeight({
-    defaultRowHeight: 180,
+    // Bias the first estimate low. Overestimating a dynamic row makes the
+    // virtualizer stop mounting before the viewport, which is visible as a
+    // blank area while the real height cache is still warming up.
+    defaultRowHeight: VIRTUAL_CHAT_DEFAULT_ROW_HEIGHT,
     // Keep measured history rows stable while streaming appends new rows.
     key: threadId
   })
@@ -367,6 +365,13 @@ export const VirtualChatTimeline = React.forwardRef<
       scrollEndRef
     ]
   )
+  const cancelBottomSettle = useCallback((): void => {
+    bottomSettleTokenRef.current += 1
+    if (bottomSettleFrameRef.current !== null) {
+      cancelAnimationFrame(bottomSettleFrameRef.current)
+      bottomSettleFrameRef.current = null
+    }
+  }, [])
   const scrollToLastRow = useCallback((): void => {
     listRef.current?.scrollToRow({
       index: lastRowIndexRef.current,
@@ -374,61 +379,85 @@ export const VirtualChatTimeline = React.forwardRef<
       behavior: "instant"
     })
   }, [])
+  const scrollToBottomNow = useCallback((): boolean => {
+    const viewport = listRef.current?.element
+    if (!viewport) return false
+
+    // The row scroll first makes the tail row eligible for rendering. Once it
+    // exists, use the actual DOM geometry so dynamic row measurements are
+    // reflected instead of relying on react-window's stale estimate.
+    scrollEndRef.current?.scrollIntoView({ block: "end", inline: "nearest" })
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    return true
+  }, [])
   const queueScrollEndAnchor = useCallback((): void => {
-    if (scrollEndFrameRef.current !== null) {
-      cancelAnimationFrame(scrollEndFrameRef.current)
+    stickyToBottomRef.current = true
+    cancelBottomSettle()
+    const token = bottomSettleTokenRef.current
+
+    const settle = (frame: number, previousHeight: number, stableFrames: number): void => {
+      if (token !== bottomSettleTokenRef.current || !stickyToBottomRef.current) return
+
+      const viewport = listRef.current?.element
+      if (!viewport) {
+        if (frame >= BOTTOM_SETTLE_MAX_FRAMES) return
+        bottomSettleFrameRef.current = requestAnimationFrame(() =>
+          settle(frame + 1, previousHeight, stableFrames)
+        )
+        return
+      }
+
+      if (frame === 0) {
+        // First make the tail part of the rendered range. The next frame will
+        // read the concrete scrollHeight after react-window commits it.
+        scrollToLastRow()
+      } else {
+        scrollToBottomNow()
+      }
+
+      const height = viewport.scrollHeight
+      const distanceToBottom = height - viewport.scrollTop - viewport.clientHeight
+      const viewportReady = viewport.clientHeight > 0
+      const heightStable = previousHeight >= 0 && Math.abs(height - previousHeight) < 1
+      const nextStableFrames = heightStable ? stableFrames + 1 : 0
+
+      if (
+        frame < BOTTOM_SETTLE_MAX_FRAMES &&
+        (!viewportReady ||
+          distanceToBottom > BOTTOM_SETTLE_DISTANCE ||
+          nextStableFrames < BOTTOM_SETTLE_STABLE_FRAMES)
+      ) {
+        bottomSettleFrameRef.current = requestAnimationFrame(() =>
+          settle(frame + 1, height, nextStableFrames)
+        )
+      } else {
+        bottomSettleFrameRef.current = null
+      }
     }
-    scrollEndFrameRef.current = requestAnimationFrame(() => {
-      scrollEndFrameRef.current = null
-      // Mount the tail row without reading layout, then use its concrete anchor.
-      scrollToLastRow()
-      scrollEndFrameRef.current = requestAnimationFrame(() => {
-        scrollEndFrameRef.current = null
-        scrollEndRef.current?.scrollIntoView({ block: "end", inline: "nearest" })
-      })
-    })
-  }, [scrollToLastRow])
+
+    bottomSettleFrameRef.current = requestAnimationFrame(() => settle(0, -1, 0))
+  }, [cancelBottomSettle, scrollToBottomNow, scrollToLastRow])
   const scrollToEnd = useCallback((): void => {
     queueScrollEndAnchor()
   }, [queueScrollEndAnchor])
-  // const handleRowsRendered = useCallback(
-  //   (
-  //     _visibleRows: VirtualChatTimelineRowRange,
-  //     allRows: VirtualChatTimelineRowRange
-  //   ): void => {
-  //     if (!initialTailAnchorPendingRef.current) return
-  //
-  //     const lastRowIndex = lastRowIndexRef.current
-  //     if (allRows.stopIndex < lastRowIndex) {
-  //       scrollToLastRow()
-  //       return
-  //     }
-  //
-  //     const tail = scrollEndRef.current
-  //     if (!tail) {
-  //       scrollToLastRow()
-  //       return
-  //     }
-  //
-  //     initialTailAnchorPendingRef.current = false
-  //     tail.scrollIntoView({ block: "end", inline: "nearest" })
-  //   },
-  //   [scrollToLastRow]
-  // )
   const scrollToMessage = useCallback(
     (messageId: string): boolean => {
       const messageRowIndex =
         liveSegment.messageRowIndexById.get(messageId) ??
         historySegment.messageRowIndexById.get(messageId)
       if (messageRowIndex === undefined) return false
-      listRef.current?.scrollToRow({
+      const list = listRef.current
+      if (!list) return false
+      stickyToBottomRef.current = false
+      cancelBottomSettle()
+      list.scrollToRow({
         index: messageRowIndex,
         align: "center",
-        behavior: "smooth"
+        behavior: "instant"
       })
       return true
     },
-    [historySegment.messageRowIndexById, liveSegment.messageRowIndexById]
+    [cancelBottomSettle, historySegment.messageRowIndexById, liveSegment.messageRowIndexById]
   )
 
   useImperativeHandle(
@@ -445,10 +474,10 @@ export const VirtualChatTimeline = React.forwardRef<
 
   // 回复完成会收缩 tail；用户正在阅读历史时，保持其当前 viewport 位置。
   useLayoutEffect(() => {
+    const viewport = listRef.current?.element
     if (chatMessageListProps.isLoading) {
       completionScrollTopRef.current = null
       return () => {
-        const viewport = listRef.current?.element
         if (!viewport) return
         const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
         if (distanceToBottom > SCROLL_POSITION_PRESERVE_DISTANCE) {
@@ -460,30 +489,107 @@ export const VirtualChatTimeline = React.forwardRef<
     const scrollTop = completionScrollTopRef.current
     if (scrollTop === null) return undefined
     completionScrollTopRef.current = null
-    const viewport = listRef.current?.element
     if (viewport) viewport.scrollTop = scrollTop
     return undefined
   }, [chatMessageListProps.isLoading])
 
+  // Claude-style sticky follow: initial mount and later content growth only
+  // chase the bottom while sticky is still true.
   useLayoutEffect(() => {
-    initialTailAnchorPendingRef.current = !historyLoading
-    return () => {
-      initialTailAnchorPendingRef.current = false
-      if (scrollEndFrameRef.current !== null) {
-        cancelAnimationFrame(scrollEndFrameRef.current)
-        scrollEndFrameRef.current = null
+    if (historyLoading || rowCount <= 1 || !stickyToBottomRef.current) return
+    queueScrollEndAnchor()
+  }, [historyLoading, queueScrollEndAnchor, rowCount, threadId])
+
+  useEffect(() => () => cancelBottomSettle(), [cancelBottomSettle])
+
+  const handleListResize = useCallback((): void => {
+    if (!historyLoading && rowCount > 1 && stickyToBottomRef.current) {
+      queueScrollEndAnchor()
+    }
+  }, [historyLoading, queueScrollEndAnchor, rowCount])
+
+  // User scroll state is explicit. Content growth may follow the bottom only
+  // while the user is already there; scrolling up breaks the sticky behavior,
+  // and returning within the threshold re-enables it.
+  useEffect(() => {
+    let viewport: HTMLDivElement | null = null
+    let attachFrame: number | null = null
+    let resizeObserver: ResizeObserver | null = null
+    let mutationObserver: MutationObserver | null = null
+    let cleanupAttached = (): void => {}
+
+    const updateStickyFromViewport = (): void => {
+      if (!viewport) return
+      const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      const nextSticky = distanceToBottom <= BOTTOM_SETTLE_DISTANCE
+      if (stickyToBottomRef.current && !nextSticky) {
+        cancelBottomSettle()
+      }
+      stickyToBottomRef.current = nextSticky
+    }
+
+    const observeListContent = (): void => {
+      if (!viewport || !resizeObserver) return
+      resizeObserver.disconnect()
+      resizeObserver.observe(viewport)
+      const spacer = viewport.lastElementChild
+      if (spacer?.getAttribute("aria-hidden") === "true") {
+        resizeObserver.observe(spacer)
+      }
+      if (scrollEndRef.current) resizeObserver.observe(scrollEndRef.current)
+    }
+
+    const attach = (): void => {
+      viewport = listRef.current?.element ?? null
+      if (!viewport) {
+        attachFrame = requestAnimationFrame(attach)
+        return
+      }
+
+      const handleScroll = (): void => {
+        updateStickyFromViewport()
+      }
+      viewport.addEventListener("scroll", handleScroll, { passive: true })
+
+      if (typeof ResizeObserver !== "undefined") {
+        resizeObserver = new ResizeObserver(() => {
+          observeListContent()
+          if (!historyLoading && stickyToBottomRef.current) {
+            queueScrollEndAnchor()
+          }
+        })
+        observeListContent()
+      }
+
+      if (typeof MutationObserver !== "undefined") {
+        mutationObserver = new MutationObserver(observeListContent)
+        mutationObserver.observe(viewport, { childList: true })
+      }
+
+      cleanupAttached = (): void => {
+        viewport?.removeEventListener("scroll", handleScroll)
+        resizeObserver?.disconnect()
+        mutationObserver?.disconnect()
       }
     }
-  }, [historyLoading, threadId])
+
+    attach()
+
+    return () => {
+      if (attachFrame !== null) cancelAnimationFrame(attachFrame)
+      cleanupAttached()
+    }
+  }, [cancelBottomSettle, historyLoading, queueScrollEndAnchor, rowCount])
 
   return (
     <List
       className="flex-1 min-h-0"
       defaultHeight={720}
       listRef={listRef}
-      // onRowsRendered={handleRowsRendered}
-      // Keep enough rows mounted to avoid blank space during fast scrolling.
-      overscanCount={8}
+      onResize={handleListResize}
+      // Dynamic message heights can be much larger than the default estimate.
+      // Keep a generous row buffer so range updates do not expose the spacer.
+      overscanCount={VIRTUAL_CHAT_OVERSCAN_COUNT}
       rowComponent={VirtualChatTimelineRow}
       rowCount={rowCount}
       rowHeight={dynamicRowHeight}

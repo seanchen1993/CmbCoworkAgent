@@ -6,11 +6,13 @@ const BOTTOM_DISTANCE_THRESHOLD = 32
 interface ChatScrollToBottomButtonProps {
   getViewport: () => HTMLDivElement | null
   onScrollToBottom: () => void
+  resetKey?: string
 }
 
 export function ChatScrollToBottomButton({
   getViewport,
-  onScrollToBottom
+  onScrollToBottom,
+  resetKey
 }: ChatScrollToBottomButtonProps): React.JSX.Element | null {
   const [visible, setVisible] = useState(false)
   const frameRef = useRef<number | null>(null)
@@ -46,9 +48,8 @@ export function ChatScrollToBottomButton({
       // Continue observing only the viewport so a resize can still hide it.
       if (visible) return
 
-      const virtualSpacer = Array.from(viewport.children).find(
-        (element) => element.getAttribute("aria-hidden") === "true"
-      )
+      const lastChild = viewport.lastElementChild
+      const virtualSpacer = lastChild?.getAttribute("aria-hidden") === "true" ? lastChild : null
       const content = virtualSpacer ?? viewport.firstElementChild
       if (content instanceof HTMLElement) resizeObserver.observe(content)
     }
@@ -76,7 +77,7 @@ export function ChatScrollToBottomButton({
       viewport?.removeEventListener("scroll", updateVisibility)
       resizeObserver?.disconnect()
     }
-  }, [getViewport, updateVisibility, visible])
+  }, [getViewport, resetKey, updateVisibility, visible])
 
   if (!visible) return null
 
