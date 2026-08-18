@@ -12,6 +12,7 @@ import {
 import {
   getThreadCheckpointPath,
   deleteThreadCheckpoint,
+  getSkillsDir,
   getEnabledSkillsSources,
   getEnabledSkillMiddlewareSources,
   getUserInfo,
@@ -29,6 +30,7 @@ import {
   getDisabledSkillDirs,
   getGlobalRoutingMode
 } from "../storage"
+import { resolveHarnessFeatureCurrentStage } from "../harness-board/service"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import { getProjectThreadDataDirectory } from "./context-history-path"
@@ -4755,7 +4757,11 @@ The workspace root is: ${workspacePath}`
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
-  backend.setHiddenSkillDirs(getDisabledSkillDirs())
+  const hiddenSkillDirs = [...getDisabledSkillDirs()]
+  if (!(runtimePolicy.isProjectMode && isWorkflowMode)) {
+    hiddenSkillDirs.push(join(getSkillsDir(), "harness-project-workflow"))
+  }
+  backend.setHiddenSkillDirs(hiddenSkillDirs)
   backend.setSkillLifecycleRegistry(
     skillLifecycleSources.length > 0 ? new SkillLifecycleRegistry(skillLifecycleSources) : undefined
   )
@@ -5011,6 +5017,34 @@ The workspace root is: ${workspacePath}`
             // defaults `?? "full"` below), so it still keeps them.
             const restrictedRole =
               subagentOptions.shellAccess === "read_only" || subagentOptions.shellAccess === "none"
+            const currentHarnessStage =
+              runtimePolicy.isProjectMode && harnessProjectId && featureId
+                ? resolveHarnessFeatureCurrentStage(harnessProjectId, featureId)
+                : null
+            const projectWorkflowLeafContext = runtimePolicy.isProjectMode
+              ? {
+                  pluginPromptInject,
+                  pluginOutputDir,
+                  systemId,
+                  pluginRoot,
+                  pluginId,
+                  pluginName,
+                  pluginWorkspace,
+                  featureId,
+                  isHarnessProjectSession,
+                  harnessProjectId,
+                  harnessAdapterName,
+                  harnessAdapterVersion,
+                  harnessNodeName: currentHarnessStage?.name ?? harnessNodeName,
+                  harnessNodeStatus: currentHarnessStage?.status ?? harnessNodeStatus,
+                  projectCode,
+                  projectDir,
+                  harnessAgentsPrompt,
+                  agentmdLoadStatus,
+                  additionalAgentsWorkspacePaths,
+                  additionalAgentsWorkspaceMappings
+                }
+              : {}
             const subagentRuntime = await createAgentRuntime({
               threadId: subagentOptions.threadId,
               agentId: subagentOptions.agentId,
@@ -5032,6 +5066,7 @@ The workspace root is: ${workspacePath}`
               enableAgentsPrompt: !restrictedRole,
               disableMemoryInjection: restrictedRole,
               memoryEnabled: memoryEnabledForThread,
+              ...projectWorkflowLeafContext,
               agentMode: "normal",
               disableSubagents: true,
               // agentType-resolved tool policy. Cuts the disallowed tools and
