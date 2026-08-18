@@ -138,6 +138,7 @@ import type {
 } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import { ChatSearchOverlay } from "./ChatSearchOverlay"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
@@ -3430,6 +3431,11 @@ export function ChatContainer({
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages, streamData.messages])
 
+  const chatScrollNavigatorMessages = useMemo(
+    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
+    [threadMessages]
+  )
+
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
   // the last message's text length — otherwise search misses text that is still
@@ -3595,6 +3601,12 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
+  const scrollToConversationBottom = useCallback((): void => {
+    const viewport = getViewport()
+    if (!viewport) return
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+  }, [getViewport])
+
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
   // case where focus sits on <body> after clicking the transcript. The visibility
@@ -3661,16 +3673,6 @@ export function ChatContainer({
       viewport.scrollTop = viewport.scrollHeight
     }
   }, [getViewport, historyLoading, threadId])
-
-  // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
-  useEffect(() => {
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-    }
-  }, [contextCompaction?.id, contextCompaction?.phase, streamData, isLoading])
 
   // Focus input on mount
   useEffect(() => {
@@ -4469,12 +4471,7 @@ export function ChatContainer({
         // auto-drain once idle. Cleared here (not merely "past the guards") so a
         // FAILED submit attempt right after Stop can't accidentally un-suppress.
         setQueueAutoDrainSuppressed(false)
-        // The queue panel just grew the composer, shrinking the transcript
-        // viewport — re-pin it to the bottom (mirrors the send path) so the last
-        // message isn't left visually cut off above the panel.
         requestAnimationFrame(() => {
-          const viewport = getViewport()
-          if (viewport) viewport.scrollTop = viewport.scrollHeight
           inputRef.current?.focus()
         })
         return
@@ -4563,12 +4560,6 @@ export function ChatContainer({
             generateTitleForFirstMessage(threadId, titleSource)
           }
         }
-      }
-
-      // 发送消息，滚动到底部
-      const viewport = getViewport()
-      if (viewport) {
-        viewport.scrollTop = viewport.scrollHeight
       }
 
       const startTime = Date.now()
@@ -6790,15 +6781,15 @@ export function ChatContainer({
       {nuxDialog}
 
       <ChatScrollNavigator
-        messages={displayMessages}
+        messages={chatScrollNavigatorMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
       >
-        {({ reserveRightSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}
+                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
                 style={
                   userInputScrollPadding
                     ? { paddingBottom: `${userInputScrollPadding}px` }
@@ -6969,7 +6960,7 @@ export function ChatContainer({
                 (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
-                <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
+                <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-20")}>
                   {(() => {
                     const approval = pendingApproval as unknown as Record<string, unknown>
                     const operation = approval.operation
@@ -7244,11 +7235,11 @@ export function ChatContainer({
               workspacePath={workspacePath}
               currentThreadMetadata={currentThread?.metadata}
               createThread={createThread}
-              reserveRightSpace={reserveRightSpace}
+              reserveLeftSpace={reserveLeftSpace}
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
             {goalUi.goal && (
-              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-[20px]")}>
+              <div className={cn("px-4 pb-1", reserveLeftSpace && "md:pl-[20px]")}>
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
@@ -7263,7 +7254,7 @@ export function ChatContainer({
               className={cn(
                 "px-4 pb-4",
                 goalUi.goal ? "pt-1" : "pt-4",
-                reserveRightSpace && "md:pr-[20px]"
+                reserveLeftSpace && "md:pl-[20px]"
               )}
             >
               {showGitChangeNotice && (
@@ -7295,6 +7286,11 @@ export function ChatContainer({
                 </div>
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+                <ChatScrollToBottomButton
+                  getViewport={getViewport}
+                  onScrollToBottom={scrollToConversationBottom}
+                  resetKey={threadId}
+                />
                 <SlashCommandPopover
                   mode={slash.mode}
                   selectedIdx={slash.selectedIdx}

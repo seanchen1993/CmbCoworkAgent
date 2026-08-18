@@ -44,7 +44,7 @@ interface ContextReminderControllerProps {
   workspacePath: string | null
   currentThreadMetadata?: Record<string, unknown>
   createThread: CreateHarnessThread
-  reserveRightSpace: boolean
+  reserveLeftSpace: boolean
   creatingDisabled?: boolean
   onHarnessSessionCreated?: (threadId: string) => void
 }
@@ -72,7 +72,7 @@ export function ContextReminderController({
   workspacePath,
   currentThreadMetadata,
   createThread,
-  reserveRightSpace,
+  reserveLeftSpace,
   creatingDisabled = false,
   onHarnessSessionCreated
 }: ContextReminderControllerProps): React.JSX.Element | null {
@@ -182,7 +182,7 @@ export function ContextReminderController({
   if (!pending) return null
 
   return (
-    <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
+    <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-20")}>
       <div className="mx-auto max-w-3xl rounded-lg border-2 border-status-warning/50 bg-status-warning/5 p-4 space-y-3">
         <div className="flex items-center gap-2">
           <CircleAlert className="size-4 text-status-warning" />
