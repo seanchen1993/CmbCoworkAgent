@@ -48,7 +48,8 @@ import {
   classifyCommandConcurrency,
   isGitCommitCommand,
   isGitPushCommand,
-  isReadOnlyShellCommand
+  isReadOnlyShellCommand,
+  type CommandShellSyntax
 } from "./exec-policy"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import {
@@ -4988,6 +4989,19 @@ export class LocalSandbox
     }
   }
 
+  private static async resolveCommandShellSyntax(
+    sandboxMode: WindowsSandboxMode
+  ): Promise<CommandShellSyntax> {
+    if (process.platform !== "win32") return "posix"
+    const shell =
+      sandboxMode === "none"
+        ? await LocalSandbox.resolveShell()
+        : (await LocalSandbox.resolveWindowsSandboxShell()).shell
+    const shellBase = path.basename(shell).replace(/\.exe$/i, "").toLowerCase()
+    if (["bash", "sh", "zsh", "fish"].includes(shellBase)) return "posix"
+    return ["pwsh", "powershell"].includes(shellBase) ? "powershell" : "cmd"
+  }
+
   /** Asynchronous `which` — locate an executable on PATH without blocking the main process. */
   private static async which(name: string): Promise<string | null> {
     const isWindows = process.platform === "win32"
@@ -5759,10 +5773,13 @@ export class LocalSandbox
     if (cwdError) {
       return `Error: ${cwdError}`
     }
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       return `Command forbidden: ${safety.reason}`
@@ -5793,12 +5810,15 @@ export class LocalSandbox
     // through the orchestrator and return the outcome.
     if (
       this.orchestrator &&
-      (isGitCommitCommand(effectiveCommand) || isGitPushCommand(effectiveCommand))
+      (isGitCommitCommand(effectiveCommand, shellSyntax) ||
+        isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
@@ -5866,7 +5886,8 @@ export class LocalSandbox
                 effectiveCommand,
                 effectiveCwd,
                 this.windowsSandbox,
-                rawResult
+                rawResult,
+                outsideShellSyntax
               )
               .catch((err) => {
                 console.warn(
@@ -6049,10 +6070,13 @@ export class LocalSandbox
     }
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       console.log(`[LocalSandbox] execute: FORBIDDEN — ${safety.reason}`)
@@ -6101,7 +6125,9 @@ export class LocalSandbox
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
@@ -6264,6 +6290,22 @@ export class LocalSandbox
         )
       }
       if (shouldBypassSandboxForProjectPluginHook) {
+        const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
+        const outsideSafety = assessCommandSafety(command, effectiveCwd, {
+          shellSyntax: outsideShellSyntax
+        })
+        if (
+          outsideSafety.level === "forbidden" ||
+          isGitCommitCommand(command, outsideShellSyntax) ||
+          isGitPushCommand(command, outsideShellSyntax)
+        ) {
+          return {
+            output:
+              `Command forbidden after project-hook shell change: ${outsideSafety.reason || "Git submit commands must use the orchestrated workflow"}`,
+            exitCode: 1,
+            truncated: false
+          }
+        }
         return this.executeRawUnserialized(
           command,
           "none",

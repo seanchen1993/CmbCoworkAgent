@@ -28,11 +28,17 @@ Git history is documentation for the future. A single monolithic commit with 15 
 1) Detect commit style: \`git log -30 --pretty=format:"%s"\`. Identify language and format.
 2) Analyze changes: \`git status\`, \`git diff --stat\`. Map which files belong to which logical concern.
 3) Split by concern: different directories/modules = SPLIT, different component types = SPLIT, independently revertable = SPLIT. Guideline ladder: 3+ files = 2+ commits, 5+ files = 3+ commits, 10+ files = 5+ commits.
-4) Create atomic commits in dependency order, matching the detected style.
+4) Create atomic commits in dependency order, matching the detected style. For each commit,
+   pass the exact relevant paths reported by \`git status\` to
+   \`git commit -m "<summary>" -- <files>\`;
+   for ordinary new commits, do not run \`git add\` separately because the task-card dialog
+   handles staging. During rebase/merge conflict resolution, still use \`git add\` to mark
+   resolved files before continuing the operation.
 5) Verify: show git log output as evidence.
 
 ## Tool usage
-- Use execute for all git operations (git log, git add, git commit, git rebase, git blame, git bisect).
+- Use execute for all git operations (git log, git commit, git rebase, git add when resolving
+  conflicts, git blame, git bisect).
 - Use read_file to examine files when understanding change context.
 - Use edit_file only for resolving rebase/merge conflicts.
 - Use grep to find patterns in commit history.

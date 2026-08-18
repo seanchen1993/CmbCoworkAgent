@@ -1002,6 +1002,7 @@ function normalizeApprovalPayload(request: unknown): HITLRequest & Record<string
     suggestedCommitMessage: req.suggestedCommitMessage,
     suggestedCommitFilePaths: req.suggestedCommitFilePaths,
     suggestedCommitFileBasePath: req.suggestedCommitFileBasePath,
+    suggestedGitWorktreePath: req.suggestedGitWorktreePath,
     suggestedCommitFileSelectionSource: req.suggestedCommitFileSelectionSource,
     filePath: req.filePath,
     code: req.code,

@@ -164,13 +164,39 @@ export async function resolveGitOperationPath(
   requestedPath?: string | null
 ): Promise<{ worktreePath: string; gitRoot: string } | { error: string }> {
   const workspaceRoot = path.resolve(workspacePath)
-  const candidatePath = path.resolve(requestedPath?.trim() || workspaceRoot)
+  const hasRequestedPath = typeof requestedPath === "string" && requestedPath.length > 0
+  const candidatePath = path.resolve(hasRequestedPath ? requestedPath : workspaceRoot)
   const relativeToWorkspace = path.relative(workspaceRoot, candidatePath)
-  if (relativeToWorkspace.startsWith("..") || path.isAbsolute(relativeToWorkspace)) {
+  if (
+    relativeToWorkspace === ".." ||
+    relativeToWorkspace.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeToWorkspace)
+  ) {
     return { error: "目标 Git 路径不在当前工作区内" }
   }
 
-  const gitRoot = await getGitRootForPath(candidatePath)
+  let realWorkspaceRoot: string
+  let realCandidatePath: string
+  try {
+    const resolvedPaths = await Promise.all([
+      fs.realpath(workspaceRoot),
+      fs.realpath(candidatePath)
+    ])
+    realWorkspaceRoot = resolvedPaths[0]
+    realCandidatePath = resolvedPaths[1]
+  } catch {
+    return { error: "目标 Git 路径不存在或无法访问" }
+  }
+  const relativeToRealWorkspace = path.relative(realWorkspaceRoot, realCandidatePath)
+  if (
+    relativeToRealWorkspace === ".." ||
+    relativeToRealWorkspace.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeToRealWorkspace)
+  ) {
+    return { error: "目标 Git 路径解析后不在当前工作区内" }
+  }
+
+  const gitRoot = await getGitRootForPath(realCandidatePath)
   if (!gitRoot) {
     const repos = await discoverWorkspaceGitRepositories(workspaceRoot)
     if (!requestedPath && repos.length > 1) {
@@ -182,5 +208,5 @@ export async function resolveGitOperationPath(
     return { error: "目标路径不是 Git 仓库" }
   }
 
-  return { worktreePath: candidatePath, gitRoot }
+  return { worktreePath: realCandidatePath, gitRoot }
 }
