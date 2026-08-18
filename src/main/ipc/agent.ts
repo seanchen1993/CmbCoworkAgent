@@ -906,12 +906,12 @@ function withHarnessStageInvalidation(
   }
 }
 
-function resolveHarnessCurrentStageForContext(
+async function resolveHarnessCurrentStageForContext(
   projectId?: string,
   slug?: string
-): Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus"> {
+): Promise<Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus">> {
   if (!projectId || !slug) return {}
-  const currentStage = resolveHarnessFeatureCurrentStage(projectId, slug)
+  const currentStage = await resolveHarnessFeatureCurrentStage(projectId, slug)
   primeHarnessStageAttribution(projectId, slug, currentStage)
   if (!currentStage?.name) return {}
   return {
@@ -920,10 +920,10 @@ function resolveHarnessCurrentStageForContext(
   }
 }
 
-function getHarnessAgentContext(
+async function getHarnessAgentContext(
   metadata: Record<string, unknown>,
   options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
-): HarnessAgentContext {
+): Promise<HarnessAgentContext> {
   const harnessProjectSession =
     metadata.harnessProjectSession &&
     typeof metadata.harnessProjectSession === "object" &&
@@ -934,7 +934,7 @@ function getHarnessAgentContext(
   const harnessFeature = readHarnessFeatureMetadata(metadata)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const featureContext = buildHarnessFeatureAgentContext(metadata, {
+    const featureContext = await buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
@@ -949,7 +949,7 @@ function getHarnessAgentContext(
             harnessNodeName: options.featureBinding.nodeName,
             harnessNodeStatus: options.featureBinding.nodeStatus
           }
-        : resolveHarnessCurrentStageForContext(
+        : await resolveHarnessCurrentStageForContext(
             featureContext.harnessProjectId,
             featureContext.featureId
           )
@@ -2456,8 +2456,8 @@ function createHarnessAgentmdLoadStatusHandler(
     try {
       const firstSuccess = markHarnessProjectSystemConstraintsLoaded(projectId)
       if (firstSuccess) {
-        // reportProjectSnapshotNow performs a synchronous project inspect before
-        // its first await; defer it so telemetry never delays runtime creation.
+        // Defer the asynchronous snapshot report so telemetry setup never delays
+        // runtime creation on this turn.
         setImmediate(() => void reportProjectSnapshotNow(projectId))
       }
     } catch (error) {
@@ -6048,7 +6048,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Non-project threads or unparsable metadata: leave the trace untagged.
       }
       if (harnessFeatureBinding) {
-        const currentStage = resolveHarnessFeatureCurrentStage(
+        const currentStage = await resolveHarnessFeatureCurrentStage(
           harnessFeatureBinding.projectId,
           harnessFeatureBinding.slug
         )
@@ -6468,7 +6468,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
-        const harnessAgentContext = getHarnessAgentContext(metadata, {
+        const harnessAgentContext = await getHarnessAgentContext(metadata, {
           workspacePath,
           featureBinding: harnessFeatureBinding
         })
@@ -9332,7 +9332,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = metadata.workspacePath as string | undefined
-      const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+      const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
         window,
@@ -10491,7 +10491,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
-    const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+    const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
       window,

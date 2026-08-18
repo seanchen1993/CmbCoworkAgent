@@ -95,9 +95,9 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
     })
   }
 
-  let decision: ReturnType<typeof invokeHarnessAutoNextStep>
+  let decision: Awaited<ReturnType<typeof invokeHarnessAutoNextStep>>
   try {
-    decision = invokeHarnessAutoNextStep(feature.projectId, feature.featureId, event)
+    decision = await invokeHarnessAutoNextStep(feature.projectId, feature.featureId, event)
   } catch (error) {
     console.error("[AutoMode] autoNextStep failed:", {
       eventId: event.eventId,
