@@ -187,6 +187,34 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(rawExecute).not.toHaveBeenCalled()
   })
 
+  it("returns the ignored-only auto-dismiss reason to the Agent verbatim", async () => {
+    const workspace = process.cwd()
+    const message = "Agent 指定的文件均被 Git ignore，未发起提交。"
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "approve",
+      tool_call_id: "test",
+      commitResult: { success: false, error: message }
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      false,
+      false,
+      workspace
+    )
+
+    const result = await orchestrator.execute(
+      'git commit -m "test" -- manual-tests/agent-commit-ignore/ignored-secret.log',
+      workspace,
+      "none"
+    )
+
+    expect(result).toMatchObject({ output: message, exitCode: 1 })
+    expect(rawExecute).not.toHaveBeenCalled()
+  })
+
   it.skipIf(process.platform !== "win32")(
     "projects MSYS absolute pathspecs from Git Bash on Windows",
     async () => {

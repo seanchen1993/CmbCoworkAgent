@@ -12,6 +12,25 @@ export interface CommitSelectionOptions {
   targetWorktreePath?: string
 }
 
+export const AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE =
+  "Agent 指定的文件均被 Git ignore，未发起提交。"
+
+export function shouldAutoDismissEmptyAgentCommitSelection(options: {
+  selectionSource?: "pathspec" | "staged"
+  suggestedPathCount: number
+  selectedPathCount: number
+  loading: boolean
+  failed: boolean
+}): boolean {
+  return (
+    options.selectionSource === "pathspec" &&
+    options.suggestedPathCount > 0 &&
+    options.selectedPathCount === 0 &&
+    !options.loading &&
+    !options.failed
+  )
+}
+
 export function normalizeCommitPath(filePath: string): string {
   if (filePath === ".") return filePath
   return filePath.replace(/^\.\//, "").replace(/\/+$/, "")

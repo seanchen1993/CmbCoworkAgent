@@ -15,11 +15,13 @@ import { VirtualList } from "@/components/ui/virtual-list"
 import { cn } from "@/lib/utils"
 import { parseUnifiedDiffRows, type DiffRow } from "@/lib/diff-utils"
 import {
+  AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE,
   buildInitialSelectedPaths,
   normalizeCommitPath,
   pathMatchesSelection,
   pathsForCommitSelectionFile,
-  resolveCommitWorktreePath
+  resolveCommitWorktreePath,
+  shouldAutoDismissEmptyAgentCommitSelection
 } from "@/lib/agent-git-commit-selection"
 import type { TaskCardItem } from "../../../../shared/task-card-types"
 
@@ -191,6 +193,7 @@ export function AgentGitCommitDialog({
 }: AgentGitCommitDialogProps): React.JSX.Element {
   const activeThreadIdRef = useRef(threadId)
   const diffListRequestIdRef = useRef(0)
+  const emptySelectionResolvedRef = useRef(false)
   const { cardNumber, handleCardNumberChange, persistNow } = useWorkspaceTaskCard(workspacePath)
   const commitWorktreePath = resolveCommitWorktreePath(
     workspacePath,
@@ -425,6 +428,32 @@ export function AgentGitCommitDialog({
   const fileSelectionMissing =
     !fileSelectionPending && !fileSelectionFailed && selectedCommitFilePaths.length === 0
   const fileSelectionBlocked = fileSelectionPending || fileSelectionFailed || fileSelectionMissing
+
+  useEffect(() => {
+    if (emptySelectionResolvedRef.current || !diff) return
+    if (
+      !shouldAutoDismissEmptyAgentCommitSelection({
+        selectionSource: initialFileSelectionSource,
+        suggestedPathCount: suggestedFilePathCount,
+        selectedPathCount: selectedCommitFilePaths.length,
+        loading: fileSelectionPending,
+        failed: fileSelectionFailed
+      })
+    ) {
+      return
+    }
+    emptySelectionResolvedRef.current = true
+    onCommitted({ success: false, error: AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE })
+  }, [
+    diff,
+    fileSelectionFailed,
+    fileSelectionPending,
+    initialFileSelectionSource,
+    onCommitted,
+    selectedCommitFilePaths.length,
+    suggestedFilePathCount
+  ])
+
   const finalMessage = useMemo(
     () => (cardValue ? `${cardValue} #comment ${commitType}:${messageValue} #CMBDevClaw` : ""),
     [cardValue, commitType, messageValue]

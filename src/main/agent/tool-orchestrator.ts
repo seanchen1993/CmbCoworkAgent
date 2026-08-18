@@ -59,6 +59,9 @@ export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecisi
 const SANDBOX_BYPASS_PROMPT_REASON =
   "命令在沙箱内执行失败，疑似受沙箱限制。是否允许我在沙箱外重试同一命令？"
 
+const AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE =
+  "Agent 指定的文件均被 Git ignore，未发起提交。"
+
 function normalizeDirBoundaryKey(dir: string): string {
   const resolved = path.resolve(dir)
   if (process.platform === "win32") {
@@ -543,6 +546,13 @@ export class ToolOrchestrator {
     if (result?.success) {
       const detail = result.commitMessage ? `：${result.commitMessage}` : ""
       return { output: `提交成功${detail}`, exitCode: 0, truncated: false }
+    }
+    if (result?.error === AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE) {
+      return {
+        output: AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE,
+        exitCode: 1,
+        truncated: false
+      }
     }
     return {
       output: `提交失败：${result?.error || "未知错误"}`,

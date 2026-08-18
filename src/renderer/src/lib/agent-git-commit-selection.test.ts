@@ -1,12 +1,44 @@
 import { describe, expect, it } from "vitest"
 import {
+  AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE,
   buildInitialSelectedPaths,
   pathMatchesSelection,
   pathsForCommitSelectionFile,
-  resolveCommitWorktreePath
+  resolveCommitWorktreePath,
+  shouldAutoDismissEmptyAgentCommitSelection
 } from "./agent-git-commit-selection"
 
 describe("Agent git commit selection", () => {
+  it("auto-dismisses an explicit Agent scope after every suggested path is filtered out", () => {
+    expect(
+      shouldAutoDismissEmptyAgentCommitSelection({
+        selectionSource: "pathspec",
+        suggestedPathCount: 3,
+        selectedPathCount: 0,
+        loading: false,
+        failed: false
+      })
+    ).toBe(true)
+    expect(AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE).toContain("Git ignore")
+  })
+
+  it("does not auto-dismiss while loading, after an error, or after a manual selection", () => {
+    const base = {
+      selectionSource: "pathspec" as const,
+      suggestedPathCount: 1,
+      selectedPathCount: 0,
+      loading: false,
+      failed: false
+    }
+
+    expect(shouldAutoDismissEmptyAgentCommitSelection({ ...base, loading: true })).toBe(false)
+    expect(shouldAutoDismissEmptyAgentCommitSelection({ ...base, failed: true })).toBe(false)
+    expect(shouldAutoDismissEmptyAgentCommitSelection({ ...base, selectedPathCount: 1 })).toBe(false)
+    expect(
+      shouldAutoDismissEmptyAgentCommitSelection({ ...base, selectionSource: "staged" })
+    ).toBe(false)
+  })
+
   it("selects every Git-reported change when the Agent did not specify a scope", () => {
     const selected = buildInitialSelectedPaths([{ path: "src/visible.ts" }], undefined, [
       "src/visible.ts",
