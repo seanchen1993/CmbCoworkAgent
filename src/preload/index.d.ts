@@ -1397,7 +1397,7 @@ interface CustomAPI {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: { worktreePath?: string; agentInitiated?: boolean }
     ) => Promise<{
       success: boolean
       error?: string

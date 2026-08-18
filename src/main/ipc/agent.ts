@@ -79,6 +79,10 @@ import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
 import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
 import {
+  markHarnessStageAttributionDirty,
+  primeHarnessStageAttribution
+} from "../services/harness-stage-attribution"
+import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
@@ -794,12 +798,30 @@ function getHarnessHookContext(
   }
 }
 
+function withHarnessStageInvalidation(
+  callback: HookResultCallback,
+  projectId?: string,
+  featureSlug?: string
+): HookResultCallback {
+  return (event, hook, result): void => {
+    if (
+      hook.hookSourceType === "plugin" ||
+      hook.hookSourceType === "skill" ||
+      Boolean(hook.pluginRoot)
+    ) {
+      markHarnessStageAttributionDirty(projectId, featureSlug)
+    }
+    callback(event, hook, result)
+  }
+}
+
 async function resolveHarnessCurrentStageForContext(
   projectId?: string,
   slug?: string
 ): Promise<Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus">> {
   if (!projectId || !slug) return {}
   const currentStage = await resolveHarnessFeatureCurrentStage(projectId, slug)
+  primeHarnessStageAttribution(projectId, slug, currentStage)
   if (!currentStage?.name) return {}
   return {
     harnessNodeName: currentStage.name,
@@ -821,7 +843,7 @@ async function getHarnessAgentContext(
   const harnessFeature = readHarnessFeatureMetadata(metadata)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const featureContext = buildHarnessFeatureAgentContext(metadata, {
+    const featureContext = await buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
@@ -5944,6 +5966,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           harnessFeatureBinding.projectId,
           harnessFeatureBinding.slug
         )
+        primeHarnessStageAttribution(
+          harnessFeatureBinding.projectId,
+          harnessFeatureBinding.slug,
+          currentStage
+        )
         if (currentStage?.name)
           harnessFeatureBinding = {
             ...harnessFeatureBinding,
@@ -6200,7 +6227,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         runToken,
         abortController.signal,
-        makeHookResultCallback(window, channel, turnState.turnId)
+        withHarnessStageInvalidation(
+          makeHookResultCallback(window, channel, turnState.turnId),
+          harnessFeatureBinding?.projectId,
+          harnessFeatureBinding?.slug
+        )
       )
       const onFailureFuseNotice = guardPhysicalStreamRunCallback(
         threadId,
@@ -9403,7 +9434,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         runToken,
         abortController.signal,
-        makeHookResultCallback(window, channel, turnState.turnId)
+        withHarnessStageInvalidation(
+          makeHookResultCallback(window, channel, turnState.turnId),
+          harnessAgentContext.harnessProjectId,
+          harnessAgentContext.featureId
+        )
       )
       const onFailureFuseNotice = guardPhysicalStreamRunCallback(
         threadId,
@@ -10476,7 +10511,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       threadId,
       runToken,
       abortController.signal,
-      makeHookResultCallback(window, channel, turnState.turnId)
+      withHarnessStageInvalidation(
+        makeHookResultCallback(window, channel, turnState.turnId),
+        harnessAgentContext.harnessProjectId,
+        harnessAgentContext.featureId
+      )
     )
     const onFailureFuseNotice = guardPhysicalStreamRunCallback(
       threadId,

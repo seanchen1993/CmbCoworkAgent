@@ -316,6 +316,15 @@ export interface RecordGenInput {
   newString?: string
   /** Optional: replacement count returned by the edit tool. Defaults to 1. */
   occurrences?: number
+  /**
+   * Point-in-time workflow stage captured immediately before the file mutation.
+   * Presence (including explicit nulls) overrides the turn-start context so a
+   * queued recordGen microtask cannot inherit a stale stage.
+   */
+  harnessStage?: {
+    nodeName: string | null
+    nodeStatus: string | null
+  }
 }
 
 interface JsonlGenEntry {
@@ -1244,7 +1253,14 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // can run and clearAdoptionContext(threadId) — which would zero out the
     // skill/model/trace fields on both the cloud event and the sqlite row,
     // and in turn strip skill attribution from the downstream code_adopt.
-    const ctx = getContext(input.threadId)
+    const turnContext = getContext(input.threadId)
+    const ctx: AdoptionContext = input.harnessStage
+      ? {
+          ...turnContext,
+          harnessNodeName: input.harnessStage.nodeName ?? undefined,
+          harnessNodeStatus: input.harnessStage.nodeStatus ?? undefined
+        }
+      : turnContext
 
     const absPath = input.workspacePath
       ? resolvePath(input.workspacePath, input.filePath)
