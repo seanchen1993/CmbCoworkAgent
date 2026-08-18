@@ -1,7 +1,42 @@
 import type { BrowserWindow, IpcMain } from "electron"
+import {
+  BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL,
+  BUILTIN_BROWSER_LOG_PREFIX,
+  type BrowserAttachOptions,
+  type BrowserBounds,
+  type BrowserCdpConfig,
+  type BrowserNavigateOptions,
+  type BrowserRecordingDraftUpdateInput,
+  type BrowserRecordingSession,
+  type BrowserScriptExecutionInput,
+  type BrowserScriptLibraryDeleteInput,
+  type BrowserScriptLibraryListOptions,
+  type BrowserScriptLibraryReadInput,
+  type BrowserScriptLibrarySaveInput,
+  type BrowserScriptLibraryUpdateInput,
+  type ScriptRecordingStartOptions
+} from "../../shared/browser-types"
+import {
+  autoRegisterPlaywrightMcpConnector,
+  syncPlaywrightMcpConnectorForBrowserCdpConfig
+} from "../browser/cdp/browser-playwright-mcp-connector"
 import { BrowserService } from "../browser/core/browser-service"
-import { syncPlaywrightMcpConnectorForBrowserCdpConfig } from "../browser/cdp/browser-playwright-mcp-connector"
 import { setGlobalBrowserService } from "../browser/core/browser-service-registry"
+import { registerBrowserProfileImportHandlers } from "./browser-profile-import"
+import {
+  cancelRecordingScriptExecutionInBuiltinBrowser,
+  executeRecordingScriptInBuiltinBrowser,
+  getBrowserScriptExecutionState,
+  isBrowserScriptExecutionCancelledError,
+  onBrowserScriptExecutionStateChange
+} from "../browser/record/common/browser-script-execution-service"
+import {
+  deleteBrowserScriptLibraryEntry,
+  listBrowserScriptLibraryEntries,
+  readBrowserScriptLibraryScript,
+  saveBrowserScriptLibraryEntry,
+  updateBrowserScriptLibraryEntry
+} from "../browser/record/common/browser-script-library-service"
 import {
   getScriptRecording,
   installScriptRecorderForSubtree,
@@ -11,66 +46,32 @@ import {
   stopScriptRecording,
   updateScriptRecordingDraft
 } from "../browser/record/script-record/script-recording-service"
-import {
-  deleteBrowserScriptLibraryEntry,
-  listBrowserScriptLibraryEntries,
-  readBrowserScriptLibraryScript,
-  saveBrowserScriptLibraryEntry,
-  updateBrowserScriptLibraryEntry
-} from "../browser/record/common/browser-script-library-service"
-import {
-  cancelRecordingScriptExecutionInBuiltinBrowser,
-  executeRecordingScriptInBuiltinBrowser,
-  getBrowserScriptExecutionState,
-  isBrowserScriptExecutionCancelledError,
-  onBrowserScriptExecutionStateChange
-} from "../browser/record/common/browser-script-execution-service"
-import type {
-  BrowserRecordingDraftUpdateInput,
-  BrowserScriptLibraryDeleteInput,
-  BrowserScriptLibraryListOptions,
-  BrowserScriptLibraryReadInput,
-  BrowserScriptExecutionInput,
-  BrowserScriptLibrarySaveInput,
-  BrowserScriptLibraryUpdateInput
-} from "../../shared/browser-types"
 import { invalidateGlobalMcpCapabilityService } from "../mcp/capability-service"
 import { getBrowserCdpConfigAsync, saveBrowserCdpConfigAsync } from "../storage"
-import {
-  BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL,
-  BUILTIN_BROWSER_LOG_PREFIX
-} from "../../shared/browser-types"
-import type {
-  BrowserAttachOptions,
-  BrowserRecordingSession,
-  BrowserBounds,
-  BrowserCdpConfig,
-  ScriptRecordingStartOptions,
-  BrowserNavigateOptions
-} from "../../shared/browser-types"
 
 const BROWSER_SERVICE_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserService]`
 
-export function registerBrowserHandlers(
-  ipcMain: IpcMain,
-  getMainWindow: () => BrowserWindow | null
-): BrowserService {
-  const browserService = new BrowserService(getMainWindow)
-  setGlobalBrowserService(browserService)
-  const disposeScriptExecutionStateForwarder = onBrowserScriptExecutionStateChange((state) => {
+export type GetMainWindow = () => BrowserWindow | null
+
+export interface BrowserIpcContext {
+  browserService: BrowserService
+  getMainWindow: GetMainWindow
+  ipcMain: IpcMain
+}
+
+function registerBrowserStateForwarding(getMainWindow: GetMainWindow): void {
+  void onBrowserScriptExecutionStateChange((state) => {
     const window = getMainWindow()
     if (!window || window.isDestroyed()) return
     window.webContents.send(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, state)
   })
+}
 
-  ipcMain.handle("browser:attach", (_event, options?: BrowserAttachOptions) => {
-    return browserService.attach(options)
-  })
-
-  ipcMain.handle("browser:detach", () => {
-    return browserService.detach()
-  })
-
+function registerBrowserRendererLifecycleIpc({
+  browserService,
+  getMainWindow,
+  ipcMain
+}: BrowserIpcContext): void {
   ipcMain.on("browser:disposeAllForRendererUnload", (event) => {
     const window = getMainWindow()
     if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
@@ -85,6 +86,16 @@ export function registerBrowserHandlers(
       `${BROWSER_SERVICE_LOG_PREFIX} Renderer unload cleanup requested by sender ${event.sender.id}; disposed=${disposedSessionId ?? "(none)"}.`
     )
   })
+}
+
+function registerBrowserControlIpc({ browserService, ipcMain }: BrowserIpcContext): void {
+  ipcMain.handle("browser:attach", (_event, options?: BrowserAttachOptions) => {
+    return browserService.attach(options)
+  })
+
+  ipcMain.handle("browser:detach", () => {
+    return browserService.detach()
+  })
 
   ipcMain.handle("browser:setBounds", (_event, bounds: BrowserBounds, visible?: boolean) => {
     return browserService.setBounds(bounds, visible)
@@ -98,26 +109,25 @@ export function registerBrowserHandlers(
   )
 
   ipcMain.handle("browser:goBack", () => browserService.goBack())
-
   ipcMain.handle("browser:goForward", () => browserService.goForward())
-
   ipcMain.handle("browser:reload", () => browserService.reload())
-
   ipcMain.handle("browser:stop", () => browserService.stop())
-
   ipcMain.handle("browser:clearConsole", () => browserService.clearConsole())
-
   ipcMain.handle("browser:getState", () => browserService.getState())
+}
 
-  ipcMain.handle("browser:getCdpConfig", () => getBrowserCdpConfigAsync())
+async function installScriptRecorderOnActiveBrowser(browserService: BrowserService): Promise<void> {
+  const webContents = browserService.getWebContents()
+  if (!webContents) return
+  await installScriptRecorderForSubtree(webContents.mainFrame)
+}
+
+function registerBrowserScriptRecordingIpc({ browserService, ipcMain }: BrowserIpcContext): void {
   ipcMain.handle(
     "browser:startScriptRecording",
     async (_event, options?: ScriptRecordingStartOptions): Promise<BrowserRecordingSession> => {
       const session = startScriptRecording(options)
-      const webContents = browserService.getWebContents()
-      if (webContents) {
-        await installScriptRecorderForSubtree(webContents.mainFrame)
-      }
+      await installScriptRecorderOnActiveBrowser(browserService)
       return session
     }
   )
@@ -135,10 +145,7 @@ export function registerBrowserHandlers(
 
   ipcMain.handle("browser:resumeScriptRecording", async (): Promise<BrowserRecordingSession> => {
     const session = resumeScriptRecording()
-    const webContents = browserService.getWebContents()
-    if (webContents) {
-      await installScriptRecorderForSubtree(webContents.mainFrame)
-    }
+    await installScriptRecorderOnActiveBrowser(browserService)
     return session
   })
 
@@ -148,7 +155,9 @@ export function registerBrowserHandlers(
   )
 
   ipcMain.handle("browser:getScriptRecording", (): BrowserRecordingSession => getScriptRecording())
+}
 
+function registerBrowserScriptLibraryIpc({ ipcMain }: Pick<BrowserIpcContext, "ipcMain">): void {
   ipcMain.handle(
     "browser:saveScriptLibraryEntry",
     async (_event, input: BrowserScriptLibrarySaveInput) => {
@@ -183,7 +192,9 @@ export function registerBrowserHandlers(
       return deleteBrowserScriptLibraryEntry(input)
     }
   )
+}
 
+function registerBrowserScriptExecutionIpc({ ipcMain }: Pick<BrowserIpcContext, "ipcMain">): void {
   ipcMain.handle(
     "browser:executeRecordingScript",
     async (_event, input: BrowserScriptExecutionInput): Promise<void> => {
@@ -201,18 +212,28 @@ export function registerBrowserHandlers(
   ipcMain.handle("browser:cancelRecordingScriptExecution", async () => {
     return cancelRecordingScriptExecutionInBuiltinBrowser()
   })
+}
+
+function sanitizeBrowserCdpConfigUpdates(
+  updates?: Partial<BrowserCdpConfig>
+): Partial<BrowserCdpConfig> {
+  const sanitized: Partial<BrowserCdpConfig> = {}
+  if (updates && typeof updates.enabled === "boolean") {
+    sanitized.enabled = updates.enabled
+  }
+  if (updates && typeof updates.profileImportEnabled === "boolean") {
+    sanitized.profileImportEnabled = updates.profileImportEnabled
+  }
+  return sanitized
+}
+
+function registerBrowserCdpIpc({ ipcMain }: Pick<BrowserIpcContext, "ipcMain">): void {
+  ipcMain.handle("browser:getCdpConfig", () => getBrowserCdpConfigAsync())
 
   ipcMain.handle(
     "browser:saveCdpConfig",
     async (_event, updates?: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> => {
-      const sanitized: Partial<BrowserCdpConfig> = {}
-      if (updates && typeof updates.enabled === "boolean") {
-        sanitized.enabled = updates.enabled
-      }
-      if (updates && typeof updates.profileImportEnabled === "boolean") {
-        sanitized.profileImportEnabled = updates.profileImportEnabled
-      }
-      const saved = await saveBrowserCdpConfigAsync(sanitized)
+      const saved = await saveBrowserCdpConfigAsync(sanitizeBrowserCdpConfigUpdates(updates))
       const { invalidateCapabilities } = await syncPlaywrightMcpConnectorForBrowserCdpConfig(saved)
       if (invalidateCapabilities) {
         await invalidateGlobalMcpCapabilityService("browser:saveCdpConfig")
@@ -220,9 +241,45 @@ export function registerBrowserHandlers(
       return saved
     }
   )
+}
 
+function registerBrowserCaptureIpc({ browserService, ipcMain }: BrowserIpcContext): void {
   ipcMain.handle("browser:captureScreenshot", () => browserService.captureScreenshot())
+}
 
-  void disposeScriptExecutionStateForwarder
+export function registerBrowserIpcHandlers(context: BrowserIpcContext): void {
+  registerBrowserStateForwarding(context.getMainWindow)
+  registerBrowserRendererLifecycleIpc(context)
+  registerBrowserControlIpc(context)
+  registerBrowserScriptRecordingIpc(context)
+  registerBrowserScriptLibraryIpc(context)
+  registerBrowserScriptExecutionIpc(context)
+  registerBrowserCdpIpc(context)
+  registerBrowserCaptureIpc(context)
+}
+
+export function registerBrowserHandlers(
+  ipcMain: IpcMain,
+  getMainWindow: GetMainWindow
+): BrowserService {
+  const browserService = new BrowserService(getMainWindow)
+  setGlobalBrowserService(browserService)
+  registerBrowserIpcHandlers({ browserService, getMainWindow, ipcMain })
+  return browserService
+}
+
+export function registerBuiltinBrowserIpc(
+  ipcMain: IpcMain,
+  getMainWindow: GetMainWindow,
+  browserCdpPort: number | null
+): BrowserService {
+  const browserService = registerBrowserHandlers(ipcMain, getMainWindow)
+  registerBrowserProfileImportHandlers(ipcMain, getMainWindow, browserService)
+  void autoRegisterPlaywrightMcpConnector(browserCdpPort).catch((err) =>
+    console.error(
+      `${BUILTIN_BROWSER_LOG_PREFIX}[Main] Failed to auto-register Playwright MCP connector:`,
+      err
+    )
+  )
   return browserService
 }

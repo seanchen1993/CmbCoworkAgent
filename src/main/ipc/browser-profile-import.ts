@@ -1,4 +1,4 @@
-import { dialog, type BrowserWindow, type IpcMain } from "electron"
+import { dialog, type BrowserWindow, type IpcMain, type IpcMainInvokeEvent } from "electron"
 import { getBrowserCdpConfig } from "../storage"
 import type {
   BrowserCookieBridgeErrorCode,
@@ -159,7 +159,10 @@ async function startBrowserProfileImportRuntime(): Promise<void> {
     console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} cookie bridge server started`)
     try {
       const registration = await ensureChromeNativeHostRegistration()
-      console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} native host registration result`, registration)
+      console.log(
+        `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} native host registration result`,
+        registration
+      )
     } catch (error) {
       console.warn(
         `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} registration failed: ${error instanceof Error ? error.message : String(error)}`
@@ -252,11 +255,7 @@ export function stopBrowserProfileImportRuntime(): void {
   cookieBridgeServer?.stop()
 }
 
-export function registerBrowserProfileImportHandlers(
-  ipcMain: IpcMain,
-  getMainWindow: () => BrowserWindow | null,
-  browserService: BrowserService
-): void {
+function initializeBrowserProfileImportRuntimeForSession(): void {
   const startupConfig = getBrowserCdpConfig()
   browserProfileImportActiveForSession = startupConfig.profileImportEnabled === true
   console.log(
@@ -269,7 +268,65 @@ export function registerBrowserProfileImportHandlers(
       )
     })
   }
+}
 
+async function importBrowserProfileData(
+  event: IpcMainInvokeEvent,
+  options: BrowserProfileImportOptions | undefined,
+  getMainWindow: () => BrowserWindow | null,
+  browserService: BrowserService
+): Promise<BrowserProfileImportResult> {
+  const window = getMainWindow()
+  if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
+    return profileImportFailure("拒绝来自未知窗口的浏览器数据导入请求", options)
+  }
+  if (!options || options.sourceBrowser !== "chrome") {
+    return profileImportFailure("不支持的浏览器数据导入来源", options)
+  }
+  if (!browserProfileImportActiveForSession) {
+    return profileImportFailure("浏览器数据导入功能在当前会话未生效，请保存配置后重启应用", options)
+  }
+
+  if (process.platform === "win32") {
+    return importWindowsCookieData(window, browserService)
+  }
+
+  try {
+    const imported = await readChromeProfileImportData({
+      sourceBrowser: "chrome",
+      profileDirectory: options.profileDirectory,
+      importCookies: options.importCookies !== false
+    })
+    const counts = await browserService.importProfileData(imported.data)
+    const skippedCookies = counts.skippedCookies + imported.skippedCookies
+    const skippedWebsites = mergeSkippedWebsites(imported.skippedWebsites, counts.skippedWebsites)
+    return {
+      success: true,
+      sourceBrowser: "chrome",
+      importMethod: "profile",
+      profileDirectory: imported.profileDirectory,
+      importedCookies: counts.importedCookies,
+      importedLocalStorage: counts.importedLocalStorage,
+      skippedCookies,
+      skippedLocalStorage: counts.skippedLocalStorage,
+      skippedWebsites,
+      warning:
+        counts.importedCookies === 0
+          ? "没有成功导入 Cookie，可能是 Chrome profile 没有可导入站点数据或 Cookie 加密不可解"
+          : skippedCookies > 0
+            ? "部分 Cookie 因加密、分区或格式限制被跳过"
+            : undefined
+    }
+  } catch (error) {
+    return profileImportFailure(sanitizeProfileImportError(error), options)
+  }
+}
+
+function registerBrowserProfileImportIpc(
+  ipcMain: IpcMain,
+  getMainWindow: () => BrowserWindow | null,
+  browserService: BrowserService
+): void {
   ipcMain.handle(
     "browser:isProfileImportRuntimeEnabled",
     () => browserProfileImportActiveForSession
@@ -278,56 +335,16 @@ export function registerBrowserProfileImportHandlers(
   ipcMain.handle(
     "browser:importProfileData",
     async (event, options?: BrowserProfileImportOptions): Promise<BrowserProfileImportResult> => {
-      const window = getMainWindow()
-      if (!window || window.isDestroyed() || event.sender.id !== window.webContents.id) {
-        return profileImportFailure("拒绝来自未知窗口的浏览器数据导入请求", options)
-      }
-      if (!options || options.sourceBrowser !== "chrome") {
-        return profileImportFailure("不支持的浏览器数据导入来源", options)
-      }
-      if (!browserProfileImportActiveForSession) {
-        return profileImportFailure(
-          "浏览器数据导入功能在当前会话未生效，请保存配置后重启应用",
-          options
-        )
-      }
-
-      if (process.platform === "win32") {
-        return importWindowsCookieData(window, browserService)
-      }
-
-      try {
-        const imported = await readChromeProfileImportData({
-          sourceBrowser: "chrome",
-          profileDirectory: options.profileDirectory,
-          importCookies: options.importCookies !== false
-        })
-        const counts = await browserService.importProfileData(imported.data)
-        const skippedCookies = counts.skippedCookies + imported.skippedCookies
-        const skippedWebsites = mergeSkippedWebsites(
-          imported.skippedWebsites,
-          counts.skippedWebsites
-        )
-        return {
-          success: true,
-          sourceBrowser: "chrome",
-          importMethod: "profile",
-          profileDirectory: imported.profileDirectory,
-          importedCookies: counts.importedCookies,
-          importedLocalStorage: counts.importedLocalStorage,
-          skippedCookies,
-          skippedLocalStorage: counts.skippedLocalStorage,
-          skippedWebsites,
-          warning:
-            counts.importedCookies === 0
-              ? "没有成功导入 Cookie，可能是 Chrome profile 没有可导入站点数据或 Cookie 加密不可解"
-              : skippedCookies > 0
-                ? "部分 Cookie 因加密、分区或格式限制被跳过"
-                : undefined
-        }
-      } catch (error) {
-        return profileImportFailure(sanitizeProfileImportError(error), options)
-      }
+      return importBrowserProfileData(event, options, getMainWindow, browserService)
     }
   )
+}
+
+export function registerBrowserProfileImportHandlers(
+  ipcMain: IpcMain,
+  getMainWindow: () => BrowserWindow | null,
+  browserService: BrowserService
+): void {
+  initializeBrowserProfileImportRuntimeForSession()
+  registerBrowserProfileImportIpc(ipcMain, getMainWindow, browserService)
 }

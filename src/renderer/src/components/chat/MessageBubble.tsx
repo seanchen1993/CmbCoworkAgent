@@ -29,7 +29,10 @@ import { MessageFeedbackDialog, type DislikeFeedbackPayload } from "./MessageFee
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
-import { parseBuiltinBrowserPrompt } from "@/features/builtin-browser/builtin-browser"
+import {
+  parseUserVisibleBuiltinBrowserContent,
+  stripBuiltinBrowserPrompt
+} from "@/features/builtin-browser/chat-integration"
 import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
@@ -62,13 +65,6 @@ function parseUserVisibleSkillContent(content: string): {
   }
   const legacy = stripLegacyGoalTransportSummary(content)
   return { visibleText: legacy.text, skillName: legacy.skillName }
-}
-
-function parseUserVisibleBrowserContent(content: string): {
-  visibleText: string
-  browserSelected: boolean
-} {
-  return parseBuiltinBrowserPrompt(content)
 }
 
 function parseGoalUserSetMessage(text: string): {
@@ -138,7 +134,7 @@ function extractMessagePlainText(
 ): string {
   const maybeStrip = options.stripSkillUse ? stripSkillUseBlock : (s: string): string => s
   const stripBrowser = options.stripBuiltinBrowser
-    ? (s: string): string => parseBuiltinBrowserPrompt(s).visibleText
+    ? stripBuiltinBrowserPrompt
     : (s: string): string => s
   if (typeof content === "string") return stripBrowser(maybeStrip(content))
   if (!Array.isArray(content)) return ""
@@ -805,7 +801,7 @@ function MessageBubbleImpl({
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
         const skillContent = parseUserVisibleSkillContent(displayContent)
-        const browserContent = parseUserVisibleBrowserContent(skillContent.visibleText)
+        const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
             {skillContent.skillName && (
@@ -829,7 +825,7 @@ function MessageBubbleImpl({
           // Use streaming markdown for assistant text blocks
           if (isUser) {
             const skillContent = parseUserVisibleSkillContent(displayText)
-            const browserContent = parseUserVisibleBrowserContent(skillContent.visibleText)
+            const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
             return (
               <div
                 key={index}

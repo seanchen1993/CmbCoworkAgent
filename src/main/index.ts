@@ -4,7 +4,6 @@ import {
   runBrowserNativeMessagingHost
 } from "./browser/chrome/browser-native-messaging-host"
 import { configureBrowserCdpEndpoint } from "./browser/cdp/browser-cdp"
-import { autoRegisterPlaywrightMcpConnector } from "./browser/cdp/browser-playwright-mcp-connector"
 import { BUILTIN_BROWSER_LOG_PREFIX } from "../shared/browser-types"
 
 const MAIN_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[Main]`
@@ -273,9 +272,11 @@ import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
-import { registerBrowserHandlers } from "./ipc/browser"
-import { registerBrowserProfileImportHandlers, stopBrowserProfileImportRuntime } from "./ipc/browser-profile-import"
-import { setGlobalBrowserService } from "./browser/core/browser-service-registry"
+import { registerBuiltinBrowserIpc } from "./ipc/browser"
+import {
+  beginBuiltinBrowserAppQuitCleanup,
+  disposeBuiltinBrowserForMainWindowEvent,
+} from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
 import { setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
@@ -310,23 +311,19 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
-let browserService: ReturnType<typeof registerBrowserHandlers> | null = null
+let browserService: ReturnType<typeof registerBuiltinBrowserIpc> | null = null
 let closeToTrayPromptOpen = false
 let closeToTrayPromptRequestId = 0
 let closeToTrayPromptTimer: NodeJS.Timeout | null = null
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
 
 function disposeBrowserServiceForMainWindow(reason: string): void {
-  if (isAppQuitting()) {
-    console.info(
-      `${MAIN_BROWSER_LOG_PREFIX} Deferred BrowserView disposal because the app is quitting; reason=${reason}.`
-    )
-    return
-  }
-  const disposedSessionId = browserService?.disposeAll() ?? null
-  if (disposedSessionId) {
-    console.info(`${MAIN_BROWSER_LOG_PREFIX} Disposed BrowserView session ${disposedSessionId} because ${reason}.`)
-  }
+  disposeBuiltinBrowserForMainWindowEvent({
+    browserService,
+    isAppQuitting: isAppQuitting(),
+    logPrefix: MAIN_BROWSER_LOG_PREFIX,
+    reason
+  })
 }
 
 function cleanupLegacySkillEvalRecords(): void {
@@ -726,9 +723,6 @@ if (browserNativeMessagingHostLaunch) {
     registerModelHandlers(ipcMain)
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
-    autoRegisterPlaywrightMcpConnector(browserCdpPort).catch((err) =>
-      console.error(`${MAIN_BROWSER_LOG_PREFIX} Failed to auto-register Playwright MCP connector:`, err)
-    )
     registerScheduledTaskHandlers(ipcMain)
     registerHeartbeatHandlers(ipcMain)
     registerMemoryHandlers(ipcMain)
@@ -757,8 +751,7 @@ if (browserNativeMessagingHostLaunch) {
     registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
-    browserService = registerBrowserHandlers(ipcMain, () => mainWindow)
-    registerBrowserProfileImportHandlers(ipcMain, () => mainWindow, browserService)
+    browserService = registerBuiltinBrowserIpc(ipcMain, () => mainWindow, browserCdpPort)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -976,10 +969,11 @@ if (browserNativeMessagingHostLaunch) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
-    const browserServiceToDispose = browserService
+    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(
+      browserService,
+      MAIN_BROWSER_LOG_PREFIX
+    )
     browserService = null
-    setGlobalBrowserService(null)
-    stopBrowserProfileImportRuntime()
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()
@@ -1000,12 +994,7 @@ if (browserNativeMessagingHostLaunch) {
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ]).finally(() => {
-      const disposedSessionId = browserServiceToDispose?.disposeAll() ?? null
-      if (disposedSessionId) {
-        console.info(
-          `${MAIN_BROWSER_LOG_PREFIX} Disposed BrowserView session ${disposedSessionId} after MCP/runtime cleanup.`
-        )
-      }
+      disposeBuiltinBrowserAfterAppCleanup()
     })
 
     const CLEANUP_TIMEOUT_MS = 10_000

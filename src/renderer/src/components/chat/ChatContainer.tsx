@@ -136,11 +136,14 @@ import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import {
-  BUILTIN_BROWSER_PROMPT_PREFIX,
-  formatBuiltinBrowserPrompt,
-  isBuiltinBrowserSlashCommand,
-  parseBuiltinBrowserPrompt
-} from "@/features/builtin-browser/builtin-browser"
+  formatBuiltinBrowserTranscriptMessage,
+  formatBuiltinBrowserTransportMessage,
+  getBuiltinBrowserTitleSource,
+  isBuiltinBrowserCommandSelection,
+  parseBuiltinBrowserEditDraft,
+  resolveBuiltinBrowserVisibleUserText,
+  shouldRemoveBuiltinBrowserChipWithBackspace
+} from "@/features/builtin-browser/chat-integration"
 import {
   isBareGoalSlashCommandInput,
   isGoalSlashControlCommandInput,
@@ -3673,7 +3676,7 @@ export function ChatContainer({
 
   const applySlashCommand = useCallback(
     (command: SlashCommandItem) => {
-      if (isBuiltinBrowserSlashCommand(command)) {
+      if (isBuiltinBrowserCommandSelection(command)) {
         setSelectedSkill(null)
         setSelectedBuiltinBrowser(true)
         setInput("")
@@ -4158,10 +4161,12 @@ export function ChatContainer({
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
       const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
-      const visibleUserText = browser ? rawMessage : rawMessage || fallbackUserText
-      if (browser) {
-        rawMessage = formatBuiltinBrowserPrompt(rawMessage)
-      }
+      const visibleUserText = resolveBuiltinBrowserVisibleUserText({
+        browserSelected: browser,
+        fallbackUserText,
+        rawMessage
+      })
+      rawMessage = formatBuiltinBrowserTransportMessage(rawMessage, browser)
       // If user only uploaded files without text, add a default prompt.
       // skill-only sends (text empty, no attachments) still fall into this branch
       // because the default prompt requires attachments — for skill-only we let
@@ -4229,9 +4234,7 @@ export function ChatContainer({
         const fileNames = attachmentPayload.map((a) => `📎 ${a.filename}`).join("\n")
         displayContent = `${fileNames}\n\n${visibleUserText}`
       }
-      if (browser) {
-        displayContent = `${BUILTIN_BROWSER_PROMPT_PREFIX}${displayContent}`
-      }
+      displayContent = formatBuiltinBrowserTranscriptMessage(displayContent, browser)
       displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
       if (
         /\[\[CMB_COORDINATOR_(?:WORKER_NOTIFICATION|INTERNAL_(?:CONTEXT|NOTIFICATION)_(?:START|END))\]\]/.test(
@@ -4305,9 +4308,13 @@ export function ChatContainer({
                 .commandText.replace(/^\/goal\b/i, "")
                 .trim()
             : ""
-          const titleSource =
-            (isGoalSlashInput ? goalTitleSource : visibleUserText) ||
-            (skill ? `使用 ${skill.name}` : browser ? "使用内置浏览器" : "")
+          let titleSource = isGoalSlashInput ? goalTitleSource : visibleUserText
+          if (!titleSource && skill) {
+            titleSource = `使用 ${skill.name}`
+          }
+          if (!titleSource) {
+            titleSource = getBuiltinBrowserTitleSource(browser)
+          }
           if (titleSource) {
             generateTitleForFirstMessage(threadId, titleSource)
           }
@@ -4440,7 +4447,14 @@ export function ChatContainer({
       return
     }
 
-    if (e.key === "Backspace" && !isComposing && selectedBuiltinBrowser && input.length === 0) {
+    if (
+      shouldRemoveBuiltinBrowserChipWithBackspace({
+        browserSelected: selectedBuiltinBrowser,
+        inputLength: input.length,
+        isComposing,
+        key: e.key
+      })
+    ) {
       e.preventDefault()
       setSelectedBuiltinBrowser(false)
       return
@@ -5407,7 +5421,7 @@ export function ChatContainer({
       // name as text is never useful.
       const skillParsed = parseSkillUseBlock(original)
       const bodyAfterSkill = skillParsed ? skillParsed.rest : original
-      const browserParsed = parseBuiltinBrowserPrompt(bodyAfterSkill)
+      const browserParsed = parseBuiltinBrowserEditDraft(bodyAfterSkill)
       const bodyAfterBrowser = browserParsed.visibleText
       let missingSkillName: string | null = null
       // Only touch selectedSkill when the edited message itself carried a skill
