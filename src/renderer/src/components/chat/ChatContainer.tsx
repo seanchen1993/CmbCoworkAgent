@@ -157,8 +157,6 @@ import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import {
-  formatBuiltinBrowserTranscriptMessage,
-  formatBuiltinBrowserTransportMessage,
   getBuiltinBrowserTitleSource,
   isBuiltinBrowserCommandSelection,
   parseBuiltinBrowserEditDraft,

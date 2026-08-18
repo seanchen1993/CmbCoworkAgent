@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef } from "react"
+import { useEffect, useState, useMemo, useRef, useCallback } from "react"
 import { Loader2, AlertCircle, FileCode } from "lucide-react"
 import { useThreadState } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
@@ -76,34 +76,6 @@ export function FileViewer({
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
   const lastLoadedReloadTokenRef = useRef<number | undefined>(undefined)
-
-  const readHtmlDependencyFile = useCallback(
-    async (resolvedPath: string): Promise<string | null> => {
-      // HTML 依赖读取统一走 preload 暴露的 API，避免 file:// 直链受限。
-      if (externalFullPath) {
-        const tokenRes = await window.api.workspace.requestExternalFileRead(resolvedPath)
-        if (!tokenRes.success || !tokenRes.token) {
-          return null
-        }
-        const result = await window.api.workspace.readExternalFile(tokenRes.token)
-        if (result?.success && typeof result.content === "string") {
-          return result.content
-        }
-        return null
-      }
-
-      const result = threadId
-        ? await window.api.workspace.readFile(threadId, resolvedPath)
-        : null
-
-      if (result?.success && typeof result.content === "string") {
-        return result.content
-      }
-
-      return null
-    },
-    [externalFullPath, threadId]
-  )
 
   // Markdown 本地图片读取：相对路径已解析为可读路径，这里返回 base64 内容。
   const readBinaryDependencyFile = useCallback(
