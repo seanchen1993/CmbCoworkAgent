@@ -68,17 +68,39 @@ function RobotEditDialog(props: {
   }
 
   const handleSubmit = (): void => {
-    if (!form.chatId.trim()) { setError("会话 ID 不能为空"); return }
-    if (!isEditing && existingChatIds.includes(form.chatId.trim())) {
-      setError("会话 ID 已存在，不能重复"); return
+    if (!form.chatId.trim()) {
+      setError("会话 ID 不能为空")
+      return
     }
-    if (!form.fromId.trim()) { setError("fromId 不能为空"); return }
-    if (!form.clientId.trim()) { setError("clientId 不能为空"); return }
-    if (!form.clientSecret.trim()) { setError("clientSecret 不能为空"); return }
-    if (!form.workDir) { setError("请选择工作目录"); return }
+    if (!isEditing && existingChatIds.includes(form.chatId.trim())) {
+      setError("会话 ID 已存在，不能重复")
+      return
+    }
+    if (!form.fromId.trim()) {
+      setError("fromId 不能为空")
+      return
+    }
+    if (!form.clientId.trim()) {
+      setError("clientId 不能为空")
+      return
+    }
+    if (!form.clientSecret.trim()) {
+      setError("clientSecret 不能为空")
+      return
+    }
+    if (!form.workDir) {
+      setError("请选择工作目录")
+      return
+    }
 
-    const users = toUserListStr.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
-    if (users.length === 0) { setError("toUserList 不能为空"); return }
+    const users = toUserListStr
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (users.length === 0) {
+      setError("toUserList 不能为空")
+      return
+    }
 
     setError(null)
     onSave({ ...form, toUserList: users })
@@ -103,25 +125,45 @@ function RobotEditDialog(props: {
               className={cn("h-9", isEditing && "opacity-60 cursor-not-allowed")}
               readOnly={isEditing}
             />
-            {isEditing && <p className="text-[10px] text-muted-foreground">会话 ID 创建后不可修改</p>}
+            {isEditing && (
+              <p className="text-[10px] text-muted-foreground">会话 ID 创建后不可修改</p>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <label className="text-sm font-medium">fromId</label>
-              <Input value={form.fromId} onChange={(e) => update("fromId", e.target.value)} className="h-9" />
+              <Input
+                value={form.fromId}
+                onChange={(e) => update("fromId", e.target.value)}
+                className="h-9"
+              />
             </div>
             <div className="space-y-1">
               <label className="text-sm font-medium">clientId</label>
-              <Input value={form.clientId} onChange={(e) => update("clientId", e.target.value)} className="h-9" />
+              <Input
+                value={form.clientId}
+                onChange={(e) => update("clientId", e.target.value)}
+                className="h-9"
+              />
             </div>
           </div>
           <div className="space-y-1">
             <label className="text-sm font-medium">clientSecret</label>
-            <Input value={form.clientSecret} onChange={(e) => update("clientSecret", e.target.value)} type="password" className="h-9" />
+            <Input
+              value={form.clientSecret}
+              onChange={(e) => update("clientSecret", e.target.value)}
+              type="password"
+              className="h-9"
+            />
           </div>
           <div className="space-y-1">
             <label className="text-sm font-medium">toUserList（逗号分隔）</label>
-            <Input value={toUserListStr} onChange={(e) => setToUserListStr(e.target.value)} placeholder="user1, user2" className="h-9" />
+            <Input
+              value={toUserListStr}
+              onChange={(e) => setToUserListStr(e.target.value)}
+              placeholder="user1, user2"
+              className="h-9"
+            />
           </div>
           <div className="space-y-1">
             <label className="text-sm font-medium">模型</label>
@@ -132,14 +174,21 @@ function RobotEditDialog(props: {
             >
               <option value="">默认模型</option>
               {models.map((m) => (
-                <option key={m.id} value={m.id}>{m.name}</option>
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
               ))}
             </select>
           </div>
           <div className="space-y-1">
             <label className="text-sm font-medium">工作目录</label>
             <div className="flex gap-2">
-              <Input value={form.workDir || ""} readOnly placeholder="请选择工作目录" className="flex-1 h-9" />
+              <Input
+                value={form.workDir || ""}
+                readOnly
+                placeholder="请选择工作目录"
+                className="flex-1 h-9"
+              />
               <Button variant="outline" size="sm" onClick={handleSelectWorkDir}>
                 <FolderOpen className="size-4 mr-1" />
                 选择
@@ -151,7 +200,9 @@ function RobotEditDialog(props: {
         {error && <p className="text-sm text-destructive">{error}</p>}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
           <Button onClick={handleSubmit}>{editRobot ? "保存" : "添加"}</Button>
         </DialogFooter>
       </DialogContent>
@@ -161,10 +212,7 @@ function RobotEditDialog(props: {
 
 // ── Robot Detail View ────────────────────────────────────────────────────────
 
-function CallbackUrlBuilder(props: {
-  chatIds: string[]
-  userIp: string
-}): React.JSX.Element {
+function CallbackUrlBuilder(props: { chatIds: string[]; userIp: string }): React.JSX.Element {
   const { chatIds, userIp } = props
   const [selectedChatId, setSelectedChatId] = useState("")
   const [copied, setCopied] = useState(false)
@@ -198,7 +246,9 @@ function CallbackUrlBuilder(props: {
             onChange={(e) => setSelectedChatId(e.target.value)}
           >
             {chatIds.map((id) => (
-              <option key={id} value={id}>{id}</option>
+              <option key={id} value={id}>
+                {id}
+              </option>
             ))}
           </select>
         )}
@@ -217,13 +267,27 @@ function CallbackUrlBuilder(props: {
             className="h-7 px-2 shrink-0 text-xs gap-1"
             onClick={handleCopy}
           >
-            {copied ? <><Check className="size-3 text-green-500" />已复制</> : <><Copy className="size-3" />复制</>}
+            {copied ? (
+              <>
+                <Check className="size-3 text-green-500" />
+                已复制
+              </>
+            ) : (
+              <>
+                <Copy className="size-3" />
+                复制
+              </>
+            )}
           </Button>
         </div>
       ) : (
         <div className="rounded-lg bg-background/80 border border-border/40 p-2.5">
           <p className="text-[12px] text-muted-foreground">
-            {!callbackBase ? "回调地址未配置，请联系管理员" : !ip ? "请先开启服务以获取 IP" : "请先添加机器人"}
+            {!callbackBase
+              ? "回调地址未配置，请联系管理员"
+              : !ip
+                ? "请先开启服务以获取 IP"
+                : "请先添加机器人"}
           </p>
         </div>
       )}
@@ -251,7 +315,8 @@ function RobotDetail(props: {
             </div>
             <h3 className="text-lg font-semibold text-foreground/80">机器人管理</h3>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              接收远端消息并自动调用 AI 处理后回复。支持配置多个独立的机器人，每个机器人拥有独立的会话、模型和工作目录。
+              接收远端消息并自动调用 AI
+              处理后回复。支持配置多个独立的机器人，每个机器人拥有独立的会话、模型和工作目录。
             </p>
           </div>
 
@@ -259,10 +324,23 @@ function RobotDetail(props: {
             <div className="rounded-xl border border-border/60 bg-muted/30 p-4 space-y-3">
               <p className="text-sm font-medium text-foreground/70">快速开始</p>
               <ul className="text-[13px] text-muted-foreground space-y-2 leading-relaxed">
-                <li className="flex gap-2"><span className="text-foreground/40 shrink-0">1.</span>点击 <span className="font-medium text-foreground/60">+</span> 添加机器人，配置认证信息与工作目录</li>
-                <li className="flex gap-2"><span className="text-foreground/40 shrink-0">2.</span>开启服务，确认 IP 后自动连接</li>
-                <li className="flex gap-2"><span className="text-foreground/40 shrink-0">3.</span>复制下方回调地址，配置到机器人后台</li>
-                <li className="flex gap-2"><span className="text-foreground/40 shrink-0">4.</span>收到远端消息后 AI 自动处理并回复</li>
+                <li className="flex gap-2">
+                  <span className="text-foreground/40 shrink-0">1.</span>点击{" "}
+                  <span className="font-medium text-foreground/60">+</span>{" "}
+                  添加机器人，配置认证信息与工作目录
+                </li>
+                <li className="flex gap-2">
+                  <span className="text-foreground/40 shrink-0">2.</span>开启服务，确认 IP
+                  后自动连接
+                </li>
+                <li className="flex gap-2">
+                  <span className="text-foreground/40 shrink-0">3.</span>
+                  复制下方回调地址，配置到机器人后台
+                </li>
+                <li className="flex gap-2">
+                  <span className="text-foreground/40 shrink-0">4.</span>收到远端消息后 AI
+                  自动处理并回复
+                </li>
               </ul>
             </div>
 
@@ -353,8 +431,14 @@ function IpConfirmDialog(props: {
 
   const handleConfirm = (): void => {
     const trimmed = ip.trim()
-    if (!trimmed) { setError("IP 不能为空"); return }
-    if (!IPV4_RE.test(trimmed)) { setError("IP 格式无效"); return }
+    if (!trimmed) {
+      setError("IP 不能为空")
+      return
+    }
+    if (!IPV4_RE.test(trimmed)) {
+      setError("IP 格式无效")
+      return
+    }
     onConfirm(trimmed)
   }
 
@@ -370,16 +454,26 @@ function IpConfirmDialog(props: {
         <div className="space-y-2">
           <Input
             value={ip}
-            onChange={(e) => { setError(null); setIp(e.target.value) }}
+            onChange={(e) => {
+              setError(null)
+              setIp(e.target.value)
+            }}
             placeholder={loading ? "正在检测..." : "192.168.1.100"}
             disabled={loading}
-            className={cn("h-9 text-sm", error && "border-destructive focus-visible:ring-destructive")}
+            className={cn(
+              "h-9 text-sm",
+              error && "border-destructive focus-visible:ring-destructive"
+            )}
           />
           {error && <p className="text-[11px] text-destructive">{error}</p>}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleConfirm} disabled={loading}>确认启用</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button onClick={handleConfirm} disabled={loading}>
+            确认启用
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -439,17 +533,19 @@ export function ChatXPanel(): React.JSX.Element {
     try {
       const [cfg, modelConfigs] = await Promise.all([
         window.api.chatx.getConfig(),
-        window.api.models.getCustomConfigs()
+        window.api.models.list()
       ])
       if (!mountedRef.current) return
       setConfig(cfg)
-      setModels(modelConfigs.map((c) => ({ id: `custom:${c.id}`, name: c.name })))
+      setModels(modelConfigs.map((c) => ({ id: c.id, name: c.name })))
     } catch (e) {
       console.error("[ChatXPanel] load error:", e)
     }
   }, [])
 
-  useEffect(() => { loadAll() }, [loadAll])
+  useEffect(() => {
+    loadAll()
+  }, [loadAll])
 
   const saveConfig = useCallback(async (updates: Partial<ChatXConfig>) => {
     try {
@@ -540,12 +636,16 @@ export function ChatXPanel(): React.JSX.Element {
     const robots = config.robots.filter((_, i) => i !== selectedIndex)
     setSelectedIndex(robots.length > 0 ? Math.min(selectedIndex, robots.length - 1) : null)
     if (robots.length === 0 && config.enabled) {
-      setConfig((prev) => prev ? { ...prev, robots, enabled: false } : prev)
+      setConfig((prev) => (prev ? { ...prev, robots, enabled: false } : prev))
       setWsStatus("disconnected")
       await saveConfig({ robots, enabled: false })
-      try { await window.api.chatx.restart() } catch { /* ignore */ }
+      try {
+        await window.api.chatx.restart()
+      } catch {
+        /* ignore */
+      }
     } else {
-      setConfig((prev) => prev ? { ...prev, robots } : prev)
+      setConfig((prev) => (prev ? { ...prev, robots } : prev))
       await saveConfig({ robots })
     }
   }, [selectedIndex, saveConfig, config])
@@ -558,7 +658,7 @@ export function ChatXPanel(): React.JSX.Element {
     )
   }
 
-  const selectedRobot = selectedIndex !== null ? config.robots[selectedIndex] ?? null : null
+  const selectedRobot = selectedIndex !== null ? (config.robots[selectedIndex] ?? null) : null
 
   return (
     <>
@@ -570,7 +670,13 @@ export function ChatXPanel(): React.JSX.Element {
               <h2 className="text-base font-bold">机器人管理</h2>
               {config.enabled && (
                 <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                  <span className={cn("size-1.5 rounded-full", statusColor[wsStatus], (wsStatus === "connecting" || wsStatus === "reconnecting") && "animate-pulse")} />
+                  <span
+                    className={cn(
+                      "size-1.5 rounded-full",
+                      statusColor[wsStatus],
+                      (wsStatus === "connecting" || wsStatus === "reconnecting") && "animate-pulse"
+                    )}
+                  />
                   {statusLabel[wsStatus]}
                 </span>
               )}
@@ -598,7 +704,12 @@ export function ChatXPanel(): React.JSX.Element {
                   />
                 </button>
               </label>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0 shrink-0" onClick={handleAddRobot}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0 shrink-0"
+                onClick={handleAddRobot}
+              >
                 <Plus className="size-4" />
               </Button>
             </div>
@@ -608,9 +719,7 @@ export function ChatXPanel(): React.JSX.Element {
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-1">
             {config.robots.length === 0 ? (
-              <p className="text-xs text-muted-foreground px-1 py-2">
-                暂无机器人，点击 + 添加
-              </p>
+              <p className="text-xs text-muted-foreground px-1 py-2">暂无机器人，点击 + 添加</p>
             ) : (
               config.robots.map((robot, i) => (
                 <button
@@ -623,8 +732,12 @@ export function ChatXPanel(): React.JSX.Element {
                 >
                   <Cpu className="size-3.5 shrink-0 text-blue-400" />
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm truncate block">{robot.chatId || `机器人 ${i + 1}`}</span>
-                    <span className="text-[10px] text-muted-foreground truncate block">{robot.fromId || "未配置"}</span>
+                    <span className="text-sm truncate block">
+                      {robot.chatId || `机器人 ${i + 1}`}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground truncate block">
+                      {robot.fromId || "未配置"}
+                    </span>
                   </div>
                 </button>
               ))
@@ -648,7 +761,7 @@ export function ChatXPanel(): React.JSX.Element {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         onSave={handleSaveRobot}
-        editRobot={editIndex !== null ? config.robots[editIndex] ?? null : null}
+        editRobot={editIndex !== null ? (config.robots[editIndex] ?? null) : null}
         models={models}
         existingChatIds={config.robots.map((r) => r.chatId)}
       />

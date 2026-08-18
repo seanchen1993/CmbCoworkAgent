@@ -77,6 +77,62 @@ export function FileViewer({
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
   const lastLoadedReloadTokenRef = useRef<number | undefined>(undefined)
 
+  const readHtmlDependencyFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      // HTML 依赖读取统一走 preload 暴露的 API，避免 file:// 直链受限。
+      if (externalFullPath) {
+        const tokenRes = await window.api.workspace.requestExternalFileRead(resolvedPath)
+        if (!tokenRes.success || !tokenRes.token) {
+          return null
+        }
+        const result = await window.api.workspace.readExternalFile(tokenRes.token)
+        if (result?.success && typeof result.content === "string") {
+          return result.content
+        }
+        return null
+      }
+
+      const result = threadId
+        ? await window.api.workspace.readFile(threadId, resolvedPath)
+        : null
+
+      if (result?.success && typeof result.content === "string") {
+        return result.content
+      }
+
+      return null
+    },
+    [externalFullPath, threadId]
+  )
+
+  // Markdown 本地图片读取：相对路径已解析为可读路径，这里返回 base64 内容。
+  const readBinaryDependencyFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      if (externalFullPath) {
+        const tokenRes = await window.api.workspace.requestExternalFileRead(resolvedPath)
+        if (!tokenRes.success || !tokenRes.token) {
+          return null
+        }
+        const result = await window.api.workspace.readExternalBinaryFile(tokenRes.token)
+        if (result?.success && typeof result.content === "string") {
+          return result.content
+        }
+        return null
+      }
+
+      const result = threadId
+        ? await window.api.workspace.readBinaryFile(threadId, resolvedPath)
+        : null
+
+      if (result?.success && typeof result.content === "string") {
+        return result.content
+      }
+
+      return null
+    },
+    [externalFullPath, threadId]
+  )
+
   // Reset state when filePath changes
   useEffect(() => {
     setError(null)
@@ -107,35 +163,59 @@ export function FileViewer({
 
         if (isBinary) {
           // Read as binary file (base64)
-          const result = externalFullPath
-            ? await window.api.workspace.readExternalBinaryFile(externalFullPath)
-            : threadId
+          if (externalFullPath) {
+            const tokenRes = await window.api.workspace.requestExternalFileRead(externalFullPath)
+            if (!tokenRes.success || !tokenRes.token) {
+              setError(tokenRes.error || "Failed to request file read token")
+              return
+            }
+            const result = await window.api.workspace.readExternalBinaryFile(tokenRes.token)
+            if (result.success && result.content !== undefined) {
+              setBinaryContent(result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
+            }
+          } else {
+            const result = threadId
               ? await window.api.workspace.readBinaryFile(threadId, filePath)
               : { success: false, error: "Missing thread id for workspace file preview" }
-          if (result.success && result.content !== undefined) {
-            setBinaryContent(result.content)
-            setFileSize(result.size)
-            lastLoadedReloadTokenRef.current = reloadToken
-          } else {
-            setError(result.error || "Failed to read file")
+            if (result.success && result.content !== undefined) {
+              setBinaryContent(result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
+            }
           }
         } else {
           // Read as text file
-          const result = externalFullPath
-            ? await window.api.workspace.readExternalFile(externalFullPath)
-            : threadId
+          if (externalFullPath) {
+            const tokenRes = await window.api.workspace.requestExternalFileRead(externalFullPath)
+            if (!tokenRes.success || !tokenRes.token) {
+              setError(tokenRes.error || "Failed to request file read token")
+              return
+            }
+            const result = await window.api.workspace.readExternalFile(tokenRes.token)
+            if (result.success && result.content !== undefined) {
+              setExternalTextContent(result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
+            }
+          } else {
+            const result = threadId
               ? await window.api.workspace.readFile(threadId, filePath)
               : { success: false, error: "Missing thread id for workspace file preview" }
-          if (result.success && result.content !== undefined) {
-            if (externalFullPath) {
-              setExternalTextContent(result.content)
-            } else {
+            if (result.success && result.content !== undefined) {
               setThreadFileContents?.(cacheKey, result.content)
+              setFileSize(result.size)
+              lastLoadedReloadTokenRef.current = reloadToken
+            } else {
+              setError(result.error || "Failed to read file")
             }
-            setFileSize(result.size)
-            lastLoadedReloadTokenRef.current = reloadToken
-          } else {
-            setError(result.error || "Failed to read file")
           }
         }
       } catch (e) {
@@ -255,6 +335,7 @@ export function FileViewer({
           viewMode={previewMode}
           whiteBackground
           className="markdown-preview"
+          readBinaryFile={readBinaryDependencyFile}
         />
       </div>
     )

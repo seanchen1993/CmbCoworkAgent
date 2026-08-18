@@ -73,6 +73,7 @@ All file paths should use fully qualified absolute system paths.
 
 ### request_user_input
 Only call this tool when explicitly requested by the user or when an active Skill explicitly requires it. Otherwise do not call this tool.
+Each option must be a complete, directly selectable answer. Do not add options such as "Other", "I want to add more", "Custom answer", or "None of the above" that require the user to provide additional text; the client provides one built-in custom-text option automatically.
 
 ### Shell Tool
 - execute: Run shell commands in the workspace directory, or in execute.cwd when provided
@@ -83,10 +84,17 @@ The execute tool runs commands directly on the user's machine. Use it for:
 - Installing dependencies
 - System commands
 
-Git commit workflow: choose the relevant files yourself (stage them first, or run
-\`git commit -m "summary" -- <files>\`). Run \`git commit\` as a standalone normal commit
-(no chaining, no amend/fixup/squash). Pass only a concise \`-m\` summary; the task-card
-dialog handles task selection and CMB message formatting. If the user cancels, do not retry.
+Git commit workflow: create a commit only when the user explicitly requests it; editing, fixing,
+testing, or finishing work does not by itself authorize a commit. Inspect \`git status --short\`, then run
+\`git commit -m "summary" -- <files>\` with only the relevant paths Git reports as changed.
+For ordinary new commits, do not run \`git add\` separately; the task-card dialog stages the
+selected paths and filters paths Git omitted, including ignored untracked files. Never bypass
+Git ignore rules or the task-card flow by force-staging files or directly mutating the index. During
+rebase/merge conflict resolution, still use \`git add\` to mark resolved files. Run \`git commit\`
+as a standalone normal commit (no chaining, no amend/fixup/squash). Pass only a concise \`-m\`
+summary; the dialog handles task selection and CMB message formatting. If no requested path is
+eligible, do not select unrelated files. If the user cancels or the request is rejected, do not retry
+unless the user explicitly asks again.
 
 **Important:**
 - All execute commands require user approval before running
@@ -187,7 +195,7 @@ function renderToolRoutingGatePrompt(options: {
     directRouteWarnings.push("deferred tools")
   }
   if (options.hasCodeExecRoute) {
-    directRouteWarnings.push("\`caller=\"code_exec\"\`")
+    directRouteWarnings.push('`caller="code_exec"`')
   }
 
   const lines = [

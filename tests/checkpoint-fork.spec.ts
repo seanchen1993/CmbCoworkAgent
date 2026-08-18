@@ -37,6 +37,11 @@ import {
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
   truncateCheckpointMessagesAfter
 } from "../src/shared/checkpoint-transcript"
+import {
+  buildMessageRoleCollisionId,
+  buildMessageSameRoleDuplicateId
+} from "../src/shared/message-role-collision"
+import { buildSubagentTaskInvocationIdentity } from "../src/shared/subagent-invocation-identity"
 
 function config(threadId: string, checkpointId?: string, checkpointNs = ""): RunnableConfig {
   return {
@@ -148,6 +153,217 @@ function testCheckpointAuthorityMergeKeepsCompleteCheckpointContent(): void {
     cleanedFinalAnswer.tool_calls,
     [],
     "checkpoint-confirmed text answers must not resurrect polluted persisted tool calls"
+  )
+
+  const crossRoleCollision = mergeCheckpointAuthorityTranscriptMessage(
+    {
+      id: "cross-role-id",
+      role: "assistant",
+      content: "assistant answer"
+    },
+    {
+      id: "cross-role-id",
+      role: "tool",
+      content: "tool output",
+      tool_call_id: "call-1"
+    }
+  )
+  assert.equal(crossRoleCollision.role, "assistant")
+  assert.equal(crossRoleCollision.content, "assistant answer")
+  assert.equal(
+    crossRoleCollision.tool_call_id,
+    undefined,
+    "cross-role id collisions must not leak tool linkage onto a visible assistant"
+  )
+
+  const preservedCrossRoleCollision = mergeCheckpointAuthorityTranscriptMessages(
+    [
+      {
+        id: "shared-provider-id",
+        role: "assistant",
+        content: "assistant tool call",
+        tool_calls: [{ id: "call-1", name: "read_file", args: {} }]
+      }
+    ],
+    [
+      {
+        id: "shared-provider-id",
+        role: "tool",
+        content: "tool output",
+        tool_call_id: "call-1"
+      }
+    ]
+  )
+  assert.equal(preservedCrossRoleCollision.length, 2)
+  assert.equal(preservedCrossRoleCollision[0].role, "assistant")
+  assert.equal(preservedCrossRoleCollision[1].role, "tool")
+  assert.notEqual(
+    preservedCrossRoleCollision[0].id,
+    preservedCrossRoleCollision[1].id,
+    "cross-role records need unique render ids"
+  )
+
+  const repeatedCrossRoleSync = mergeCheckpointAuthorityTranscriptMessages(
+    preservedCrossRoleCollision,
+    [
+      {
+        id: "shared-provider-id",
+        role: "tool",
+        content: "tool output with complete metadata",
+        tool_call_id: "call-1",
+        name: "read_file"
+      }
+    ]
+  )
+  assert.equal(repeatedCrossRoleSync.length, 2, "repeated collision syncs must be idempotent")
+  assert.equal(repeatedCrossRoleSync[1].name, "read_file")
+
+  const reverseCrossRoleCollision = mergeCheckpointAuthorityTranscriptMessages(
+    [
+      {
+        id: "reverse-shared-id",
+        role: "tool",
+        content: "checkpoint tool output",
+        tool_call_id: "call-2"
+      }
+    ],
+    [
+      {
+        id: "reverse-shared-id",
+        role: "assistant",
+        content: "durable final answer"
+      }
+    ]
+  )
+  assert.equal(reverseCrossRoleCollision.length, 2)
+  assert.equal(reverseCrossRoleCollision[0].role, "tool")
+  assert.equal(reverseCrossRoleCollision[1].role, "assistant")
+  assert.equal(reverseCrossRoleCollision[1].content, "durable final answer")
+
+  const checkpointOnlyCrossRoleCollision = mergeCheckpointAuthorityTranscriptMessages(
+    [
+      {
+        id: "checkpoint-shared-id",
+        role: "assistant",
+        content: "checkpoint assistant"
+      },
+      {
+        id: "checkpoint-shared-id",
+        role: "tool",
+        content: "checkpoint tool output",
+        tool_call_id: "call-3"
+      }
+    ],
+    []
+  )
+  assert.equal(checkpointOnlyCrossRoleCollision.length, 2)
+  assert.equal(
+    new Set(checkpointOnlyCrossRoleCollision.map((message) => message.id)).size,
+    2,
+    "checkpoint-only role collisions also need unique render ids"
+  )
+
+  const checkpointSameRoleCollision = mergeCheckpointAuthorityTranscriptMessages(
+    [
+      {
+        id: "checkpoint-reused-assistant-id",
+        role: "assistant",
+        content: "first assistant chunk"
+      },
+      {
+        id: "checkpoint-reused-assistant-id",
+        role: "assistant",
+        content: "second distinct assistant chunk"
+      }
+    ],
+    []
+  )
+  assert.equal(checkpointSameRoleCollision.length, 2)
+  assert.deepEqual(
+    checkpointSameRoleCollision.map((message) => message.content),
+    ["first assistant chunk", "second distinct assistant chunk"],
+    "same-role checkpoint id reuse must not discard a message"
+  )
+  assert.equal(
+    new Set(checkpointSameRoleCollision.map((message) => message.id)).size,
+    2,
+    "same-role checkpoint id reuse also needs unique render ids"
+  )
+  assert.equal(
+    checkpointSameRoleCollision[1].id,
+    buildMessageSameRoleDuplicateId("checkpoint-reused-assistant-id", "assistant"),
+    "same-role duplicates need an identity distinct from cross-role reconciliation ids"
+  )
+  const updatedSameRoleCollision = mergeCheckpointAuthorityTranscriptMessages(
+    checkpointSameRoleCollision,
+    [
+      {
+        id: checkpointSameRoleCollision[1].id,
+        role: "assistant",
+        content: "second distinct assistant chunk extended"
+      }
+    ]
+  )
+  assert.equal(
+    updatedSameRoleCollision[0].content,
+    "first assistant chunk",
+    "cross-source normalization must not redirect an exact same-role collision id"
+  )
+  assert.equal(updatedSameRoleCollision[1].content, "second distinct assistant chunk extended")
+
+  const crossSourceProviderId = "cross-source-keeper-mismatch"
+  const crossSourceDurableMessages = [
+    {
+      id: crossSourceProviderId,
+      role: "tool",
+      content: "tool result updated",
+      tool_call_id: "call-cross-source"
+    },
+    {
+      id: buildMessageRoleCollisionId(crossSourceProviderId, "assistant"),
+      role: "assistant",
+      content: "checkpoint assistant expanded",
+      tool_calls: [{ id: "call-cross-source", name: "read_file", args: {} }]
+    }
+  ]
+  const crossSourceKeeperMismatch = mergeCheckpointAuthorityTranscriptMessages(
+    [
+      {
+        id: crossSourceProviderId,
+        role: "assistant",
+        content: "checkpoint assistant",
+        tool_calls: [{ id: "call-cross-source", name: "read_file", args: {} }]
+      },
+      {
+        id: buildMessageRoleCollisionId(crossSourceProviderId, "tool"),
+        role: "tool",
+        content: "tool result",
+        tool_call_id: "call-cross-source"
+      }
+    ],
+    crossSourceDurableMessages
+  )
+  assert.equal(
+    crossSourceKeeperMismatch.length,
+    2,
+    "checkpoint and durable sources must not duplicate a role when their raw-id keeper differs"
+  )
+  assert.deepEqual(
+    crossSourceKeeperMismatch.map((message) => message.role),
+    ["assistant", "tool"],
+    "cross-source collision reconciliation must preserve checkpoint role order"
+  )
+  assert.equal(crossSourceKeeperMismatch[0].content, "checkpoint assistant expanded")
+  assert.equal(crossSourceKeeperMismatch[1].content, "tool result updated")
+
+  const repeatedCrossSourceSync = mergeCheckpointAuthorityTranscriptMessages(
+    crossSourceKeeperMismatch,
+    crossSourceDurableMessages
+  )
+  assert.equal(
+    repeatedCrossSourceSync.length,
+    2,
+    "cross-source collision reconciliation must remain idempotent on repeated durable syncs"
   )
   console.log("PASS DB transcript cannot overwrite complete checkpoint content")
 }
@@ -573,6 +789,282 @@ function testThreadValuesFiltering(): void {
   console.log("PASS fork thread_values are rebuilt from the checkpoint transcript")
 }
 
+function testRepeatedTaskInvocationForkFilteringPreservesSidecarRefs(): void {
+  const rawTaskId = "task-reused-at-fork"
+  const firstTaskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "first invocation" }
+  }
+  const secondTaskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "second invocation" }
+  }
+  const firstParent = {
+    id: "parent-first-task-invocation",
+    type: "ai",
+    content: "",
+    tool_calls: [firstTaskCall]
+  }
+  const secondParent = {
+    id: "parent-second-task-invocation",
+    type: "ai",
+    content: "",
+    tool_calls: [secondTaskCall]
+  }
+  const firstInvocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: firstParent.id,
+    parentOccurrence: 1,
+    parentContent: firstParent.content,
+    parentToolCalls: firstParent.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: firstTaskCall.args
+  })
+  const secondInvocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: secondParent.id,
+    parentOccurrence: 1,
+    parentContent: secondParent.content,
+    parentToolCalls: secondParent.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: secondTaskCall.args
+  })
+  const firstExecutionId = rawTaskId
+  const secondExecutionId = `${rawTaskId}::invocation-second`
+  const firstContentRef = {
+    v: 1,
+    sha256: "1".repeat(64),
+    bytes: 48_001,
+    kind: "content"
+  }
+  const firstToolCallsRef = {
+    v: 1,
+    sha256: "2".repeat(64),
+    bytes: 48_002,
+    kind: "tool_calls"
+  }
+  const secondContentRef = {
+    v: 1,
+    sha256: "3".repeat(64),
+    bytes: 48_003,
+    kind: "content"
+  }
+  const secondToolCallsRef = {
+    v: 1,
+    sha256: "4".repeat(64),
+    bytes: 48_004,
+    kind: "tool_calls"
+  }
+  const sourceTranscripts = {
+    [firstExecutionId]: [
+      {
+        id: `subagent-prompt-${firstExecutionId}`,
+        role: "user",
+        content: "first invocation",
+        subagent_tool_call_id: rawTaskId,
+        subagent_invocation_scope: firstInvocationScope
+      },
+      {
+        id: `subagent-final-${firstExecutionId}`,
+        role: "assistant",
+        content: "first sidecar preview",
+        content_ref: firstContentRef,
+        tool_calls_ref: firstToolCallsRef
+      }
+    ],
+    [secondExecutionId]: [
+      {
+        id: `subagent-prompt-${secondExecutionId}`,
+        role: "user",
+        content: "second invocation",
+        subagent_tool_call_id: rawTaskId,
+        subagent_invocation_scope: secondInvocationScope
+      },
+      {
+        id: `subagent-final-${secondExecutionId}`,
+        role: "assistant",
+        content: "second sidecar preview",
+        content_ref: secondContentRef,
+        tool_calls_ref: secondToolCallsRef
+      }
+    ]
+  }
+
+  const firstBoundary = makeCheckpoint("cp-first-reused-task-boundary")
+  ;(firstBoundary.channel_values as Record<string, unknown>).messages = [
+    { id: "user-before-first-task", type: "human", content: "first" },
+    firstParent,
+    {
+      id: "first-task-result",
+      type: "tool",
+      content: "first result",
+      tool_call_id: rawTaskId,
+      name: "task"
+    }
+  ]
+  const secondBoundary = makeCheckpoint("cp-second-reused-task-boundary")
+  ;(secondBoundary.channel_values as Record<string, unknown>).messages = [
+    ...((firstBoundary.channel_values as Record<string, unknown>).messages as unknown[]),
+    { id: "user-before-second-task", type: "human", content: "second" },
+    secondParent,
+    {
+      id: "second-task-result",
+      type: "tool",
+      content: "second result",
+      tool_call_id: rawTaskId,
+      name: "task"
+    }
+  ]
+
+  const bothFiltered = buildFilteredThreadValues(
+    { subagentTranscripts: sourceTranscripts },
+    deriveCheckpointTranscriptIndex(secondBoundary)
+  ).subagentTranscripts as Record<string, Array<Record<string, unknown>>>
+  assert.deepEqual(Object.keys(bothFiltered), [firstExecutionId, secondExecutionId])
+  assert.deepEqual(bothFiltered[firstExecutionId][1].content_ref, firstContentRef)
+  assert.deepEqual(bothFiltered[firstExecutionId][1].tool_calls_ref, firstToolCallsRef)
+  assert.deepEqual(bothFiltered[secondExecutionId][1].content_ref, secondContentRef)
+  assert.deepEqual(bothFiltered[secondExecutionId][1].tool_calls_ref, secondToolCallsRef)
+
+  const firstOnlyFiltered = buildFilteredThreadValues(
+    { subagentTranscripts: sourceTranscripts },
+    deriveCheckpointTranscriptIndex(firstBoundary)
+  ).subagentTranscripts as Record<string, Array<Record<string, unknown>>>
+  assert.deepEqual(
+    Object.keys(firstOnlyFiltered),
+    [firstExecutionId],
+    "forking at invocation one must not retain invocation two from the reused raw task ID"
+  )
+  assert.deepEqual(firstOnlyFiltered[firstExecutionId], sourceTranscripts[firstExecutionId])
+  console.log("PASS repeated task invocation fork filtering preserves exact sidecar references")
+}
+
+function testIdlessTaskProviderAdoptionKeepsInvocationBucket(): void {
+  const rawTaskId = "task-idless-provider-fork"
+  const providerParentId = "provider-parent-after-idless-live"
+  const taskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "adopt provider parent" }
+  }
+  const providerSnapshotParent = {
+    id: ["langchain_core", "messages", "AIMessage"],
+    kwargs: {
+      id: providerParentId,
+      content: "",
+      tool_calls: [taskCall],
+      additional_kwargs: {}
+    }
+  }
+  const invocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: providerParentId,
+    parentOccurrence: 1,
+    parentContent: providerSnapshotParent.kwargs.content,
+    parentToolCalls: providerSnapshotParent.kwargs.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: taskCall.args
+  })
+  const executionId = `${rawTaskId}::invocation-idless-live`
+  const checkpoint = makeCheckpoint("cp-idless-provider-adoption")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [providerSnapshotParent]
+  const index = deriveCheckpointTranscriptIndex(checkpoint)
+  assert.deepEqual(index.subagentTranscriptInvocations, [
+    { toolCallId: rawTaskId, invocationScope }
+  ])
+
+  const filtered = buildFilteredThreadValues(
+    {
+      subagentTranscripts: {
+        [executionId]: [
+          {
+            id: `subagent-prompt-${executionId}`,
+            role: "user",
+            content: "adopt provider parent",
+            subagent_tool_call_id: rawTaskId,
+            subagent_invocation_scope: invocationScope
+          }
+        ]
+      }
+    },
+    index
+  ).subagentTranscripts as Record<string, unknown>
+  assert.deepEqual(
+    Object.keys(filtered),
+    [executionId],
+    "the values/provider identity adopted after an id-less live parent must keep its bucket"
+  )
+  console.log("PASS id-less task provider adoption shares the checkpoint invocation identity")
+}
+
+function testCrossRoleParentIdCollisionKeepsInvocationBucket(): void {
+  const sharedParentId = "shared-human-and-task-parent-id"
+  const rawTaskId = "task-cross-role-parent-fork"
+  const taskCall = {
+    id: rawTaskId,
+    name: "task",
+    args: { subagent_type: "verifier", description: "cross-role provider identity" }
+  }
+  const taskParent = {
+    id: ["langchain_core", "messages", "AIMessage"],
+    kwargs: {
+      id: sharedParentId,
+      content: "",
+      tool_calls: [taskCall],
+      additional_kwargs: {}
+    }
+  }
+  const invocationScope = buildSubagentTaskInvocationIdentity({
+    parentMessageId: sharedParentId,
+    parentOccurrence: 1,
+    parentContent: taskParent.kwargs.content,
+    parentToolCalls: taskParent.kwargs.tool_calls,
+    taskToolCallId: rawTaskId,
+    taskToolCallIndex: 0,
+    taskArgs: taskCall.args
+  })
+  const executionId = `${rawTaskId}::invocation-cross-role`
+  const checkpoint = makeCheckpoint("cp-cross-role-parent-id")
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: sharedParentId, type: "human", content: "human owns the raw render id" },
+    taskParent
+  ]
+  const index = deriveCheckpointTranscriptIndex(checkpoint)
+  assert.notEqual(
+    index.visibleMessages[1]?.renderId,
+    sharedParentId,
+    "the assistant should receive a collision-safe render ID"
+  )
+  assert.deepEqual(index.subagentTranscriptInvocations, [
+    { toolCallId: rawTaskId, invocationScope }
+  ])
+
+  const filtered = buildFilteredThreadValues(
+    {
+      subagentTranscripts: {
+        [executionId]: [
+          {
+            id: `subagent-prompt-${executionId}`,
+            role: "user",
+            content: "cross-role provider identity",
+            subagent_tool_call_id: rawTaskId,
+            subagent_invocation_scope: invocationScope
+          }
+        ]
+      }
+    },
+    index
+  ).subagentTranscripts as Record<string, unknown>
+  assert.deepEqual(
+    Object.keys(filtered),
+    [executionId],
+    "render-ID collision repair must not change the shared raw parent invocation identity"
+  )
+  console.log("PASS cross-role parent ID reuse keeps the shared invocation identity")
+}
+
 function testPersistedTranscriptFilteringUsesCheckpointBoundary(): void {
   const checkpoint = makeCheckpoint("cp-transcript-filter")
   const index = deriveCheckpointTranscriptIndex(checkpoint)
@@ -641,6 +1133,153 @@ function testMessagesAfterCheckpointVisibleIds(): void {
   console.log("PASS durable tail detection follows checkpoint visible ids")
 }
 
+function testMessagesAfterCheckpointMatchesRoleScopedCollisionIdentity(): void {
+  const sharedId = "checkpoint-role-collision"
+  const checkpointMessages = [
+    { id: sharedId, role: "user" },
+    {
+      id: buildMessageRoleCollisionId(sharedId, "assistant"),
+      role: "assistant"
+    }
+  ]
+  const persistedMessages = [
+    { id: sharedId, role: "assistant", content: "database kept assistant raw" },
+    {
+      id: buildMessageRoleCollisionId(sharedId, "user"),
+      role: "user",
+      content: "database kept user synthetic"
+    },
+    { id: "future-assistant", role: "assistant", content: "durable tail" }
+  ]
+
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(persistedMessages, checkpointMessages).map(
+      (message) => message.id
+    ),
+    ["future-assistant"],
+    "checkpoint tail detection should match source id plus role when keepers differ"
+  )
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(persistedMessages.slice(0, 2), checkpointMessages),
+    [],
+    "opposite raw-id keepers alone must not look like a durable tail"
+  )
+
+  const excludedUserId = "current-user-collision"
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(
+      [
+        ...persistedMessages.slice(0, 2),
+        {
+          id: buildMessageRoleCollisionId(excludedUserId, "user"),
+          role: "user",
+          content: "current user"
+        }
+      ],
+      checkpointMessages,
+      { excludeMessages: [{ id: excludedUserId, role: "user" }] }
+    ),
+    [],
+    "current-turn exclusions should also match a role-scoped synthetic id"
+  )
+  console.log("PASS durable tail detection matches role-scoped collision identities")
+}
+
+function testMessagesAfterCheckpointDistinguishesSameRoleDuplicates(): void {
+  const sharedId = "checkpoint-same-role-duplicate"
+  const duplicateId = buildMessageSameRoleDuplicateId(sharedId, "assistant")
+  const checkpointMessages = [{ id: sharedId, role: "assistant", renderId: sharedId }]
+  const persistedMessages = [
+    { id: sharedId, role: "assistant", content: "checkpoint assistant" },
+    { id: duplicateId, role: "assistant", content: "later durable assistant" }
+  ]
+
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(persistedMessages, checkpointMessages).map(
+      (message) => message.id
+    ),
+    [duplicateId],
+    "a later same-role duplicate must remain a durable tail message"
+  )
+
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(persistedMessages, [
+      ...checkpointMessages,
+      { id: sharedId, role: "assistant", renderId: duplicateId }
+    ]),
+    [],
+    "a same-role duplicate included by render id must remain inside the checkpoint boundary"
+  )
+
+  const canonicalFirstId = "checkpoint-canonical-first"
+  const canonicalPersistedMessages = [
+    { id: "checkpoint-canonical-user", role: "user", content: "question" },
+    {
+      id: canonicalFirstId,
+      provider_source_id: sharedId,
+      provider_occurrence: 1,
+      role: "assistant",
+      content: "checkpoint answer"
+    },
+    { id: "checkpoint-canonical-future-user", role: "user", content: "future" }
+  ]
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(canonicalPersistedMessages, [
+      { id: "checkpoint-canonical-user", role: "user" },
+      { id: sharedId, role: "assistant" }
+    ]).map((message) => message.id),
+    ["checkpoint-canonical-future-user"],
+    "a canonical render id with the same provider occurrence must remain inside the checkpoint"
+  )
+  const canonicalSecondId = "checkpoint-canonical-second"
+  const canonicalOccurrences = [
+    canonicalPersistedMessages[0],
+    canonicalPersistedMessages[1],
+    {
+      id: canonicalSecondId,
+      provider_source_id: sharedId,
+      provider_occurrence: 2,
+      role: "assistant",
+      content: "later answer"
+    }
+  ]
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(canonicalOccurrences, [
+      { id: "checkpoint-canonical-user", role: "user" },
+      { id: sharedId, role: "assistant" }
+    ]).map((message) => message.id),
+    [canonicalSecondId],
+    "a different provider occurrence must remain after an occurrence-one checkpoint boundary"
+  )
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(canonicalOccurrences, [
+      { id: "checkpoint-canonical-user", role: "user" },
+      { id: sharedId, role: "assistant" },
+      { id: duplicateId, role: "assistant" }
+    ]),
+    [],
+    "checkpoint boundaries that include both provider occurrences must consume both aliases"
+  )
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(canonicalOccurrences, [
+      { id: "checkpoint-canonical-user", role: "user" }
+    ], {
+      excludeMessages: [{ id: sharedId, role: "assistant" }]
+    }).map((message) => message.id),
+    [canonicalSecondId],
+    "provider-aware exclusions must remove only the matching occurrence"
+  )
+  assert.deepEqual(
+    findMessagesAfterCheckpointVisibleIds(canonicalPersistedMessages, [
+      "checkpoint-canonical-user",
+      sharedId
+    ]).map((message) => message.id),
+    [canonicalFirstId, "checkpoint-canonical-future-user"],
+    "legacy string boundaries must keep strict render-id semantics"
+  )
+  console.log("PASS durable tail detection distinguishes same-role duplicate identities")
+}
+
 function testWorkflowPlumbingFilteredFromTranscript(): void {
   const checkpoint = makeCheckpoint("cp-workflow-plumbing") as Checkpoint
   ;(checkpoint.channel_values as Record<string, unknown>).messages = [
@@ -685,6 +1324,138 @@ function testCheckpointMessageTruncation(): void {
   assert.deepEqual(index.visibleMessageIds, ["user-1", "assistant-1"])
   assert.equal(truncateCheckpointMessagesAfter(checkpoint, "missing"), false)
   console.log("PASS checkpoint fork can truncate transcript to a selected message")
+}
+
+function testRoleCollisionCheckpointForkTarget(): void {
+  const sharedId = "fork-shared-provider-id"
+  const assistantRenderId = buildMessageRoleCollisionId(sharedId, "assistant")
+  const checkpoint = makeCheckpoint("cp-role-collision-fork") as Checkpoint
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: sharedId, type: "human", content: "question" },
+    { id: sharedId, type: "ai", content: "answer" }
+  ]
+
+  const transcript = deriveCheckpointTranscriptIndex(checkpoint)
+  assert.deepEqual(transcript.visibleMessageIds, [sharedId, sharedId])
+  assert.deepEqual(
+    transcript.visibleMessages.map((message) => message.renderId),
+    [sharedId, assistantRenderId],
+    "checkpoint transcript should expose the same role-scoped ids as the rendered chat"
+  )
+
+  const status = describeCheckpointMessageForkTarget(checkpoint, assistantRenderId)
+  assert.equal(status.isForkableMessageBoundary, true)
+  assert.equal(status.message?.id, sharedId)
+  assert.equal(status.message?.rawIndex, 1)
+  const filteredThreadValues = buildFilteredThreadValues(
+    {
+      messageTimes: {
+        [sharedId]: { start_at: "2026-07-03T00:00:00.000Z" },
+        [assistantRenderId]: { start_at: "2026-07-03T00:00:01.000Z" }
+      },
+      messageTimeOrder: [
+        { id: sharedId, start_at: "2026-07-03T00:00:00.000Z" },
+        { id: assistantRenderId, start_at: "2026-07-03T00:00:01.000Z" }
+      ]
+    },
+    transcript
+  )
+  assert.deepEqual(
+    Object.keys(filteredThreadValues.messageTimes as Record<string, unknown>),
+    [sharedId, assistantRenderId],
+    "fork thread values should retain times for both role-scoped render ids"
+  )
+  assert.deepEqual(
+    (filteredThreadValues.messageTimeOrder as Array<{ id: string }>).map((entry) => entry.id),
+    [sharedId, assistantRenderId]
+  )
+  assert.equal(
+    isForkableCheckpointForMessage(
+      makeTuple({
+        checkpoint,
+        metadata: makeForkBoundaryMetadata("cp-role-collision-fork", 1, sharedId)
+      }),
+      assistantRenderId
+    ),
+    true,
+    "a raw checkpoint boundary marker should accept the assistant render id"
+  )
+
+  assert.equal(truncateCheckpointMessagesAfter(checkpoint, assistantRenderId), true)
+  assert.equal(
+    ((checkpoint.channel_values as Record<string, unknown>).messages as unknown[]).length,
+    2,
+    "truncating by a synthetic render id must select the assistant occurrence, not the first raw id"
+  )
+  console.log("PASS role-collision render ids resolve to the exact checkpoint fork boundary")
+}
+
+function testSameRoleDuplicateCheckpointForkTarget(): void {
+  const sharedId = "fork-same-role-provider-id"
+  const duplicateRenderId = buildMessageSameRoleDuplicateId(sharedId, "assistant")
+  const checkpoint = makeCheckpoint("cp-same-role-duplicate-fork") as Checkpoint
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: sharedId, type: "ai", content: "first assistant chunk" },
+    { id: sharedId, type: "ai", content: "second assistant chunk" }
+  ]
+
+  const transcript = deriveCheckpointTranscriptIndex(checkpoint)
+  assert.deepEqual(
+    transcript.visibleMessages.map((message) => message.renderId),
+    [sharedId, duplicateRenderId],
+    "same-role checkpoint occurrences need stable, independently addressable render ids"
+  )
+  const status = describeCheckpointMessageForkTarget(checkpoint, duplicateRenderId)
+  assert.equal(status.isForkableMessageBoundary, true)
+  assert.equal(status.message?.rawIndex, 1)
+  assert.equal(truncateCheckpointMessagesAfter(checkpoint, duplicateRenderId), true)
+  assert.equal(
+    ((checkpoint.channel_values as Record<string, unknown>).messages as unknown[]).length,
+    2,
+    "fork truncation must resolve the second same-role occurrence by render id"
+  )
+  console.log("PASS same-role duplicate render ids resolve to exact checkpoint boundaries")
+}
+
+function testCurrentRunProviderTupleRestoresThirdOccurrenceForkTarget(): void {
+  const providerId = "fork-current-run-provider"
+  const stableId = "current-run-assistant:fork-stable"
+  const thirdOccurrenceId = buildMessageSameRoleDuplicateId(providerId, "assistant", 3)
+  const checkpoint = makeCheckpoint("cp-current-run-provider-tuple") as Checkpoint
+  ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+    { id: "fork-current-user-1", type: "human", content: "first" },
+    { id: providerId, type: "ai", content: "old answer" },
+    { id: "fork-current-user-2", type: "human", content: "second" },
+    {
+      id: stableId,
+      type: "ai",
+      content: "first final",
+      additional_kwargs: {
+        cmb_internal_provider_source_id: providerId,
+        cmb_internal_provider_occurrence: 2
+      }
+    },
+    { id: "fork-current-user-3", type: "human", content: "guide" },
+    { id: providerId, type: "ai", content: "guided answer" }
+  ]
+
+  const transcript = deriveCheckpointTranscriptIndex(checkpoint)
+  const assistants = transcript.visibleMessages.filter((message) => message.role === "assistant")
+  assert.deepEqual(
+    assistants.map((message) => message.renderId),
+    [providerId, stableId, thirdOccurrenceId],
+    "checkpoint indexing must count the stable completed reply as provider occurrence two"
+  )
+  assert.equal(assistants[1]?.provider_source_id, providerId)
+  assert.equal(assistants[1]?.provider_occurrence, 2)
+  const status = describeCheckpointMessageForkTarget(checkpoint, thirdOccurrenceId)
+  assert.equal(
+    status.isForkableMessageBoundary,
+    true,
+    "the guided occurrence-three reply must resolve as the checkpoint fork boundary"
+  )
+  assert.equal(status.message?.rawIndex, 5)
+  console.log("PASS current-run checkpoint tuples restore occurrence-three fork boundaries")
 }
 
 function testMessageForkBoundaryValidation(): void {
@@ -1020,10 +1791,18 @@ async function main(): Promise<void> {
     await testConfigurableCheckpointRetention(dir)
     await testMetadataUpdatePreservesCheckpointShape(dir)
     testThreadValuesFiltering()
+    testRepeatedTaskInvocationForkFilteringPreservesSidecarRefs()
+    testIdlessTaskProviderAdoptionKeepsInvocationBucket()
+    testCrossRoleParentIdCollisionKeepsInvocationBucket()
     testPersistedTranscriptFilteringUsesCheckpointBoundary()
     testMessagesAfterCheckpointVisibleIds()
+    testMessagesAfterCheckpointMatchesRoleScopedCollisionIdentity()
+    testMessagesAfterCheckpointDistinguishesSameRoleDuplicates()
     testWorkflowPlumbingFilteredFromTranscript()
     testCheckpointMessageTruncation()
+    testRoleCollisionCheckpointForkTarget()
+    testSameRoleDuplicateCheckpointForkTarget()
+    testCurrentRunProviderTupleRestoresThirdOccurrenceForkTarget()
     testMessageForkBoundaryValidation()
     testInterruptDetection()
     testForkabilitySummary()

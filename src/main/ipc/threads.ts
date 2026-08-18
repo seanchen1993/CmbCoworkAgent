@@ -1,5 +1,6 @@
 import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
-import { existsSync } from "fs"
+import { constants as fsConstants, existsSync } from "fs"
+import { copyFile, lstat, mkdir } from "fs/promises"
 import path from "path"
 import Store from "electron-store"
 import AdmZip from "adm-zip"
@@ -8,8 +9,6 @@ import {
   getAllThreads,
   getThread,
   getThreadMessages,
-  getThreadMessagesAfterAnyId,
-  getThreadMessagesByIds,
   getThreadGoalEvents,
   getThreadGoalEventsForRestore,
   addThreadGoalEvent,
@@ -28,6 +27,9 @@ import {
   pendingApprovals
 } from "../agent/runtime"
 import {
+  cancelAndWaitForAgentThreadRun,
+  disposeAgentThreadState,
+  disposeDeletedAgentThreadRuntime,
   forgetCoordinatorThreadState,
   hasActiveAgentRun,
   isActiveAgentRunAborting,
@@ -56,10 +58,13 @@ import {
 } from "../agent/coordinator-worker-manager"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
+import {
+  deleteProjectThreadDataDirectory,
+  getProjectThreadDataDirectory
+} from "../agent/context-history-path"
 import { generateTitle } from "../services/title-generator"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
-import { disposeAgentThreadState } from "./agent"
 import { getDefaultModel } from "./models"
 import type {
   ForkableCheckpoint,
@@ -68,6 +73,7 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  SubagentTranscriptBlobField,
   ThreadUpdateParams,
   ThreadValuesMergeParams
 } from "../types"
@@ -83,6 +89,10 @@ import {
   mergeCheckpointAuthorityTranscriptMessages,
   truncateCheckpointMessagesAfter
 } from "../../shared/checkpoint-transcript"
+import {
+  getMessageProviderOccurrenceIdentity,
+  getMessageProviderTupleFromMetadata
+} from "../../shared/message-role-collision"
 import {
   buildVisibleForkableCheckpointList,
   describeCheckpointForkability,
@@ -103,9 +113,31 @@ import {
   type CheckpointTuple
 } from "@langchain/langgraph-checkpoint"
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
+import {
+  buildHarnessFeatureAgentContext,
+  DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
+} from "../harness-board/service"
+import {
+  acquireSubagentTranscriptBlobReadPin,
+  advanceSubagentTranscriptReferenceEpoch,
+  buildSubagentTranscriptStartupManifests,
+  compactSubagentTranscriptManifests,
+  exportSubagentTranscriptBlobValue,
+  getSubagentTranscriptReferenceEpoch,
+  hydrateSubagentTranscriptManifestPage,
+  mergeSubagentTranscriptManifestMessages,
+  quarantineSubagentTranscriptBlobGcCandidates,
+  removeQuarantinedSubagentTranscriptBlobs,
+  scanSubagentTranscriptBlobGcCandidates,
+  sliceSubagentTranscriptManifestPage,
+  withSubagentTranscriptContentMutationLock
+} from "../services/subagent-transcript-content-store"
+import {
+  SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY,
+  isSubagentTranscriptBlobRef
+} from "../../shared/subagent-transcript-storage"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
-
 interface ExportAttachment {
   filename: string
 }
@@ -276,7 +308,7 @@ async function assertCanPersistExplicitNormalMode(
     if (unresolvedWorkers.length === 0 && !hasPendingNotifications) {
       return
     }
-    throw new Error("该线程缺少工作区路径，无法安全切回 Solo Agent。请先重新选择工作区后再切换。")
+    throw new Error("该线程缺少工作区路径，无法安全切换到 Solo 或 Multi。请先重新选择工作区后再切换。")
   }
 
   await coordinatorWorkerManager.restoreWorkersForThread({
@@ -296,7 +328,7 @@ async function assertCanPersistExplicitNormalMode(
     .map((worker) => `${worker.worker_id}: ${worker.description}`)
     .join("; ")
   throw new Error(
-    "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切回 Solo Agent。" +
+    "仍有 Agent Team worker 在运行或结果待处理，请先处理完成后再切换到 Solo 或 Multi。" +
       (workerList ? `相关 worker：${workerList}` : "请先切回 Agent Team 处理这些结果。")
   )
 }
@@ -305,7 +337,6 @@ const TOOL_CALL_ARGS_LIMIT = 1200
 const TOOL_RESULT_CONTENT_LIMIT = 4000
 const MAX_FORK_DURABLE_TAIL_MESSAGES = 1_000
 const MAX_FORK_DURABLE_TAIL_BYTES = 8 * 1024 * 1024
-
 function parseJsonObject(raw: string | null | undefined): Record<string, unknown> | undefined {
   if (!raw) return undefined
   try {
@@ -329,9 +360,22 @@ function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thr
     updated_at: new Date(row.updated_at),
     metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     status: row.status as Thread["status"],
-    thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+    // Subagent transcripts can contain thousands of manifest entries. They
+    // travel only through the dedicated transcript IPC; returning them from
+    // every unrelated update/merge/fork response repeatedly structured-clones
+    // the entire history and defeats the sidecar storage boundary.
+    thread_values: threadValuesWithoutSubagentTranscripts(row.thread_values),
     title: row.title ?? undefined
   }
+}
+
+function threadValuesWithoutSubagentTranscripts(
+  raw: string | null | undefined
+): Record<string, unknown> | undefined {
+  if (!raw) return undefined
+  const values = parseThreadValues(raw)
+  delete values[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+  return values
 }
 
 function mergeThreadMessageTranscripts(
@@ -370,19 +414,23 @@ function normalizeIpcMessageRole(role: unknown): Message["role"] | undefined {
 function copyForkedThreadMessages(input: {
   sourceThreadId: string
   targetThreadId: string
-  visibleMessageIds: readonly string[]
+  visibleMessages: readonly { id: string; role: string; renderId?: string; rawIndex?: number }[]
   checkpointMessages?: CheckpointMessage[]
 }): void {
-  const allowedIds = new Set(input.visibleMessageIds)
-  if (allowedIds.size === 0) return
+  if (input.visibleMessages.length === 0) return
+  const visibleRawIndices = input.visibleMessages.flatMap((message) =>
+    typeof message.rawIndex === "number" ? [message.rawIndex] : []
+  )
+  const allowedIdentities = new Set(
+    input.visibleMessages.map((message) =>
+      getMessageProviderOccurrenceIdentity({ ...message, id: message.renderId || message.id })
+    )
+  )
   const checkpointMessages = checkpointMessagesToThreadMessages(input.checkpointMessages, {
-    visibleMessageIds: input.visibleMessageIds
+    visibleRawIndices
   })
-  const persistedMessages = getThreadMessagesByIds(
-    input.sourceThreadId,
-    input.visibleMessageIds
-  ).filter((message) =>
-    allowedIds.has(message.id)
+  const persistedMessages = getThreadMessages(input.sourceThreadId).filter((message) =>
+    allowedIdentities.has(getMessageProviderOccurrenceIdentity(message))
   )
   const messages = mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
   if (messages.length === 0) return
@@ -453,13 +501,11 @@ function isForkVisiblePersistedMessage(message: Message): boolean {
 
 function findDurableForkTailMessages(
   sourceThreadId: string,
-  visibleMessageIds: readonly string[]
+  visibleMessages: readonly { id: string; role: string; renderId?: string }[]
 ): Message[] {
   return findMessagesAfterCheckpointVisibleIds(
-    getThreadMessagesAfterAnyId(sourceThreadId, visibleMessageIds).filter(
-      isForkVisiblePersistedMessage
-    ),
-    visibleMessageIds
+    getThreadMessages(sourceThreadId).filter(isForkVisiblePersistedMessage),
+    visibleMessages
   )
 }
 
@@ -546,7 +592,7 @@ function materializeLatestForkTuple(
   const initialTranscript = deriveCheckpointTranscriptIndex(latestTuple.checkpoint)
   const durableTail = findDurableForkTailMessages(
     sourceThreadId,
-    initialTranscript.visibleMessageIds
+    initialTranscript.visibleMessages
   )
   if (durableTail.length === 0) return [...tuples]
 
@@ -864,6 +910,9 @@ function buildForkMetadata(input: {
     ? overrides.agentMode
     : getAgentModeFromMetadata(sourceMetadata)
   if (isAgentMode(agentMode)) next.agentMode = agentMode
+  if (agentMode === "normal") {
+    next.subagentsEnabled = sourceMetadata.subagentsEnabled !== false
+  }
 
   const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
   if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
@@ -885,6 +934,27 @@ interface ForkCheckpointHistoryEntry {
   parentCheckpointId?: string
 }
 
+const FORK_PRIVATE_SUMMARIZATION_STATE_KEYS = [
+  "_summarizationEvent",
+  "_summarizationSessionId",
+  "_cmbSummarizationOwner"
+] as const
+
+function copyCheckpointWithoutSourceSummarizationState(
+  checkpoint: CheckpointTuple["checkpoint"]
+): CheckpointTuple["checkpoint"] {
+  const copied = copyCheckpoint(checkpoint)
+  const channelValues = copied.channel_values
+  if (!channelValues || typeof channelValues !== "object" || Array.isArray(channelValues)) {
+    return copied
+  }
+
+  for (const key of FORK_PRIVATE_SUMMARIZATION_STATE_KEYS) {
+    delete (channelValues as Record<string, unknown>)[key]
+  }
+  return copied
+}
+
 function fallbackForkCheckpointMetadata(): CheckpointMetadata {
   return {
     source: "fork",
@@ -901,8 +971,13 @@ function getTupleParentCheckpointId(tuple: CheckpointTuple): string | undefined 
 
 function checkpointTranscriptDedupeKey(checkpoint: CheckpointTuple["checkpoint"]): string {
   const transcript = deriveCheckpointTranscriptIndex(checkpoint)
-  return transcript.visibleMessageIds.length > 0
-    ? JSON.stringify(transcript.visibleMessageIds)
+  return transcript.visibleMessages.length > 0
+    ? JSON.stringify(
+        transcript.visibleMessages.map((message) => [
+          message.role,
+          message.renderId ?? message.id
+        ])
+      )
     : `checkpoint:${checkpoint.id}`
 }
 
@@ -952,9 +1027,16 @@ function buildForkCheckpointHistory(input: {
   const entries = input.sourceHistoryTuples.map((tuple) => {
     const checkpointId = getCheckpointId(tuple)
     const parentCheckpointId = getTupleParentCheckpointId(tuple)
+    const sourceCheckpoint =
+      checkpointId === input.selectedCheckpointId ? input.selectedCheckpoint : tuple.checkpoint
     return {
-      checkpoint:
-        checkpointId === input.selectedCheckpointId ? input.selectedCheckpoint : tuple.checkpoint,
+      // A fork owns a new app-managed artifact directory. Keeping the source
+      // event would leave its effective prompt pointing at the source thread's
+      // absolute history path (and potentially expose history appended after
+      // the fork boundary). The raw messages remain in the checkpoint, while
+      // referenced evicted tool payloads are copied into the target directory
+      // before commit, so the target can continue independently.
+      checkpoint: copyCheckpointWithoutSourceSummarizationState(sourceCheckpoint),
       metadata:
         checkpointId === input.selectedCheckpointId
           ? input.selectedMetadata
@@ -1017,9 +1099,102 @@ async function putForkCheckpointHistory(input: {
   }
 }
 
+const LARGE_TOOL_RESULT_PATH_PREFIX = "/large_tool_results/"
+const LARGE_TOOL_RESULT_REFERENCE_PATTERN =
+  /saved in the filesystem at this path: (\/large_tool_results\/[^\s]+)/g
+
+function collectReferencedLargeToolResultNames(checkpoint: Checkpoint): string[] {
+  const names = new Set<string>()
+  for (const message of getCheckpointChannelMessages(checkpoint) ?? []) {
+    if (getMessageRole(message) !== "tool") continue
+    const content = stringifyContent(getCheckpointMessageContent(message))
+    for (const match of content.matchAll(LARGE_TOOL_RESULT_REFERENCE_PATTERN)) {
+      const logicalPath = match[1]
+      const name = logicalPath.slice(LARGE_TOOL_RESULT_PATH_PREFIX.length)
+      if (
+        !name ||
+        name === "." ||
+        name === ".." ||
+        name.includes("/") ||
+        name.includes("\\") ||
+        name.includes("\0")
+      ) {
+        throw new Error(
+          `Fork checkpoint contains an invalid large tool result path: ${logicalPath}`
+        )
+      }
+      names.add(name)
+    }
+  }
+  return [...names]
+}
+
+async function resolveForkLargeToolResultSource(
+  candidates: readonly string[]
+): Promise<string | null> {
+  for (const candidate of candidates) {
+    try {
+      const stats = await lstat(candidate)
+      if (stats.isSymbolicLink() || !stats.isFile()) {
+        throw new Error(`Fork large tool result is not a regular file: ${candidate}`)
+      }
+      return candidate
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      throw error
+    }
+  }
+  return null
+}
+
+async function copyForkLargeToolResults(input: {
+  checkpoints: readonly Checkpoint[]
+  sourceThreadId: string
+  sourceWorkspacePath: string | null
+  targetThreadId: string
+  targetWorkspacePath: string | null
+}): Promise<void> {
+  const referencedNames = [
+    ...new Set(input.checkpoints.flatMap(collectReferencedLargeToolResultNames))
+  ]
+  if (referencedNames.length === 0) return
+  if (!input.sourceWorkspacePath || !input.targetWorkspacePath) {
+    throw new Error(
+      "Fork checkpoint references large tool results but the workspace path is missing."
+    )
+  }
+
+  const [sourceThreadDataDirectory, targetThreadDataDirectory] = await Promise.all([
+    getProjectThreadDataDirectory(input.sourceWorkspacePath, input.sourceThreadId),
+    getProjectThreadDataDirectory(input.targetWorkspacePath, input.targetThreadId)
+  ])
+  const sourceManagedDirectory = path.join(sourceThreadDataDirectory, "large_tool_results")
+  const sourceLegacyDirectory = path.join(
+    input.sourceWorkspacePath,
+    ".cmbdevclaw",
+    "large_tool_results"
+  )
+  const targetDirectory = path.join(targetThreadDataDirectory, "large_tool_results")
+
+  await mkdir(targetDirectory, { recursive: true, mode: 0o700 })
+  for (const name of referencedNames) {
+    const sourcePath = await resolveForkLargeToolResultSource([
+      path.join(sourceManagedDirectory, name),
+      path.join(sourceLegacyDirectory, name)
+    ])
+    if (!sourcePath) {
+      console.warn(
+        `[Threads] Fork source is missing referenced large tool result ${LARGE_TOOL_RESULT_PATH_PREFIX}${name}; preserving the preview-only checkpoint.`
+      )
+      continue
+    }
+    await copyFile(sourcePath, path.join(targetDirectory, name), fsConstants.COPYFILE_EXCL)
+  }
+}
+
 async function cleanupFailedFork(
   targetThreadId: string,
-  options: { rowCreated: boolean }
+  options: { rowCreated: boolean; workspacePath: string | null }
 ): Promise<void> {
   try {
     deleteThreadCheckpoint(targetThreadId)
@@ -1031,6 +1206,13 @@ async function cleanupFailedFork(
       dbDeleteThread(targetThreadId)
     } catch (error) {
       console.warn("[Threads] Failed to cleanup fork thread row:", error)
+    }
+  }
+  if (options.workspacePath) {
+    try {
+      await deleteProjectThreadDataDirectory(options.workspacePath, targetThreadId)
+    } catch (error) {
+      console.warn("[Threads] Failed to cleanup fork app-managed data:", error)
     }
   }
 }
@@ -1172,6 +1354,8 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       parseThreadValues(sourceRow.thread_values),
       transcriptIndex
     )
+    const targetWorkspacePath =
+      typeof targetMetadata.workspacePath === "string" ? targetMetadata.workspacePath : null
 
     let targetSaver: SqlJsSaver | null = null
     let rowCreated = false
@@ -1191,6 +1375,13 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
         selectedCheckpoint: forkCheckpoint,
         selectedMetadata: checkpointMetadata
       })
+      await copyForkLargeToolResults({
+        checkpoints: checkpointHistory.map((entry) => entry.checkpoint),
+        sourceThreadId,
+        sourceWorkspacePath: workspacePath,
+        targetThreadId,
+        targetWorkspacePath
+      })
       targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId), undefined, {
         maxRootCheckpoints: Math.max(1, checkpointHistory.length),
         maxRootForkBoundaryCheckpoints: Math.max(0, checkpointHistory.length)
@@ -1205,17 +1396,20 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       targetSaver = null
       await verifyForkCheckpointPersisted(targetThreadId, forkCheckpoint.id)
 
-      dbCreateThread(targetThreadId, targetMetadata)
-      rowCreated = true
-
-      const row = dbUpdateThread(targetThreadId, {
-        thread_values: JSON.stringify(filteredThreadValues)
+      const row = await withSubagentTranscriptContentMutationLock(async () => {
+        dbCreateThread(targetThreadId, targetMetadata)
+        rowCreated = true
+        const updated = dbUpdateThread(targetThreadId, {
+          thread_values: JSON.stringify(filteredThreadValues)
+        })
+        if (!updated) throw new Error("Forked thread row was not created.")
+        advanceSubagentTranscriptReferenceEpoch()
+        return updated
       })
-      if (!row) throw new Error("Forked thread row was not created.")
       copyForkedThreadMessages({
         sourceThreadId,
         targetThreadId,
-        visibleMessageIds: transcriptIndex.visibleMessageIds,
+        visibleMessages: transcriptIndex.visibleMessages,
         checkpointMessages: getCheckpointChannelMessages(forkCheckpoint)
       })
       copyForkedGoalStateForCheckpoint({
@@ -1239,7 +1433,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
           console.warn("[Threads] Failed to close fork target saver:", closeError)
         }
       }
-      await cleanupFailedFork(targetThreadId, { rowCreated })
+      await cleanupFailedFork(targetThreadId, { rowCreated, workspacePath: targetWorkspacePath })
       throw error
     }
   })
@@ -1372,10 +1566,28 @@ function comparableMessageTextsMatch(left: string, right: string): boolean {
   return shorterLength >= 24 && (left.startsWith(right) || right.startsWith(left))
 }
 
-function findCheckpointMessageById(checkpoint: unknown, messageId: string): CheckpointMessage | null {
+function findCheckpointMessageById(
+  checkpoint: unknown,
+  messageId: string,
+  role?: Message["role"],
+  rawIndex?: number
+): CheckpointMessage | null {
   const messages = getCheckpointChannelMessages(checkpoint) ?? []
+  if (rawIndex !== undefined) {
+    const indexedMessage = messages[rawIndex]
+    if (
+      indexedMessage &&
+      getCheckpointMessageId(indexedMessage, rawIndex) === messageId &&
+      (!role || getMessageRole(indexedMessage) === role)
+    ) {
+      return indexedMessage
+    }
+  }
   const index = messages.findIndex((message, messageIndex) => {
-    return getCheckpointMessageId(message, messageIndex) === messageId
+    return (
+      getCheckpointMessageId(message, messageIndex) === messageId &&
+      (!role || getMessageRole(message) === role)
+    )
   })
   return index >= 0 ? messages[index] : null
 }
@@ -1414,7 +1626,8 @@ function snapshotMatchesCheckpointAssistantBoundary(
   tuple: CheckpointTuple,
   snapshot: ForkMessageSnapshot | undefined,
   targetMessageId: string,
-  targetText: string
+  targetText: string,
+  targetRawIndex?: number
 ): boolean {
   if (!snapshot) return false
   if (snapshot.role && snapshot.role !== "assistant") return false
@@ -1424,7 +1637,12 @@ function snapshotMatchesCheckpointAssistantBoundary(
   )
   const checkpointText = normalizeComparableMessageText(targetText)
 
-  const rawMessage = findCheckpointMessageById(tuple.checkpoint, targetMessageId)
+  const rawMessage = findCheckpointMessageById(
+    tuple.checkpoint,
+    targetMessageId,
+    "assistant",
+    targetRawIndex
+  )
   if (!rawMessage) return false
   const snapshotId = typeof snapshot.id === "string" ? snapshot.id.trim() : ""
   if (snapshotId && snapshotId === targetMessageId) return true
@@ -1442,13 +1660,21 @@ function findSnapshotAssistantMessageInTranscript(
   tuple: CheckpointTuple,
   snapshot: ForkMessageSnapshot | undefined,
   transcript: ReturnType<typeof deriveCheckpointTranscriptIndex>
-): { id: string; text: string; index: number } | null {
+): { id: string; text: string; index: number; rawIndex?: number } | null {
   if (!snapshot) return null
   for (let index = transcript.visibleMessages.length - 1; index >= 0; index -= 1) {
     const message = transcript.visibleMessages[index]
     if (message.role !== "assistant") continue
-    if (snapshotMatchesCheckpointAssistantBoundary(tuple, snapshot, message.id, message.text)) {
-      return { id: message.id, text: message.text, index }
+    if (
+      snapshotMatchesCheckpointAssistantBoundary(
+        tuple,
+        snapshot,
+        message.id,
+        message.text,
+        message.rawIndex
+      )
+    ) {
+      return { id: message.id, text: message.text, index, rawIndex: message.rawIndex }
     }
   }
   return null
@@ -1466,13 +1692,15 @@ function snapshotAllowsSparseAssistantFallback(
 
 function findLastAssistantBeforeToolTail(
   transcript: ReturnType<typeof deriveCheckpointTranscriptIndex>
-): { id: string; text: string; index: number } | null {
+): { id: string; text: string; index: number; rawIndex?: number } | null {
   let index = transcript.visibleMessages.length - 1
   while (index >= 0 && transcript.visibleMessages[index].role === "tool") {
     index -= 1
   }
   const message = index >= 0 ? transcript.visibleMessages[index] : undefined
-  return message?.role === "assistant" ? { id: message.id, text: message.text, index } : null
+  return message?.role === "assistant"
+    ? { id: message.id, text: message.text, index, rawIndex: message.rawIndex }
+    : null
 }
 
 function resolveInterruptedToolClusterForkTarget(
@@ -1486,13 +1714,16 @@ function resolveInterruptedToolClusterForkTarget(
 
   const exactMessage = exactTarget.message
   let candidateSource: "exact" | "snapshot" | "fallback" | null = null
-  let candidate: { id: string; text: string; index: number } | null = null
+  let candidate: { id: string; text: string; index: number; rawIndex?: number } | null = null
   if (exactMessage?.role === "assistant") {
     candidateSource = "exact"
     candidate = {
       id: exactMessage.id,
       text: exactMessage.text,
-      index: transcript.visibleMessages.findIndex((message) => message.id === exactMessage.id)
+      index: transcript.visibleMessages.findIndex(
+        (message) => (message.renderId ?? message.id) === (exactMessage.renderId ?? exactMessage.id)
+      ),
+      rawIndex: exactMessage.rawIndex
     }
   } else {
     candidate = findSnapshotAssistantMessageInTranscript(tuple, snapshot, transcript)
@@ -1507,7 +1738,13 @@ function resolveInterruptedToolClusterForkTarget(
 
   if (
     candidateSource === "snapshot" &&
-    !snapshotMatchesCheckpointAssistantBoundary(tuple, snapshot, candidate.id, candidate.text)
+    !snapshotMatchesCheckpointAssistantBoundary(
+      tuple,
+      snapshot,
+      candidate.id,
+      candidate.text,
+      candidate.rawIndex
+    )
   ) {
     return null
   }
@@ -1517,14 +1754,24 @@ function resolveInterruptedToolClusterForkTarget(
     return null
   }
 
-  const assistantMessage = findCheckpointMessageById(tuple.checkpoint, candidate.id)
+  const assistantMessage = findCheckpointMessageById(
+    tuple.checkpoint,
+    candidate.id,
+    "assistant",
+    candidate.rawIndex
+  )
   const assistantToolCallIds = getCheckpointMessageToolCallIds(assistantMessage)
   if (assistantToolCallIds.size === 0) return null
 
   const rawMessages = getCheckpointChannelMessages(tuple.checkpoint) ?? []
-  const candidateRawIndex = rawMessages.findIndex((message, index) => {
-    return getCheckpointMessageId(message, index) === candidate.id
-  })
+  const candidateRawIndex =
+    candidate.rawIndex ??
+    rawMessages.findIndex((message, index) => {
+      return (
+        getCheckpointMessageId(message, index) === candidate.id &&
+        getMessageRole(message) === "assistant"
+      )
+    })
   if (candidateRawIndex < 0) return null
 
   for (let index = candidateRawIndex + 1; index < rawMessages.length; index += 1) {
@@ -1557,13 +1804,15 @@ function resolveForkableCheckpointMessageTarget(
   // 场景：用户选择了一条 tool_call 消息（不可直接 fork），需要回退到同轮次的 assistant 消息。
   const lastVisibleMessage = exactTarget.transcript.visibleMessages.at(-1)
   if (lastVisibleMessage?.role === "assistant") {
-    if (!isForkableCheckpointForMessage(tuple, lastVisibleMessage.id)) return null
+    const lastVisibleMessageId = lastVisibleMessage.renderId ?? lastVisibleMessage.id
+    if (!isForkableCheckpointForMessage(tuple, lastVisibleMessageId)) return null
     if (
       !snapshotMatchesCheckpointAssistantBoundary(
         tuple,
         snapshot,
         lastVisibleMessage.id,
-        lastVisibleMessage.text
+        lastVisibleMessage.text,
+        lastVisibleMessage.rawIndex
       )
     ) {
       return null
@@ -1571,7 +1820,7 @@ function resolveForkableCheckpointMessageTarget(
 
     return {
       mode: "message",
-      messageId: lastVisibleMessage.id,
+      messageId: lastVisibleMessageId,
       transcript: exactTarget.transcript
     }
   }
@@ -1773,6 +2022,25 @@ function safeFileName(value: string): string {
   return cleaned || "chat-session"
 }
 
+async function collectReferencedTranscriptHashesBounded(): Promise<Set<string>> {
+  const hashes = new Set<string>()
+  const chunkChars = 1024 * 1024
+  const overlapChars = 160
+  for (const row of getAllThreads()) {
+    const raw = typeof row.thread_values === "string" ? row.thread_values : ""
+    for (let offset = 0; offset < raw.length; offset += chunkChars) {
+      const start = Math.max(0, offset - overlapChars)
+      const chunk = raw.slice(start, Math.min(raw.length, offset + chunkChars))
+      const pattern = /"sha256"\s*:\s*"([a-f0-9]{64})"/g
+      for (let match = pattern.exec(chunk); match; match = pattern.exec(chunk)) {
+        hashes.add(match[1])
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+  }
+  return hashes
+}
+
 function escapeMarkdown(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/`/g, "\\`")
 }
@@ -1954,23 +2222,29 @@ function roleToCheckpointType(role: Message["role"]): CheckpointMessage["type"] 
 
 function checkpointMessagesToThreadMessages(
   messages: CheckpointMessage[] | undefined,
-  options: { visibleMessageIds?: readonly string[] } = {}
+  options: { visibleRawIndices?: readonly number[] } = {}
 ): Message[] {
   if (!Array.isArray(messages)) return []
-  const visibleMessageIds = options.visibleMessageIds
-    ? new Set(options.visibleMessageIds)
+  const visibleRawIndices = options.visibleRawIndices
+    ? new Set(options.visibleRawIndices)
     : undefined
   const now = new Date()
   return messages.flatMap((msg, index): Message | [] => {
     const role = getMessageRole(msg)
     if (!role) return []
     const id = getCheckpointMessageId(msg, index)
-    if (visibleMessageIds && !visibleMessageIds.has(id)) return []
+    if (visibleRawIndices && !visibleRawIndices.has(index)) return []
     const content = getCheckpointMessageTranscriptContent(msg, role)
     const rawText = stringifyContent(content)
     if (isWorkflowPlumbingTranscriptContent(rawText)) return []
+    const additionalKwargs = getCheckpointMessageAdditionalKwargs(msg)
+    const providerTuple =
+      role === "assistant"
+        ? getMessageProviderTupleFromMetadata(additionalKwargs)
+        : undefined
     return {
       id,
+      ...providerTuple,
       role,
       content:
         typeof content === "string"
@@ -2023,7 +2297,11 @@ export function mergeCheckpointAndPersistedThreadMessagesForSession(
   const checkpointMessages = checkpointMessagesToThreadMessages(
     getCheckpointChannelMessages(checkpoint),
     checkpointTranscriptIndex
-      ? { visibleMessageIds: checkpointTranscriptIndex.visibleMessageIds }
+      ? {
+          visibleRawIndices: checkpointTranscriptIndex.visibleMessages.flatMap((message) =>
+            typeof message.rawIndex === "number" ? [message.rawIndex] : []
+          )
+        }
       : {}
   )
   return mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
@@ -2067,7 +2345,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       updated_at: new Date(row.updated_at),
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
       status: row.status as Thread["status"],
-      thread_values: row.thread_values ? JSON.parse(row.thread_values) : undefined,
+      // Large subagent fields are loaded through the dedicated hydrating API;
+      // never duplicate legacy inline payloads through this general response.
+      thread_values: threadValuesWithoutSubagentTranscripts(row.thread_values),
       title: row.title
     }
   })
@@ -2115,6 +2395,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     const threadId = uuid()
     // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
     const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
+    const harnessFeatureMetadata =
+      nextMetadata.harnessFeature &&
+      typeof nextMetadata.harnessFeature === "object" &&
+      !Array.isArray(nextMetadata.harnessFeature)
+        ? (nextMetadata.harnessFeature as Record<string, unknown>)
+        : undefined
+    if (harnessFeatureMetadata) {
+      nextMetadata.harnessFeature = {
+        ...harnessFeatureMetadata,
+        requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+      }
+    }
 
     // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
     // 这样可以兼容两种场景：
@@ -2131,6 +2423,47 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       ) {
         nextMetadata.workspacePath = lastWorkspacePath
       }
+    }
+
+    let harnessContext: ReturnType<typeof buildHarnessFeatureAgentContext> | null = null
+    try {
+      const workspacePath =
+        typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
+      harnessContext = buildHarnessFeatureAgentContext(nextMetadata, {
+        workspacePath,
+        requestUserInputConfigSource: "plugin"
+      })
+      if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
+        nextMetadata.harnessFeature = {
+          ...harnessFeatureMetadata,
+          requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
+        }
+      }
+    } catch (error) {
+      console.warn("[Threads] Failed to resolve Harness request_user_input policy:", error)
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode")) {
+      try {
+        const initialAgentMode = harnessContext?.agentConfig?.agentMode
+        if (initialAgentMode === "solo") {
+          nextMetadata.agentMode = "normal"
+          nextMetadata.subagentsEnabled = false
+        }
+        if (initialAgentMode === "multi") {
+          nextMetadata.agentMode = "normal"
+          nextMetadata.subagentsEnabled = true
+        }
+        if (initialAgentMode === "agent_team") nextMetadata.agentMode = "coordinator"
+      } catch (error) {
+        console.warn("[Threads] Failed to apply Harness initial agent mode:", error)
+      }
+    }
+    if (
+      getAgentModeFromMetadata(nextMetadata) === "normal" &&
+      typeof nextMetadata.subagentsEnabled !== "boolean"
+    ) {
+      nextMetadata.subagentsEnabled = true
     }
 
     const hasModel = Object.prototype.hasOwnProperty.call(nextMetadata, "model")
@@ -2193,8 +2526,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       if (updates.title !== undefined) updateData.title = updates.title
       if (updates.status !== undefined) updateData.status = updates.status
       if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
-      if (updates.thread_values !== undefined)
-        updateData.thread_values = JSON.stringify(updates.thread_values)
+      if (updates.thread_values !== undefined) {
+        const currentThread = getThread(threadId)
+        const currentValues = parseThreadValues(currentThread?.thread_values)
+        const safeValues = { ...updates.thread_values }
+        if (Object.prototype.hasOwnProperty.call(currentValues, SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY)) {
+          safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY] =
+            currentValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        } else {
+          delete safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        }
+        updateData.thread_values = JSON.stringify(safeValues)
+      }
 
       const row = dbUpdateThread(threadId, updateData)
       if (!row) throw new Error("Thread not found")
@@ -2207,10 +2550,272 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     "threads:mergeThreadValues",
     async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
       return withThreadRunMutationLock(threadId, async () => {
-        const row = dbMergeThreadValues(threadId, patch)
+        const safePatch = { ...patch }
+        delete safePatch[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        const row = dbMergeThreadValues(threadId, safePatch)
         if (!row) throw new Error("Thread not found")
 
         return serializeThreadRow(row)
+      })
+    }
+  )
+
+  ipcMain.handle("threads:getSubagentTranscripts", async (_event, threadId: string) => {
+    return withThreadRunMutationLock(threadId, async () => {
+      const row = getThread(threadId)
+      if (!row) return {}
+      const threadValues = parseThreadValues(row.thread_values)
+      const rawTranscripts = threadValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+      // Startup is a read-only index path. Never migrate or hydrate the full
+      // unbounded history here: a legacy thread may contain thousands of large
+      // inline rows, and sidecar I/O failure must not block the main chat.
+      return buildSubagentTranscriptStartupManifests(rawTranscripts)
+    })
+  })
+
+  ipcMain.handle(
+    "threads:getSubagentTranscript",
+    async (
+      _event,
+      {
+        threadId,
+        subagentId,
+        before
+      }: { threadId: string; subagentId: string; before?: number }
+    ) => {
+      const page = await withThreadRunMutationLock(threadId, async () => {
+        const row = getThread(threadId)
+        if (!row || !subagentId) return sliceSubagentTranscriptManifestPage([], before)
+        const threadValues = parseThreadValues(row.thread_values)
+        const rawTranscripts = threadValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        const transcriptRecord =
+          rawTranscripts && typeof rawTranscripts === "object" && !Array.isArray(rawTranscripts)
+            ? (rawTranscripts as Record<string, unknown>)
+            : {}
+        const bucket = transcriptRecord[subagentId]
+        let selectedPage = sliceSubagentTranscriptManifestPage(bucket, before)
+        if (
+          !selectedPage.deferredHydration ||
+          !Array.isArray(bucket) ||
+          selectedPage.start >= selectedPage.end
+        ) {
+          return selectedPage
+        }
+
+        const deferredMessage = bucket[selectedPage.start]
+        const hasSidecar =
+          deferredMessage &&
+          typeof deferredMessage === "object" &&
+          !Array.isArray(deferredMessage) &&
+          (["content", "reasoning", "tool_calls"] as const).some((field) =>
+            isSubagentTranscriptBlobRef(
+              (deferredMessage as Record<string, unknown>)[`${field}_ref`],
+              field
+            )
+          )
+        if (hasSidecar) return selectedPage
+
+        // A legacy inline value can itself exceed the hydration budget. Compact
+        // just that selected row on demand so the bounded page gains a sidecar
+        // that the user can stream-export; never migrate the whole history here.
+        selectedPage = await withSubagentTranscriptContentMutationLock(async () => {
+          const compacted = await compactSubagentTranscriptManifests({
+            [subagentId]: [deferredMessage]
+          })
+          const compactedBucket = compacted.manifests[subagentId]
+          if (!compacted.changed || !Array.isArray(compactedBucket) || !compactedBucket[0]) {
+            return selectedPage
+          }
+          const updatedBucket = [...bucket]
+          updatedBucket[selectedPage.start] = compactedBucket[0]
+          const updatedRow = dbMergeThreadValues(threadId, {
+            [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: {
+              ...transcriptRecord,
+              [subagentId]: updatedBucket
+            }
+          })
+          if (!updatedRow) throw new Error("Thread not found")
+          advanceSubagentTranscriptReferenceEpoch()
+          return sliceSubagentTranscriptManifestPage(updatedBucket, before)
+        })
+        return selectedPage
+      })
+      // Blobs are immutable. Release both mutation locks before unbounded disk
+      // reads so opening a large record cannot delay cancel/delete or another
+      // focused request. Concurrent GC may make a blob unavailable; hydration
+      // deliberately degrades to the compact projection in that case.
+      const hydrated = await hydrateSubagentTranscriptManifestPage(page)
+      const deferredMessage = page.deferredHydration ? page.messages[0] : undefined
+      const deferredExport =
+        deferredMessage &&
+        typeof deferredMessage === "object" &&
+        !Array.isArray(deferredMessage) &&
+        typeof (deferredMessage as Record<string, unknown>).id === "string"
+          ? {
+              messageIndex: page.start,
+              expectedMessageId: (deferredMessage as Record<string, unknown>).id as string,
+              fields: (["content", "reasoning", "tool_calls"] as const).filter((field) =>
+                isSubagentTranscriptBlobRef(
+                  (deferredMessage as Record<string, unknown>)[`${field}_ref`],
+                  field
+                )
+              )
+            }
+          : undefined
+      return {
+        messages: hydrated,
+        deferredHydration: page.deferredHydration,
+        ...(deferredExport?.fields.length && { deferredExport }),
+        end: page.end,
+        start: page.start,
+        ...(page.nextBefore !== undefined && { nextBefore: page.nextBefore }),
+        total: page.total
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "threads:exportSubagentTranscriptBlob",
+    async (
+      event,
+      {
+        threadId,
+        subagentId,
+        messageIndex,
+        expectedMessageId,
+        field
+      }: {
+        threadId: string
+        subagentId: string
+        messageIndex: number
+        expectedMessageId: string
+        field: SubagentTranscriptBlobField
+      }
+    ) => {
+      let releasePin: (() => void) | undefined
+      try {
+        if (!(["content", "reasoning", "tool_calls"] as const).includes(field)) {
+          return { success: false, error: "Invalid transcript field" }
+        }
+        const ref = await withThreadRunMutationLock(threadId, async () => {
+          const row = getThread(threadId)
+          if (
+            !row ||
+            !subagentId ||
+            !expectedMessageId ||
+            !Number.isSafeInteger(messageIndex) ||
+            messageIndex < 0
+          ) {
+            return undefined
+          }
+          const rawTranscripts = parseThreadValues(row.thread_values)[
+            SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
+          ]
+          const bucket =
+            rawTranscripts && typeof rawTranscripts === "object" && !Array.isArray(rawTranscripts)
+              ? (rawTranscripts as Record<string, unknown>)[subagentId]
+              : undefined
+          if (!Array.isArray(bucket)) return undefined
+          const message = bucket[messageIndex]
+          if (!message || typeof message !== "object" || Array.isArray(message)) return undefined
+          if ((message as Record<string, unknown>).id !== expectedMessageId) return undefined
+          const candidate = (message as Record<string, unknown>)[`${field}_ref`]
+          if (!isSubagentTranscriptBlobRef(candidate, field)) return undefined
+          await withSubagentTranscriptContentMutationLock(async () => {
+            releasePin = acquireSubagentTranscriptBlobReadPin(candidate)
+          })
+          return candidate
+        })
+        if (!ref) return { success: false, error: "完整内容引用不存在或已失效" }
+
+        const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
+        const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
+          title: "导出子代理完整记录字段",
+          defaultPath: `${safeFileName(`${subagentId}-${expectedMessageId}-${field}`)}.json`,
+          filters: [{ name: "JSON", extensions: ["json"] }]
+        })
+        if (result.canceled || !result.filePath) return { success: false, canceled: true }
+        await exportSubagentTranscriptBlobValue(ref, result.filePath)
+        return { success: true, filePath: result.filePath }
+      } catch (error) {
+        console.warn("[Threads] Failed to export subagent transcript blob:", error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      } finally {
+        releasePin?.()
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "threads:persistSubagentTranscripts",
+    async (
+      _event,
+      { threadId, transcripts }: { threadId: string; transcripts: Record<string, unknown> }
+    ) => {
+      return withThreadRunMutationLock(threadId, async () => {
+        return withSubagentTranscriptContentMutationLock(async () => {
+          const currentRow = getThread(threadId)
+          if (!currentRow) throw new Error("Thread not found")
+          const currentTranscripts = parseThreadValues(currentRow.thread_values)[
+            SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
+          ]
+          const currentRecord =
+            currentTranscripts &&
+            typeof currentTranscripts === "object" &&
+            !Array.isArray(currentTranscripts)
+              ? (currentTranscripts as Record<string, unknown>)
+              : {}
+          const compacted = await compactSubagentTranscriptManifests(transcripts)
+          const mergedManifests = Object.fromEntries(
+            Object.entries(compacted.manifests).map(([subagentId, incomingMessages]) => [
+              subagentId,
+              mergeSubagentTranscriptManifestMessages(
+                currentRecord[subagentId],
+                incomingMessages
+              )
+            ])
+          )
+          const row = dbMergeThreadValues(threadId, {
+            [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: mergedManifests
+          })
+          if (!row) throw new Error("Thread not found")
+          advanceSubagentTranscriptReferenceEpoch()
+          // The database needs each full merged bucket, but the renderer only
+          // needs refs/metadata for rows in this delta. Returning a 20k-row
+          // bucket for one changed message recreates the structured-clone stall
+          // the sidecar channel is intended to avoid.
+          return Object.fromEntries(
+            Object.entries(compacted.manifests).map(([subagentId, incomingMessages]) => {
+              const mergedMessages = Array.isArray(mergedManifests[subagentId])
+                ? (mergedManifests[subagentId] as unknown[])
+                : []
+              const mergedById = new Map(
+                mergedMessages.flatMap((message) =>
+                  message &&
+                  typeof message === "object" &&
+                  !Array.isArray(message) &&
+                  typeof (message as Record<string, unknown>).id === "string"
+                    ? [[(message as Record<string, unknown>).id as string, message] as const]
+                    : []
+                )
+              )
+              const responseRows = Array.isArray(incomingMessages)
+                ? incomingMessages.flatMap((message) =>
+                    message &&
+                    typeof message === "object" &&
+                    !Array.isArray(message) &&
+                    typeof (message as Record<string, unknown>).id === "string"
+                      ? [mergedById.get((message as Record<string, unknown>).id as string) ?? message]
+                      : [message]
+                  )
+                : []
+              return [subagentId, responseRows] as const
+            })
+          )
+        })
       })
     }
   )
@@ -2221,6 +2826,64 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // rolls back the mark attempt B still depends on; if B then succeeds without
   // a workspacePath, the no-sweep late-writer window the tombstone closes
   // would silently reopen. ThreadIds are uuids, so the map stays tiny.
+  let transcriptBlobGcRun: Promise<void> | null = null
+  let transcriptBlobGcRerunRequested = false
+  let transcriptBlobGcRetryTimer: NodeJS.Timeout | undefined
+  const runTranscriptBlobGcSweep = async (): Promise<boolean> => {
+    const epoch = await withSubagentTranscriptContentMutationLock(async () =>
+      getSubagentTranscriptReferenceEpoch()
+    )
+    const referencedHashes = await collectReferencedTranscriptHashesBounded()
+    const candidates = await scanSubagentTranscriptBlobGcCandidates(referencedHashes, 0)
+    const batchSize = 8
+    for (let offset = 0; offset < candidates.length; offset += batchSize) {
+      let stale = false
+      const quarantined = await withSubagentTranscriptContentMutationLock(async () => {
+        if (getSubagentTranscriptReferenceEpoch() !== epoch) {
+          stale = true
+          return []
+        }
+        return quarantineSubagentTranscriptBlobGcCandidates(
+          candidates.slice(offset, offset + batchSize),
+          referencedHashes
+        )
+      })
+      if (stale) return false
+      await removeQuarantinedSubagentTranscriptBlobs(quarantined)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    return true
+  }
+  const scheduleTranscriptBlobGc = (): void => {
+    if (transcriptBlobGcRun) {
+      transcriptBlobGcRerunRequested = true
+      return
+    }
+    if (transcriptBlobGcRetryTimer) return
+    transcriptBlobGcRun = (async () => {
+      let completed = false
+      for (let attempt = 0; attempt < 2 && !completed; attempt += 1) {
+        completed = await runTranscriptBlobGcSweep()
+      }
+      if (!completed) {
+        transcriptBlobGcRetryTimer = setTimeout(() => {
+          transcriptBlobGcRetryTimer = undefined
+          scheduleTranscriptBlobGc()
+        }, 1_000)
+      }
+    })()
+      .catch((error) => {
+        console.warn("[Threads] Failed to prune transcript content blobs:", error)
+      })
+      .finally(() => {
+        transcriptBlobGcRun = null
+        if (transcriptBlobGcRerunRequested) {
+          transcriptBlobGcRerunRequested = false
+          scheduleTranscriptBlobGc()
+        }
+      })
+  }
+
   const deletingThreads = new Map<string, Promise<void>>()
 
   const performThreadDeletion = async (
@@ -2266,6 +2929,15 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       } catch (error) {
         console.warn("[Threads] Workflow cancel on delete failed:", error)
       }
+      const window = BrowserWindow.fromWebContents(event.sender)
+      try {
+        const foregroundOutcome = await cancelAndWaitForAgentThreadRun(threadId, window)
+        if (foregroundOutcome === "timed_out") {
+          console.warn("[Threads] Timed out waiting for foreground run cleanup during delete")
+        }
+      } catch (error) {
+        console.warn("[Threads] Foreground run cancel on delete failed:", error)
+      }
       // Drop the thread's tool-concurrency locks so the module-level map
       // doesn't keep one idle lock per deleted thread for the process lifetime.
       clearToolConcurrencyLocksForThread(threadId)
@@ -2282,7 +2954,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         }
       }
       workspacePath = workspacePath ?? activeWorkspaceFallback
-      const window = BrowserWindow.fromWebContents(event.sender)
       const hookChannel = `agent:stream:${threadId}`
       await fireSessionEnd(
         threadId,
@@ -2309,6 +2980,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)
+      // Revoke foreground ownership and synchronously drop every buffered
+      // transcript before the event loop can deliver a late chunk from a run
+      // that exceeded the bounded cancellation wait.
+      disposeDeletedAgentThreadRuntime(threadId)
       // Incarnation boundary crossed: permanently silence every store/snapshot
       // born before this deletion (revive-immune epoch bump).
       commitWorkflowThreadDisposal(threadId)
@@ -2382,6 +3057,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     forgetCoordinatorThreadState(threadId)
     if (workspacePath) {
       try {
+        await deleteProjectThreadDataDirectory(workspacePath, threadId)
+        console.log("[Threads] Deleted app-managed thread history and large results")
+      } catch (e) {
+        console.warn("[Threads] Failed to delete app-managed thread data:", e)
+      }
+      try {
         await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)
         console.log("[Threads] Deleted coordinator worker artifacts")
       } catch (e) {
@@ -2398,6 +3079,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     } catch (e) {
       console.warn("[Threads] Failed to delete task-mmd files:", e)
     }
+
+    // Shared, content-addressed blobs are swept in the background. Directory
+    // walking/stat/removal stay outside the global write lock; only an
+    // epoch-checked batch of canonical->quarantine renames holds it.
+    scheduleTranscriptBlobGc()
   }
 
   ipcMain.handle("threads:delete", async (event, threadId: string) => {

@@ -79,7 +79,10 @@ function ensureRootNode(trace: AgentTrace, nodes: TraceNode[]): TraceNode[] {
   ]
 }
 
-function pickToolCalls(modelToolCalls: TraceToolCall[] | undefined, stepToolCalls: TraceToolCall[]): TraceToolCall[] {
+function pickToolCalls(
+  modelToolCalls: TraceToolCall[] | undefined,
+  stepToolCalls: TraceToolCall[]
+): TraceToolCall[] {
   if (Array.isArray(modelToolCalls) && modelToolCalls.length > 0) return modelToolCalls
   return stepToolCalls
 }
@@ -133,9 +136,11 @@ export function buildTraceTree(trace: AgentTrace): TraceNode[] {
     const llmOutput = modelCall?.outputMessage?.content ?? step?.assistantText ?? ""
     const isLast = i === maxRuns - 1
     const llmStatus: TraceNodeStatus =
-      trace.outcome === "error" && isLast ? "error" :
-      trace.outcome === "unknown" && isLast ? "unknown" :
-      "success"
+      trace.outcome === "error" && isLast
+        ? "error"
+        : trace.outcome === "unknown" && isLast
+          ? "unknown"
+          : "success"
 
     nodes.push({
       id: llmId,
@@ -149,7 +154,10 @@ export function buildTraceTree(trace: AgentTrace): TraceNode[] {
       output: llmOutput,
       metadata: {
         messageId: modelCall?.messageId,
-        tokenUsage: modelCall?.tokenUsage
+        tokenUsage: modelCall?.tokenUsage,
+        ...(modelCall?.outputMessage?.reasoning
+          ? { reasoning: modelCall.outputMessage.reasoning }
+          : {})
       }
     })
 

@@ -48,9 +48,15 @@ import {
   Workflow,
   GitFork,
   FolderOpen,
-  Paperclip
+  Paperclip,
+  CornerDownRight,
+  MoreHorizontal,
+  GripVertical,
+  Pencil,
+  ListEnd,
+  Check
 } from "lucide-react"
-import type { FileAttachment } from "@/types"
+import type { FileAttachment, QueuedMessage } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
@@ -74,6 +80,10 @@ import {
   subscribePendingHarnessNextActions
 } from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
+import {
+  getAppleIntelligenceGlowEnabled,
+  subscribeAppleIntelligenceGlow
+} from "@/lib/apple-intelligence-glow"
 import { useShallow } from "zustand/react/shallow"
 import {
   useCurrentThread,
@@ -87,7 +97,20 @@ import {
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
 import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
-import { isCoordinatorModeMetadata, isWorkflowModeMetadata } from "@/lib/coordinator-mode-helpers"
+import {
+  buildToolResultAssociations,
+  getWorkerToolUiKey
+} from "@/lib/worker-tool-result-key"
+import {
+  buildVisibleMessageLayout,
+  messageHasVisibleRow
+} from "@/lib/message-display-visibility"
+import { createToolDerivationMessageSelector } from "@/lib/message-render-stability"
+import {
+  isCoordinatorModeMetadata,
+  isMultiModeMetadata,
+  isWorkflowModeMetadata
+} from "@/lib/coordinator-mode-helpers"
 import { ModelSwitcher } from "./ModelSwitcher"
 import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
@@ -115,15 +138,13 @@ import type {
 } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import { ChatSearchOverlay } from "./ChatSearchOverlay"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
-import {
-  ContextReminderController,
-  isContextReminderPending
-} from "./ContextReminderController"
+import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
 import { uploadChatData, ChatReportPayload } from "@/api"
 import { marketApi, MarketItem } from "../../api/market"
 import {
@@ -171,12 +192,21 @@ import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChi
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  getQueuedModelContent,
+  getQueuedDisplayContent,
+  getQueuedPreview,
+  guardCoordinatorPlainText,
+  canClaimQueuedMessage,
+  classifyGuidedMessage
+} from "@/lib/queued-message-content"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
   liveStreamMessageRole,
+  normalizeLiveStreamMessageIds,
   normalizeLiveStreamMessageContent,
   stringifyMessageContentForReport,
   type LiveStreamMessage as StreamMessage
@@ -193,12 +223,15 @@ import {
 } from "@/lib/goal-control-submit"
 import {
   releaseSubmitInFlightLock,
+  shouldQueueBehindInFlightSubmit,
   shouldUseSubmitInFlightLock,
-  tryAcquireSubmitInFlightLock
+  tryAcquireSubmitInFlightLock,
+  type SubmitInFlightLockRef
 } from "@/lib/submit-in-flight-lock"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
+import { ContextCompactionCard } from "./ContextCompactionCard"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
@@ -282,7 +315,9 @@ async function installFeaturedSkills(
       // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
       const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
       const shouldInstall =
-        !existingSkill || !installedVersion || isMarketVersionDifferent(installedVersion, skill.version)
+        !existingSkill ||
+        !installedVersion ||
+        isMarketVersionDifferent(installedVersion, skill.version)
 
       if (!shouldInstall) {
         console.log(`Skill ${skillName} is already up to date, skipping install.`)
@@ -369,6 +404,30 @@ type WelcomeSkillTreeNode = {
   label: string
   card?: WelcomeSkillCard
   children: WelcomeSkillTreeNode[]
+}
+
+function interruptionNoticeCopy(event: string, action: string): {
+  title: string
+  explanation: string
+} {
+  if (event.startsWith("Failure fuse")) {
+    return {
+      title: "工具失败熔断已停止本轮",
+      explanation:
+        "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+    }
+  }
+  if (event.startsWith("Tool-call loop")) {
+    return {
+      title: "重复工具调用熔断已停止本轮",
+      explanation:
+        "这是重复工具调用熔断结果，不是 Hook 策略或应用崩溃。你可以调整策略后发送新消息继续对话。"
+    }
+  }
+  return {
+    title: action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮",
+    explanation: "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"
+  }
 }
 
 function getWelcomeSkillTreePath(skill: SkillMetadata): string {
@@ -1171,6 +1230,11 @@ function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
   )
 }
 
+function useStableToolDerivationMessages(messages: readonly Message[]): readonly Message[] {
+  const [selectStableMessages] = useState(createToolDerivationMessageSelector)
+  return selectStableMessages(messages)
+}
+
 const THINKING_MESSAGES = [
   "我先想想...",
   "让我捋一捋...",
@@ -1214,6 +1278,59 @@ const ATTACH_FILE_POPOVER_CONTENT = (
 const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
+/** 输入框正文硬上限(字符数)。超过则拒绝发送并提示,防止病态超长输入。
+ * 取值与附件总字符上限(MAX_TOTAL_CHARS)一致,均为 24000。 */
+const MAX_INPUT_CHARS = 24_000
+
+// Module-level (not a component-local useRef): TabbedPanel unmounts ChatContainer
+// entirely when switching to a file tab (`isAgentTab ? <ChatContainer> : <FileViewer>`)
+// — a component-local ref would silently reset to an empty Set on remount, the
+// same class of bug queueAutoDrainSuppressed had before it moved to thread-context.
+// This lock's synchronous acquire-then-immediately-read semantics (see
+// submit-in-flight-lock.ts) don't fit React state (setState isn't synchronously
+// readable in the same tick), so instead of moving it into ThreadState like
+// queueAutoDrainSuppressed, it stays a plain mutable object — just hoisted to
+// module scope so it survives remounts. Keyed by threadId internally (every
+// caller already passes threadId as the lock key), so sharing one Set across
+// all ChatContainer instances is safe: different threads never collide, and if
+// two instances ever pointed at the SAME thread, sharing the lock is the
+// correct behavior anyway.
+const submitInFlightLockStore: SubmitInFlightLockRef = { current: new Set<string>() }
+// Distinguishes a live Enter/send that is still preparing its payload from other
+// users of the shared submit lock (notably the queue pump). A second Enter during
+// this preparation window is a duplicate gesture and must be rejected; a genuinely
+// new message racing a pump before isLoading updates should still be queued.
+const liveSubmitPreparingThreads = new Set<string>()
+// Busy sends bypass the long-lived run lock so they can be parked while a turn
+// is active. This short-lived guard atomically claims the current composer
+// payload while @file attachments are being resolved.
+const queuedDraftPreparingThreads = new Set<string>()
+/**
+ * Temporarily hide the current-run "引导" action from the queue UI.
+ *
+ * The underlying main-process queue, durable acknowledgement, reconciliation,
+ * and IPC plumbing are intentionally retained so the implementation can be
+ * repaired without rebuilding the feature. The action remains disabled because
+ * a guided message can currently produce incorrect live transcript boundaries
+ * in Team/Coordinator mode (for example, duplicating or attaching assistant
+ * output to the wrong visible turn). Ordinary FIFO queueing and automatic
+ * post-run draining do not depend on this control and remain available.
+ *
+ * Re-enable only after the guided user turn and its following assistant turn are
+ * rendered as separate, non-duplicated messages in Solo, Team, and Workflow,
+ * including persistence/reload verification for the same transcript.
+ */
+const CURRENT_RUN_GUIDE_UI_ENABLED = false
+const QUEUE_MODEL_REQUIRED_ERROR = "请先在下方选择模型后再发送消息。"
+const QUEUE_MODEL_MISSING_ERROR = "当前线程模型不存在，请重新选择模型。"
+const QUEUE_MODEL_UNAVAILABLE_ERROR = "当前模型不可用，请先在模型配置中设置 API 密钥。"
+const QUEUE_WORKSPACE_REQUIRED_ERROR = "请先选择一个工作区文件夹再发送消息。"
+const RECOVERABLE_QUEUE_ERRORS = new Set([
+  QUEUE_MODEL_REQUIRED_ERROR,
+  QUEUE_MODEL_MISSING_ERROR,
+  QUEUE_MODEL_UNAVAILABLE_ERROR,
+  QUEUE_WORKSPACE_REQUIRED_ERROR
+])
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
 const CHAT_REPORT_RETRY_DELAY_MS = 1_000
@@ -1299,54 +1416,13 @@ function getForkMessagePreview(message: Message): string {
   return text.length > 180 ? `${text.slice(0, 180)}...` : text
 }
 
-const MESSAGE_FORK_CHECKPOINT_HINT =
-  "可在左侧会话列表右键该会话，选择“从 checkpoint fork”。"
+const MESSAGE_FORK_CHECKPOINT_HINT = "可在左侧会话列表右键该会话，选择“从 checkpoint fork”。"
 
 function getMessageForkCheckpointHint(errorMessage?: string): string {
   const message = errorMessage?.trim()
-  if (!message) return `该消息附近没有可精确 fork 的稳定 checkpoint。${MESSAGE_FORK_CHECKPOINT_HINT}`
+  if (!message)
+    return `该消息附近没有可精确 fork 的稳定 checkpoint。${MESSAGE_FORK_CHECKPOINT_HINT}`
   return `${message} ${MESSAGE_FORK_CHECKPOINT_HINT}`
-}
-
-const getMessageBubbleText = (content: Message["content"]): string => {
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-
-  return content
-    .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
-    .filter(Boolean)
-    .join("\n")
-}
-
-// MessageBubble renders `null` for messages with no visible content: tool-result
-// messages, empty system notices, and assistant/user messages whose text is empty
-// and that carry no tool calls or reasoning. Such empty wrappers must NOT get content-visibility
-// containment — when scrolled off-screen the intrinsic-size fallback would reserve
-// phantom height (stacking across many empty tool results into a large blank gap
-// between tools and text). Detection is intentionally generous: a false positive
-// only skips a cheap optimization on an already-short message (harmless), while a
-// false negative reintroduces the gap.
-//
-// Match each role to its actual render path: assistant/user bubbles render only
-// `text` blocks (getMessageBubbleText), while the system branch renders via
-// extractMessagePlainText, which also reads string `block.content` — so system
-// must use getMessageText (same text+content logic) or a notice carried in a
-// content block would be misclassified as empty.
-const messageRendersNothing = (message: Message): boolean => {
-  if (message.role === "tool") return true
-  const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
-  if (hasToolCalls) return false
-  if (message.role === "assistant" && typeof message.reasoning === "string") {
-    return (
-      message.reasoning.trim().length === 0 &&
-      getMessageBubbleText(message.content).trim().length === 0
-    )
-  }
-  const visibleText =
-    message.role === "system"
-      ? getMessageText(message.content)
-      : getMessageBubbleText(message.content)
-  return visibleText.trim().length === 0
 }
 
 function RotatingHeadline() {
@@ -1689,13 +1765,11 @@ interface ChatMessageListProps {
   hookLogBucketByTurnId: Map<string, HookLogBucket>
   detachedHookLogBuckets: HookLogBucket[]
   contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: (
-    messageId: string,
-    role: Message["role"]
-  ) => (node: HTMLDivElement | null) => void
+  setMessageRef: (messageId: string, role: Message["role"]) => (node: HTMLDivElement | null) => void
   isLoading: boolean
   toolResults: Map<string, ChatToolResultInfo>
   toolCallStates: Map<string, ToolCallState>
+  pendingApprovalToolCallKeys: Set<string>
   pendingApproval: HITLRequest | null
   autoApproveGitPush: boolean
   onApprovalDecision: (decision: ChatApprovalDecision) => void
@@ -1720,6 +1794,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
   isLoading,
   toolResults,
   toolCallStates,
+  pendingApprovalToolCallKeys,
   pendingApproval,
   autoApproveGitPush,
   onApprovalDecision,
@@ -1732,11 +1807,23 @@ const ChatMessageList = React.memo(function ChatMessageList({
   assistantDurationMsById,
   userSendTimeLabelById
 }: ChatMessageListProps): React.JSX.Element {
+  const visibleMessageLayout = useMemo(
+    () =>
+      buildVisibleMessageLayout(messages, (message) => {
+        const hasHookLogChip =
+          hookLoggingEnabled &&
+          message.role === "user" &&
+          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+        return messageHasVisibleRow(message, hasHookLogChip)
+      }),
+    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
+  )
+
   return (
     <>
       {messages.map((message, index) => {
-        const previousMessage = index > 0 ? messages[index - 1] : null
-        const isLastMessage = index === messages.length - 1
+        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
+        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
         const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
         const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
 
@@ -1744,9 +1831,8 @@ const ChatMessageList = React.memo(function ChatMessageList({
           hookLoggingEnabled && message.role === "user"
             ? hookLogBucketByTurnId.get(message.id)
             : undefined
-        const rendersNothing = messageRendersNothing(message)
         const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (rendersNothing && !hasHookLogChip) return null
+        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
         const navigatorRef = setMessageRef(message.id, message.role)
         const combinedRef = (node: HTMLDivElement | null): void => {
@@ -1760,7 +1846,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
 
         return (
           <div
-            key={message.id}
+            key={`${message.role}:${message.id}`}
             ref={combinedRef}
             data-message-role={message.role}
           >
@@ -1771,6 +1857,7 @@ const ChatMessageList = React.memo(function ChatMessageList({
               showAssistantMeta={showAssistantMeta}
               toolResults={toolResults}
               toolCallStates={toolCallStates}
+              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
               pendingApproval={pendingApproval}
               autoApproveGitPush={autoApproveGitPush}
               onApprovalDecision={onApprovalDecision}
@@ -1811,7 +1898,11 @@ const ChatMessageList = React.memo(function ChatMessageList({
   )
 })
 
-function SystemPromptPreviewButton({ threadId }: { threadId?: string | null }): React.JSX.Element | null {
+function SystemPromptPreviewButton({
+  threadId
+}: {
+  threadId?: string | null
+}): React.JSX.Element | null {
   const [allowed, setAllowed] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -1942,7 +2033,9 @@ export function ChatContainer({
   const [searchOpen, setSearchOpen] = useState(false)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
-  const submitInFlightRef = useRef<Set<string>>(new Set())
+  // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
+  // declaration above for why this must survive ChatContainer remounts.
+  const submitInFlightRef = submitInFlightLockStore
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
   const [skillsLoading, setSkillsLoading] = useState(true)
@@ -1976,6 +2069,11 @@ export function ChatContainer({
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
+  const appleIntelligenceGlowEnabled = useSyncExternalStore(
+    subscribeAppleIntelligenceGlow,
+    getAppleIntelligenceGlowEnabled,
+    () => false
+  )
   // NUX (first-run sandbox setup)
   const [showNux, setShowNux] = useState<boolean>(false)
   const [nuxLoading, setNuxLoading] = useState(false)
@@ -2001,9 +2099,25 @@ export function ChatContainer({
     ? "workflow"
     : isCoordinatorModeMetadata(initialThreadMetadata)
       ? "coordinator"
-      : "normal"
+      : isMultiModeMetadata(initialThreadMetadata)
+        ? "multi"
+        : "normal"
   const [agentMode, setAgentMode] = useState<ChatAgentMode>(initialAgentMode)
-  const agentModeHydratedRef = useRef(initialAgentMode !== "normal")
+  const agentModeHydratedRef = useRef(
+    initialAgentMode === "coordinator" || initialAgentMode === "workflow"
+  )
+  const persistedAgentModeRef = useRef<ChatAgentMode>(initialAgentMode)
+  const agentModeChangeRequestRef = useRef(0)
+  const agentModeChangeChainRef = useRef<Promise<void>>(Promise.resolve())
+  const agentModeSaveRef = useRef<Promise<void>>(Promise.resolve())
+  // Draft-queue UI state: inline edit, drag-reorder, and a pump tick that
+  // re-triggers the auto-drain effect after each queued send settles.
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
+  const [editingQueueText, setEditingQueueText] = useState("")
+  const [draggingQueueId, setDraggingQueueId] = useState<string | null>(null)
+  const queuedEditRequestRef = useRef(0)
+  const guidingQueuedMessageIdsRef = useRef(new Set<string>())
+  const [queuePumpTick, setQueuePumpTick] = useState(0)
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryQueuesRef = useRef<
@@ -2093,8 +2207,7 @@ export function ChatContainer({
   const currentThreadIdRef = useRef(threadId)
   const messageForkRequestIdRef = useRef(0)
   currentThreadIdRef.current = threadId
-  const [forkDestinationMode, setForkDestinationMode] =
-    useState<ForkDestinationMode>("local")
+  const [forkDestinationMode, setForkDestinationMode] = useState<ForkDestinationMode>("local")
   const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
   const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
   const harnessFeatureBinding = useMemo(
@@ -2105,9 +2218,8 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
-  const disableCoordinatorModeOption =
-    isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
-  const disableWorkflowModeOption = isProjectModeAgentContext
+  const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const disableWorkflowModeOption = false
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -2139,9 +2251,10 @@ export function ChatContainer({
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
         })
-      return environmentForcedCoordinator && !disableCoordinatorModeOption
-        ? "coordinator"
-        : "normal"
+      if (environmentForcedCoordinator && !disableCoordinatorModeOption) {
+        return "coordinator"
+      }
+      return isMultiModeMetadata(metadata) ? "multi" : "normal"
     },
     [disableCoordinatorModeOption, disableWorkflowModeOption]
   )
@@ -2169,14 +2282,19 @@ export function ChatContainer({
             ? "workflow"
             : isCoordinatorModeMetadata(currentThread?.metadata)
               ? "coordinator"
-              : "normal"
+              : isMultiModeMetadata(currentThread?.metadata)
+                ? "multi"
+                : "normal"
     setAgentMode(metadataDerivedMode)
-    agentModeHydratedRef.current = metadataDerivedMode !== "normal"
+    persistedAgentModeRef.current = metadataDerivedMode
+    agentModeHydratedRef.current =
+      metadataDerivedMode === "coordinator" || metadataDerivedMode === "workflow"
 
     void loadResolvedAgentMode()
       .then((nextMode) => {
         if (cancelled) return
         agentModeHydratedRef.current = true
+        persistedAgentModeRef.current = nextMode
         setAgentMode(nextMode)
       })
       .catch((error) => {
@@ -2295,6 +2413,8 @@ export function ChatContainer({
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    queuedMessages,
+    queueAutoDrainSuppressed,
     toolCallStates,
     pendingApprovals,
     goalUi,
@@ -2320,6 +2440,7 @@ export function ChatContainer({
     historyLoading,
     scheduledTaskId,
     modelRetry,
+    contextCompaction,
     activeTurnStartTime,
     setToolCallState,
     setTodos,
@@ -2330,6 +2451,16 @@ export function ChatContainer({
     setActiveTurnStartTime,
     clearFinishedWorkflowRun,
     appendMessage,
+    syncDurableTranscript,
+    removeLocalMessage,
+    addQueuedMessage,
+    prependQueuedMessage,
+    getQueuedMessage,
+    updateQueuedMessage,
+    deleteQueuedMessage,
+    reorderQueuedMessages,
+    promoteQueuedMessage,
+    setQueueAutoDrainSuppressed,
     refreshGoalUi,
     setError,
     clearError,
@@ -2482,14 +2613,18 @@ export function ChatContainer({
 
   const handleAgentModeChange = useCallback(
     (nextMode: ChatAgentMode): void => {
-      const previousMode = agentMode
-      void (async () => {
+      if (submitInFlightRef.current.has(threadId)) {
+        toast.message("消息正在提交，请稍后切换执行模式")
+        return
+      }
+      const requestId = ++agentModeChangeRequestRef.current
+      const operation = agentModeChangeChainRef.current.then(async () => {
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
-          toast.error("项目模式暂不支持子代理协同，只能使用 Solo Agent。")
+          toast.error("项目模式暂不支持 Agent Team。")
           return
         }
         if (disableWorkflowModeOption && nextMode === "workflow") {
-          toast.error("项目模式暂不支持 Workflow，只能使用 Solo Agent。")
+          toast.error("项目模式暂不支持 Workflow。")
           return
         }
         if (historyLoading) {
@@ -2504,6 +2639,7 @@ export function ChatContainer({
           const isEnvironmentForcedCoordinator = await window.api.agent
             .isCoordinatorModeForced()
             .catch(() => false)
+          if (requestId !== agentModeChangeRequestRef.current) return
           if (isEnvironmentForcedCoordinator) {
             toast.error("当前环境变量强制开启 Agent Team，不能切换到其他执行模式")
             return
@@ -2514,6 +2650,7 @@ export function ChatContainer({
               .catch(() => []),
             window.api.agent.hasCoordinatorWorkerNotifications(threadId).catch(() => false)
           ])
+          if (requestId !== agentModeChangeRequestRef.current) return
           const hasRemoteUnresolvedWorkers = workers.some(
             (worker) => worker.status === "running" || worker.notification_acknowledged === false
           )
@@ -2523,26 +2660,48 @@ export function ChatContainer({
           }
         }
 
+        if (requestId !== agentModeChangeRequestRef.current) return
         agentModeHydratedRef.current = true
         setAgentMode(nextMode)
         const thread = await window.api.threads.get(threadId)
+        if (requestId !== agentModeChangeRequestRef.current) return
         const metadata = thread?.metadata ?? {}
-        const nextMetadata: Record<string, unknown> = { ...metadata, agentMode: nextMode }
+        const nextMetadata: Record<string, unknown> = {
+          ...metadata,
+          agentMode: nextMode === "multi" ? "normal" : nextMode
+        }
+        if (nextMode === "normal" || nextMode === "multi") {
+          nextMetadata.subagentsEnabled = nextMode === "multi"
+        } else {
+          delete nextMetadata.subagentsEnabled
+        }
         if (nextMode !== "coordinator") {
           delete nextMetadata.coordinatorMode
         }
         await updateThread(threadId, {
           metadata: nextMetadata
         })
-      })().catch((error) => {
-        console.error("[ChatContainer] Failed to update agent mode:", error)
-        agentModeHydratedRef.current = true
-        setAgentMode(previousMode)
-        toast.error("Agent 模式保存失败，请重试")
+        persistedAgentModeRef.current = nextMode
       })
+      // Serialize writes so an older request can never finish after a newer one
+      // and overwrite thread metadata with the wrong execution mode.
+      agentModeSaveRef.current = operation
+      agentModeChangeChainRef.current = operation.catch(() => undefined)
+      void operation
+        .catch((error) => {
+          if (requestId !== agentModeChangeRequestRef.current) return
+          console.error("[ChatContainer] Failed to update agent mode:", error)
+          agentModeHydratedRef.current = true
+          setAgentMode(persistedAgentModeRef.current)
+          toast.error("Agent 模式保存失败，请重试")
+        })
+        .finally(() => {
+          if (agentModeSaveRef.current === operation) {
+            agentModeSaveRef.current = Promise.resolve()
+          }
+        })
     },
     [
-      agentMode,
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
       historyLoading,
@@ -2759,17 +2918,16 @@ export function ChatContainer({
 
   // 从模型配置中获取用户设置的上下文窗口大小
   useEffect(() => {
-    if (!currentModel || !currentModel.startsWith("custom:")) {
+    if (!currentModel) {
       setModelContextLimit(undefined)
       return
     }
     let ignore = false
-    const id = currentModel.replace("custom:", "")
     window.api.models
-      .getCustomConfigs()
-      .then((configs) => {
+      .list()
+      .then((models) => {
         if (ignore) return
-        const match = configs.find((c) => c.id === id)
+        const match = models.find((model) => model.id === currentModel)
         setModelContextLimit(match?.maxTokens)
       })
       .catch(() => {
@@ -3045,7 +3203,11 @@ export function ChatContainer({
             }
           },
           config: {
-            configurable: { thread_id: threadId, model_id: currentModel, agent_mode: agentMode }
+            configurable: {
+              thread_id: threadId,
+              model_id: currentModel,
+              agent_mode: agentMode === "multi" ? "normal" : agentMode
+            }
           }
         })
       } catch (err) {
@@ -3066,10 +3228,7 @@ export function ChatContainer({
   useEffect(() => {
     if (!yoloModeLoaded || !yoloMode || !pendingApproval) return
     const approvalRecord = pendingApproval as unknown as Record<string, unknown>
-    if (
-      approvalRecord._orchestratorRequestId &&
-      approvalRecord.operation === "git_push"
-    ) {
+    if (approvalRecord._orchestratorRequestId && approvalRecord.operation === "git_push") {
       void handleApprovalDecision("approve")
     }
   }, [handleApprovalDecision, pendingApproval, yoloMode, yoloModeLoaded])
@@ -3179,6 +3338,10 @@ export function ChatContainer({
 
   // Apple Intelligence glow: loading 时显示，淡出由 CSS animation + onAnimationEnd 控制
   useEffect(() => {
+    if (!appleIntelligenceGlowEnabled) {
+      setGlowVisible(false)
+      return
+    }
     if (isLoading) {
       setGlowVisible(true)
       return
@@ -3186,12 +3349,24 @@ export function ChatContainer({
     // 兜底：如果 transitionEnd 未触发（快速切换等边界情况），3s 后强制隐藏
     const timer = setTimeout(() => setGlowVisible(false), 3000)
     return () => clearTimeout(timer)
-  }, [isLoading])
+  }, [appleIntelligenceGlowEnabled, isLoading])
 
   const displayMessages = useMemo(() => {
+    const normalizedLiveMessages = normalizeLiveStreamMessageIds(
+      threadMessages.map((message) => ({
+        id: message.id,
+        type:
+          message.role === "user"
+            ? "human"
+            : message.role === "assistant"
+              ? "ai"
+              : message.role
+      })),
+      streamData.liveMessages || []
+    )
     const threadMessageIds = new Set(threadMessages.map((m) => m.id))
     const liveReasoningById = new Map<string, string>()
-    for (const liveMessage of streamData.liveMessages || []) {
+    for (const liveMessage of normalizedLiveMessages) {
       if (
         liveMessage.id &&
         liveStreamMessageRole(liveMessage.type) === "assistant" &&
@@ -3206,7 +3381,7 @@ export function ChatContainer({
       const liveReasoning = liveReasoningById.get(message.id)
       return liveReasoning ? { ...message, reasoning: liveReasoning } : message
     })
-    const streamingMsgs: Message[] = (streamData.liveMessages || [])
+    const streamingMsgs: Message[] = normalizedLiveMessages
       .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
       .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
       .map((streamMsg) => {
@@ -3216,7 +3391,9 @@ export function ChatContainer({
           id: streamMsg.id,
           role,
           content: normalizeLiveStreamMessageContent(streamMsg.content),
-          ...(role === "assistant" && streamMsg.reasoning ? { reasoning: streamMsg.reasoning } : {}),
+          ...(role === "assistant" && streamMsg.reasoning
+            ? { reasoning: streamMsg.reasoning }
+            : {}),
           tool_calls: streamMsg.tool_calls,
           ...(role === "tool" &&
             streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
@@ -3266,6 +3443,11 @@ export function ChatContainer({
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages, streamData.messages])
 
+  const chatScrollNavigatorMessages = useMemo(
+    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
+    [threadMessages]
+  )
+
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
   // the last message's text length — otherwise search misses text that is still
@@ -3286,70 +3468,80 @@ export function ChatContainer({
   }, [displayMessages, hookLogBuckets])
 
   const lastContentMessageId = useMemo(() => {
-    // Match what actually renders: empty messages are skipped from the DOM
-    // (see messageRendersNothing), so they own no contentMessageRefs entry and
-    // must not be returned here, or precise scroll alignment would silently fall
-    // back to scroll-to-bottom.
+    // Match what actually renders: ordinary empty messages are skipped, while
+    // an empty user row with Hook entries still owns a visible chip and scroll
+    // anchor. Returning a skipped row would make precise alignment fall back to
+    // scroll-to-bottom; omitting the Hook-only row would anchor one turn early.
     for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
-      if (!messageRendersNothing(message)) return message.id
+      const hasHookLogChip = Boolean(
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        hookLogBucketByTurnId.get(message.id)?.entries.length
+      )
+      if (messageHasVisibleRow(message, hasHookLogChip)) return message.id
     }
     return null
-  }, [displayMessages])
+  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
-  // Per-message derived flags precomputed in a single O(n) reverse pass. The
-  // render loop previously recomputed these with `slice().find/some` for every
-  // message, which is O(n^2) on every render (and renders fire on every
-  // streaming token). Here we walk right-to-left once, tracking the nearest
-  // non-tool message role and whether a later user message exists.
+  // Per-message derived flags precomputed in a single O(n) reverse pass. Use
+  // the same visibility rule as ChatMessageList so invisible tool/empty rows do
+  // not affect assistant actions or turn boundaries.
   const perMessageFlags = useMemo(() => {
     const n = displayMessages.length
     const showAssistantMeta: boolean[] = new Array(n)
     const hasUserAfterHead: boolean[] = new Array(n)
-    let nextNonToolRole: string | null = null
+    let nextVisibleRole: string | null = null
     let userAfter = false
     for (let index = n - 1; index >= 0; index -= 1) {
       const message = displayMessages[index]
       hasUserAfterHead[index] = userAfter
+      const hasHookLogChip =
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+      if (!messageHasVisibleRow(message, hasHookLogChip)) {
+        showAssistantMeta[index] = false
+        continue
+      }
       showAssistantMeta[index] =
-        message.role !== "assistant" || nextNonToolRole === null || nextNonToolRole !== "assistant"
+        message.role !== "assistant" || nextVisibleRole === null || nextVisibleRole !== "assistant"
       if (message.role === "user") userAfter = true
-      if (message.role !== "tool") nextNonToolRole = message.role
+      nextVisibleRole = message.role
     }
     return { showAssistantMeta, hasUserAfterHead }
-  }, [displayMessages])
+  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
-  // Build tool results map from tool messages
-  const toolResults = useMemo(() => {
-    const results = new Map<string, { content: string | unknown; is_error?: boolean }>()
-    for (const msg of displayMessages) {
-      if (msg.role === "tool" && msg.tool_call_id) {
-        results.set(msg.tool_call_id, {
-          content: msg.content,
-          is_error: msg.is_error === true || msg.status === "error"
-        })
-      }
-    }
-    return results
-  }, [displayMessages])
+  const toolDerivationMessages = useStableToolDerivationMessages(displayMessages)
+  const toolResults = useMemo(
+    () => buildToolResultAssociations(toolDerivationMessages),
+    [toolDerivationMessages]
+  )
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
     () => buildMessageBubbleTimingMeta(displayMessages),
     [displayMessages]
   )
 
-  const toolCallDisplayStates = useMemo(() => {
-    const orderedToolCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = []
-    const seenToolCallIds = new Set<string>()
+  const { toolCallDisplayStates, pendingApprovalToolCallKeys } = useMemo(() => {
+    const orderedToolCalls: Array<{
+      key: string
+      call: { id: string; name: string; args: Record<string, unknown> }
+    }> = []
 
-    for (const message of displayMessages) {
+    for (const message of toolDerivationMessages) {
       if (!Array.isArray(message.tool_calls)) continue
-      for (const toolCall of message.tool_calls) {
-        if (!toolCall?.id || seenToolCallIds.has(toolCall.id)) continue
-        seenToolCallIds.add(toolCall.id)
-        orderedToolCalls.push(toolCall)
-      }
+      message.tool_calls.forEach((toolCall, index) => {
+        if (!toolCall?.id) return
+        orderedToolCalls.push({
+          key: getWorkerToolUiKey(message.id, toolCall.id, index),
+          call: toolCall
+        })
+      })
     }
+
+    const lastOccurrenceKeyByCallId = new Map<string, string>()
+    for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
 
     const currentApprovalIds = new Set<string>()
     if (pendingApproval?.pendingToolCallIds?.length) {
@@ -3359,21 +3551,29 @@ export function ChatContainer({
     } else if (pendingApproval?.tool_call?.id) {
       currentApprovalIds.add(pendingApproval.tool_call.id)
     }
+    const approvalKeys = new Set<string>()
+    for (const id of currentApprovalIds) {
+      const key = lastOccurrenceKeyByCallId.get(id)
+      if (key) approvalKeys.add(key)
+    }
 
     let activeAssigned = false
     const nextStates = new Map<string, ToolCallState>()
 
-    for (const toolCall of orderedToolCalls) {
-      const baseState = toolCallStates[toolCall.id]
+    for (const { key, call: toolCall } of orderedToolCalls) {
+      const baseState =
+        lastOccurrenceKeyByCallId.get(toolCall.id) === key
+          ? toolCallStates[toolCall.id]
+          : undefined
       const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
-      const result = toolResults.get(toolCall.id)
+      const result = toolResults.get(key)
       let status: ToolCallStatus
 
       if (result !== undefined) {
         status = result.is_error ? "failed" : "completed"
       } else if (isTerminalToolCallStatus(baseState?.status)) {
-        status = baseState.status
-      } else if (currentApprovalIds.has(toolCall.id)) {
+        status = baseState!.status
+      } else if (approvalKeys.has(key)) {
         status = "awaiting_approval"
         activeAssigned = true
       } else if (!isLoading) {
@@ -3385,7 +3585,7 @@ export function ChatContainer({
         status = "queued"
       }
 
-      nextStates.set(toolCall.id, {
+      nextStates.set(key, {
         id: toolCall.id,
         status,
         name: toolCall.name || baseState?.name,
@@ -3400,8 +3600,11 @@ export function ChatContainer({
       })
     }
 
-    return nextStates
-  }, [displayMessages, isLoading, pendingApproval, toolCallStates, toolResults])
+    return {
+      toolCallDisplayStates: nextStates,
+      pendingApprovalToolCallKeys: approvalKeys
+    }
+  }, [isLoading, pendingApproval, toolCallStates, toolDerivationMessages, toolResults])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
@@ -3409,6 +3612,12 @@ export function ChatContainer({
       "[data-radix-scroll-area-viewport]"
     ) as HTMLDivElement | null
   }, [])
+
+  const scrollToConversationBottom = useCallback((): void => {
+    const viewport = getViewport()
+    if (!viewport) return
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+  }, [getViewport])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
@@ -3467,7 +3676,6 @@ export function ChatContainer({
     userInputDialogLayout?.top
   ])
 
-
   //  滚动到底部
   // 1.初始化
   // 2.切换thread
@@ -3477,17 +3685,6 @@ export function ChatContainer({
       viewport.scrollTop = viewport.scrollHeight
     }
   }, [getViewport, historyLoading, threadId])
-
-
-  // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
-  useEffect(() => {
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-    }
-  }, [streamData, isLoading])
 
   // Focus input on mount
   useEffect(() => {
@@ -3600,7 +3797,8 @@ export function ChatContainer({
   )
   // 项目已删除时，会话仅可查看历史：禁用输入框与编辑器控件。
   const effectiveInputDisabled = inputDisabled || contextReminderPending || readOnly
-  const effectiveComposerControlsDisabled = composerControlsDisabled || contextReminderPending || readOnly
+  const effectiveComposerControlsDisabled =
+    composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {
     if (readOnlyReason) return readOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
@@ -3610,7 +3808,7 @@ export function ChatContainer({
         return "Goal 运行中：可输入 /goal status、/goal pause、/goal clear"
       }
       if (streamData.isLoading && !scheduledTaskLoading) {
-        return "任务运行中，可先编辑草稿，完成后再发送"
+        return "任务运行中，输入消息按回车加入队列，完成后自动发送"
       }
       return "任务运行中，可使用取消按钮停止当前任务"
     }
@@ -3766,10 +3964,13 @@ export function ChatContainer({
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (content: string, options: { persistTiming?: boolean } = {}): Promise<Message> => {
+    async (
+      content: string,
+      options: { persistTiming?: boolean; id?: string } = {}
+    ): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
-        id: crypto.randomUUID(),
+        id: options.id ?? crypto.randomUUID(),
         role: "user",
         content,
         created_at: userStartAt,
@@ -3988,13 +4189,40 @@ export function ChatContainer({
     if (slash.mode.kind === "slash" && !isBareGoalSlashCommandInput(trimmedInput)) return
     if (readOnly) return
     if (contextReminderPending) return
+    // A plain (non-/goal) message submitted while the thread is busy — running,
+    // or a tool approval is pending — is parked in the draft queue instead of
+    // being blocked (running) or interrupting the run (approval). Every /goal
+    // input keeps its existing routing, so goals mode is untouched.
+    //
+    // A pump-held lock counts as busy before isLoading updates, so a genuinely new
+    // message queues behind it. A normal live submit preparing @file attachments
+    // does not: a rapid second Enter still sees the original input and must hit the
+    // shared lock below instead of enqueuing a duplicate draft.
+    const shouldQueueBehindSubmit = shouldQueueBehindInFlightSubmit({
+      hasInFlightSubmit: submitInFlightRef.current.has(threadId),
+      isLiveSubmitPreparing: liveSubmitPreparingThreads.has(threadId)
+    })
+    const willEnqueueWhileBusy =
+      !isGoalSlashInput &&
+      (isLoading ||
+        Boolean(pendingApproval) ||
+        approvalQueue.length > 0 ||
+        shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
-      (isLoading && !allowSubmitWhileLoading) ||
+      (isLoading && !allowSubmitWhileLoading && !willEnqueueWhileBusy) ||
       !stream
     )
       return
+
+    // 硬上限:正文超过 MAX_INPUT_CHARS 字符时拒绝发送并提示,保留输入不清空。
+    if (trimmedInput.length > MAX_INPUT_CHARS) {
+      setError(
+        `消息长度 ${trimmedInput.length.toLocaleString()} 字符,超过上限 ${MAX_INPUT_CHARS.toLocaleString()} 字符。请精简后再发送,或将长内容作为文件上传。`
+      )
+      return
+    }
 
     const goalControlWithPendingTransport =
       hasPendingGoalTransportPayload &&
@@ -4062,8 +4290,21 @@ export function ChatContainer({
       return
     }
 
-    const shouldLockSubmit = shouldUseSubmitInFlightLock({ isSideChannelGoalControl })
+    // The submit-in-flight lock is held for the ENTIRE duration of the active run
+    // (stream.submit resolves only when the run ends). Enqueuing a draft doesn't
+    // call stream.submit, so it must NOT contend for that lock — otherwise a draft
+    // submitted mid-run can never acquire it and is silently dropped. (This mirrors
+    // how side-channel /goal control commands also bypass the lock.)
+    const shouldLockSubmit =
+      shouldUseSubmitInFlightLock({ isSideChannelGoalControl }) && !willEnqueueWhileBusy
     if (!tryAcquireSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)) return
+    if (shouldLockSubmit) liveSubmitPreparingThreads.add(threadId)
+    const shouldLockQueuedDraftPreparation = willEnqueueWhileBusy
+    if (shouldLockQueuedDraftPreparation && queuedDraftPreparingThreads.has(threadId)) {
+      releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
+      return
+    }
+    if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.add(threadId)
 
     try {
       const pendingApprovalRecord = pendingApproval as unknown as Record<string, unknown> | null
@@ -4099,13 +4340,25 @@ export function ChatContainer({
         }
       }
 
+      // Solo/Multi differ only in thread metadata. Wait before claiming and
+      // clearing the composer so a failed mode save cannot send under the old
+      // policy or lose the user's draft.
+      const pendingModeSave = agentModeSaveRef.current
+      try {
+        await pendingModeSave
+      } catch {
+        toast.error("Agent 模式保存失败，消息未发送；再次发送将使用原模式")
+        return
+      }
       // Reset both the error message and its structured detail at turn start so
       // no stale diagnostics linger into the new turn.
       if (threadError || errorDetail) {
         clearError()
       }
 
-      if (pendingApproval || approvalQueue.length > 0) {
+      // When parking a draft mid-approval we deliberately do NOT reject the
+      // pending approval — the run stays alive and the draft drains/steers later.
+      if (!willEnqueueWhileBusy && (pendingApproval || approvalQueue.length > 0)) {
         // P0 fix: notify main process to reject the pending approval instead of silently dropping it.
         // Otherwise the orchestrator's Promise hangs until the 5-minute timeout.
         for (const approval of [pendingApproval, ...approvalQueue].filter(Boolean)) {
@@ -4124,11 +4377,22 @@ export function ChatContainer({
         clearPendingApprovals()
       }
 
-      // Snapshot the skill selection before we clear it — synchronous path, no
-      // async gap, so no token/stillOurs needed.
+      // Claim the current composer payload before @file IO. A second Enter sees
+      // the preparation guard, while text typed during the await goes into a
+      // fresh composer and is not cleared when this draft is enqueued.
       const skill = selectedSkill
       const browser = selectedBuiltinBrowser
+      const claimedAttachments = attachments
+      const claimedMentionedFiles = mentionedFiles
       let rawMessage = trimmedInput
+      setInput("")
+      setAttachments([])
+      setMentionedFiles([])
+      if (skill) setSelectedSkill(null)
+      // The original composer payload is now atomically claimed. Any later
+      // Enter belongs to newly typed input and should queue behind this submit
+      // while @file IO is still running, rather than being silently ignored.
+      if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
       const {
@@ -4139,8 +4403,8 @@ export function ChatContainer({
         warningMessage: atFileWarningMessage
       } = await resolveAtFileAttachments({
         rawMessage,
-        attachments,
-        mentionedFiles,
+        attachments: claimedAttachments,
+        mentionedFiles: claimedMentionedFiles,
         workspacePath,
         workspaceFiles,
         maxAttachments: MAX_ATTACHMENTS,
@@ -4149,14 +4413,15 @@ export function ChatContainer({
       })
       rawMessage = cleanedMessage
 
-      // 优先提示数量上限；如果数量没超，再提示内容总量上限。
+      // These are delivery warnings, not run failures. A thread error blocks the
+      // queue pump, so keep the degraded send non-blocking in both live and busy paths.
       if (mentionCountLimitHit) {
-        setError(`@文件最多只会带入前 ${MAX_ATTACHMENTS} 个附件`)
+        toast.warning(`@文件最多只会带入前 ${MAX_ATTACHMENTS} 个附件`)
       } else if (mentionAttachmentLimitHit) {
-        setError(`@文件内容总量已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
+        toast.warning(`@文件内容总量已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
       } else if (atFileWarningMessage) {
         // 非致命失败只做提示，不中断后面的普通发送流程。
-        setError(atFileWarningMessage)
+        toast.warning(atFileWarningMessage)
       }
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
@@ -4166,7 +4431,6 @@ export function ChatContainer({
         fallbackUserText,
         rawMessage
       })
-      rawMessage = formatBuiltinBrowserTransportMessage(rawMessage, browser)
       // If user only uploaded files without text, add a default prompt.
       // skill-only sends (text empty, no attachments) still fall into this branch
       // because the default prompt requires attachments — for skill-only we let
@@ -4174,16 +4438,15 @@ export function ChatContainer({
       // When a skill is active we also skip the default prompt: the skill's own
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
-      const userText = rawMessage || fallbackUserText
-      setInput("")
-      setAttachments([])
-      setMentionedFiles([])
-      if (skill) setSelectedSkill(null)
+      const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
       if (browser) setSelectedBuiltinBrowser(false)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
       }
-      insertLog("send: " + (visibleUserText || (skill ? `[skill-only: ${skill.name}]` : "")))
+      insertLog(
+        (willEnqueueWhileBusy ? "queue: " : "send: ") +
+          (visibleUserText || (skill ? `[skill-only: ${skill.name}]` : ""))
+      )
 
       const isFirstMessage = threadMessages.length === 0
       // Keep real user intent visible in the transcript. Goal status/pause/clear
@@ -4191,8 +4454,13 @@ export function ChatContainer({
       // are user turns and should appear immediately in live UI.
       const shouldAppendVisibleUserMessage = !bypassGoalControlValidation
 
-      // Build the full message with attachments as XML tags (sent to model)
-      let fullMessage = userText
+      // Compose the message parts (text / attachment XML / display prefix / skill
+      // block) into a QueuedMessage-shaped draft. The exact same shape is either
+      // sent now or parked in the draft queue, so a drained draft is byte-identical
+      // to sending it live. Attachment XML is what the model sees; the "📎 name"
+      // prefix is what the user's bubble shows.
+      let attachmentModelBlocks = ""
+      let attachmentDisplayPrefix = ""
       if (attachmentPayload && attachmentPayload.length > 0) {
         const attachmentTexts = attachmentPayload.map((att) => {
           const truncAttr = att.truncated ? ' truncated="true"' : ""
@@ -4200,14 +4468,12 @@ export function ChatContainer({
           const safeContent = att.content.replace(/<\/attachment>/gi, "< /attachment>")
           return `\n\n<attachment filename="${escXml(att.filename)}"${pathAttr} type="${att.mimeType}" size="${att.size}"${truncAttr}>\n${safeContent}\n</attachment>`
         })
-        fullMessage = userText + attachmentTexts.join("")
+        attachmentModelBlocks = attachmentTexts.join("")
+        attachmentDisplayPrefix = attachmentPayload.map((a) => `📎 ${a.filename}`).join("\n")
       }
 
-      // Append the skill-use block at the very end. The model is told to `read`
-      // the SKILL.md on its own — we don't inline the body. Hooks/routing/memory
-      // see this block verbatim; they don't need to know it's a slash command.
-      // join(\n\n) on filtered parts avoids leading blank lines when the user
-      // sends a skill with no text or attachments (skill-only invocation).
+      // Skill-use block, appended last. The model is told to `read` the SKILL.md
+      // itself — we don't inline the body. Hooks/routing/memory see it verbatim.
       const skillBlock = skill
         ? formatSkillUseBlock({
             name: skill.name,
@@ -4217,32 +4483,40 @@ export function ChatContainer({
             allowedTools: skill.allowedTools
           })
         : ""
-      fullMessage = [fullMessage, skillBlock].filter(Boolean).join("\n\n")
 
-      // displayContent is what the user sees in their bubble while this run is
-      // in-memory. It carries the trailing skill block so MessageBubble's
-      // tail-anchored parser can render the chip and strip it back out.
-      //
-      // Note: the *checkpointed* version of this message is `fullMessage` (the
-      // full payload sent to the model, including <attachment>…</attachment>
-      // bodies), not displayContent. After a thread reload, MessageBubble
-      // therefore renders chip + raw attachment XML instead of chip + 📎 names.
-      // That replay-vs-live divergence is a pre-existing limitation of the
-      // attachment pipeline and is not introduced by the slash-command code.
-      let displayContent: string = visibleUserText
-      if (attachmentPayload && attachmentPayload.length > 0) {
-        const fileNames = attachmentPayload.map((a) => `📎 ${a.filename}`).join("\n")
-        displayContent = `${fileNames}\n\n${visibleUserText}`
+      const composedDraft: QueuedMessage = {
+        id: crypto.randomUUID(),
+        text: userText,
+        attachmentModelBlocks,
+        attachmentDisplayPrefix,
+        skillBlock,
+        builtinBrowser: browser,
+        modelId: currentModel,
+        created_at: new Date(),
+        updated_at: new Date()
       }
-      displayContent = formatBuiltinBrowserTranscriptMessage(displayContent, browser)
-      displayContent = [displayContent, skillBlock].filter(Boolean).join("\n\n")
-      if (
-        /\[\[CMB_COORDINATOR_(?:WORKER_NOTIFICATION|INTERNAL_(?:CONTEXT|NOTIFICATION)_(?:START|END))\]\]/.test(
-          displayContent
-        )
-      ) {
-        displayContent = `用户输入的普通文本：\n\n${displayContent}`
+
+      // Busy → park the draft and stop. The auto-drain effect sends it once the
+      // thread is idle again, or the user can steer it into the running turn.
+      if (willEnqueueWhileBusy) {
+        addQueuedMessage(composedDraft)
+        // An actual enqueue is unambiguous renewed intent to keep going — lift
+        // any Stop-driven pause so this (and any earlier still-queued) draft can
+        // auto-drain once idle. Cleared here (not merely "past the guards") so a
+        // FAILED submit attempt right after Stop can't accidentally un-suppress.
+        setQueueAutoDrainSuppressed(false)
+        requestAnimationFrame(() => {
+          inputRef.current?.focus()
+        })
+        return
       }
+
+      // fullMessage is the model payload (attachment XML inlined); displayContent
+      // is the user's bubble (📎 names). Note: the *checkpointed* message is
+      // fullMessage, so after a reload MessageBubble renders raw attachment XML
+      // rather than 📎 names — a pre-existing attachment-pipeline limitation.
+      const fullMessage = getQueuedModelContent(composedDraft)
+      const displayContent = guardCoordinatorPlainText(getQueuedDisplayContent(composedDraft))
 
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
@@ -4251,15 +4525,20 @@ export function ChatContainer({
         ? "normal"
         : coordinatorPrefixed
           ? "coordinator"
-          : agentMode
+          : persistedAgentModeRef.current
       if (disableWorkflowModeOption && submitAgentMode === "workflow") {
         submitAgentMode = "normal"
       }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
-        submitAgentMode = await loadResolvedAgentMode().catch((error) => {
-          console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
-          return agentMode
-        })
+        submitAgentMode = await loadResolvedAgentMode()
+          .then((resolvedMode) => {
+            persistedAgentModeRef.current = resolvedMode
+            return resolvedMode
+          })
+          .catch((error) => {
+            console.warn("[ChatContainer] Failed to resolve submit agent mode:", error)
+            return agentMode
+          })
         if (disableWorkflowModeOption && submitAgentMode === "workflow") {
           submitAgentMode = "normal"
         }
@@ -4283,9 +4562,10 @@ export function ChatContainer({
       if (shouldAppendVisibleUserMessage) {
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
-        visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
+        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent, {
           persistTiming: !isGoalSlashInput
         })
+        visibleUserMessage = await visibleUserMessagePromise
       }
 
       const shouldGenerateTitleForGoalSet =
@@ -4321,17 +4601,21 @@ export function ChatContainer({
         }
       }
 
-      // 发送消息，滚动到底部
-      const viewport = getViewport()
-      if (viewport) {
-        viewport.scrollTop = viewport.scrollHeight
-      }
-
       const startTime = Date.now()
       setActiveTurnStartTime(startTime)
       // A finished workflow panel belongs to the previous turn; drop it when a
       // new message goes out so it doesn't linger forever in the transcript.
       clearFinishedWorkflowRun()
+      // Every validation above (length, lock, model, workspace) has passed and
+      // we're committed to sending — this is the actual "renewed intent" signal
+      // that should lift a Stop-driven pause, not merely having reached past the
+      // early-return guards (a later failed attempt, e.g. MAX_INPUT_CHARS or a
+      // held lock, would otherwise un-suppress without anything having sent).
+      setQueueAutoDrainSuppressed(false)
+      // Payload preparation and the optimistic bubble are committed. A later
+      // Enter is now new input and should queue behind the held run lock even
+      // before useStream propagates isLoading.
+      if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       try {
         await stream.submit(
           {
@@ -4342,7 +4626,7 @@ export function ChatContainer({
               configurable: {
                 thread_id: threadId,
                 model_id: currentModel,
-                agent_mode: submitAgentMode,
+                agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
                 ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
               }
             }
@@ -4352,9 +4636,640 @@ export function ChatContainer({
         setActiveTurnStartTime(null)
       }
     } finally {
+      if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
+      if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.delete(threadId)
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
+
+  const startEditingQueuedMessage = useCallback((message: QueuedMessage): void => {
+    setEditingQueueId(message.id)
+    setEditingQueueText(message.text)
+  }, [])
+
+  const cancelEditingQueuedMessage = useCallback((): void => {
+    setEditingQueueId(null)
+    setEditingQueueText("")
+  }, [])
+
+  const saveEditingQueuedMessage = useCallback(async (): Promise<void> => {
+    if (!editingQueueId) return
+    const message = getQueuedMessage(editingQueueId)
+    if (!message) {
+      setEditingQueueId(null)
+      setEditingQueueText("")
+      return
+    }
+    if (guidingQueuedMessageIdsRef.current.has(message.id)) {
+      toast.message("该消息正在提交引导，请稍后再编辑")
+      return
+    }
+    const nextText = editingQueueText.trim()
+    // Allow an empty text only when the draft still carries an attachment or skill
+    // block; otherwise a blank save would produce an unsendable empty message.
+    const hasNonTextPayload =
+      Boolean(message.attachmentModelBlocks?.trim()) || Boolean(message.skillBlock?.trim())
+    if (!nextText && !hasNonTextPayload) return
+    // Mirror handleSubmit's hard cap. A freshly-composed draft is already checked
+    // there before it can enter the queue, but the edit textarea has no length
+    // limit of its own — without this, editing an already-queued draft is the one
+    // path that could push arbitrarily long text past the limit and into the model.
+    // Uses a toast, not setError: a queued draft is typically being edited WHILE
+    // the thread is busy, and the error card is gated on !isLoading — setError
+    // here would be invisible until the run ends, and threadError also gates the
+    // auto-drain pump (see below), so a stale error from this purely local
+    // validation would silently stall the ENTIRE queue (not just this item) once
+    // the thread goes idle, until the user notices and dismisses it.
+    if (nextText.length > MAX_INPUT_CHARS) {
+      toast.error(
+        `消息长度 ${nextText.length.toLocaleString()} 字符，超过上限 ${MAX_INPUT_CHARS.toLocaleString()} 字符。请精简后再保存。`
+      )
+      return
+    }
+    const updatedMessage = { ...message, text: nextText }
+    setEditingQueueId(null)
+    setEditingQueueText("")
+
+    if (!message.handoffRequestedAt) {
+      updateQueuedMessage(message.id, { text: nextText })
+      return
+    }
+
+    const requestId = ++queuedEditRequestRef.current
+    const originalUpdatedAt = message.updated_at.getTime()
+    const isCurrentRequest = (): boolean => requestId === queuedEditRequestRef.current
+    const getUnchangedGuidedMessage = (): QueuedMessage | undefined => {
+      const current = getQueuedMessage(message.id)
+      return current?.handoffRequestedAt && current.updated_at.getTime() === originalUpdatedAt
+        ? current
+        : undefined
+    }
+    const reconcile = (): Promise<{
+      pendingIds: string[]
+      injectedIds: string[]
+      durableIds: string[]
+    }> => window.api.agent.reconcileCurrentRunQueuedMessages(threadId, [message.id])
+    const finishDurable = (durableIds: string[]): boolean => {
+      if (!durableIds.includes(message.id)) return false
+      if (!threadMessages.some((item) => item.id === message.id)) {
+        appendMessage({
+          id: message.id,
+          role: "user",
+          content: guardCoordinatorPlainText(getQueuedDisplayContent(message)),
+          created_at: new Date()
+        })
+      }
+      deleteQueuedMessage(message.id)
+      toast.message("该消息已被模型接收，编辑未生效，已从队列移除")
+      return true
+    }
+
+    try {
+      const beforeEdit = await reconcile()
+      if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
+      if (finishDurable(beforeEdit.durableIds)) return
+
+      if (classifyGuidedMessage(message.id, beforeEdit) === "unconsumed") {
+        updateQueuedMessage(message.id, { text: nextText, handoffRequestedAt: undefined })
+        return
+      }
+
+      const result = await window.api.agent.queueCurrentRunMessage(threadId, {
+        id: message.id,
+        content: getQueuedModelContent(updatedMessage),
+        displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(updatedMessage))
+      })
+      if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
+      if (result.queued) {
+        updateQueuedMessage(message.id, { text: nextText })
+        return
+      }
+
+      // The run can finish between reconciliation and the update IPC. Reconcile
+      // again before deciding whether this is an unconsumed draft or an already
+      // durable user turn; never downgrade from handoff based on no_active_run.
+      const afterRejection = await reconcile()
+      if (!isCurrentRequest() || !getUnchangedGuidedMessage()) return
+      if (finishDurable(afterRejection.durableIds)) return
+      if (classifyGuidedMessage(message.id, afterRejection) === "unconsumed") {
+        updateQueuedMessage(message.id, { text: nextText, handoffRequestedAt: undefined })
+      } else {
+        toast.error("该引导消息正在提交，暂时无法编辑")
+      }
+    } catch (err) {
+      console.error("[ChatContainer] Failed to reconcile edited guided message:", err)
+      // Ambiguous transport failure is not evidence that the run rejected the
+      // message. Preserve the original handoff to prevent a duplicate fresh turn.
+      if (isCurrentRequest() && getUnchangedGuidedMessage()) {
+        toast.error("无法确认引导消息状态，原消息保持不变")
+      }
+    }
+  }, [
+    appendMessage,
+    deleteQueuedMessage,
+    editingQueueId,
+    editingQueueText,
+    getQueuedMessage,
+    threadId,
+    threadMessages,
+    updateQueuedMessage
+  ])
+
+  const moveQueuedMessage = useCallback(
+    (sourceId: string, targetId: string, placement: "before" | "after"): void => {
+      if (sourceId === targetId) return
+      const source = getQueuedMessage(sourceId)
+      const target = getQueuedMessage(targetId)
+      if (!source || !target || source.handoffRequestedAt || target.handoffRequestedAt) return
+      const ids = queuedMessages.map((message) => message.id)
+      const sourceIndex = ids.indexOf(sourceId)
+      const targetIndex = ids.indexOf(targetId)
+      if (sourceIndex < 0 || targetIndex < 0) return
+      ids.splice(sourceIndex, 1)
+      const adjustedTargetIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex
+      ids.splice(placement === "after" ? adjustedTargetIndex + 1 : adjustedTargetIndex, 0, sourceId)
+      reorderQueuedMessages(ids)
+    },
+    [getQueuedMessage, queuedMessages, reorderQueuedMessages]
+  )
+
+  const handleDeleteQueuedMessage = useCallback(
+    (message: QueuedMessage): void => {
+      // Main only needs a withdrawal tombstone for a handoff that is queued or
+      // still inside async hook preparation. Ordinary local drafts never entered
+      // main and deleting them must not poison the same id in another window.
+      if (message.handoffRequestedAt || guidingQueuedMessageIdsRef.current.has(message.id)) {
+        void window.api.agent.deleteCurrentRunQueuedMessage(threadId, message.id)
+      }
+      deleteQueuedMessage(message.id)
+    },
+    [deleteQueuedMessage, threadId]
+  )
+
+  const handleGuideQueuedMessage = useCallback(
+    async (message: QueuedMessage): Promise<void> => {
+      if (hasActiveGoalRunning) {
+        toast.message("Active Goal 运行中，请先暂停 Goal 再引导消息")
+        return
+      }
+      const current = getQueuedMessage(message.id)
+      if (!current || current.handoffRequestedAt) return
+      // Claim ownership before crossing the IPC boundary. This synchronously
+      // blocks local editing, reordering, and auto-drain while main is deciding
+      // whether it can accept the steer.
+      guidingQueuedMessageIdsRef.current.add(current.id)
+      updateQueuedMessage(current.id, { handoffRequestedAt: new Date() })
+      try {
+        const result = await window.api.agent.queueCurrentRunMessage(threadId, {
+          id: current.id,
+          content: getQueuedModelContent(current),
+          displayContent: guardCoordinatorPlainText(getQueuedDisplayContent(current))
+        })
+        if (result.queued) {
+          toast.success("已提交给当前运行，会在下一次模型调用前接收")
+          return
+        }
+        // The user can delete the draft while its async hook preparation is in
+        // flight. Main records a withdrawal tombstone; no fallback UI is needed.
+        if (!getQueuedMessage(current.id)) return
+        if (result.reason === "withdrawn") {
+          deleteQueuedMessage(current.id)
+          return
+        }
+        if (result.reason === "already_injected") {
+          // Main is authoritative: this id already reached the model loop and
+          // was durably persisted before injection. Never clear the handoff or
+          // promote it into the ordinary queue, which would submit it twice.
+          try {
+            const reconciliation = await window.api.agent.reconcileCurrentRunQueuedMessages(
+              threadId,
+              [current.id]
+            )
+            if (classifyGuidedMessage(current.id, reconciliation) === "durable") {
+              if (!threadMessages.some((item) => item.id === current.id)) {
+                appendMessage({
+                  id: current.id,
+                  role: "user",
+                  content: guardCoordinatorPlainText(getQueuedDisplayContent(current)),
+                  created_at: new Date()
+                })
+              }
+              deleteQueuedMessage(current.id)
+            }
+          } catch (error) {
+            console.warn("[ChatContainer] Failed to reconcile already-injected draft:", error)
+          }
+          toast.message("该消息已由当前运行接收，正在同步记录")
+          return
+        }
+        if (getQueuedMessage(current.id)?.handoffRequestedAt) {
+          updateQueuedMessage(current.id, { handoffRequestedAt: undefined })
+        }
+        if (result.reason === "active_goal") {
+          toast.message("Active Goal 运行中，请先暂停 Goal 再引导消息")
+          return
+        }
+        if (result.reason === "hook_blocked") {
+          toast.error(result.message || "该消息被 Hook 策略拦截，已保留在队列中")
+          return
+        }
+        if (result.reason === "run_not_ready") {
+          toast.message("当前运行仍在准备中，请稍后重试引导")
+          return
+        }
+        // No steerable foreground run (e.g. background workflow/worker) — surface
+        // it to the front of the queue so it drains first once the thread is idle.
+        // Clicking 引导 is explicit renewed intent, so it must also resume a
+        // Stop-paused queue; the pump's normal idle/goal/approval gates still
+        // decide when it may actually submit.
+        setQueueAutoDrainSuppressed(false)
+        promoteQueuedMessage(current.id)
+        toast.message("当前没有可插队的运行，已提到队首")
+      } catch (err) {
+        console.error("[ChatContainer] Failed to guide queued message:", err)
+        if (getQueuedMessage(current.id)?.handoffRequestedAt) {
+          updateQueuedMessage(current.id, { handoffRequestedAt: undefined })
+        }
+        setQueueAutoDrainSuppressed(false)
+        promoteQueuedMessage(current.id)
+        toast.error("插队失败，已提到队首")
+      } finally {
+        guidingQueuedMessageIdsRef.current.delete(current.id)
+      }
+    },
+    [
+      appendMessage,
+      deleteQueuedMessage,
+      getQueuedMessage,
+      hasActiveGoalRunning,
+      promoteQueuedMessage,
+      setQueueAutoDrainSuppressed,
+      threadMessages,
+      threadId,
+      updateQueuedMessage
+    ]
+  )
+
+  const submitQueuedMessage = useCallback(
+    async (queued: QueuedMessage): Promise<void> => {
+      if (!stream) return
+      const fullMessage = getQueuedModelContent(queued)
+      if (!fullMessage.trim()) {
+        deleteQueuedMessage(queued.id)
+        return
+      }
+      // A persisted draft can outlive its selected model, credentials, or
+      // workspace. Keep it queued and surface the same local validation as a
+      // live send instead of creating an optimistic bubble that can only fail
+      // in the backend.
+      const queuedModel = queued.modelId
+        ? models.find((model) => model.id === queued.modelId)
+        : undefined
+      const currentSelectedModel = currentModel
+        ? models.find((model) => model.id === currentModel)
+        : undefined
+      const selectedModel = queuedModel?.available
+        ? queuedModel
+        : currentSelectedModel?.available
+          ? currentSelectedModel
+          : undefined
+      if (!selectedModel) {
+        if (!queued.modelId && !currentModel) {
+          setError(QUEUE_MODEL_REQUIRED_ERROR)
+        } else if (queuedModel || currentSelectedModel) {
+          setError(QUEUE_MODEL_UNAVAILABLE_ERROR)
+        } else {
+          setError(QUEUE_MODEL_MISSING_ERROR)
+        }
+        return
+      }
+      const queuedModelId = selectedModel.id
+      if (!workspacePath) {
+        // The draft remains queued on this validation return, so persist a
+        // successful stale-model fallback now. In the send path the draft is
+        // claimed and removed instead; its failure handler re-parks it with the
+        // same resolved model id.
+        if (queued.modelId !== queuedModelId) {
+          updateQueuedMessage(queued.id, { modelId: queuedModelId })
+        }
+        setError(QUEUE_WORKSPACE_REQUIRED_ERROR)
+        return
+      }
+      const displayContent = guardCoordinatorPlainText(getQueuedDisplayContent(queued))
+      // A queued message is a fresh turn: resolve agent_mode from the user's
+      // current selection (plus a [coordinator] text prefix), matching handleSubmit
+      // exactly — including the async hydration below. A draft can auto-drain before
+      // the live send path ever ran (e.g. the very first turn on a coordinator/workflow
+      // thread was composed, queued while busy, and the run finishes before the user
+      // ever hits a live send), so `agentModeHydratedRef` may still be unresolved here.
+      // Skipping this hydration would route that turn through the wrong mode.
+      const pendingModeSave = agentModeSaveRef.current
+      try {
+        await pendingModeSave
+      } catch {
+        return
+      }
+      const coordinatorPrefixed =
+        !disableCoordinatorModeOption &&
+        /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
+      let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
+        ? "normal"
+        : coordinatorPrefixed
+          ? "coordinator"
+          : persistedAgentModeRef.current
+      if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+        submitAgentMode = "normal"
+      }
+      if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
+        submitAgentMode = await loadResolvedAgentMode()
+          .then((resolvedMode) => {
+            persistedAgentModeRef.current = resolvedMode
+            return resolvedMode
+          })
+          .catch((error) => {
+            console.warn("[ChatContainer] Failed to resolve queued draft agent mode:", error)
+            return agentMode
+          })
+        if (disableWorkflowModeOption && submitAgentMode === "workflow") {
+          submitAgentMode = "normal"
+        }
+        agentModeHydratedRef.current = true
+        if (submitAgentMode !== agentMode) {
+          setAgentMode(submitAgentMode)
+        }
+      }
+      if (
+        (disableCoordinatorModeOption && agentMode === "coordinator") ||
+        (disableWorkflowModeOption && agentMode === "workflow")
+      ) {
+        agentModeHydratedRef.current = true
+        setAgentMode("normal")
+      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+        agentModeHydratedRef.current = true
+        setAgentMode("coordinator")
+      }
+      // Agent-mode hydration above is asynchronous. The user may edit, delete,
+      // or guide this draft while it is awaiting that result. Claim it only if
+      // the authoritative queue still contains the exact same version and it
+      // has not been handed to the active run. No await occurs between this
+      // check and deletion, so the claim is atomic on the renderer event loop.
+      const currentQueued = getQueuedMessage(queued.id)
+      if (!canClaimQueuedMessage(queued, currentQueued)) return
+      const isFirstMessage = threadMessages.length === 0
+      deleteQueuedMessage(queued.id)
+      // Reuse the draft's own id for the optimistic bubble. If stream.submit below
+      // throws, the catch re-parks this same draft and the pump retries it — without
+      // a stable id, each retry would call appendMessage with a FRESH uuid and leave
+      // a new orphaned "ghost" user bubble behind every attempt (appendMessage upserts
+      // by id, so re-using queued.id makes a retry replace the same bubble instead).
+      const visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
+        persistTiming: true,
+        id: queued.id
+      })
+      if (isFirstMessage) {
+        const currentThread = threads.find((t) => t.thread_id === threadId)
+        const hasDefaultTitle = currentThread?.title?.startsWith("Thread ")
+        const titleSource = queued.text.trim() || (queued.skillBlock ? "使用技能" : "")
+        if (hasDefaultTitle && titleSource) {
+          generateTitleForFirstMessage(threadId, titleSource)
+        }
+      }
+      const startTime = Date.now()
+      setActiveTurnStartTime(startTime)
+      clearFinishedWorkflowRun()
+      try {
+        await stream.submit(
+          {
+            messages: [{ type: "human", content: fullMessage }]
+          },
+          {
+            config: {
+              configurable: {
+                thread_id: threadId,
+                model_id: queuedModelId,
+                agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode,
+                ...(visibleUserMessage?.id ? { hook_turn_id: visibleUserMessage.id } : {})
+              }
+            }
+          }
+        )
+      } finally {
+        setActiveTurnStartTime(null)
+      }
+    },
+    [
+      agentMode,
+      appendVisibleUserMessageWithTime,
+      clearFinishedWorkflowRun,
+      currentModel,
+      deleteQueuedMessage,
+      disableCoordinatorModeOption,
+      disableWorkflowModeOption,
+      generateTitleForFirstMessage,
+      getQueuedMessage,
+      loadResolvedAgentMode,
+      models,
+      setActiveTurnStartTime,
+      setError,
+      stream,
+      threadId,
+      threadMessages.length,
+      threads,
+      updateQueuedMessage,
+      workspacePath
+    ]
+  )
+
+  // Queue validation errors are recoverable configuration prompts. Once the
+  // selected model and workspace are usable, clear only those known errors so
+  // the parked draft can resume; unrelated run failures still block auto-drain.
+  useEffect(() => {
+    if (!threadError || !RECOVERABLE_QUEUE_ERRORS.has(threadError)) return
+    const selectedModel = currentModel
+      ? models.find((model) => model.id === currentModel)
+      : undefined
+    if (selectedModel?.available && workspacePath) clearError()
+  }, [clearError, currentModel, models, threadError, workspacePath])
+
+  // Reconcile handed-off drafts against main-process state instead of guessing
+  // from an idle transition. Durable messages leave the draft queue, messages
+  // still owned by the run stay handed off, and only unconsumed messages return
+  // to normal auto-drain. This also repairs a lost injection event or reload.
+  useEffect(() => {
+    if (isLoading || pendingApproval || historyLoading) return
+    const handedOff = queuedMessages.filter((queued) => queued.handoffRequestedAt)
+    if (handedOff.length === 0) return
+
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    const scheduleRetry = (): void => {
+      retryTimer = setTimeout(() => {
+        if (!cancelled) setQueuePumpTick((tick) => tick + 1)
+      }, 1000)
+    }
+    void window.api.agent
+      .reconcileCurrentRunQueuedMessages(
+        threadId,
+        handedOff.map((queued) => queued.id)
+      )
+      .then(async ({ pendingIds, injectedIds, durableIds }) => {
+        if (cancelled) return
+        const pending = new Set([...pendingIds, ...injectedIds])
+        const durable = new Set(durableIds)
+        const visibleIds = new Set(threadMessages.map((message) => message.id))
+        const missingDurableIds = handedOff
+          .filter((queued) => durable.has(queued.id) && !visibleIds.has(queued.id))
+          .map((queued) => queued.id)
+        const missingDurableIdSet = new Set(missingDurableIds)
+        if (missingDurableIds.length > 0) {
+          const synced = await syncDurableTranscript(missingDurableIds)
+          if (cancelled) return
+          if (!synced) {
+            scheduleRetry()
+            return
+          }
+        }
+        let shouldRetry = false
+        for (const queued of handedOff) {
+          if (durable.has(queued.id)) {
+            // Missing durable messages and their handed-off drafts are committed
+            // atomically by syncDurableTranscript. A separately queued delete
+            // could otherwise run after its lifecycle fence became stale.
+            if (!missingDurableIdSet.has(queued.id)) deleteQueuedMessage(queued.id)
+          } else if (pending.has(queued.id)) {
+            shouldRetry = true
+          } else {
+            updateQueuedMessage(queued.id, { handoffRequestedAt: undefined })
+          }
+        }
+        // A renderer reload can lose the original queue IPC callback while main
+        // is still inside a slow Hook. Poll only while main still owns a handoff;
+        // auto-drain remains blocked until it becomes durable or unconsumed.
+        if (shouldRetry) scheduleRetry()
+      })
+      .catch((error) => {
+        if (cancelled) return
+        console.warn("[ChatContainer] Failed to reconcile guided drafts:", error)
+        // A transient IPC failure must not strand an ambiguous handoff forever.
+        // Keep it blocked from auto-drain, then retry authoritative reconciliation.
+        scheduleRetry()
+      })
+
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+  }, [
+    deleteQueuedMessage,
+    historyLoading,
+    isLoading,
+    pendingApproval,
+    queuePumpTick,
+    queuedMessages,
+    syncDurableTranscript,
+    threadId,
+    threadMessages,
+    updateQueuedMessage
+  ])
+
+  // Auto-drain the queue head once the thread is idle. Gated on !hasActiveGoalRunning
+  // so a draft never slips into the gap between two goal legs (it waits for the goal
+  // to complete/pause). Serializes on submitInFlightRef — the SAME lock handleSubmit's
+  // live-send path uses (see willEnqueueWhileBusy above) — rather than a second,
+  // pump-only ref: the pump holds this lock for the duration of its own submit
+  // (below), so checking it here covers BOTH "another live send is in flight" and
+  // "the pump itself is already mid-flight" with one shared source of truth. This is
+  // a UX ordering guard, not a data-safety one — useStream's own client-side queue
+  // already fully serializes submit() calls on this stream instance (see the longer
+  // note by willEnqueueWhileBusy), so nothing is ever lost either way. What a second,
+  // uncoordinated lock WOULD produce: a live "/goal resume" (unconditionally excluded
+  // from willEnqueueWhileBusy — goal commands must never be silently parked in the
+  // queue) could slip in ahead of the pump's own stream.submit and end up silently
+  // queued behind it inside the SDK with no visible indication why, while the pump's
+  // optimistic UI (bubble already appended, draft already removed from the queue)
+  // sits there looking "sent." Failing fast here avoids that. queuePumpTick forces
+  // a re-check after each settle.
+  useEffect(() => {
+    if (queueAutoDrainSuppressed) return
+    if (submitInFlightRef.current.has(threadId)) return
+    if (isLoading || pendingApproval || threadError || !stream) return
+    if (historyLoading || readOnly || contextReminderPending) return
+    if (hasActiveGoalRunning) return
+    // Reconciliation owns transcript ordering for every handed-off draft, not
+    // only the queue head. Draining any ordinary item first could append it
+    // before a previously injected guided turn whose acknowledgement is late.
+    if (queuedMessages.some((queued) => queued.handoffRequestedAt)) return
+    const next = queuedMessages[0]
+    if (!next) return
+
+    if (!tryAcquireSubmitInFlightLock(submitInFlightRef, true, threadId)) return
+    submitQueuedMessage(next)
+      .catch(async (err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        setError(message)
+        let durable: boolean | undefined
+        try {
+          const reconciliation = await window.api.agent.reconcileCurrentRunQueuedMessages(
+            threadId,
+            [next.id]
+          )
+          durable = reconciliation.durableIds.includes(next.id)
+        } catch (reconcileError) {
+          console.warn(
+            "[ChatContainer] Failed to reconcile queued submission after stream error:",
+            reconcileError
+          )
+        }
+        // Main may have durably accepted the user turn before the model/runtime
+        // failed. Keep that failed turn visible and never retry its side effects.
+        if (durable === true) return
+
+        // No durable turn exists, or transport failure made that ambiguous. Remove
+        // the optimistic bubble and restore the draft. Ambiguous drafts are marked
+        // handed-off so normal drain waits for the existing reconcile effect.
+        removeLocalMessage(next.id)
+        // Restore the failed head at the front so transient failures do not
+        // reorder a FIFO queue (A,B must not become B,A).
+        const savedModelStillAvailable = models.some(
+          (model) => model.id === next.modelId && model.available
+        )
+        const currentModelAvailable = models.some(
+          (model) => model.id === currentModel && model.available
+        )
+        prependQueuedMessage({
+          ...next,
+          ...(!savedModelStillAvailable && currentModelAvailable && currentModel
+            ? { modelId: currentModel }
+            : {}),
+          ...(durable === undefined ? { handoffRequestedAt: new Date() } : {}),
+          updated_at: new Date()
+        })
+      })
+      .finally(() => {
+        releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
+        setQueuePumpTick((tick) => tick + 1)
+      })
+  }, [
+    contextReminderPending,
+    currentModel,
+    hasActiveGoalRunning,
+    historyLoading,
+    isLoading,
+    models,
+    pendingApproval,
+    prependQueuedMessage,
+    queueAutoDrainSuppressed,
+    queuePumpTick,
+    queuedMessages,
+    readOnly,
+    removeLocalMessage,
+    setError,
+    stream,
+    submitQueuedMessage,
+    submitInFlightRef,
+    threadError,
+    threadId
+  ])
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
     // IME composing (Chinese/Japanese/Korean) should not trigger submit on Enter
@@ -4529,6 +5444,12 @@ export function ChatContainer({
       // foreground turn only. Durable background workers are stopped explicitly
       // via the separate background-worker stop control.
       threadContext.suppressCoordinatorNotificationAutoRun(threadId)
+      // Stop must actually stop: don't let a queued draft immediately fire a new
+      // run right behind the one being cancelled. Lives in thread-context (not a
+      // local ref) because TabbedPanel unmounts ChatContainer entirely when the
+      // user switches to a file tab — a local ref would silently reset to false
+      // the moment they glance at an open file and back, undoing the suppression.
+      setQueueAutoDrainSuppressed(true)
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
       } finally {
@@ -5150,9 +6071,7 @@ export function ChatContainer({
           <RotatingHeadline />
         )}
         {skillsLoading ? (
-          <div className="text-sm text-muted-foreground text-center py-10">
-            正在加载技能列表...
-          </div>
+          <div className="text-sm text-muted-foreground text-center py-10">正在加载技能列表...</div>
         ) : skills.length === 0 ? null : (
           <div className="space-y-3">
             {programmingSkillCards.length > 0 && (
@@ -5599,9 +6518,7 @@ export function ChatContainer({
     }
 
     const overrides: ThreadForkOverrides | undefined =
-      forkDestinationMode === "workspace"
-        ? { workspacePath: selectedWorkspacePath }
-        : undefined
+      forkDestinationMode === "workspace" ? { workspacePath: selectedWorkspacePath } : undefined
 
     const resolvedMessageId =
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
@@ -5785,6 +6702,9 @@ export function ChatContainer({
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+  const interruptionNotice = hookInterruption
+    ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
+    : null
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -5829,9 +6749,7 @@ export function ChatContainer({
                   </span>
                   <span>{messageForkTarget.checkpoint.messageCount} 条消息</span>
                 </div>
-                <div className="line-clamp-3 text-sm text-foreground">
-                  {messageForkPreview}
-                </div>
+                <div className="line-clamp-3 text-sm text-foreground">{messageForkPreview}</div>
               </div>
 
               <div className="grid gap-2 sm:grid-cols-2">
@@ -5923,15 +6841,15 @@ export function ChatContainer({
       {nuxDialog}
 
       <ChatScrollNavigator
-        messages={displayMessages}
+        messages={chatScrollNavigatorMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
       >
-        {({ reserveRightSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}
+                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
                 style={
                   userInputScrollPadding
                     ? { paddingBottom: `${userInputScrollPadding}px` }
@@ -5972,6 +6890,7 @@ export function ChatContainer({
                     isLoading={isLoading}
                     toolResults={toolResults}
                     toolCallStates={toolCallDisplayStates}
+                    pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
                     pendingApproval={pendingApproval}
                     autoApproveGitPush={!yoloModeLoaded || yoloMode}
                     onApprovalDecision={handleApprovalDecision}
@@ -5984,6 +6903,10 @@ export function ChatContainer({
                     assistantDurationMsById={assistantDurationMsById}
                     userSendTimeLabelById={userSendTimeLabelById}
                   />
+
+                  {contextCompaction && (
+                    <ContextCompactionCard compaction={contextCompaction} />
+                  )}
 
                   {/*测试git diff功能*/}
                   {/*<DisplayDiffTest/>*/}
@@ -6016,22 +6939,24 @@ export function ChatContainer({
                   {/* Streaming indicator and inline TODOs */}
                   {isLoading && (
                     <div className="space-y-3">
-                      <div className="flex items-center gap-2 text-sm">
-                        <div className="rainbow-spinner" />
-                        <span
-                          className="thinking-shimmer-text"
-                          data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                        >
-                          {THINKING_MESSAGES[thinkingMessageIndex]}
-                        </span>
-                        {streamData.isLoading && (
-                          <ProcessingDuration
-                            key={threadId}
-                            startTime={activeTurnStartTime}
-                            text="已处理"
-                          />
-                        )}
-                      </div>
+                      {contextCompaction?.phase !== "started" && (
+                        <div className="flex items-center gap-2 text-sm">
+                          <div className="rainbow-spinner" />
+                          <span
+                            className="thinking-shimmer-text"
+                            data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+                          >
+                            {THINKING_MESSAGES[thinkingMessageIndex]}
+                          </span>
+                          {streamData.isLoading && (
+                            <ProcessingDuration
+                              key={threadId}
+                              startTime={activeTurnStartTime}
+                              text="已处理"
+                            />
+                          )}
+                        </div>
+                      )}
                       {todos.length > 0 && <ChatTodos todos={todos} />}
                     </div>
                   )}
@@ -6045,11 +6970,7 @@ export function ChatContainer({
                       <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "工具失败熔断已停止本轮"
-                            : hookInterruption.action === "halt"
-                              ? "Hook 已停止本轮"
-                              : "Hook 已阻断本轮"}
+                          {interruptionNotice?.title}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
                           <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
@@ -6066,9 +6987,7 @@ export function ChatContainer({
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground mt-2">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
-                            : "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"}
+                          {interruptionNotice?.explanation}
                         </div>
                       </div>
                       <button
@@ -6101,7 +7020,7 @@ export function ChatContainer({
                 (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
-                <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
+                <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-20")}>
                   {(() => {
                     const approval = pendingApproval as unknown as Record<string, unknown>
                     const operation = approval.operation
@@ -6376,11 +7295,11 @@ export function ChatContainer({
               workspacePath={workspacePath}
               currentThreadMetadata={currentThread?.metadata}
               createThread={createThread}
-              reserveRightSpace={reserveRightSpace}
+              reserveLeftSpace={reserveLeftSpace}
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
             {goalUi.goal && (
-              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-20")}>
+              <div className={cn("px-4 pb-1", reserveLeftSpace && "md:pl-[20px]")}>
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
@@ -6395,7 +7314,7 @@ export function ChatContainer({
               className={cn(
                 "px-4 pb-4",
                 goalUi.goal ? "pt-1" : "pt-4",
-                reserveRightSpace && "md:pr-[20px]"
+                reserveLeftSpace && "md:pl-[20px]"
               )}
             >
               {showGitChangeNotice && (
@@ -6427,6 +7346,11 @@ export function ChatContainer({
                 </div>
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+                <ChatScrollToBottomButton
+                  getViewport={getViewport}
+                  onScrollToBottom={scrollToConversationBottom}
+                  resetKey={threadId}
+                />
                 <SlashCommandPopover
                   mode={slash.mode}
                   selectedIdx={slash.selectedIdx}
@@ -6442,6 +7366,158 @@ export function ChatContainer({
                   onSelectFile={applyAtFileMention}
                 />
                 <div className="flex flex-col gap-2">
+                  {queuedMessages.length > 0 && (
+                    <div className="px-1 py-1">
+                      <div className="flex items-center gap-2 pb-1 text-[11px] text-muted-foreground">
+                        <ListEnd className="size-3.5" />
+                        <span>排队中 {queuedMessages.length} 条</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {queuedMessages.map((queued) => {
+                          const isEditing = editingQueueId === queued.id
+                          const isGuided = Boolean(queued.handoffRequestedAt)
+                          return (
+                            <div
+                              key={queued.id}
+                              draggable={!isEditing && !isGuided}
+                              onDragStart={() => {
+                                if (!isGuided) setDraggingQueueId(queued.id)
+                              }}
+                              onDragOver={(e) => {
+                                if (!isGuided) e.preventDefault()
+                              }}
+                              onDrop={(e) => {
+                                e.preventDefault()
+                                if (isGuided) {
+                                  setDraggingQueueId(null)
+                                  return
+                                }
+                                if (draggingQueueId) {
+                                  const rect = e.currentTarget.getBoundingClientRect()
+                                  const placement =
+                                    e.clientY > rect.top + rect.height / 2 ? "after" : "before"
+                                  moveQueuedMessage(draggingQueueId, queued.id, placement)
+                                }
+                                setDraggingQueueId(null)
+                              }}
+                              onDragEnd={() => setDraggingQueueId(null)}
+                              className={cn(
+                                "rounded-xl bg-amber-900/5 px-2.5 py-2 transition-colors",
+                                draggingQueueId === queued.id && "opacity-50",
+                                !isEditing && "hover:bg-amber-900/10"
+                              )}
+                            >
+                              {isEditing ? (
+                                <div className="space-y-2">
+                                  <textarea
+                                    value={editingQueueText}
+                                    onChange={(e) => setEditingQueueText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                                        e.preventDefault()
+                                        saveEditingQueuedMessage()
+                                      }
+                                      if (e.key === "Escape") {
+                                        e.preventDefault()
+                                        cancelEditingQueuedMessage()
+                                      }
+                                    }}
+                                    className="min-h-20 w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                                    autoFocus
+                                  />
+                                  <div className="flex justify-end gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={cancelEditingQueuedMessage}
+                                      className="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted"
+                                    >
+                                      <X className="size-3.5" />
+                                      取消
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={saveEditingQueuedMessage}
+                                      className="flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-xs text-primary-foreground hover:bg-primary/90"
+                                    >
+                                      <Check className="size-3.5" />
+                                      保存
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <GripVertical className="size-4 shrink-0 cursor-grab text-muted-foreground/50" />
+                                  <CornerDownRight className="size-4 shrink-0 text-muted-foreground/70" />
+                                  <div className="min-w-0 flex-1 truncate text-sm text-foreground/80">
+                                    {getQueuedPreview(queued)}
+                                  </div>
+                                  {CURRENT_RUN_GUIDE_UI_ENABLED && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleGuideQueuedMessage(queued)}
+                                      disabled={isGuided}
+                                      aria-disabled={isGuided || hasActiveGoalRunning}
+                                      title={
+                                        isGuided
+                                          ? "已提交给当前运行"
+                                          : hasActiveGoalRunning
+                                            ? "Active Goal 运行中，请先暂停 Goal 再引导消息"
+                                            : "提交给当前运行，下次模型调用前接收"
+                                      }
+                                      className={cn(
+                                        "flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-default disabled:opacity-60",
+                                        hasActiveGoalRunning && "opacity-60"
+                                      )}
+                                    >
+                                      <CornerDownRight className="size-3.5" />
+                                      {isGuided ? "已引导" : "引导"}
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteQueuedMessage(queued)}
+                                    title="删除"
+                                    className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                                  >
+                                    <Trash2 className="size-3.5" />
+                                  </button>
+                                  <Popover>
+                                    <PopoverTrigger asChild>
+                                      <button
+                                        type="button"
+                                        title="更多"
+                                        className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                                      >
+                                        <MoreHorizontal className="size-4" />
+                                      </button>
+                                    </PopoverTrigger>
+                                    <PopoverContent align="end" className="w-40 p-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => startEditingQueuedMessage(queued)}
+                                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted"
+                                      >
+                                        <Pencil className="size-4" />
+                                        编辑消息
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteQueuedMessage(queued)}
+                                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                                      >
+                                        <ListEnd className="size-4" />
+                                        关闭排队
+                                      </button>
+                                    </PopoverContent>
+                                  </Popover>
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-end gap-2">
                     <div
                       ref={dropZoneRef}
@@ -6449,7 +7525,7 @@ export function ChatContainer({
                         "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
                         pendingUserInput
                           ? "border-primary/25 bg-background"
-                          : glowVisible
+                          : appleIntelligenceGlowEnabled && glowVisible
                             ? "bg-white/80"
                             : "bg-white",
                         dragOver && "border-primary"
@@ -6472,7 +7548,7 @@ export function ChatContainer({
                           <BuiltinBrowserChip onRemove={() => setSelectedBuiltinBrowser(false)} />
                         </div>
                       )}
-                      {glowVisible && !pendingUserInput && (
+                      {appleIntelligenceGlowEnabled && glowVisible && !pendingUserInput && (
                         <div
                           className={cn(
                             "siri-bg-glow rounded-xl",
@@ -6592,21 +7668,34 @@ export function ChatContainer({
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
+                            showWorkflow
                             mode={
                               (disableCoordinatorModeOption && agentMode === "coordinator") ||
                               (disableWorkflowModeOption && agentMode === "workflow")
                                 ? "normal"
                                 : agentMode
                             }
-                            locked={
-                              isLoading || !canChangeAgentMode
-                            }
+                            locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
-                              disableCoordinatorModeOption || disableWorkflowModeOption
+                              disableCoordinatorModeOption ||
+                              disableWorkflowModeOption
                                 ? {
                                     coordinator: disableCoordinatorModeOption,
                                     workflow: disableWorkflowModeOption
+                                  }
+                                : undefined
+                            }
+                            disabledModeReasons={
+                              disableCoordinatorModeOption ||
+                              disableWorkflowModeOption
+                                ? {
+                                    coordinator: disableCoordinatorModeOption
+                                      ? "项目模式暂不支持 Agent Team。"
+                                      : undefined,
+                                    workflow: disableWorkflowModeOption
+                                      ? "项目模式暂不支持 Workflow。"
+                                      : undefined
                                   }
                                 : undefined
                             }
@@ -6692,7 +7781,7 @@ export function ChatContainer({
                                           preventDefault: () => {}
                                         } as React.FormEvent
                                         // 发送继续消息
-                                        handleSubmit(fakeEvent, '继续')
+                                        handleSubmit(fakeEvent, "继续")
                                       }}
                                       disabled={effectiveInputDisabled}
                                       className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"

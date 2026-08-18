@@ -2,7 +2,19 @@ import { HumanMessage, ToolMessage } from "@langchain/core/messages"
 import { DynamicStructuredTool, ToolInputParsingException } from "@langchain/core/tools"
 import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
-import { extractTextFromUnknownContent } from "../coordinator-worker-stream"
+import {
+  extractTextFromUnknownContent,
+  observeSkillUsageFromStream
+} from "../coordinator-worker-stream"
+import { SkillUsageDetector } from "../skill-evolution/usage-detector"
+import {
+  createTraceCollectorSafely,
+  finishTraceInBackground,
+  runTraceSideEffect,
+  type TraceCollector
+} from "../trace/collector"
+import type { TraceContext, TraceNodeStatus, TraceOutcome } from "../trace/types"
+import { setAdoptionContext } from "../../services/adoption-tracker"
 import { validateJsonSchemaValue } from "./json-schema"
 import {
   WORKFLOW_STRUCTURED_OUTPUT_MAX_ATTEMPTS,
@@ -13,6 +25,11 @@ import {
   type WorkflowSubagentResult
 } from "./types"
 import { WORKFLOW_SUBAGENT_BASE_PROMPT, buildWorkflowSubagentStructuredPrompt } from "./prompts"
+import {
+  extractVisibleReasoning,
+  TRACE_REASONING_MAX_CHARS,
+  truncateReasoningForTrace
+} from "../../../shared/model-reasoning"
 
 const STRUCTURED_OUTPUT_FATAL_ERROR = Symbol.for("cmb.workflow.structured_output.fatal")
 // Explicitly marks a structured-output failure as "retry on a fresh session" so the
@@ -30,6 +47,7 @@ const STRUCTURED_OUTPUT_EXAMPLE_ARRAY_MAX_ITEMS = 16
 const STRUCTURED_OUTPUT_EXAMPLE_MAX_NODES = 256
 const STRUCTURED_OUTPUT_EXAMPLE_MAX_CHARS = 4_000
 const STRUCTURED_OUTPUT_STRINGIFY_MAX_OBJECT_KEYS = 256
+const WORKFLOW_TRACE_TOOL_ARGS_PARSE_MAX_CHARS = 100_000
 const STRUCTURED_OUTPUT_EXAMPLE_UNAVAILABLE = Symbol("structured_output_example_unavailable")
 const STRUCTURED_OUTPUT_NO_SINGLE_VALUE = Symbol("structured_output_no_single_value")
 const PROVIDER_SCHEMA_DROPPED_ANNOTATIONS = new Set([
@@ -65,6 +83,7 @@ export interface WorkflowSubagentDeps {
   /** Creates a one-shot agent runtime for a subagent thread. */
   createRuntime: (options: {
     threadId: string
+    agentId: string
     modelId?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -79,6 +98,7 @@ export interface WorkflowSubagentDeps {
   isRetryableApiError: (error: unknown) => boolean
   parentThreadId: string
   defaultModelId?: string
+  traceContext?: TraceContext
   /** True while any subagent of this run is blocked on a pending user approval —
    * lets the engine's inactivity watchdog treat the run as waiting, not hung. Pass
    * the run's `runId` so the check is scoped to THIS run (concurrent runs on one
@@ -92,6 +112,7 @@ export interface RunWorkflowSubagentRequest {
   model?: string
   agentIndex: number
   label: string
+  phase?: string | null
   runId: string
   signal: AbortSignal
   /** Role system prompt resolved from the call's agentType (prepended to the
@@ -228,6 +249,61 @@ function raceWithAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
+function normalizeWorkflowModelId(model: string | undefined): string | undefined {
+  if (!model) return undefined
+  return model.startsWith("custom:") ? model : `custom:${model}`
+}
+
+function describeWorkflowTraceError(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name || "Workflow subagent failed"
+  if (typeof error === "string" && error) return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+function createWorkflowSubagentTrace(
+  deps: WorkflowSubagentDeps,
+  request: RunWorkflowSubagentRequest,
+  threadId: string
+): TraceCollector | undefined {
+  const parent = deps.traceContext
+  if (!parent) return undefined
+  const requestedModelId =
+    normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown"
+  const workflowPhase = request.phase ?? undefined
+  return createTraceCollectorSafely(
+    threadId,
+    request.prompt,
+    requestedModelId,
+    {
+      traceKind: "subagent",
+      executionMode: "workflow",
+      rootTraceId: parent.rootTraceId,
+      rootThreadId: parent.rootThreadId,
+      parentTraceId: parent.traceId,
+      parentThreadId: parent.threadId,
+      parentSpanId: parent.rootNodeId,
+      linkType: "async_span_link",
+      subagentKind: "workflow_agent",
+      subagentRunId: `${request.runId}:agent:${request.agentIndex}`,
+      subagentThreadId: threadId,
+      handoffAction: "workflow_agent",
+      handoffSourceAgent: "workflow",
+      handoffTargetAgent: request.label,
+      workflowRunId: request.runId,
+      workflowAgentIndex: request.agentIndex,
+      workflowPhase,
+      workflowAgentLabel: request.label,
+      harnessFeature: parent.harnessFeature,
+      includeSkillEval: false
+    },
+    "Workflow"
+  )
+}
+
 async function runOnce(
   deps: WorkflowSubagentDeps,
   request: RunWorkflowSubagentRequest,
@@ -238,6 +314,7 @@ async function runOnce(
   const runShort = request.runId.replace(/^wf_/, "")
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
+  const agentId = `${request.runId}:agent:${request.agentIndex}`
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -249,6 +326,38 @@ async function runOnce(
   timeoutTimer?.unref?.()
 
   const structured: { value: unknown; called: boolean } = { value: undefined, called: false }
+  let tracer: TraceCollector | undefined
+  let latestSnapshot: unknown
+  let traceTerminalRecorded = false
+  let traceOutcome: TraceOutcome = "success"
+  let traceError: string | undefined
+  const skillUsageDetector = new SkillUsageDetector()
+  const syncSkillAttribution = (): void => {
+    if (!tracer) return
+    const usedSkills = skillUsageDetector.getUsedSkillNames()
+    const skillSource = skillUsageDetector.getUsedSkillSourceRefs()
+    tracer.setUsedSkills(usedSkills)
+    tracer.setSkillSource(skillSource)
+    tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
+    setAdoptionContext(threadId, { usedSkills, skillSource })
+  }
+  const recordValuesSnapshot = (snapshot: unknown): void => {
+    latestSnapshot = snapshot
+    runTraceSideEffect("Workflow Skill observer", () => {
+      if (
+        observeSkillUsageFromStream(
+          "values",
+          snapshot,
+          skillUsageDetector,
+          undefined,
+          request.prompt
+        )
+      ) {
+        syncSkillAttribution()
+      }
+    })
+    request.onValues?.(snapshot)
+  }
 
   try {
     // agentIndex is deterministic, so after a crash-resume this threadId can
@@ -256,6 +365,7 @@ async function runOnce(
     // transcript poisons the subagent (or 400s on a dangling tool_call).
     // Purge any stale per-thread state before creating the runtime.
     await deps.cleanupThread(threadId).catch(() => undefined)
+    tracer = createWorkflowSubagentTrace(deps, request, threadId)
 
     const additionalTools = request.schema
       ? [
@@ -282,6 +392,7 @@ async function runOnce(
 
     const { runtime, modelFellBack } = await createRuntimeWithModelFallback(deps, {
       threadId,
+      agentId,
       model: request.model,
       extraSystemPrompt,
       abortSignal: controller.signal,
@@ -290,12 +401,25 @@ async function runOnce(
       disallowedTools: request.disallowedTools,
       shellAccess: request.shellAccess
     })
+    runTraceSideEffect("Workflow", () => {
+      tracer?.setModelId(
+        modelFellBack
+          ? (deps.defaultModelId ?? "unknown")
+          : (normalizeWorkflowModelId(request.model) ?? deps.defaultModelId ?? "unknown")
+      )
+    })
 
     const streamConfig = {
       configurable: { thread_id: threadId },
       callbacks: [],
       signal: controller.signal,
-      streamMode: ["values"] as Array<"values">,
+      // "messages" is subscribed for its side effect, not for display: it attaches
+      // LangGraph's StreamMessagesHandler (lc_prefer_streaming), which switches the
+      // underlying HTTP call to SSE. Without it the request is non-streaming and the
+      // 60s first-byte watchdog in createRetryingFetch kills any model turn whose
+      // generation exceeds 60s (e.g. write_file of a large file). consumeValuesStream
+      // skips non-"values" chunks, so the token stream is otherwise ignored.
+      streamMode: ["values", "messages"] as Array<"values" | "messages">,
       recursionLimit: 1000
     }
     const stopAfterStructuredAccepted =
@@ -315,10 +439,11 @@ async function runOnce(
           await runtime.stream({ messages: [new HumanMessage(request.prompt)] }, streamConfig),
           controller.signal,
           stopAfterStructuredAccepted,
-          request.onValues
+          recordValuesSnapshot
         ))(),
       controller.signal
     )
+    latestSnapshot = snapshot
     throwIfStructuredOutputInterrupt(snapshot)
 
     // Structured mode: if the model never called structured_output, give it one
@@ -386,17 +511,25 @@ async function runOnce(
             ),
             controller.signal,
             stopAfterStructuredAccepted,
-            request.onValues
+            recordValuesSnapshot
           ))(),
         controller.signal
       )
+      latestSnapshot = snapshot
       throwIfStructuredOutputInterrupt(snapshot)
     }
 
     throwIfAborted(controller.signal, request.signal, timeoutMs)
 
     const text = extractFinalAssistantText(snapshot)
+    let reasoning = ""
+    if (tracer) {
+      runTraceSideEffect("Workflow reasoning observer", () => {
+        reasoning = truncateReasoningForTrace(extractFinalAssistantReasoning(snapshot))
+      })
+    }
     const outputTokens = extractOutputTokens(snapshot, text)
+    const toolCallCount = extractWorkflowToolCallCount(snapshot)
 
     if (request.schema) {
       if (!isStructuredAccepted(structured, request.schema)) {
@@ -406,17 +539,80 @@ async function runOnce(
             : "subagent completed without calling the structured_output tool"
         )
       }
+      runTraceSideEffect("Workflow", () => {
+        if (!tracer) return
+        tracer.addTerminalNode({
+          type: "message",
+          output: text.trim() ? text : structured.value,
+          metadata: {
+            outputTokens,
+            toolCallCount,
+            modelFellBack,
+            structuredOutput: true,
+            ...(reasoning ? { reasoning } : {})
+          }
+        })
+        traceTerminalRecorded = true
+      })
       return { text, structured: structured.value, outputTokens, modelFellBack }
     }
 
     if (!text.trim()) {
       throw new Error("subagent produced no assistant output")
     }
+    runTraceSideEffect("Workflow", () => {
+      if (!tracer) return
+      tracer.addTerminalNode({
+        type: "message",
+        output: text,
+        metadata: {
+          outputTokens,
+          toolCallCount,
+          modelFellBack,
+          structuredOutput: false,
+          ...(reasoning ? { reasoning } : {})
+        }
+      })
+      traceTerminalRecorded = true
+    })
     return { text, structured: undefined, outputTokens, modelFellBack }
   } catch (error) {
-    throwIfAborted(controller.signal, request.signal, timeoutMs)
+    if (isWorkflowAbortError(error)) {
+      traceOutcome = "cancelled"
+      traceError = describeWorkflowTraceError(error)
+      throw error
+    }
+    try {
+      throwIfAborted(controller.signal, request.signal, timeoutMs)
+    } catch (abortError) {
+      traceOutcome = "cancelled"
+      traceError = describeWorkflowTraceError(abortError)
+      throw abortError
+    }
+    traceOutcome = "error"
+    traceError = describeWorkflowTraceError(error)
     throw error
   } finally {
+    if (tracer) {
+      const tracerToFinish = tracer
+      runTraceSideEffect("Workflow", () => {
+        const toolCallCount = extractWorkflowToolCallCount(latestSnapshot)
+        if (!traceTerminalRecorded && toolCallCount > 0) {
+          tracerToFinish.addTerminalNode({
+            type: traceOutcome === "cancelled" ? "cancel" : "error",
+            output: traceError,
+            metadata: {
+              toolCallCount
+            }
+          })
+          traceTerminalRecorded = true
+        }
+      })
+      const traceSnapshot = latestSnapshot
+      finishTraceInBackground(tracerToFinish, traceOutcome, traceError, "Workflow", () => {
+        recordWorkflowTraceToolDetails(tracerToFinish, traceSnapshot)
+      })
+    }
     if (timeoutTimer) clearTimeout(timeoutTimer)
     request.signal.removeEventListener("abort", onParentAbort)
     // Abort the per-subagent controller on every exit path (including normal
@@ -446,6 +642,7 @@ export async function createRuntimeWithModelFallback(
   deps: WorkflowSubagentDeps,
   options: {
     threadId: string
+    agentId: string
     model?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -457,6 +654,7 @@ export async function createRuntimeWithModelFallback(
 ): Promise<{ runtime: WorkflowSubagentRuntime; modelFellBack: boolean }> {
   const baseOptions = {
     threadId: options.threadId,
+    agentId: options.agentId,
     extraSystemPrompt: options.extraSystemPrompt,
     abortSignal: options.abortSignal,
     additionalTools: options.additionalTools,
@@ -464,12 +662,13 @@ export async function createRuntimeWithModelFallback(
     shellAccess: options.shellAccess
   }
   if (options.model) {
-    // Don't double-prefix, but stay consistent with how the runtime resolves
-    // it: the runtime only recognizes the `custom:` prefix (it slices it off),
-    // so add `custom:` unless it is ALREADY there. (Using includes(":") would
+    // Don't double-prefix known model references. Bare profile model names keep
+    // the legacy custom-model interpretation. (Using includes(":") would
     // wrongly skip the prefix for a custom model whose own name contains a
     // colon, and would not help an unsupported provider prefix anyway.)
-    const modelId = options.model.startsWith("custom:") ? options.model : `custom:${options.model}`
+    const modelId = /^(?:custom|builtin):/.test(options.model)
+      ? options.model
+      : `custom:${options.model}`
     try {
       return {
         runtime: await deps.createRuntime({ ...baseOptions, modelId }),
@@ -737,12 +936,16 @@ function rootSchemaCoversProperty(schema: Record<string, unknown>, key: string):
   ) {
     return true
   }
-  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties)) return true
+  if (schema.additionalProperties === true || isPlainRecord(schema.additionalProperties))
+    return true
   return rootSchemaVariants(schema).some((variant) => rootSchemaCoversProperty(variant, key))
 }
 
 function rootSchemaDeclaresProperty(schema: Record<string, unknown>, key: string): boolean {
-  if (isPlainRecord(schema.properties) && Object.prototype.hasOwnProperty.call(schema.properties, key)) {
+  if (
+    isPlainRecord(schema.properties) &&
+    Object.prototype.hasOwnProperty.call(schema.properties, key)
+  ) {
     return true
   }
   return rootSchemaVariants(schema).some((variant) => rootSchemaDeclaresProperty(variant, key))
@@ -1614,9 +1817,13 @@ export async function consumeValuesStream(
 interface MessageLike {
   additional_kwargs?: { tool_calls?: unknown[] }
   content?: unknown
+  name?: unknown
+  status?: unknown
   kwargs?: {
     additional_kwargs?: { tool_calls?: unknown[] }
     content?: unknown
+    name?: unknown
+    status?: unknown
     tool_calls?: unknown[]
     invalid_tool_calls?: unknown[]
     tool_call_id?: unknown
@@ -1790,6 +1997,134 @@ function extractFinalAssistantText(snapshot: unknown): string {
   return ""
 }
 
+function extractFinalAssistantReasoning(snapshot: unknown): string {
+  const messages = snapshotMessages(snapshot)
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!isAiMessage(message)) continue
+    const reasoning = extractVisibleReasoning(message, TRACE_REASONING_MAX_CHARS + 1).trim()
+    if (reasoning) return reasoning
+  }
+  return ""
+}
+
+interface WorkflowNormalizedToolCall {
+  toolCallId?: string
+  name: string
+  input?: unknown
+}
+
+export interface WorkflowTraceToolDetail extends WorkflowNormalizedToolCall {
+  output?: unknown
+  status: TraceNodeStatus
+}
+
+function workflowTraceToolCallName(toolCall: unknown): string {
+  if (!isPlainRecord(toolCall)) return "unknown"
+  const fn = isPlainRecord(toolCall.function) ? toolCall.function : undefined
+  let name = ""
+  if (typeof toolCall.name === "string") name = toolCall.name
+  else if (typeof fn?.name === "string") name = fn.name
+  return name.trim() || "unknown"
+}
+
+function workflowTraceToolCallInput(toolCall: unknown): unknown {
+  if (!isPlainRecord(toolCall)) return undefined
+  if (Object.prototype.hasOwnProperty.call(toolCall, "args")) return toolCall.args
+  const fn = isPlainRecord(toolCall.function) ? toolCall.function : undefined
+  if (!fn || !Object.prototype.hasOwnProperty.call(fn, "arguments")) return undefined
+  const args = fn.arguments
+  if (typeof args !== "string") return args
+  const trimmed = args.trim()
+  if (
+    !trimmed ||
+    trimmed.length > WORKFLOW_TRACE_TOOL_ARGS_PARSE_MAX_CHARS ||
+    (!trimmed.startsWith("{") && !trimmed.startsWith("["))
+  ) {
+    return args
+  }
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return args
+  }
+}
+
+function extractWorkflowNormalizedToolCalls(snapshot: unknown): WorkflowNormalizedToolCall[] {
+  const details: WorkflowNormalizedToolCall[] = []
+  const seenIds = new Set<string>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (!isAiMessage(message)) continue
+    for (const call of messageNormalizedToolCalls(message)) {
+      const id = toolCallId(call)
+      if (id) {
+        if (seenIds.has(id)) continue
+        seenIds.add(id)
+      }
+      const input = workflowTraceToolCallInput(call)
+      details.push({
+        ...(id ? { toolCallId: id } : {}),
+        name: workflowTraceToolCallName(call),
+        ...(input !== undefined ? { input } : {})
+      })
+    }
+  }
+  return details
+}
+
+function workflowTraceToolResultStatus(message: MessageLike): TraceNodeStatus {
+  const status = message.status ?? message.kwargs?.status
+  if (status === "error") return "error"
+  if (status === "cancelled") return "cancelled"
+  if (status === "unknown") return "unknown"
+  return "success"
+}
+
+/**
+ * Recover the tools that actually executed from a Workflow agent's cumulative
+ * values snapshot. Only normalized/actionable AI tool calls are included;
+ * malformed calls from additional_kwargs/invalid_tool_calls are intentionally
+ * excluded because the runtime never executed them.
+ */
+export function extractWorkflowTraceToolDetails(snapshot: unknown): WorkflowTraceToolDetail[] {
+  const resultsByCallId = new Map<string, { output?: unknown; status: TraceNodeStatus }>()
+  for (const message of snapshotMessages(snapshot)) {
+    if (!isToolMessage(message)) continue
+    const id = toolMessageToolCallId(message)
+    if (!id) continue
+    const output = message.content ?? message.kwargs?.content
+    resultsByCallId.set(id, {
+      ...(output !== undefined ? { output } : {}),
+      status: workflowTraceToolResultStatus(message)
+    })
+  }
+
+  return extractWorkflowNormalizedToolCalls(snapshot).map((call) => {
+    const result = call.toolCallId ? resultsByCallId.get(call.toolCallId) : undefined
+    return {
+      ...call,
+      ...(result && result.output !== undefined ? { output: result.output } : {}),
+      status: result?.status ?? "unknown"
+    }
+  })
+}
+
+function recordWorkflowTraceToolDetails(tracer: TraceCollector, snapshot: unknown): void {
+  for (const tool of extractWorkflowTraceToolDetails(snapshot)) {
+    const toolNodeId = tracer.addToolNode({
+      name: tool.name,
+      ...(tool.input !== undefined ? { input: tool.input } : {}),
+      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {})
+    })
+    tracer.addToolResultNode({
+      parentId: toolNodeId,
+      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
+      ...(tool.output !== undefined ? { output: tool.output } : {}),
+      status: tool.status
+    })
+  }
+}
+
 /**
  * Sums reported output tokens across assistant messages; falls back to a
  * chars/4 estimate when the provider reports no usage (common on mid-tier
@@ -1821,6 +2156,10 @@ export function extractOutputTokens(snapshot: unknown, text: string): number {
   if (total > 0) return total
   // Last resort when the snapshot carried no assistant content at all.
   return Math.max(1, estimateTokenCount(text))
+}
+
+function extractWorkflowToolCallCount(snapshot: unknown): number {
+  return extractWorkflowNormalizedToolCalls(snapshot).length
 }
 
 /**

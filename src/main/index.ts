@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, shell } from "electron"
 import {
   isBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
@@ -25,7 +25,13 @@ if (process.platform === "linux") {
 
 import { join } from "path"
 import { existsSync, rmSync } from "fs"
-import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
+import {
+  writeMainLog,
+  writeRendererLog,
+  flushLogs,
+  flushLogsSync,
+  initializeLogRedaction
+} from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import {
@@ -36,23 +42,27 @@ import {
   isAppTrayAvailable,
   requestAppAttention,
   setAppQuitting,
-  showPendingAppAttention,
-  shouldHideMainWindowOnClose
+  showPendingAppAttention
 } from "./app-tray"
 import { setAppAttentionHandler } from "./app-attention-events"
+import { APP_ATTENTION_CHANNEL, isRendererAppAttentionPayload } from "../shared/app-attention"
 import {
-  APP_ATTENTION_CHANNEL,
-  isRendererAppAttentionPayload
-} from "../shared/app-attention"
-import type {
-  CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
+  closePromptActionToBehavior,
+  isCloseToTrayPromptResponse,
+  isWindowCloseBehavior,
+  resolveWindowCloseRequest,
+  type CloseToTrayPromptReason,
+  type CloseToTrayPromptEvent,
+  type WindowCloseBehavior
 } from "../shared/close-to-tray"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
 const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
 const EVENT_CATEGORIES = new Set<EventCategory>([
@@ -66,21 +76,6 @@ const EVENT_CATEGORIES = new Set<EventCategory>([
   "chatx",
   "workspace"
 ])
-
-function isCloseToTrayPromptResponse(
-  payload: unknown
-): payload is { requestId: number; action: CloseToTrayPromptAction } {
-  if (!payload || typeof payload !== "object") return false
-  // 使用 in 操作符进行属性存在性检查，比 as 断言更安全
-  if (!("requestId" in payload) || !("action" in payload)) return false
-  const record = payload as Record<string, unknown>
-  return (
-    typeof record.requestId === "number" &&
-    (record.action === "minimize-to-tray" ||
-      record.action === "direct-close" ||
-      record.action === "cancel")
-  )
-}
 
 function isTrackEventPayload(payload: unknown): payload is {
   eventName: string
@@ -160,7 +155,8 @@ function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): strin
           }
         }
         if (typeof nestedValue === "symbol") return nestedValue.toString()
-        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (typeof nestedValue === "function")
+          return `[Function ${nestedValue.name || "anonymous"}]`
         if (nestedValue && typeof nestedValue === "object") {
           if (seen.has(nestedValue)) return "[Circular]"
           seen.add(nestedValue)
@@ -197,9 +193,9 @@ function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
 
 function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
   return ((...args: Parameters<T>) => {
-    writeMainLog(level, args)
-    forwardMainLogToRenderer(level, args)
-    fn(...args)
+    const redactedArgs = writeMainLog(level, args)
+    forwardMainLogToRenderer(level, redactedArgs)
+    fn(...(redactedArgs as Parameters<T>))
   }) as T
 }
 
@@ -210,6 +206,7 @@ if (!browserNativeMessagingHostLaunch) {
   console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
   console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
   console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
+  console.trace = withEpipeGuard(withMainFileLogging("DEBUG", console.trace.bind(console)))
 
   // Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
   // or when the renderer window is destroyed while the main process is still logging).
@@ -242,7 +239,12 @@ if (!browserNativeMessagingHostLaunch) {
   process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
   process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 }
-import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
+import {
+  disposeAllAgentThreadStates,
+  hasAnyActiveAgentTasks,
+  registerAgentHandlers,
+  shutdownAllAgentTasks
+} from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
@@ -269,6 +271,7 @@ import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
@@ -278,7 +281,7 @@ import {
   disposeBuiltinBrowserForMainWindowEvent,
 } from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
-import { setTraceReporter } from "./agent/trace/collector"
+import { initializeTraceStorageSecurity, setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
@@ -288,17 +291,34 @@ import {
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
 import { getAllThreads, initializeDatabase, flush } from "./db"
-import { startScheduler, stopScheduler } from "./services/scheduler"
-import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
-import { startChatX, stopChatX } from "./services/chatx"
+import {
+  hasActiveScheduledTaskRuns,
+  startScheduler,
+  stopScheduler,
+  stopSchedulerAndWait
+} from "./services/scheduler"
+import {
+  isHeartbeatRunning,
+  startHeartbeat,
+  stopHeartbeat,
+  stopHeartbeatAndWait
+} from "./services/heartbeat"
+import { hasActiveChatXRuns, startChatX, stopChatX, stopChatXAndWait } from "./services/chatx"
 import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
+import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
+import {
+  getOpenworkDir,
+  getWindowCloseBehavior,
+  isKeepAwakeEnabled,
+  setKeepAwakeEnabled,
+  setWindowCloseBehavior
+} from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
@@ -306,6 +326,7 @@ import {
   configurePetWindow,
   createPetWindow,
   getPetWindowDebugInfo,
+  markPetStartupReady,
   registerPetHandlers
 } from "./pet"
 
@@ -315,7 +336,27 @@ let browserService: ReturnType<typeof registerBuiltinBrowserIpc> | null = null
 let closeToTrayPromptOpen = false
 let closeToTrayPromptRequestId = 0
 let closeToTrayPromptTimer: NodeJS.Timeout | null = null
+let closeToTrayPromptReason: CloseToTrayPromptReason | null = null
+let closeToTrayPromptRememberChoiceAllowed = false
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+const PET_STARTUP_DELAY_MS = 750
+let petStartupTimer: NodeJS.Timeout | null = null
+
+function cancelDelayedPetStartup(): void {
+  if (!petStartupTimer) return
+  clearTimeout(petStartupTimer)
+  petStartupTimer = null
+}
+
+function schedulePetStartupAfterMainLoad(window: BrowserWindow): void {
+  cancelDelayedPetStartup()
+  petStartupTimer = setTimeout(() => {
+    petStartupTimer = null
+    if (mainWindow !== window || window.isDestroyed() || window.webContents.isDestroyed()) return
+    markPetStartupReady()
+  }, PET_STARTUP_DELAY_MS)
+  petStartupTimer.unref?.()
+}
 
 function disposeBrowserServiceForMainWindow(reason: string): void {
   disposeBuiltinBrowserForMainWindowEvent({
@@ -328,8 +369,8 @@ function disposeBrowserServiceForMainWindow(reason: string): void {
 
 function cleanupLegacySkillEvalRecords(): void {
   const roots = new Set(
-    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter(
-      (value): value is string => Boolean(value)
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter((value): value is string =>
+      Boolean(value)
     )
   )
 
@@ -436,25 +477,48 @@ function hideMainWindowToTray(window: BrowserWindow): void {
 
 function clearCloseToTrayPromptState(): void {
   closeToTrayPromptOpen = false
+  closeToTrayPromptReason = null
+  closeToTrayPromptRememberChoiceAllowed = false
   if (closeToTrayPromptTimer) {
     clearTimeout(closeToTrayPromptTimer)
     closeToTrayPromptTimer = null
   }
 }
 
-function requestHideMainWindowToTray(window: BrowserWindow): void {
+function hasActiveForegroundRuns(): boolean {
+  return (
+    hasAnyActiveAgentTasks() ||
+    hasActiveChatXRuns() ||
+    hasActiveScheduledTaskRuns() ||
+    isHeartbeatRunning()
+  )
+}
+
+function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
+  const savedBehavior = setWindowCloseBehavior(behavior)
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
+  }
+  return savedBehavior
+}
+
+function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return
   if (closeToTrayPromptOpen) {
-    if (!window.isDestroyed()) window.focus()
+    window.focus()
     return
   }
 
+  const trayAvailable = isAppTrayAvailable()
   closeToTrayPromptOpen = true
+  closeToTrayPromptReason = reason
+  closeToTrayPromptRememberChoiceAllowed = reason !== "active-runs"
   closeToTrayPromptRequestId += 1
   const requestId = closeToTrayPromptRequestId
   closeToTrayPromptTimer = setTimeout(() => {
     if (closeToTrayPromptRequestId === requestId) {
       console.warn("[Main] Close-to-tray prompt timed out")
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
         const event: CloseToTrayPromptEvent = {
           type: "dismiss",
           requestId,
@@ -469,7 +533,10 @@ function requestHideMainWindowToTray(window: BrowserWindow): void {
   const event: CloseToTrayPromptEvent = {
     type: "open",
     requestId,
-    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘"
+    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘",
+    reason,
+    canMinimizeToTray: trayAvailable,
+    rememberChoiceAllowed: closeToTrayPromptRememberChoiceAllowed
   }
   window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
 }
@@ -491,7 +558,9 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99"].some((ip) =>
+      getLocalIP().includes(ip)
+    ) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
@@ -513,6 +582,33 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: "deny" }
+  })
+
+  // Electron does not provide an application context menu automatically.
+  // Use native edit roles so labels, clipboard behavior, shortcuts, and
+  // enabled states follow the OS for editable fields and selected read-only text.
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    const window = mainWindow
+    const hasSelectedText = params.selectionText.trim().length > 0
+    if ((!params.isEditable && !hasSelectedText) || !window || window.isDestroyed()) return
+
+    Menu.buildFromTemplate([
+      { role: "cut", enabled: params.editFlags.canCut },
+      { role: "copy", enabled: params.editFlags.canCopy },
+      { role: "paste", enabled: params.editFlags.canPaste },
+      { type: "separator" },
+      { role: "selectAll", enabled: params.editFlags.canSelectAll }
+    ]).popup({ window })
+  })
+
+  // A renderer reload destroys the in-flight stream consumer while the agent
+  // continues in the main process. This application intentionally has no
+  // mid-turn reload/reconnect contract, so block browser refresh shortcuts.
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const isRefreshShortcut =
+      input.key === "F5" ||
+      ((input.meta || input.control) && input.key.toLowerCase() === "r")
+    if (isRefreshShortcut) event.preventDefault()
   })
 
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
@@ -542,22 +638,23 @@ function createWindow(): void {
     console.error("[Main] Renderer process gone:", details)
   })
 
-  mainWindow.webContents.on('did-finish-load', () => {
+  mainWindow.webContents.on("did-finish-load", () => {
     const version = app.getVersion()
-    console.log('version---------------', version)
-    console.log('getLocalIP', getLocalIP())
+    console.log("version---------------", version)
+    console.log("getLocalIP", getLocalIP())
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('version', version)
-      mainWindow.webContents.send('ip', getLocalIP())
+      mainWindow.webContents.send("version", version)
+      mainWindow.webContents.send("ip", getLocalIP())
+      schedulePetStartupAfterMainLoad(mainWindow)
     }
   })
 
   // HMR for renderer based on electron-vite cli
   if (isDev && process.env["ELECTRON_RENDERER_URL"]) {
-    console.log('local render')
+    console.log("local render")
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"])
   } else {
-    console.log('url render')
+    console.log("url render")
     // mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
@@ -571,11 +668,23 @@ function createWindow(): void {
     console.warn("[Main] Main window close requested", {
       pet: getPetWindowDebugInfo()
     })
-    if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
-      event.preventDefault()
-      if (mainWindow) {
-        requestHideMainWindowToTray(mainWindow)
-      }
+    const trayAvailable = isAppTrayAvailable()
+    const decision = resolveWindowCloseRequest({
+      behavior: getWindowCloseBehavior(),
+      isAppQuitting: isAppQuitting(),
+      trayAvailable,
+      hasActiveForegroundRuns: hasActiveForegroundRuns()
+    })
+    if (decision.action === "allow-close") return
+
+    event.preventDefault()
+    if (!mainWindow) return
+    if (decision.action === "minimize-to-tray") {
+      hideMainWindowToTray(mainWindow)
+    } else if (decision.action === "quit") {
+      app.quit()
+    } else {
+      requestWindowCloseChoice(mainWindow, decision.reason)
     }
   })
 
@@ -585,6 +694,7 @@ function createWindow(): void {
       pet: getPetWindowDebugInfo()
     })
     disposeBrowserServiceForMainWindow("the main window closed")
+    cancelDelayedPetStartup()
     clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
@@ -622,7 +732,8 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
-      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      const workspacePath =
+        typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
       if (!workspacePath) continue
       const key = workspacePath.toLowerCase()
       if (seen.has(key)) continue
@@ -675,6 +786,53 @@ if (browserNativeMessagingHostLaunch) {
       ensureMainWindowVisible,
       applyMacDockIcon
     })
+
+    try {
+      await flushLogs()
+      const logRedaction = initializeLogRedaction()
+      if (logRedaction.failedFiles > 0) {
+        console.warn(
+          `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+        )
+      } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
+        console.log(
+          `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
+        )
+      }
+    } catch (error) {
+      console.warn(
+        `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+
+    try {
+      const traceStorage = initializeTraceStorageSecurity()
+      if (!traceStorage.ready) {
+        console.warn(
+          `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+        )
+      } else if (traceStorage.mode === "plaintext") {
+        console.warn(
+          "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
+        )
+      } else if (traceStorage.migrationSkipped) {
+        console.log(
+          `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
+        )
+      } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
+        console.warn(
+          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
+        )
+      } else {
+        console.log(
+          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
+        )
+      }
+    } catch (error) {
+      console.warn(
+        `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
 
     // Default open or close DevTools by F12 in development
     if (isDev) {
@@ -748,6 +906,7 @@ if (browserNativeMessagingHostLaunch) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
+    registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
@@ -755,14 +914,36 @@ if (browserNativeMessagingHostLaunch) {
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
-      if (
-        event.sender.id !== mainWindow.webContents.id ||
-        !isRendererAppAttentionPayload(payload)
-      )
+      if (event.sender.id !== mainWindow.webContents.id || !isRendererAppAttentionPayload(payload))
         return
       // Main-process sources own persistent state and keys. Strip renderer keys so
       // a compromised renderer cannot overwrite or resolve an approval/input entry.
       requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
+    })
+
+    ipcMain.handle(WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL, (event) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Window close settings are only available to the main window")
+      }
+      return getWindowCloseBehavior()
+    })
+
+    ipcMain.handle(WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL, (event, behavior: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Window close settings are only available to the main window")
+      }
+      if (!isWindowCloseBehavior(behavior)) {
+        throw new Error("Invalid window close behavior")
+      }
+      return saveWindowCloseBehavior(behavior)
     })
 
     ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
@@ -771,15 +952,81 @@ if (browserNativeMessagingHostLaunch) {
       if (!isCloseToTrayPromptResponse(payload)) return
       if (!closeToTrayPromptOpen || payload.requestId !== closeToTrayPromptRequestId) return
 
-      clearCloseToTrayPromptState()
-      if (payload.action === "minimize-to-tray") {
-        hideMainWindowToTray(mainWindow)
-      } else if (payload.action === "direct-close") {
-        // app.quit() 会触发 before-quit → will-quit 事件链，
-        // 其中会执行 fireSessionEndAll（中断活跃 agent 运行）、
-        // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
-        app.quit()
+      const promptWindow = mainWindow
+      const promptReason = closeToTrayPromptReason
+      const rememberChoiceAllowed = closeToTrayPromptRememberChoiceAllowed
+      const needsActiveRunConfirmation = (): boolean =>
+        payload.action === "direct-close" &&
+        promptReason !== "active-runs" &&
+        hasActiveForegroundRuns()
+
+      if (payload.action === "minimize-to-tray" && !isAppTrayAvailable()) {
+        clearCloseToTrayPromptState()
+        requestWindowCloseChoice(promptWindow, "tray-unavailable")
+        return
       }
+
+      // A background ChatX message can start while the ordinary close prompt is
+      // open. Upgrade to the non-suppressible safety prompt before quitting.
+      if (needsActiveRunConfirmation()) {
+        clearCloseToTrayPromptState()
+        requestWindowCloseChoice(promptWindow, "active-runs")
+        return
+      }
+
+      let rememberError: unknown = null
+      const rememberedBehavior = closePromptActionToBehavior(payload.action)
+      if (rememberChoiceAllowed && payload.rememberChoice && rememberedBehavior) {
+        try {
+          saveWindowCloseBehavior(rememberedBehavior)
+        } catch (error) {
+          console.warn("[Main] Failed to remember window close behavior:", error)
+          rememberError = error
+        }
+      }
+
+      clearCloseToTrayPromptState()
+
+      const performAction = (): void => {
+        if (payload.action === "minimize-to-tray") {
+          // The native save-failure warning may outlive the tray. Never hide
+          // the only main window after its recovery entry point disappeared.
+          if (!isAppTrayAvailable() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "tray-unavailable")
+            return
+          }
+          if (!promptWindow.isDestroyed()) hideMainWindowToTray(promptWindow)
+        } else if (payload.action === "direct-close") {
+          // The save-failure warning is asynchronous. A task can start while it
+          // is open, so repeat the safety check immediately before the real quit.
+          if (needsActiveRunConfirmation() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "active-runs")
+            return
+          }
+          // app.quit() 会触发 before-quit → will-quit 事件链，
+          // 其中会先中断并等待活跃任务，再执行 fireSessionEndAll，
+          // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
+          app.quit()
+        }
+      }
+
+      if (rememberError && !promptWindow.isDestroyed()) {
+        void dialog
+          .showMessageBox(promptWindow, {
+            type: "warning",
+            title: "设置未保存",
+            message: "无法记住本次关闭窗口的选择",
+            detail: "本次操作仍会执行，原关闭窗口设置保持不变。",
+            buttons: ["知道了"],
+            defaultId: 0,
+            noLink: true
+          })
+          .catch((error) => console.warn("[Main] Failed to show close setting warning:", error))
+          .finally(performAction)
+        return
+      }
+
+      performAction()
     })
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
@@ -874,6 +1121,7 @@ if (browserNativeMessagingHostLaunch) {
     // Expose result to renderer — renderer polls this on mount to show update toast
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
 
+    const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
@@ -883,7 +1131,10 @@ if (browserNativeMessagingHostLaunch) {
         applyMacDockIcon()
       }
     })
-    createPetWindow()
+    // Background services can execute immediately on startup. Wait for the
+    // initial catalog request so due work never runs against a temporary
+    // fallback merely because the remote manifest was still loading.
+    await initialModelCatalogLoad
 
     // Start scheduled task scheduler and heartbeat service
     startScheduler()
@@ -903,9 +1154,11 @@ if (browserNativeMessagingHostLaunch) {
     })
 
     app.on("activate", () => {
-      ensureMainWindowVisible()
+      const activatedWindow = ensureMainWindowVisible()
       applyMacDockIcon()
-      createPetWindow()
+      if (activatedWindow && !activatedWindow.webContents.isLoadingMainFrame()) {
+        createPetWindow()
+      }
     })
   })
 
@@ -923,26 +1176,60 @@ if (browserNativeMessagingHostLaunch) {
   // then re-issue app.quit(). will-quit fires during teardown — async hook spawns
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
+  let sessionEndInProgress = false
   app.on("before-quit", (event) => {
-    setAppQuitting(true)
+    const activeSessions = hasActiveSessions()
+    const activeTasks = hasActiveForegroundRuns()
     console.warn("[Main] before-quit", {
       sessionEndDone,
-      hasActiveSessions: hasActiveSessions(),
+      sessionEndInProgress,
+      hasActiveSessions: activeSessions,
+      hasActiveTasks: activeTasks,
       pet: getPetWindowDebugInfo()
     })
-    if (sessionEndDone) return
-    if (!hasActiveSessions()) {
+    if (sessionEndDone) {
+      setAppQuitting(true)
+      return
+    }
+    if (sessionEndInProgress) {
+      // fireSessionEndAll clears its session map before awaiting hooks. A second
+      // quit request must not observe the empty map and bypass the in-flight drain.
+      event.preventDefault()
+      return
+    }
+    if (!activeSessions && !activeTasks) {
       sessionEndDone = true
+      setAppQuitting(true)
       return
     }
     event.preventDefault()
-    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
-      .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
-      .finally(() => disposeAllAgentThreadStates())
-      .finally(() => {
+    sessionEndInProgress = true
+    void (async () => {
+      try {
+        const shutdownResults = await Promise.allSettled([
+          shutdownAllAgentTasks(5_000),
+          stopChatXAndWait(5_000),
+          stopSchedulerAndWait(5_000),
+          stopHeartbeatAndWait(5_000)
+        ])
+        for (const result of shutdownResults) {
+          if (result.status === "rejected") {
+            console.warn("[Main] Active task shutdown error:", result.reason)
+          }
+        }
+        await fireSessionEndAll(5_000, (threadId) =>
+          makeBroadcastHookResultCallback(`agent:stream:${threadId}`)
+        )
+      } catch (error) {
+        console.warn("[Main] SessionEnd hooks error:", error)
+      } finally {
+        disposeAllAgentThreadStates()
         sessionEndDone = true
+        sessionEndInProgress = false
+        setAppQuitting(true)
         app.quit()
-      })
+      }
+    })()
   })
 
   let quitting = false
@@ -982,6 +1269,7 @@ if (browserNativeMessagingHostLaunch) {
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
+    stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
     try {
       shutdownAdoptionTracker()

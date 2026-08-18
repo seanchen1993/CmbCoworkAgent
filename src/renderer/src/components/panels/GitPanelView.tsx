@@ -11,7 +11,6 @@ import {
   TriangleAlert,
   Folder,
   FolderOpen,
-  FileText,
   CheckCircle2,
   RefreshCw,
   ArrowDown,
@@ -21,11 +20,12 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
+import { isBinaryFile } from "@/lib/file-types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { OpenInIdeButton } from "@/components/ui/open-in-ide-button"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { toast } from "sonner"
 import { GitCommitDialog } from "./GitCommitDialog"
 import type { CommitType } from "./GitCommitDialog"
@@ -40,6 +40,7 @@ import {
 import { insertLog } from "../../../js/mmjUtils"
 import type { ThreadGitContext } from "@/lib/thread-context"
 import type { GitCommitHistoryRecord } from "../../../../shared/git-commit-history"
+import type { TaskCardItem } from "../../../../shared/task-card-types"
 import { useWorkspaceTaskCard } from "@/components/git/use-workspace-task-card"
 
 const GIT_BRANCH_REFRESH_EVENT = "cmb:git-branch-switched"
@@ -52,6 +53,11 @@ const COMMIT_TYPE_VALUES = new Set<string>([
   "test",
   "chore"
 ])
+
+function isDiffUnsupportedFile(filePath: string): boolean {
+  const fileName = filePath.split(/[\\/]/).pop() || filePath
+  return isBinaryFile(fileName)
+}
 
 type GitPanelMetaState = {
   success: boolean
@@ -100,8 +106,6 @@ type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied
 type GitPanelDiffFile = GitPanelDiffState["files"][number]
 type GitPanelTreeDiffFile = GitPanelDiffFile & GitPanelTreeFile
 
-// 同时按需拉取的文件 diff 上限，避免刷新后一次性为大量已展开文件并发拉取 diff 拖垮主进程。
-const MAX_CONCURRENT_FILE_DIFF_LOADS = 3
 const GIT_REJECT_DIALOG_FILE_LIMIT = 10_000
 const ALL_REPOSITORIES_VALUE = "__all__"
 const WORKSPACE_REPOSITORY_KEY = "__workspace__"
@@ -312,22 +316,27 @@ export function GitPanelView({
   const [rejectDialogLoading, setRejectDialogLoading] = useState(false)
   const [rejectDialogSelectionSeed, setRejectDialogSelectionSeed] = useState(0)
   const {
-    cardNumber,
-    handleCardNumberChange,
-    setCardNumberLocal,
+    handleCardNumberChange: persistWorkspaceCardChange,
     persistNow: persistWorkspaceCard
   } = useWorkspaceTaskCard(workspacePath)
-  const [commitType, setCommitType] = useState<CommitType>("fix")
+  const [commitCardNumber, setCommitCardNumber] = useState("")
+  const [commitType, setCommitType] = useState<CommitType | "">("")
   const [commitMessage, setCommitMessage] = useState("")
   const [commitHistory, setCommitHistory] = useState<GitCommitHistoryRecord[]>([])
-  const [expandedFilePaths, setExpandedFilePaths] = useState<Set<string>>(new Set())
+  const [expandedFilePath, setExpandedFilePath] = useState<string | null>(null)
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(new Set())
   const [collapsedRepositoryPaths, setCollapsedRepositoryPaths] = useState<Set<string>>(new Set())
   const [collapsedDirectoryPaths, setCollapsedDirectoryPaths] = useState<Set<string>>(new Set())
   const [activeRepositoryPath, setActiveRepositoryPath] = useState(ALL_REPOSITORIES_VALUE)
   const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false)
-  const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
-  const [fileDiffErrors, setFileDiffErrors] = useState<Record<string, string>>({})
+  // 单文件 diff 缓存：只保留当前展开文件的 diff 内容，展开新文件时清除旧缓存
+  const [currentFileDiff, setCurrentFileDiff] = useState<string | null>(null)
+  const [diffLoadingPath, setDiffLoadingPath] = useState<string | null>(null)
+  const [diffFileError, setDiffFileError] = useState<string | null>(null)
+  const diffLoadingPathRef = useRef<string | null>(null)
+  const pendingRefreshRef = useRef<{ meta: boolean; diff: boolean } | null>(null)
+  const loadedDiffPathRef = useRef<string | null>(null)
+  const [diffReloadVersion, setDiffReloadVersion] = useState(0)
   const [revertingFilePath, setRevertingFilePath] = useState<string | null>(null)
   const [pendingRevertFile, setPendingRevertFile] = useState<GitPanelDiffFile | null>(null)
   const [pulling, setPulling] = useState(false)
@@ -361,15 +370,20 @@ export function GitPanelView({
     rejectInFlightRef.current = false
     suppressFileChangeRefreshUntilRef.current = 0
     setCommitHistory([])
-    setExpandedFilePaths(new Set())
+    setExpandedFilePath(null)
     setSelectedFilePaths(new Set())
     setCollapsedRepositoryPaths(new Set())
     setCollapsedDirectoryPaths(new Set())
     setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
     setRepositoryPickerOpen(false)
     selectionScopeRef.current = ALL_REPOSITORIES_VALUE
-    setFileDiffLoadingPaths(new Set())
-    setFileDiffErrors({})
+    setCurrentFileDiff(null)
+    setDiffLoadingPath(null)
+    setDiffFileError(null)
+    diffLoadingPathRef.current = null
+    pendingRefreshRef.current = null
+    loadedDiffPathRef.current = null
+    setDiffReloadVersion(0)
     setPendingRevertFile(null)
     setPushMetaState(null)
     setPushMetaLoading(false)
@@ -390,6 +404,14 @@ export function GitPanelView({
       const shouldRefreshMeta = options?.meta ?? false
       const shouldRefreshDiff = options?.diff ?? true
       if (!shouldRefreshMeta && !shouldRefreshDiff) return
+      if (diffLoadingPathRef.current) {
+        const pendingRefresh = pendingRefreshRef.current
+        pendingRefreshRef.current = {
+          meta: Boolean(pendingRefresh?.meta || shouldRefreshMeta),
+          diff: Boolean(pendingRefresh?.diff || shouldRefreshDiff)
+        }
+        return
+      }
 
       let toastShown = false
       setError(null)
@@ -440,8 +462,12 @@ export function GitPanelView({
               })
               if (requestId !== diffRequestIdRef.current) return
               setDiffState(nextDiff)
-              setFileDiffLoadingPaths(new Set())
-              setFileDiffErrors({})
+              setCurrentFileDiff(null)
+              setDiffLoadingPath(null)
+              setDiffFileError(null)
+              diffLoadingPathRef.current = null
+              loadedDiffPathRef.current = null
+              setDiffReloadVersion((version) => version + 1)
             } catch (e) {
               if (requestId !== diffRequestIdRef.current) return
               reportRefreshError(e instanceof Error ? e.message : "加载 Git 文件变更失败")
@@ -602,11 +628,15 @@ export function GitPanelView({
 
   useEffect(() => {
     const files = visibleDiffFiles
-    setExpandedFilePaths((prev) => {
-      if (files.length === 0) return new Set()
-      return new Set([...prev].filter((path) => files.some((f) => f.path === path)))
-    })
-  }, [visibleDiffFiles])
+    if (files.length === 0) {
+      setExpandedFilePath(null)
+      return
+    }
+    // 如果当前展开的文件不在新列表中，清除
+    if (expandedFilePath && !files.some((f) => f.path === expandedFilePath)) {
+      setExpandedFilePath(null)
+    }
+  }, [visibleDiffFiles, expandedFilePath])
 
   useEffect(() => {
     const files = visibleDiffFiles
@@ -625,18 +655,33 @@ export function GitPanelView({
 
   const applyCommitHistoryRecord = useCallback(
     (record: GitCommitHistoryRecord): void => {
-      // Prefill the card from history only when the workspace has none yet, and
-      // keep it local — it is persisted on a successful commit, not on dialog open.
-      if (!cardNumber.trim() && record.cardNumber.trim()) {
-        setCardNumberLocal(record.cardNumber)
-      }
-      if (COMMIT_TYPE_VALUES.has(record.commitType)) {
-        setCommitType(record.commitType as CommitType)
-      }
+      setCommitCardNumber(record.cardNumber)
+      setCommitType(
+        COMMIT_TYPE_VALUES.has(record.commitType) ? (record.commitType as CommitType) : ""
+      )
       setCommitMessage(record.commitMessage)
     },
-    [cardNumber, setCardNumberLocal]
+    []
   )
+
+  const handleCommitCardNumberChange = useCallback(
+    (nextValue: string, card?: TaskCardItem | null): void => {
+      setCommitCardNumber(nextValue)
+      persistWorkspaceCardChange(nextValue, card)
+    },
+    [persistWorkspaceCardChange]
+  )
+
+  const resetCommitForm = useCallback(() => {
+    setCommitCardNumber("")
+    setCommitType("")
+    setCommitMessage("")
+  }, [])
+
+  const openCommitDialog = useCallback(() => {
+    resetCommitForm()
+    setSubmitAction("commit")
+  }, [resetCommitForm])
 
   useEffect(() => {
     if (submitAction !== "commit" || !threadId) return
@@ -660,18 +705,24 @@ export function GitPanelView({
 
   const loadFileDiff = useCallback(
     async (filePath: string): Promise<void> => {
-      if (!threadId) return
-      const currentFile = diffState?.files.find((file) => file.path === filePath)
-      if (!currentFile || currentFile.diffLoaded || fileDiffLoadingPaths.has(filePath)) return
+      if (!threadId || !filePath || diffLoadingPath === filePath) return
       const requestDiffId = diffRequestIdRef.current
       const requestThreadId = threadId
 
-      setFileDiffLoadingPaths((prev) => new Set(prev).add(filePath))
-      setFileDiffErrors((prev) => {
-        const next = { ...prev }
-        delete next[filePath]
-        return next
-      })
+      if (isDiffUnsupportedFile(filePath)) {
+        setCurrentFileDiff(null)
+        setDiffFileError(null)
+        setDiffLoadingPath(null)
+        diffLoadingPathRef.current = null
+        loadedDiffPathRef.current = filePath
+        return
+      }
+
+      // 清除旧缓存，开始加载新文件
+      setCurrentFileDiff(null)
+      setDiffFileError(null)
+      diffLoadingPathRef.current = filePath
+      setDiffLoadingPath(filePath)
 
       try {
         const repo = getFileRepository(filePath, repositories)
@@ -685,86 +736,41 @@ export function GitPanelView({
         if (!result.success || !result.file) {
           throw new Error(result.error || "加载文件 diff 失败")
         }
-
-        setDiffState((prev) => {
-          if (!prev) return prev
-          if (requestDiffId !== diffRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return prev
-          const files = prev.files.map((file) => {
-            if (file.path !== filePath) return file
-            return {
-              ...file,
-              diff: result.file?.diff ?? "",
-              diffLoaded: true,
-              additions: result.file?.additions ?? file.additions,
-              deletions: result.file?.deletions ?? file.deletions
-            }
-          })
-          // 懒加载下文件级行数可能在展开后才精确化（尤其是未跟踪新文件），
-          // 这里同步重算全局 totals，避免顶部汇总与逐文件 +/- 长期对不上。
-          const totals = files.reduce(
-            (acc, file) => {
-              acc.additions += file.additions
-              acc.deletions += file.deletions
-              return acc
-            },
-            { additions: 0, deletions: 0 }
-          )
-          return {
-            ...prev,
-            files,
-            totals: { ...prev.totals, additions: totals.additions, deletions: totals.deletions }
-          }
-        })
+        if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
+          setCurrentFileDiff(result.file.diff ?? "")
+          loadedDiffPathRef.current = filePath
+        }
       } catch (e) {
         if (requestDiffId !== diffRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return
-        const message = e instanceof Error ? e.message : "加载文件 diff 失败"
-        setFileDiffErrors((prev) => ({ ...prev, [filePath]: message }))
+        setDiffFileError(e instanceof Error ? e.message : "加载文件 diff 失败")
       } finally {
         if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
-          setFileDiffLoadingPaths((prev) => {
-            const next = new Set(prev)
-            next.delete(filePath)
-            return next
-          })
+          if (diffLoadingPathRef.current === filePath) {
+            diffLoadingPathRef.current = null
+            setDiffLoadingPath(null)
+            const pendingRefresh = pendingRefreshRef.current
+            pendingRefreshRef.current = null
+            if (pendingRefresh) {
+              void refresh(pendingRefresh)
+            }
+          }
         }
       }
     },
-    [threadId, diffState?.files, fileDiffLoadingPaths, repositories]
+    [threadId, diffLoadingPath, repositories, refresh]
   )
 
   const toggleFileExpanded = useCallback((filePath: string): void => {
-    const shouldExpand = !expandedFilePaths.has(filePath)
-    setExpandedFilePaths((prev) => {
-      const next = new Set(prev)
-      if (next.has(filePath)) {
-        next.delete(filePath)
-      } else {
-        next.add(filePath)
-      }
-      return next
-    })
-    if (shouldExpand) {
-      void loadFileDiff(filePath)
-    }
-  }, [expandedFilePaths, loadFileDiff])
+    const isCurrentlyExpanded = expandedFilePath === filePath
+    setExpandedFilePath(isCurrentlyExpanded ? null : filePath)
+  }, [expandedFilePath])
 
   useEffect(() => {
-    // 刷新会把已展开文件的 diffLoaded 重置，若一次性为所有展开文件并发拉取 diff，
-    // 每个文件会触发多个 git 子进程，展开数较多时主进程 CPU 会瞬时飙升。
-    // 这里用并发预算自时钟节流：单个 loadFileDiff 完成后会更新 loading 集合并重跑本 effect，
-    // 从而按 MAX_CONCURRENT_FILE_DIFF_LOADS 排队补齐剩余文件。
-    let budget = MAX_CONCURRENT_FILE_DIFF_LOADS - fileDiffLoadingPaths.size
-    if (budget <= 0) return
-    for (const filePath of expandedFilePaths) {
-      if (budget <= 0) break
-      const file = visibleDiffFiles.find((item) => item.path === filePath)
-      if (!file || file.diffLoaded || fileDiffLoadingPaths.has(filePath) || fileDiffErrors[filePath]) {
-        continue
-      }
-      void loadFileDiff(filePath)
-      budget -= 1
-    }
-  }, [expandedFilePaths, fileDiffErrors, fileDiffLoadingPaths, loadFileDiff, visibleDiffFiles])
+    // 刷新后只有当前展开文件需要重新加载，且仅当未缓存过或文件列表已更新时
+    if (!expandedFilePath) return
+    if (loadedDiffPathRef.current === expandedFilePath && !diffFileError) return
+    void loadFileDiff(expandedFilePath)
+  }, [expandedFilePath, loadFileDiff, diffFileError, diffReloadVersion])
 
   const toggleFileSelected = useCallback((filePath: string): void => {
     setSelectedFilePaths((prev) => {
@@ -826,8 +832,9 @@ export function GitPanelView({
         return
       }
       if (refreshTimer) clearTimeout(refreshTimer)
+      const isMetaChange = data.changeType === "meta"
       refreshTimer = setTimeout(() => {
-        void refresh({ meta: false, diff: true })
+        void refresh({ meta: isMetaChange, diff: true })
       }, 120)
     })
     return () => {
@@ -950,8 +957,13 @@ export function GitPanelView({
         return
       }
 
-      if (action === "commit" && !cardNumber.trim()) {
+      if (action === "commit" && !commitCardNumber.trim()) {
         showToast("请选择任务卡片", "error")
+        return
+      }
+
+      if (action === "commit" && !commitType) {
+        showToast("请选择提交类型", "error")
         return
       }
 
@@ -976,7 +988,7 @@ export function GitPanelView({
 
       const finalMessage =
         action === "commit"
-          ? `${cardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
+          ? `${commitCardNumber.trim()} #comment ${commitType}:${commitMessage.trim()} #CMBDevClaw`
           : undefined
 
       if (action === "commit") {
@@ -1001,7 +1013,7 @@ export function GitPanelView({
           showToast("提交成功", "success")
           insertLog("commit成功")
           // Remember the card actually committed with for this workspace.
-          persistWorkspaceCard(cardNumber.trim())
+          persistWorkspaceCard(commitCardNumber.trim())
         } else {
           const result = await window.api.workspace.pushWorktree(
             threadId,
@@ -1011,7 +1023,7 @@ export function GitPanelView({
           showToast("推送成功", "success")
           insertLog("push成功")
         }
-        setCommitMessage("")
+        resetCommitForm()
         setSubmitAction(null)
         if (action === "push") {
           void refresh({ meta: true, diff: true })
@@ -1035,7 +1047,7 @@ export function GitPanelView({
     },
     [
       threadId,
-      cardNumber,
+      commitCardNumber,
       commitType,
       commitMessage,
       diffState?.hasPendingDiff,
@@ -1047,7 +1059,8 @@ export function GitPanelView({
       refresh,
       showToast,
       toRepositoryRelativePaths,
-      persistWorkspaceCard
+      persistWorkspaceCard,
+      resetCommitForm
     ]
   )
 
@@ -1121,6 +1134,9 @@ export function GitPanelView({
   const isInitialMetaLoading = metaLoading && metaState === null && !error
   const isInitialDiffLoading = diffLoading && diffState === null && !error
   const isDiffReady = Boolean(diffState?.success)
+  const shouldExpandEmptyDiffState = Boolean(
+    diffState?.success && hasGitRepo && visibleDiffFiles.length === 0
+  )
   // Keep the submit entry visible for git repos so users can push right after commit,
   // even if pushability detection lags or temporarily reports false.
   const canShowSubmit = hasGitRepo
@@ -1186,27 +1202,18 @@ export function GitPanelView({
     repo?: GitRepositoryInfo | null,
     treeRow?: GitPanelFileTreeRow<GitPanelTreeDiffFile>
   ): React.JSX.Element => {
-    const diff = file.diff
-    const isExpanded = expandedFilePaths.has(file.path)
+    const isExpanded = expandedFilePath === file.path
     const isSelected = selectedFilePaths.has(file.path)
-    const isFileDiffLoading = fileDiffLoadingPaths.has(file.path)
-    const fileDiffError = fileDiffErrors[file.path]
-    const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
-    const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
     const fullDisplayPath = getRepositoryFileDisplayPath(file.path, repo)
     const displayPath = treeRow?.name ?? fullDisplayPath
-    const previousDisplayPath = file.previousPath
-      ? getRepositoryFileDisplayPath(file.previousPath, repo)
-      : undefined
     const treeIndent = treeRow ? 8 + treeRow.depth * 18 : 8
-    const diffIndent = treeRow ? 30 + treeRow.depth * 18 : 8
 
     return (
       <div
         key={file.path}
         className={cn(
-          "border-t border-border/60 bg-background transition-colors first:border-t-0",
-          isExpanded && "bg-muted/10"
+          "border-t border-border/60 bg-white transition-colors first:border-t-0 dark:bg-background",
+          isExpanded && "bg-blue-500/5"
         )}
       >
         <div
@@ -1227,16 +1234,68 @@ export function GitPanelView({
             />
             <button
               type="button"
-              aria-expanded={isExpanded}
+              aria-pressed={isExpanded}
+              aria-label={`查看 ${fullDisplayPath} 的 diff`}
               onClick={() => toggleFileExpanded(file.path)}
-              className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-            >
-              {isExpanded ? (
-                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-              ) : (
-                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              className={cn(
+                "flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
+                isExpanded && "bg-blue-500/10"
               )}
-              <FileText className="size-3.5 shrink-0 text-muted-foreground" />
+            >
+              <span
+                className="font-mono font-semibold truncate text-left"
+                title={fullDisplayPath}
+              >
+                {displayPath}
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const renderDiffPane = (): React.JSX.Element => {
+    const selectedFile = expandedFilePath
+      ? (visibleDiffFiles.find((file) => file.path === expandedFilePath) ?? null)
+      : null
+
+    if (!selectedFile) {
+      return (
+        <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 p-6 text-center">
+          <div className="flex size-10 items-center justify-center rounded-full border border-border/70 bg-muted/30">
+            <GitCompareArrows className="size-4.5 text-muted-foreground" />
+          </div>
+          <div>
+            <div className="text-sm font-medium text-foreground">查看文件变更</div>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              在左侧文件列表中选择一个变更文件，这里将展示它的 diff 内容。
+            </p>
+          </div>
+        </div>
+      )
+    }
+
+    const file = selectedFile
+    const repo = getFileRepository(file.path, repositories)
+    const diffLoaded = loadedDiffPathRef.current === file.path
+    const diff = diffLoaded ? currentFileDiff : null
+    const isFileDiffLoading = diffLoadingPath === file.path || (!diffLoaded && !diffFileError)
+    const fileDiffErr = diffFileError
+    const statusMeta = getFileStatusMeta(file.status, file.path, file.previousPath)
+    const fullDisplayPath = getRepositoryFileDisplayPath(file.path, repo)
+    const displayFileName = fullDisplayPath.split(/[\\/]/).pop() || fullDisplayPath
+    const isDiffUnsupported = isDiffUnsupportedFile(fullDisplayPath)
+    const previousDisplayPath = file.previousPath
+      ? getRepositoryFileDisplayPath(file.previousPath, repo)
+      : undefined
+    const showMovePath = file.status === "renamed" && Boolean(file.previousPath)
+
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="shrink-0 border-b border-border/70 bg-muted/20 px-3 py-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
               <span
                 className={cn(
                   "inline-flex h-4 shrink-0 items-center rounded border px-1 text-[9px] font-medium leading-none",
@@ -1247,203 +1306,202 @@ export function GitPanelView({
                 {statusMeta.label}
               </span>
               <span
-                className="font-mono font-semibold truncate text-left"
+                className="min-w-0 truncate font-mono text-xs font-semibold text-foreground"
                 title={fullDisplayPath}
               >
-                {displayPath}
-              </span>
-            </button>
-          </div>
-          <span className="flex items-center gap-2 shrink-0">
-            <OpenInIdeButton
-              filePath={file.path}
-              workspacePath={workspacePath}
-              fileMissing={file.status === "deleted"}
-              align="end"
-              stopPropagation
-              onOpenError={(message) => {
-                showToast(message, "error")
-              }}
-            />
-            <IconPopoverButton
-              icon={<FolderOpen className="size-3" />}
-              popoverContent="打开文件夹"
-              aria-label="打开文件夹"
-              align="end"
-              stopPropagation
-              onClick={() => onOpenFileFolder?.(file.path)}
-            />
-            <Popover
-              open={pendingRevertFile?.path === file.path}
-              onOpenChange={(open) => {
-                if (revertingFilePath) return
-                setPendingRevertFile(open ? file : null)
-              }}
-            >
-              <PopoverTrigger asChild>
-                <button
-                  type="button"
-                  disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
-                  aria-label={revertingFilePath === file.path ? "回退中" : "回退文件"}
-                  className={cn(
-                    "cursor-pointer inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    revertingFilePath === file.path && "opacity-80",
-                    revertingFilePath &&
-                      revertingFilePath !== file.path &&
-                      "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground"
-                  )}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                  }}
-                >
-                  <Undo2
-                    className={cn(
-                      "size-3",
-                      revertingFilePath === file.path && "animate-spin"
-                    )}
-                  />
-                </button>
-              </PopoverTrigger>
-              <PopoverContent
-                align="end"
-                sideOffset={6}
-                className="w-72 p-3"
-                onClick={(event) => event.stopPropagation()}
-                onOpenAutoFocus={(event) => event.preventDefault()}
-                onCloseAutoFocus={(event) => event.preventDefault()}
-              >
-                <div className="space-y-3">
-                  <div className="space-y-1">
-                    <div className="text-xs font-semibold text-foreground">确认回退文件</div>
-                    <p className="text-xs leading-5 text-muted-foreground">
-                      回退会回退全部变更，不会回退到大模型的上一次修改，请确认是否回退。
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-border/70 bg-muted/20 px-2.5 py-2 text-[11px]">
-                    <div className="mb-1 text-muted-foreground">目标文件</div>
-                    <div className="truncate font-mono text-foreground" title={fullDisplayPath}>
-                      {fullDisplayPath}
-                    </div>
-                    {previousDisplayPath && (
-                      <div
-                        className="mt-1 truncate font-mono text-muted-foreground"
-                        title={previousDisplayPath}
-                      >
-                        {previousDisplayPath}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={Boolean(revertingFilePath)}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        setPendingRevertFile(null)
-                      }}
-                    >
-                      取消
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      disabled={Boolean(revertingFilePath)}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        confirmPendingRevertFile()
-                      }}
-                    >
-                      {revertingFilePath === file.path ? (
-                        <>
-                          <Loader2 className="size-3.5 animate-spin" />
-                          回退中...
-                        </>
-                      ) : (
-                        <>
-                          <Undo2 className="size-3.5" />
-                          确认回退
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
-          </span>
-        </div>
-        {isExpanded && (
-          <div className="pb-2 pr-2" style={{ paddingLeft: diffIndent }}>
-            <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
-              <span className="text-muted-foreground">变更统计</span>
-              <span
-                className={cn(
-                  "inline-flex h-4 items-center rounded border px-1 text-[9px] font-medium leading-none",
-                  statusMeta.className
-                )}
-              >
-                {statusMeta.label}
-              </span>
-              <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                +{file.additions}
-              </span>
-              <span className="text-muted-foreground">/</span>
-              <span className="font-semibold text-rose-600 dark:text-rose-400">
-                -{file.deletions}
+                {displayFileName}
               </span>
             </div>
-            {showMovePath && (
-              <div className="mb-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
-                <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
-                  <GitCompareArrows className="size-3.5" />
-                  {statusMeta.label}信息
-                </div>
-                <div className="grid gap-1.5 font-mono">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="shrink-0 text-muted-foreground">原路径</span>
-                    <span
-                      className="truncate text-muted-foreground line-through decoration-muted-foreground/50"
-                      title={file.previousPath}
-                    >
-                      {previousDisplayPath}
-                    </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <OpenInIdeButton
+                filePath={file.path}
+                workspacePath={workspacePath}
+                fileMissing={file.status === "deleted"}
+                align="end"
+                stopPropagation
+                onOpenError={(message) => {
+                  showToast(message, "error")
+                }}
+              />
+              <IconPopoverButton
+                icon={<FolderOpen className="size-3" />}
+                popoverContent="打开文件夹"
+                aria-label="打开文件夹"
+                align="end"
+                stopPropagation
+                onClick={() => onOpenFileFolder?.(file.path)}
+              />
+              <Popover
+                open={pendingRevertFile?.path === file.path}
+                onOpenChange={(open) => {
+                  if (revertingFilePath) return
+                  setPendingRevertFile(open ? file : null)
+                }}
+              >
+                <PopoverAnchor asChild>
+                  <span className="inline-flex">
+                    <IconPopoverButton
+                      icon={
+                        <Undo2
+                          className={cn(
+                            "size-3",
+                            revertingFilePath === file.path && "animate-spin"
+                          )}
+                        />
+                      }
+                      popoverContent="回退文件"
+                      aria-label={revertingFilePath === file.path ? "回退中" : "回退文件"}
+                      align="end"
+                      stopPropagation
+                      disabled={Boolean(revertingFilePath && revertingFilePath !== file.path)}
+                      className={cn(
+                        revertingFilePath === file.path && "opacity-80",
+                        revertingFilePath &&
+                          revertingFilePath !== file.path &&
+                          "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground"
+                      )}
+                      onClick={() => setPendingRevertFile(file)}
+                    />
+                  </span>
+                </PopoverAnchor>
+                <PopoverContent
+                  align="end"
+                  sideOffset={6}
+                  className="w-72 p-3"
+                  onClick={(event) => event.stopPropagation()}
+                  onOpenAutoFocus={(event) => event.preventDefault()}
+                  onCloseAutoFocus={(event) => event.preventDefault()}
+                >
+                  <div className="space-y-3">
+                    <div className="space-y-1">
+                      <div className="text-xs font-semibold text-foreground">确认回退文件</div>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        回退会回退全部变更，不会回退到大模型的上一次修改，请确认是否回退。
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-border/70 bg-muted/20 px-2.5 py-2 text-[11px]">
+                      <div className="mb-1 text-muted-foreground">目标文件</div>
+                      <div className="truncate font-mono text-foreground" title={fullDisplayPath}>
+                        {fullDisplayPath}
+                      </div>
+                      {previousDisplayPath && (
+                        <div
+                          className="mt-1 truncate font-mono text-muted-foreground"
+                          title={previousDisplayPath}
+                        >
+                          {previousDisplayPath}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={Boolean(revertingFilePath)}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setPendingRevertFile(null)
+                        }}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        disabled={Boolean(revertingFilePath)}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          confirmPendingRevertFile()
+                        }}
+                      >
+                        {revertingFilePath === file.path ? (
+                          <>
+                            <Loader2 className="size-3.5 animate-spin" />
+                            回退中...
+                          </>
+                        ) : (
+                          <>
+                            <Undo2 className="size-3.5" />
+                            确认回退
+                          </>
+                        )}
+                      </Button>
+                    </div>
                   </div>
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="shrink-0 text-muted-foreground">现路径</span>
-                    <span
-                      className="truncate font-semibold text-foreground"
-                      title={file.path}
-                    >
-                      {fullDisplayPath}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-            {isFileDiffLoading ? (
-              <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin text-blue-600 dark:text-blue-400" />
-                正在加载该文件 diff...
-              </div>
-            ) : fileDiffError ? (
-              <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                {fileDiffError}
-              </div>
-            ) : !file.diffLoaded ? (
-              <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                展开后将按需加载该文件 diff。
-              </div>
-            ) : diff && diff.trim() !== "" ? (
-              <DiffDisplay diff={diff} filePath={displayPath} />
-            ) : (
-              <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                当前文件暂无可展示 diff（可能已恢复、删除或为二进制文件）。
-              </div>
-            )}
+                </PopoverContent>
+              </Popover>
+            </div>
           </div>
-        )}
+          {showMovePath && (
+            <div className="mt-2 rounded-md border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs">
+              <div className="mb-1 flex items-center gap-1.5 font-medium text-blue-700 dark:text-blue-300">
+                <GitCompareArrows className="size-3.5" />
+                {statusMeta.label}信息
+              </div>
+              <div className="grid gap-1.5 font-mono">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-muted-foreground">原路径</span>
+                  <span
+                    className="truncate text-muted-foreground line-through decoration-muted-foreground/50"
+                    title={file.previousPath}
+                  >
+                    {previousDisplayPath}
+                  </span>
+                </div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 text-muted-foreground">现路径</span>
+                  <span
+                    className="truncate font-semibold text-foreground"
+                    title={file.path}
+                  >
+                    {fullDisplayPath}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="right-panel-scroll flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
+          {isDiffUnsupported ? (
+            <div
+              role="status"
+              className="flex h-full min-h-0 flex-col items-center justify-center gap-3 p-6 text-center"
+            >
+              <div className="flex size-10 items-center justify-center rounded-full border border-border/70 bg-muted/30">
+                <TriangleAlert className="size-4.5 text-muted-foreground" />
+              </div>
+              <div>
+                <div className="text-sm font-medium text-foreground">暂不支持 Diff 预览</div>
+                <p className="mt-1 max-w-[320px] text-xs leading-5 text-muted-foreground">
+                  图片、视频、音频、文档及其他二进制资源无法展示文本 diff。
+                </p>
+                <p
+                  className="mt-2 max-w-[320px] truncate font-mono text-[11px] text-muted-foreground"
+                  title={fullDisplayPath}
+                >
+                  {displayFileName}
+                </p>
+              </div>
+            </div>
+          ) : isFileDiffLoading ? (
+            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin text-blue-600 dark:text-blue-400" />
+              正在加载该文件 diff...
+            </div>
+          ) : fileDiffErr ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              {fileDiffErr}
+            </div>
+          ) : diff && diff.trim() !== "" ? (
+            <DiffDisplay diff={diff} filePath={fullDisplayPath} />
+          ) : (
+            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+              当前文件暂无可展示 diff（可能已恢复、删除或为二进制文件）。
+            </div>
+          )}
+        </div>
       </div>
     )
   }
@@ -1469,7 +1527,7 @@ export function GitPanelView({
     return (
       <div
         key={`${repositoryKey}:${row.id}`}
-        className="border-t border-border/60 bg-muted/20 first:border-t-0"
+        className="border-t border-border/60 bg-white first:border-t-0 dark:bg-background"
       >
         <div
           className="flex items-center justify-between gap-2 py-1.5 pr-2 text-xs"
@@ -1508,9 +1566,9 @@ export function GitPanelView({
   }
 
   return (
-    <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
-      <div className="sticky top-0 z-10 px-3 py-2 border-b border-border/70 bg-background-elevated/80 backdrop-blur shrink-0">
-        <div className="rounded-lg border border-border/70 bg-background/90 px-2.5 py-2">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-white dark:bg-background">
+      <div className="sticky top-0 z-10 shrink-0 border-b border-border/70 bg-white/95  backdrop-blur dark:bg-background-elevated/80">
+        <div className=" bg-white px-2.5 py-2 dark:bg-background/90">
           {isInitialMetaLoading ? (
             <>
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
@@ -1678,7 +1736,7 @@ export function GitPanelView({
                     {canShowSubmit && (
                       <div className="flex items-center gap-1">
                         <button
-                          onClick={() => setSubmitAction("commit")}
+                          onClick={openCommitDialog}
                           disabled={running !== null || !isDiffReady || !hasPending}
                           title={isInitialDiffLoading ? "准备中..." : "Commit 提交"}
                           aria-label={isInitialDiffLoading ? "准备中" : "Commit 提交"}
@@ -1781,194 +1839,265 @@ export function GitPanelView({
           )}
         </div>
       </div>
-      <div
-        className="overflow-y-auto overflow-x-hidden right-panel-scroll bg-background flex-1 min-h-0 p-3 space-y-3"
-        aria-busy={loading}
-      >
-        {combinedError && (
-          <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
-            <AlertCircle className="size-3.5 mt-0.5 shrink-0" />
-            <span>{combinedError}</span>
-          </div>
-        )}
-        {hasGitRepo && isInitialDiffLoading && (
-          <div className="rounded-xl border border-border/70 bg-muted/10 px-4 py-8">
-            <div className="mx-auto max-w-[360px] text-center">
-              <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full border border-blue-500/25 bg-blue-500/10">
-                <Loader2 className="size-5 animate-spin text-blue-600 dark:text-blue-400" />
-              </div>
-              <div className="text-sm font-medium text-foreground">文件变更加载中</div>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                Git 仓库信息已就绪，正在读取文件变更和 diff，请稍候。
-              </p>
-              <div className="mt-4 space-y-2">
-                <div className="h-10 rounded-lg border border-border/60 bg-background/80 animate-pulse" />
-                <div className="h-10 rounded-lg border border-border/60 bg-background/70 animate-pulse" />
-                <div className="h-24 rounded-lg border border-border/60 bg-background/60 animate-pulse" />
-              </div>
-            </div>
-          </div>
-        )}
-        {(metaState || diffState) && !hasGitRepo && (
-          <div className="rounded-md border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground">
-            当前任务未关联 Git 仓库。请先在工作区选择器绑定 Git 仓库路径。
-          </div>
-        )}
-        {hasGitRepo && diffState?.success === false && !diffLoading && (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
-            文件变更加载失败，分支与仓库信息已就绪。可点击右上角“刷新”重试。
-          </div>
-        )}
-        {diffState?.success && hasGitRepo && (
-          <>
-            {omittedFileCount > 0 && (
-              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">
-                当前变更文件较多，为避免卡顿仅展示前 {visibleFilesCount}{" "}
-                个文件。请先提交或回退部分改动后再查看全部详情。
+      <div className="flex min-h-0 flex-1" aria-busy={loading}>
+        {/* 左侧：变更文件 tree 列表 */}
+        <div
+          className={cn(
+            "flex min-h-0 flex-col bg-white dark:bg-background",
+            shouldExpandEmptyDiffState
+              ? "min-w-0 flex-1"
+              : "w-[min(340px,42%)] shrink-0 border-r border-border/70"
+          )}
+        >
+          <div className="shrink-0 border-b border-border/70 px-3 py-2">
+            {combinedError && (
+              <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
+                <AlertCircle className="size-3.5 mt-0.5 shrink-0" />
+                <span>{combinedError}</span>
               </div>
             )}
-            {visibleDiffFiles.length === 0 ? (
-              <div className="rounded-xl border border-border/70 bg-muted/20 px-4 py-8">
-                <div className="mx-auto max-w-[420px]">
-                  <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10">
-                    <CheckCircle2 className="size-4.5 text-emerald-600 dark:text-emerald-400" />
+            {diffState?.success && hasGitRepo && visibleDiffFiles.length > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs text-muted-foreground">
+                  已选择{" "}
+                  <span className="font-semibold text-foreground">
+                    {selectedTotals.fileCount}
+                  </span>{" "}
+                  / {visibleDiffFiles.length} 个文件
+                </div>
+                <button
+                  type="button"
+                  className="inline-flex items-center rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-background-interactive hover:text-foreground"
+                  onClick={() => {
+                    setSelectedFilePaths(
+                      allVisibleFilesSelected
+                        ? new Set()
+                        : new Set(visibleDiffFiles.map((file) => file.path))
+                    )
+                  }}
+                >
+                  {allVisibleFilesSelected ? "取消全选" : "全选文件"}
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="right-panel-scroll min-h-0 flex-1 space-y-3 overflow-y-auto overflow-x-hidden">
+            {hasGitRepo && isInitialDiffLoading && (
+              <div className="rounded-xl border border-border/70 bg-muted/10 px-4 py-8">
+                <div className="mx-auto max-w-[360px] text-center">
+                  <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full border border-blue-500/25 bg-blue-500/10">
+                    <Loader2 className="size-5 animate-spin text-blue-600 dark:text-blue-400" />
                   </div>
-                  <div className="text-center text-sm font-medium text-foreground">
-                    没有待审批改动
-                  </div>
-                  <p className="mt-1 text-center text-xs leading-5 text-muted-foreground">
-                    当前工作区与基线一致，暂时没有可展示的净变更。
+                  <div className="text-sm font-medium text-foreground">文件变更加载中</div>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    Git 仓库信息已就绪，正在读取文件变更和 diff，请稍候。
                   </p>
-                  <div className="mt-3 rounded-lg border border-border/70 bg-background/70 p-3">
-                    <div className="mb-2 inline-flex items-center rounded-full border border-border/70 bg-muted/60 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                      可能原因
-                    </div>
-                    <ul className="space-y-1.5 text-xs leading-5 text-muted-foreground">
-                      <li className="flex items-start gap-2">
-                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
-                        文件被{" "}
-                        <code className="rounded bg-muted px-1 py-0.5 text-[11px]">.gitignore</code>{" "}
-                        忽略
-                      </li>
-                      <li className="flex items-start gap-2">
-                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
-                        文件改动后又恢复为原内容，最终净变更为 0
-                      </li>
-                      <li className="flex items-start gap-2">
-                        <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
-                        当前修改仅影响未纳入 Git 跟踪的内容
-                      </li>
-                    </ul>
+                  <div className="mt-4 space-y-2">
+                    <div className="h-10 rounded-lg border border-border/60 bg-background/80 animate-pulse" />
+                    <div className="h-10 rounded-lg border border-border/60 bg-background/70 animate-pulse" />
+                    <div className="h-24 rounded-lg border border-border/60 bg-background/60 animate-pulse" />
                   </div>
-                  <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">
-                    后续出现可跟踪的净变更时，这里会自动显示最新 diff。
-                  </p>
                 </div>
               </div>
-            ) : (
+            )}
+            {(metaState || diffState) && !hasGitRepo && (
+              <div className="rounded-md border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground">
+                当前任务未关联 Git 仓库。请先在工作区选择器绑定 Git 仓库路径。
+              </div>
+            )}
+            {hasGitRepo && diffState?.success === false && !diffLoading && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+                文件变更加载失败，分支与仓库信息已就绪。可点击右上角“刷新”重试。
+              </div>
+            )}
+            {diffState?.success && hasGitRepo && (
               <>
-                <div className="rounded-md border border-border/70 bg-background px-2.5 py-2 flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-xs text-muted-foreground">
-                    已选择{" "}
-                    <span className="font-semibold text-foreground">
-                      {selectedTotals.fileCount}
-                    </span>{" "}
-                    / {visibleDiffFiles.length} 个文件
+                {omittedFileCount > 0 && (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">
+                    当前变更文件较多，为避免卡顿仅展示前 {visibleFilesCount}{" "}
+                    个文件。请先提交或回退部分改动后再查看全部详情。
                   </div>
-                  <button
-                    type="button"
-                    className="inline-flex items-center rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-background-interactive hover:text-foreground"
-                    onClick={() => {
-                      setSelectedFilePaths(
-                        allVisibleFilesSelected
-                          ? new Set()
-                          : new Set(visibleDiffFiles.map((file) => file.path))
-                      )
-                    }}
-                  >
-                    {allVisibleFilesSelected ? "取消全选" : "全选文件"}
-                  </button>
-                </div>
-                <div className="space-y-3">
-                  {repositoryTreeGroups.map((group) => {
-                    const repositoryKey = group.repositoryKey
-                    const isCollapsed = collapsedRepositoryPaths.has(repositoryKey)
-                    const selectedInGroup = group.files.filter((file) => selectedFilePaths.has(file.path))
-                    const allGroupFilesSelected =
-                      group.files.length > 0 && selectedInGroup.length === group.files.length
-                    const someGroupFilesSelected =
-                      selectedInGroup.length > 0 && !allGroupFilesSelected
-                    const collapsedDirectoryIds = getCollapsedDirectoryIds(
-                      repositoryKey,
-                      collapsedDirectoryPaths
-                    )
-                    const treeRows = flattenGitPanelFileTree(group.tree, collapsedDirectoryIds)
-                    return (
-                      <section
-                        key={repositoryKey}
-                        className="overflow-hidden rounded-md border border-border/80 bg-background"
-                      >
-                        {hasMultipleRepositories && group.repo && (
-                          <div className="flex items-center justify-between gap-3 border-b border-border/70 bg-blue-500/5 px-3 py-2">
-                            <label className="inline-flex min-w-0 flex-1 items-center gap-2 text-xs font-semibold">
-                              <TreeSelectionCheckbox
-                                checked={allGroupFilesSelected}
-                                indeterminate={someGroupFilesSelected}
-                                ariaLabel={`选择仓库 ${group.repo.displayPath}`}
-                                onChange={() =>
-                                  setFilePathsSelected(
-                                    group.files.map((file) => file.path),
-                                    !allGroupFilesSelected
-                                  )
-                                }
-                              />
-                              <button
-                                type="button"
-                                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground"
-                                aria-label={isCollapsed ? "展开仓库" : "折叠仓库"}
-                                aria-expanded={!isCollapsed}
-                                onClick={(event) => {
-                                  event.preventDefault()
-                                  event.stopPropagation()
-                                  toggleRepositoryCollapsed(repositoryKey)
-                                }}
-                              >
-                                {isCollapsed ? (
-                                  <ChevronRight className="size-3.5" />
-                                ) : (
-                                  <ChevronDown className="size-3.5" />
-                                )}
-                              </button>
-                              <span className="flex size-6 shrink-0 items-center justify-center rounded-md border border-blue-500/25 bg-blue-500/10">
-                                <GitBranch className="size-3.5 text-blue-700 dark:text-blue-300" />
-                              </span>
-                              <span className="shrink-0 rounded border border-blue-500/25 bg-background/80 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-700 dark:text-blue-300">
-                                仓库
-                              </span>
-                              <span
-                                className="truncate font-mono text-foreground"
-                                title={group.repo.path}
-                              >
-                                {group.repo.displayPath}
-                              </span>
-                            </label>
-                            <div className="flex shrink-0 items-center gap-2 text-[11px] font-medium text-muted-foreground">
-                              <span className="rounded-full border border-border/70 bg-background/80 px-2 py-0.5">
-                                {selectedInGroup.length}/{group.files.length}
-                              </span>
+                )}
+                {visibleDiffFiles.length === 0 ? (
+                  <div className="rounded-2xl border border-emerald-500/20 bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.10),_transparent_50%),linear-gradient(180deg,rgba(255,255,255,0.92),rgba(248,250,252,0.92))] px-5 py-8 dark:bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.12),_transparent_42%),linear-gradient(180deg,rgba(10,16,24,0.96),rgba(10,16,24,0.88))]">
+                    <div className="mx-auto max-w-[620px]">
+                      <div className="inline-flex items-center rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+                        工作区状态正常
+                      </div>
+
+                      <div className="mt-4 text-center">
+                        <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 shadow-sm">
+                          <CheckCircle2 className="size-5 text-emerald-600 dark:text-emerald-400" />
+                        </div>
+                        <div className="text-base font-semibold text-foreground">没有待审批改动</div>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                          Git 已完成本次扫描，在当前查看范围内没有发现需要展示的净变更。
+                        </p>
+                      </div>
+
+                      <div className="mt-5 grid gap-2 sm:grid-cols-3">
+                        <div className="rounded-xl border border-border/70 bg-background/80 px-3 py-3 text-left">
+                          <div className="text-[11px] font-medium text-muted-foreground">可展示净变更</div>
+                          <div className="mt-1 text-base font-semibold text-foreground">0 个文件</div>
+                        </div>
+                        <div className="rounded-xl border border-border/70 bg-background/80 px-3 py-3 text-left">
+                          <div className="text-[11px] font-medium text-muted-foreground">当前查看范围</div>
+                          <div className="mt-1 truncate font-mono text-sm font-semibold text-foreground">
+                            {activeRepositoryLabel}
+                          </div>
+                        </div>
+                        <div className="rounded-xl border border-border/70 bg-background/80 px-3 py-3 text-left">
+                          <div className="text-[11px] font-medium text-muted-foreground">下次出现改动时</div>
+                          <div className="mt-1 text-sm font-semibold text-foreground">这里会自动恢复 diff 列表</div>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid gap-3 lg:grid-cols-[1.15fr,0.85fr]">
+                        <div className="rounded-xl border border-border/70 bg-background/75 p-4">
+                          <div className="text-sm font-medium text-foreground">为什么会这样</div>
+                          <ul className="mt-3 space-y-2 text-xs leading-5 text-muted-foreground">
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                              文件被{" "}
+                              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">.gitignore</code>{" "}
+                              或工作区规则忽略，因此不会进入审批列表
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                              文件改动后又恢复为原内容，最终相对基线的净变更为 0
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-muted-foreground/60" />
+                              当前改动发生在别的子仓库或查看范围之外，可切换“操作仓库”再确认
+                            </li>
+                          </ul>
+                        </div>
+
+                        <div className="rounded-xl border border-border/70 bg-background/75 p-4">
+                          <div className="text-sm font-medium text-foreground">接下来可以做什么</div>
+                          <ul className="mt-3 space-y-2 text-xs leading-5 text-muted-foreground">
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-500/70" />
+                              继续编辑文件，新的可跟踪净变更会在这里自动出现
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-500/70" />
+                              点击右上角“刷新”立即重新扫描当前工作区状态
+                            </li>
+                            <li className="flex items-start gap-2">
+                              <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-emerald-500/70" />
+                              如果当前工作区是多仓库结构，先切换“操作仓库”再查看更精确的范围
+                            </li>
+                          </ul>
+                          <div className="mt-4 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void refresh()
+                              }}
+                              disabled={loading}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-border/80 bg-background/90 px-3 py-1.5 text-[11px] font-medium text-foreground transition-colors hover:bg-background-interactive disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+                              重新刷新
+                            </button>
+                            <div className="inline-flex items-center rounded-lg border border-border/70 bg-muted/30 px-3 py-1.5 text-[11px] text-muted-foreground">
+                              {hasMultipleRepositories ? "可切换子仓库缩小范围" : "当前范围已是完整工作区"}
                             </div>
                           </div>
-                        )}
-                        <div className={cn("divide-y-0", isCollapsed && "hidden")}>
-                          {treeRows.map((row) => renderFileTreeRow(row, group.repo, repositoryKey))}
                         </div>
-                      </section>
-                    )
-                  })}
-                </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-3">
+                      {repositoryTreeGroups.map((group) => {
+                        const repositoryKey = group.repositoryKey
+                        const isCollapsed = collapsedRepositoryPaths.has(repositoryKey)
+                        const selectedInGroup = group.files.filter((file) => selectedFilePaths.has(file.path))
+                        const allGroupFilesSelected =
+                          group.files.length > 0 && selectedInGroup.length === group.files.length
+                        const someGroupFilesSelected =
+                          selectedInGroup.length > 0 && !allGroupFilesSelected
+                        const collapsedDirectoryIds = getCollapsedDirectoryIds(
+                          repositoryKey,
+                          collapsedDirectoryPaths
+                        )
+                        const treeRows = flattenGitPanelFileTree(group.tree, collapsedDirectoryIds)
+                        return (
+                          <section
+                            key={repositoryKey}
+                            className="overflow-hidden bg-white dark:bg-background"
+                          >
+                            {hasMultipleRepositories && group.repo && (
+                              <div className="flex items-center justify-between gap-3 border-b border-border/70 bg-blue-500/5 px-3 py-2">
+                                <label className="inline-flex min-w-0 flex-1 items-center gap-2 text-xs font-semibold">
+                                  <TreeSelectionCheckbox
+                                    checked={allGroupFilesSelected}
+                                    indeterminate={someGroupFilesSelected}
+                                    ariaLabel={`选择仓库 ${group.repo.displayPath}`}
+                                    onChange={() =>
+                                      setFilePathsSelected(
+                                        group.files.map((file) => file.path),
+                                        !allGroupFilesSelected
+                                      )
+                                    }
+                                  />
+                                  <button
+                                    type="button"
+                                    className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background/80 hover:text-foreground"
+                                    aria-label={isCollapsed ? "展开仓库" : "折叠仓库"}
+                                    aria-expanded={!isCollapsed}
+                                    onClick={(event) => {
+                                      event.preventDefault()
+                                      event.stopPropagation()
+                                      toggleRepositoryCollapsed(repositoryKey)
+                                    }}
+                                  >
+                                    {isCollapsed ? (
+                                      <ChevronRight className="size-3.5" />
+                                    ) : (
+                                      <ChevronDown className="size-3.5" />
+                                    )}
+                                  </button>
+                                  <span className="flex size-6 shrink-0 items-center justify-center rounded-md border border-blue-500/25 bg-blue-500/10">
+                                    <GitBranch className="size-3.5 text-blue-700 dark:text-blue-300" />
+                                  </span>
+                                  <span className="shrink-0 rounded border border-blue-500/25 bg-background/80 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-700 dark:text-blue-300">
+                                    仓库
+                                  </span>
+                                  <span
+                                    className="truncate font-mono text-foreground"
+                                    title={group.repo.path}
+                                  >
+                                    {group.repo.displayPath}
+                                  </span>
+                                </label>
+                                <div className="flex shrink-0 items-center gap-2 text-[11px] font-medium text-muted-foreground">
+                                  <span className="rounded-full border border-border/70 bg-background/80 px-2 py-0.5">
+                                    {selectedInGroup.length}/{group.files.length}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+                            <div className={cn("divide-y-0", isCollapsed && "hidden")}>
+                              {treeRows.map((row) => renderFileTreeRow(row, group.repo, repositoryKey))}
+                            </div>
+                          </section>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
               </>
             )}
-          </>
+          </div>
+        </div>
+        {!shouldExpandEmptyDiffState && (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-background">
+            {visibleDiffFiles.length > 0 && renderDiffPane()}
+          </div>
         )}
       </div>
 
@@ -1979,16 +2108,19 @@ export function GitPanelView({
         fileCount={hasPending ? selectedTotals.fileCount : (diffState?.totals.fileCount ?? 0)}
         additions={hasPending ? selectedTotals.additions : (diffState?.totals.additions ?? 0)}
         deletions={hasPending ? selectedTotals.deletions : (diffState?.totals.deletions ?? 0)}
-        cardNumber={cardNumber}
+        cardNumber={commitCardNumber}
         commitType={commitType}
         commitMessage={commitMessage}
         commitHistory={commitHistory}
         preferredTaskText={branchName}
         onOpenChange={(open) => {
-          if (!open) setSubmitAction(null)
+          if (!open) {
+            resetCommitForm()
+            setSubmitAction(null)
+          }
         }}
-        onCardNumberChange={handleCardNumberChange}
-        onCommitTypeChange={setCommitType}
+        onCardNumberChange={handleCommitCardNumberChange}
+        onCommitTypeChange={(value) => setCommitType(value as CommitType)}
         onCommitMessageChange={setCommitMessage}
         onHistorySelect={applyCommitHistoryRecord}
         onSubmit={() => {

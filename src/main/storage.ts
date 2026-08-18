@@ -28,6 +28,7 @@ import {
 } from "./hooks/types"
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
+import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
 import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -60,10 +61,16 @@ import {
   readPluginManifest
 } from "./plugins/manifest"
 import type { BrowserCdpConfig } from "../shared/browser-types"
+import { getBundledBuiltinModelApiKey } from "./models/builtin-credential"
+import {
+  calculateMaxCompatibleOutputTokens,
+  calculateSummarizationTriggerTokens
+} from "../shared/model-token-budget"
 const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
 const CUSTOM_API_KEY_PREFIX = "CUSTOM_API_KEY__"
+const BUILTIN_MODEL_API_KEY_ENV_NAME = "CMB_BUILTIN_MODEL_API_KEY"
 
 export function getOpenworkDir(): string {
   if (!existsSync(OPENWORK_DIR)) {
@@ -78,6 +85,14 @@ export function getDbPath(): string {
 
 export function getCheckpointDbPath(): string {
   return join(getOpenworkDir(), "langgraph.sqlite")
+}
+
+export function getSubagentTranscriptContentDir(): string {
+  const dir = join(getOpenworkDir(), "subagent-transcript-content")
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
 }
 
 export function getLogsDir(): string {
@@ -250,6 +265,18 @@ function writeEnvFile(env: Record<string, string>): void {
     .filter((entry) => entry[1])
     .map(([k, v]) => `${k}=${v}`)
   writeFileSync(getEnvFilePath(), lines.join("\n") + "\n")
+}
+
+/** Resolve the managed-model credential, keeping runtime values overridable. */
+export function getBuiltinModelApiKey(options?: {
+  allowBundledFallback?: boolean
+}): string | undefined {
+  const processValue = process.env[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
+  if (processValue) return processValue
+  const localValue = parseEnvFile()[BUILTIN_MODEL_API_KEY_ENV_NAME]?.trim()
+  if (localValue) return localValue
+  if (options?.allowBundledFallback === false) return undefined
+  return getBundledBuiltinModelApiKey()
 }
 
 // Skills directory — bundled with the app at project root /skills/
@@ -1020,6 +1047,20 @@ export interface CustomModelConfig {
   tier?: "premium" | "economy"
 }
 
+export interface BuiltinModelOverride {
+  name?: string
+  maxTokens?: number
+  maxOutputTokens?: number
+  temperature?: number
+  topP?: number
+  topK?: number
+  interleavedThinking?: boolean
+  enableThinking?: boolean
+  enableThinkingEffort?: boolean
+  thinkingEffort?: ThinkingEffort
+  tier?: "premium" | "economy"
+}
+
 export interface UserInfoConfig {
   sapId?: string //8
   ystId?: string //6
@@ -1141,6 +1182,18 @@ function normalizeMaxOutputTokens(value: unknown): number {
   return Math.min(MAX_MAX_OUTPUT_TOKENS, Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(value)))
 }
 
+function normalizeStoredModelTokenBudget(
+  maxTokensValue: unknown,
+  maxOutputTokensValue: unknown
+): { maxTokens: number; maxOutputTokens: number } {
+  const maxTokens = normalizeMaxTokens(maxTokensValue)
+  const maxOutputTokens = Math.min(
+    normalizeMaxOutputTokens(maxOutputTokensValue),
+    calculateMaxCompatibleOutputTokens(maxTokens)
+  )
+  return { maxTokens, maxOutputTokens }
+}
+
 function normalizeTemperature(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_TEMPERATURE
@@ -1184,7 +1237,10 @@ function resolveInterleavedThinkingSetting(
   return typeof value === "boolean" ? value : defaultInterleavedThinkingForModel(model)
 }
 
-function resolveEnableThinkingSetting(enableThinking: unknown, interleavedThinking: unknown): boolean {
+function resolveEnableThinkingSetting(
+  enableThinking: unknown,
+  interleavedThinking: unknown
+): boolean {
   if (typeof enableThinking === "boolean") return enableThinking
   return interleavedThinking === true
 }
@@ -1361,6 +1417,70 @@ function getSettingsStore(): Store {
   return _settingsStore
 }
 
+const BUILTIN_MODEL_OVERRIDES_KEY = "builtinModelOverrides"
+
+export function getBuiltinModelOverrides(): Record<string, BuiltinModelOverride> {
+  const raw = getSettingsStore().get(BUILTIN_MODEL_OVERRIDES_KEY, {}) as unknown
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {}
+  return raw as Record<string, BuiltinModelOverride>
+}
+
+export function setBuiltinModelOverride(id: string, override: BuiltinModelOverride): void {
+  const normalizedId = id.trim()
+  if (!normalizedId) throw new Error("内置模型 ID 不能为空")
+  const current = getBuiltinModelOverrides()
+  getSettingsStore().set(BUILTIN_MODEL_OVERRIDES_KEY, {
+    ...current,
+    [normalizedId]: override
+  })
+}
+
+export function resetBuiltinModelOverride(id: string): void {
+  const current = getBuiltinModelOverrides()
+  if (!(id in current)) return
+  delete current[id]
+  getSettingsStore().set(BUILTIN_MODEL_OVERRIDES_KEY, current)
+}
+
+export function getStoredDefaultModelId(): string {
+  return String(getSettingsStore().get("defaultModel", "") || "").trim()
+}
+
+export function setStoredDefaultModelId(modelId: string): void {
+  getSettingsStore().set("defaultModel", modelId.trim())
+}
+
+const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+
+export function getWindowCloseBehavior(): WindowCloseBehavior {
+  try {
+    return normalizeWindowCloseBehavior(getSettingsStore().get(WINDOW_CLOSE_BEHAVIOR_KEY))
+  } catch (error) {
+    console.warn("[Storage] Failed to load window close behavior; using ask:", error)
+    return "ask"
+  }
+}
+
+export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
+  const normalized = normalizeWindowCloseBehavior(behavior)
+  getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
+  return normalized
+}
+
+/** Enabled expert-library agent names (专家团 opt-ins), persisted in the shared
+ * settings store (key "enabledExpertAgents"). Non-string entries are dropped
+ * defensively; validity against the current library is the caller's concern
+ * (stored names may outlive a library upgrade). */
+export function getEnabledExpertAgents(): string[] {
+  const raw = getSettingsStore().get("enabledExpertAgents", []) as unknown
+  if (!Array.isArray(raw)) return []
+  return raw.filter((n): n is string => typeof n === "string")
+}
+
+export function setEnabledExpertAgents(names: string[]): void {
+  getSettingsStore().set("enabledExpertAgents", names)
+}
+
 /**
  * Resolve the user-designated default model config (the "默认模型" chosen in
  * settings), falling back to the first configured model when no explicit
@@ -1462,6 +1582,7 @@ function toPublicConfig(
   config: StoredCustomModelRecord,
   env?: Record<string, string>
 ): CustomModelPublicConfig {
+  const tokenBudget = normalizeStoredModelTokenBudget(config.maxTokens, config.maxOutputTokens)
   const enableThinking = resolveEnableThinkingSetting(
     config.enableThinking,
     config.interleavedThinking
@@ -1472,16 +1593,13 @@ function toPublicConfig(
     baseUrl: config.baseUrl,
     model: config.model,
     hasApiKey: !!getCustomModelApiKey(config.id, env),
-    maxTokens: normalizeMaxTokens(config.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(config.maxOutputTokens),
+    maxTokens: tokenBudget.maxTokens,
+    maxOutputTokens: tokenBudget.maxOutputTokens,
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
     enableThinking,
-    enableThinkingEffort: resolveThinkingEffortEnabled(
-      enableThinking,
-      config.enableThinkingEffort
-    ),
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, config.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       config.model,
       config.interleavedThinking,
@@ -1496,6 +1614,7 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
   migrateLegacyCustomModel()
   const env = parseEnvFile()
   return readCustomModelsRaw().map((item) => {
+    const tokenBudget = normalizeStoredModelTokenBudget(item.maxTokens, item.maxOutputTokens)
     const enableThinking = resolveEnableThinkingSetting(
       item.enableThinking,
       item.interleavedThinking
@@ -1506,16 +1625,13 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
       baseUrl: item.baseUrl,
       model: item.model,
       apiKey: getCustomModelApiKey(item.id, env),
-      maxTokens: normalizeMaxTokens(item.maxTokens),
-      maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
+      maxTokens: tokenBudget.maxTokens,
+      maxOutputTokens: tokenBudget.maxOutputTokens,
       temperature: normalizeTemperature(item.temperature),
       topP: normalizeTopP(item.topP),
       topK: normalizeTopK(item.topK),
       enableThinking,
-      enableThinkingEffort: resolveThinkingEffortEnabled(
-        enableThinking,
-        item.enableThinkingEffort
-      ),
+      enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, item.enableThinkingEffort),
       interleavedThinking: resolveInterleavedThinkingSetting(
         item.model,
         item.interleavedThinking,
@@ -1531,6 +1647,7 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
   migrateLegacyCustomModel()
   const record = readCustomModelsRaw().find((item) => item.id === id)
   if (!record) return null
+  const tokenBudget = normalizeStoredModelTokenBudget(record.maxTokens, record.maxOutputTokens)
   const enableThinking = resolveEnableThinkingSetting(
     record.enableThinking,
     record.interleavedThinking
@@ -1541,16 +1658,13 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     baseUrl: record.baseUrl,
     model: record.model,
     apiKey: getCustomModelApiKey(record.id),
-    maxTokens: normalizeMaxTokens(record.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(record.maxOutputTokens),
+    maxTokens: tokenBudget.maxTokens,
+    maxOutputTokens: tokenBudget.maxOutputTokens,
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
     enableThinking,
-    enableThinkingEffort: resolveThinkingEffortEnabled(
-      enableThinking,
-      record.enableThinkingEffort
-    ),
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, record.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       record.model,
       record.interleavedThinking,
@@ -1576,6 +1690,7 @@ export function upsertCustomModelConfig(
 
   const validatedMaxTokens = assertValidMaxTokens(config.maxTokens)
   const validatedMaxOutputTokens = assertValidMaxOutputTokens(config.maxOutputTokens)
+  calculateSummarizationTriggerTokens(validatedMaxTokens, validatedMaxOutputTokens)
   const validatedTemperature = assertValidTemperature(config.temperature)
   const validatedTopP = assertValidTopP(config.topP)
   const validatedTopK = assertValidTopK(config.topK)
@@ -1623,10 +1738,7 @@ export function upsertCustomModelConfig(
     topP: validatedTopP,
     topK: validatedTopK,
     enableThinking,
-    enableThinkingEffort: resolveThinkingEffortEnabled(
-      enableThinking,
-      config.enableThinkingEffort
-    ),
+    enableThinkingEffort: resolveThinkingEffortEnabled(enableThinking, config.enableThinkingEffort),
     interleavedThinking: resolveInterleavedThinkingSetting(
       normalizedModel,
       config.interleavedThinking,
@@ -2744,7 +2856,7 @@ export function resolveHookLogDir(): string {
 export function getHookLogDir(): string {
   getOpenworkDir()
   const dir = resolveHookLogDir()
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
   return dir
 }
 

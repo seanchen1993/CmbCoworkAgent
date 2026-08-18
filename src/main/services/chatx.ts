@@ -23,6 +23,7 @@ import { showPetCompletedTaskNotice } from "../pet"
 import type { ChatXRobotConfig } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import { getChatXUserMessageId, namespaceChatXStreamEventIds } from "./chatx-stream-ids"
+import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -93,6 +94,7 @@ const runningChats = new Set<string>()
 const activeAbortControllers = new Map<string, AbortController>()
 const threadIdToChatKey = new Map<string, string>()
 const messageQueues = new Map<string, ChatXInboundMessage[]>()
+let shuttingDown = false
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -337,19 +339,31 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
 
     broadcastToChannel(channel, { type: "started" })
 
+    const selectedModel = getAvailableModelConfigOrDefault(robot.modelId)
+    if (!selectedModel) {
+      throw new Error("没有可用的模型配置，无法处理 ChatX 消息")
+    }
+    const effectiveModelId = toModelRef(selectedModel)
+    if (robot.modelId && effectiveModelId !== robot.modelId) {
+      console.warn(
+        `[ChatX] Configured model ${robot.modelId} is unavailable; falling back to ${effectiveModelId}`
+      )
+    }
+
     const agent = await createAgentRuntime({
       threadId,
       workspacePath,
-      modelId: robot.modelId || undefined,
+      modelId: effectiveModelId,
       enableAgentsPrompt: false,
       abortSignal: abortController.signal
     })
 
-    const converter = new StreamConverter()
+    const currentTurnUserMessageId = getChatXUserMessageId(msg.msgId)
+    const converter = new StreamConverter(`chatx:${msg.msgId}`, currentTurnUserMessageId)
 
     const stream = await agent.stream(
       {
-        messages: [new HumanMessage({ id: getChatXUserMessageId(msg.msgId), content: msg.content })]
+        messages: [new HumanMessage({ id: currentTurnUserMessageId, content: msg.content })]
       },
       {
         configurable: { thread_id: threadId },
@@ -658,10 +672,18 @@ function scheduleReconnect(): void {
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export function startChatX(): void {
+  if (shuttingDown) {
+    console.warn("[ChatX] Ignoring start request while the application is quitting")
+    return
+  }
   console.log("[ChatX] Starting ChatX service")
   stopped = false
   reconnectAttempts = 0
   connect()
+}
+
+export function hasActiveChatXRuns(): boolean {
+  return runningChats.size > 0
 }
 
 export function stopChatX(): void {
@@ -699,6 +721,21 @@ export function stopChatX(): void {
   }
   messageQueues.clear()
   cleanup()
+}
+
+/** Stop accepting ChatX work and wait briefly for active handlers to close
+ * their checkpointers. The owner-managed running set is intentionally retained
+ * until each handler's finally block completes. */
+export async function stopChatXAndWait(timeoutMs = 5_000): Promise<void> {
+  shuttingDown = true
+  stopChatX()
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+  while (runningChats.size > 0 && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50))
+  }
+  if (runningChats.size > 0) {
+    console.warn(`[ChatX] Timed out waiting for ${runningChats.size} active chat(s) to settle`)
+  }
 }
 
 /** Cancel a running ChatX conversation by threadId. Returns true if found and cancelled. */

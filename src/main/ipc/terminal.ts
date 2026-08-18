@@ -8,7 +8,8 @@ import { fork, type ChildProcess } from "node:child_process"
 import { accessSync } from "fs"
 import path from "path"
 import { app } from "electron"
-import { getCustomModelConfigById, syncSkillsToClaudeDir } from "../storage"
+import { syncSkillsToClaudeDir } from "../storage"
+import { getModelConfigByRef } from "../models/registry"
 import { getGlobalMemoryDir, getProjectMemoryDir } from "../memory/paths"
 import { trackEvent } from "../services/event-reporter"
 
@@ -57,7 +58,7 @@ function buildClaudeEnv(
   syncMemory: boolean,
   workDir?: string
 ): Record<string, string> {
-  const config = getCustomModelConfigById(modelId)
+  const config = getModelConfigByRef(modelId)
   if (!config) throw new Error(`模型配置不存在: ${modelId}`)
   const proxyBase = getClaudeCodeProxyBase()
   if (!proxyBase) throw new Error("VITE_CLAUDE_CODE_PROXY_BASE 未配置")

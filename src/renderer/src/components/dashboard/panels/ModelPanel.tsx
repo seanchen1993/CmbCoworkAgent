@@ -15,6 +15,12 @@ function formatNumber(n: number): string {
   return String(Math.round(n))
 }
 
+function formatPieCountLabel(name: unknown, value: unknown, percent?: number): string {
+  const count = typeof value === "number" ? value : Number(value ?? 0)
+  const formattedCount = Number.isFinite(count) ? Math.round(count).toLocaleString("zh-CN") : "0"
+  return `${String(name ?? "")} ${formattedCount} 次 ${((percent ?? 0) * 100).toFixed(0)}%`
+}
+
 function formatTierName(tier: string): string {
   if (tier === "premium") return "强力"
   if (tier === "economy") return "经济"
@@ -95,7 +101,7 @@ export function ModelPanel({
                   cx="50%"
                   cy="50%"
                   outerRadius={70}
-                  label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
+                  label={({ name, value, percent }) => formatPieCountLabel(name, value, percent)}
                   labelLine={false}
                   fontSize={10}
                 >
@@ -133,7 +139,7 @@ export function ModelPanel({
                   cx="50%"
                   cy="50%"
                   outerRadius={70}
-                  label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
+                  label={({ name, value, percent }) => formatPieCountLabel(name, value, percent)}
                   labelLine={false}
                   fontSize={10}
                 >

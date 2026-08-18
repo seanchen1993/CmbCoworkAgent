@@ -557,22 +557,22 @@ export function recoverEmittedMalformedToolCalls(message: AIMessage): boolean {
 
 /**
  * INPUT sanitize. Return a request-message list in which no assistant turn
- * carries a raw tool call the API would 400 on. An assistant message whose
- * NORMALIZED `tool_calls` is empty but whose `additional_kwargs.tool_calls` is
- * non-empty is, by construction, a malformed emission (valid calls are auto-
- * parsed into normalized `tool_calls`; only unparseable ones stay out), so we
- * ALWAYS strip that raw artifact — we do NOT try to tell "already paired" from
- * "dangling". Two reasons this must be unconditional:
- *   - `patchToolCalls` (which runs right after us) builds its keep-set from
- *     NORMALIZED tool_calls only, so it would orphan-drop any ToolMessage paired
- *     to a raw call and leave the raw call dangling → 400. Passing a "paired" raw
- *     turn through is therefore never safe.
+ * carries a raw tool call the API would 400 on. `tool_calls` is LangChain's
+ * canonical parsed representation; `additional_kwargs.tool_calls` is only the
+ * provider-wire copy. We ALWAYS strip that raw artifact when present, including
+ * mixed turns that have valid normalized calls plus one malformed raw call. Two
+ * reasons this must be unconditional:
+ *   - normalized parity repair builds its keep-set from NORMALIZED tool_calls
+ *     only, so it would orphan-drop any ToolMessage paired to a raw call and
+ *     leave the raw call dangling → 400. Passing a "paired" raw turn through is
+ *     therefore never safe.
  *   - a pairing check keyed on a global set of ToolMessage ids is unsound anyway:
  *     ids can repeat across turns/gateways, so an old same-id ToolMessage would
  *     make a later raw call look falsely paired.
- * After we strip, any now-orphaned ToolMessage is removed by `patchToolCalls`,
- * keeping the request consistent. Non-empty normalized turns are patchToolCalls'
- * job, not ours. Returns the original array (same reference) when unchanged.
+ * After we strip, the request-level parity repair below removes any now-orphaned
+ * ToolMessage and closes normalized dangling calls at API-round boundaries.
+ * DeepAgents' patchToolCalls remains an additional downstream safeguard. Returns
+ * the original array (same reference) when unchanged.
  *
  * We ALSO blank the `__cmbRecoveredMalformedToolCall__` marker and elide completed
  * large write/edit arguments before they reach the model. Both are request-only:
@@ -596,7 +596,7 @@ export function sanitizeModelRequestMessages(messages: BaseMessage[]): BaseMessa
     if (sanitized !== message) changed = true
     const normalized = Array.isArray(sanitized.tool_calls) ? sanitized.tool_calls : []
     const rawToolCalls = rawAdditionalKwargsToolCalls(sanitized)
-    if (normalized.length > 0 || rawToolCalls.length === 0) {
+    if (rawToolCalls.length === 0) {
       out.push(sanitized)
       continue
     }
@@ -606,10 +606,68 @@ export function sanitizeModelRequestMessages(messages: BaseMessage[]): BaseMessa
     // Keep the assistant's visible text (e.g. its <think> block); drop a turn
     // that was nothing but the broken tool call — Claude Code's
     // filterUnresolvedToolUses parity.
-    if (hasVisibleContent(cleaned)) out.push(cleaned)
+    if (normalized.length > 0 || hasVisibleContent(cleaned)) out.push(cleaned)
   }
 
   return changed ? out : messages
+}
+
+/**
+ * Repair normalized tool-call parity at API-round boundaries for an outgoing
+ * model request. DeepAgents' upstream helper searches globally by tool-call id,
+ * but OpenAI-compatible providers can reuse ids such as `call_0` in later
+ * rounds. A later result must therefore never satisfy an earlier interrupted
+ * call. This is request-only: checkpoint and archive history remain lossless.
+ */
+export function repairModelRequestToolCallParity(messages: BaseMessage[]): BaseMessage[] {
+  let changed = false
+  const repaired: BaseMessage[] = []
+
+  let pendingCalls: Array<{ id: string; name: string }> = []
+  let completedCallIds = new Set<string>()
+
+  const closePendingRound = (): void => {
+    for (const toolCall of pendingCalls) {
+      if (completedCallIds.has(toolCall.id)) continue
+      changed = true
+      repaired.push(
+        new ToolMessage({
+          content: `Tool call ${toolCall.name} with id ${toolCall.id} was cancelled - another message came in before it could be completed.`,
+          name: toolCall.name,
+          tool_call_id: toolCall.id
+        })
+      )
+    }
+    pendingCalls = []
+    completedCallIds = new Set<string>()
+  }
+
+  for (const message of messages) {
+    if (ToolMessage.isInstance(message)) {
+      const belongsToPendingRound = pendingCalls.some(
+        (toolCall) => toolCall.id === message.tool_call_id
+      )
+      if (!belongsToPendingRound || completedCallIds.has(message.tool_call_id)) {
+        changed = true
+        continue
+      }
+
+      repaired.push(message)
+      completedCallIds.add(message.tool_call_id)
+      continue
+    }
+
+    closePendingRound()
+    repaired.push(message)
+
+    if (!AIMessage.isInstance(message)) continue
+    pendingCalls = (message.tool_calls ?? []).flatMap((toolCall) =>
+      toolCall.id ? [{ id: toolCall.id, name: toolCall.name }] : []
+    )
+  }
+
+  closePendingRound()
+  return changed ? repaired : messages
 }
 
 /**
@@ -639,20 +697,19 @@ export function createMalformedToolCallGuardMiddleware(): ReturnType<typeof crea
 }
 
 /**
- * RECOVERY half (wrapModelCall only): input sanitize + output promotion. Placed
- * just before deepagents' `patchToolCalls` in the chain; the two are
- * complementary — we own the raw/malformed (`additional_kwargs` /
- * `invalid_tool_calls`) shape, patchToolCalls owns normalized dangling calls.
- * Kept late (inner) so the sanitize sees the final request message list (after
- * summarization etc.) right before it is sent.
+ * RECOVERY half (wrapModelCall only): input sanitize, round-local normalized
+ * parity repair, and output promotion. DeepAgents' downstream patchToolCalls
+ * remains a final safeguard. Kept late (inner) so the repair sees the final
+ * request message list (after summarization etc.) right before it is sent.
  */
 export function createMalformedToolCallRecoveryMiddleware(): ReturnType<typeof createMiddleware> {
   return createMiddleware({
     name: "malformedToolCallRecovery",
     wrapModelCall: async (request, handler) => {
       const sanitized = sanitizeModelRequestMessages(request.messages)
+      const repaired = repairModelRequestToolCallParity(sanitized)
       const response = await handler(
-        sanitized === request.messages ? request : { ...request, messages: sanitized }
+        repaired === request.messages ? request : { ...request, messages: repaired }
       )
       if (AIMessage.isInstance(response)) {
         recoverEmittedMalformedToolCalls(response)

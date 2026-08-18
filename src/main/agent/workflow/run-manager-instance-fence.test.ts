@@ -268,4 +268,64 @@ describe("recoverFlushFailedRun instance fence", () => {
     expect(await workflowRunManager.recoverFlushFailedRun(workspace, THREAD_ID, runId)).toBe(true)
     expect(loadWorkflowRun(workspace, THREAD_ID, runId)?.notificationDelivered).toBe(true)
   })
+
+  // The goal-defer guard's core invariant: exclude ONLY the instance a delivery
+  // turn is currently reporting, so a backlog / resumed-instance pending run is
+  // still seen and the goal doesn't evaluate on partial evidence.
+  test("hasDeliverablePendingNotificationExcept: backlog is found; only the current instance is excluded", () => {
+    const runA = generateWorkflowRunId()
+    const runB = generateWorkflowRunId()
+    seedFlushFailedSnapshot(runA, FIRST_STARTED_AT)
+    seedFlushFailedSnapshot(runB, RESUMED_STARTED_AT)
+
+    // Delivering A must still surface the OTHER pending run B (and vice versa).
+    expect(
+      workflowRunManager.hasDeliverablePendingNotificationExcept(workspace, THREAD_ID, {
+        runId: runA,
+        startedAt: FIRST_STARTED_AT
+      })
+    ).toBe(true)
+    expect(
+      workflowRunManager.hasDeliverablePendingNotificationExcept(workspace, THREAD_ID, {
+        runId: runB,
+        startedAt: RESUMED_STARTED_AT
+      })
+    ).toBe(true)
+    // The plain form excludes nothing.
+    expect(workflowRunManager.hasDeliverablePendingNotification(workspace, THREAD_ID)).toBe(true)
+
+    // With only A pending, excluding A's instance leaves nothing.
+    privates.flushFailedRuns.delete(runB)
+    privates.flushFailedEpochs.delete(runB)
+    expect(
+      workflowRunManager.hasDeliverablePendingNotificationExcept(workspace, THREAD_ID, {
+        runId: runA,
+        startedAt: FIRST_STARTED_AT
+      })
+    ).toBe(false)
+  })
+
+  test("hasDeliverablePendingNotificationExcept: a resumed instance (same runId, new startedAt) is NOT excluded", () => {
+    // A resume REUSES the runId; excluding by runId alone would hide the resumed
+    // instance's pending notification (the partial-evidence bug). Only the exact
+    // runId + startedAt of the current delivery must be excluded.
+    const runId = generateWorkflowRunId()
+    seedFlushFailedSnapshot(runId, RESUMED_STARTED_AT) // the RESUMED instance is what's pending
+
+    // Delivering the ORIGINAL instance (FIRST_STARTED_AT) must still see the resumed
+    // one as deliverable-pending — same runId, different startedAt.
+    expect(
+      workflowRunManager.hasDeliverablePendingNotificationExcept(workspace, THREAD_ID, {
+        runId,
+        startedAt: FIRST_STARTED_AT
+      })
+    ).toBe(true)
+    // Excluding the ACTUAL pending instance (same runId + startedAt) leaves nothing.
+    expect(
+      workflowRunManager.hasDeliverablePendingNotificationExcept(workspace, THREAD_ID, {
+        runId,
+        startedAt: RESUMED_STARTED_AT
+      })
+    ).toBe(false)
+  })
 })

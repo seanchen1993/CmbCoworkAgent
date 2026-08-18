@@ -1274,8 +1274,8 @@ export function RightPanel({
       )}
 
       {moduleMode === "preview" && (
-        <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-white">
-          <div className="bg-white p-2 h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
+        <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-background">
+          <div className="bg-background h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
             {previewPath ? (
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
@@ -2026,16 +2026,26 @@ function ResourcePreview({
     }
 
     try {
-      const result = resolved.inWorkspace
-        ? await window.api.workspace.readFile(threadId, resolved.workspaceFilePath)
-        : await window.api.workspace.readExternalFile(resolved.fullPath)
-
-      if (!result.success || result.content === undefined) {
-        toast.error(result.error || "复制失败，请重试")
-        return
+      if (resolved.inWorkspace) {
+        const result = await window.api.workspace.readFile(threadId, resolved.workspaceFilePath)
+        if (!result.success || result.content === undefined) {
+          toast.error(result.error || "复制失败，请重试")
+          return
+        }
+        await navigator.clipboard.writeText(result.content)
+      } else {
+        const tokenRes = await window.api.workspace.requestExternalFileRead(resolved.fullPath)
+        if (!tokenRes.success || !tokenRes.token) {
+          toast.error(tokenRes.error || "复制失败，请重试")
+          return
+        }
+        const result = await window.api.workspace.readExternalFile(tokenRes.token)
+        if (!result.success || result.content === undefined) {
+          toast.error(result.error || "复制失败，请重试")
+          return
+        }
+        await navigator.clipboard.writeText(result.content)
       }
-
-      await navigator.clipboard.writeText(result.content)
       setCopySuccess(true)
       setTimeout(() => setCopySuccess(false), 2000)
       toast.success("文件内容已复制")
@@ -2069,7 +2079,7 @@ function ResourcePreview({
   }, [onFullscreenChange])
 
   return (
-    <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
+    <div className="border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
       <div className="sticky top-0 z-10 flex items-center justify-between gap-2 px-3 py-2 border-b border-border/70 bg-background-elevated/70 shrink-0">
         <div className="min-w-0">
           <div className="text-[12px] font-semibold truncate" title={filePath}>

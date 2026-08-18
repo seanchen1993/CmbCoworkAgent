@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
@@ -34,13 +34,13 @@ interface GitCommitDialogProps {
   additions: number
   deletions: number
   cardNumber: string
-  commitType: CommitType
+  commitType: CommitType | ""
   commitMessage: string
   commitHistory: GitCommitHistoryRecord[]
   preferredTaskText?: string
   onOpenChange: (open: boolean) => void
   onCardNumberChange: (value: string, card?: TaskCardItem | null) => void
-  onCommitTypeChange: (value: CommitType) => void
+  onCommitTypeChange: (value: CommitType | "") => void
   onCommitMessageChange: (value: string) => void
   onHistorySelect: (record: GitCommitHistoryRecord) => void
   onSubmit: () => void
@@ -66,7 +66,6 @@ export function GitCommitDialog({
   onSubmit
 }: GitCommitDialogProps): React.JSX.Element {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | undefined>(undefined)
-  const selectedHistoryIdRef = useRef<string | undefined>(undefined)
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
   const finalMessagePreview = cardValue
@@ -74,6 +73,7 @@ export function GitCommitDialog({
     : ""
   const noSelectedFiles = fileCount <= 0
   const cardMissing = !noSelectedFiles && !cardValue
+  const commitTypeMissing = !noSelectedFiles && !commitType
   const messageMissing = !noSelectedFiles && !messageValue
   const historySelectValue =
     selectedHistoryId && commitHistory.some((record) => record.id === selectedHistoryId)
@@ -81,36 +81,16 @@ export function GitCommitDialog({
       : undefined
 
   useEffect(() => {
-    selectedHistoryIdRef.current = selectedHistoryId
-  }, [selectedHistoryId])
+    if (open) return
 
-  useEffect(() => {
     const timer = window.setTimeout(() => {
-      if (!open) {
-        setSelectedHistoryId(undefined)
-        return
-      }
-
-      const latest = commitHistory[0]
-      if (!latest) {
-        setSelectedHistoryId(undefined)
-        return
-      }
-
-      const currentHistoryId = selectedHistoryIdRef.current
-      const selectedExists = currentHistoryId
-        ? commitHistory.some((record) => record.id === currentHistoryId)
-        : false
-      if (selectedExists) return
-
-      setSelectedHistoryId(latest.id)
-      onHistorySelect(latest)
+      setSelectedHistoryId(undefined)
     }, 0)
 
     return () => {
       window.clearTimeout(timer)
     }
-  }, [open, commitHistory, onHistorySelect])
+  }, [open])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -204,9 +184,26 @@ export function GitCommitDialog({
               <label htmlFor="git-commit-type" className="font-medium text-foreground">
                 提交类型
               </label>
+              <span
+                className={cn(
+                  "text-[11px]",
+                  commitTypeMissing ? "text-destructive" : "text-muted-foreground"
+                )}
+              >
+                必填
+              </span>
             </div>
-            <Select value={commitType} onValueChange={onCommitTypeChange}>
-              <SelectTrigger id="git-commit-type" className="w-full">
+            <Select
+              value={commitType}
+              onValueChange={(value) => onCommitTypeChange(value as CommitType)}
+            >
+              <SelectTrigger
+                id="git-commit-type"
+                className={cn(
+                  "w-full",
+                  commitTypeMissing && "border-destructive/50 focus-visible:ring-destructive/40"
+                )}
+              >
                 <SelectValue placeholder="选择提交类型" />
               </SelectTrigger>
               <SelectContent>

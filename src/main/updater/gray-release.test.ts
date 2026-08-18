@@ -313,6 +313,8 @@ describe("evaluateStaging — percentage bucket", () => {
 describe("isSameStagingPayload — install-time guard (P1 fix)", () => {
   const baseResult: UpdateCheckResult = {
     version: "1.2.4",
+    targetVersion: "1.2.4",
+    minVersion: "1.0.0",
     updateType: "asar",
     releaseNotes: "x",
     mandatory: false,
@@ -340,6 +342,10 @@ describe("isSameStagingPayload — install-time guard (P1 fix)", () => {
     expect(
       isSameStagingPayload(baseResult, { ...baseResult, downloadSha256: "sha-bbb" })
     ).toBe(false)
+  })
+
+  it("returns false when the final channel target changes during a chained update", () => {
+    expect(isSameStagingPayload(baseResult, { ...baseResult, targetVersion: "1.2.5" })).toBe(false)
   })
 
   it("returns false when same version but different file name", () => {

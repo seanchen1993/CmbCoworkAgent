@@ -47,6 +47,7 @@ import {
 } from "../src/main/agent/workflow/run-store.ts"
 import {
   buildWorkflowNotificationMessage,
+  isWorkflowNotificationTurnMessage,
   WORKFLOW_NOTIFICATION_TURN_PROMPT
 } from "../src/main/agent/workflow/notification.ts"
 import {
@@ -73,7 +74,9 @@ import {
 import {
   consumeValuesStream,
   createRuntimeWithModelFallback,
+  extractWorkflowTraceToolDetails,
   isModelUnavailableError,
+  runWorkflowSubagent,
   type WorkflowSubagentDeps
 } from "../src/main/agent/workflow/subagent.ts"
 import {
@@ -119,6 +122,32 @@ function testRendererNotificationFullMatch(): void {
     isWorkflowNotificationPrompt("[[CMB_WORKFLOW_NOTIFICATION_V1:wf_abc123]] result"),
     "expanded notification marker (runId suffix) stays a prefix match"
   )
+}
+
+function testWorkflowNotificationTurnMessageFullMatch(): void {
+  // The main-process goal-preempt guard (agent.ts) exempts the workflow completion
+  // notification turn via isWorkflowNotificationTurnMessage — WITHOUT it, a goal
+  // that launched a workflow is paused ("user message preempted active goal") the
+  // instant its result arrives and never resumes. Must FULL-match so a genuine
+  // notification is always exempted, while a user pasting text that merely STARTS
+  // with the trigger still counts as a real user message.
+  assert(
+    isWorkflowNotificationTurnMessage(WORKFLOW_NOTIFICATION_TURN_PROMPT),
+    "exact turn prompt is recognized as internal workflow plumbing"
+  )
+  assert(
+    isWorkflowNotificationTurnMessage(`  ${WORKFLOW_NOTIFICATION_TURN_PROMPT}  `),
+    "surrounding whitespace is trimmed before matching"
+  )
+  assert(
+    !isWorkflowNotificationTurnMessage("[[CMB_WORKFLOW_NOTIFICATION_TURN]] a user-pasted log line"),
+    "text merely starting with the trigger is NOT internal plumbing (would still preempt)"
+  )
+  assert(
+    !isWorkflowNotificationTurnMessage("请帮我修复登录 bug"),
+    "an ordinary user message is not internal plumbing"
+  )
+  assert(!isWorkflowNotificationTurnMessage(""), "empty message is not internal plumbing")
 }
 
 function testByNewestRunTieBreak(): void {
@@ -610,6 +639,66 @@ async function testConsumeValuesStreamTapIsolation(): Promise<void> {
   assert(
     JSON.stringify(withThrowingTap) === JSON.stringify(withoutTap),
     "a throwing onValues tap must be swallowed and not change the returned snapshot"
+  )
+}
+
+function testWorkflowTraceToolDetails(): void {
+  const details = extractWorkflowTraceToolDetails({
+    messages: [
+      {
+        _getType: () => "ai",
+        tool_calls: [{ id: "call-read", name: "read_file", args: { path: "src/app.ts" } }]
+      },
+      {
+        id: ["langchain_core", "messages", "AIMessage"],
+        kwargs: {
+          tool_calls: [
+            { id: "call-execute", name: "execute", args: { command: "npm run typecheck" } }
+          ]
+        }
+      },
+      {
+        _getType: () => "tool",
+        tool_call_id: "call-read",
+        content: "export const app = true",
+        status: "success"
+      },
+      {
+        id: ["langchain_core", "messages", "ToolMessage"],
+        kwargs: {
+          tool_call_id: "call-execute",
+          content: "typecheck failed",
+          status: "error"
+        }
+      },
+      {
+        // Cumulative snapshots may repeat a provider call id; trace detail must not duplicate it.
+        _getType: () => "ai",
+        tool_calls: [{ id: "call-read", name: "read_file", args: { path: "src/app.ts" } }]
+      },
+      {
+        // Malformed/raw artifacts are not executable calls and must stay out of trace details.
+        _getType: () => "ai",
+        tool_calls: [],
+        invalid_tool_calls: [{ id: "call-invalid", name: "write_file", args: "{" }]
+      }
+    ]
+  })
+
+  assert(details.length === 2, `two executed tools should be recovered, got ${details.length}`)
+  assert(
+    details[0]?.name === "read_file" &&
+      JSON.stringify(details[0]?.input) === JSON.stringify({ path: "src/app.ts" }) &&
+      details[0]?.output === "export const app = true" &&
+      details[0]?.status === "success",
+    `read_file detail should retain args/result/status: ${JSON.stringify(details[0])}`
+  )
+  assert(
+    details[1]?.name === "execute" &&
+      JSON.stringify(details[1]?.input) === JSON.stringify({ command: "npm run typecheck" }) &&
+      details[1]?.output === "typecheck failed" &&
+      details[1]?.status === "error",
+    `execute detail should retain args/result/error status: ${JSON.stringify(details[1])}`
   )
 }
 
@@ -1787,7 +1876,7 @@ async function testUndeliveredScanEligibilityPredicate(): Promise<void> {
 
     const unfiltered = findUndeliveredTerminalRun(ws, threadId)
     assert(unfiltered?.runId === newer, "without a predicate the newest undelivered wins")
-    const filtered = findUndeliveredTerminalRun(ws, threadId, (runId) => runId !== newer)
+    const filtered = findUndeliveredTerminalRun(ws, threadId, (run) => run.runId !== newer)
     assert(
       filtered?.runId === older,
       "an ineligible newest candidate must not hide the older deliverable run (guard blind spot)"
@@ -3908,28 +3997,46 @@ async function testModelFallbackOnlyOnUnavailable(): Promise<void> {
     "a checkpointer fault is NOT model-unavailable"
   )
 
-  const mkDeps = (firstError: Error): WorkflowSubagentDeps =>
+  type RuntimeCall = { agentId: string; modelId?: string }
+  const mkDeps = (firstError: Error, calls: RuntimeCall[] = []): WorkflowSubagentDeps =>
     ({
       defaultModelId: "custom:default",
       cleanupThread: async () => {},
-      createRuntime: async ({ modelId }: { modelId?: string }) => {
+      createRuntime: async ({
+        agentId,
+        modelId
+      }: {
+        agentId: string
+        modelId?: string
+      }) => {
+        calls.push({ agentId, modelId })
         if (modelId === "custom:wanted") throw firstError
         return {} as never
       }
     }) as unknown as WorkflowSubagentDeps
   const opts = {
     threadId: "t",
+    agentId: "wf_run:agent:4",
     extraSystemPrompt: "",
     abortSignal: new AbortController().signal,
     label: "L",
     model: "wanted"
   }
 
+  const fallbackCalls: RuntimeCall[] = []
   const fellBack = await createRuntimeWithModelFallback(
-    mkDeps(new Error("Custom model not configured. Please configure a model in Settings.")),
+    mkDeps(
+      new Error("Custom model not configured. Please configure a model in Settings."),
+      fallbackCalls
+    ),
     opts
   )
   assert(fellBack.modelFellBack === true, "an unavailable model falls back to the default")
+  assert(fallbackCalls.length === 2, "model fallback creates the requested and default runtimes")
+  assert(
+    fallbackCalls.every((call) => call.agentId === opts.agentId),
+    "model fallback preserves the workflow agent identity"
+  )
 
   let propagated = false
   try {
@@ -3938,6 +4045,48 @@ async function testModelFallbackOnlyOnUnavailable(): Promise<void> {
     propagated = true
   }
   assert(propagated, "a non-model init fault propagates instead of silently downgrading")
+}
+
+async function testWorkflowAgentIdentityStableAcrossRetry(): Promise<void> {
+  const runtimeCalls: Array<{ threadId: string; agentId: string }> = []
+  const deps = {
+    parentThreadId: "parent",
+    cleanupThread: async () => {},
+    isRetryableApiError: (error: unknown) =>
+      error instanceof Error && error.message === "retryable runtime init",
+    createRuntime: async (options: {
+      threadId: string
+      agentId: string
+    }): Promise<{ stream: () => Promise<AsyncIterable<unknown>> }> => {
+      runtimeCalls.push({ threadId: options.threadId, agentId: options.agentId })
+      if (runtimeCalls.length === 1) throw new Error("retryable runtime init")
+      return {
+        stream: async () =>
+          (async function* (): AsyncIterable<unknown> {
+            yield ["values", { messages: [{ type: "ai", content: "done" }] }]
+          })()
+      }
+    }
+  } as unknown as WorkflowSubagentDeps
+
+  const result = await runWorkflowSubagent(deps, {
+    prompt: "retry identity",
+    agentIndex: 7,
+    label: "retry-agent",
+    runId: "wf_retry_identity",
+    signal: new AbortController().signal
+  })
+
+  assert(result.text === "done", "workflow retry returns the successful second-attempt output")
+  assert(runtimeCalls.length === 2, "retryable runtime failure creates a fresh runtime")
+  assert(
+    runtimeCalls[0]?.threadId !== runtimeCalls[1]?.threadId,
+    "workflow retry uses a fresh checkpoint thread"
+  )
+  assert(
+    runtimeCalls.every((call) => call.agentId === "wf_retry_identity:agent:7"),
+    "workflow retry preserves one stable agent identity across checkpoint threads"
+  )
 }
 
 async function testGlobCapStreamEarlyStop(): Promise<void> {
@@ -4059,21 +4208,32 @@ return "WROTE"`,
     const outsideTarget = join(dirname(dir), `wf-escape-${basename(dir)}.txt`)
     writeFileSync(outsideTarget, "original")
     try {
-      symlinkSync(outsideTarget, join(dir, "link.txt"))
-      const symEscape = await createHarness(dir).run(
-        `export const meta = { name: "js", description: "d" }
+      let symlinkAvailable = true
+      try {
+        symlinkSync(outsideTarget, join(dir, "link.txt"))
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? error.code : undefined
+        if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES")) throw error
+        symlinkAvailable = false
+        console.log("SKIP workflow file-symlink jail check: Windows symlink privilege unavailable")
+      }
+
+      if (symlinkAvailable) {
+        const symEscape = await createHarness(dir).run(
+          `export const meta = { name: "js", description: "d" }
 await writeFile("link.txt", "HACKED")
 return "WROTE"`,
-        echoRunner
-      )
-      assert(
-        symEscape.status === "error" && /workspace/.test(symEscape.error ?? ""),
-        `writeFile via a workspace symlink pointing out must be rejected, got ${symEscape.status}: ${symEscape.error}`
-      )
-      assert(
-        readFileSync(outsideTarget, "utf-8") === "original",
-        "the outside target must be left untouched"
-      )
+          echoRunner
+        )
+        assert(
+          symEscape.status === "error" && /workspace/.test(symEscape.error ?? ""),
+          `writeFile via a workspace symlink pointing out must be rejected, got ${symEscape.status}: ${symEscape.error}`
+        )
+        assert(
+          readFileSync(outsideTarget, "utf-8") === "original",
+          "the outside target must be left untouched"
+        )
+      }
     } finally {
       rmSync(outsideTarget, { force: true })
     }
@@ -4191,6 +4351,7 @@ async function main(): Promise<void> {
     await testModelFallbackNotJournaled(workspace)
     await testFullResultSidecarForOversizedReturn(workspace)
     await testConsumeValuesStreamTapIsolation()
+    testWorkflowTraceToolDetails()
     await testWorkflowAgentSnapshotBounding()
     await testAgentToolStreamStaleSidecarKilled()
     await testClearAllAgentToolStreamsSweepsRunIdSidecars()
@@ -4232,13 +4393,15 @@ async function main(): Promise<void> {
     testReconcileHydratedRun()
     await testGlobCapStreamEarlyStop()
     await testModelFallbackOnlyOnUnavailable()
+    await testWorkflowAgentIdentityStableAcrossRetry()
     testNotificationTurnPromptInSync()
     testRendererNotificationFullMatch()
+    testWorkflowNotificationTurnMessageFullMatch()
     testByNewestRunTieBreak()
     await testChildWorkflowPhaseModelInherited(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (82 tests)")
+    console.log("PASS workflow-engine (84 tests)")
   } finally {
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome

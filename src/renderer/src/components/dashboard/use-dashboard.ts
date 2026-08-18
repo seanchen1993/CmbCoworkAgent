@@ -3,6 +3,12 @@
  */
 import { useState, useEffect, useCallback, useRef } from "react"
 import type { SkillAdoptionRankingItem } from "./skill-adoption-ranking"
+import type {
+  LocalAdoptionLine,
+  LocalGeneratedLineDetail,
+  LocalGeneratedLineStatus,
+  LocalGenAdoptionLines
+} from "../../../../shared/adoption-trace-types"
 
 // ─────────────────────────────────────────────────────────
 // Types
@@ -140,6 +146,33 @@ export interface DashboardTraceDetail {
   userIp?: string
   modelId?: string
   modelName?: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -274,23 +307,11 @@ export interface DashboardCommitAdoptionEvents {
 }
 
 /** 本地逐行溯源中的一行（提交版文本 + 是否命中生成行哈希）。 */
-export interface DashboardLocalAdoptionLine {
-  lineNumber: number
-  text: string
-  adopted: boolean
-}
-
+export type DashboardLocalAdoptionLine = LocalAdoptionLine
+export type DashboardLocalGeneratedLineStatus = LocalGeneratedLineStatus
+export type DashboardLocalGeneratedLineDetail = LocalGeneratedLineDetail
 /** 单条 gen 的本地逐行结果；available=false 时附降级原因。 */
-export interface DashboardLocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  reason?: string
-  relPath?: string
-  generatedLineCount?: number
-  matchedLineCount?: number
-  truncated?: boolean
-  lines?: DashboardLocalAdoptionLine[]
-}
+export type DashboardLocalGenAdoptionLines = LocalGenAdoptionLines
 
 export interface DashboardCodeStats {
   generatedLines: number
@@ -544,13 +565,28 @@ export interface DashboardProjectModeProject {
   lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
+  systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  /** Conversations attributed to a workflow node in the Dev group. */
+  devStageConversationCount: number
+  /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
+}
+
+export interface DashboardProjectModeExportData {
+  users: DashboardProjectModeTopUser[]
+  projects: DashboardProjectModeProject[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 export type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -1694,6 +1730,10 @@ function parseSkillEvalArtifacts(raw: any): DashboardSkillEvalRun["resultArtifac
 
 function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
   if (!raw || typeof raw !== "object") return undefined
+  const optionalStringField = (key: keyof DashboardTraceDetail): Record<string, string> =>
+    raw[key] ? { [key]: String(raw[key]) } : {}
+  const optionalNumberField = (key: keyof DashboardTraceDetail): Record<string, number> =>
+    raw[key] !== undefined && raw[key] !== null ? { [key]: numberValue(raw[key]) } : {}
   return {
     traceId: String(raw.traceId ?? ""),
     threadId: String(raw.threadId ?? ""),
@@ -1708,6 +1748,29 @@ function parseDashboardTraceDetail(raw: any): DashboardTraceDetail | undefined {
     ...(raw.userIp ? { userIp: String(raw.userIp) } : {}),
     ...(raw.modelId ? { modelId: String(raw.modelId) } : {}),
     ...(raw.modelName ? { modelName: String(raw.modelName) } : {}),
+    ...optionalNumberField("observabilitySchemaVersion"),
+    ...optionalStringField("traceKind"),
+    ...optionalStringField("executionMode"),
+    ...optionalStringField("rootTraceId"),
+    ...optionalStringField("rootThreadId"),
+    ...optionalStringField("parentTraceId"),
+    ...optionalStringField("parentThreadId"),
+    ...optionalStringField("parentSpanId"),
+    ...optionalStringField("linkType"),
+    ...optionalStringField("subagentKind"),
+    ...optionalStringField("subagentRunId"),
+    ...optionalStringField("subagentThreadId"),
+    ...optionalStringField("handoffAction"),
+    ...optionalStringField("handoffSourceAgent"),
+    ...optionalStringField("handoffTargetAgent"),
+    ...optionalStringField("coordinatorWorkerId"),
+    ...optionalNumberField("coordinatorWorkerTurn"),
+    ...optionalStringField("coordinatorWorkerRole"),
+    ...optionalStringField("coordinatorWorkerWorkload"),
+    ...optionalStringField("workflowRunId"),
+    ...optionalNumberField("workflowAgentIndex"),
+    ...optionalStringField("workflowPhase"),
+    ...optionalStringField("workflowAgentLabel"),
     outcome: String(raw.outcome ?? "unknown"),
     totalToolCalls: numberValue(raw.totalToolCalls),
     modelCallCount: numberValue(raw.modelCallCount),

@@ -5,9 +5,9 @@
  * remote ingestion endpoint (`POST {baseUrl}/api/traces/events`).
  *
  * Mirrors the design of S3TraceReporter:
- *   - fire-and-forget; never throws upward
+ *   - returns an explicit result to durable callers; never throws upward
  *   - 10s timeout via Promise.race resolve-sentinel pattern
- *   - silent failure logged as a warning
+ *   - failures are logged and classified as retryable/permanent
  *
  * Index design (server-side, single ES index `cowork-events`):
  *   eventId / eventName / eventCategory / eventTime /
@@ -74,8 +74,18 @@ export interface CoworkEvent {
   properties?:   Record<string, unknown>
 }
 
+export type EventReportResult =
+  | { ok: true; status: number }
+  | {
+      ok: false
+      retryable: boolean
+      error: string
+      status?: number
+      retryAfterMs?: number
+    }
+
 export interface IEventReporter {
-  report(event: CoworkEvent): Promise<void>
+  report(event: CoworkEvent): Promise<EventReportResult>
 }
 
 // ─────────────────────────────────────────────────────────
@@ -83,8 +93,10 @@ export interface IEventReporter {
 // ─────────────────────────────────────────────────────────
 
 export class NoopEventReporter implements IEventReporter {
-  async report(_event: CoworkEvent): Promise<void> {
-    // intentionally empty
+  async report(_event: CoworkEvent): Promise<EventReportResult> {
+    void _event
+    // A durable outbox must retain the event until a real reporter is configured.
+    return { ok: false, retryable: true, error: "event reporter is not configured" }
   }
 }
 
@@ -95,8 +107,10 @@ export class HttpEventReporter implements IEventReporter {
     this.baseUrl = baseUrl.trim().replace(/\/+$/, "")
   }
 
-  async report(event: CoworkEvent): Promise<void> {
-    if (!this.baseUrl) return
+  async report(event: CoworkEvent): Promise<EventReportResult> {
+    if (!this.baseUrl) {
+      return { ok: false, retryable: true, error: "event reporter base URL is empty" }
+    }
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined
 
@@ -115,28 +129,52 @@ export class HttpEventReporter implements IEventReporter {
       ])
 
       if (result === FETCH_TIMEOUT || !("ok" in result)) {
+        const error = `upload timed out after ${REPORT_TIMEOUT_MS}ms`
         console.warn(
           `[EventReporter] Upload timed out for event ${event.eventName} (${event.eventId}) ` +
           `after ${REPORT_TIMEOUT_MS}ms`
         )
-        return
+        return { ok: false, retryable: true, error }
       }
 
       if (!result.ok) {
+        const retryAfterMs = parseRetryAfterMs(result.headers.get("retry-after"))
+        const retryable = result.status === 408 || result.status === 429 || result.status >= 500
+        const error = `${result.status} ${result.statusText}`.trim()
         console.warn(
-          `[EventReporter] Upload failed for event ${event.eventName} (${event.eventId}): ` +
-          `${result.status} ${result.statusText}`
+          `[EventReporter] Upload failed for event ${event.eventName} (${event.eventId}): ` + error
         )
-        return
+        return {
+          ok: false,
+          retryable,
+          error,
+          status: result.status,
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {})
+        }
       }
 
       console.log(`[EventReporter] Reported ${event.eventName} (${event.eventId})`)
+      return { ok: true, status: result.status }
     } catch (e) {
       console.warn(`[EventReporter] Upload error for event ${event.eventName}:`, e)
+      return {
+        ok: false,
+        retryable: true,
+        error: e instanceof Error ? e.message : String(e)
+      }
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId)
     }
   }
+}
+
+function parseRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000)
+  const dateMs = Date.parse(value)
+  if (!Number.isFinite(dateMs)) return undefined
+  return Math.max(0, dateMs - Date.now())
 }
 
 // ─────────────────────────────────────────────────────────

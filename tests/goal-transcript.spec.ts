@@ -19,6 +19,8 @@ import {
 } from "../src/renderer/src/lib/goal-transcript.ts"
 import { buildGoalContinuationPrompt, buildGoalStartPrompt } from "../src/main/agent/goals/goal-manager.ts"
 import {
+  isWorkflowPlumbingTranscriptContent,
+  neutralizeWorkflowPlumbingUserText,
   WORKFLOW_NOTIFICATION_MARKER_PREFIX,
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_TRIGGER
@@ -122,6 +124,39 @@ function testGoalArtifactsAreNotCheckpointTranscript(): void {
   assert(
     !isGoalTranscriptArtifact(message("normal-system", "system", "Hook 已执行")),
     "non-goal system messages should remain visible"
+  )
+}
+
+function testContextCompactionProseRemainsVisibleWithoutStructuralMarker(): void {
+  assert(
+    isVisibleCheckpointTranscriptMessage(
+      message(
+        "compact-deepagents",
+        "assistant",
+        "You are in the middle of a conversation that has been summarized.\nsummary"
+      )
+    ),
+    "ordinary assistant text must not be hidden only because it resembles compaction prose"
+  )
+  assert(
+    isVisibleCheckpointTranscriptMessage(
+      message(
+        "compact-legacy",
+        "assistant",
+        "Here is a summary of the conversation to date:\nsummary"
+      )
+    ),
+    "legacy-looking assistant text must remain visible without an internal marker"
+  )
+  assert(
+    isVisibleCheckpointTranscriptMessage(
+      message(
+        "ordinary-user",
+        "user",
+        "You are in the middle of a conversation that has been summarized. 这句话是什么意思？"
+      )
+    ),
+    "ordinary user text that resembles summary prose should remain visible"
   )
 }
 
@@ -868,6 +903,27 @@ function testWorkflowPlumbingStaysOutOfCheckpointTranscript(): void {
   )
 }
 
+function testUserSuppliedWorkflowMarkersRemainVisible(): void {
+  const markerText = `${WORKFLOW_NOTIFICATION_MARKER_PREFIX}workflow-run-1]] pasted log`
+  const neutralizedMarker = neutralizeWorkflowPlumbingUserText(markerText)
+  const neutralizedTurnPrompt = neutralizeWorkflowPlumbingUserText(
+    WORKFLOW_NOTIFICATION_TURN_PROMPT
+  )
+
+  assert(
+    neutralizedMarker.endsWith(markerText),
+    "neutralization should preserve the user's workflow marker text"
+  )
+  assert(
+    !isWorkflowPlumbingTranscriptContent(neutralizedMarker),
+    "a user-supplied V1 marker should remain visible after restore/export"
+  )
+  assert(
+    !isWorkflowPlumbingTranscriptContent(neutralizedTurnPrompt),
+    "a user-supplied full workflow turn prompt should remain visible after restore/export"
+  )
+}
+
 function testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore(): void {
   const rawCheckpointMessages = [
     message("user-1", "user", "用动态工作流实现！"),
@@ -893,6 +949,7 @@ function testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore(): void
 function run(): void {
   const tests = [
     testGoalArtifactsAreNotCheckpointTranscript,
+    testContextCompactionProseRemainsVisibleWithoutStructuralMarker,
     testInternalGoalPromptsAndGoalArtifactsAreFilteredTogether,
     testAllGoalCommandsStayInCheckpointTranscript,
     testKnownGoalNoticeVariantsStayOutOfCheckpointTranscript,
@@ -915,6 +972,7 @@ function run(): void {
     testGoalEventsStayInGoalUiState,
     testVisibilityPredicateMatchesTranscriptBuilder,
     testWorkflowPlumbingStaysOutOfCheckpointTranscript,
+    testUserSuppliedWorkflowMarkersRemainVisible,
     testWorkflowPlumbingDoesNotDuplicateFollowingAssistantOnRestore
   ]
 

@@ -23,6 +23,7 @@ import type {
   HarnessEventStatus,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureStatus,
   HarnessAgentmdLoadStatusItem,
@@ -34,6 +35,8 @@ import type {
   HarnessProjectListItem,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
+  HarnessProjectModeSubagentConfig,
+  HarnessRequestUserInputConfig,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
@@ -445,22 +448,19 @@ function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): bool
 function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
   if (adapter.type !== "plugin") return null
   const plugins = getPlugins().filter(pluginHasBoardConfig)
+  const adapterId = normalizeText(adapter.id).trim()
+  if (adapterId) {
+    const plugin = plugins.find((item) => pluginAdapterId(item) === adapterId)
+    if (plugin) return plugin
+  }
+
   const adapterName = normalizeText(adapter.name).trim()
   if (adapterName) {
     const plugin = plugins.find((item) => item.name === adapterName)
     if (plugin) return plugin
   }
 
-  const adapterId = normalizeText(adapter.id).trim()
-  if (!adapterId) return null
-  return plugins.find((item) => pluginMatchesAdapterId(item, adapterId)) ?? null
-}
-
-function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
-  if (adapter.type !== "plugin") return null
-  const adapterName = normalizeText(adapter.name).trim()
-  if (!adapterName) return null
-  return getPlugins().find((item) => item.name === adapterName) ?? null
+  return null
 }
 
 function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
@@ -557,7 +557,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
-  return findPluginByAdapterName(adapter)
+  return findPluginForAdapterSnapshot(adapter)
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -897,11 +897,6 @@ function boardConfigPublicAgentmdDeployUnits(cwd: string): string[] {
   return parsed ? uniqueStringsInOrder(parsed.supported_deploy_units) : []
 }
 
-function boardConfigEnableTaskTool(cwd: string): boolean | undefined {
-  const parsed = readBoardConfig(cwd)
-  return typeof parsed?.enable_task_tool === "boolean" ? parsed.enable_task_tool : undefined
-}
-
 function boardConfigSupportsSessionContextInjection(cwd: string): boolean {
   return readBoardConfigInspectCommand(cwd, "sessionContext") !== null
 }
@@ -1002,8 +997,7 @@ function formatMarkdownTableCell(value: string): string {
 
 function resolveHarnessAdditionalWorkspaceRootMappings(
   projectId: string,
-  featureId: string,
-  _workspacePath: string
+  featureId: string
 ): HarnessDeployUnitMapping[] {
   const seen = new Set<string>()
   const mappings: HarnessDeployUnitMapping[] = []
@@ -1276,6 +1270,30 @@ function runInspectAdapter(
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = runHarnessInvocation(invocation, harnessCommandLogOptions(mode))
 
+  return parseInspectAdapterOutput(invocation, configKey, stdoutBuffer)
+}
+
+async function runInspectAdapterAsync(
+  project: HarnessProjectMetadata,
+  mode: "project" | "run",
+  feature?: string
+): Promise<Record<string, unknown>> {
+  const invocation = buildConfiguredHarnessInvocation(project, mode, { feature })
+  const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+  const stdoutBuffer = await runHarnessInvocationAsync(
+    invocation,
+    harnessCommandLogOptions(mode),
+    HARNESS_ADAPTER_TIMEOUT_MS
+  )
+
+  return parseInspectAdapterOutput(invocation, configKey, stdoutBuffer)
+}
+
+function parseInspectAdapterOutput(
+  invocation: ConfiguredHarnessInvocation,
+  configKey: HarnessInspectCommandConfigKey,
+  stdoutBuffer: Buffer
+): Record<string, unknown> {
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
@@ -1972,6 +1990,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
   const adapterName = normalizeText(harnessAdapter.name)
   const projectCode = normalizeText(value.projectCode)
   const projectDir = normalizeText(value.projectDir) || projectCode
+  const systemConstraintFirstLoadedAt = normalizeText(value.systemConstraintFirstLoadedAt).trim()
   if (!adapterId || !adapterName || harnessAdapter.type !== "plugin") return null
   const now = new Date().toISOString()
 
@@ -1986,6 +2005,7 @@ function normalizeProject(value: unknown): HarnessProjectMetadata | null {
     systemName: normalizeText(value.systemName),
     workspacePath: normalizeText(value.workspacePath) || normalizeText(oldWorkspace.path),
     sessionWorkspacePath: normalizeText(value.sessionWorkspacePath) || undefined,
+    ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
@@ -2263,6 +2283,30 @@ function saveFeatureDeployUnitBinding(
   return binding
 }
 
+function updateFeatureDeployUnitBinding(
+  projectId: string,
+  featureId: string,
+  selectedDeployUnitMappings: HarnessDeployUnitMapping[]
+): HarnessFeatureDeployUnitBindingRecord {
+  const store = readFeatureDeployUnitBindingStore()
+  const key = featureDeployUnitBindingKey(projectId, featureId)
+  const existingIndex = store.bindings.findIndex(
+    (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
+  )
+  if (existingIndex < 0) {
+    throw new Error("未找到该特性的发布单元绑定记录")
+  }
+
+  const binding: HarnessFeatureDeployUnitBindingRecord = {
+    ...store.bindings[existingIndex],
+    selectedDeployUnitMappings,
+    updatedAt: formatGmt8Timestamp()
+  }
+  store.bindings[existingIndex] = binding
+  writeFeatureDeployUnitBindingStore(store)
+  return binding
+}
+
 export function listHarnessDeployUnitMappings(): HarnessDeployUnitMapping[] {
   return readDeployUnitMappingStore().mappings
 }
@@ -2291,6 +2335,7 @@ export function saveHarnessLeanTokenConfig(input: HarnessLeanTokenConfig): Harne
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
   const harnessAdapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
+  const resolvedAdapter = plugin ? pluginToHarnessAdapterSnapshot(plugin) : harnessAdapter
   const boardCompatibility = evaluateBoardPluginCompatibility(
     plugin,
     harnessAdapter.name || harnessAdapter.id
@@ -2311,10 +2356,11 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     systemName: project.systemName,
     workspacePath: project.workspacePath,
     sessionWorkspacePath: project.sessionWorkspacePath,
+    systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     harnessAdapter: {
-      id: harnessAdapter.id,
-      name: harnessAdapter.name,
-      type: harnessAdapter.type
+      id: resolvedAdapter.id,
+      name: resolvedAdapter.name,
+      type: resolvedAdapter.type
     },
     creator: project.creator,
     boardCompatibility,
@@ -2428,13 +2474,13 @@ function validateFeatureCreateInput(input: HarnessFeatureCreateInput): void {
 }
 
 function resolveFeatureSelectedDeployUnits(
-  input: HarnessFeatureCreateInput,
-  _project: HarnessProjectMetadata
+  selectedDeployUnits: HarnessDeployUnitMapping[] | undefined,
+  options: { allowEmpty?: boolean } = {}
 ): HarnessDeployUnitMapping[] {
-  if (!Array.isArray(input.selectedDeployUnits)) return []
+  if (!Array.isArray(selectedDeployUnits)) return []
 
-  const selected = normalizeDeployUnitMappings(input.selectedDeployUnits)
-  if (selected.length === 0) {
+  const selected = normalizeDeployUnitMappings(selectedDeployUnits)
+  if (selected.length === 0 && !(options.allowEmpty && selectedDeployUnits.length === 0)) {
     throw new Error("请至少选择一个发布单元")
   }
 
@@ -2680,7 +2726,7 @@ export function readHarnessFeatureMetadata(
 export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   enableAgentsPrompt?: boolean
-  enableTaskTool?: boolean
+  agentConfig?: HarnessAgentConfig
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
   additionalAgentsWorkspaceMappings?: HarnessDeployUnitMapping[]
@@ -2705,16 +2751,117 @@ export interface HarnessFeatureAgentContext {
 
 export interface HarnessFeatureAgentContextOptions {
   workspacePath?: string
+  /** Resolve tool policy from the plugin while a project feature session is created. */
+  requestUserInputConfigSource?: "plugin" | "session_snapshot"
 }
 
 function isHarnessSessionContextOk(value: unknown): boolean {
   return value === true
 }
 
+export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
+
+export interface HarnessAgentConfig {
+  agentMode?: HarnessRuntimeAgentMode
+  subagentConfig?: HarnessProjectModeSubagentConfig
+  toolConfig?: {
+    requestUserInput?: HarnessRequestUserInputConfig
+  }
+}
+
+export const DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: HarnessRequestUserInputConfig = {
+  allowAutoResolution: false,
+  autoResolutionType: "select_first"
+}
+
+const REQUEST_USER_INPUT_TIMEOUT_MIN_MS = 30_000
+const REQUEST_USER_INPUT_TIMEOUT_MAX_MS = 240_000
+const REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS = 1_000
+
+function normalizeHarnessRequestUserInputConfig(
+  value: unknown
+): HarnessRequestUserInputConfig | undefined {
+  if (!isObject(value)) return undefined
+
+  if (value.allowAutoResolution !== true) {
+    return { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+  }
+
+  const defaultTimeoutMs =
+    typeof value.defaultTimeoutMs === "number" &&
+    Number.isInteger(value.defaultTimeoutMs) &&
+    value.defaultTimeoutMs >= REQUEST_USER_INPUT_TIMEOUT_MIN_MS &&
+    value.defaultTimeoutMs <= REQUEST_USER_INPUT_TIMEOUT_MAX_MS
+      ? value.defaultTimeoutMs
+      : undefined
+  const userMessage = normalizeText(value.userMessage).trim()
+  const autoResolutionType = value.autoResolutionType === "user_message" && userMessage
+    ? "user_message"
+    : "select_first"
+
+  return {
+    allowAutoResolution: true,
+    ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+    autoResolutionType,
+    ...(autoResolutionType === "user_message"
+      ? { userMessage: userMessage.slice(0, REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS) }
+      : {})
+  }
+}
+
+function resolveHarnessRequestUserInputConfig(value: unknown): HarnessRequestUserInputConfig {
+  const normalized = normalizeHarnessRequestUserInputConfig(value)
+  return normalized ?? { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+}
+
+function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undefined {
+  if (!isObject(value)) return undefined
+
+  const agentMode =
+    value.agentMode === "solo" ||
+    value.agentMode === "multi" ||
+    value.agentMode === "agent_team"
+      ? value.agentMode
+      : undefined
+  const normalizeStringList = (input: unknown): string[] => {
+    if (!Array.isArray(input)) return []
+    return [
+      ...new Set(
+        input
+          .filter((item): item is string => typeof item === "string")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
+    ]
+  }
+  const subagentConfig = isObject(value.subagentConfig)
+    ? {
+        disabledBuiltinSubagents: normalizeStringList(
+          value.subagentConfig.disabledBuiltinSubagents
+        ),
+        customSubagentFiles: normalizeStringList(value.subagentConfig.customSubagentFiles)
+      }
+    : undefined
+
+  const requestUserInputConfig = isObject(value.toolConfig)
+    ? normalizeHarnessRequestUserInputConfig(value.toolConfig.requestUserInput)
+    : undefined
+
+  if (!agentMode && !subagentConfig && !requestUserInputConfig) return undefined
+  return {
+    ...(agentMode ? { agentMode } : {}),
+    ...(subagentConfig ? { subagentConfig } : {}),
+    ...(requestUserInputConfig
+      ? { toolConfig: { requestUserInput: requestUserInputConfig } }
+      : {})
+  }
+}
+
 interface HarnessSessionContextInjectResult {
   prompt?: string
   warning?: string
   agentmdLoadStatus?: HarnessAgentmdLoadStatusItem[]
+  agentConfig?: HarnessAgentConfig
 }
 
 function formatSessionContextInjectWarning(detail: string): string {
@@ -2766,6 +2913,7 @@ function readHarnessFeatureSessionContextAgentPrompt(
       })
       return { warning: formatSessionContextInjectWarning(detail) }
     }
+    const agentConfig = normalizeHarnessAgentConfig(result.agentConfig)
     if (sessionContext.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
       console.warn("[HarnessBoard] session_context_inject sessionContext truncated:", {
         chars: sessionContext.length,
@@ -2773,10 +2921,15 @@ function readHarnessFeatureSessionContextAgentPrompt(
       })
       return {
         prompt: sessionContext.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS),
-        agentmdLoadStatus
+        agentmdLoadStatus,
+        ...(agentConfig ? { agentConfig } : {})
       }
     }
-    return { prompt: sessionContext, agentmdLoadStatus }
+    return {
+      prompt: sessionContext,
+      agentmdLoadStatus,
+      ...(agentConfig ? { agentConfig } : {})
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     console.error("[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:", {
@@ -2804,7 +2957,6 @@ export function buildHarnessFeatureAgentContext(
   const plugin = findAdapterPlugin(project)
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  const enableTaskTool = boardConfigEnableTaskTool(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const featureBinding = findFeatureDeployUnitBinding(project.projectId, feature.slug)
   const sessionContextInjectionSource =
@@ -2825,12 +2977,23 @@ export function buildHarnessFeatureAgentContext(
   const sessionContextInjectResult = usePluginAgentsPrompt
     ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, { sessionWorkspacePath })
     : undefined
+  const pluginAgentConfig = sessionContextInjectResult?.agentConfig
+  const persistedToolConfig = isObject(metadata) && isObject(metadata.harnessFeature)
+    ? metadata.harnessFeature.requestUserInputConfig
+    : undefined
+  const requestUserInputConfig =
+    options.requestUserInputConfigSource === "plugin"
+      ? resolveHarnessRequestUserInputConfig(pluginAgentConfig?.toolConfig?.requestUserInput)
+      : resolveHarnessRequestUserInputConfig(persistedToolConfig)
+  const agentConfig: HarnessAgentConfig = {
+    ...(pluginAgentConfig ?? {}),
+    toolConfig: { requestUserInput: requestUserInputConfig }
+  }
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
   const additionalWorkspaceRootMappings = resolveHarnessAdditionalWorkspaceRootMappings(
     project.projectId,
-    feature.slug,
-    sessionWorkspacePath
+    feature.slug
   )
   const additionalWorkspaceRoots = additionalWorkspaceRootMappings.map(
     (mapping) => mapping.localRepoPath
@@ -2845,7 +3008,7 @@ export function buildHarnessFeatureAgentContext(
   return {
     systemPromptInject,
     enableAgentsPrompt: !pluginPromptLoaded,
-    ...(enableTaskTool !== undefined ? { enableTaskTool } : {}),
+    ...(agentConfig ? { agentConfig } : {}),
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
       ? {
@@ -2895,36 +3058,78 @@ export function resolveHarnessFeatureCurrentStage(
     if (!normalizedProjectId || !normalizedSlug) return null
     const project = requireProject(normalizedProjectId)
     const snapshot = runInspectAdapter(project, "run", normalizedSlug)
-    const run = isObject(snapshot.run) ? snapshot.run : {}
-    const currentNodeId = normalizeText(run.currentNodeId).trim()
-    if (!currentNodeId) return null
-    const workflow = normalizeWorkflow(snapshot.workflow)
-    const node = workflow.nodes.find((n) => n.id === currentNodeId)
-    const label = normalizeText(node?.label).trim()
-    if (!label) return null
-    const group = normalizeText(node?.group).trim()
-    const name = group ? `${group}-${label}` : label
-
-    // Status of the current node *at this turn*, as a stable enum label. The run
-    // nodes array (plugin-provided) carries per-node nodeStatus; fall back to the
-    // run-level currentNodeStatus. Use the default label map so buckets stay
-    // stable regardless of any plugin-custom status label. "unknown" → null so we
-    // never report a noise bucket.
-    const runNode = Array.isArray(run.nodes)
-      ? run.nodes.find(
-          (n): n is Record<string, unknown> =>
-            isObject(n) && normalizeText(n.id).trim() === currentNodeId
-        )
-      : undefined
-    const rawStatus = runNode?.nodeStatus ?? run.currentNodeStatus
-    const nodeStatus = normalizeNodeStatus(rawStatus)
-    const status =
-      nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
-
-    return { name, status }
+    return resolveCurrentStageFromSnapshot(snapshot)
   } catch {
     return null
   }
+}
+
+/**
+ * Async counterpart used by code-generation attribution. Unlike the synchronous
+ * turn-start lookup, this does not block Electron's main thread while a plugin
+ * adapter is queried immediately before a generated code mutation.
+ */
+export async function resolveHarnessFeatureCurrentStageAsync(
+  projectId: string,
+  slug: string
+): Promise<{ name: string; status: string | null } | null> {
+  try {
+    const normalizedProjectId = normalizeText(projectId).trim()
+    const normalizedSlug = normalizeText(slug).trim()
+    if (!normalizedProjectId || !normalizedSlug) return null
+    const project = requireProject(normalizedProjectId)
+    const snapshot = await runInspectAdapterAsync(project, "run", normalizedSlug)
+    return resolveCurrentStageFromSnapshot(snapshot)
+  } catch {
+    return null
+  }
+}
+
+function resolveCurrentStageFromSnapshot(
+  snapshot: Record<string, unknown>
+): { name: string; status: string | null } | null {
+  const run = isObject(snapshot.run) ? snapshot.run : {}
+  const currentNodeId = normalizeText(run.currentNodeId).trim()
+  if (!currentNodeId) return null
+  const workflow = normalizeWorkflow(snapshot.workflow)
+  const runNode = Array.isArray(run.nodes)
+    ? run.nodes.find(
+        (n): n is Record<string, unknown> =>
+          isObject(n) && normalizeText(n.id).trim() === currentNodeId
+      )
+    : undefined
+  return resolveCurrentStageFromWorkflow(
+    workflow,
+    currentNodeId,
+    runNode?.nodeStatus ?? run.currentNodeStatus
+  )
+}
+
+function resolveCurrentStageFromWorkflow(
+  workflow: HarnessWorkflow,
+  currentNodeId: string,
+  rawStatus: unknown
+): { name: string; status: string | null } | null {
+  const node = workflow.nodes.find((item) => item.id === currentNodeId)
+  const label = normalizeText(node?.label).trim()
+  if (!label) return null
+  const group = normalizeText(node?.group).trim()
+  const name = group ? `${group}-${label}` : label
+  const nodeStatus = normalizeNodeStatus(rawStatus)
+  const status =
+    nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
+
+  return { name, status }
+}
+
+/** Reuse a Feature-page run refresh as an authoritative attribution snapshot. */
+export function resolveHarnessRunDetailCurrentStage(
+  detail: HarnessRunDetailViewModel
+): { name: string; status: string | null } | null {
+  const currentNodeId = normalizeText(detail.run.currentNodeId).trim()
+  if (!currentNodeId) return null
+  const currentNode = detail.run.nodes.find((node) => node.id === currentNodeId)
+  return resolveCurrentStageFromWorkflow(detail.workflow, currentNodeId, currentNode?.nodeStatus)
 }
 
 export function buildHarnessFeatureDialogTips(projectId: string, slug: string): string | null {
@@ -3028,7 +3233,7 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   const feature = input.feature.trim()
   const workspacePath = projectDirectoryPath(project)
   const workflowOptions = buildFeatureWorkflowCommandOptions(input)
-  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input, project)
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input.selectedDeployUnits)
   const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
     input.sessionContextInjectionSource
   )
@@ -3072,6 +3277,23 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
   }
 }
 
+export function updateHarnessFeatureDeployUnits(
+  input: HarnessFeatureDeployUnitUpdateInput
+): HarnessFeatureDeployUnitBinding {
+  const projectId = normalizeText(input.projectId).trim()
+  const featureId = normalizeText(input.featureId).trim()
+  if (!projectId || !featureId) {
+    throw new Error("Project and feature are required")
+  }
+  validateHarnessName(featureId, "特性名称")
+  requireProject(projectId)
+
+  const selectedDeployUnits = resolveFeatureSelectedDeployUnits(input.selectedDeployUnits, {
+    allowEmpty: true
+  })
+  return updateFeatureDeployUnitBinding(projectId, featureId, selectedDeployUnits)
+}
+
 export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNodeResult {
   const { projectId, slug, nodeId } = validateSkipNodeInput(input)
   const project = requireProject(projectId)
@@ -3107,6 +3329,35 @@ export function getHarnessDynamicWorkflowConfig(
 ): HarnessDynamicWorkflowConfig | null {
   const project = requireProject(projectId)
   return getHarnessDynamicWorkflowConfigForProject(project)
+}
+
+/**
+ * Persist the first observed feature-session run whose complete system-constraint
+ * set loaded successfully. The marker is monotonic and deliberately does not
+ * touch lifecycle.updateAt, so telemetry does not reorder the project list.
+ * Returns true only when the project was changed for the first time.
+ */
+export function markHarnessProjectSystemConstraintsLoaded(
+  projectId: string,
+  loadedAt = new Date().toISOString()
+): boolean {
+  const id = normalizeText(projectId).trim()
+  if (!id) return false
+
+  const store = readProjectStore()
+  const index = store.projects.findIndex((item) => item.projectId === id)
+  if (index === -1 || store.projects[index].systemConstraintFirstLoadedAt) return false
+
+  const parsedLoadedAt = new Date(loadedAt)
+  const firstLoadedAt = Number.isNaN(parsedLoadedAt.getTime())
+    ? new Date().toISOString()
+    : parsedLoadedAt.toISOString()
+  store.projects[index] = {
+    ...store.projects[index],
+    systemConstraintFirstLoadedAt: firstLoadedAt
+  }
+  writeProjectStore(store)
+  return true
 }
 
 export function updateHarnessProjectMetadata(

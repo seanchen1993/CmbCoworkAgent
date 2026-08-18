@@ -17,10 +17,13 @@
  * `tools`/`disallowedTools` frontmatter (CC tool names are auto-mapped) or the
  * coarse `workload` shortcut.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "fs"
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs"
 import { homedir } from "os"
-import { join } from "path"
+import { basename, extname, isAbsolute, join } from "path"
 import { parseYamlFrontmatter } from "../utils/skill-identifiers"
+import type { ExpertAgentAccess } from "../../shared/expert-agent-types"
+import type { HarnessProjectModeSubagentConfig } from "../../shared/harness-board-types"
+import { LIBRARY_AGENT_PROFILES } from "./library"
 
 /** execute/shell policy for an agent. none = no shell at all; read_only = only
  * provably read-only commands (gated by exec-policy's isReadOnlyShellCommand);
@@ -36,7 +39,7 @@ export interface AgentProfile {
   systemPrompt: string
   /** Optional model override (undefined = inherit the session model). */
   model?: string
-  source: "built-in" | "user"
+  source: "built-in" | "library" | "user"
   /** Project tool names this agent may NOT use (CC aliases already resolved,
    * `execute` handled via shellAccess instead of appearing here). */
   disallowedTools: string[]
@@ -44,8 +47,8 @@ export interface AgentProfile {
   shellAccess: AgentShellAccess
 }
 
-/** The fs/exec tools an allowlist/denylist can govern in this project. Mirrors
- * the set deepagents' filesystem middleware provides plus our task_output. */
+/** The built-in tools an allowlist/denylist can govern in this project. Mirrors
+ * the tools provided by deepagents' filesystem/todo middleware plus task_output. */
 const KNOWN_TOOLS = [
   "read_file",
   "write_file",
@@ -54,7 +57,8 @@ const KNOWN_TOOLS = [
   "ls",
   "glob",
   "grep",
-  "task_output"
+  "task_output",
+  "write_todos"
 ] as const
 
 /** Claude Code tool name → this project's tool name. Names absent here (e.g.
@@ -232,6 +236,21 @@ function deriveToolPolicy(fm: Record<string, string>): ToolPolicy {
   }
 
   return policyFromDisallowed(denyExplicit)
+}
+
+/** Inverse of deriveToolPolicy's workload tiers: classify a profile's
+ * (disallowedTools, shellAccess) into the coarse access tier the settings UI
+ * badges with. Lives here, next to deriveToolPolicy, so the tier semantics
+ * have one home — if a tier's definition changes, both directions change
+ * together. */
+export function accessTierForPolicy(
+  disallowedTools: readonly string[],
+  shellAccess: AgentShellAccess
+): ExpertAgentAccess {
+  const noWrites =
+    disallowedTools.includes("write_file") && disallowedTools.includes("edit_file")
+  if (!noWrites) return "full"
+  return shellAccess === "read_only" ? "read_only" : "verify"
 }
 
 /** Split a flat disallowed-tool list into (non-execute denylist, shellAccess).
@@ -564,9 +583,93 @@ function loadUserAgents(dir: string): AgentProfile[] {
   return out
 }
 
-/** Full registry: built-in profiles + user agents from `~/.cmbcoworkagent/agents/`
- * and `<workspace>/.cmbcoworkagent/agents/`. Project overrides user overrides
- * built-in (last writer wins).
+/** Load user-format agent Markdown files explicitly selected by a project-mode
+ * plugin. The parser and permission derivation are shared with global/workspace
+ * user agents; this wrapper only adds direct-file validation and deduplication. */
+function loadExplicitUserAgentFiles(filePaths: readonly string[]): AgentProfile[] {
+  const out: AgentProfile[] = []
+  const seenPaths = new Set<string>()
+  for (const configuredPath of filePaths) {
+    if (!isAbsolute(configuredPath)) {
+      console.warn(
+        `[AgentRegistry] Project-mode custom subagent path must be absolute; skipped: ${configuredPath}`
+      )
+      continue
+    }
+    try {
+      const filePath = realpathSync(configuredPath)
+      if (seenPaths.has(filePath)) continue
+      seenPaths.add(filePath)
+      if (extname(filePath).toLowerCase() !== ".md" || !statSync(filePath).isFile()) {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent path is not a Markdown file; skipped: ${configuredPath}`
+        )
+        continue
+      }
+      const profile = parseAgentFile(filePath, basename(filePath, extname(filePath)))
+      if (profile) out.push(profile)
+    } catch (error) {
+      console.warn(
+        `[AgentRegistry] Failed to load project-mode custom subagent file ${configuredPath}:`,
+        error
+      )
+    }
+  }
+  return out
+}
+
+// ── Expert agent library (专家团) enablement ──
+//
+// The curated library profiles (src/main/agent/library/) are OFF by default.
+// Which ones are active is user-controlled via settings, but this module must
+// stay free of electron/storage imports (tests/agent-registry.spec.ts runs it
+// under plain tsx), so the settings read is INJECTED: main registers a reader
+// at startup (see ipc/expert-agents.ts) and loadAgentProfiles calls it on
+// every load — a toggle takes effect on the next runtime creation with no
+// restart. Default reader = nothing enabled, which is also the correct
+// behavior in test contexts.
+type EnabledLibraryAgentsReader = () => readonly string[]
+let readEnabledLibraryAgents: EnabledLibraryAgentsReader = () => []
+
+export function registerEnabledLibraryAgentsReader(reader: EnabledLibraryAgentsReader): void {
+  readEnabledLibraryAgents = reader
+}
+
+/** The enabled subset of the library, resolved via the injected reader.
+ * Unknown names in the stored list (e.g. a profile removed in an upgrade) are
+ * silently skipped. A library profile whose name collides with a BUILT-IN name
+ * (case-insensitive) is refused at runtime with a warning: the registry's
+ * canonical-key collapse would otherwise let it silently REPLACE the built-in
+ * and its tool policy — the privilege footgun the collapse comment warns
+ * about. The curation spec asserts this never ships, but the runtime must not
+ * rely on a test having run. */
+function loadEnabledLibraryProfiles(): AgentProfile[] {
+  let enabled: readonly string[]
+  try {
+    enabled = readEnabledLibraryAgents()
+  } catch (error) {
+    console.warn("[AgentRegistry] Failed to read enabled library agents; treating as none:", error)
+    return []
+  }
+  if (!Array.isArray(enabled) || enabled.length === 0) return []
+  const enabledSet = new Set(enabled)
+  return LIBRARY_AGENT_PROFILES.filter((p) => {
+    if (!enabledSet.has(p.name)) return false
+    if (BUILT_IN_NAME_BY_LOWER.has(p.name.toLowerCase())) {
+      console.warn(
+        `[AgentRegistry] Library agent "${p.name}" collides with a built-in profile name and was skipped — rename the library profile.`
+      )
+      return false
+    }
+    return true
+  })
+}
+
+/** Full registry: built-in profiles + enabled expert-library profiles + user
+ * agents from `~/.cmbcoworkagent/agents/` and
+ * `<workspace>/.cmbcoworkagent/agents/`. Project overrides user overrides
+ * library overrides built-in (last writer wins). Built-ins can never be
+ * disabled; library profiles are opt-in via the 专家团 settings page.
  *
  * Keyed to mirror the resolver: `agentType` resolution treats BUILT-IN names
  * case-insensitively (Explore / explore / EXPLORE), but custom names exact-only.
@@ -580,7 +683,27 @@ function loadUserAgents(dir: string): AgentProfile[] {
 const BUILT_IN_NAME_BY_LOWER = new Map(
   BUILT_IN_AGENT_PROFILES.map((p) => [p.name.toLowerCase(), p.name] as const)
 )
-export function loadAgentProfiles(workspacePath?: string): AgentProfile[] {
+const GENERAL_PURPOSE_SUBAGENT_NAME = "general-purpose"
+const BUNDLED_AGENT_NAMES = new Set([
+  GENERAL_PURPOSE_SUBAGENT_NAME,
+  ...BUILT_IN_AGENT_PROFILES.map((profile) => profile.name),
+  ...LIBRARY_AGENT_PROFILES.map((profile) => profile.name)
+])
+const BUNDLED_AGENT_NAMES_LOWER = new Set(
+  [...BUNDLED_AGENT_NAMES].map((name) => name.toLowerCase())
+)
+const warnedUnknownDisabledBuiltinSubagents = new Set<string>()
+
+export function isGeneralPurposeSubagentEnabled(
+  subagentConfig?: HarnessProjectModeSubagentConfig
+): boolean {
+  return !subagentConfig?.disabledBuiltinSubagents.includes(GENERAL_PURPOSE_SUBAGENT_NAME)
+}
+
+export function loadAgentProfiles(
+  workspacePath?: string,
+  subagentConfig?: HarnessProjectModeSubagentConfig
+): AgentProfile[] {
   const byName = new Map<string, AgentProfile>()
   const put = (p: AgentProfile): void => {
     // Built-in logical name → canonical key (collapse all casings/layers, last
@@ -588,10 +711,42 @@ export function loadAgentProfiles(workspacePath?: string): AgentProfile[] {
     const key = BUILT_IN_NAME_BY_LOWER.get(p.name.toLowerCase()) ?? p.name
     byName.set(key, p)
   }
-  for (const p of BUILT_IN_AGENT_PROFILES) put(p)
-  for (const p of loadUserAgents(join(homedir(), ".cmbcoworkagent", "agents"))) put(p)
-  if (workspacePath) {
-    for (const p of loadUserAgents(join(workspacePath, ".cmbcoworkagent", "agents"))) put(p)
+
+  if (subagentConfig) {
+    const disabled = new Set(subagentConfig.disabledBuiltinSubagents)
+    for (const name of disabled) {
+      if (BUNDLED_AGENT_NAMES.has(name) || warnedUnknownDisabledBuiltinSubagents.has(name)) continue
+      warnedUnknownDisabledBuiltinSubagents.add(name)
+      console.warn(`[AgentRegistry] Unknown disabledBuiltinSubagents entry "${name}" was ignored.`)
+    }
+    for (const p of BUILT_IN_AGENT_PROFILES) {
+      if (!disabled.has(p.name)) put(p)
+    }
+    for (const p of LIBRARY_AGENT_PROFILES) {
+      if (!disabled.has(p.name)) put(p)
+    }
+    for (const p of loadExplicitUserAgentFiles(subagentConfig.customSubagentFiles)) {
+      if (BUNDLED_AGENT_NAMES_LOWER.has(p.name.toLowerCase())) {
+        console.warn(
+          `[AgentRegistry] Project-mode custom subagent "${p.name}" collides with a bundled subagent name and was skipped.`
+        )
+        continue
+      }
+      if (byName.has(p.name)) {
+        console.warn(
+          `[AgentRegistry] Duplicate project-mode custom subagent name "${p.name}" was skipped.`
+        )
+        continue
+      }
+      put(p)
+    }
+  } else {
+    for (const p of BUILT_IN_AGENT_PROFILES) put(p)
+    for (const p of loadEnabledLibraryProfiles()) put(p)
+    for (const p of loadUserAgents(join(homedir(), ".cmbcoworkagent", "agents"))) put(p)
+    if (workspacePath) {
+      for (const p of loadUserAgents(join(workspacePath, ".cmbcoworkagent", "agents"))) put(p)
+    }
   }
   return [...byName.values()]
 }
@@ -626,9 +781,9 @@ export function resolveAgentProfile(name: string, workspacePath?: string): Agent
 }
 
 /**
- * Strip a blocked tool's "- <tool>: …" documentation line — and, when
- * shellAccess is "none", the deepagents "## Execute Tool" section — from an
- * injected filesystem/system prompt.
+ * Strip a blocked tool's "- <tool>: …" documentation line, the deepagents
+ * "## Execute Tool" section when shellAccess is "none", and LangChain's
+ * write_todos guidance when that middleware-provided tool is blocked.
  *
  * deepagents' filesystem middleware advertises tool usage in the SYSTEM PROMPT,
  * not only through the model's tool list, so hiding a tool from request.tools is
@@ -658,6 +813,23 @@ export function stripBlockedToolDocs(systemMessage: unknown, blocked: Iterable<s
     // section), since it can still run provably read-only commands.
     if (blockedSet.has("execute")) {
       out = out.replace(/\n## Execute Tool[\s\S]*?(?=\n## |\n### |$)/g, "")
+    }
+    if (blockedSet.has("write_todos")) {
+      // todoListMiddleware appends this guidance before the registry guard runs.
+      // Match its exact start/end markers instead of a broad Markdown-section
+      // regex: the prompt contains another `##` heading internally, and deleting
+      // until the next heading could either leave half the guidance behind or
+      // consume an unrelated prompt appended by a later middleware.
+      const startMarker = "\n## `write_todos`\n"
+      const endMarker =
+        "\n- Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant."
+      let start = out.indexOf(startMarker)
+      while (start !== -1) {
+        const end = out.indexOf(endMarker, start + startMarker.length)
+        if (end === -1) break
+        out = out.slice(0, start) + out.slice(end + endMarker.length)
+        start = out.indexOf(startMarker, start)
+      }
     }
     return out
   }
