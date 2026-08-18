@@ -17,14 +17,18 @@ import { promisify } from "util"
 import { ApprovalStore } from "./approval-store"
 import {
   assessCommandSafety,
+  containsGitAddCommand,
   derivePermanentApprovalPattern,
   extractGitCommitPathspecs,
   extractGitCommitMessage,
   isAmendOrFixupCommit,
   isChainedShellCommand,
   isForcePushCommand,
+  isGitAddCommand,
   isGitCommitCommand,
   isGitPushCommand,
+  isSimpleIsolatedGitCommitCommand,
+  isWholeScopeGitAddCommand,
   normalizeCdPrefixedGitCommitCommand,
   normalizeGitAddPrefixedGitCommitCommand,
   resolveGitCommandCwd,
@@ -54,6 +58,11 @@ export type RawExecuteFn = (
 
 /** Function to request interactive approval from the user (renderer). */
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
+export type IsolatedGitMutationFn = (
+  operation: "stage" | "commit",
+  message: string | undefined,
+  cwd: string
+) => Promise<ExecuteResponse>
 
 /**
  * Generic prompt shown when a sandboxed command fails with output that looks like a
@@ -65,9 +74,13 @@ const SANDBOX_BYPASS_PROMPT_REASON =
 
 async function readStagedGitFilePaths(cwd: string): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "diff", "--cached", "--name-only", "-z"], {
-      maxBuffer: 2 * 1024 * 1024
-    })
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", cwd, "diff", "--cached", "--name-only", "-z"],
+      {
+        maxBuffer: 2 * 1024 * 1024
+      }
+    )
     return Array.from(
       new Set(
         String(stdout)
@@ -84,7 +97,10 @@ async function readStagedGitFilePaths(cwd: string): Promise<string[]> {
 function normalizeDirBoundaryKey(dir: string): string {
   const resolved = path.resolve(dir)
   if (process.platform === "win32") {
-    return resolved.replace(/[\\/]+/g, "\\").replace(/\\+$/, "").toLowerCase()
+    return resolved
+      .replace(/[\\/]+/g, "\\")
+      .replace(/\\+$/, "")
+      .toLowerCase()
   }
   return resolved.replace(/\/+$/, "") || "/"
 }
@@ -97,7 +113,9 @@ function isPathInsideOrSame(targetPath: string, rootPath: string): boolean {
   return target === root || target.startsWith(`${root}${separator}`)
 }
 
-async function resolveExistingDirForBoundary(dir: string): Promise<{ path: string; exists: boolean }> {
+async function resolveExistingDirForBoundary(
+  dir: string
+): Promise<{ path: string; exists: boolean }> {
   try {
     return { path: await realpath(dir), exists: true }
   } catch {
@@ -186,7 +204,10 @@ export class ToolOrchestrator {
      * editing many files must not re-prompt per file (the official acceptEdits
      * semantics). Shell `execute` stays gated — it's the more dangerous op.
      */
-    private autoApproveFileEdits: boolean = false
+    private autoApproveFileEdits: boolean = false,
+    /** Isolated worktree runtimes must never retry a denied command on the host. */
+    private sandboxEscapeAllowed: boolean = true,
+    private isolatedGitMutation?: IsolatedGitMutationFn
   ) {}
 
   /**
@@ -224,12 +245,66 @@ export class ToolOrchestrator {
         }
       }
 
+      // An isolated workflow checkout is intentionally not a child of the thread's
+      // source workspace, so the Git Panel's thread-scoped commit/push IPC cannot
+      // authorize it. Commits go through a guarded host broker that stages only the
+      // assigned scope and advances only its branch. Direct push commands are rejected for
+      // app-owned transient branches; arbitrary project subprocesses and network access
+      // remain outside this worktree-integrity boundary and are explicitly treated as trusted.
+      if (!this.sandboxEscapeAllowed && isGitPushCommand(command)) {
+        return {
+          output: "Command forbidden: direct push from an isolated workflow worktree is blocked",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      if (!this.sandboxEscapeAllowed && this.isolatedGitMutation) {
+        if (containsGitAddCommand(command)) {
+          if (!isGitAddCommand(command) || !isWholeScopeGitAddCommand(command)) {
+            return {
+              output:
+                "Command forbidden: isolated staging only supports `git add -A` or `git add --all`; commit automatically stages the assigned scope",
+              exitCode: 1,
+              truncated: false
+            }
+          }
+          return this.isolatedGitMutation("stage", undefined, cwd)
+        }
+        if (isGitCommitCommand(command)) {
+          if (isChainedShellCommand(command)) {
+            return {
+              output:
+                "Command forbidden: run isolated `git commit -m ...` as a standalone command; the broker stages the assigned scope automatically",
+              exitCode: 1,
+              truncated: false
+            }
+          }
+          if (!isSimpleIsolatedGitCommitCommand(command)) {
+            return {
+              output:
+                "Command forbidden: isolated commits support only `git commit -m <message>`; amend/fixup/squash, pathspecs, and staging options are not supported",
+              exitCode: 1,
+              truncated: false
+            }
+          }
+          const message = extractGitCommitMessage(command)
+          if (!message?.trim()) {
+            return {
+              output: "Command forbidden: isolated worktree commits require -m/--message",
+              exitCode: 1,
+              truncated: false
+            }
+          }
+          return this.isolatedGitMutation("commit", message, cwd)
+        }
+      }
+
       // 2.5 git commit → route through the task-card commit dialog instead of a plain
       // approval. The renderer collects the task card + message, performs the commit via
       // workspace:commitWorktree (the same path as the Git Panel), and reports the result
       // back. This applies even in YOLO mode: a commit must always carry a task card and
       // the CMB message format, so it is the one operation YOLO still prompts for.
-      if (isGitCommitCommand(command)) {
+      if (this.sandboxEscapeAllowed && isGitCommitCommand(command)) {
         let commitCommand = command
         let commitCwd = cwd
         let preselectedFilePaths: string[] | undefined
@@ -406,7 +481,9 @@ export class ToolOrchestrator {
         suggestedCommitFileBasePath = undefined
       }
     }
-    console.log(`[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`)
+    console.log(
+      `[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`
+    )
     const decision = await this.requestApproval({
       id: randomUUID(),
       tool_call: { id: randomUUID(), name: "execute", args: { command } },
@@ -464,7 +541,9 @@ export class ToolOrchestrator {
         truncated: false
       }
     }
-    console.log(`[Orchestrator] git push → workspace:pushWorktree (cwd=${cwd}, gitCwd=${gitCommandCwd})`)
+    console.log(
+      `[Orchestrator] git push → workspace:pushWorktree (cwd=${cwd}, gitCwd=${gitCommandCwd})`
+    )
     const decision = await this.requestApproval({
       id: randomUUID(),
       tool_call: { id: randomUUID(), name: "execute", args: { command } },
@@ -514,6 +593,7 @@ export class ToolOrchestrator {
     result: ExecuteResponse
   ): Promise<ExecuteResponse> {
     if (sandboxMode === "none") return result
+    if (!this.sandboxEscapeAllowed) return result
     // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
     // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
     return this.maybeRequestSandboxBypass(command, cwd, sandboxMode, result)

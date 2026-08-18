@@ -2,7 +2,6 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
-const modelsSource = readFileSync(new URL("../src/main/ipc/models.ts", import.meta.url), "utf8")
 const localSandboxSource = readFileSync(
   new URL("../src/main/agent/local-sandbox.ts", import.meta.url),
   "utf8"
@@ -46,7 +45,12 @@ const workflowRunManagerSource = readFileSync(
   new URL("../src/main/agent/workflow/run-manager.ts", import.meta.url),
   "utf8"
 )
+const gitWorktreeSource = readFileSync(
+  new URL("../src/main/services/git-worktree.ts", import.meta.url),
+  "utf8"
+)
 const threadsSource = readFileSync(new URL("../src/main/ipc/threads.ts", import.meta.url), "utf8")
+const modelsSource = readFileSync(new URL("../src/main/ipc/models.ts", import.meta.url), "utf8")
 const storageSource = readFileSync(new URL("../src/main/storage.ts", import.meta.url), "utf8")
 const agentIpcSource = readFileSync(new URL("../src/main/ipc/agent.ts", import.meta.url), "utf8")
 const checkpointTranscriptSource = readFileSync(
@@ -1718,7 +1722,7 @@ test("workflow warns when the initial run state could not be persisted", () => {
   )
   assert.match(
     workflowToolSource,
-    /initialPersisted[\s\S]*?may NOT be resumable/,
+    /initialPersisted[\s\S]*?may not be resumable/,
     "the tool warns the user when the run isn't durable"
   )
 })
@@ -1792,14 +1796,19 @@ test("workflow subagent hard-stops a hung stream via raceWithAbort", () => {
   assert.equal(wrapped.length, 2, "both stream consumptions are wrapped in raceWithAbort")
 })
 
-test("workflow persists the resumed flag at launch (survives reload)", () => {
-  // #7: resumed is set ONCE at launch from the resume journal — matching engine's
-  // run-start `journal.length > 0` — and persisted, so a fresh run whose journal
-  // later grows is not mistaken for a resume after a renderer reload.
+test("workflow persists the explicit resumed flag at launch (survives reload)", () => {
+  // Resume is explicit rather than inferred only from the journal: isolated
+  // worktrees deliberately are not journal-replayed, but resuming such a run
+  // must still preserve its durable records and renderer status.
   assert.match(
     workflowRunManagerSource,
-    /resumed: \(request\.resumeJournal\?\.length \?\? 0\) > 0/,
-    "launch persists resumed from the resume journal length"
+    /resumed: request\.resumed === true/,
+    "launch persists the explicit resume state"
+  )
+  assert.match(
+    workflowToolSource,
+    /resumed: resume\.run !== null/,
+    "workflow tool marks resume even when only durable worktrees are reused"
   )
 })
 
@@ -2069,6 +2078,16 @@ test("workflow settle reports + retries a failed final persist (no stale notific
     /if \(!finalPersisted\)[\s\S]*?could NOT be persisted/,
     "settle logs loudly when the final persist fails"
   )
+  const fallbackPublishedAt = workflowRunManagerSource.indexOf(
+    "this.flushFailedRuns.set(request.runId"
+  )
+  const lifecycleRemovedAt = workflowRunManagerSource.indexOf(
+    "this.active.delete(request.threadId)"
+  )
+  assert(
+    fallbackPublishedAt >= 0 && lifecycleRemovedAt >= 0 && fallbackPublishedAt < lifecycleRemovedAt,
+    "terminal fallback is published before the active lifecycle entry is removed"
+  )
 })
 
 test("workflow notification reads an in-memory snapshot when final persist failed", () => {
@@ -2102,7 +2121,7 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
   // else findPendingNotification would re-surface and wrongly report it.
   assert.match(
     workflowRunManagerSource,
-    /if \(!entry\.userCancelled\)[\s\S]*?if \(!finalPersisted\)[\s\S]*?flushFailedRuns\.set\(/,
+    /if \(!entry\.userCancelled && !finalPersisted\)[\s\S]*?flushFailedRuns\.set\(/,
     "flush-failed snapshot is stored only for non-cancelled runs"
   )
   assert.match(
@@ -2124,16 +2143,21 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
   )
   assert.match(
     workflowsIpcSource,
-    /const recovered = workflowRunManager\.getFlushFailedRun\(runId\)[\s\S]*?return stripJournalForRenderer\(recovered\)/,
-    "get-run serves the in-memory terminal snapshot"
+    /const recovered = workflowRunManager\.getFlushFailedRun\(runId\)[\s\S]*?if \(recovered\?\.threadId === threadId\)[\s\S]*?retryPersistFlushFailedRun\(workspacePath, threadId, runId\)[\s\S]*?return stripJournalForRenderer\(recovered\)/,
+    "get-run serves and retries only an in-memory snapshot owned by the requested thread"
   )
   // ack writes the true terminal state back to disk (disk may have recovered),
   // carrying the capture-time disposal epoch so a snapshot from a deleted (then
   // revived) incarnation is dropped instead of rebuilding the swept run dir.
   assert.match(
     workflowRunManagerSource,
-    /async recoverFlushFailedRun[\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*snapshot,\s*this\.flushFailedEpochs\.get\(runId\)\s*\)/,
+    /persistCurrentFlushFailedRun[\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*frozen,\s*this\.flushFailedEpochs\.get\(runId\)\s*\)[\s\S]*?flushFailedRevisions\.get\(runId\)[\s\S]*?dropFlushFailedRun\(runId\)/,
     "recoverFlushFailedRun writes the snapshot back to disk on ack, epoch-fenced"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /async recoverFlushFailedRun[\s\S]*?this\.persistCurrentFlushFailedRun\(workspacePath, threadId, runId\)/,
+    "the ack path uses the revision-fenced write-back helper"
   )
   // The snapshot keeps the FULL journal (writing an empty one would wipe the resume
   // cache); the real behavior is covered by testPersistRecoveredRunKeepsJournal.
@@ -2332,7 +2356,7 @@ test("flush-failed snapshot gets a real write-back retry on read paths, not just
   // does NOT touch notificationDelivered (the ack owns that flag).
   assert.match(
     workflowRunManagerSource,
-    /async retryPersistFlushFailedRun\([\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*snapshot,\s*this\.flushFailedEpochs\.get\(runId\)\s*\)[\s\S]*?this\.dropFlushFailedRun\(runId\)/,
+    /async retryPersistFlushFailedRun\([\s\S]*?return this\.persistCurrentFlushFailedRun\(workspacePath, threadId, runId\)/,
     "run manager exposes a read-path write-back retry that drops the snapshot on success"
   )
   assert.match(
@@ -2398,6 +2422,108 @@ test("auto-commit is skipped while background work is active on the thread (#3)"
     agentIpcSource,
     /workflowRunManager\.hasDeliverablePendingNotification\(workspacePath, threadId\)[\s\S]*?status: "skipped"/,
     "and skips a FAST workflow's undelivered edits (honors 'leave for review'); the delivered run is already markNotified before finalize, so no turn-type guard is needed"
+  )
+})
+
+test("only source-mutating worktree merge uses the workspace integration guard", () => {
+  assert.doesNotMatch(
+    agentIpcSource,
+    /tryWithWorkspaceIntegrationLease/,
+    "worktree integration must not hold a product-wide lease across ordinary auto-commit UI"
+  )
+  assert.match(
+    workflowsIpcSource,
+    /if \(payload\.action === "diff"\)[\s\S]*?else if \(payload\.action === "discard"\)[\s\S]*?else if \(payload\.action === "cleanup"\)[\s\S]*?else \{[\s\S]*?withWorkspaceIntegrationLease/,
+    "diff/discard/cleanup must not occupy the source-integration lease"
+  )
+  assert.match(
+    workflowsIpcSource,
+    /withWorkspaceIntegrationLease\(\s*record\.sourceRoot,\s*`ui:\$\{payload\.threadId\}:\$\{payload\.runId\}`/,
+    "merge alone must serialize the shared source checkout mutation"
+  )
+})
+
+test("isolated worktree provisioning requires the durable run index", () => {
+  assert.match(
+    workflowRunManagerSource,
+    /!\(await runStore\.whenInitialPersisted\)[\s\S]{0,120}!runStore\.isCurrentSnapshotPersisted\(\)[\s\S]{0,500}entry\.worktrees\.acquire/,
+    "worktree ownership requires either the eager persist or a later durable snapshot of the current run"
+  )
+})
+
+test("isolated commits verify the assigned branch again after staging", () => {
+  const commit = sectionBetween(
+    gitWorktreeSource,
+    "export async function commitWorkflowWorktree",
+    "interface WorktreeListEntry"
+  )
+  const stagedAt = commit.indexOf("stageWorkflowWorktreeUnlocked(boundary, signal)")
+  const recheckAt = commit.indexOf("assertWorkflowWorktreeCommitBranch(boundary, signal)")
+  const gitCommitAt = commit.indexOf('"commit"')
+  assert.ok(stagedAt !== -1 && recheckAt > stagedAt && gitCommitAt > recheckAt,
+    "a branch switch during staging must be rejected before git commit runs")
+})
+
+test("retained worktrees pin only their owning workspace until explicitly resolved", () => {
+  assert.match(
+    workflowRunManagerSource,
+    /isWorkspacePinnedForThread[\s\S]*?countUnresolvedWorkflowWorktrees\(workspacePath, threadId,[\s\S]*?failClosedOnUnreadable: false/,
+    "workspace pinning includes durable unresolved worktrees"
+  )
+  assert.doesNotMatch(
+    agentIpcSource,
+    /workflowLeaveBlockedMessage[\s\S]{0,900}isWorkspacePinnedForThread/,
+    "a retained worktree does not block mode-only changes"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /isWorkspacePinnedForThread[\s\S]*?identifyRepository\(workspacePath\)[\s\S]*?listWorkflowWorktreeRecordsForPrune\(repository\.commonDir\)[\s\S]*?record\.threadId === threadId/,
+    "workspace pinning also sees a crash-window manifest absent from run.json"
+  )
+})
+
+test("flush-failed worktree recovery paths remain actionable", () => {
+  assert.match(
+    workflowsIpcSource,
+    /getFlushFailedRun\(payload\.runId\) \?\?[\s\S]*?loadWorkflowRun\(workspacePath, payload\.threadId, payload\.runId\)/,
+    "worktree actions must use the same in-memory terminal run shown by workflow:get-run"
+  )
+  assert.match(
+    workflowsIpcSource,
+    /persistActionWorktreeRecord\([\s\S]*?updateFlushFailedWorktreeRecord/,
+    "worktree action results must update a flush-failed snapshot before retrying disk persistence"
+  )
+  assert.match(
+    threadsSource,
+    /listFlushFailedRuns\(threadId\)[\s\S]*?record\.cleanupPending === true/,
+    "thread deletion keeps a flush-failed terminal worktree whose branch or manifest cleanup remains pending"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /updateFlushFailedWorktreeRecord[\s\S]*?newerWorkflowWorktreeRecord\(current, record\)/,
+    "flush-failed snapshots use the same terminal-monotonic worktree merge as run.json"
+  )
+})
+
+test("pristine cleanup keeps a terminal recovery record when ownership deletion fails", () => {
+  assert.match(
+    workflowRunManagerSource,
+    /onRecordDelete: \(record\)[\s\S]*?run\.worktrees = \(run\.worktrees \?\? \[\]\)\.filter/,
+    "the normal path still removes a pristine worktree from run history"
+  )
+  const leaseSource = readFileSync(
+    new URL("../src/main/agent/workflow/worktree-lease.ts", import.meta.url),
+    "utf8"
+  )
+  assert.match(
+    leaseSource,
+    /private async removeAndForget[\s\S]*?deleteWorkflowWorktreeRecord[\s\S]*?catch \(error\)[\s\S]*?"discarded"[\s\S]*?cleanupPending: true[\s\S]*?onRecordChange/,
+    "a removed pristine checkout is terminal-pending, never hidden while its manifest remains"
+  )
+  assert.match(
+    threadsSource,
+    /alreadyCleaned[\s\S]*?finalizeWorkflowWorktreeRecord/,
+    "thread deletion finalizes a clean terminal tombstone before dropping its recovery route"
   )
 })
 
@@ -2633,29 +2759,19 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   // running/pending — otherwise the threads:update guard is just a bypassed side door.
   assert.match(
     modelsSource,
-    /assertWorkspaceSwitchAllowed[\s\S]*?workflowRunManager\.isBusyForThread\(/,
+    /assertWorkspaceSwitchAllowed[\s\S]*?workflowRunManager\.isWorkspacePinnedForThread\(/,
     "workspace-picker entry blocks a switch while a workflow is busy (the real entry, not just threads:update)"
   )
-  // threads:update is the secondary entry; it reuses the same isBusyForThread check
-  // when switching workspace while staying in workflow mode.
+  // threads:update is the secondary entry; any real workspace change uses the
+  // retained-worktree pin, including a combined mode+workspace update.
   assert.match(
     threadsSource,
-    /nextMetadata\.agentMode === "workflow"[\s\S]*?nextMetadata\.workspacePath !== currentMetadata\.workspacePath[\s\S]*?workflowRunManager\.isBusyForThread\(threadId, currentMetadata\.workspacePath\)/,
-    "threads:update also guards a workspace switch while staying in workflow mode"
+    /nextMetadata\.workspacePath !== currentMetadata\.workspacePath[\s\S]*?await workflowRunManager\.isWorkspacePinnedForThread\(\s*threadId,\s*currentMetadata\.workspacePath\s*\)/,
+    "threads:update also guards a workspace switch with unresolved worktrees"
   )
   // #7 escape hatch: both guard sites release a pending run whose auto-re-report
   // has been exhausted this process, so a wedged notification can't lock the user
   // in workflow mode with no exit but deleting the thread.
-  assert.match(
-    agentIpcSource,
-    /workflowRunManager\.hasDeliverablePendingNotification\(workspacePath, threadId\)/,
-    "agent:invoke workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
-  )
-  assert.match(
-    threadsSource,
-    /workflowRunManager\.hasDeliverablePendingNotification\(wsp, threadId\)/,
-    "threads:update workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
-  )
   // #5 strand-caveat parity: the workspace-picker entry (the REAL switch path, hit
   // by "创建 Worktree 并切换" → workspace:set) must, after releasing a
   // renotify-exhausted pending run, log the same strand-under-original-workspace
@@ -2726,7 +2842,12 @@ test("workflow subagent cleanup cancels run_in_background tasks (no leak past th
   // leaks CPU/memory/file writes after the workflow completes or is cancelled.
   assert.match(
     runtimeSource,
-    /LocalSandbox\.cancelBackgroundTasks\(workflowThreadId\)/,
-    "workflow subagent cleanup cancels run_in_background tasks"
+    /LocalSandbox\.cancelBackgroundTasksAndWait\(workflowThreadId\)/,
+    "workflow subagent cleanup cancels and waits for run_in_background process trees"
+  )
+  assert.doesNotMatch(
+    runtimeSource,
+    /waitForWorktreeHookCommands/,
+    "worktree hooks reuse the normal hook runner instead of adding a second process registry"
   )
 })

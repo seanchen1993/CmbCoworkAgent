@@ -1,20 +1,290 @@
 import { describe, expect, it } from "vitest"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
 import path from "node:path"
 import {
   assessCommandSafety,
   extractGitCommitMessage,
   extractGitCommitPathspecs,
+  getWorktreeShellIsolationViolation,
   isAmendOrFixupCommit,
   isChainedShellCommand,
   isForcePushCommand,
   isGitCommitCommand,
+  isSimpleIsolatedGitCommitCommand,
+  isWholeScopeGitAddCommand,
   normalizeCdPrefixedGitCommitCommand,
   normalizeGitAddPrefixedGitCommitCommand,
   resolveGitCommandCwd,
   resolveGitPushCommandCwd
 } from "./exec-policy"
+import type { WorkflowWorktreeIsolationBoundary } from "./workflow/types"
 
 const CWD = "C:/repo"
+
+const WORKTREE_ROOT = path.resolve("/managed/repo/agent-a")
+const SOURCE_ROOT = path.resolve("/source")
+const WORKTREE_BOUNDARY: WorkflowWorktreeIsolationBoundary = {
+  workspaceRoot: WORKTREE_ROOT,
+  worktreeRoot: WORKTREE_ROOT,
+  commonDir: path.resolve("/source/.git"),
+  branch: "cmbcowork/wf/run/agent-a"
+}
+
+describe("isolated Git broker grammar", () => {
+  it("accepts only whole-scope staging forms", () => {
+    for (const command of ["git add -A", "git add --all"]) {
+      expect(isWholeScopeGitAddCommand(command)).toBe(true)
+    }
+    for (const command of [
+      "git add .",
+      "git add -- .",
+      "git add src/a.ts",
+      "git add -u",
+      "git -C src add -A"
+    ]) {
+      expect(isWholeScopeGitAddCommand(command)).toBe(false)
+    }
+  })
+
+  it("accepts one explicit message and rejects semantic rewrites", () => {
+    for (const command of [
+      'git commit -m "isolated work"',
+      "git commit --message=isolated",
+      "git commit -misolated"
+    ]) {
+      expect(isSimpleIsolatedGitCommitCommand(command)).toBe(true)
+    }
+    for (const command of [
+      "git commit --amend -m x",
+      "git commit --fixup HEAD -m x",
+      "git commit -m x -- src/a.ts",
+      "git commit -am x",
+      "git commit -m one -m two",
+      "git -C src commit -m x",
+      "git commit -m x && git status"
+    ]) {
+      expect(isSimpleIsolatedGitCommitCommand(command)).toBe(false)
+    }
+  })
+})
+
+describe("dynamic-workflow worktree shell isolation", () => {
+  it("allows normal checkout-local development and Git operations", () => {
+    for (const command of [
+      "npm test",
+      "git status --short",
+      "git add src/app.ts",
+      'git commit -m "work"',
+      "git -C src status",
+      "git -c core.fsmonitor=false status",
+      "git config --get user.name",
+      "git checkout HEAD -- src/app.ts",
+      "git checkout .",
+      "git checkout ./src/app.ts",
+      "echo $(git rev-parse --short HEAD)",
+      "pushd src && popd",
+      "git tag --list 'v*'",
+      "git tag --contains HEAD",
+      "git tag --merged HEAD",
+      "git tag --points-at HEAD",
+      "git tag --format '%(refname:short)' --list",
+      "git tag --list --sort version:refname",
+      "git reflog",
+      "git stash list",
+      "git submodule status",
+      "git lfs ls-files",
+      "git worktree list",
+      "git -c color.ui=false status",
+      "git apply change.patch",
+      "git fetch origin",
+      "git pull --ff-only",
+      "git merge --abort",
+      "git merge --continue",
+      "git merge --quit",
+      "git rebase --abort",
+      "git rebase --continue",
+      "git rebase --quit",
+      "git rebase --skip",
+      "git rebase --edit-todo",
+      "git rebase --show-current-patch",
+      "git cherry-pick --continue",
+      "git revert --continue",
+      "git update-index --refresh",
+      "git hash-object -w src/app.ts",
+      "git branch scratch",
+      "git tag new-tag",
+      "git branch --list 'feature/*'",
+      "git branch --contains HEAD",
+      "git branch --merged HEAD",
+      "git branch --format '%(refname:short)' --list",
+      "git symbolic-ref --short HEAD",
+      "git symbolic-ref --no-recurse HEAD",
+      "git hash-object README.md",
+      "git notes show",
+      "git notes --ref=commits show HEAD",
+      "git bisect log",
+      "git rerere status",
+      "git commit-graph verify",
+      "git commit-graph --object-dir .git/objects verify",
+      "git multi-pack-index verify",
+      "git multi-pack-index --object-dir=.git/objects verify",
+      "git replace -l",
+      "git replace -l 'refs/*'",
+      "git config --get user.name",
+      "git config --local user.name",
+      "git config list",
+      "git remote",
+      "git remote -v",
+      "git remote get-url origin",
+      "git remote show origin",
+      "echo GIT_DIR=/example",
+      "rg GIT_WORK_TREE= src",
+      `node -e "console.log('GIT_CONFIG_COUNT=2')"`,
+      "printf %s GIT_INDEX_FILE=/docs/example",
+      "env -u GIT_DIR git status",
+      "test -f .git",
+      `cat ${path.join(SOURCE_ROOT, "README.md")}`
+    ]) {
+      expect(
+        getWorktreeShellIsolationViolation(command, WORKTREE_ROOT, WORKTREE_BOUNDARY)
+      ).toBeNull()
+    }
+  })
+
+  it("blocks cwd escapes, Git redirection, branch switching, and shared metadata writes", () => {
+    const blocked = [
+      "cd ../agent-b && touch escaped.txt",
+      "git -C ../agent-b status",
+      "git --git-dir=/source/.git status",
+      "git -c core.worktree=/source status",
+      "GIT_DIR=/source/.git GIT_WORK_TREE=/source git branch sneaky-source-branch",
+      "GIT_COMMON_DIR=/source/.git git branch sneaky-source-branch",
+      "env GIT_DIR=/source/.git git status",
+      "export GIT_DIR=/source/.git && git status",
+      "GIT_WORK_TREE=/source && git status",
+      "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=/source git status",
+      "git branch -f another HEAD",
+      "git branch -D another",
+      "git tag -f existing-tag HEAD",
+      "git tag -d existing-tag",
+      "git switch main",
+      "git checkout main",
+      "git update-ref refs/heads/main HEAD",
+      "git reflog expire --expire=now --all",
+      "git reflog --all expire --expire=now",
+      "git reflog delete HEAD@{0}",
+      "git gc --prune=now",
+      "git pack-refs --all --prune",
+      "git maintenance run --auto",
+      "git merge --no-ff dependency",
+      "git rebase main",
+      "git merge --autostash main",
+      "git rebase --update-refs main",
+      "git stash push",
+      "git config user.name evil",
+      "git config --local user.name evil",
+      "git config set user.name evil",
+      "git remote add x https://example.invalid/repo.git",
+      "git remote -v add x https://example.invalid/repo.git",
+      "git remote set-url origin https://example.invalid/repo.git",
+      "git remote --verbose set-url origin https://example.invalid/repo.git",
+      "git remote remove origin"
+    ]
+    for (const command of blocked) {
+      expect(
+        getWorktreeShellIsolationViolation(command, WORKTREE_ROOT, WORKTREE_BOUNDARY),
+        command
+      ).not.toBeNull()
+    }
+  })
+
+  it("allows ordinary absolute-path reads because worktree mode is not a security sandbox", () => {
+    expect(
+      getWorktreeShellIsolationViolation(
+        `cat ${path.join(SOURCE_ROOT, "README.md")}`,
+        WORKTREE_ROOT,
+        WORKTREE_BOUNDARY
+      )
+    ).toBeNull()
+  })
+
+  it("keeps a monorepo-scoped agent inside its assigned repository subdirectory", () => {
+    const scopedRoot = path.join(WORKTREE_ROOT, "packages", "assigned")
+    const scopedBoundary = { ...WORKTREE_BOUNDARY, workspaceRoot: scopedRoot }
+    expect(
+      getWorktreeShellIsolationViolation("touch local.ts", scopedRoot, scopedBoundary)
+    ).toBeNull()
+    expect(
+      getWorktreeShellIsolationViolation(
+        "cd ../sibling && touch escaped.ts",
+        scopedRoot,
+        scopedBoundary
+      )
+    ).toMatch(/outside the assigned workspace/i)
+  })
+
+  it("rejects symlinked cd and git -C escapes", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "cmb-worktree-guard-"))
+    try {
+      const worktree = path.join(root, "worktree")
+      const outside = path.join(root, "outside")
+      mkdirSync(worktree)
+      mkdirSync(outside)
+      symlinkSync(outside, path.join(worktree, "escape"), "dir")
+      const boundary = { ...WORKTREE_BOUNDARY, workspaceRoot: worktree, worktreeRoot: worktree }
+
+      expect(getWorktreeShellIsolationViolation("cd escape && pwd", worktree, boundary)).toMatch(
+        /outside the assigned workspace/i
+      )
+      expect(
+        getWorktreeShellIsolationViolation("git -C escape rev-parse --show-toplevel", worktree, boundary)
+      ).toMatch(/outside the assigned workspace/i)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("allows an enabled skill cwd without weakening source-checkout protection", () => {
+    const skillRoot = path.join(path.dirname(WORKTREE_ROOT), "enabled-skills", "demo")
+    expect(
+      getWorktreeShellIsolationViolation("node scripts/run.js", skillRoot, WORKTREE_BOUNDARY, [
+        skillRoot
+      ])
+    ).toBeNull()
+    expect(
+      getWorktreeShellIsolationViolation("git -C . status", skillRoot, WORKTREE_BOUNDARY, [
+        skillRoot
+      ])
+    ).toBeNull()
+    expect(
+      getWorktreeShellIsolationViolation(
+        `cd ${SOURCE_ROOT} && touch escaped.txt`,
+        skillRoot,
+        WORKTREE_BOUNDARY,
+        [skillRoot]
+      )
+    ).toMatch(/outside the assigned workspace or enabled skill/i)
+    expect(
+      getWorktreeShellIsolationViolation(
+        `git -C ${SOURCE_ROOT} status`,
+        skillRoot,
+        WORKTREE_BOUNDARY,
+        [skillRoot]
+      )
+    ).toMatch(/outside the assigned workspace or enabled skill/i)
+  })
+
+  it("does not confuse a legal ..-prefixed name with a parent-directory escape", () => {
+    expect(
+      getWorktreeShellIsolationViolation(
+        "npm test",
+        path.join(WORKTREE_ROOT, "..local"),
+        WORKTREE_BOUNDARY
+      )
+    ).toBeNull()
+  })
+})
 
 describe("git submit commands are no longer forbidden", () => {
   it("git commit is not forbidden (handled by the task-card dialog instead)", () => {
@@ -38,7 +308,9 @@ describe("git submit commands are no longer forbidden", () => {
     expect(assessCommandSafety("bash -c 'git commit -m x'", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("sh -c 'cd src && git commit -m x'", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("pwsh -c 'git commit -m x'", CWD).level).toBe("forbidden")
-    expect(assessCommandSafety("powershell -Command 'git commit -m x'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("powershell -Command 'git commit -m x'", CWD).level).toBe(
+      "forbidden"
+    )
     expect(assessCommandSafety("cmd /c git commit -m x", CWD).level).toBe("forbidden")
   })
 
@@ -144,7 +416,9 @@ describe("normalizeCdPrefixedGitCommitCommand", () => {
   it("does not allow non-cd commands or trailing commands around the commit", () => {
     expect(normalizeCdPrefixedGitCommitCommand("git add -A && git commit -m x", CWD)).toBeNull()
     expect(normalizeCdPrefixedGitCommitCommand("git commit -m x && git push", CWD)).toBeNull()
-    expect(normalizeCdPrefixedGitCommitCommand("cd src && git commit -m x && git push", CWD)).toBeNull()
+    expect(
+      normalizeCdPrefixedGitCommitCommand("cd src && git commit -m x && git push", CWD)
+    ).toBeNull()
   })
 })
 
@@ -184,7 +458,10 @@ describe("normalizeGitAddPrefixedGitCommitCommand", () => {
   it("rejects broad git add or trailing commands", () => {
     expect(normalizeGitAddPrefixedGitCommitCommand("git add -A && git commit -m x", CWD)).toBeNull()
     expect(
-      normalizeGitAddPrefixedGitCommitCommand("git add src/a.ts && git commit -m x && git push", CWD)
+      normalizeGitAddPrefixedGitCommitCommand(
+        "git add src/a.ts && git commit -m x && git push",
+        CWD
+      )
     ).toBeNull()
   })
 
@@ -201,7 +478,10 @@ describe("normalizeGitAddPrefixedGitCommitCommand", () => {
 
   it("still allows a single-directory add chain (adds and commit share one base)", () => {
     expect(
-      normalizeGitAddPrefixedGitCommitCommand("git add a.ts && git add b.ts && git commit -m x", CWD)
+      normalizeGitAddPrefixedGitCommitCommand(
+        "git add a.ts && git add b.ts && git commit -m x",
+        CWD
+      )
     ).toEqual({
       command: "git commit -m x",
       cwd: CWD,
@@ -260,12 +540,12 @@ describe("extractGitCommitPathspecs", () => {
     expect(extractGitCommitPathspecs("git commit -t template.txt -m x -- src/a.ts")).toEqual([
       "src/a.ts"
     ])
-    expect(extractGitCommitPathspecs("git commit --template template.txt -m x -- src/a.ts")).toEqual([
-      "src/a.ts"
-    ])
-    expect(extractGitCommitPathspecs("git commit --template=template.txt -m x -- src/a.ts")).toEqual([
-      "src/a.ts"
-    ])
+    expect(
+      extractGitCommitPathspecs("git commit --template template.txt -m x -- src/a.ts")
+    ).toEqual(["src/a.ts"])
+    expect(
+      extractGitCommitPathspecs("git commit --template=template.txt -m x -- src/a.ts")
+    ).toEqual(["src/a.ts"])
   })
 
   it("returns an empty selection when no pathspec is present", () => {

@@ -290,12 +290,14 @@ async function assertWorkspaceSwitchAllowed(
       ? workflowRunManager.findPendingNotification(currentPath, threadId)
       : null
   if (
-    workflowRunManager.isBusyForThread(
+    await workflowRunManager.isWorkspacePinnedForThread(
       threadId,
       typeof currentPath === "string" ? currentPath : undefined
     )
   ) {
-    throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换工作区。")
+    throw new Error(
+      "仍有动态工作流、待汇报结果或尚未处理的 worktree，请先完成 Merge/Discard/Cleanup 后再切换工作区。"
+    )
   }
   if (hasActiveAgentRun(threadId)) {
     throw new Error("当前线程仍有前台请求在执行，请等待该轮完成后再切换工作区。")
@@ -3626,7 +3628,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (newPath) {
         const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
         if (!ready) return null
-
         metadata.workspacePath = newPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })

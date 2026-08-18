@@ -114,6 +114,10 @@ import type {
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
+import type {
+  WorkflowWorktreeAction,
+  WorkflowWorktreeActionResponse
+} from "../main/ipc/workflow-worktree-payload"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
@@ -593,6 +597,19 @@ const api = {
     },
     cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
       return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
+    },
+    worktreeAction: (
+      threadId: string,
+      runId: string,
+      worktreeId: string,
+      action: WorkflowWorktreeAction
+    ): Promise<WorkflowWorktreeActionResponse> => {
+      return ipcRenderer.invoke("workflow:worktree-action", {
+        threadId,
+        runId,
+        worktreeId,
+        action
+      }) as Promise<WorkflowWorktreeActionResponse>
     },
     setAgentStreamInterest: (
       threadId: string,

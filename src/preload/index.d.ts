@@ -1,5 +1,9 @@
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
+  WorkflowWorktreeAction,
+  WorkflowWorktreeActionResponse
+} from "../main/ipc/workflow-worktree-payload"
+import type {
   Thread,
   Message,
   ModelConfig,
@@ -892,6 +896,12 @@ interface CustomAPI {
     listRuns: (threadId: string) => Promise<unknown[]>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    worktreeAction: (
+      threadId: string,
+      runId: string,
+      worktreeId: string,
+      action: WorkflowWorktreeAction
+    ) => Promise<WorkflowWorktreeActionResponse>
     /** Register/deregister per-agent "viewing interest" (the focus panel is showing this
      * running agent) so the display-only live tap only serializes/broadcasts that agent. */
     setAgentStreamInterest: (

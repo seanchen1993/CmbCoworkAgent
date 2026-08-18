@@ -17,7 +17,7 @@
  */
 
 import assert from "node:assert"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { LocalSandbox } from "../src/main/agent/local-sandbox.ts"
@@ -46,7 +46,7 @@ function delay(ms: number): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  const workspace = await mkdtemp(join(tmpdir(), "cmb-bg-cap-"))
+  const workspace = await realpath(await mkdtemp(join(tmpdir(), "cmb-bg-cap-")))
   try {
     const sandbox = new LocalSandbox({
       rootDir: workspace,
@@ -191,6 +191,92 @@ async function run(): Promise<void> {
       assert.ok(final?.completed, "task should eventually complete")
       assert.match(final!.output ?? "", /alpha[\s\S]*beta/, "completed output should contain both lines")
       console.log("PASS AC-B8 getTaskOutput: partialOutput + idleSeconds while running")
+    }
+
+    // A workflow may return while a run_in_background child is still writing.
+    // Teardown must wait for the whole process group, not merely abort the shell,
+    // before the worktree lifecycle inspects or removes its checkout.
+    {
+      const marker = join(workspace, "background-writer.txt")
+      const workflowThreadId = "workflow-background-wait"
+      const workflowSandbox = new LocalSandbox({
+        rootDir: workspace,
+        runId: workflowThreadId,
+        worktreeIsolation: {
+          workspaceRoot: workspace,
+          worktreeRoot: workspace,
+          commonDir: join(workspace, ".git-common"),
+          branch: "cmbcowork/wf/background/wait"
+        },
+        windowsSandbox: "none",
+        timeout: 30_000,
+        maxOutputBytes: 100_000
+      })
+      const writer = nodeCommand(
+        `const fs=require('fs');process.on('SIGTERM',()=>{});setInterval(()=>fs.appendFileSync(${JSON.stringify(marker)},'x'),20)`
+      )
+      await workflowSandbox.executeBackground(writer)
+      let initial = ""
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          initial = await readFile(marker, "utf8")
+        } catch {
+          initial = ""
+        }
+        if (initial.length > 0) break
+        await delay(20)
+      }
+      assert.ok(initial.length > 0, "background writer must start before cancellation")
+      await LocalSandbox.cancelBackgroundTasksAndWait(workflowThreadId)
+      const afterCancel = await readFile(marker, "utf8")
+      await delay(400)
+      assert.equal(
+        await readFile(marker, "utf8"),
+        afterCancel,
+        "cancel-and-wait must leave no process writing after workflow teardown"
+      )
+
+      if (process.platform === "darwin") {
+        const residualMarker = join(workspace, "background-residual-writer.txt")
+        const residualThreadId = "workflow-background-residual"
+        const residualSandbox = new LocalSandbox({
+          rootDir: workspace,
+          runId: residualThreadId,
+          worktreeIsolation: {
+            workspaceRoot: workspace,
+            worktreeRoot: workspace,
+            commonDir: join(workspace, ".git-common"),
+            branch: "cmbcowork/wf/background/residual"
+          },
+          windowsSandbox: "none",
+          timeout: 30_000,
+          maxOutputBytes: 100_000
+        })
+        const residualWriter = `${nodeCommand(
+          `const fs=require('fs');process.on('SIGTERM',()=>{});setInterval(()=>fs.appendFileSync(${JSON.stringify(residualMarker)},'x'),20)`
+        )} >/dev/null 2>&1 & while [ ! -s ${JSON.stringify(residualMarker)} ]; do sleep 0.01; done`
+        await residualSandbox.executeBackground(residualWriter)
+        let residualStarted = ""
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          try {
+            residualStarted = await readFile(residualMarker, "utf8")
+          } catch {
+            residualStarted = ""
+          }
+          if (residualStarted.length > 0) break
+          await delay(20)
+        }
+        assert.ok(residualStarted.length > 0, "redirected background child must start")
+        await LocalSandbox.cancelBackgroundTasksAndWait(residualThreadId)
+        const residualAfterWait = await readFile(residualMarker, "utf8")
+        await delay(400)
+        assert.equal(
+          await readFile(residualMarker, "utf8"),
+          residualAfterWait,
+          "successful worktree shell exit must not leave a redirected child behind"
+        )
+      }
+      console.log("PASS workflow background teardown waits for process-tree termination")
     }
 
     console.log("PASS local-sandbox background cap suite")
