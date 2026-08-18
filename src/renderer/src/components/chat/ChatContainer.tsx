@@ -3431,6 +3431,11 @@ export function ChatContainer({
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages, streamData.messages])
 
+  const chatScrollNavigatorMessages = useMemo(
+    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
+    [threadMessages]
+  )
+
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
   // the last message's text length — otherwise search misses text that is still
@@ -6776,7 +6781,7 @@ export function ChatContainer({
       {nuxDialog}
 
       <ChatScrollNavigator
-        messages={displayMessages}
+        messages={chatScrollNavigatorMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
       >
