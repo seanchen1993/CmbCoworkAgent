@@ -51,7 +51,7 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
   const origin = getNativeMessagingOrigin()
   if (!origin) throw new Error("Native messaging host was launched by an unknown extension")
 
-  log(`started, origin=${origin}`)
+  log(`started, origin=${origin}, pid=${process.pid}, execPath=${process.execPath}`)
 
   process.stdout.once("error", (error: NodeJS.ErrnoException) => {
     log(`stdout error: code=${error.code}, message=${error.message}`)
@@ -127,13 +127,17 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
       for (const message of chromeDecoder.push(chunk)) {
         const record = recordValue(message)
         if (record.type === "extension-ready") {
-          log(`extension-ready received, version=${record.extensionVersion}`)
+          log(
+            `extension-ready received, version=${record.extensionVersion}, mainSocket=${mainSocket !== null}, mainConnected=${mainConnected}`
+          )
           lastReadyMessage = message as CmbChromeExtensionReadyMessage
         }
         if (mainSocket && mainConnected && !mainSocket.destroyed) {
           mainSocket.write(encodeNativeMessage(message))
         } else {
-          log("Chrome message received but socket not connected, exiting")
+          log(
+            `Chrome message received but socket not connected, type=${record.type ?? "(unknown)"}, mainSocket=${mainSocket !== null}, mainConnected=${mainConnected}, exiting`
+          )
           process.exit(0)
         }
       }

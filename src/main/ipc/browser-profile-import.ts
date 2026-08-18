@@ -151,10 +151,15 @@ async function startBrowserProfileImportRuntime(): Promise<void> {
   if (browserProfileImportRuntimeStartPromise) return browserProfileImportRuntimeStartPromise
 
   browserProfileImportRuntimeStartPromise = (async () => {
+    console.log(
+      `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} starting browser profile import runtime, enabled=${browserProfileImportActiveForSession}`
+    )
     const server = await getCookieBridgeServer()
     await server.start()
+    console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} cookie bridge server started`)
     try {
-      await ensureChromeNativeHostRegistration()
+      const registration = await ensureChromeNativeHostRegistration()
+      console.log(`${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} native host registration result`, registration)
     } catch (error) {
       console.warn(
         `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} registration failed: ${error instanceof Error ? error.message : String(error)}`
@@ -254,6 +259,9 @@ export function registerBrowserProfileImportHandlers(
 ): void {
   const startupConfig = getBrowserCdpConfig()
   browserProfileImportActiveForSession = startupConfig.profileImportEnabled === true
+  console.log(
+    `${BROWSER_COOKIE_BRIDGE_LOG_PREFIX} registerBrowserProfileImportHandlers, profileImportEnabled=${startupConfig.profileImportEnabled}, activeForSession=${browserProfileImportActiveForSession}`
+  )
   if (browserProfileImportActiveForSession) {
     void startBrowserProfileImportRuntime().catch((error) => {
       console.warn(
