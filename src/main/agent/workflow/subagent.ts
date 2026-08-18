@@ -83,6 +83,7 @@ export interface WorkflowSubagentDeps {
   /** Creates a one-shot agent runtime for a subagent thread. */
   createRuntime: (options: {
     threadId: string
+    agentId: string
     modelId?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -313,6 +314,7 @@ async function runOnce(
   const runShort = request.runId.replace(/^wf_/, "")
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
+  const agentId = `${request.runId}:agent:${request.agentIndex}`
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -390,6 +392,7 @@ async function runOnce(
 
     const { runtime, modelFellBack } = await createRuntimeWithModelFallback(deps, {
       threadId,
+      agentId,
       model: request.model,
       extraSystemPrompt,
       abortSignal: controller.signal,
@@ -639,6 +642,7 @@ export async function createRuntimeWithModelFallback(
   deps: WorkflowSubagentDeps,
   options: {
     threadId: string
+    agentId: string
     model?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -650,6 +654,7 @@ export async function createRuntimeWithModelFallback(
 ): Promise<{ runtime: WorkflowSubagentRuntime; modelFellBack: boolean }> {
   const baseOptions = {
     threadId: options.threadId,
+    agentId: options.agentId,
     extraSystemPrompt: options.extraSystemPrompt,
     abortSignal: options.abortSignal,
     additionalTools: options.additionalTools,

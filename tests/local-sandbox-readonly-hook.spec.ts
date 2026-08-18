@@ -157,7 +157,12 @@ async function run(): Promise<void> {
       "cat ~/.ss?/cmb-nx", // glob INSIDE the sensitive segment
       "cat ~/.ssh/cmb-nx*", // glob in a later segment (matches nothing real)
       ...(user
-        ? [`cat ~${user}/.ssh/cmb-nx`, `cat ${homeParent}/$USER/.gnupg/cmb-nx`] // ~user / $USER
+        ? [
+            `cat ~${user}/.ssh/cmb-nx`,
+            ...(process.platform !== "win32"
+              ? [`cat ${homeParent}/$USER/.gnupg/cmb-nx`] // POSIX $USER
+              : [])
+          ]
         : []),
       // POSIX backslash escaping (`\.ssh` → `.ssh`), ANSI-C quoting $'...'
       // (decodes \xHH/\nnn/\.), brace expansion (`{.ssh,x}` → `.ssh`), and POSIX

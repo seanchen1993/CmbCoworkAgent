@@ -457,22 +457,19 @@ function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): bool
 function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
   if (adapter.type !== "plugin") return null
   const plugins = getPlugins().filter(pluginHasBoardConfig)
+  const adapterId = normalizeText(adapter.id).trim()
+  if (adapterId) {
+    const plugin = plugins.find((item) => pluginAdapterId(item) === adapterId)
+    if (plugin) return plugin
+  }
+
   const adapterName = normalizeText(adapter.name).trim()
   if (adapterName) {
     const plugin = plugins.find((item) => item.name === adapterName)
     if (plugin) return plugin
   }
 
-  const adapterId = normalizeText(adapter.id).trim()
-  if (!adapterId) return null
-  return plugins.find((item) => pluginMatchesAdapterId(item, adapterId)) ?? null
-}
-
-function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
-  if (adapter.type !== "plugin") return null
-  const adapterName = normalizeText(adapter.name).trim()
-  if (!adapterName) return null
-  return getPlugins().find((item) => item.name === adapterName) ?? null
+  return null
 }
 
 function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
@@ -578,7 +575,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
-  return findPluginByAdapterName(adapter)
+  return findPluginForAdapterSnapshot(adapter)
 }
 
 function projectSupportsAutoNextStep(project: HarnessProjectMetadata): boolean {
@@ -1300,6 +1297,30 @@ function runInspectAdapter(
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
   const stdoutBuffer = runHarnessInvocation(invocation, harnessCommandLogOptions(mode))
 
+  return parseInspectAdapterOutput(invocation, configKey, stdoutBuffer)
+}
+
+async function runInspectAdapterAsync(
+  project: HarnessProjectMetadata,
+  mode: "project" | "run",
+  feature?: string
+): Promise<Record<string, unknown>> {
+  const invocation = buildConfiguredHarnessInvocation(project, mode, { feature })
+  const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
+  const stdoutBuffer = await runHarnessInvocationAsync(
+    invocation,
+    harnessCommandLogOptions(mode),
+    HARNESS_ADAPTER_TIMEOUT_MS
+  )
+
+  return parseInspectAdapterOutput(invocation, configKey, stdoutBuffer)
+}
+
+function parseInspectAdapterOutput(
+  invocation: ConfiguredHarnessInvocation,
+  configKey: HarnessInspectCommandConfigKey,
+  stdoutBuffer: Buffer
+): Record<string, unknown> {
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
@@ -2495,6 +2516,7 @@ export function saveHarnessLeanTokenConfig(input: HarnessLeanTokenConfig): Harne
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
   const harnessAdapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
+  const resolvedAdapter = plugin ? pluginToHarnessAdapterSnapshot(plugin) : harnessAdapter
   const boardCompatibility = evaluateBoardPluginCompatibility(
     plugin,
     harnessAdapter.name || harnessAdapter.id
@@ -2517,9 +2539,9 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     sessionWorkspacePath: project.sessionWorkspacePath,
     systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     harnessAdapter: {
-      id: harnessAdapter.id,
-      name: harnessAdapter.name,
-      type: harnessAdapter.type
+      id: resolvedAdapter.id,
+      name: resolvedAdapter.name,
+      type: resolvedAdapter.type
     },
     creator: project.creator,
     boardCompatibility,
@@ -3219,36 +3241,78 @@ export function resolveHarnessFeatureCurrentStage(
     if (!normalizedProjectId || !normalizedSlug) return null
     const project = requireProject(normalizedProjectId)
     const snapshot = runInspectAdapter(project, "run", normalizedSlug)
-    const run = isObject(snapshot.run) ? snapshot.run : {}
-    const currentNodeId = normalizeText(run.currentNodeId).trim()
-    if (!currentNodeId) return null
-    const workflow = normalizeWorkflow(snapshot.workflow)
-    const node = workflow.nodes.find((n) => n.id === currentNodeId)
-    const label = normalizeText(node?.label).trim()
-    if (!label) return null
-    const group = normalizeText(node?.group).trim()
-    const name = group ? `${group}-${label}` : label
-
-    // Status of the current node *at this turn*, as a stable enum label. The run
-    // nodes array (plugin-provided) carries per-node nodeStatus; fall back to the
-    // run-level currentNodeStatus. Use the default label map so buckets stay
-    // stable regardless of any plugin-custom status label. "unknown" → null so we
-    // never report a noise bucket.
-    const runNode = Array.isArray(run.nodes)
-      ? run.nodes.find(
-          (n): n is Record<string, unknown> =>
-            isObject(n) && normalizeText(n.id).trim() === currentNodeId
-        )
-      : undefined
-    const rawStatus = runNode?.nodeStatus ?? run.currentNodeStatus
-    const nodeStatus = normalizeNodeStatus(rawStatus)
-    const status =
-      nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
-
-    return { name, status }
+    return resolveCurrentStageFromSnapshot(snapshot)
   } catch {
     return null
   }
+}
+
+/**
+ * Async counterpart used by code-generation attribution. Unlike the synchronous
+ * turn-start lookup, this does not block Electron's main thread while a plugin
+ * adapter is queried immediately before a generated code mutation.
+ */
+export async function resolveHarnessFeatureCurrentStageAsync(
+  projectId: string,
+  slug: string
+): Promise<{ name: string; status: string | null } | null> {
+  try {
+    const normalizedProjectId = normalizeText(projectId).trim()
+    const normalizedSlug = normalizeText(slug).trim()
+    if (!normalizedProjectId || !normalizedSlug) return null
+    const project = requireProject(normalizedProjectId)
+    const snapshot = await runInspectAdapterAsync(project, "run", normalizedSlug)
+    return resolveCurrentStageFromSnapshot(snapshot)
+  } catch {
+    return null
+  }
+}
+
+function resolveCurrentStageFromSnapshot(
+  snapshot: Record<string, unknown>
+): { name: string; status: string | null } | null {
+  const run = isObject(snapshot.run) ? snapshot.run : {}
+  const currentNodeId = normalizeText(run.currentNodeId).trim()
+  if (!currentNodeId) return null
+  const workflow = normalizeWorkflow(snapshot.workflow)
+  const runNode = Array.isArray(run.nodes)
+    ? run.nodes.find(
+        (n): n is Record<string, unknown> =>
+          isObject(n) && normalizeText(n.id).trim() === currentNodeId
+      )
+    : undefined
+  return resolveCurrentStageFromWorkflow(
+    workflow,
+    currentNodeId,
+    runNode?.nodeStatus ?? run.currentNodeStatus
+  )
+}
+
+function resolveCurrentStageFromWorkflow(
+  workflow: HarnessWorkflow,
+  currentNodeId: string,
+  rawStatus: unknown
+): { name: string; status: string | null } | null {
+  const node = workflow.nodes.find((item) => item.id === currentNodeId)
+  const label = normalizeText(node?.label).trim()
+  if (!label) return null
+  const group = normalizeText(node?.group).trim()
+  const name = group ? `${group}-${label}` : label
+  const nodeStatus = normalizeNodeStatus(rawStatus)
+  const status =
+    nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
+
+  return { name, status }
+}
+
+/** Reuse a Feature-page run refresh as an authoritative attribution snapshot. */
+export function resolveHarnessRunDetailCurrentStage(
+  detail: HarnessRunDetailViewModel
+): { name: string; status: string | null } | null {
+  const currentNodeId = normalizeText(detail.run.currentNodeId).trim()
+  if (!currentNodeId) return null
+  const currentNode = detail.run.nodes.find((node) => node.id === currentNodeId)
+  return resolveCurrentStageFromWorkflow(detail.workflow, currentNodeId, currentNode?.nodeStatus)
 }
 
 export function buildHarnessFeatureDialogTips(projectId: string, slug: string): string | null {

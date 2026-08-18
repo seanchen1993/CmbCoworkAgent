@@ -22,7 +22,8 @@ import {
   syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
   updateHarnessFeatureAutoMode,
-  updateHarnessProjectMetadata
+  updateHarnessProjectMetadata,
+  resolveHarnessRunDetailCurrentStage
 } from "../harness-board/service"
 import {
   getEnterpriseProjectDetails,
@@ -35,6 +36,10 @@ import {
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
+import {
+  markHarnessStageAttributionDirty,
+  primeHarnessStageAttribution
+} from "../services/harness-stage-attribution"
 import type {
   HarnessDeployUnitSearchInput,
   HarnessDeployUnitSearchResult,
@@ -320,10 +325,19 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       payload: { projectId: string; slug: string }
     ): Promise<HarnessRunDetailViewModel> => {
       const detail = getHarnessRunDetail(payload.projectId, payload.slug)
+      // Feature-page refreshes already paid for an authoritative feature_status
+      // query, so reuse that result instead of spawning another adapter lookup
+      // before the next code generation.
+      primeHarnessStageAttribution(
+        payload.projectId,
+        payload.slug,
+        resolveHarnessRunDetailCurrentStage(detail)
+      )
       startHarnessWatchRefs(
         `run:${payload.projectId}:${payload.slug}`,
         detail.project.projectRootPath,
-        detail.run.watchRefs
+        detail.run.watchRefs,
+        { projectId: payload.projectId, featureSlug: payload.slug }
       )
       return detail
     }
@@ -332,7 +346,9 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:skipNode",
     async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
-      return skipHarnessRunNode(input)
+      const result = skipHarnessRunNode(input)
+      markHarnessStageAttributionDirty(result.projectId, result.slug)
+      return result
     }
   )
 

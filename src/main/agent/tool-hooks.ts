@@ -3,6 +3,11 @@ import { Command, isCommand } from "@langchain/langgraph"
 import { createMiddleware } from "langchain"
 import type { HookContext, HookResultCallback } from "../hooks/runner"
 import { runHooksEnriched } from "../hooks/required-skill"
+import {
+  getCurrentHookAgentId,
+  getHookAgentIdFromRequest,
+  runWithHookAgentId
+} from "../hooks/execution-context"
 import { throwIfHookHalt } from "../hooks/halt"
 import { mergeUpdatedInput as mergeHookUpdatedInput } from "../hooks/updated-input"
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
@@ -24,6 +29,7 @@ export interface ToolHookMiddlewareOptions {
   resolveHooksForContext: (event: HookEvent, context: HookContext) => HookConfig[]
   onHookResult?: HookResultCallback
   hookTurnId?: string
+  agentId?: string
   systemId?: string
   pluginWorkspace?: string
   featureId?: string
@@ -56,6 +62,7 @@ function buildHookContext(
     workspacePath: options.workspacePath,
     sessionId: options.threadId,
     turnId: options.hookTurnId,
+    agentId: getCurrentHookAgentId() ?? options.agentId,
     systemId: options.systemId,
     pluginWorkspace: options.pluginWorkspace,
     featureId: options.featureId,
@@ -242,90 +249,97 @@ export function createToolHookMiddleware(options: ToolHookMiddlewareOptions) {
     name: "toolHookMiddleware",
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapToolCall: async (request: any, handler: any): Promise<any> => {
-      const toolCall = request.toolCall as
-        | { id?: string; name?: string; args?: unknown }
-        | undefined
-      const toolName = toolCall?.name
-      if (!toolName || skipToolNames.has(toolName)) {
-        return handler(request)
-      }
+      const agentId = getHookAgentIdFromRequest(request) ?? options.agentId
+      return runWithHookAgentId(agentId, async () => {
+        const toolCall = request.toolCall as
+          | { id?: string; name?: string; args?: unknown }
+          | undefined
+        const toolName = toolCall?.name
+        if (!toolName || skipToolNames.has(toolName)) {
+          return handler(request)
+        }
 
-      const baseToolArgs = normalizeToolArgs(toolCall.args)
-      const hookContext = buildHookContext(toolName, baseToolArgs, options)
-      const preResult = await runHooksEnriched(
-        options.resolveHooksForContext("PreToolUse", hookContext),
-        "PreToolUse",
-        hookContext,
-        options.onHookResult
-      )
-      if (preResult) {
-        options.hookScope.activatePersistentHooks(
-          options.resolveHooksForContext("PreToolUse", hookContext)
+        const baseToolArgs = normalizeToolArgs(toolCall.args)
+        const hookContext = buildHookContext(toolName, baseToolArgs, options)
+        const preResult = await runHooksEnriched(
+          options.resolveHooksForContext("PreToolUse", hookContext),
+          "PreToolUse",
+          hookContext,
+          options.onHookResult
         )
-      }
-      throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
+        if (preResult) {
+          options.hookScope.activatePersistentHooks(
+            options.resolveHooksForContext("PreToolUse", hookContext)
+          )
+        }
+        throwIfHookHalt("PreToolUse", preResult, `${toolName} was stopped by a PreToolUse hook`)
 
-      if (preResult?.blocked || preResult?.decision === "block") {
-        const reason =
-          preResult.reason ||
-          preResult.stopReason ||
-          preResult.stdout ||
-          preResult.stderr ||
-          `${toolName} was blocked by a hook`
-        return buildBlockedToolResult(toolName, toolCall?.id, reason)
-      }
+        if (preResult?.blocked || preResult?.decision === "block") {
+          const reason =
+            preResult.reason ||
+            preResult.stopReason ||
+            preResult.stdout ||
+            preResult.stderr ||
+            `${toolName} was blocked by a hook`
+          return buildBlockedToolResult(toolName, toolCall?.id, reason)
+        }
 
-      const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
-      const result = await handler({
-        ...request,
-        toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
-        state:
-          request.state && typeof request.state === "object" && !Array.isArray(request.state)
-            ? { ...(request.state as Record<string, unknown>) }
-            : request.state
+        const toolArgs = mergeUpdatedInput(baseToolArgs, preResult?.updatedInput)
+        const result = await handler({
+          ...request,
+          toolCall: toolCall ? { ...toolCall, args: toolArgs } : toolCall,
+          state:
+            request.state && typeof request.state === "object" && !Array.isArray(request.state)
+              ? { ...(request.state as Record<string, unknown>) }
+              : request.state
+        })
+
+        const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
+        const alreadyRecordedThrowFailure = Boolean(
+          signal && toolCall?.id && hasFailureFired(toolCall.id)
+        )
+        const failureFuseDecision =
+          signal && !alreadyRecordedThrowFailure
+            ? (options.onToolFailureDecision?.({
+                toolName,
+                toolCallId: toolCall?.id,
+                toolArgs,
+                signal
+              }) ?? null)
+            : null
+        if (shouldSendFailureFuseNotice(failureFuseDecision)) {
+          options.onFailureFuseNotice?.(failureFuseDecision)
+        }
+        if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
+
+        const postContext: HookContext = {
+          ...hookContext,
+          toolArgs,
+          toolResult: stringifyToolResult(result)
+        }
+        const postResult = await runHooksEnriched(
+          options.resolveHooksForContext("PostToolUse", postContext),
+          "PostToolUse",
+          postContext,
+          options.onHookResult
+        )
+        if (postResult) {
+          options.hookScope.activatePersistentHooks(
+            options.resolveHooksForContext("PostToolUse", postContext)
+          )
+        }
+        throwIfHookHalt(
+          "PostToolUse",
+          postResult,
+          `${toolName} was stopped by a PostToolUse hook`
+        )
+        if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
+
+        const feedback = buildPostHookFeedback(
+          mergeFailureFuseWarning(postResult, failureFuseDecision)
+        )
+        return feedback ? appendFeedbackToResult(result, feedback, toolCall?.id) : result
       })
-
-      const signal = detectToolFailure(toolName, getFailureDetectionInput(result))
-      const alreadyRecordedThrowFailure = Boolean(
-        signal && toolCall?.id && hasFailureFired(toolCall.id)
-      )
-      const failureFuseDecision =
-        signal && !alreadyRecordedThrowFailure
-          ? (options.onToolFailureDecision?.({
-              toolName,
-              toolCallId: toolCall?.id,
-              toolArgs,
-              signal
-            }) ?? null)
-          : null
-      if (shouldSendFailureFuseNotice(failureFuseDecision)) {
-        options.onFailureFuseNotice?.(failureFuseDecision)
-      }
-      if (!signal) options.onToolSuccess?.({ toolName, toolArgs })
-
-      const postContext: HookContext = {
-        ...hookContext,
-        toolArgs,
-        toolResult: stringifyToolResult(result)
-      }
-      const postResult = await runHooksEnriched(
-        options.resolveHooksForContext("PostToolUse", postContext),
-        "PostToolUse",
-        postContext,
-        options.onHookResult
-      )
-      if (postResult) {
-        options.hookScope.activatePersistentHooks(
-          options.resolveHooksForContext("PostToolUse", postContext)
-        )
-      }
-      throwIfHookHalt("PostToolUse", postResult, `${toolName} was stopped by a PostToolUse hook`)
-      if (failureFuseDecision) throwIfFailureFuseHalt(failureFuseDecision)
-
-      const feedback = buildPostHookFeedback(
-        mergeFailureFuseWarning(postResult, failureFuseDecision)
-      )
-      return feedback ? appendFeedbackToResult(result, feedback, toolCall?.id) : result
     }
   })
 }

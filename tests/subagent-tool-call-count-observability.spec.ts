@@ -8,6 +8,15 @@
 import { readFileSync } from "fs"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
+import { tool } from "@langchain/core/tools"
+import { Command } from "@langchain/langgraph"
+import { z } from "zod"
+import {
+  ACTION_STATIONARITY_OWNER_CONFIG_KEY,
+  SUBAGENT_OWNER_METADATA_KEY,
+  SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY,
+  wrapTaskToolWithOwnerMetadata
+} from "../src/main/agent/runtime.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -36,6 +45,10 @@ const soloTaskTraceSource = readFileSync(
   "utf8"
 )
 const agentIpcSource = readFileSync(join(__dirname, "../src/main/ipc/agent.ts"), "utf8")
+const chatContainerSource = readFileSync(
+  join(__dirname, "../src/renderer/src/components/chat/ChatContainer.tsx"),
+  "utf8"
+)
 const adoptionTrackerSource = readFileSync(
   join(__dirname, "../src/main/services/adoption-tracker.ts"),
   "utf8"
@@ -217,7 +230,7 @@ function testSoloTaskTracePartitioning(): void {
   )
   assertIncludes(
     runtimeSource,
-    'soloTaskTraceManager?.finishTask(ownerId, "success", result)',
+    'soloTaskTraceManager?.finishTask(ownerId, "success", sanitizedResult)',
     "Solo task trace should finish alongside the owning task invocation"
   )
   assertIncludes(
@@ -264,7 +277,204 @@ function testSoloTaskTracePartitioning(): void {
   )
 }
 
-function run(): void {
+function testIdlessTaskStationarityOwnerWiring(): void {
+  assertIncludes(
+    runtimeSource,
+    "normalizeId(config?.toolCall?.id) ?? normalizeId(config?.toolCallId)",
+    "task invocation should fall back when the primary tool-call id is blank"
+  )
+  assertIncludes(
+    runtimeSource,
+    "stationarity: `idless-task-${idlessTaskInvocationSequence}`",
+    "an id-less task invocation should receive a unique stationarity owner"
+  )
+  assertIncludes(
+    runtimeSource,
+    "[ACTION_STATIONARITY_OWNER_CONFIG_KEY]: invocationOwner.stationarity",
+    "the invocation-specific owner should reach subagent stationarity runtime config"
+  )
+  assertIncludes(
+    runtimeSource,
+    "[SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY]: invocationOwner.stationarity",
+    "the invocation-specific owner should isolate subagent summarization state"
+  )
+}
+
+function testSubagentStationarityHaltBypassesToolRecovery(): void {
+  assertIncludes(
+    runtimeSource,
+    "if (getActionStationarityHaltError(error)) return null",
+    "a task-subagent stationarity halt must bypass recoverable tool-error conversion"
+  )
+  const toolErrorMiddlewareStart = runtimeSource.indexOf('name: "toolErrorCatch"')
+  const earlyStationarityRethrow = runtimeSource.indexOf(
+    "if (getActionStationarityHaltError(error)) throw error",
+    toolErrorMiddlewareStart
+  )
+  const failureSignalIndex = runtimeSource.indexOf(
+    "if (onToolFailureSignal && toolCallId",
+    toolErrorMiddlewareStart
+  )
+  assert(
+    toolErrorMiddlewareStart >= 0 &&
+      earlyStationarityRethrow > toolErrorMiddlewareStart &&
+      failureSignalIndex > earlyStationarityRethrow,
+    "a task-subagent stationarity halt must propagate before failure-fuse accounting"
+  )
+}
+
+async function testTaskWrapperPreservesStationarityOwnerConfig(): Promise<void> {
+  const capturedConfigs: Array<Record<string, unknown>> = []
+  const rawTask = tool(
+    async (_input, config) => {
+      capturedConfigs.push(config as unknown as Record<string, unknown>)
+      return "ok"
+    },
+    {
+      name: "task",
+      description: "fake task",
+      schema: z.object({ description: z.string() })
+    }
+  )
+  const wrappedTask = wrapTaskToolWithOwnerMetadata(rawTask)
+
+  await wrappedTask.invoke({ description: "first" })
+  await wrappedTask.invoke({ description: "second" })
+
+  const firstConfigurable = capturedConfigs[0]?.configurable as Record<string, unknown> | undefined
+  const secondConfigurable = capturedConfigs[1]?.configurable as Record<string, unknown> | undefined
+  const firstOwner = firstConfigurable?.[ACTION_STATIONARITY_OWNER_CONFIG_KEY]
+  const secondOwner = secondConfigurable?.[ACTION_STATIONARITY_OWNER_CONFIG_KEY]
+  assert(
+    typeof firstOwner === "string" && firstOwner.startsWith("idless-task-"),
+    "an id-less wrapped task should receive an internal stationarity owner"
+  )
+  assert(
+    typeof secondOwner === "string" && secondOwner !== firstOwner,
+    "separate id-less wrapped task invocations should receive different owners"
+  )
+  assert(
+    !(
+      SUBAGENT_OWNER_METADATA_KEY in
+      ((capturedConfigs[0]?.metadata as Record<string, unknown> | undefined) ?? {})
+    ),
+    "an internal id-less owner must not be exposed as renderer metadata"
+  )
+
+  await wrappedTask.invoke({
+    name: "task",
+    args: { description: "explicit" },
+    id: "task-real-id",
+    type: "tool_call"
+  })
+  const explicitConfig = capturedConfigs[2]
+  const explicitConfigurable = explicitConfig?.configurable as Record<string, unknown> | undefined
+  const explicitMetadata = explicitConfig?.metadata as Record<string, unknown> | undefined
+  assert(
+    explicitConfigurable?.[ACTION_STATIONARITY_OWNER_CONFIG_KEY] === "task-real-id",
+    "a real task id should remain the stationarity owner"
+  )
+  assert(
+    explicitMetadata?.[SUBAGENT_OWNER_METADATA_KEY] === "task-real-id",
+    "a real task id should remain available for renderer attribution"
+  )
+  assert(
+    explicitConfigurable?.[SUBAGENT_SUMMARIZATION_OWNER_CONFIG_KEY] === "task-real-id",
+    "a real task id should scope its own summarization lifecycle"
+  )
+}
+
+async function testTaskWrapperDoesNotReturnSubagentSummarizationState(): Promise<void> {
+  const rawTask = tool(
+    async () =>
+      new Command({
+        update: {
+          _summarizationEvent: { cutoffIndex: 4 },
+          _summarizationSessionId: "child-session",
+          _cmbSummarizationOwner: "task-real-id",
+          stableResult: "keep this"
+        }
+      }),
+    {
+      name: "task",
+      description: "fake task",
+      schema: z.object({ description: z.string() })
+    }
+  )
+  const wrappedTask = wrapTaskToolWithOwnerMetadata(rawTask)
+  const result = await wrappedTask.invoke({
+    name: "task",
+    args: { description: "explicit" },
+    id: "task-real-id",
+    type: "tool_call"
+  })
+
+  assert(result instanceof Command, "wrapped task should preserve the task Command contract")
+  const update = result.update as Record<string, unknown>
+  assert(update.stableResult === "keep this", "unrelated child state should remain intact")
+  assert(
+    !("_summarizationEvent" in update) &&
+      !("_summarizationSessionId" in update) &&
+      !("_cmbSummarizationOwner" in update),
+    "a child summarization lifecycle must not overwrite parent summarization state"
+  )
+}
+
+function testGuardNoticesAreNotPresentedAsHooks(): void {
+  assertIncludes(
+    chatContainerSource,
+    'event.startsWith("Tool-call loop")',
+    "tool-call stationarity should have a dedicated notice branch"
+  )
+  assertIncludes(
+    chatContainerSource,
+    'title: "重复工具调用熔断已停止本轮"',
+    "tool-call stationarity should not be labelled as a Hook"
+  )
+}
+
+function testLoopGuardEmergencySwitchCoversAllRuntimeEntryPoints(): void {
+  assertIncludes(
+    runtimeSource,
+    "const loopGuardsEnabled = areAgentLoopGuardsEnabled()",
+    "main and task-subagent middleware should share the emergency switch"
+  )
+  assertIncludes(
+    runtimeSource,
+    "...(loopGuardsEnabled",
+    "disabled guards should be omitted instead of running in observe mode"
+  )
+}
+
+function testDetachedRuntimeLoopGuardLifecycle(): void {
+  assertIncludes(
+    runtimeSource,
+    "actionStationarityTurnId = hookTurnId",
+    "ordinary runtimes should preserve the existing foreground logical-turn behavior"
+  )
+  assertIncludes(
+    runtimeSource,
+    "actionStationarityTurnId: workerActionStationarityTurnId",
+    "background coordinator workers should use an independent loop-guard lifecycle"
+  )
+  assertIncludes(
+    runtimeSource,
+    "clearActionStationarityTurn(\n        workerInput.workerThreadId,\n        workerActionStationarityTurnId",
+    "background coordinator workers should clean their own loop-guard state"
+  )
+  assertIncludes(
+    runtimeSource,
+    "actionStationarityTurnId: subagentOptions.threadId",
+    "workflow leaf agents should use their own attempt lifecycle"
+  )
+  assertIncludes(
+    runtimeSource,
+    "clearActionStationarityTurn(workflowThreadId, workflowThreadId)",
+    "workflow leaf agents should clean their own loop-guard state"
+  )
+}
+
+async function run(): Promise<void> {
   testCoordinatorWorkerWritesToolCallCount()
   console.log("PASS coordinator worker toolCallCount wiring")
   testWorkflowSubagentWritesToolCallCount()
@@ -277,6 +487,23 @@ function run(): void {
   console.log("PASS subagent trace sidecar isolation")
   testSoloTaskTracePartitioning()
   console.log("PASS Solo task child/root trace partitioning")
+  testIdlessTaskStationarityOwnerWiring()
+  console.log("PASS id-less task stationarity owner wiring")
+  testSubagentStationarityHaltBypassesToolRecovery()
+  console.log("PASS task-subagent stationarity halt propagation wiring")
+  await testTaskWrapperPreservesStationarityOwnerConfig()
+  console.log("PASS task wrapper stationarity owner propagation")
+  await testTaskWrapperDoesNotReturnSubagentSummarizationState()
+  console.log("PASS task wrapper isolates child summarization state")
+  testGuardNoticesAreNotPresentedAsHooks()
+  console.log("PASS guard notices use dedicated non-Hook presentation")
+  testLoopGuardEmergencySwitchCoversAllRuntimeEntryPoints()
+  console.log("PASS loop guard emergency switch wiring")
+  testDetachedRuntimeLoopGuardLifecycle()
+  console.log("PASS detached loop-guard lifecycle wiring")
 }
 
-run()
+run().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

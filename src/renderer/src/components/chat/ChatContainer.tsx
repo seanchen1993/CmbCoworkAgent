@@ -80,6 +80,10 @@ import {
   subscribePendingHarnessNextActions
 } from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
+import {
+  getAppleIntelligenceGlowEnabled,
+  subscribeAppleIntelligenceGlow
+} from "@/lib/apple-intelligence-glow"
 import { useShallow } from "zustand/react/shallow"
 import {
   useCurrentThread,
@@ -134,6 +138,7 @@ import type {
 } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import { ChatSearchOverlay } from "./ChatSearchOverlay"
 import { SkillsByCategorySection } from "./SkillsByCategorySection"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
@@ -389,6 +394,30 @@ type WelcomeSkillTreeNode = {
   label: string
   card?: WelcomeSkillCard
   children: WelcomeSkillTreeNode[]
+}
+
+function interruptionNoticeCopy(event: string, action: string): {
+  title: string
+  explanation: string
+} {
+  if (event.startsWith("Failure fuse")) {
+    return {
+      title: "工具失败熔断已停止本轮",
+      explanation:
+        "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+    }
+  }
+  if (event.startsWith("Tool-call loop")) {
+    return {
+      title: "重复工具调用熔断已停止本轮",
+      explanation:
+        "这是重复工具调用熔断结果，不是 Hook 策略或应用崩溃。你可以调整策略后发送新消息继续对话。"
+    }
+  }
+  return {
+    title: action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮",
+    explanation: "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"
+  }
 }
 
 function getWelcomeSkillTreePath(skill: SkillMetadata): string {
@@ -2030,6 +2059,11 @@ export function ChatContainer({
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
+  const appleIntelligenceGlowEnabled = useSyncExternalStore(
+    subscribeAppleIntelligenceGlow,
+    getAppleIntelligenceGlowEnabled,
+    () => false
+  )
   // NUX (first-run sandbox setup)
   const [showNux, setShowNux] = useState<boolean>(false)
   const [nuxLoading, setNuxLoading] = useState(false)
@@ -2175,7 +2209,7 @@ export function ChatContainer({
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
   const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
-  const disableWorkflowModeOption = isProjectModeAgentContext
+  const disableWorkflowModeOption = false
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -3292,6 +3326,10 @@ export function ChatContainer({
 
   // Apple Intelligence glow: loading 时显示，淡出由 CSS animation + onAnimationEnd 控制
   useEffect(() => {
+    if (!appleIntelligenceGlowEnabled) {
+      setGlowVisible(false)
+      return
+    }
     if (isLoading) {
       setGlowVisible(true)
       return
@@ -3299,7 +3337,7 @@ export function ChatContainer({
     // 兜底：如果 transitionEnd 未触发（快速切换等边界情况），3s 后强制隐藏
     const timer = setTimeout(() => setGlowVisible(false), 3000)
     return () => clearTimeout(timer)
-  }, [isLoading])
+  }, [appleIntelligenceGlowEnabled, isLoading])
 
   const displayMessages = useMemo(() => {
     const normalizedLiveMessages = normalizeLiveStreamMessageIds(
@@ -3392,6 +3430,11 @@ export function ChatContainer({
     })
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages, streamData.messages])
+
+  const chatScrollNavigatorMessages = useMemo(
+    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
+    [threadMessages]
+  )
 
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
@@ -3558,6 +3601,12 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
+  const scrollToConversationBottom = useCallback((): void => {
+    const viewport = getViewport()
+    if (!viewport) return
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+  }, [getViewport])
+
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
   // case where focus sits on <body> after clicking the transcript. The visibility
@@ -3624,16 +3673,6 @@ export function ChatContainer({
       viewport.scrollTop = viewport.scrollHeight
     }
   }, [getViewport, historyLoading, threadId])
-
-  // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
-  useEffect(() => {
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-    }
-  }, [contextCompaction?.id, contextCompaction?.phase, streamData, isLoading])
 
   // Focus input on mount
   useEffect(() => {
@@ -4432,12 +4471,7 @@ export function ChatContainer({
         // auto-drain once idle. Cleared here (not merely "past the guards") so a
         // FAILED submit attempt right after Stop can't accidentally un-suppress.
         setQueueAutoDrainSuppressed(false)
-        // The queue panel just grew the composer, shrinking the transcript
-        // viewport — re-pin it to the bottom (mirrors the send path) so the last
-        // message isn't left visually cut off above the panel.
         requestAnimationFrame(() => {
-          const viewport = getViewport()
-          if (viewport) viewport.scrollTop = viewport.scrollHeight
           inputRef.current?.focus()
         })
         return
@@ -4526,12 +4560,6 @@ export function ChatContainer({
             generateTitleForFirstMessage(threadId, titleSource)
           }
         }
-      }
-
-      // 发送消息，滚动到底部
-      const viewport = getViewport()
-      if (viewport) {
-        viewport.scrollTop = viewport.scrollHeight
       }
 
       const startTime = Date.now()
@@ -6614,6 +6642,9 @@ export function ChatContainer({
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+  const interruptionNotice = hookInterruption
+    ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
+    : null
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -6750,15 +6781,15 @@ export function ChatContainer({
       {nuxDialog}
 
       <ChatScrollNavigator
-        messages={displayMessages}
+        messages={chatScrollNavigatorMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
       >
-        {({ reserveRightSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}
+                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
                 style={
                   userInputScrollPadding
                     ? { paddingBottom: `${userInputScrollPadding}px` }
@@ -6879,11 +6910,7 @@ export function ChatContainer({
                       <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "工具失败熔断已停止本轮"
-                            : hookInterruption.action === "halt"
-                              ? "Hook 已停止本轮"
-                              : "Hook 已阻断本轮"}
+                          {interruptionNotice?.title}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
                           <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
@@ -6900,9 +6927,7 @@ export function ChatContainer({
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground mt-2">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
-                            : "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"}
+                          {interruptionNotice?.explanation}
                         </div>
                       </div>
                       <button
@@ -6935,7 +6960,7 @@ export function ChatContainer({
                 (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
-                <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
+                <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-20")}>
                   {(() => {
                     const approval = pendingApproval as unknown as Record<string, unknown>
                     const operation = approval.operation
@@ -7210,11 +7235,11 @@ export function ChatContainer({
               workspacePath={workspacePath}
               currentThreadMetadata={currentThread?.metadata}
               createThread={createThread}
-              reserveRightSpace={reserveRightSpace}
+              reserveLeftSpace={reserveLeftSpace}
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
             {goalUi.goal && (
-              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-[20px]")}>
+              <div className={cn("px-4 pb-1", reserveLeftSpace && "md:pl-[20px]")}>
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
@@ -7229,7 +7254,7 @@ export function ChatContainer({
               className={cn(
                 "px-4 pb-4",
                 goalUi.goal ? "pt-1" : "pt-4",
-                reserveRightSpace && "md:pr-[20px]"
+                reserveLeftSpace && "md:pl-[20px]"
               )}
             >
               {showGitChangeNotice && (
@@ -7261,6 +7286,11 @@ export function ChatContainer({
                 </div>
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+                <ChatScrollToBottomButton
+                  getViewport={getViewport}
+                  onScrollToBottom={scrollToConversationBottom}
+                  resetKey={threadId}
+                />
                 <SlashCommandPopover
                   mode={slash.mode}
                   selectedIdx={slash.selectedIdx}
@@ -7435,7 +7465,7 @@ export function ChatContainer({
                         "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
                         pendingUserInput
                           ? "border-primary/25 bg-background"
-                          : glowVisible
+                          : appleIntelligenceGlowEnabled && glowVisible
                             ? "bg-white/80"
                             : "bg-white",
                         dragOver && "border-primary"
@@ -7453,7 +7483,7 @@ export function ChatContainer({
                           />
                         </div>
                       )}
-                      {glowVisible && !pendingUserInput && (
+                      {appleIntelligenceGlowEnabled && glowVisible && !pendingUserInput && (
                         <div
                           className={cn(
                             "siri-bg-glow rounded-xl",
@@ -7573,7 +7603,7 @@ export function ChatContainer({
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
-                            showWorkflow={!isProjectModeAgentContext}
+                            showWorkflow
                             mode={
                               (disableCoordinatorModeOption && agentMode === "coordinator") ||
                               (disableWorkflowModeOption && agentMode === "workflow")

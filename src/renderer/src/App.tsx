@@ -86,7 +86,7 @@ const LEFT_DEFAULT = 280
 const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
-const RIGHT_PREVIEW_EXPAND_VW = 0.35
+const RIGHT_PREVIEW_EXPAND_VW = 0.4
 
 interface WorkerSplitHandleProps {
   onDrag: (totalDelta: number) => void
@@ -1019,7 +1019,7 @@ function App(): React.JSX.Element {
                 {/* Right Panel - floating style */}
                 <div
                   style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                  className={previewFullscreen ? "flex-1 min-w-0" : "shrink-0"}
                 >
                   <RightPanel
                     moduleMode={rightModule}
@@ -1106,7 +1106,7 @@ function App(): React.JSX.Element {
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 <div
                   style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0 p-2 pl-0" : "shrink-0 p-2 pl-0"}
+                  className={previewFullscreen ? "flex-1 min-w-0" : "shrink-0"}
                 >
                   <RightPanel
                     threadId={harnessSessionThreadId}

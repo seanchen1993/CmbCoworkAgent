@@ -136,13 +136,26 @@ function mergeReasoningIntoContent(content: unknown, reasoning: unknown): string
 export class InterleavedThinkingChatOpenAICompletions extends ChatOpenAICompletions {
   private thinkingOpen = false
   private readonly exposeReasoning: boolean
+  private readonly requestFields: unknown
 
   constructor(fields?: unknown, options?: { exposeReasoning?: boolean }) {
     super(fields as never)
+    this.requestFields = fields
     this.exposeReasoning = options?.exposeReasoning === true
   }
 
   override async *_streamResponseChunks(
+    messages: BaseMessage[],
+    options: this["ParsedCallOptions"],
+    runManager?: CallbackManagerForLLMRun
+  ): AsyncGenerator<ChatGenerationChunk> {
+    const requestCompletions = new InterleavedThinkingChatOpenAICompletions(this.requestFields, {
+      exposeReasoning: this.exposeReasoning
+    })
+    yield* requestCompletions.streamResponseChunksWithRequestState(messages, options, runManager)
+  }
+
+  private async *streamResponseChunksWithRequestState(
     messages: BaseMessage[],
     options: this["ParsedCallOptions"],
     runManager?: CallbackManagerForLLMRun

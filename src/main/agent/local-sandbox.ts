@@ -48,7 +48,8 @@ import {
   classifyCommandConcurrency,
   isGitCommitCommand,
   isGitPushCommand,
-  isReadOnlyShellCommand
+  isReadOnlyShellCommand,
+  type CommandShellSyntax
 } from "./exec-policy"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import {
@@ -87,9 +88,15 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import { isMemoryStoragePath } from "../memory/paths"
 import {
+  isCodeFile,
   recordGen as recordAdoptionGen,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  getHarnessStageAttributionForCodeGeneration,
+  markHarnessStageAttributionDirty,
+  type HarnessStageAttribution
+} from "../services/harness-stage-attribution"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
@@ -304,6 +311,14 @@ export interface LocalSandboxOptions {
   abortSignal?: AbortSignal
   /** Unique run/thread identifier used for ACL ref-counting across concurrent runs. */
   runId?: string
+  /** Absolute app-managed directory backing DeepAgents' logical /large_tool_results path. */
+  largeToolResultsDir?: string
+  /**
+   * App-managed roots for automatic artifacts such as compaction history. Writes
+   * through the dedicated internal API are constrained to these roots and do
+   * not participate in user tool approval or Hook lifecycles.
+   */
+  internalArtifactRoots?: string[]
   /** Records successful agent-owned file mutations for post-run automation. */
   onFileMutation?: (filePath: string, kind: AgentFileMutationKind) => void
   /** Detects reads of skill files so skill lifecycle hooks can wrap the load. */
@@ -316,6 +331,8 @@ export interface LocalSandboxOptions {
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
   systemId?: string
+  /** Optional subagent identifier exposed to hooks as AGENT_ID. */
+  agentId?: string
   /** Optional harness plugin root exposed to child processes as PLUGIN_ROOT. */
   pluginRoot?: string
   /** Optional harness plugin identifier exposed to child processes as PLUGIN_ID. */
@@ -419,6 +436,14 @@ interface WorkspaceSwitchPreparationResult {
  */
 export const readOnlyShellExecutionContext = new AsyncLocalStorage<boolean>()
 
+/**
+ * Marks a write issued by the public write_file tool. DeepAgents spills large
+ * tool results through the same backend method, so this distinguishes that
+ * automatic bookkeeping path from a model-requested write to the reserved
+ * logical /large_tool_results directory.
+ */
+export const agentFileWriteContext = new AsyncLocalStorage<boolean>()
+
 export class LocalSandbox
   extends FilesystemBackend
   implements SandboxBackendProtocol, SkillHookContextProvider
@@ -436,6 +461,7 @@ export class LocalSandbox
   private readonly pluginOutputDir?: string
   private readonly pluginRoot?: string
   private readonly systemId?: string
+  private readonly agentId?: string
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
   private readonly harnessProjectId?: string
@@ -452,6 +478,10 @@ export class LocalSandbox
   private readonly _onHookResult?: HookResultCallback
   private readonly _onFailureFuseNotice?: FailureFuseNoticeCallback
   private readonly _hookTurnId?: string
+  /** Physical directory backing DeepAgents' logical /large_tool_results files. */
+  private readonly _largeToolResultsDir: string
+  /** Canonical app-owned roots accepted by the internal artifact writer. */
+  private readonly _internalArtifactRoots: readonly string[]
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
   private readonly _sandboxCacheRoot: string
   private readonly _sandboxCacheRootPromise: Promise<string>
@@ -1711,6 +1741,7 @@ export class LocalSandbox
     baseEnv.SESSION_ID = this.runId
     const systemId = options.systemId?.trim()
     if (systemId) baseEnv.SYSTEM_ID = systemId
+    const agentId = options.agentId?.trim()
     const pluginRoot = options.pluginRoot?.trim()
     if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
     const pluginId = options.pluginId?.trim()
@@ -1743,10 +1774,17 @@ export class LocalSandbox
     }
     this.env = baseEnv
     this.workingDir = options.rootDir ?? process.cwd()
+    this._largeToolResultsDir = options.largeToolResultsDir
+      ? path.resolve(options.largeToolResultsDir)
+      : path.join(this.workingDir, ".cmbdevclaw", "large_tool_results")
+    this._internalArtifactRoots = (options.internalArtifactRoots ?? [this._largeToolResultsDir])
+      .map((root) => path.resolve(root))
+      .filter((root, index, roots) => roots.indexOf(root) === index)
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.pluginOutputDir = options.pluginOutputDir
     this.pluginRoot = pluginRoot || undefined
     this.systemId = systemId || undefined
+    this.agentId = agentId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
     this.harnessProjectId = harnessProjectId || undefined
@@ -1787,7 +1825,7 @@ export class LocalSandbox
     LocalSandbox.prewarmForWorkspace(this.workingDir, this.windowsSandbox, baseEnv)
 
     // Redirect deepagents' virtual eviction paths (e.g. /large_tool_results/)
-    // to workspace-local dirs, since virtualMode=false treats "/" as absolute
+    // to app-managed storage, since virtualMode=false treats "/" as absolute
     // and writing to system root fails on macOS (SIP) and Windows (permissions).
     // MUST run before caching _resolvePath below, so the cache captures the patched version.
     this.patchResolvePath()
@@ -2452,6 +2490,23 @@ export class LocalSandbox
     return `Memory storage is managed by the background summarizer. Direct ${action} to '${filePath}' is blocked; use the Memory panel or let the conversation summary persist it.`
   }
 
+  private markHarnessStageAttributionDirty(): void {
+    markHarnessStageAttributionDirty(this.harnessProjectId, this.featureId)
+  }
+
+  private async captureHarnessStageForCodeGeneration(
+    filePath: string
+  ): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId || !isCodeFile(filePath)) return undefined
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
+  }
+
+  private commandMayMutateHarnessState(command: string, cwd: string): boolean {
+    const windowsShell =
+      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+    return !isReadOnlyShellCommand(command, cwd, windowsShell)
+  }
+
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     const hookContext: HookContext = {
       ...context,
@@ -2459,6 +2514,7 @@ export class LocalSandbox
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
       ...(this.systemId && !context.systemId ? { systemId: this.systemId } : {}),
+      ...(this.agentId && !context.agentId ? { agentId: this.agentId } : {}),
       ...(this.pluginWorkspace && !context.pluginWorkspace
         ? { pluginWorkspace: this.pluginWorkspace }
         : {}),
@@ -2485,6 +2541,18 @@ export class LocalSandbox
 
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+    const hasHarnessOwnedHook = hooks.some(
+      (hook) =>
+        hook.hookSourceType === "plugin" ||
+        hook.hookSourceType === "skill" ||
+        Boolean(hook.pluginRoot)
+    )
+    if (hasHarnessOwnedHook && (result || (event !== "PreToolUse" && hooks.length > 0))) {
+      // Plugin lifecycle hooks may advance the workflow without going through
+      // LocalSandbox.execute(). Invalidation is cheap; the next code mutation
+      // performs the actual adapter refresh.
+      this.markHarnessStageAttributionDirty()
+    }
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -2667,17 +2735,32 @@ export class LocalSandbox
     }
     const original = (this as any).resolvePath.bind(this)
     const workingDir = this.workingDir
-    const redirects: Record<string, string> = {
-      "/large_tool_results/": ".cmbdevclaw/large_tool_results"
-    }
     ;(this as any).resolvePath = (key: string): string => {
-      for (const [prefix, localDir] of Object.entries(redirects)) {
-        if (key.startsWith(prefix)) {
-          const redirected = path.join(workingDir, localDir, key.slice(prefix.length))
-          console.log("[LocalSandbox] Redirecting path:", key, "→", redirected)
-          key = redirected
-          break
+      const prefix = "/large_tool_results/"
+      if (key.startsWith(prefix)) {
+        const suffix = key.slice(prefix.length)
+        const managedCandidate = path.resolve(this._largeToolResultsDir, suffix)
+        const managedRelative = path.relative(this._largeToolResultsDir, managedCandidate)
+        if (
+          !managedRelative ||
+          managedRelative.startsWith("..") ||
+          path.isAbsolute(managedRelative)
+        ) {
+          throw new Error(`Invalid large tool result path outside managed storage: ${key}`)
         }
+        const managedPath = managedCandidate
+        const legacyPath = path.join(
+          workingDir,
+          ".cmbdevclaw",
+          "large_tool_results",
+          path.basename(managedRelative)
+        )
+        const redirected =
+          managedPath !== legacyPath && !existsSync(managedPath) && existsSync(legacyPath)
+            ? legacyPath
+            : managedPath
+        console.log("[LocalSandbox] Redirecting path:", key, "→", redirected)
+        key = redirected
       }
       return original(key)
     }
@@ -4039,10 +4122,124 @@ export class LocalSandbox
       : `只读沙箱模式下禁止${action}文件 '${filePath}'。如需${action}请以管理员身份运行或切换沙箱模式。`
   }
 
+  private resolveInternalArtifactPath(filePath: string): string | null {
+    let resolvedPath: string
+    try {
+      resolvedPath = this._resolvePath(filePath)
+    } catch {
+      return null
+    }
+
+    return this._internalArtifactRoots.some((root) => {
+      const relative = path.relative(root, resolvedPath)
+      return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative)
+    })
+      ? resolvedPath
+      : null
+  }
+
+  private async validateInternalArtifactPath(filePath: string): Promise<string | null> {
+    const resolvedPath = this.resolveInternalArtifactPath(filePath)
+    if (!resolvedPath) return null
+
+    const root = this._internalArtifactRoots.find((candidate) => {
+      const relative = path.relative(candidate, resolvedPath)
+      return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative)
+    })
+    if (!root) return null
+
+    try {
+      await fs.mkdir(path.dirname(resolvedPath), { recursive: true })
+      const [realRoot, realParent] = await Promise.all([
+        fs.realpath(root),
+        fs.realpath(path.dirname(resolvedPath))
+      ])
+      const parentRelative = path.relative(realRoot, realParent)
+      if (parentRelative.startsWith("..") || path.isAbsolute(parentRelative)) return null
+
+      try {
+        if ((await fs.lstat(resolvedPath)).isSymbolicLink()) return null
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null
+      }
+      return resolvedPath
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Write an app-managed artifact without presenting it as a user-requested
+   * write_file operation. The caller cannot escape the explicitly configured
+   * artifact roots, and these writes deliberately skip tool approvals, Hooks,
+   * mutation tracking, and read-only workspace policy.
+   */
+  async writeInternalArtifact(
+    filePath: string,
+    content: string,
+    options: { createOnly?: boolean } = {}
+  ): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+
+    return this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) return { error: "文件写入已取消。" }
+      try {
+        await fs.writeFile(resolvedPath, content, {
+          encoding: "utf8",
+          flag: options.createOnly ? "wx" : "w"
+        })
+        return {}
+      } catch (error) {
+        if (options.createOnly && (error as NodeJS.ErrnoException).code === "EEXIST") {
+          return {
+            error: `Cannot write to ${filePath} because it already exists. Read and then make an edit, or write to a new path.`
+          }
+        }
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
+  /** Check an app-managed artifact without reading its contents into memory. */
+  async internalArtifactExists(filePath: string): Promise<boolean> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return false
+
+    try {
+      return (await fs.stat(resolvedPath)).isFile()
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+      return false
+    }
+  }
+
+  /** Append to an app-managed artifact under the same path and symlink checks. */
+  async appendInternalArtifact(filePath: string, content: string): Promise<WriteResult> {
+    const resolvedPath = await this.validateInternalArtifactPath(filePath)
+    if (!resolvedPath) return { error: `Invalid internal artifact path: ${filePath}` }
+
+    return this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) return { error: "文件写入已取消。" }
+      try {
+        await fs.appendFile(resolvedPath, content, "utf8")
+        return {}
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+  }
+
   /**
    * Override write to enforce readonly sandbox restrictions.
    */
   async write(filePath: string, content: string): Promise<WriteResult> {
+    // DeepAgents' automatic result eviction writes to this reserved logical
+    // path after the public tool call completes. A model-issued write_file is
+    // marked by the runtime and continues through the regular approval flow.
+    if (filePath.startsWith("/large_tool_results/") && !agentFileWriteContext.getStore()) {
+      return this.writeInternalArtifact(filePath, content, { createOnly: true })
+    }
     if (this.isBlockedBySandbox(filePath)) {
       return { error: `Access denied — '${filePath}' is restricted by sandbox policy.` }
     }
@@ -4107,7 +4304,12 @@ export class LocalSandbox
     // file ⇒ prior content is empty and deletedLineCount = 0. We skip the
     // old pre-read entirely (it was wasted I/O on success and would also
     // bypass isCodeFile / size guards on failure).
+    let harnessStage: HarnessStageAttribution | undefined
     const result = await this.withFileLock(resolvedPath, async () => {
+      if (this.isAborted) {
+        return { error: "文件写入已取消。" }
+      }
+      harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
       if (this.isAborted) {
         return { error: "文件写入已取消。" }
       }
@@ -4119,6 +4321,7 @@ export class LocalSandbox
     })
     if (!result.error) {
       this._onFileMutation?.(effectiveFilePath, "write")
+      if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
@@ -4129,7 +4332,8 @@ export class LocalSandbox
           workspacePath: this.workingDir,
           // write_file only succeeds when creating a new file (see above) —
           // no prior lines could have been deleted.
-          deletedLineCount: 0
+          deletedLineCount: 0,
+          ...(harnessStage ? { harnessStage } : {})
         })
       } catch {
         // tracker must not affect tool result
@@ -4146,6 +4350,7 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
+      this.markHarnessStageAttributionDirty()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
@@ -4282,7 +4487,12 @@ export class LocalSandbox
     }
     try {
       const resolvedPath = this._resolvePath(effectiveFilePath)
+      let harnessStage: HarnessStageAttribution | undefined
       const result = await this.withFileLock(resolvedPath, async () => {
+        if (this.isAborted) {
+          return { error: "文件编辑已取消。" }
+        }
+        harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
         if (this.isAborted) {
           return { error: "文件编辑已取消。" }
         }
@@ -4315,6 +4525,7 @@ export class LocalSandbox
       })
       if (!result.error) {
         this._onFileMutation?.(effectiveFilePath, "edit")
+        if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
         // Adoption tracking (side-effect only, never throws).
         // Only successful edits should be counted as generated code adoption.
         try {
@@ -4332,7 +4543,8 @@ export class LocalSandbox
             // avoiding any full-file scan or retention of editor buffers.
             oldString: effectiveOldString,
             newString: effectiveNewString,
-            occurrences: result.occurrences
+            occurrences: result.occurrences,
+            ...(harnessStage ? { harnessStage } : {})
           })
         } catch {
           // tracker must not affect tool result
@@ -4354,6 +4566,7 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
+        this.markHarnessStageAttributionDirty()
         if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
@@ -4825,6 +5038,19 @@ export class LocalSandbox
         LocalSandbox._resolvedShellPromise = null
       }
     }
+  }
+
+  private static async resolveCommandShellSyntax(
+    sandboxMode: WindowsSandboxMode
+  ): Promise<CommandShellSyntax> {
+    if (process.platform !== "win32") return "posix"
+    const shell =
+      sandboxMode === "none"
+        ? await LocalSandbox.resolveShell()
+        : (await LocalSandbox.resolveWindowsSandboxShell()).shell
+    const shellBase = path.basename(shell).replace(/\.exe$/i, "").toLowerCase()
+    if (["bash", "sh", "zsh", "fish"].includes(shellBase)) return "posix"
+    return ["pwsh", "powershell"].includes(shellBase) ? "powershell" : "cmd"
   }
 
   /** Asynchronous `which` — locate an executable on PATH without blocking the main process. */
@@ -5598,10 +5824,13 @@ export class LocalSandbox
     if (cwdError) {
       return `Error: ${cwdError}`
     }
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       return `Command forbidden: ${safety.reason}`
@@ -5632,13 +5861,19 @@ export class LocalSandbox
     // through the orchestrator and return the outcome.
     if (
       this.orchestrator &&
-      (isGitCommitCommand(effectiveCommand) || isGitPushCommand(effectiveCommand))
+      (isGitCommitCommand(effectiveCommand, shellSyntax) ||
+        isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
@@ -5659,6 +5894,9 @@ export class LocalSandbox
       result: undefined as LocalExecuteResponse | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
@@ -5705,7 +5943,8 @@ export class LocalSandbox
                 effectiveCommand,
                 effectiveCwd,
                 this.windowsSandbox,
-                rawResult
+                rawResult,
+                outsideShellSyntax
               )
               .catch((err) => {
                 console.warn(
@@ -5717,6 +5956,9 @@ export class LocalSandbox
           : rawResult
         if (task.completed) return
         task.result = result
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         // Append final output to chunks for completeness
         if (result.output) task.outputChunks.push(result.output)
         task.completed = true
@@ -5736,6 +5978,9 @@ export class LocalSandbox
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         task.result = {
           output: `Error: ${err instanceof Error ? err.message : String(err)}`,
           exitCode: 1,
@@ -5888,10 +6133,13 @@ export class LocalSandbox
     }
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       console.log(`[LocalSandbox] execute: FORBIDDEN — ${safety.reason}`)
@@ -5940,8 +6188,13 @@ export class LocalSandbox
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
       recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
@@ -5958,6 +6211,9 @@ export class LocalSandbox
     const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
       cwd: effectiveCwd
     })
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
     recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
@@ -6103,6 +6359,22 @@ export class LocalSandbox
         )
       }
       if (shouldBypassSandboxForProjectPluginHook) {
+        const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
+        const outsideSafety = assessCommandSafety(command, effectiveCwd, {
+          shellSyntax: outsideShellSyntax
+        })
+        if (
+          outsideSafety.level === "forbidden" ||
+          isGitCommitCommand(command, outsideShellSyntax) ||
+          isGitPushCommand(command, outsideShellSyntax)
+        ) {
+          return {
+            output:
+              `Command forbidden after project-hook shell change: ${outsideSafety.reason || "Git submit commands must use the orchestrated workflow"}`,
+            exitCode: 1,
+            truncated: false
+          }
+        }
         return this.executeRawUnserialized(
           command,
           "none",

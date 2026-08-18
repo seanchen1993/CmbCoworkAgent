@@ -6,7 +6,7 @@
  */
 
 import assert from "assert"
-import { mkdtemp, rm } from "fs/promises"
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import type { Checkpoint, CheckpointMetadata, PendingWrite } from "@langchain/langgraph-checkpoint"
@@ -1080,14 +1080,44 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
       } as Message
     ])
 
+    const sourceCheckpoint = makeCheckpoint(checkpointId)
+    ;(sourceCheckpoint.channel_values as Record<string, unknown>)._summarizationSessionId =
+      "session_source"
+    ;(sourceCheckpoint.channel_values as Record<string, unknown>)._cmbSummarizationOwner =
+      "source-owner"
+    ;(sourceCheckpoint.channel_values as Record<string, unknown>)._summarizationEvent = {
+      cutoffIndex: 1,
+      filePath: "/source-thread/conversation_history/session_source.md",
+      summaryMessage: {
+        type: "human",
+        content:
+          "The full conversation history has been saved to /source-thread/conversation_history/session_source.md"
+      }
+    }
+    ;(sourceCheckpoint.channel_versions as Record<string, number>)._summarizationSessionId = 1
+    ;(sourceCheckpoint.channel_versions as Record<string, number>)._cmbSummarizationOwner = 1
+    ;(sourceCheckpoint.channel_versions as Record<string, number>)._summarizationEvent = 1
+
     const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
     await sourceSaver.put(
       { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
-      makeCheckpoint(checkpointId),
+      sourceCheckpoint,
       makeForkBoundaryMetadata(checkpointId)
     )
     await sourceSaver.flushStrict()
     await sourceSaver.close()
+
+    const sourceBeforeForkVerifier = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    const sourceBeforeFork = await sourceBeforeForkVerifier.getTuple({
+      configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+    })
+    await sourceBeforeForkVerifier.close()
+    assert.equal(
+      (sourceBeforeFork?.checkpoint.channel_values as Record<string, unknown>)
+        ._summarizationSessionId,
+      "session_source",
+      "test source checkpoint must contain the summarization state being sanitized"
+    )
 
     const forked = await forkThread({ sourceThreadId, title: "Forked thread" })
     targetThreadId = forked.thread.thread_id
@@ -1111,6 +1141,40 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
     })
     await targetSaver.close()
     assert.equal(targetTuple?.checkpoint.id, checkpointId, "target checkpoint should be persisted")
+    const targetChannelValues = targetTuple?.checkpoint.channel_values as
+      | Record<string, unknown>
+      | undefined
+    assert.equal(
+      targetChannelValues?._summarizationEvent,
+      undefined,
+      "fork must not retain a summary event that references the source thread history"
+    )
+    assert.equal(
+      targetChannelValues?._summarizationSessionId,
+      undefined,
+      "fork must create its own summarization session"
+    )
+    assert.equal(
+      targetChannelValues?._cmbSummarizationOwner,
+      undefined,
+      "fork must not retain source-private summarization ownership"
+    )
+    assert.equal(
+      Array.isArray(targetChannelValues?.messages),
+      true,
+      "fork must retain the raw messages needed for independent recompaction"
+    )
+
+    const sourceVerifier = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId))
+    const sourceTuple = await sourceVerifier.getTuple({
+      configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+    })
+    await sourceVerifier.close()
+    assert.equal(
+      (sourceTuple?.checkpoint.channel_values as Record<string, unknown>)._summarizationSessionId,
+      "session_source",
+      "fork sanitization must not mutate the source checkpoint"
+    )
 
     const targetMessages = db.getThreadMessages(targetThreadId)
     assert.deepEqual(
@@ -1136,6 +1200,155 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
     }
     db.deleteThread(sourceThreadId)
     deleteThreadCheckpoint(sourceThreadId)
+    await db.closeDatabase()
+  }
+}
+
+async function testForkCopiesOnlyReferencedLargeToolResults(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
+  const { getProjectThreadDataDirectory } =
+    await import("../src/main/agent/context-history-path.ts")
+  const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
+  const { forkThread } = await import("../src/main/ipc/threads.ts")
+
+  const sourceThreadId = "fork-large-result-source"
+  const checkpointId = "fork-large-result-checkpoint"
+  const workspace = await mkdtemp(join(tmpdir(), "cmb-fork-large-result-workspace-"))
+  let targetThreadId: string | undefined
+
+  await db.initializeDatabase()
+  try {
+    db.createThread(sourceThreadId, {
+      workspacePath: workspace,
+      title: "Large result source",
+      [FORK_BOUNDARY_THREAD_METADATA_KEY]: FORK_BOUNDARY_MARKER_VERSION
+    })
+
+    const historicalCheckpointId = "fork-large-result-historical-checkpoint"
+    const historicalCheckpoint = makeCheckpoint(historicalCheckpointId)
+    ;(historicalCheckpoint.channel_values as Record<string, unknown>).messages = [
+      { id: "user-old", type: "human", content: "inspect the older large result" },
+      {
+        id: "assistant-old-tool-call",
+        type: "ai",
+        content: "I will inspect the older result.",
+        tool_calls: [{ id: "call-old", name: "inspect", args: { target: "older" } }]
+      },
+      {
+        id: "tool-result-old",
+        type: "tool",
+        tool_call_id: "call-old",
+        name: "inspect",
+        content:
+          "Tool result too large, the result of this tool call call-old was saved in the filesystem at this path: /large_tool_results/call-old\nRead it in chunks."
+      },
+      { id: "assistant-old-final", type: "ai", content: "The older inspection is complete." }
+    ]
+
+    const checkpoint = makeCheckpoint(checkpointId)
+    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
+      { id: "user-1", type: "human", content: "inspect the large result" },
+      {
+        id: "assistant-tool-call",
+        type: "ai",
+        content: "I will inspect it.",
+        tool_calls: [{ id: "call-fork", name: "inspect", args: { target: "large" } }]
+      },
+      {
+        id: "tool-result",
+        type: "tool",
+        tool_call_id: "call-fork",
+        name: "inspect",
+        content:
+          "Tool result too large, the result of this tool call call-fork was saved in the filesystem at this path: /large_tool_results/call-fork\nRead it in chunks."
+      },
+      { id: "assistant-final", type: "ai", content: "The inspection is complete." }
+    ]
+
+    const sourceSaver = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 3
+    })
+    await sourceSaver.put(
+      { configurable: { thread_id: sourceThreadId, checkpoint_ns: "" } },
+      historicalCheckpoint,
+      makeForkBoundaryMetadata(historicalCheckpointId, "assistant-old-final")
+    )
+    await sourceSaver.put(
+      {
+        configurable: {
+          thread_id: sourceThreadId,
+          checkpoint_ns: "",
+          checkpoint_id: historicalCheckpointId
+        }
+      },
+      checkpoint,
+      makeForkBoundaryMetadata(checkpointId, "assistant-final")
+    )
+    await sourceSaver.flushStrict()
+    await sourceSaver.close()
+
+    const sourceDataDirectory = await getProjectThreadDataDirectory(workspace, sourceThreadId)
+    const sourceLargeResultsDirectory = join(sourceDataDirectory, "large_tool_results")
+    const sourceLegacyLargeResultsDirectory = join(
+      workspace,
+      ".cmbdevclaw",
+      "large_tool_results"
+    )
+    await mkdir(sourceLargeResultsDirectory, { recursive: true })
+    await mkdir(sourceLegacyLargeResultsDirectory, { recursive: true })
+    await writeFile(join(sourceLargeResultsDirectory, "call-fork"), "complete fork evidence")
+    await writeFile(
+      join(sourceLegacyLargeResultsDirectory, "call-old"),
+      "historical legacy fork evidence"
+    )
+    await writeFile(join(sourceLargeResultsDirectory, "not-referenced"), "must not be copied")
+
+    const forked = await forkThread({ sourceThreadId, title: "Large result fork" })
+    targetThreadId = forked.thread.thread_id
+    const targetDataDirectory = await getProjectThreadDataDirectory(workspace, targetThreadId)
+    const copiedResultPath = join(targetDataDirectory, "large_tool_results", "call-fork")
+    const copiedHistoricalResultPath = join(targetDataDirectory, "large_tool_results", "call-old")
+    const unreferencedResultPath = join(targetDataDirectory, "large_tool_results", "not-referenced")
+
+    assert.equal(
+      await readFile(copiedResultPath, "utf8"),
+      "complete fork evidence",
+      "fork must copy the complete result referenced by its checkpoint"
+    )
+    assert.equal(
+      await readFile(copiedHistoricalResultPath, "utf8"),
+      "historical legacy fork evidence",
+      "fork must copy legacy results referenced only by an older retained checkpoint"
+    )
+    await assert.rejects(
+      access(unreferencedResultPath),
+      "fork must not copy large results outside the retained checkpoint history"
+    )
+
+    await rm(sourceDataDirectory, { recursive: true, force: true })
+    await rm(sourceLegacyLargeResultsDirectory, { recursive: true, force: true })
+    assert.equal(
+      await readFile(copiedResultPath, "utf8"),
+      "complete fork evidence",
+      "forked large results must remain readable after the source data is removed"
+    )
+    assert.equal(
+      await readFile(copiedHistoricalResultPath, "utf8"),
+      "historical legacy fork evidence",
+      "historical legacy fork results must remain readable after the source data is removed"
+    )
+  } finally {
+    if (targetThreadId) {
+      await closeCheckpointer(targetThreadId)
+      db.deleteThread(targetThreadId)
+      deleteThreadCheckpoint(targetThreadId)
+    }
+    await closeCheckpointer(sourceThreadId)
+    db.deleteThread(sourceThreadId)
+    deleteThreadCheckpoint(sourceThreadId)
+    await rm(workspace, { recursive: true, force: true })
     await db.closeDatabase()
   }
 }
@@ -1303,6 +1516,7 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
 async function testForkedBranchesRemainIndependentWhenForkedAgain(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
   const { deleteThreadCheckpoint, getThreadCheckpointPath } = await import("../src/main/storage.ts")
   const { forkThread } = await import("../src/main/ipc/threads.ts")
 
@@ -1451,6 +1665,7 @@ async function testForkedBranchesRemainIndependentWhenForkedAgain(): Promise<voi
   } finally {
     for (const threadId of [branchForkThreadId, sourceForkThreadId, branchThreadId, sourceThreadId]) {
       if (!threadId) continue
+      await closeCheckpointer(threadId)
       db.deleteThread(threadId)
       deleteThreadCheckpoint(threadId)
     }
@@ -2300,6 +2515,7 @@ async function testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence():
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testForkThreadCopiesCheckpointThreadRowAndTranscript()
+    await testForkCopiesOnlyReferencedLargeToolResults()
     await testInterruptedDurableTailForkIsConsistentAndComplete()
     await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
     await testForkLatestAllowsUserInterruptedPendingWritesBoundary()

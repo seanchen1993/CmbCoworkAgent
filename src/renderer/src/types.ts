@@ -460,6 +460,7 @@ export interface HITLRequest {
   suggestedCommitMessage?: string
   suggestedCommitFilePaths?: string[]
   suggestedCommitFileBasePath?: string
+  suggestedGitWorktreePath?: string
   suggestedCommitFileSelectionSource?: "pathspec" | "staged"
 }
 
