@@ -1261,14 +1261,18 @@ async function runHarnessInvocationAsync(
   }
 }
 
-function runInspectAdapter(
+async function runInspectAdapter(
   project: HarnessProjectMetadata,
   mode: "project" | "run",
   feature?: string
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const invocation = buildConfiguredHarnessInvocation(project, mode, { feature })
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
-  const stdoutBuffer = runHarnessInvocation(invocation, harnessCommandLogOptions(mode))
+  const stdoutBuffer = await runHarnessInvocationAsync(
+    invocation,
+    harnessCommandLogOptions(mode),
+    HARNESS_ADAPTER_TIMEOUT_MS
+  )
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
@@ -3024,16 +3028,16 @@ export function buildHarnessFeatureAgentContext(
  * unlabeled node) so it never blocks a conversation. `status` is null when the
  * node status cannot be resolved (so an "unknown" bucket is never reported).
  */
-export function resolveHarnessFeatureCurrentStage(
+export async function resolveHarnessFeatureCurrentStage(
   projectId: string,
   slug: string
-): { name: string; status: string | null } | null {
+): Promise<{ name: string; status: string | null } | null> {
   try {
     const normalizedProjectId = normalizeText(projectId).trim()
     const normalizedSlug = normalizeText(slug).trim()
     if (!normalizedProjectId || !normalizedSlug) return null
     const project = requireProject(normalizedProjectId)
-    const snapshot = runInspectAdapter(project, "run", normalizedSlug)
+    const snapshot = await runInspectAdapter(project, "run", normalizedSlug)
     const run = isObject(snapshot.run) ? snapshot.run : {}
     const currentNodeId = normalizeText(run.currentNodeId).trim()
     if (!currentNodeId) return null
@@ -3622,15 +3626,17 @@ export async function syncHarnessProjectConstraints(
   }
 }
 
-export function getHarnessProjectDetail(projectId: string): HarnessProjectDetailViewModel {
-  return getHarnessProjectDetails([projectId])[projectId]
+export async function getHarnessProjectDetail(
+  projectId: string
+): Promise<HarnessProjectDetailViewModel> {
+  return (await getHarnessProjectDetails([projectId]))[projectId]
 }
 
-function runInspectAdapterBatch(
+async function runInspectAdapterBatch(
   projects: HarnessProjectMetadata[],
   mode: "project",
   cwd: string
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const firstProject = projects[0]
   const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
   if (!configuredCommand) {
@@ -3651,9 +3657,10 @@ function runInspectAdapterBatch(
     }
   }
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
-  const stdoutBuffer = runHarnessInvocation(
+  const stdoutBuffer = await runHarnessInvocationAsync(
     configured,
-    harnessCommandLogOptions(mode, `${projects.length} project(s)`)
+    harnessCommandLogOptions(mode, `${projects.length} project(s)`),
+    HARNESS_ADAPTER_TIMEOUT_MS
   )
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
@@ -3714,9 +3721,9 @@ function projectAdapterLoadedStatus(project: HarnessProjectMetadata): HarnessSta
   return okStatus("inspected", `${adapterName} 已加载`)
 }
 
-export function getHarnessProjectDetails(
+export async function getHarnessProjectDetails(
   projectIds: string[]
-): Record<string, HarnessProjectDetailViewModel> {
+): Promise<Record<string, HarnessProjectDetailViewModel>> {
   if (projectIds.length === 0) return {}
 
   const projects = projectIds.map((id) => requireProject(id))
@@ -3771,7 +3778,7 @@ export function getHarnessProjectDetails(
 
   for (const group of groups.values()) {
     try {
-      const snapshot = runInspectAdapterBatch(group.projects, "project", group.cwd)
+      const snapshot = await runInspectAdapterBatch(group.projects, "project", group.cwd)
       const workflow = normalizeWorkflow(snapshot.workflow)
       if (!isObject(snapshot.projects)) {
         throw new Error("Inspect adapter returned invalid batch JSON: projects is not an object")
@@ -3814,9 +3821,12 @@ export function getHarnessProjectDetails(
   return result
 }
 
-export function getHarnessRunDetail(projectId: string, slug: string): HarnessRunDetailViewModel {
+export async function getHarnessRunDetail(
+  projectId: string,
+  slug: string
+): Promise<HarnessRunDetailViewModel> {
   const project = requireProject(projectId)
-  const snapshot = runInspectAdapter(project, "run", slug)
+  const snapshot = await runInspectAdapter(project, "run", slug)
   const workflow = normalizeWorkflow(snapshot.workflow)
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const featureSlug = normalizeText(run.featureId) || normalizeText(run.featureName) || slug

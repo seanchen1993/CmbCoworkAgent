@@ -384,7 +384,7 @@ async function pollOnce(): Promise<void> {
 
   let details: Record<string, HarnessProjectDetailViewModel> = {}
   try {
-    details = getHarnessProjectDetails(projects.map((p) => p.projectId))
+    details = await getHarnessProjectDetails(projects.map((p) => p.projectId))
   } catch (e) {
     // Fall back to metadata-only snapshots if detail computation fails wholesale.
     console.warn("[HarnessStatusReporter] Failed to compute project details:", e)
@@ -433,7 +433,7 @@ export async function reportProjectSnapshotNow(projectId: string): Promise<void>
 
   let detail: HarnessProjectDetailViewModel | undefined
   try {
-    detail = getHarnessProjectDetails([id])[id]
+    detail = (await getHarnessProjectDetails([id]))[id]
   } catch (e) {
     // Metadata-only snapshot if the inspect probe fails.
     console.warn(`[HarnessStatusReporter] reportNow: failed to compute detail for ${id}:`, e)
