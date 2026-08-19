@@ -936,7 +936,7 @@ export class ImRemoteRunner {
 
   private targetPrefixForEvent(event: ImEventRecord): string | undefined {
     const snapshot = event.targetSnapshot
-    if (snapshot?.kind !== "feature") return undefined
+    if (!snapshot || snapshot.kind === "inbox") return undefined
     try {
       const active = this.dependencies.conversationState.getActiveTarget(event.conversationKey)
       return targetPrefix(snapshot, Boolean(active && active.targetId !== snapshot.targetId))

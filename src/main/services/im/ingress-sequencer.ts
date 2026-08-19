@@ -53,6 +53,13 @@ function acknowledgementForEvent(event: ImEventRecord): RemoteImAckV1 {
   }
 }
 
+function acknowledgementForDelivery(
+  storedEvent: ImEventRecord,
+  delivery: RemoteImEventV1
+): RemoteImAckV1 {
+  return { ...acknowledgementForEvent(storedEvent), leaseId: delivery.lease.id }
+}
+
 export class ImIngressSequencer {
   private readonly conversationState: ImConversationStateStore
   private readonly eventStore: ImEventStore
@@ -102,7 +109,7 @@ export class ImIngressSequencer {
         ...(options.retryOfEventId ? { retryOfEventId: options.retryOfEventId } : {})
       })
       if (received.duplicate && received.event.state !== "received") {
-        const ack = acknowledgementForEvent(received.event)
+        const ack = acknowledgementForDelivery(received.event, event)
         await this.emit(ack)
         return { duplicate: true, event: received.event, acknowledgements: [ack] }
       }
@@ -143,7 +150,7 @@ export class ImIngressSequencer {
       const received = await this.eventStore.receiveEvent(event, snapshot)
       if (received.duplicate && received.event.state !== "received") {
         await this.replyClient.sendPending()
-        const ack = acknowledgementForEvent(received.event)
+        const ack = acknowledgementForDelivery(received.event, event)
         await this.emit(ack)
         return { duplicate: true, event: received.event, acknowledgements: [ack] }
       }
