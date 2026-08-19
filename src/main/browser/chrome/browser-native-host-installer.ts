@@ -44,9 +44,12 @@ function batchQuotedPath(value: string): string {
   return `"${value.replace(/%/g, "%%")}"`
 }
 
-function createWindowsNativeHostWrapper(execPath: string, entryPath: string): string {
+export function createWindowsNativeHostWrapper(execPath: string, entryPath: string): string {
   return [
     "@echo off",
+    // The wrapper is written as UTF-8. CMD must switch code pages before parsing
+    // the executable and entry paths, which may contain Chinese characters.
+    "chcp 65001 >nul",
     "setlocal",
     'set "ELECTRON_RUN_AS_NODE=1"',
     `${batchQuotedPath(execPath)} ${batchQuotedPath(entryPath)} ${CMB_BROWSER_NATIVE_HOST_FLAG} %*`,
