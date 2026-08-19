@@ -527,10 +527,10 @@ interface DashboardUserListItem {
   count: number
   lastActiveAt?: string
   avgDurationMs: number
-  totalToolCalls: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  codeStats: DashboardCodeStats | null
 }
 
 interface DashboardUserListData {
@@ -628,6 +628,8 @@ interface DashboardUserDetail {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 当前时间范围内该用户的代码生成、Commit 采纳与 Push 入库统计。 */
+  codeStats: DashboardCodeStats | null
   bySkill: Array<{ skill: string; count: number }>
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
@@ -3168,11 +3170,62 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
     count: asNumber(bucket.doc_count),
     lastActiveAt: asOptionalString(source.startedAt),
     avgDurationMs: asNumber(asRecord(bucket.avg_duration).value),
-    totalToolCalls: asNumber(asRecord(bucket.total_tool_calls).value),
     totalInputTokens,
     totalOutputTokens,
-    totalTokens
+    totalTokens,
+    codeStats: null
   }
+}
+
+async function fetchUserListCodeStats(
+  sapIds: string[],
+  range: TimeRange,
+  upperOrgLv1: string | null,
+  options?: { projectMode?: boolean }
+): Promise<Map<string, DashboardCodeStats>> {
+  const normalizedSapIds = Array.from(new Set(sapIds.map((sapId) => sapId.trim()).filter(Boolean)))
+  if (normalizedSapIds.length === 0) return new Map()
+
+  // Keep the per-user code metrics on the same time and department scope as the
+  // platform overview. Restricting the event query to the visible page avoids a
+  // large all-user aggregation on every list request.
+  const orgFilter = upperOrgLv1 ? buildOrgLevelMatchFilter(upperOrgLv1) : null
+  const scopeFilters: Record<string, unknown>[] = [
+    ...(orgFilter ? [orgFilter] : []),
+    ...(options?.projectMode ? [{ exists: { field: "properties.harnessProjectId" } }] : [])
+  ]
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    scopeFilters
+  )
+  const raw = asRecord(
+    await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [{ terms: { sapId: normalizedSapIds } }],
+          should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+          minimum_should_match: 1
+        }
+      },
+      aggs: {
+        users: {
+          terms: { field: "sapId", size: normalizedSapIds.length },
+          aggs: perBucketAggs
+        }
+      }
+    })
+  )
+
+  const result = new Map<string, DashboardCodeStats>()
+  const buckets = asRecord(asRecord(raw.aggregations).users).buckets
+  for (const rawBucket of Array.isArray(buckets) ? buckets : []) {
+    const bucket = asRecord(rawBucket)
+    const sapId = asString(bucket.key)
+    if (sapId) result.set(sapId, normalizeCodeStatsFromContainer(bucket))
+  }
+  return result
 }
 
 async function fetchUserList(
@@ -3229,7 +3282,6 @@ async function fetchUserList(
             }
           },
           avg_duration: { avg: { field: "durationMs" } },
-          total_tool_calls: { sum: { field: "totalToolCalls" } },
           total_input_tokens: { sum: { field: "totalInputTokens" } },
           total_output_tokens: { sum: { field: "totalOutputTokens" } },
           total_tokens: { sum: { field: "totalTokens" } }
@@ -3243,13 +3295,22 @@ async function fetchUserList(
   const usersAgg = asRecord(aggs.users)
   const allBuckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
   const buckets = allBuckets.slice(offset, offset + pageSize)
+  const items = buckets
+    .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
+    .filter((item) => item.sapId)
+  const codeStatsBySapId = await fetchUserListCodeStats(
+    items.map((item) => item.sapId),
+    range,
+    upperOrgLv1
+  )
   const totalActiveUsers = asNumber(asRecord(aggs.total_active_users).value)
   const nextOffset = offset + pageSize
   const hasMoreBuckets = asNumber(usersAgg.sum_other_doc_count) > 0
   return {
-    items: buckets
-      .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
-      .filter((item) => item.sapId),
+    items: items.map((item) => ({
+      ...item,
+      codeStats: codeStatsBySapId.get(item.sapId) ?? null
+    })),
     pageSize,
     ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
     totalActiveUsers
@@ -3802,7 +3863,12 @@ async function fetchUserDetail(
           _source: { includes: dashboardTraceSourceIncludes() }
         }
 
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const [raw, codeStatsBySapId] = await Promise.all([
+    esQuery(getEsIndex("trace"), body) as Promise<EsSearchResponse>,
+    fetchUserListCodeStats([normalizedSapId], range, null, {
+      projectMode: options?.projectMode
+    })
+  ])
   const rawRecord = asRecord(raw)
   const aggs = asRecord(rawRecord.aggregations)
   const userInfo = getLatestHitSource(aggs, "latest_user_info")
@@ -3842,6 +3908,7 @@ async function fetchUserDetail(
     totalInputTokens,
     totalOutputTokens,
     totalTokens,
+    codeStats: codeStatsBySapId.get(normalizedSapId) ?? null,
     bySkill: normalizeTermsBucketList(
       asRecord(aggs.by_skill).buckets,
       "skill"
@@ -8118,6 +8185,15 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
   const count = Math.max(3, 150 - index * 3)
   const totalInputTokens = count * (820 + (index % 7) * 120)
   const totalOutputTokens = count * (240 + (index % 5) * 80)
+  const generatedLines = count * (5 + (index % 4))
+  const measuredGeneratedLines = Math.round(generatedLines * (0.68 + (index % 3) * 0.06))
+  const effectiveGeneratedLines = Math.round(measuredGeneratedLines * 0.92)
+  const adoptedLines = Math.round(effectiveGeneratedLines * (0.64 + (index % 4) * 0.07))
+  const pushedEffectiveGeneratedLines = Math.round(effectiveGeneratedLines * 0.78)
+  const pushedAdoptedLines = Math.min(
+    pushedEffectiveGeneratedLines,
+    Math.round(adoptedLines * 0.72)
+  )
   return {
     sapId: `10010${String(index + 1).padStart(3, "0")}`,
     ystId: `2743${String(index + 1).padStart(3, "0")}`,
@@ -8126,10 +8202,23 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
     count,
     lastActiveAt: new Date(Date.now() - index * 42 * 60 * 1000).toISOString(),
     avgDurationMs: 4200 + (index % 9) * 650,
-    totalToolCalls: count * (2 + (index % 4)),
     totalInputTokens,
     totalOutputTokens,
-    totalTokens: totalInputTokens + totalOutputTokens
+    totalTokens: totalInputTokens + totalOutputTokens,
+    codeStats:
+      index % 11 === 10
+        ? null
+        : makeDashboardCodeStats({
+            generatedLines,
+            deletedLines: Math.round(generatedLines * 0.08),
+            measuredGeneratedLines,
+            effectiveGeneratedLines,
+            adoptedLines,
+            pushedMeasuredGeneratedLines: Math.round(measuredGeneratedLines * 0.8),
+            pushedEffectiveGeneratedLines,
+            pushedAdoptedLines,
+            pushedCommitCount: Math.max(1, Math.round(count / 12))
+          })
   }
 }
 
@@ -8338,10 +8427,11 @@ function makeMockUserDetail(
     upperOrgLv1: user.upperOrgLv1,
     totalCalls: user.count,
     avgDurationMs: user.avgDurationMs,
-    totalToolCalls: user.totalToolCalls,
+    totalToolCalls: user.count * (2 + (index % 4)),
     totalInputTokens: user.totalInputTokens,
     totalOutputTokens: user.totalOutputTokens,
     totalTokens: user.totalTokens,
+    codeStats: user.codeStats,
     bySkill: [
       { skill: "代码审查", count: Math.floor(user.count * 0.34) },
       { skill: "单元测试", count: Math.floor(user.count * 0.22) },
