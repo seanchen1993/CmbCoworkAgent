@@ -28,7 +28,7 @@ interface ChatScrollUserInputQuestion {
 
 export interface ChatScrollNavigatorRenderProps {
   hasQuestions: boolean
-  reserveRightSpace: boolean
+  reserveLeftSpace: boolean
   setMessageRef: MessageRefSetter
 }
 
@@ -421,7 +421,7 @@ export function ChatScrollNavigator({
   }, [clearCloseTimer, clearOpenTimer])
 
   const hasQuestions = questions.length > 0
-  const reserveRightSpace = hasQuestions && !rightPanelCollapsed
+  const reserveLeftSpace = hasQuestions && !rightPanelCollapsed
 
   const density =
     questions.length <= 8
@@ -433,10 +433,10 @@ export function ChatScrollNavigator({
           : "dense"
 
   const keyHeight = {
-    loose: 14,
-    normal: 13,
-    compact: 12,
-    dense: 10
+    loose: 12,
+    normal: 11,
+    compact: 10,
+    dense: 8
   }[density]
 
   const getRidgeDistance = (index: number): number | null => {
@@ -446,18 +446,16 @@ export function ChatScrollNavigator({
   }
 
   const getLineWidth = (distance: number | null, isActive: boolean): number => {
-    const base = 14
+    const base = 11
     const active = base
-    const ridge = [34, 29, 24, 19, 16, base]
+    const ridge = [26, 22, 18, 15, 12, base]
 
     if (distance !== null) return ridge[distance]
     return isActive ? active : base
   }
 
   const getLineHeight = (distance: number | null): number => {
-    if (distance === 0) return 4
-    if (distance === 1) return 3
-    return 3
+    return distance === 0 ? 3 : 2
   }
 
   const renderPopoverContent = (question: ChatScrollQuestion, index: number): ReactNode => {
@@ -527,11 +525,11 @@ export function ChatScrollNavigator({
 
   return (
     <>
-      {children({ hasQuestions, reserveRightSpace, setMessageRef })}
+      {children({ hasQuestions, reserveLeftSpace, setMessageRef })}
       {hasQuestions && (
         <div
           ref={wrapperRef}
-          className="pointer-events-none absolute right-0 top-[46%] z-20 hidden -translate-y-1/2 md:block"
+          className="pointer-events-none absolute left-0 top-[46%] z-20 hidden -translate-y-1/2 md:block"
         >
           <Popover
             open={popoverOpen}
@@ -546,7 +544,7 @@ export function ChatScrollNavigator({
                 if (popoverOpen && hoveredIndex !== null) updatePopoverPosition(hoveredIndex)
               }}
               className={cn(
-                "pointer-events-auto relative flex max-h-[62vh] w-10 flex-col items-end gap-px overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                "pointer-events-auto relative flex max-h-[62vh] w-9 flex-col items-start gap-px overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               )}
             >
               {questions.map((question, index) => {
@@ -575,10 +573,7 @@ export function ChatScrollNavigator({
                     }}
                     style={{ height: keyHeight }}
                     className={cn(
-                      "group relative flex w-full items-center justify-end rounded-lg pr-1 transition-colors duration-200 hover:bg-foreground/6 focus-visible:bg-foreground/10 focus-visible:outline-none dark:hover:bg-white/8",
-                      isActive &&
-                        "before:absolute before:right-0 before:top-1/2 before:-translate-y-1/2 before:rounded-full before:bg-[#D97757]",
-                      isActive && "before:size-1.5"
+                      "group relative flex w-full items-center justify-start rounded-lg pl-1 transition-colors duration-200 hover:bg-foreground/6 focus-visible:bg-foreground/10 focus-visible:outline-none dark:hover:bg-white/8"
                     )}
                   >
                     <span
@@ -587,7 +582,7 @@ export function ChatScrollNavigator({
                         "relative z-10 rounded-full transition-all duration-200 ease-out",
                         ridgeDistance !== null
                           ? "bg-foreground/80 dark:bg-white/85"
-                          : "bg-foreground/35 dark:bg-white/35",
+                          : "bg-foreground/20 dark:bg-white/25",
                         hasRequestedUserInput && "bg-[#eb31ba] dark:bg-[#2DD4BF]",
                         isActive && "bg-[#D97757] dark:bg-[#E58A68]"
                       )}
@@ -610,9 +605,9 @@ export function ChatScrollNavigator({
               </PopoverAnchor>
             )}
             <PopoverContent
-              side="left"
+              side="right"
               align="start"
-              sideOffset={10}
+              sideOffset={30}
               onMouseEnter={clearCloseTimer}
               onMouseLeave={armClose}
               className="max-h-[70vh] mb-10 max-w-80 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border-border/70 bg-white px-3 py-2 leading-relaxed shadow-lg shadow-black/5 backdrop-blur-sm"

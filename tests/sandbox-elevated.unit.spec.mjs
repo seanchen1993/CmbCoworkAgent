@@ -747,8 +747,8 @@ test("Windows sandbox execution no longer installs native-helper workarounds", (
 test("orchestrator wraps every sandbox failure in Codex's single retry-without-sandbox prompt", () => {
   const orchestratorSection = sectionBetween(
     toolOrchestratorSource,
-    "async execute(command: string, cwd: string, sandboxMode: string)",
-    "private async approveFileOp("
+    "  async execute(",
+    "  async approveFileOp("
   )
   const bypassSection = sectionBetween(
     toolOrchestratorSource,
@@ -763,12 +763,12 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     orchestratorSection,
-    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
     "safe commands should also be eligible for Codex-style sandbox bypass prompts after sandbox failure"
   )
   assert.match(
     orchestratorSection,
-    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
     "YOLO mode should skip only the initial command approval; sandbox escape must still require the retry approval prompt"
   )
   assert.match(
@@ -929,7 +929,7 @@ test("background execute() routes results through the orchestrator's bypass chec
 
   assert.match(
     backgroundSection,
-    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult\s*\)/,
+    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult,\s*outsideShellSyntax\s*\)/,
     "executeBackground must hand the raw result to the orchestrator's bypass check before marking the task complete — otherwise backgrounded `npm run build` skips the approval prompt"
   )
   assert.match(
@@ -980,8 +980,8 @@ test("autoApproveFileEdits waives ONLY file-edit approval, never shell execute",
   // are gated on yoloMode alone, so a workflow subagent still gets a shell prompt.
   const executeSection = sectionBetween(
     toolOrchestratorSource,
-    "async execute(command: string, cwd: string, sandboxMode: string)",
-    "async approveFileOp("
+    "  async execute(",
+    "  async approveFileOp("
   )
   assert.ok(
     !executeSection.includes("autoApproveFileEdits"),

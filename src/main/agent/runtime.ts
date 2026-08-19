@@ -4656,7 +4656,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
             }
           }
         }
-      : undefined
+      : undefined,
+    workspacePath
   )
   backend.setOrchestrator(orchestrator)
 

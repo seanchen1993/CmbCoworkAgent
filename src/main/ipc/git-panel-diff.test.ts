@@ -13,7 +13,15 @@
  */
 
 import { execFileSync } from "child_process"
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "fs"
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from "fs"
 import { tmpdir } from "os"
 import { basename, dirname, join } from "path"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
@@ -31,6 +39,8 @@ import {
   buildGitPanelFileDiffState,
   buildGitPanelMetaState,
   buildGitPanelState,
+  pathExistsForGitAdd,
+  resolveSelectedChangedFilesForGitOps,
   shouldUseDefaultGitPush
 } from "./models"
 import { discoverWorkspaceGitRepositories } from "../services/git-repository-discovery"
@@ -267,6 +277,55 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
     }
   })
 
+  it("excludes gitignored untracked files but keeps tracked files matching the same rule", async () => {
+    const localRepo = createRepo("gitpanel-gitignore-")
+    try {
+      writeFileSync(join(localRepo, ".gitignore"), "*.log\n")
+      writeFileSync(join(localRepo, "tracked.log"), "before\n")
+      gitIn(localRepo, ["add", ".gitignore"])
+      gitIn(localRepo, ["add", "-f", "tracked.log"])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+
+      writeFileSync(join(localRepo, "tracked.log"), "after\n")
+      writeFileSync(join(localRepo, "debug.log"), "ignored\n")
+      writeFileSync(join(localRepo, "feature.ts"), "export const feature = true\n")
+
+      const state = await buildGitPanelState(localRepo, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+
+      expect(state.changedFiles.sort()).toEqual(["feature.ts", "tracked.log"])
+      expect(state.files.map((file) => file.path).sort()).toEqual(["feature.ts", "tracked.log"])
+
+      const selected = await resolveSelectedChangedFilesForGitOps(localRepo, [
+        "debug.log",
+        "feature.ts",
+        "tracked.log"
+      ])
+      const ignoredOnly = await resolveSelectedChangedFilesForGitOps(localRepo, ["debug.log"])
+      expect(selected.sort()).toEqual(["feature.ts", "tracked.log"])
+      expect(ignoredOnly).toEqual([])
+
+      // Even if an earlier command force-added an ignored, HEAD-untracked file,
+      // the Agent commit backend must not treat that index entry as eligible.
+      gitIn(localRepo, ["add", "-f", "debug.log"])
+      const forceAddedSelection = await resolveSelectedChangedFilesForGitOps(localRepo, [
+        "debug.log",
+        "feature.ts",
+        "tracked.log"
+      ], [], { excludeNewIgnored: true })
+      expect(forceAddedSelection.sort()).toEqual(["feature.ts", "tracked.log"])
+
+      const manualSelection = await resolveSelectedChangedFilesForGitOps(localRepo, ["debug.log"])
+      expect(manualSelection).toEqual(["debug.log"])
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
   it("preserves leading spaces in untracked file names while filtering noise dirs", async () => {
     const localRepo = createRepo("gitpanel-leading-space-")
     try {
@@ -351,6 +410,100 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
       rmSync(localRepo, { recursive: true, force: true })
     }
   })
+
+  it("does not widen an explicit path using filesystem-move heuristics", async () => {
+    const localRepo = createRepo("gitpanel-selected-untracked-")
+    try {
+      writeFileSync(join(localRepo, "unrelated-delete.ts"), "shared content\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      rmSync(join(localRepo, "unrelated-delete.ts"))
+      writeFileSync(join(localRepo, "selected-new.ts"), "shared content\n")
+
+      const selected = await resolveSelectedChangedFilesForGitOps(localRepo, ["selected-new.ts"])
+
+      expect(selected).toEqual(["selected-new.ts"])
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps both explicitly supplied paths for an indexed rename", async () => {
+    const localRepo = createRepo("gitpanel-selected-indexed-rename-")
+    try {
+      writeFileSync(join(localRepo, "old-name.ts"), "shared content\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      renameSync(join(localRepo, "old-name.ts"), join(localRepo, "new-name.ts"))
+      gitIn(localRepo, ["add", "-A"])
+
+      const selected = await resolveSelectedChangedFilesForGitOps(localRepo, [
+        "old-name.ts",
+        "new-name.ts"
+      ])
+
+      expect(selected).toEqual(["old-name.ts", "new-name.ts"])
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("does not widen a copied destination to its independently modified source", async () => {
+    const localRepo = createRepo("gitpanel-selected-indexed-copy-")
+    try {
+      writeFileSync(join(localRepo, "source.ts"), "shared content\n")
+      gitIn(localRepo, ["add", "."])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      gitIn(localRepo, ["config", "status.renames", "copies"])
+      copyFileSync(join(localRepo, "source.ts"), join(localRepo, "copy.ts"))
+      gitIn(localRepo, ["add", "copy.ts"])
+      writeFileSync(join(localRepo, "source.ts"), "independent source edit\n")
+
+      const selected = await resolveSelectedChangedFilesForGitOps(localRepo, ["copy.ts"])
+
+      expect(selected).toEqual(["copy.ts"])
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform === "win32")(
+    "preserves literal quote characters in selected Git paths",
+    async () => {
+      const localRepo = createRepo("gitpanel-selected-quoted-path-")
+      try {
+        writeFileSync(join(localRepo, '"quoted.ts"'), "before\n")
+        writeFileSync(join(localRepo, "quoted.ts"), "before\n")
+        gitIn(localRepo, ["add", "."])
+        gitIn(localRepo, ["commit", "-q", "-m", "init"])
+        writeFileSync(join(localRepo, '"quoted.ts"'), "selected\n")
+        writeFileSync(join(localRepo, "quoted.ts"), "unrelated\n")
+
+        const selected = await resolveSelectedChangedFilesForGitOps(localRepo, ['"quoted.ts"'])
+
+        expect(selected).toEqual(['"quoted.ts"'])
+      } finally {
+        rmSync(localRepo, { recursive: true, force: true })
+      }
+    }
+  )
+})
+
+describe("Agent commit path staging", () => {
+  it.skipIf(process.platform === "win32")(
+    "treats a dangling symlink as an existing Git path",
+    async () => {
+      const localRepo = createRepo("gitpanel-dangling-symlink-")
+      try {
+        symlinkSync("missing-target", join(localRepo, "dangling-link"))
+
+        await expect(pathExistsForGitAdd(localRepo, "dangling-link")).resolves.toBe(true)
+        await expect(pathExistsForGitAdd(localRepo, "missing-link")).resolves.toBe(false)
+      } finally {
+        rmSync(localRepo, { recursive: true, force: true })
+      }
+    }
+  )
 })
 
 describe("buildGitPanelState — full mode (includeDiffs:true)", () => {
@@ -420,6 +573,66 @@ describe("buildGitPanelDiffState — workspace review scope", () => {
       expect(state.changedFiles).toEqual(["a.txt"])
       expect(state.changedFilesTotal).toBe(1)
     } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps repeated subdirectory prefixes as distinct worktree paths", async () => {
+    const localRepo = createRepo("gitpanel-subdir-prefix-")
+    try {
+      const workspacePath = join(localRepo, "sub")
+      mkdirSync(join(workspacePath, "sub"), { recursive: true })
+      writeFileSync(join(workspacePath, "x.ts"), "direct\n")
+      writeFileSync(join(workspacePath, "sub", "x.ts"), "nested\n")
+
+      const state = await buildGitPanelState(workspacePath, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+      expect(state.changedFiles.sort()).toEqual(["sub/x.ts", "x.ts"])
+
+      const selected = await resolveSelectedChangedFilesForGitOps(workspacePath, ["sub/x.ts"])
+      expect(selected).toEqual(["sub/x.ts"])
+    } finally {
+      rmSync(localRepo, { recursive: true, force: true })
+    }
+  })
+
+  it("maps repository-root status output into a symlinked subdirectory workspace", async () => {
+    const localRepo = createRepo("gitpanel-symlink-subdir-")
+    const linkParent = mkdtempSync(join(tmpdir(), "gitpanel-symlink-workspace-"))
+    const linkedWorkspace = join(linkParent, "workspace")
+    try {
+      mkdirSync(join(localRepo, "sub"), { recursive: true })
+      writeFileSync(join(localRepo, "sub", "x.ts"), "before\n")
+      gitIn(localRepo, ["add", "sub/x.ts"])
+      gitIn(localRepo, ["commit", "-q", "-m", "init"])
+      writeFileSync(join(localRepo, "sub", "x.ts"), "after\n")
+
+      try {
+        symlinkSync(
+          join(localRepo, "sub"),
+          linkedWorkspace,
+          process.platform === "win32" ? "junction" : "dir"
+        )
+      } catch {
+        return
+      }
+
+      const state = await buildGitPanelState(linkedWorkspace, [], {
+        silent: true,
+        includeAllWhenNoTracked: true,
+        includeDiffs: false,
+        includeChangedFiles: true
+      })
+      expect(state.changedFiles).toEqual(["x.ts"])
+      await expect(
+        resolveSelectedChangedFilesForGitOps(linkedWorkspace, ["x.ts"])
+      ).resolves.toEqual(["x.ts"])
+    } finally {
+      rmSync(linkParent, { recursive: true, force: true })
       rmSync(localRepo, { recursive: true, force: true })
     }
   })

@@ -2,9 +2,9 @@ import { IpcMain, dialog, app, BrowserWindow, type MessageBoxOptions } from "ele
 import Store from "electron-store"
 import { randomUUID } from "crypto"
 import * as fs from "fs/promises"
-import { existsSync } from "fs"
+import { existsSync, realpathSync } from "fs"
 import * as path from "path"
-import { execFile } from "child_process"
+import { execFile, spawn } from "child_process"
 import { promisify } from "util"
 import { getWindowsSandboxMode } from "../storage"
 import { workflowRunManager } from "../agent/workflow/run-manager"
@@ -122,6 +122,7 @@ interface GitChangedFilesSummaryPayload {
 }
 
 interface ExecFileError extends Error {
+  code?: number | string
   stderr?: string | Buffer
   stdout?: string | Buffer
 }
@@ -352,12 +353,14 @@ function normalizeTrackedPath(input: string): string {
   return (quoted ? quoted[1] : value).replace(/\\/g, "/")
 }
 
-function normalizeGitRelativePath(input: string): string {
+function normalizeLiteralTrackedPath(input: string): string {
   const value = String(input ?? "")
   if (!value.trim()) return ""
-  const quoted = value.trim().match(/^"(.*)"$/)
-  return (quoted ? quoted[1] : value)
-    .replace(/\\/g, "/")
+  return process.platform === "win32" ? value.replace(/\\/g, "/") : value
+}
+
+function normalizeGitRelativePath(input: string): string {
+  return normalizeLiteralTrackedPath(input)
     .replace(/^\.\/+/, "")
     .replace(/^\/+/, "")
     .replace(/\/+$/, "")
@@ -368,11 +371,17 @@ function toPosixRelative(input: string): string {
 }
 
 function isAbsoluteLikePath(input: string): boolean {
-  return path.isAbsolute(input) || /^[a-zA-Z]:[\\/]/.test(input)
+  return path.isAbsolute(input) ||
+    (process.platform === "win32" && /^[a-zA-Z]:[\\/]/.test(input))
 }
 
 function findGitRootByFs(startPath: string): string | null {
-  let current = path.resolve(startPath)
+  let current: string
+  try {
+    current = realpathSync(startPath)
+  } catch {
+    current = path.resolve(startPath)
+  }
   while (true) {
     if (existsSync(path.join(current, ".git"))) return current
     const parent = path.dirname(current)
@@ -382,7 +391,7 @@ function findGitRootByFs(startPath: string): string | null {
 }
 
 function resolveWorktreeRelativeCandidate(worktreePath: string, rawPath: string): string | null {
-  const trimmed = normalizeTrackedPath(rawPath)
+  const trimmed = normalizeLiteralTrackedPath(rawPath)
   if (!trimmed) return null
 
   const worktreeAbs = path.resolve(worktreePath)
@@ -419,14 +428,13 @@ function addWorktreeRelativeCandidate(
 
 function toWorktreeRelativePath(worktreePath: string, rawPath: string): string[] {
   const result = new Set<string>()
-  const trimmed = normalizeTrackedPath(rawPath)
+  const trimmed = normalizeLiteralTrackedPath(rawPath)
   if (!trimmed) return []
   const worktreeAbs = path.resolve(worktreePath)
-  let relDirect = ""
 
   // Direct relative candidate (only for non-absolute paths)
   if (!isAbsoluteLikePath(trimmed)) {
-    relDirect = addWorktreeRelativeCandidate(result, worktreeAbs, trimmed) ?? ""
+    addWorktreeRelativeCandidate(result, worktreeAbs, trimmed)
 
     // Recovery for previously stored broken absolute paths (e.g. "Users/xxx" without leading "/").
     const rootedAbs = path.resolve(path.sep, trimmed)
@@ -439,33 +447,52 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string): string[]
     : path.resolve(worktreeAbs, trimmed)
   addWorktreeRelativeCandidate(result, worktreeAbs, candidateAbs)
 
-  // Also accept paths that are relative to git root (not workspace root),
-  // then map them back to workspace-relative paths when workspacePath is a subdirectory.
-  if (!isAbsoluteLikePath(trimmed)) {
-    const gitRoot = findGitRootByFs(worktreeAbs)
-    if (gitRoot && gitRoot !== worktreeAbs) {
-      const workspaceFromGitRootRaw = path.relative(gitRoot, worktreeAbs)
-      const workspaceFromGitRoot = toPosixRelative(workspaceFromGitRootRaw)
-      const rawAsGitRelative = toPosixRelative(trimmed)
-      if (
-        workspaceFromGitRoot &&
-        rawAsGitRelative &&
-        (rawAsGitRelative === workspaceFromGitRoot ||
-          rawAsGitRelative.startsWith(`${workspaceFromGitRoot}/`))
-      ) {
-        const mapped = rawAsGitRelative.slice(workspaceFromGitRoot.length).replace(/^\/+/, "")
-        if (mapped) addWorktreeRelativeCandidate(result, worktreeAbs, mapped)
-        // When workspace is a subdirectory of git root, git status paths are often
-        // repo-root-relative (e.g. "A/file.ts"). In that case prefer mapped
-        // workspace-relative path ("file.ts") and drop misleading direct candidate.
-        if (relDirect && relDirect === rawAsGitRelative) {
-          result.delete(relDirect)
-        }
-      }
-    }
+  return Array.from(result).filter(Boolean)
+}
+
+/**
+ * Convert a path emitted by Git into the operation worktree's coordinate system.
+ * All status/ls-files calls below force repository-root-relative output, so this
+ * conversion is deterministic. Do not use the old "try both roots" heuristic here:
+ * in a subdirectory worktree, `sub/x` can legitimately name a different file from
+ * the repository-root path `sub/x`.
+ */
+function gitOutputPathToWorktreeRelativePath(worktreePath: string, rawPath: string): string[] {
+  const normalized = normalizeLiteralTrackedPath(rawPath)
+  if (!normalized) return []
+  if (isAbsoluteLikePath(normalized)) {
+    const direct = resolveWorktreeRelativeCandidate(worktreePath, normalized)
+    return direct ? [direct] : []
   }
 
-  return Array.from(result).filter(Boolean)
+  const gitRoot = findGitRootByFs(worktreePath)
+  if (!gitRoot) {
+    const direct = resolveWorktreeRelativeCandidate(worktreePath, normalized)
+    return direct ? [direct] : []
+  }
+  const absoluteCandidate = path.resolve(gitRoot, normalized)
+  const mapped = resolveWorktreeRelativeCandidate(worktreePath, absoluteCandidate)
+  if (mapped) return [mapped]
+
+  // Git resolves a symlink/junction cwd to the physical repository and emits
+  // repository-root-relative paths. Project that physical path back into the
+  // logical workspace so a symlinked workspace keeps the same file identity.
+  try {
+    const physicalWorktree = realpathSync(worktreePath)
+    const physicalRelative = path.relative(physicalWorktree, absoluteCandidate)
+    if (
+      physicalRelative &&
+      physicalRelative !== ".." &&
+      !physicalRelative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(physicalRelative)
+    ) {
+      const normalizedRelative = normalizeGitRelativePath(physicalRelative)
+      return normalizedRelative ? [normalizedRelative] : []
+    }
+  } catch {
+    // The lexical containment result above remains authoritative when realpath fails.
+  }
+  return []
 }
 
 function isRenameOrCopyStatus(status: string): boolean {
@@ -644,6 +671,8 @@ async function runStatusPorcelain(
       [
         "-c",
         "core.quotepath=false",
+        "-c",
+        "status.relativePaths=false",
         "--literal-pathspecs",
         "status",
         "--porcelain",
@@ -662,6 +691,8 @@ async function runStatusPorcelain(
       [
         "-c",
         "core.quotepath=false",
+        "-c",
+        "status.relativePaths=false",
         "--literal-pathspecs",
         "status",
         "--porcelain",
@@ -696,6 +727,8 @@ async function runStatusPorcelainExcludingNoiseDirs(
   const trackedArgs = (useZ: boolean): string[] => [
     "-c",
     "core.quotepath=false",
+    "-c",
+    "status.relativePaths=false",
     "--literal-pathspecs",
     "status",
     "--porcelain",
@@ -711,6 +744,7 @@ async function runStatusPorcelainExcludingNoiseDirs(
     "ls-files",
     "--others",
     "--exclude-standard",
+    "--full-name",
     ...(useZ ? ["-z"] : []),
     "--",
     ...pathspecs,
@@ -1045,11 +1079,11 @@ function collectChangedFileEntriesFromStatus(
   const changedMap = new Map<string, GitPanelChangedFile>()
 
   for (const entry of parsePorcelainPathEntries(statusOutput)) {
-    const pathCandidates = toWorktreeRelativePath(worktreePath, entry.path)
+    const pathCandidates = gitOutputPathToWorktreeRelativePath(worktreePath, entry.path)
     if (pathCandidates.length === 0) continue
 
     const previousPathCandidates = entry.previousPath
-      ? toWorktreeRelativePath(worktreePath, entry.previousPath)
+      ? gitOutputPathToWorktreeRelativePath(worktreePath, entry.previousPath)
       : []
     const mappedPreviousPath =
       pickBestWorktreeRelativePath(worktreePath, previousPathCandidates) ?? undefined
@@ -1372,9 +1406,15 @@ async function runGitWithLiteralPathspecs(
   return runGit(worktreePath, ["--literal-pathspecs", ...args, "--", ...pathspecs], options)
 }
 
-async function pathExistsForGitAdd(worktreePath: string, relPath: string): Promise<boolean> {
+export async function pathExistsForGitAdd(
+  worktreePath: string,
+  relPath: string
+): Promise<boolean> {
   try {
-    await fs.stat(path.join(worktreePath, relPath))
+    // Git tracks the symlink directory entry itself. stat() follows the target and
+    // therefore misclassifies a dangling symlink as a deletion; lstat() preserves
+    // Git's filesystem semantics and lets `git add` stage the link value.
+    await fs.lstat(path.join(worktreePath, relPath))
     return true
   } catch {
     return false
@@ -2599,7 +2639,7 @@ function normalizeSelectedChangedFileEntries(
           )
       for (const matchedPath of matchedPaths) {
         const entry = entryByPath.get(matchedPath)
-        if (entry?.previousPath) {
+        if (entry?.status === "renamed" && entry.previousPath) {
           selectedSet.add(normalizeGitRelativePath(entry.previousPath))
           selectedSet.add(normalizeGitRelativePath(entry.path))
         } else {
@@ -2609,6 +2649,168 @@ function normalizeSelectedChangedFileEntries(
     }
   }
   return Array.from(selectedSet)
+}
+
+async function getHeadTrackedPaths(
+  worktreePath: string,
+  candidates: string[]
+): Promise<Set<string>> {
+  if (candidates.length === 0) return new Set()
+  const tracked = new Set<string>()
+  const batchSize = 32
+  for (let index = 0; index < candidates.length; index += batchSize) {
+    const batch = candidates.slice(index, index + batchSize)
+    let output: string
+    try {
+      output = await runGitWithLiteralPathspecs(
+        worktreePath,
+        ["ls-tree", "-r", "--name-only", "--full-name", "-z", "HEAD"],
+        batch,
+        { silent: true }
+      )
+    } catch (error) {
+      const detail = getExecErrorText(error).toLowerCase()
+      if (
+        detail.includes("not a valid object name head") ||
+        detail.includes("bad revision") ||
+        detail.includes("unknown revision") ||
+        detail.includes("ambiguous argument 'head'")
+      ) {
+        return new Set()
+      }
+      throw error
+    }
+
+    for (const rawPath of output.split("\0").filter(Boolean)) {
+      for (const relativePath of gitOutputPathToWorktreeRelativePath(worktreePath, rawPath)) {
+        tracked.add(normalizeGitRelativePath(relativePath))
+      }
+    }
+  }
+  return tracked
+}
+
+async function runGitCheckIgnoreStdin(
+  worktreePath: string,
+  candidates: string[]
+): Promise<string> {
+  const execute = (): Promise<string> =>
+    new Promise((resolve, reject) => {
+      let settled = false
+      const resolveOnce = (value: string): void => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      }
+      const rejectOnce = (error: Error): void => {
+        if (settled) return
+        settled = true
+        reject(error)
+      }
+      const child = spawn(
+        "git",
+        ["-C", worktreePath, "check-ignore", "--no-index", "--stdin", "-z"],
+        {
+          env: GIT_BASE_ENV,
+          stdio: ["pipe", "pipe", "pipe"],
+          ...GIT_SPAWN_OPTIONS
+        }
+      )
+      const stdout: Buffer[] = []
+      const stderr: Buffer[] = []
+      let stdinError: Error | null = null
+      child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk))
+      child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
+      child.on("error", rejectOnce)
+      // Consume EPIPE/EOF so it cannot become an unhandled stream error, but
+      // wait for close: stderr carries actionable Git diagnostics such as
+      // dubious-ownership, which must win over the incidental pipe error.
+      child.stdin.on("error", (error) => {
+        stdinError = error
+      })
+      child.on("close", (code) => {
+        const output = Buffer.concat(stdout).toString("utf8")
+        if (code === 0 || code === 1) {
+          resolveOnce(output)
+          return
+        }
+        const error = new Error(
+          Buffer.concat(stderr).toString("utf8").trim() ||
+            stdinError?.message ||
+            `git check-ignore exited with code ${code ?? "unknown"}`
+        ) as ExecFileError
+        error.code = code ?? undefined
+        error.stdout = output
+        rejectOnce(error)
+      })
+      child.stdin.end(`${candidates.join("\0")}\0`)
+    })
+
+  try {
+    return await execute()
+  } catch (error) {
+    if (!isDubiousOwnershipError(error)) throw error
+    await addSafeDirectory(worktreePath)
+    return execute()
+  }
+}
+
+async function getIgnoredUntrackedPaths(
+  worktreePath: string,
+  candidates: string[]
+): Promise<Set<string>> {
+  const ignored = new Set<string>()
+  if (candidates.length === 0) return ignored
+  const output = await runGitCheckIgnoreStdin(worktreePath, candidates)
+  for (const rawPath of output.split("\0").filter(Boolean)) {
+    for (const relativePath of toWorktreeRelativePath(worktreePath, rawPath)) {
+      ignored.add(normalizeGitRelativePath(relativePath))
+    }
+  }
+  return ignored
+}
+
+async function excludeNewIgnoredEntriesFromAgentCommit(
+  worktreePath: string,
+  changedEntries: GitPanelChangedFile[]
+): Promise<GitPanelChangedFile[]> {
+  const candidates = Array.from(
+    new Set(
+      changedEntries
+        .filter((entry) => entry.status === "added" || entry.status === "copied")
+        .map((entry) => normalizeGitRelativePath(entry.path))
+        .filter(Boolean)
+    )
+  )
+  if (candidates.length === 0) return changedEntries
+
+  const trackedInHead = await getHeadTrackedPaths(worktreePath, candidates)
+  const newCandidates = candidates.filter((candidate) => !trackedInHead.has(candidate))
+  const ignoredNewPaths = await getIgnoredUntrackedPaths(worktreePath, newCandidates)
+  if (ignoredNewPaths.size === 0) return changedEntries
+  return changedEntries.filter(
+    (entry) => !ignoredNewPaths.has(normalizeGitRelativePath(entry.path))
+  )
+}
+
+/** Resolve a commit scope through Git status without widening explicit pathspecs. */
+export async function resolveSelectedChangedFilesForGitOps(
+  worktreePath: string,
+  selectedFilePaths?: string[],
+  trackedFiles: string[] = [],
+  options?: { excludeNewIgnored?: boolean }
+): Promise<string[]> {
+  if (Array.isArray(selectedFilePaths) && selectedFilePaths.length === 0) return []
+  const hasExplicitSelection = Array.isArray(selectedFilePaths)
+  const changedEntries = await getChangedFileEntriesForGitOps(
+    worktreePath,
+    hasExplicitSelection ? selectedFilePaths : trackedFiles,
+    { includeAllWhenNoTracked: !hasExplicitSelection }
+  )
+  const safeEntries = options?.excludeNewIgnored
+    ? await excludeNewIgnoredEntriesFromAgentCommit(worktreePath, changedEntries)
+    : changedEntries
+  return normalizeSelectedChangedFileEntries(worktreePath, safeEntries, selectedFilePaths)
 }
 
 function getChangedFilesFromEntries(changedEntries: GitPanelChangedFile[]): string[] {
@@ -4464,7 +4666,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         threadId: string
         message: string
         filePaths?: string[]
-        options?: { worktreePath?: string }
+        options?: { worktreePath?: string; agentInitiated?: boolean }
       }
     ) => {
       try {
@@ -4487,17 +4689,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
                 typeof filePath === "string" && filePath.trim().length > 0
             )
           : null
-        const changedEntries = explicitFilePaths?.length === 0
-          ? []
-          : await getChangedFileEntriesForGitOps(
-              worktreePath,
-              explicitFilePaths ?? tracked,
-              { includeAllWhenNoTracked: explicitFilePaths === null }
-            )
-        const filesToCommit = normalizeSelectedChangedFileEntries(
+        const filesToCommit = await resolveSelectedChangedFilesForGitOps(
           worktreePath,
-          changedEntries,
-          explicitFilePaths ?? undefined
+          explicitFilePaths ?? undefined,
+          tracked,
+          { excludeNewIgnored: options?.agentInitiated === true }
         )
         logGitStep(
           threadId,

@@ -2432,11 +2432,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
     }
 
-    let harnessContext: ReturnType<typeof buildHarnessFeatureAgentContext> | null = null
+    let harnessContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>> = null
     try {
       const workspacePath =
         typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
-      harnessContext = buildHarnessFeatureAgentContext(nextMetadata, {
+      harnessContext = await buildHarnessFeatureAgentContext(nextMetadata, {
         workspacePath,
         requestUserInputConfigSource: "plugin"
       })
