@@ -5,14 +5,9 @@ import { join } from "path"
 
 const BRIDGE_DIRECTORY = join(homedir(), ".cmbcoworkagent", "browser-native-host")
 const BRIDGE_SECRET_FILE = join(BRIDGE_DIRECTORY, "bridge-secret")
-const BRIDGE_NATIVE_HOST_LOG_FILE = join(BRIDGE_DIRECTORY, "native-host.log")
 
 export function getBrowserCookieBridgeDirectory(): string {
   return BRIDGE_DIRECTORY
-}
-
-export function getBrowserCookieBridgeNativeHostLogPath(): string {
-  return BRIDGE_NATIVE_HOST_LOG_FILE
 }
 
 export function getBrowserCookieBridgeSecret(): string {

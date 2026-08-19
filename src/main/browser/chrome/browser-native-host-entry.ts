@@ -2,14 +2,17 @@ import {
   isDedicatedBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
 } from "./browser-native-messaging-host"
-import { writeBrowserNativeHostLog } from "./browser-native-host-log"
 
 if (!isDedicatedBrowserNativeMessagingHostLaunch()) {
-  writeBrowserNativeHostLog("Missing native host flag or trusted extension origin")
+  process.stderr.write(
+    "[CmbBrowserNativeHost] Missing native host flag or trusted extension origin\n"
+  )
   process.exitCode = 1
 } else {
   void runBrowserNativeMessagingHost().catch((error) => {
-    writeBrowserNativeHostLog(error instanceof Error ? error.message : String(error))
+    process.stderr.write(
+      `[CmbBrowserNativeHost] ${error instanceof Error ? error.message : String(error)}\n`
+    )
     process.exitCode = 1
   })
 }
