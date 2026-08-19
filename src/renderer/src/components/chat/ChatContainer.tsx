@@ -3407,7 +3407,12 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
+    [
+      setInput,
+      setSelectedBuiltinBrowser,
+      setSelectedSkill,
+      slashResetSelection
+    ]
   )
 
   const applyAtFileMention = useCallback(

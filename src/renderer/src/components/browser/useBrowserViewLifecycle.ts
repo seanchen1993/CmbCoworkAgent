@@ -4,6 +4,7 @@ import {
   BROWSER_SESSION_ID
 } from "../../../../shared/browser-types"
 import { hasOpenModalDialog, MODAL_DIALOG_CHANGE_EVENT } from "@/lib/modal-dialog"
+import { useAppStore } from "@/lib/store"
 
 const HIDDEN_BROWSER_BOUNDS = { x: 0, y: 0, width: 0, height: 0 }
 const BROWSER_APP_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[App]`
@@ -16,23 +17,19 @@ interface UseBrowserViewLifecycleOptions {
   currentThreadId: string | null
   harnessSessionThreadId: string | null
   mainView: string
-  rightModule: string
   rightPanelCollapsed: boolean
   isAgentFocusActive: boolean
-  selectBrowserModule: () => void
-  setRightPanelCollapsed: (collapsed: boolean) => void
 }
 
 export function useBrowserViewLifecycle({
   currentThreadId,
   harnessSessionThreadId,
   mainView,
-  rightModule,
   rightPanelCollapsed,
-  isAgentFocusActive,
-  selectBrowserModule,
-  setRightPanelCollapsed
+  isAgentFocusActive
 }: UseBrowserViewLifecycleOptions): void {
+  const rightModule = useAppStore((state) => state.rightModule)
+  const requestOpenBrowserPanel = useAppStore((state) => state.requestOpenBrowserPanel)
   const wasBrowserPanelVisibleRef = useRef(false)
   const rendererUnloadBrowserCleanupSentRef = useRef(false)
   const modalDialogOpenRef = useRef(false)
@@ -149,8 +146,7 @@ export function useBrowserViewLifecycle({
       const activeThreadId = mainView === "harness" ? harnessSessionThreadId : currentThreadId
       if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
       if (requestedThreadId && !activeThreadId) return
-      setRightPanelCollapsed(false)
-      selectBrowserModule()
+      requestOpenBrowserPanel()
       console.info(
         `${BROWSER_APP_LOG_PREFIX} Showing Browser panel for ${requestedThreadId || activeThreadId || "active thread"}.`
       )
@@ -159,7 +155,6 @@ export function useBrowserViewLifecycle({
     currentThreadId,
     harnessSessionThreadId,
     mainView,
-    selectBrowserModule,
-    setRightPanelCollapsed
+    requestOpenBrowserPanel
   ])
 }

@@ -226,7 +226,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
 
         <BrowserCdpConfigCard
           className="mt-2"
-          title="开启进阶自动化能力（Node版本需 》20）"
+          title="开启进阶自动化能力（ Node版本需 >= 20 ）"
           description="在此开启 AI 浏览器操控和 Chrome 登录数据导入；保存后重启应用即可生效。"
         />
 

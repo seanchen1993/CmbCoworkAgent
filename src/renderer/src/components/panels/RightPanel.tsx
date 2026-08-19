@@ -210,11 +210,7 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 
 interface RightPanelProps {
   threadId?: string | null
-  moduleMode: "work" | "preview" | "git" | "browser"
   showSystemConstraints?: boolean
-  onRequestPreviewMode?: () => void
-  onRequestBrowserMode?: () => void
-  onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
   onBrowserFullscreenChange?: (isFullscreen: boolean) => void
 }
@@ -230,28 +226,28 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 
 export function RightPanel({
   threadId,
-  moduleMode,
   showSystemConstraints = false,
-  onRequestPreviewMode,
-  onRequestBrowserMode,
-  onRequestWorkMode,
   onPreviewFullscreenChange,
   onBrowserFullscreenChange
 }: RightPanelProps): React.JSX.Element {
   const {
     currentThreadId: storeCurrentThreadId,
     pluginVersion,
+    rightModule,
     rightPanelWorkRequest,
     skillGenerationByThread,
+    setRightModule,
     setSkillGenerationPhase
   } =
     useAppStore(
       useShallow((s) => ({
         currentThreadId: s.currentThreadId,
         pluginVersion: s.pluginVersion,
+        rightModule: s.rightModule,
         rightPanelWorkRequest: s.rightPanelWorkRequest,
         // Subscribe to the whole map so we re-render when any thread's card changes
         skillGenerationByThread: s.skillGenerationByThread,
+        setRightModule: s.setRightModule,
         setSkillGenerationPhase: s.setSkillGenerationPhase
       }))
     )
@@ -657,16 +653,16 @@ export function RightPanel({
       setPreviewReloadToken((v) => v + 1)
       if (switchToPreview) {
         if (isHtmlPreviewPath(latestResourceEvent.path)) {
-          onRequestBrowserMode?.()
+          setRightModule("browser")
         } else {
-          onRequestPreviewMode?.()
+          setRightModule("preview")
         }
       }
     }
 
     // Render preview when this round finishes: true -> false
     if (!(wasLoading && !isLoading)) return
-    const shouldAutoSwitchToPreview = moduleMode !== "git" && moduleMode !== "browser"
+    const shouldAutoSwitchToPreview = rightModule !== "git" && rightModule !== "browser"
     if (
       latestCompletedLlmBatch?.files?.length &&
       lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
@@ -683,9 +679,8 @@ export function RightPanel({
     streamData.isLoading,
     latestResourceEvent,
     latestCompletedLlmBatch,
-    onRequestBrowserMode,
-    onRequestPreviewMode,
-    moduleMode
+    rightModule,
+    setRightModule
   ])
 
   useEffect(() => {
@@ -716,21 +711,21 @@ export function RightPanel({
       setPreviewPath(filePath)
       setPreviewReloadToken((v) => v + 1)
       if (isHtmlPreviewPath(filePath)) {
-        onRequestBrowserMode?.()
+        setRightModule("browser")
       } else {
-        onRequestPreviewMode?.()
+        setRightModule("preview")
       }
     })
     return cleanup
-  }, [currentThreadId, onRequestBrowserMode, onRequestPreviewMode])
+  }, [currentThreadId, setRightModule])
 
   useEffect(() => {
-    if (moduleMode !== "preview" || !previewPath) onPreviewFullscreenChange?.(false)
-  }, [moduleMode, previewPath, onPreviewFullscreenChange])
+    if (rightModule !== "preview" || !previewPath) onPreviewFullscreenChange?.(false)
+  }, [rightModule, previewPath, onPreviewFullscreenChange])
 
   useEffect(() => {
-    if (moduleMode !== "browser") onBrowserFullscreenChange?.(false)
-  }, [moduleMode, onBrowserFullscreenChange])
+    if (rightModule !== "browser") onBrowserFullscreenChange?.(false)
+  }, [rightModule, onBrowserFullscreenChange])
 
   useEffect(() => {
     if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
@@ -768,7 +763,7 @@ export function RightPanel({
 
   // Calculate available content height
   const getAvailableContentHeight = useCallback(() => {
-    if (moduleMode !== "work") return 0
+    if (rightModule !== "work") return 0
     if (!containerRef.current) return 0
     const totalHeight = containerRef.current.clientHeight
 
@@ -798,7 +793,7 @@ export function RightPanel({
 
     return Math.max(0, totalHeight - used)
   }, [
-    moduleMode,
+    rightModule,
     tasksOpen,
     filesOpen,
     showSystemConstraints,
@@ -1237,7 +1232,7 @@ export function RightPanel({
   }, [getContentHeights])
 
   const allPanelsClosed =
-    moduleMode === "work" &&
+    rightModule === "work" &&
     !tasksOpen &&
     !filesOpen &&
     !(showSystemConstraints && systemConstraintsOpen) &&
@@ -1259,7 +1254,7 @@ export function RightPanel({
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
-      {moduleMode === "browser" && (
+      {rightModule === "browser" && (
         <div className="flex h-full min-h-0 flex-col  bg-background">
           <Suspense fallback={<LazySectionFallback label="加载 Browser..." />}>
             <BrowserPanel
@@ -1273,9 +1268,9 @@ export function RightPanel({
         </div>
       )}
 
-      {moduleMode === "preview" && (
-        <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-background">
-          <div className="bg-background h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
+      {rightModule === "preview" && (
+        <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-white">
+          <div className="bg-white h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
             {previewPath ? (
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
@@ -1285,7 +1280,7 @@ export function RightPanel({
                 reloadToken={previewReloadToken}
                 onReload={() => setPreviewReloadToken((v) => v + 1)}
                 onFullscreenChange={onPreviewFullscreenChange}
-                onHidePreview={onRequestWorkMode}
+                onHidePreview={() => setRightModule("work")}
               />
             ) : (
               <div className="flex h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
@@ -1344,7 +1339,7 @@ export function RightPanel({
                     <p className="text-[11px] text-stone-500">准备好后，回到工作区继续生成内容。</p>
                     <button
                       type="button"
-                      onClick={onRequestWorkMode}
+                      onClick={() => setRightModule("work")}
                       className="inline-flex h-9 shrink-0 items-center justify-center rounded-xl border border-stone-200/90 bg-white px-4 text-xs font-medium text-stone-700 shadow-[0_8px_20px_rgba(41,37,36,0.06)] transition-[transform,background-color,color,box-shadow] hover:bg-stone-50 hover:text-stone-900 hover:shadow-[0_12px_28px_rgba(41,37,36,0.1)] active:scale-[0.98]"
                     >
                       返回工作目录
@@ -1357,7 +1352,7 @@ export function RightPanel({
         </div>
       )}
 
-      {moduleMode === "git" && (
+      {rightModule === "git" && (
         <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-white">
           <div className="bg-white p-2 h-full min-h-0">
             <Suspense fallback={<LazySectionFallback label="加载 Git 面板..." />}>
@@ -1388,7 +1383,7 @@ export function RightPanel({
         </div>
       )}
 
-      {moduleMode === "work" && (
+      {rightModule === "work" && (
         <>
           {/* TASKS */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">

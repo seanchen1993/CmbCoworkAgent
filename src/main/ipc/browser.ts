@@ -228,7 +228,10 @@ function sanitizeBrowserCdpConfigUpdates(
 }
 
 function registerBrowserCdpIpc({ ipcMain }: Pick<BrowserIpcContext, "ipcMain">): void {
-  ipcMain.handle("browser:getCdpConfig", () => getBrowserCdpConfigAsync())
+  ipcMain.handle(
+    "browser:getCdpConfig",
+    (): Promise<BrowserCdpConfig> => getBrowserCdpConfigAsync()
+  )
 
   ipcMain.handle(
     "browser:saveCdpConfig",

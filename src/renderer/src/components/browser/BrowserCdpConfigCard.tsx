@@ -21,6 +21,7 @@ interface BrowserCdpConfigCardProps {
 }
 
 const BROWSER_CDP_CONFIG_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[BrowserCdpConfigCard]`
+const APP_DOWNLOAD_URL = import.meta.env.VITE_APP_DOWNLOAD_URL?.trim()
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -35,6 +36,9 @@ export function BrowserCdpConfigCard({
   const [isSavingCdpConfig, setIsSavingCdpConfig] = useState(false)
   const [restartDialogOpen, setRestartDialogOpen] = useState(false)
   const [isRestartingApp, setIsRestartingApp] = useState(false)
+  const [pendingSwitchConfirmation, setPendingSwitchConfirmation] = useState<
+    "agent" | "profile" | null
+  >(null)
   const saveButtonRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -50,12 +54,11 @@ export function BrowserCdpConfigCard({
           `${BROWSER_CDP_CONFIG_LOG_PREFIX} Failed to load Browser CDP config: ${formatError(error)}`
         )
         if (cancelled) return
-        const fallbackConfig: BrowserCdpConfig = {
-          enabled: true,
+        setCdpConfig({
+          enabled: false,
           profileImportEnabled: false
-        }
-        setCdpConfig(fallbackConfig)
-        toast.error("读取浏览器 配置失败，已回退默认值")
+        })
+        toast.error("读取内置浏览器配置失败，已禁用 Agent 控制")
       })
 
     return () => {
@@ -64,14 +67,35 @@ export function BrowserCdpConfigCard({
   }, [])
 
   const handleCdpEnabledChange = useCallback((enabled: boolean) => {
+    if (enabled) {
+      setPendingSwitchConfirmation("agent")
+      return
+    }
     setCdpConfig((current) => (current ? { ...current, enabled } : current))
-    saveButtonRef?.current?.scrollIntoView({behavior: "smooth"})
+    saveButtonRef?.current?.scrollIntoView({ behavior: "smooth" })
   }, [])
 
   const handleProfileImportEnabledChange = useCallback((profileImportEnabled: boolean) => {
+    if (profileImportEnabled && window.electron.process.platform === "win32") {
+      setPendingSwitchConfirmation("profile")
+      return
+    }
     setCdpConfig((current) => (current ? { ...current, profileImportEnabled } : current))
     saveButtonRef?.current?.scrollIntoView({ behavior: "smooth" })
   }, [])
+
+  const handleConfirmSwitch = useCallback(() => {
+    if (!pendingSwitchConfirmation) return
+    setCdpConfig((current) => {
+      if (!current) return current
+      if (pendingSwitchConfirmation === "agent") {
+        return { ...current, enabled: true }
+      }
+      return { ...current, profileImportEnabled: true }
+    })
+    setPendingSwitchConfirmation(null)
+    saveButtonRef?.current?.scrollIntoView({ behavior: "smooth" })
+  }, [pendingSwitchConfirmation])
 
   const handleSaveCdpConfig = useCallback(async () => {
     if (!cdpConfig) return
@@ -132,7 +156,7 @@ export function BrowserCdpConfigCard({
           <div className="flex items-center justify-between gap-4 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5">
             <div className="min-w-0">
               <p className="text-xs font-medium text-stone-800">
-                Agent操控内置浏览器
+                开启 Agent操控内置浏览器
                 {/*（{cdpConfig?.enabled ? "已启用" : "未启用"}）*/}
               </p>
               <p className="mt-1 text-[11px] leading-4 text-stone-500">
@@ -140,7 +164,7 @@ export function BrowserCdpConfigCard({
               </p>
             </div>
             <Switch
-              checked={cdpConfig?.enabled ?? true}
+              checked={cdpConfig?.enabled ?? false}
               disabled={!cdpConfig || isSavingCdpConfig}
               onCheckedChange={handleCdpEnabledChange}
             />
@@ -149,7 +173,7 @@ export function BrowserCdpConfigCard({
           <div className="flex items-center justify-between gap-4 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5">
             <div className="min-w-0">
               <p className="text-xs font-medium text-stone-800">
-                导入已有Chrome登陆数据
+                开启 导入已有Chrome登陆数据
                 {/*（{cdpConfig?.profileImportEnabled ? "已启用" : "未启用"}）*/}
               </p>
               <p className="mt-1 text-[11px] leading-4 text-stone-500">
@@ -210,6 +234,65 @@ export function BrowserCdpConfigCard({
               </DialogFooter>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingSwitchConfirmation !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingSwitchConfirmation(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {pendingSwitchConfirmation === "agent"
+                ? "确认开启 Agent 操控"
+                : "确认开启 Chrome 登录数据导入"}
+            </DialogTitle>
+            <DialogDescription>
+              {pendingSwitchConfirmation === "agent" ? (
+                <>
+                  1. 使用 Agent 操控内置浏览器，必须使用{" "}
+                  <span className="font-semibold text-amber-600 dark:text-amber-400">
+                    Node.js 20 或更高版本
+                  </span>
+                  。请确认你的系统已满足要求。
+                  <span className="mt-4 block">
+                    2. 开启后会额外占用资源、内存和上下文；如果不使用，建议不要开启。
+                  </span>
+                </>
+              ) : (
+                <>
+                  1. Windows 系统需要先在 Chrome 浏览器中安装浏览器插件，才能导入已有登录数据。
+                  {APP_DOWNLOAD_URL ? (
+                    <a
+                      href={APP_DOWNLOAD_URL}
+                      className="text-purple-500 underline underline-offset-2 hover:text-purple-700 ml-2"
+                      onClick={(event) => {
+                        event.preventDefault()
+                        void window.electron.openExternal(APP_DOWNLOAD_URL)
+                      }}
+                    >
+                      下载浏览器插件
+                    </a>
+                  ) : (
+                    <span className="text-purple-500">下载浏览器插件</span>
+                  )}
+                  请确认插件已经安装。
+                  <span className="mt-4 block">
+                    2. 开启后会额外占用资源、内存；如果不使用，建议不要开启。
+                  </span>
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingSwitchConfirmation(null)}>
+              取消
+            </Button>
+            <Button onClick={handleConfirmSwitch}>确认开启</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </>

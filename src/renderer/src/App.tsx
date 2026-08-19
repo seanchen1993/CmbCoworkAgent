@@ -35,7 +35,7 @@ const DashboardView = lazy(() =>
 import { ResizeHandle } from "@/components/ui/resizable"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
-import { useAppStore } from "@/lib/store"
+import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { initMMJ } from "../js/mmjUtils"
@@ -198,7 +198,9 @@ function App(): React.JSX.Element {
     rightPanelCollapsed,
     toggleRightPanel,
     rightPanelWorkRequest,
-    setRightPanelCollapsed,
+    rightModule,
+    setRightModule,
+    setBrowserCdpConfig,
     setPendingEvolution,
     workerFocusView,
     subagentFocusView,
@@ -219,7 +221,9 @@ function App(): React.JSX.Element {
       rightPanelCollapsed: state.rightPanelCollapsed,
       toggleRightPanel: state.toggleRightPanel,
       rightPanelWorkRequest: state.rightPanelWorkRequest,
-      setRightPanelCollapsed: state.setRightPanelCollapsed,
+      rightModule: state.rightModule,
+      setRightModule: state.setRightModule,
+      setBrowserCdpConfig: state.setBrowserCdpConfig,
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
@@ -237,7 +241,6 @@ function App(): React.JSX.Element {
     BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT
   )
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
-  const [rightModule, setRightModule] = useState<"work" | "preview" | "git" | "browser">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [browserFullscreen, setBrowserFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
@@ -544,24 +547,28 @@ function App(): React.JSX.Element {
 
   const selectPreviewModule = useCallback(() => {
     setRightModule("preview")
-    handlePreviewExpand()
-  }, [handlePreviewExpand])
+  }, [setRightModule])
 
   const selectWorkModule = useCallback(() => {
     setRightModule("work")
-    handlePreviewCollapse()
-  }, [handlePreviewCollapse])
+  }, [setRightModule])
 
   const selectBrowserModule = useCallback(() => {
     setRightModule("browser")
-    handlePreviewExpand()
-  }, [handlePreviewExpand])
+  }, [setRightModule])
 
   useEffect(() => {
     if (rightPanelWorkRequest?.target !== "systemConstraints") return
     setRightModule("work")
-    handlePreviewCollapse()
-  }, [handlePreviewCollapse, rightPanelWorkRequest])
+  }, [rightPanelWorkRequest, setRightModule])
+
+  useEffect(() => {
+    if (rightModule === "work") {
+      handlePreviewCollapse()
+      return
+    }
+    handlePreviewExpand()
+  }, [handlePreviewCollapse, handlePreviewExpand, rightModule])
 
   const setThreadPendingGitDiff = useCallback((threadId: string, pending: boolean) => {
     setPendingGitDiffByThread((prev) => {
@@ -596,11 +603,8 @@ function App(): React.JSX.Element {
     currentThreadId,
     harnessSessionThreadId,
     mainView,
-    rightModule,
     rightPanelCollapsed,
-    isAgentFocusActive,
-    selectBrowserModule,
-    setRightPanelCollapsed
+    isAgentFocusActive
   })
 
   const selectGitModule = useCallback(() => {
@@ -608,8 +612,7 @@ function App(): React.JSX.Element {
       setThreadPendingGitDiff(activeRightPanelThreadId, false)
     }
     setRightModule("git")
-    handlePreviewExpand()
-  }, [activeRightPanelThreadId, handlePreviewExpand, setThreadPendingGitDiff])
+  }, [activeRightPanelThreadId, setRightModule, setThreadPendingGitDiff])
 
   const dismissGitChangeNotice = useCallback(() => {
     if (!activeRightPanelThreadId) return
@@ -639,7 +642,6 @@ function App(): React.JSX.Element {
       // Keep right panel behavior predictable when entering thread-like views and for
       // non-browser module switches between threads.
       setRightModule("work")
-      handlePreviewCollapse()
     }
 
     try {
@@ -649,7 +651,7 @@ function App(): React.JSX.Element {
       console.warn("[App] Failed to clear pet completed tasks:", error)
     }
 
-  }, [activeRightPanelThreadId, mainView, handlePreviewCollapse])
+  }, [activeRightPanelThreadId, mainView, setRightModule])
 
   useEffect(() => {
     if (mainView !== "harness") {
@@ -714,7 +716,15 @@ function App(): React.JSX.Element {
     async function init(): Promise<void> {
       try {
         await migrateDisabledSkillsFromLocalStorage()
-        await Promise.all([loadThreads(), loadDashboardAllowed()])
+        const [, , loadedBrowserCdpConfig] = await Promise.all([
+          loadThreads(),
+          loadDashboardAllowed(),
+          window.api.browser.getCdpConfig().catch((error: unknown) => {
+            console.error("Failed to load Browser CDP config during initialization:", error)
+            return DEFAULT_BROWSER_CDP_CONFIG
+          })
+        ])
+        setBrowserCdpConfig(loadedBrowserCdpConfig)
         const threads = useAppStore.getState().threads
         if (threads.length === 0) {
           await createThread()
@@ -726,7 +736,7 @@ function App(): React.JSX.Element {
       }
     }
     init()
-  }, [loadThreads, createThread])
+  }, [loadThreads, createThread, setBrowserCdpConfig])
 
   useEffect(() => {
     let cancelled = false
@@ -1149,10 +1159,6 @@ function App(): React.JSX.Element {
                   className={fullscreenRightPanelClassName}
                 >
                   <RightPanel
-                    moduleMode={rightModule}
-                    onRequestPreviewMode={selectPreviewModule}
-                    onRequestBrowserMode={selectBrowserModule}
-                    onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
                     onBrowserFullscreenChange={setBrowserFullscreen}
                   />
@@ -1242,11 +1248,7 @@ function App(): React.JSX.Element {
                 >
                   <RightPanel
                     threadId={harnessSessionThreadId}
-                    moduleMode={rightModule}
                     showSystemConstraints={mainView === "harness"}
-                    onRequestPreviewMode={selectPreviewModule}
-                    onRequestBrowserMode={selectBrowserModule}
-                    onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
                     onBrowserFullscreenChange={setBrowserFullscreen}
                   />
