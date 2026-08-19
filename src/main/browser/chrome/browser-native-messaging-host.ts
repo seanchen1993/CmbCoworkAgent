@@ -15,9 +15,6 @@ import { writeBrowserNativeHostLog } from "./browser-native-host-log"
 
 export const CMB_BROWSER_NATIVE_HOST_FLAG = "--cmb-browser-native-host"
 
-const RECONNECT_DELAY_MS = 2_000
-const MAX_RECONNECT_ATTEMPTS = 10
-
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -65,8 +62,6 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
   let mainConnected = false
   let mainDecoder = new NativeMessageDecoder()
   let lastReadyMessage: CmbChromeExtensionReadyMessage | null = null
-  let reconnectTimer: NodeJS.Timeout | null = null
-  let reconnectAttempts = 0
   let closed = false
 
   const statusMessage = (connected: boolean, error?: unknown): CmbHostStatusMessage => ({
@@ -76,33 +71,12 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
     type: "host-status"
   })
 
-  const scheduleReconnect = (): void => {
-    if (closed || reconnectTimer || mainConnected) return
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      log(`app reconnect limit reached (${MAX_RECONNECT_ATTEMPTS}), exiting`)
-      process.exit(0)
-    }
-    reconnectAttempts += 1
-    log(
-      `scheduling app reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${RECONNECT_DELAY_MS}ms`
-    )
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null
-      connectToMain()
-    }, RECONNECT_DELAY_MS)
-  }
-
   const connectToMain = (): void => {
     if (closed) return
-    if (reconnectTimer) {
-      log("connectToMain skipped, reconnect already scheduled")
-      return
-    }
-    if (mainSocket && !mainSocket.destroyed) {
+    if (mainSocket) {
       log("connectToMain skipped, already connecting")
       return
     }
-    mainSocket = null
     log(`connecting to ${getBrowserCookieBridgePipePath()}`)
     const socket = connect(getBrowserCookieBridgePipePath())
     mainSocket = socket
@@ -110,7 +84,6 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
 
     socket.once("connect", () => {
       mainConnected = true
-      reconnectAttempts = 0
       log("socket connected, sending hello")
       const hello: CmbNativeHostHelloMessage = {
         origin,
@@ -140,9 +113,9 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
       mainConnected = false
       mainSocket = null
       const reason = error ? `${error.message}` : "socket closed"
-      log(`disconnected: ${reason}`)
+      log(`disconnected: ${reason}, exiting`)
       writeChromeMessage(statusMessage(false, error))
-      scheduleReconnect()
+      process.exit(0)
     }
     socket.once("error", (error: Error) => disconnect(error))
     socket.once("close", () => disconnect())
@@ -160,15 +133,11 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
         }
         if (mainSocket && mainConnected && !mainSocket.destroyed) {
           mainSocket.write(encodeNativeMessage(message))
-        } else if (!mainSocket || mainSocket.destroyed) {
-          log(
-            `Chrome message received while app socket unavailable, type=${record.type ?? "(unknown)"}, retrying`
-          )
-          connectToMain()
         } else {
           log(
-            `Chrome message received while app socket is connecting, type=${record.type ?? "(unknown)"}, waiting`
+            `Chrome message received but socket not connected, type=${record.type ?? "(unknown)"}, mainSocket=${mainSocket !== null}, mainConnected=${mainConnected}, exiting`
           )
+          process.exit(0)
         }
       }
     } catch (error) {
@@ -182,14 +151,12 @@ export async function runBrowserNativeMessagingHost(): Promise<void> {
     process.stdin.once("end", () => {
       log("stdin ended (Chrome disconnected), cleaning up")
       closed = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
       mainSocket?.destroy()
       resolve()
     })
     process.stdin.once("error", (error) => {
       log(`stdin error: ${error instanceof Error ? error.message : String(error)}, cleaning up`)
       closed = true
-      if (reconnectTimer) clearTimeout(reconnectTimer)
       mainSocket?.destroy()
       resolve()
     })
