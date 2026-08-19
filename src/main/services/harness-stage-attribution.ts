@@ -8,8 +8,8 @@ const cache = new HarnessStageAttributionCache({
   // Keep the generic hook/runtime import path lightweight. The board service is
   // loaded only when a dirty code-generation entry actually needs inspection.
   resolver: async (projectId, featureSlug) => {
-    const { resolveHarnessFeatureCurrentStageAsync } = await import("../harness-board/service")
-    return resolveHarnessFeatureCurrentStageAsync(projectId, featureSlug)
+    const { resolveHarnessFeatureCurrentStage } = await import("../harness-board/service")
+    return resolveHarnessFeatureCurrentStage(projectId, featureSlug)
   }
 })
 

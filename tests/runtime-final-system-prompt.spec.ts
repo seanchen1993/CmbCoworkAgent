@@ -501,7 +501,7 @@ async function runHarnessCliMode(cliOptions: CliOptions): Promise<void> {
   const { buildHarnessFeatureAgentContext } = await import(
     "../src/main/harness-board/service.ts"
   )
-  const harnessContext = buildHarnessFeatureAgentContext({
+  const harnessContext = await buildHarnessFeatureAgentContext({
     harnessFeature: {
       projectId,
       slug: feature,
