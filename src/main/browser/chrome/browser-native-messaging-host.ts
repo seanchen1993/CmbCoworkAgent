@@ -11,14 +11,9 @@ import {
   getBrowserCookieBridgeSecret
 } from "./browser-cookie-bridge-paths"
 import { encodeNativeMessage, NativeMessageDecoder } from "./native-messaging-framing"
+import { writeBrowserNativeHostLog } from "./browser-native-host-log"
 
 export const CMB_BROWSER_NATIVE_HOST_FLAG = "--cmb-browser-native-host"
-
-const TAG = "[CmbBrowserNativeHost]"
-
-function log(message: string): void {
-  process.stderr.write(`${TAG} ${message}\n`)
-}
 
 function recordValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -45,6 +40,10 @@ export function isDedicatedBrowserNativeMessagingHostLaunch(
 
 function writeChromeMessage(message: unknown): void {
   process.stdout.write(encodeNativeMessage(message))
+}
+
+function log(message: string): void {
+  writeBrowserNativeHostLog(message)
 }
 
 export async function runBrowserNativeMessagingHost(): Promise<void> {
