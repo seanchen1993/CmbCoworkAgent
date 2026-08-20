@@ -55,6 +55,7 @@ import {
   STAGE_IN_PROGRESS_LABEL,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
+import { SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } from "../services/system-constraint-read-reporter"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -13469,11 +13470,38 @@ interface ProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
-/** One workflow node (stage) breakdown row for a feature: conversations + code adoption. */
+interface ProjectModeConstraintFileStat {
+  path: string
+  traceCount: number
+}
+
+interface ProjectModeConstraintReadStats {
+  traceCount: number
+  successfulReadCount: number
+  distinctFileCount: number
+  partialReadCount: number
+  filesTruncated: boolean
+  files: ProjectModeConstraintFileStat[]
+}
+
+interface ProjectModeHookEventStat {
+  event: string
+  count: number
+}
+
+interface ProjectModeHookStats {
+  executionCount: number
+  blockedCount: number
+  byEvent: ProjectModeHookEventStat[]
+}
+
+/** One workflow node (stage) breakdown row for a feature. */
 interface ProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: ProjectModeConstraintReadStats | null
+  hookExecutions?: ProjectModeHookStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: ProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因），口径同列表行。 */
@@ -13559,6 +13587,70 @@ function codeNodeStatusAgg(perBucketAggs: Record<string, unknown>): Record<strin
   }
 }
 
+/**
+ * Feature-stage event aggregation shared by code-adoption, successful system-
+ * constraint reads and hook executions. Keeping all event-side metrics under
+ * one `by_node` tree avoids an extra ES request (or a per-read event scan) when
+ * the user expands a feature's stage breakdown.
+ */
+function featureNodeEventAgg(
+  perBucketAggs: Record<string, unknown>,
+  codeGenFilters: Record<string, unknown>[],
+  codeAdoptFilters: Record<string, unknown>[],
+  constraintFilters: Record<string, unknown>[],
+  hookFilters: Record<string, unknown>[]
+): Record<string, unknown> {
+  const codeEventFilter = {
+    bool: {
+      should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+      minimum_should_match: 1
+    }
+  }
+  return {
+    by_node: {
+      terms: {
+        field: "properties.harnessNodeName",
+        size: PROJECT_MODE_FEATURE_SLUG_LIMIT,
+        missing: UNATTRIBUTED_NODE_NAME
+      },
+      aggs: {
+        ...perBucketAggs,
+        // Scope status rows to code events. Otherwise hook/constraint documents
+        // would create misleading zero-code status rows in the existing UI.
+        code_status_scope: {
+          filter: codeEventFilter,
+          aggs: {
+            by_status: {
+              terms: { field: "properties.harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE },
+              aggs: perBucketAggs
+            }
+          }
+        },
+        ...stageBucketCodeAggs(perBucketAggs),
+        system_constraint_reads: {
+          filter: { bool: { filter: constraintFilters } },
+          aggs: {
+            successful_reads: { sum: { field: "properties.successfulReadCount" } },
+            distinct_files: { cardinality: { field: "properties.constraintFiles" } },
+            partial_reads: { sum: { field: "properties.partialReadCount" } },
+            truncated_summaries: {
+              filter: { term: { "properties.filesTruncated": true } }
+            },
+            files: { terms: { field: "properties.constraintFiles", size: 20 } }
+          }
+        },
+        hook_executions: {
+          filter: { bool: { filter: hookFilters } },
+          aggs: {
+            blocked: { filter: { term: { "properties.blocked": true } } },
+            by_event: { terms: { field: "properties.event", size: 32 } }
+          }
+        }
+      }
+    }
+  }
+}
+
 /** Parse a trace `by_node` agg container → per-node conversation totals + per-status + per-stage-bucket sub-maps. */
 function parseTraceNodeBuckets(aggregations: unknown): {
   conversationByNode: Map<string, number>
@@ -13606,10 +13698,19 @@ function parseCodeNodeBuckets(aggregations: unknown): {
       const b = asRecord(bucket)
       const nodeName = asString(b.key)
       if (!nodeName) continue
-      codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
-      codeStageByNode.set(nodeName, parseStageBucketCodeStats(b))
+      const scopedCodeEvents = asRecord(b.code_status_scope)
+      // The combined feature query also contains constraint/hook-only buckets.
+      // Do not turn those into misleading all-zero code stats. Legacy callers
+      // have no code_status_scope and retain their original parsing behavior.
+      if (!("code_status_scope" in b) || asNumber(scopedCodeEvents.doc_count) > 0) {
+        codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
+        codeStageByNode.set(nodeName, parseStageBucketCodeStats(b))
+      }
       const statusMap = new Map<string, DashboardCodeStats>()
-      const statusBuckets = asRecord(b.by_status).buckets
+      const scopedStatusBuckets = asRecord(scopedCodeEvents.by_status).buckets
+      const statusBuckets = Array.isArray(scopedStatusBuckets)
+        ? scopedStatusBuckets
+        : asRecord(b.by_status).buckets
       if (Array.isArray(statusBuckets)) {
         for (const sb of statusBuckets) {
           const s = asRecord(sb)
@@ -13623,18 +13724,84 @@ function parseCodeNodeBuckets(aggregations: unknown): {
   return { codeByNode, codeStatusByNode, codeStageByNode }
 }
 
+/** Parse the non-code metrics carried by the combined feature-stage event agg. */
+function parseFeatureOperationalNodeBuckets(aggregations: unknown): {
+  constraintReadsByNode: Map<string, ProjectModeConstraintReadStats>
+  hookExecutionsByNode: Map<string, ProjectModeHookStats>
+} {
+  const constraintReadsByNode = new Map<string, ProjectModeConstraintReadStats>()
+  const hookExecutionsByNode = new Map<string, ProjectModeHookStats>()
+  const buckets = asRecord(asRecord(aggregations).by_node).buckets
+  if (!Array.isArray(buckets)) return { constraintReadsByNode, hookExecutionsByNode }
+
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const nodeName = asString(b.key)
+    if (!nodeName) continue
+
+    const constraintReads = asRecord(b.system_constraint_reads)
+    if (asNumber(constraintReads.doc_count) > 0) {
+      const fileBuckets = asRecord(constraintReads.files).buckets
+      constraintReadsByNode.set(nodeName, {
+        // One summary document is emitted per Trace × stage, so the filtered
+        // doc_count is an exact trace count and avoids a cardinality agg.
+        traceCount: asNumber(constraintReads.doc_count),
+        successfulReadCount: asNumber(asRecord(constraintReads.successful_reads).value),
+        distinctFileCount: asNumber(asRecord(constraintReads.distinct_files).value),
+        partialReadCount: asNumber(asRecord(constraintReads.partial_reads).value),
+        filesTruncated: asNumber(asRecord(constraintReads.truncated_summaries).doc_count) > 0,
+        files: Array.isArray(fileBuckets)
+          ? fileBuckets
+              .map((fileBucket) => ({
+                path: asString(asRecord(fileBucket).key),
+                traceCount: asNumber(asRecord(fileBucket).doc_count)
+              }))
+              .filter((file) => Boolean(file.path))
+          : []
+      })
+    }
+
+    const hookExecutions = asRecord(b.hook_executions)
+    if (asNumber(hookExecutions.doc_count) > 0) {
+      const eventBuckets = asRecord(hookExecutions.by_event).buckets
+      hookExecutionsByNode.set(nodeName, {
+        executionCount: asNumber(hookExecutions.doc_count),
+        blockedCount: asNumber(asRecord(hookExecutions.blocked).doc_count),
+        byEvent: Array.isArray(eventBuckets)
+          ? eventBuckets
+              .map((eventBucket) => ({
+                event: asString(asRecord(eventBucket).key),
+                count: asNumber(asRecord(eventBucket).doc_count)
+              }))
+              .filter((event) => Boolean(event.event))
+          : []
+      })
+    }
+  }
+
+  return { constraintReadsByNode, hookExecutionsByNode }
+}
+
 /** Merge parsed trace + event node maps into the sorted stage breakdown (with status sub-rows). */
 function buildFeatureNodeBreakdown(
   trace: ReturnType<typeof parseTraceNodeBuckets>,
-  code: ReturnType<typeof parseCodeNodeBuckets>
+  code: ReturnType<typeof parseCodeNodeBuckets>,
+  operational?: ReturnType<typeof parseFeatureOperationalNodeBuckets>
 ): ProjectModeFeatureNode[] {
-  const nodeNames = new Set<string>([...trace.conversationByNode.keys(), ...code.codeByNode.keys()])
+  const nodeNames = new Set<string>([
+    ...trace.conversationByNode.keys(),
+    ...code.codeByNode.keys(),
+    ...(operational?.constraintReadsByNode.keys() ?? []),
+    ...(operational?.hookExecutionsByNode.keys() ?? [])
+  ])
   return (
     [...nodeNames]
       .map((nodeName) => ({
         nodeName,
         conversationCount: trace.conversationByNode.get(nodeName) ?? 0,
         codeStats: code.codeByNode.get(nodeName) ?? null,
+        systemConstraintReads: operational?.constraintReadsByNode.get(nodeName) ?? null,
+        hookExecutions: operational?.hookExecutionsByNode.get(nodeName) ?? null,
         byStatus: buildNodeStatusBreakdown(
           trace.convStatusByNode.get(nodeName),
           code.codeStatusByNode.get(nodeName)
@@ -13687,23 +13854,65 @@ async function fetchProjectModeFeatureNodes(
     },
     aggs: traceNodeStatusAgg()
   }
-  const traceRaw = (await esQuery(getEsIndex("trace"), traceBody)) as EsSearchResponse
-  const traceParsed = parseTraceNodeBuckets(
-    (traceRaw as unknown as Record<string, unknown>).aggregations
-  )
-
-  // 2) code adoption per stage (+ status sub-breakdown) — event index, scoped to feature.
-  // Mirror fetchProjectModeProjectCodeStats: carry the same org/access filter so
-  // a non-admin never sees other orgs' code events for this project+feature.
+  // 2) Code adoption + operational telemetry share one event-side by-stage
+  // aggregation. Mirror fetchProjectModeProjectCodeStats' org/access filter so
+  // a non-admin never sees another org's events for this project+feature.
   const orgFilterClause = buildProjectModeOrgFilter(undefined, access)
-  const codeRaw = await fetchProjectModeCodeAggs([normalizedProjectId], range, codeNodeStatusAgg, [
+  const eventContextFilters: Record<string, unknown>[] = [
     ...(orgFilterClause ? [orgFilterClause] : []),
+    { term: { "properties.harnessProjectId": normalizedProjectId } },
     { term: { "properties.harnessFeatureSlug": normalizedFeatureSlug } }
+  ]
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    eventContextFilters
+  )
+  const constraintFilters: Record<string, unknown>[] = [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    ...eventContextFilters
+  ]
+  const hookFilters: Record<string, unknown>[] = [
+    { term: { eventName: "hook.executed" } },
+    timeRangeFilter("eventTime", range),
+    ...eventContextFilters
+  ]
+  const eventBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } },
+          { bool: { filter: constraintFilters } },
+          { bool: { filter: hookFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: featureNodeEventAgg(
+      perBucketAggs,
+      codeGenFilters,
+      codeAdoptFilters,
+      constraintFilters,
+      hookFilters
+    )
+  }
+
+  // Trace and event indices are independent; query them concurrently so adding
+  // operational metrics does not add another serial round trip to stage expand.
+  const [traceRaw, eventRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody) as Promise<EsSearchResponse>,
+    esQuery(getEsIndex("event"), eventBody) as Promise<EsSearchResponse>
   ])
-  const codeParsed = parseCodeNodeBuckets(asRecord(codeRaw).aggregations)
+  const traceParsed = parseTraceNodeBuckets(traceRaw.aggregations)
+  const eventAggregations = eventRaw.aggregations
+  const codeParsed = parseCodeNodeBuckets(eventAggregations)
+  const operationalParsed = parseFeatureOperationalNodeBuckets(eventAggregations)
 
   // 3) union of stages seen in either index; keep conversation-busiest first.
-  return buildFeatureNodeBreakdown(traceParsed, codeParsed)
+  return buildFeatureNodeBreakdown(traceParsed, codeParsed, operationalParsed)
 }
 
 /** DEV mock: a deterministic per-node breakdown derived from project/feature seed. */
@@ -13728,7 +13937,7 @@ function makeMockProjectModeFeatureNodes(
     pushedCommitCount: 3
   })
   const split = splitMockCodeStatsAcrossFeatures(base, nodeNames.length)
-  const nodes = nodeNames.map((nodeName, i) => {
+  const nodes: ProjectModeFeatureNode[] = nodeNames.map((nodeName, i) => {
     // Unsigned shift (>>>) so a high-bit seed never yields a negative count; +1 so
     // every mock stage shows a non-empty status sub-breakdown.
     const conversationCount = 1 + ((h >>> (i * 4)) % 8)
@@ -13737,10 +13946,30 @@ function makeMockProjectModeFeatureNodes(
     // Split the stage's code stats across its two statuses so the mock shows the
     // full four-rate breakdown (with numerator/denominator) under each status.
     const statusSplit = codeStats ? splitMockCodeStatsAcrossFeatures(codeStats, 2) : []
+    const successfulReadCount = conversationCount * 2 + i
     return {
       nodeName,
       conversationCount,
       codeStats,
+      systemConstraintReads: {
+        traceCount: conversationCount,
+        successfulReadCount,
+        distinctFileCount: 2,
+        partialReadCount: i % 2,
+        filesTruncated: false,
+        files: [
+          { path: "sys/project.md", traceCount: conversationCount },
+          { path: `sys/stages/${i + 1}.md`, traceCount: Math.max(1, conversationCount - 1) }
+        ]
+      },
+      hookExecutions: {
+        executionCount: conversationCount * 3,
+        blockedCount: i === 2 ? 1 : 0,
+        byEvent: [
+          { event: "PreToolUse", count: conversationCount * 2 },
+          { event: "PostToolUse", count: conversationCount }
+        ]
+      },
       byStatus: [
         { status: "进行中", conversationCount: inProgress, codeStats: statusSplit[0] ?? null },
         {
@@ -13761,6 +13990,8 @@ function makeMockProjectModeFeatureNodes(
     nodeName: UNATTRIBUTED_NODE_NAME,
     conversationCount: unattributedConversations,
     codeStats: unattributedCode,
+    systemConstraintReads: null,
+    hookExecutions: null,
     byStatus: [],
     stageBuckets: {
       pluginConstrained: { conversationCount: 0, codeStats: null },

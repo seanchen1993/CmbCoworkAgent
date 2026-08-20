@@ -785,10 +785,27 @@ interface DashboardProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
+interface DashboardProjectModeConstraintReadStats {
+  traceCount: number
+  successfulReadCount: number
+  distinctFileCount: number
+  partialReadCount: number
+  filesTruncated: boolean
+  files: Array<{ path: string; traceCount: number }>
+}
+
+interface DashboardProjectModeHookStats {
+  executionCount: number
+  blockedCount: number
+  byEvent: Array<{ event: string; count: number }>
+}
+
 interface DashboardProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
   byStatus: DashboardProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
   stageBuckets: DashboardStageBuckets

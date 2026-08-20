@@ -465,12 +465,31 @@ export interface DashboardProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
+export interface DashboardProjectModeConstraintReadStats {
+  traceCount: number
+  successfulReadCount: number
+  distinctFileCount: number
+  partialReadCount: number
+  filesTruncated: boolean
+  files: Array<{ path: string; traceCount: number }>
+}
+
+export interface DashboardProjectModeHookStats {
+  executionCount: number
+  blockedCount: number
+  byEvent: Array<{ event: string; count: number }>
+}
+
 /** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
 export interface DashboardProjectModeFeatureNode {
   /** Human-readable stage name (group-label, e.g. "Dev-代码实现"); no raw node id. */
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  /** Successful model-facing reads of plugin-maintained `<plugin>/sys/**` files. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions attributed to this workflow stage. */
+  hookExecutions?: DashboardProjectModeHookStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: DashboardProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */

@@ -578,6 +578,105 @@ function FeatureCodeStatsLine({
   )
 }
 
+/** Operational telemetry captured at runtime and attributed to one workflow stage. */
+function StageOperationalTelemetry({
+  node
+}: {
+  node: DashboardProjectModeFeatureNode
+}): React.JSX.Element | null {
+  const constraint = node.systemConstraintReads
+  const hooks = node.hookExecutions
+  if (!constraint && !hooks) return null
+
+  const visibleFiles = constraint?.files.slice(0, 3) ?? []
+  const visibleHookEvents = hooks?.byEvent.slice(0, 3) ?? []
+  const constraintHint = constraint ? (
+    <div className="space-y-1">
+      <div>
+        只统计 read_file 实际成功返回内容，且物理路径位于当前插件
+        &lt;plugin_path&gt;/sys/** 下的文件；同一 Trace、同一阶段汇总上报一次。
+      </div>
+      {constraint.files.map((file) => (
+        <div key={file.path} className="break-all font-mono">
+          {file.path} · {formatNumber(file.traceCount)} 个 Trace
+        </div>
+      ))}
+      {constraint.distinctFileCount > constraint.files.length ? (
+        <div>另有 {formatNumber(constraint.distinctFileCount - constraint.files.length)} 个文件</div>
+      ) : null}
+      {constraint.filesTruncated ? <div>存在文件列表被截断的汇总，文件数为下限值。</div> : null}
+    </div>
+  ) : null
+  const hookHint = hooks ? (
+    <div className="space-y-1">
+      <div>
+        统计项目模式运行时真正执行完成的 Hook；异步 Hook 的 pending
+        占位不会重复计数，阻断次数为其中阻止操作继续执行的结果数。
+      </div>
+      {hooks.byEvent.map((event) => (
+        <div key={event.event}>
+          {event.event} · {formatNumber(event.count)} 次
+        </div>
+      ))}
+    </div>
+  ) : null
+  return (
+    <div className="space-y-1 rounded bg-muted/30 px-2 py-1.5 text-[10px] text-muted-foreground">
+      {constraint ? (
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span className="font-medium text-foreground/80">系统约束</span>
+            <span>{formatNumber(constraint.traceCount)} 个 Trace</span>
+            <span>{formatNumber(constraint.successfulReadCount)} 次有效读取</span>
+            <span>
+              {constraint.filesTruncated ? "至少 " : ""}
+              {formatNumber(constraint.distinctFileCount)} 个文件
+            </span>
+            {constraint.partialReadCount > 0 ? (
+              <span>{formatNumber(constraint.partialReadCount)} 次分段读取</span>
+            ) : null}
+            <InfoHint hint={constraintHint} />
+          </div>
+          {visibleFiles.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {visibleFiles.map((file) => (
+                <span
+                  key={file.path}
+                  className="max-w-64 truncate rounded border border-border/60 bg-background/70 px-1.5 py-0.5 font-mono"
+                  title={`${file.path} · ${formatNumber(file.traceCount)} 个 Trace`}
+                >
+                  {file.path} · {formatNumber(file.traceCount)}
+                </span>
+              ))}
+              {constraint.distinctFileCount > visibleFiles.length ? (
+                <span className="px-1 py-0.5">
+                  +{formatNumber(constraint.distinctFileCount - visibleFiles.length)}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {hooks ? (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="font-medium text-foreground/80">运行时 Hook</span>
+          <span>{formatNumber(hooks.executionCount)} 次触发</span>
+          <span>{formatNumber(hooks.blockedCount)} 次阻断</span>
+          {visibleHookEvents.map((event) => (
+            <span key={event.event} className="rounded bg-background/70 px-1.5 py-0.5">
+              {event.event} · {formatNumber(event.count)}
+            </span>
+          ))}
+          {hooks.byEvent.length > visibleHookEvents.length ? (
+            <span>+{formatNumber(hooks.byEvent.length - visibleHookEvents.length)}</span>
+          ) : null}
+          <InfoHint hint={hookHint} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 /** 表格内一条「label X% (采纳/生成)」采纳率，按口径分组的列里上下各一条；有数据时可点击采纳溯源。 */
 function AdoptionRateLine({
   label,
@@ -997,6 +1096,7 @@ function FeatureStageBreakdown({
                   </button>
                 </div>
                 <FeatureCodeStatsLine codeStats={node.codeStats} />
+                <StageOperationalTelemetry node={node} />
                 <NodeBreakdownTabs
                   byStatus={node.byStatus}
                   stageBuckets={node.stageBuckets}

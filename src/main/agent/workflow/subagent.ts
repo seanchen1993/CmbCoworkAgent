@@ -88,6 +88,7 @@ export interface WorkflowSubagentDeps {
     extraSystemPrompt: string
     abortSignal: AbortSignal
     additionalTools?: DynamicStructuredTool[]
+    traceContext?: TraceContext
     /** agentType-resolved tool denylist (project tool names). Undefined = none. */
     disallowedTools?: string[]
     /** agentType-resolved shell policy. Undefined = full. */
@@ -397,6 +398,7 @@ async function runOnce(
       extraSystemPrompt,
       abortSignal: controller.signal,
       additionalTools,
+      traceContext: tracer?.getTraceContext() ?? deps.traceContext,
       label: request.label,
       disallowedTools: request.disallowedTools,
       shellAccess: request.shellAccess
@@ -647,6 +649,7 @@ export async function createRuntimeWithModelFallback(
     extraSystemPrompt: string
     abortSignal: AbortSignal
     additionalTools?: DynamicStructuredTool[]
+    traceContext?: TraceContext
     label: string
     disallowedTools?: string[]
     shellAccess?: AgentShellAccess
@@ -658,6 +661,7 @@ export async function createRuntimeWithModelFallback(
     extraSystemPrompt: options.extraSystemPrompt,
     abortSignal: options.abortSignal,
     additionalTools: options.additionalTools,
+    traceContext: options.traceContext,
     disallowedTools: options.disallowedTools,
     shellAccess: options.shellAccess
   }

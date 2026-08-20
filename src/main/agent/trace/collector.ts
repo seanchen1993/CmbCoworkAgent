@@ -64,6 +64,7 @@ import {
   type PluginSkillSourceRef
 } from "../../utils/skill-source"
 import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
+import { flushSystemConstraintReadSummaries } from "../../services/system-constraint-read-reporter"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
 import {
@@ -911,6 +912,11 @@ export class TraceCollector {
     const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
     try {
+      try {
+        flushSystemConstraintReadSummaries(this.traceId, outcome)
+      } catch (error) {
+        console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
+      }
       writeTraceFile(traceWithEval)
 
       // Fire-and-forget: trace upload is a side-channel operation and must
