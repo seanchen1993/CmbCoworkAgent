@@ -246,7 +246,12 @@ import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
-import { initializeTraceStorageSecurity, setTraceReporter } from "./agent/trace/collector"
+import {
+  flushPendingTraceReports,
+  hasPendingTraceReports,
+  initializeTraceStorageSecurity,
+  setTraceReporter
+} from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
@@ -1110,11 +1115,13 @@ if (!gotTheLock) {
   app.on("before-quit", (event) => {
     const activeSessions = hasActiveSessions()
     const activeTasks = hasActiveForegroundRuns()
+    const pendingTraceReports = hasPendingTraceReports()
     console.warn("[Main] before-quit", {
       sessionEndDone,
       sessionEndInProgress,
       hasActiveSessions: activeSessions,
       hasActiveTasks: activeTasks,
+      hasPendingTraceReports: pendingTraceReports,
       pet: getPetWindowDebugInfo()
     })
     if (sessionEndDone) {
@@ -1127,7 +1134,7 @@ if (!gotTheLock) {
       event.preventDefault()
       return
     }
-    if (!activeSessions && !activeTasks) {
+    if (!activeSessions && !activeTasks && !pendingTraceReports) {
       sessionEndDone = true
       setAppQuitting(true)
       return
@@ -1153,6 +1160,9 @@ if (!gotTheLock) {
       } catch (error) {
         console.warn("[Main] SessionEnd hooks error:", error)
       } finally {
+        await flushPendingTraceReports(5_000).catch((error) => {
+          console.warn("[Main] Pending trace report flush error:", error)
+        })
         disposeAllAgentThreadStates()
         sessionEndDone = true
         sessionEndInProgress = false
