@@ -159,6 +159,7 @@ function App(): React.JSX.Element {
     currentThreadId,
     loadThreads,
     loadDashboardAllowed,
+    loadChatScrollSettings,
     dashboardAllowed,
     createThread,
     mainView,
@@ -179,6 +180,7 @@ function App(): React.JSX.Element {
       currentThreadId: state.currentThreadId,
       loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
+      loadChatScrollSettings: state.loadChatScrollSettings,
       dashboardAllowed: state.dashboardAllowed,
       createThread: state.createThread,
       mainView: state.mainView,
@@ -606,6 +608,7 @@ function App(): React.JSX.Element {
         if (threads.length === 0) {
           await createThread()
         }
+        void loadChatScrollSettings()
       } catch (error) {
         console.error("Failed to initialize:", error)
       } finally {
@@ -613,7 +616,7 @@ function App(): React.JSX.Element {
       }
     }
     init()
-  }, [loadThreads, createThread])
+  }, [loadThreads, loadDashboardAllowed, loadChatScrollSettings, createThread])
 
   useEffect(() => {
     let cancelled = false
