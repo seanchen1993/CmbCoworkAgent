@@ -243,6 +243,7 @@ import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
+import { registerManagedLinkHandlers } from "./ipc/managed-links"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
@@ -847,6 +848,7 @@ if (!gotTheLock) {
     registerAutoCommitHandlers(ipcMain)
     registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
+    registerManagedLinkHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
 

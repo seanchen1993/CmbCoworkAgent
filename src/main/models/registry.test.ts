@@ -163,13 +163,13 @@ describe("builtin model registry", () => {
         models: [
           {
             id: "minimax-m2p5-229b-w8a8",
-            baseUrl: "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
+            baseUrl: "https://llm.example.test/minimax/v1",
             model: "minimax-m2p5-229b-w8a8"
           },
           {
             id: "deepseek-v4-flash-284b-a13b-w8a8",
             baseUrl:
-              "http://open-llm.uat.cmbchina.cn/llm/deepseek-v4-flash-284b-a13b-w8a8/v1",
+              "https://llm.example.test/deepseek/v1",
             model: "deepseek-v4-flash-284b-a13b-w8a8"
           }
         ]
