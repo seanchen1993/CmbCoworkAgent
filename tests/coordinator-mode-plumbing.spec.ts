@@ -2971,7 +2971,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "rootDir: workspacePath,\n    agentId,",
+    "rootDir: fileRoot,\n    agentId,",
     "runtime passes agent identity into LocalSandbox"
   )
   assertIncludes(

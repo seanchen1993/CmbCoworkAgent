@@ -110,6 +110,35 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
+  it("never offers an unsandboxed retry for an isolated worktree runtime", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true,
+      false,
+      false
+    )
+    const denied = {
+      output: "operation not permitted by sandbox",
+      exitCode: 1,
+      truncated: false
+    }
+
+    const result = await orchestrator.maybeRetryOutsideSandbox(
+      "touch escaped.txt",
+      process.cwd(),
+      "unelevated",
+      denied
+    )
+
+    expect(result).toBe(denied)
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
   it("fails closed for commit scope options the task-card dialog cannot reproduce", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
@@ -132,6 +161,55 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
+  it("executes isolated worktree commits in place and blocks pushes", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "committed",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const isolatedGitMutation = vi.fn().mockResolvedValue({
+      output: "broker committed",
+      exitCode: 0,
+      truncated: false
+    })
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true,
+      false,
+      false,
+      isolatedGitMutation
+    )
+
+    const committed = await orchestrator.execute("git commit -m isolated", process.cwd(), "none")
+    const pushed = await orchestrator.execute("git push origin HEAD", process.cwd(), "none")
+
+    expect(committed.output).toBe("broker committed")
+    expect(isolatedGitMutation).toHaveBeenCalledWith("commit", "isolated", process.cwd())
+    expect(requestApproval).not.toHaveBeenCalled()
+    expect(pushed.exitCode).toBe(1)
+    expect(pushed.output).toContain("direct push")
+    expect(rawExecute).not.toHaveBeenCalled()
+
+    for (const command of [
+      "git commit --amend -m rewritten",
+      "git commit --fixup HEAD -m rewritten",
+      "git commit -m partial -- src/a.ts",
+      "git commit -m chained && git status",
+      "git add src/a.ts",
+      "cd subdir && git add -A",
+      "git -C nested-repo commit -m nested",
+      "git -C nested-repo add -A"
+    ]) {
+      const rejected = await orchestrator.execute(command, process.cwd(), "none")
+      expect(rejected.exitCode, command).toBe(1)
+      expect(rejected.output, command).toContain("Command forbidden")
+    }
+    expect(isolatedGitMutation).toHaveBeenCalledTimes(1)
+  })
+
   it("rejects a bare commit instead of restaging unstaged hunks from indexed files", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
@@ -141,6 +219,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       requestApproval,
       false,
       false,
+      true,
+      undefined,
       process.cwd()
     )
 
@@ -167,6 +247,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       requestApproval,
       false,
       false,
+      true,
+      undefined,
       workspace
     )
 
@@ -202,6 +284,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       requestApproval,
       false,
       false,
+      true,
+      undefined,
       workspace
     )
 
@@ -233,6 +317,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         requestApproval,
         false,
         false,
+        true,
+        undefined,
         workspace
       )
 

@@ -40,6 +40,8 @@ export interface ToolHookMiddlewareOptions {
   harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
+  workspaceHookCwd?: string
+  forceSyncWorkspaceHooks?: boolean
   skipToolNames?: ReadonlySet<string>
   onToolFailureDecision?: (input: {
     toolName: string
@@ -72,7 +74,9 @@ function buildHookContext(
     harnessNodeName: options.harnessNodeName,
     harnessNodeStatus: options.harnessNodeStatus,
     projectCode: options.projectCode,
-    projectDir: options.projectDir
+    projectDir: options.projectDir,
+    workspaceHookCwd: options.workspaceHookCwd,
+    forceSyncWorkspaceHooks: options.forceSyncWorkspaceHooks
   }
 }
 

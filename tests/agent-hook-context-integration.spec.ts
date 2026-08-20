@@ -105,7 +105,7 @@ async function testRuntimeAgentIdFlowsThroughLocalSandbox(): Promise<void> {
   ).replace(/\r\n/g, "\n")
   assert.match(
     runtimeSource,
-    /new LocalSandbox\(\{\s*rootDir: workspacePath,\s*agentId,/,
+    /new LocalSandbox\(\{[\s\S]{0,500}?rootDir: fileRoot,\s*agentId,/,
     "createAgentRuntime must forward its static agentId into LocalSandbox"
   )
 
