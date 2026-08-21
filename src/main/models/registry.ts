@@ -28,6 +28,7 @@ import {
 import { fetchLatestJson } from "../updater/checker"
 import { resolveUpdateSource } from "../updater/channel-config"
 import { calculateSummarizationTriggerTokens } from "../../shared/model-token-budget"
+import { getHiddenEndpoint } from "../security/hidden-endpoints"
 
 export type ModelSource = "builtin" | "custom"
 export type BuiltinModelOrigin = "remote" | "fallback"
@@ -56,7 +57,7 @@ const FALLBACK_CATALOG: RemoteModelCatalogItem[] = [
   {
     id: "minimax-m2p5-229b-w8a8",
     name: "MiniMax M2.5",
-    baseUrl: "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
+    baseUrl: getHiddenEndpoint("modelMinimax"),
     model: "minimax-m2p5-229b-w8a8",
     tier: "premium"
   }

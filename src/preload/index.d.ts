@@ -118,6 +118,7 @@ import type { ChatScrollSettings } from "../shared/chat-scroll"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
