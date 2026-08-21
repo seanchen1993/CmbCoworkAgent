@@ -164,6 +164,7 @@ CREATE TABLE chatx_gw_desktop_session (
   UNIQUE KEY uq_session_principal_generation (principal_id, connection_generation),
   KEY idx_session_principal_state_generation (principal_id, state, connection_generation),
   KEY idx_session_node_state_heartbeat (node_id, state, last_heartbeat_at),
+  KEY idx_session_state_heartbeat (state, last_heartbeat_at),
   KEY idx_session_state_jwt_expiry (state, jwt_expires_at)
 ) ENGINE = InnoDB
   DEFAULT CHARACTER SET = utf8mb4

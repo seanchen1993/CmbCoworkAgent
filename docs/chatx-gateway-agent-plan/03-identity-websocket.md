@@ -119,11 +119,25 @@ Desktop 在收到 `WELCOME` 后会立即发送 `SYNC_REQUEST`，因此本阶段�
 ### IW-05：心跳与 fencing
 
 - heartbeat 更新必须同时匹配 session/principal/node/generation/ONLINE/version；
+- Desktop 每 30 秒发送 heartbeat；默认超过 90 秒未收到 heartbeat 即判定失联；
+- 所有 Pod 均可扫描 MySQL 中的超时 ONLINE session，通过 version CAS 避免误杀刚恢复
+  heartbeat 的连接；扫描间隔默认 30 秒；
+- 超时连接以 WebSocket close code `4000` 关闭，Desktop 自动重连；
 - 旧 socket 的 heartbeat、命令和 close 不得影响新 session；
 - heartbeat 超时使 session 进入终结状态；JWT 到期时先发送不带 `commandId` 的
   `ERROR { reasonCode: "AUTH_REQUIRED" }`，再关闭 socket；WSS 建立后不能返回 HTTP `401`；
 - 每个节点按心跳周期核对自己的 socket 和 DB session，节点通知丢失不影响正确性；
 - Desktop 收到 `SESSION_SUPERSEDED` 后不自动重连。
+
+### IW-06：Pod 优雅退出
+
+- 配置 `server.shutdown=graceful` 和 `spring.lifecycle.timeout-per-shutdown-phase=30s`；
+- 容器入口使用 `exec java ...`，确保 JVM 直接收到 Kubernetes `SIGTERM`；
+- Context 关闭开始时，将本 nodeId 持有的 ONLINE session 通过 version CAS 标记为 OFFLINE；
+- 随后使用 WebSocket close code `1012 Service Restart` 关闭本机连接，Desktop 自动连接其他 Pod；
+- 数据库暂时不可用时仍须关闭本机 transport，由其他 Pod 的 90 秒超时扫描恢复遗留状态；
+- Kubernetes 设置 `terminationGracePeriodSeconds: 40`，建议增加 5 秒 `preStop sleep`，
+  为 Endpoint 摘除传播预留时间。
 
 ## 5. 必须测试
 
@@ -135,6 +149,8 @@ Desktop 在收到 `WELCOME` 后会立即发送 `SYNC_REQUEST`，因此本阶段�
 - `WELCOME` 后 `SYNC_REQUEST` 收到相关 `SYNC_STATE`；
 - 同 principal 两个连接，后者成为唯一 ONLINE；
 - 旧 heartbeat/close 不覆盖新 session；
+- 90 秒前的 ONLINE session 会被 CAS 下线，CAS 竞争失败时不得关闭连接；
+- Context 关闭时本机 session 先落库 OFFLINE，再以 `1012` 关闭连接；
 - 身份同步幂等、冲突 fail closed、撤销保留历史；
 - 敏感日志扫描通过；
 - `./mvnw verify` 在 JDK 1.8 通过。
