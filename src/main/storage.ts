@@ -67,7 +67,10 @@ import {
   calculateSummarizationTriggerTokens
 } from "../shared/model-token-budget"
 
-const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
+const configuredOpenworkDir = process.env.CMB_COWORK_AGENT_HOME?.trim()
+const OPENWORK_DIR = configuredOpenworkDir
+  ? resolve(configuredOpenworkDir)
+  : join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
 const CUSTOM_API_KEY_PREFIX = "CUSTOM_API_KEY__"
