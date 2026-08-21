@@ -566,7 +566,7 @@ UNKNOWN 不自动重发。只有正式结果查询或受审计人工操作可以
 
 | type                       | payload                                                               |
 | -------------------------- | --------------------------------------------------------------------- |
-| `HELLO`                    | `appVersion`, `capabilities[]`                                        |
+| `HELLO`                    | `appVersion`, `capabilities[]`, optional `protocolExtensions[]`       |
 | `HEARTBEAT`                | `sessionId`                                                           |
 | `EVENT_ACK`                | ACK union：`type/eventId/leaseId`；failed 另含 `retryable/reasonCode` |
 | `EXECUTION_PERMIT_ACQUIRE` | `eventId`, `lastLeaseId`                                              |
@@ -585,11 +585,14 @@ HELLO 不携带 `principalId`。主体来自已验证 Upgrade。
 | `PERMIT_RESULT`                   | GRANTED: `eventId/status/leaseId/expiresAt`; DENIED: `eventId/status/reasonCode` |
 | `LEASE_REVOKED`                   | `eventId/reasonCode`                                                             |
 | `REPLY_ACCEPTED` / `REPLY_RESULT` | `deliveryId/idempotencyKey/segmentIndex/state/platformReplyId?`                  |
-| `SYNC_STATE`                      | `routes[]`，每项仅 `principalId/conversationKey/state`                           |
+| `SYNC_STATE`                      | `routes[]` 及可选 `defaultConversationKey`；路由项仅 `principalId/conversationKey/state` |
 | `ERROR`                           | `reasonCode/message?/eventId?/idempotencyKey?/conversationKey?`                  |
 
-`SYNC_STATE.routes` 只是 conversation 状态同步，不代表桌面选择。每项 `principalId` 必须与
+`SYNC_STATE.routes` 是 conversation 状态同步；当存在多条历史路由时，网关通过可选的
+`defaultConversationKey` 明确本次连接的权威默认路由。每项 `principalId` 必须与
 WELCOME 一致。
+只有 `HELLO.protocolExtensions` 包含 `sync-default-route-v1` 时才返回该可选字段，以保证
+新旧 Desktop 和网关可以独立灰度。
 
 ### 8.4 Remote event
 

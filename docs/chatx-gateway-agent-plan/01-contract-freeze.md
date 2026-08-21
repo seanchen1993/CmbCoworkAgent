@@ -47,7 +47,7 @@ JWT 的 issuer、JWKS URI、audience、主体 claim、允许算法等是部署�
 
 | type                       | payload                                                    |
 | -------------------------- | ---------------------------------------------------------- |
-| `HELLO`                    | `appVersion:string`、唯一数组 `capabilities[]`             |
+| `HELLO`                    | `appVersion:string`、唯一数组 `capabilities[]`、可选唯一数组 `protocolExtensions[]` |
 | `HEARTBEAT`                | `sessionId:string`                                         |
 | `EVENT_ACK`                | `type/eventId/leaseId`；failed 另带 `retryable/reasonCode` |
 | `EXECUTION_PERMIT_ACQUIRE` | `eventId:string`、`lastLeaseId:string`                     |
@@ -66,10 +66,14 @@ JWT 的 issuer、JWKS URI、audience、主体 claim、允许算法等是部署�
 | `PERMIT_RESULT`                   | GRANTED: `eventId/status/leaseId/expiresAt`；DENIED: `eventId/status/reasonCode` |
 | `LEASE_REVOKED`                   | `eventId/reasonCode`                                                             |
 | `REPLY_ACCEPTED` / `REPLY_RESULT` | `deliveryId/idempotencyKey/segmentIndex/state/platformReplyId?`                  |
-| `SYNC_STATE`                      | `routes[]`，每项仅 `principalId/conversationKey/state`                           |
+| `SYNC_STATE`                      | `routes[]` 及可选 `defaultConversationKey`；路由项仅 `principalId/conversationKey/state` |
 | `ERROR`                           | `reasonCode/message?/eventId?/idempotencyKey?/conversationKey?`                  |
 
 `SYNC_STATE.routes[].state` 只允许 `active`、`suspended`、`revoked`。
+`SYNC_STATE.defaultConversationKey` 如存在，必须指向同一响应中的一条 `active` 路由；客户端
+将其作为网关根据本次认证身份和当前机器人配置选出的权威默认单聊路由。
+客户端只有在 `HELLO.protocolExtensions` 声明 `sync-default-route-v1` 后才允许网关返回该字段；
+旧网关忽略扩展声明，旧客户端不会收到新增字段。
 `heartbeatIntervalSeconds` 范围为 5～300。
 
 ### RemoteImEventV1

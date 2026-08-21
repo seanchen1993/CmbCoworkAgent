@@ -391,10 +391,17 @@ export class BuiltinRobotManager {
         if (eventId && this.service) await this.service.handleLeaseRevoked(eventId, reasonCode)
         this.emitStatus()
       },
-      onRoutesSynchronized: async (routes, principalId) => {
+      onRoutesSynchronized: async (routes, principalId, defaultConversationKey) => {
         const activeRoutes = routes.filter(
           (route) => route.principalId === principalId && route.state === "active"
         )
+        if (defaultConversationKey) {
+          await this.confirmAuthoritativeRoute({
+            principalId,
+            conversationKey: defaultConversationKey
+          })
+          return
+        }
         if (activeRoutes.length === 1) {
           await this.confirmAuthoritativeRoute({
             principalId,

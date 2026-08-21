@@ -74,6 +74,7 @@ async function main(): Promise<void> {
   let confirmedProactiveRoute: string | null = null
   let mismatchNextPermit = false
   let missingRobotHelloCount = 0
+  let defaultRouteExtensionHelloCount = 0
   server.on("connection", (connected, request) => {
     socket = connected
     const connectionAuthorization = String(request.headers.authorization ?? "")
@@ -82,6 +83,12 @@ async function main(): Promise<void> {
       const envelope = JSON.parse(String(raw)) as Envelope
       receivedTypes.push(envelope.type)
       if (envelope.type === "HELLO") {
+        const protocolExtensions = Array.isArray(envelope.payload.protocolExtensions)
+          ? envelope.payload.protocolExtensions
+          : []
+        if (protocolExtensions.includes("sync-default-route-v1")) {
+          defaultRouteExtensionHelloCount += 1
+        }
         if (connectionAuthorization === "Bearer missing-robot-token") {
           missingRobotHelloCount += 1
           connected.send(
@@ -118,6 +125,9 @@ async function main(): Promise<void> {
             commandId: envelope.commandId,
             sentAt: new Date().toISOString(),
             payload: {
+              ...(connectionAuthorization === "Bearer legacy-ambiguous-token"
+                ? {}
+                : { defaultConversationKey: "conversation-remote" }),
               routes: [
                 {
                   principalId: "opaque-principal",
@@ -180,10 +190,12 @@ async function main(): Promise<void> {
     onLeaseRevoked: (payload) => {
       if (typeof payload.eventId === "string") revokedEventIds.push(payload.eventId)
     },
-    onRoutesSynchronized: (routes, principalId) => {
+    onRoutesSynchronized: (routes, principalId, defaultConversationKey) => {
       assert.equal(client.getStatus().connectionState, "connecting")
       assert.equal(principalId, "opaque-principal")
+      assert.equal(defaultConversationKey, "conversation-remote")
       assert.equal(routes.length, 2)
+      confirmedProactiveRoute = defaultConversationKey
       routesReconciledBeforeOnline = true
     },
     isProactiveRouteConfirmed: (conversationKey, principalId) =>
@@ -194,22 +206,21 @@ async function main(): Promise<void> {
   assert.equal(authorization, "Bearer identity-token-do-not-log")
   assert.equal(client.getStatus().lastHandshakeStatus, 101)
   assert(receivedTypes.includes("HELLO"))
+  assert.equal(defaultRouteExtensionHelloCount, 1)
   await waitFor(() => client.getStatus().routes.length === 2, "route sync")
   assert.equal(client.getStatus().principalId, "opaque-principal")
   assert.equal(client.getStatus().routes[0].principalId, "opaque-principal")
   assert.equal(client.getStatus().routes[0].state, "active")
   assert.equal(routesReconciledBeforeOnline, true)
-  await assert.rejects(
-    client.submitReply({
-      schemaVersion: 1,
-      deliveryId: "delivery-before-route-confirmation",
-      conversationKey: "conversation-remote",
-      idempotencyKey: "delivery-before-route-confirmation:reply:0",
-      segment: { index: 0, count: 1 },
-      message: { type: "text", content: "must wait for real ingress" }
-    }),
-    /同步会话路由/
-  )
+  const defaultRouteReply = await client.submitReply({
+    schemaVersion: 1,
+    deliveryId: "delivery-after-default-route-confirmation",
+    conversationKey: "conversation-remote",
+    idempotencyKey: "delivery-after-default-route-confirmation:reply:0",
+    segment: { index: 0, count: 1 },
+    message: { type: "text", content: "route confirmed by gateway sync" }
+  })
+  assert.equal(defaultRouteReply.platformReplyId, "platform-reply-1")
 
   const event: RemoteImEventV1 = {
     schemaVersion: 1,
@@ -325,6 +336,33 @@ async function main(): Promise<void> {
   )
 
   client.stop()
+
+  let legacyDefaultConversationKey: string | null | undefined
+  const legacyAmbiguousClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => "legacy-ambiguous-token",
+    appVersion: "test",
+    onRemoteEvent: () => undefined,
+    onRoutesSynchronized: (_routes, _principalId, defaultConversationKey) => {
+      legacyDefaultConversationKey = defaultConversationKey
+    },
+    isProactiveRouteConfirmed: () => false
+  })
+  legacyAmbiguousClient.start()
+  await waitFor(() => legacyAmbiguousClient.getStatus().routes.length === 2, "legacy route sync")
+  assert.equal(legacyDefaultConversationKey, null)
+  await assert.rejects(
+    legacyAmbiguousClient.submitReply({
+      schemaVersion: 1,
+      deliveryId: "delivery-legacy-ambiguous-route",
+      conversationKey: "conversation-remote",
+      idempotencyKey: "delivery-legacy-ambiguous-route:reply:0",
+      segment: { index: 0, count: 1 },
+      message: { type: "text", content: "must remain fail closed" }
+    }),
+    /同步会话路由/
+  )
+  legacyAmbiguousClient.stop()
 
   let refreshingToken = "expired-token"
   let authenticationRefreshCount = 0

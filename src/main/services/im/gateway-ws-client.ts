@@ -20,6 +20,7 @@ const CONNECT_TIMEOUT_MS = 10_000
 const COMMAND_TIMEOUT_MS = 15_000
 const RECONNECT_MAX_MS = 60_000
 const MAX_FRAME_BYTES = 64 * 1024
+const DEFAULT_ROUTE_SYNC_EXTENSION = "sync-default-route-v1"
 const PERMANENT_REPLY_REASON_CODES = new Set([
   "PRINCIPAL_MISMATCH",
   "INVALID_PAYLOAD",
@@ -64,7 +65,8 @@ export interface ImGatewayWsClientOptions {
   onAuthenticationRequired?: (rejectedToken: string) => boolean | Promise<boolean>
   onRoutesSynchronized?: (
     routes: readonly BuiltinRobotRouteStatus[],
-    principalId: string
+    principalId: string,
+    defaultConversationKey: string | null
   ) => void | Promise<void>
   isProactiveRouteConfirmed?: (conversationKey: string, principalId: string) => boolean
   onStatusChange?: (status: ImGatewayWsStatus) => void
@@ -373,7 +375,8 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       this.updateStatus({ lastHandshakeStatus: 101 })
       this.helloCommandId = this.sendEnvelope("HELLO", {
         appVersion: this.options.appVersion,
-        capabilities: this.options.capabilities ?? ["inbox", "feature", "scheduler", "hitl"]
+        capabilities: this.options.capabilities ?? ["inbox", "feature", "scheduler", "hitl"],
+        protocolExtensions: [DEFAULT_ROUTE_SYNC_EXTENSION]
       })
     })
     socket.on("message", (data) => {
@@ -674,10 +677,17 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   }
 
   private async updateRoutes(payload: Record<string, unknown>): Promise<void> {
-    assertOnlyKeys(payload, ["routes"], "SYNC_STATE payload")
+    assertOnlyKeys(payload, ["routes", "defaultConversationKey"], "SYNC_STATE payload")
     const routes = Array.isArray(payload.routes) ? payload.routes : []
     if (!Array.isArray(payload.routes)) {
       throw new ImGatewayProtocolError("SYNC_STATE routes are missing")
+    }
+    const defaultConversationKey =
+      payload.defaultConversationKey === undefined
+        ? null
+        : nonEmptyString(payload.defaultConversationKey)
+    if (payload.defaultConversationKey !== undefined && !defaultConversationKey) {
+      throw new ImGatewayProtocolError("SYNC_STATE default conversation is invalid")
     }
     const normalized: BuiltinRobotRouteStatus[] = []
     for (const value of routes) {
@@ -706,9 +716,21 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (!principalId) {
       throw new ImGatewayProtocolError("SYNC_STATE arrived before WELCOME")
     }
+    if (
+      defaultConversationKey &&
+      !normalized.some(
+        (route) =>
+          route.principalId === principalId &&
+          route.conversationKey === defaultConversationKey &&
+          route.state === "active"
+      )
+    ) {
+      throw new ImGatewayProtocolError("SYNC_STATE default conversation is not an active route")
+    }
     await this.options.onRoutesSynchronized?.(
       normalized.map((route) => ({ ...route })),
-      principalId
+      principalId,
+      defaultConversationKey
     )
     this.updateStatus({ connectionState: "online", routes: normalized })
   }
