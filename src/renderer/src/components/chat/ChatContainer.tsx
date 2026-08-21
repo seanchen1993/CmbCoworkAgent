@@ -2755,6 +2755,11 @@ export function ChatContainer({
           suggestedCommitFilePaths?: string[]
           suggestedCommitFileBasePath?: string
           suggestedGitWorktreePath?: string
+          suggestedGitRepositories?: Array<{
+            path: string
+            displayPath: string
+            gitRoot: string
+          }>
           suggestedCommitFileSelectionSource?: "pathspec" | "staged"
         })
       | null
@@ -6848,6 +6853,7 @@ export function ChatContainer({
                         suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
                         suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
                         suggestedGitWorktreePath={agentCommitApproval?.suggestedGitWorktreePath}
+                        suggestedGitRepositories={agentCommitApproval?.suggestedGitRepositories}
                         suggestedFileSelectionSource={
                           agentCommitApproval?.suggestedCommitFileSelectionSource
                         }
