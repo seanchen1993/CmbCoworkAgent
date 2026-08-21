@@ -1,5 +1,9 @@
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
+  WorkflowWorktreeAction,
+  WorkflowWorktreeActionResponse
+} from "../main/ipc/workflow-worktree-payload"
+import type {
   Thread,
   Message,
   ModelConfig,
@@ -132,9 +136,11 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { ChatScrollSettings } from "../shared/chat-scroll"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
@@ -148,6 +154,9 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
+  getChatScrollSettings: () => Promise<ChatScrollSettings>
+  setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
+  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
@@ -914,6 +923,12 @@ interface CustomAPI {
     listRuns: (threadId: string) => Promise<unknown[]>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    worktreeAction: (
+      threadId: string,
+      runId: string,
+      worktreeId: string,
+      action: WorkflowWorktreeAction
+    ) => Promise<WorkflowWorktreeActionResponse>
     /** Register/deregister per-agent "viewing interest" (the focus panel is showing this
      * running agent) so the display-only live tap only serializes/broadcasts that agent. */
     setAgentStreamInterest: (
@@ -1419,7 +1434,7 @@ interface CustomAPI {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: { worktreePath?: string; agentInitiated?: boolean }
     ) => Promise<{
       success: boolean
       error?: string

@@ -59,16 +59,22 @@ function buildHeaders(hook: HookConfig): Record<string, string> {
   return headers
 }
 
-async function readBoundedBody(response: Response): Promise<string> {
+interface BoundedBody {
+  body: string
+  limitExceeded: boolean
+}
+
+async function readBoundedBody(response: Response): Promise<BoundedBody> {
   // We don't trust Content-Length; stream and cap defensively. Node 20+
   // exposes a web ReadableStream on response.body.
   if (!response.body) {
-    return ""
+    return { body: "", limitExceeded: false }
   }
   const reader = response.body.getReader()
   const decoder = new TextDecoder("utf-8")
   let out = ""
   let total = 0
+  let limitExceeded = false
   try {
     for (;;) {
       const { value, done } = await reader.read()
@@ -76,6 +82,7 @@ async function readBoundedBody(response: Response): Promise<string> {
       if (!value) continue
       total += value.byteLength
       if (total > MAX_RESPONSE_BYTES) {
+        limitExceeded = true
         out += decoder.decode(value.slice(0, Math.max(0, MAX_RESPONSE_BYTES - (total - value.byteLength))))
         try {
           await reader.cancel()
@@ -94,7 +101,7 @@ async function readBoundedBody(response: Response): Promise<string> {
       /* ignore */
     }
   }
-  return out
+  return { body: out, limitExceeded }
 }
 
 export async function executeHttpHook(
@@ -138,7 +145,10 @@ export async function executeHttpHook(
       body: stdinPayload,
       signal: controller.signal
     })
-    const body = await readBoundedBody(response)
+    const { body, limitExceeded } = await readBoundedBody(response)
+    if (limitExceeded) {
+      return fallbackResult(`[HttpHook] response body exceeded ${MAX_RESPONSE_BYTES} bytes`)
+    }
     if (response.status >= 200 && response.status < 300) {
       // Defer JSON parsing to parseHookJsonOutput (called by the dispatcher).
       // Non-JSON 2xx bodies become a passthrough "approve + stdout"; JSON

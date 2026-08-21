@@ -5268,7 +5268,7 @@ function ProjectConstraintSyncPanel({
           size="sm"
           className="h-auto min-w-0 px-0 py-0 text-xs"
           onClick={() => {
-            void window.electron.openExternal("https://doc.cmbchina.com/f/v?id=zfGMOW")
+            void window.electron.openManagedLink("knowledgeGuide")
           }}
         >
           知识库使用指引

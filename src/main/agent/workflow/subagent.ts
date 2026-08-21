@@ -22,6 +22,7 @@ import {
   WorkflowAbortError,
   getWorkflowAgentTimeoutMs,
   isWorkflowAbortError,
+  type WorkflowWorktreeIsolationBoundary,
   type WorkflowSubagentResult
 } from "./types"
 import { WORKFLOW_SUBAGENT_BASE_PROMPT, buildWorkflowSubagentStructuredPrompt } from "./prompts"
@@ -83,6 +84,7 @@ export interface WorkflowSubagentDeps {
   /** Creates a one-shot agent runtime for a subagent thread. */
   createRuntime: (options: {
     threadId: string
+    agentId: string
     modelId?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -91,6 +93,8 @@ export interface WorkflowSubagentDeps {
     disallowedTools?: string[]
     /** agentType-resolved shell policy. Undefined = full. */
     shellAccess?: AgentShellAccess
+    /** Immutable checkout identity used by file-root and Git guards. */
+    worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   }) => Promise<WorkflowSubagentRuntime>
   /** Tears down per-thread resources (checkpointer, sandbox ACLs). */
   cleanupThread: (threadId: string) => Promise<void>
@@ -121,6 +125,8 @@ export interface RunWorkflowSubagentRequest {
   disallowedTools?: string[]
   /** agentType-resolved shell policy. Undefined = full. */
   shellAccess?: AgentShellAccess
+  /** Runtime checkout identity for the private worktree. */
+  worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /**
    * Best-effort display tap: invoked with each "values" snapshot (the graph state
    * `{ messages: [...] }`) so the renderer can show this subagent's live tool stream.
@@ -313,6 +319,7 @@ async function runOnce(
   const runShort = request.runId.replace(/^wf_/, "")
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
+  const agentId = `${request.runId}:agent:${request.agentIndex}`
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -384,19 +391,24 @@ async function runOnce(
       : WORKFLOW_SUBAGENT_BASE_PROMPT
     // An agentType resolves to a focused role prompt; prepend it so the subagent
     // adopts the role while still honouring the workflow base/structured contract.
-    const extraSystemPrompt = request.roleSystemPrompt
+    const rolePrompt = request.roleSystemPrompt
       ? `${request.roleSystemPrompt}\n\n${baseExtraPrompt}`
       : baseExtraPrompt
+    const extraSystemPrompt = request.worktreeIsolation
+      ? `${rolePrompt}\n\nYou are running in an isolated Git worktree at \`${request.worktreeIsolation.workspaceRoot}\` on branch \`${request.worktreeIsolation.branch}\`, separate from the source working directory and other agents. Work normally; the checkout is removed if unchanged or preserved for review if changed. Commit deliverable changes with \`git commit -m "..."\` and do not push the transient branch.`
+      : rolePrompt
 
     const { runtime, modelFellBack } = await createRuntimeWithModelFallback(deps, {
       threadId,
+      agentId,
       model: request.model,
       extraSystemPrompt,
       abortSignal: controller.signal,
       additionalTools,
       label: request.label,
       disallowedTools: request.disallowedTools,
-      shellAccess: request.shellAccess
+      shellAccess: request.shellAccess,
+      worktreeIsolation: request.worktreeIsolation
     })
     runTraceSideEffect("Workflow", () => {
       tracer?.setModelId(
@@ -639,6 +651,7 @@ export async function createRuntimeWithModelFallback(
   deps: WorkflowSubagentDeps,
   options: {
     threadId: string
+    agentId: string
     model?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -646,15 +659,18 @@ export async function createRuntimeWithModelFallback(
     label: string
     disallowedTools?: string[]
     shellAccess?: AgentShellAccess
+    worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   }
 ): Promise<{ runtime: WorkflowSubagentRuntime; modelFellBack: boolean }> {
   const baseOptions = {
     threadId: options.threadId,
+    agentId: options.agentId,
     extraSystemPrompt: options.extraSystemPrompt,
     abortSignal: options.abortSignal,
     additionalTools: options.additionalTools,
     disallowedTools: options.disallowedTools,
-    shellAccess: options.shellAccess
+    shellAccess: options.shellAccess,
+    worktreeIsolation: options.worktreeIsolation
   }
   if (options.model) {
     // Don't double-prefix known model references. Bare profile model names keep

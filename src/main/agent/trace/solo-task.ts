@@ -9,6 +9,10 @@ import {
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
 import type { TraceChatMessage, TraceContext, TraceOutcome, TraceTokenUsage } from "./types"
 import { nowIsoLocal } from "../../util/local-time"
+import {
+  HOOK_AGENT_OWNER_METADATA_KEY,
+  getHookAgentIdFromRequest
+} from "../../hooks/execution-context"
 import { extractVisibleReasoning, truncateReasoningForTrace } from "../../../shared/model-reasoning"
 
 /**
@@ -16,7 +20,7 @@ import { extractVisibleReasoning, truncateReasoningForTrace } from "../../../sha
  * The renderer and stream converter intentionally mirror this literal because
  * they cannot import main-process runtime code.
  */
-export const SOLO_TASK_OWNER_METADATA_KEY = "cmb_subagent_owner_tool_call_id"
+export const SOLO_TASK_OWNER_METADATA_KEY = HOOK_AGENT_OWNER_METADATA_KEY
 
 const MAX_TRACE_CONTENT = 2000
 const MODEL_INPUT_WINDOW = 12
@@ -185,22 +189,6 @@ function responseToolCalls(response: AnyRecord): Array<{
       args: asRecord(call.args) ?? {}
     }
   })
-}
-
-function requestOwnerId(request: unknown): string | undefined {
-  const record = asRecord(request)
-  const runtime = asRecord(record?.runtime)
-  const candidates = [
-    asRecord(runtime?.configurable)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(asRecord(runtime?.config)?.configurable)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(record?.configurable)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(record?.metadata)?.[SOLO_TASK_OWNER_METADATA_KEY],
-    asRecord(runtime?.metadata)?.[SOLO_TASK_OWNER_METADATA_KEY]
-  ]
-  const ownerId = candidates.find(
-    (candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0
-  )
-  return ownerId?.trim()
 }
 
 function safeChildThreadId(parentThreadId: string, ownerId: string): string {
@@ -382,7 +370,7 @@ export class SoloTaskTraceManager {
   }
 
   private beforeModel(state: unknown, runtime: unknown): void {
-    const ownerId = requestOwnerId({ runtime })
+    const ownerId = getHookAgentIdFromRequest({ runtime })
     if (!ownerId) return
     const entry = this.active.get(ownerId)
     if (!entry) return
@@ -396,7 +384,7 @@ export class SoloTaskTraceManager {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async wrapModelCall(request: any, handler: any): Promise<any> {
-    const ownerId = requestOwnerId(request)
+    const ownerId = getHookAgentIdFromRequest(request)
     if (!ownerId) return handler(request)
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)
@@ -484,7 +472,7 @@ export class SoloTaskTraceManager {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async wrapToolCall(request: any, handler: any): Promise<any> {
-    const ownerId = requestOwnerId(request)
+    const ownerId = getHookAgentIdFromRequest(request)
     if (!ownerId) return handler(request)
     const entry = this.active.get(ownerId)
     if (!entry) return handler(request)

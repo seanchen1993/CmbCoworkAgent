@@ -79,6 +79,10 @@ import { trackEvent } from "../services/event-reporter"
 import { trySendChatXReply } from "../services/chatx"
 import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
 import {
+  markHarnessStageAttributionDirty,
+  primeHarnessStageAttribution
+} from "../services/harness-stage-attribution"
+import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
 } from "../../shared/goal-events"
@@ -216,6 +220,11 @@ import { createPersistentThreadHookScope } from "../hooks/thread-scope-persisten
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
+import {
+  buildSubagentStartHookContext,
+  buildSubagentStopHookContext,
+  extractSubagentStartToolCallsFromStreamPayload
+} from "../hooks/subagent-context"
 import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
 import {
   getFailureFuseHaltError,
@@ -789,12 +798,30 @@ function getHarnessHookContext(
   }
 }
 
-function resolveHarnessCurrentStageForContext(
+function withHarnessStageInvalidation(
+  callback: HookResultCallback,
+  projectId?: string,
+  featureSlug?: string
+): HookResultCallback {
+  return (event, hook, result): void => {
+    if (
+      hook.hookSourceType === "plugin" ||
+      hook.hookSourceType === "skill" ||
+      Boolean(hook.pluginRoot)
+    ) {
+      markHarnessStageAttributionDirty(projectId, featureSlug)
+    }
+    callback(event, hook, result)
+  }
+}
+
+async function resolveHarnessCurrentStageForContext(
   projectId?: string,
   slug?: string
-): Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus"> {
+): Promise<Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus">> {
   if (!projectId || !slug) return {}
-  const currentStage = resolveHarnessFeatureCurrentStage(projectId, slug)
+  const currentStage = await resolveHarnessFeatureCurrentStage(projectId, slug)
+  primeHarnessStageAttribution(projectId, slug, currentStage)
   if (!currentStage?.name) return {}
   return {
     harnessNodeName: currentStage.name,
@@ -802,10 +829,10 @@ function resolveHarnessCurrentStageForContext(
   }
 }
 
-function getHarnessAgentContext(
+async function getHarnessAgentContext(
   metadata: Record<string, unknown>,
   options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
-): HarnessAgentContext {
+): Promise<HarnessAgentContext> {
   const harnessProjectSession =
     metadata.harnessProjectSession &&
     typeof metadata.harnessProjectSession === "object" &&
@@ -816,7 +843,7 @@ function getHarnessAgentContext(
   const harnessFeature = readHarnessFeatureMetadata(metadata)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const featureContext = buildHarnessFeatureAgentContext(metadata, {
+    const featureContext = await buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
@@ -831,7 +858,7 @@ function getHarnessAgentContext(
             harnessNodeName: options.featureBinding.nodeName,
             harnessNodeStatus: options.featureBinding.nodeStatus
           }
-        : resolveHarnessCurrentStageForContext(
+        : await resolveHarnessCurrentStageForContext(
             featureContext.harnessProjectId,
             featureContext.featureId
           )
@@ -1530,9 +1557,11 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   /** Diagnostic-only callback for "matched event but filtered out by scope". */
   onHookSkipped?: ScopeSkipCallback
 }): Promise<void> {
-  const [msgChunk] = params.payload as [
-    { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown } | undefined
-  ]
+  const msgChunk = Array.isArray(params.payload)
+    ? (params.payload[0] as
+        | { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown }
+        | undefined)
+    : undefined
   if (!msgChunk) return
 
   const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
@@ -1547,7 +1576,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
   const isErr =
     kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
-  const subagentStopContext: HookContext = {
+  const subagentStopContext = buildSubagentStopHookContext({
     workspacePath: params.workspacePath,
     pluginOutputDir: params.pluginOutputDir,
     systemId: params.systemId,
@@ -1560,13 +1589,11 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     harnessNodeStatus: params.harnessNodeStatus,
     projectCode: params.projectCode,
     projectDir: params.projectDir,
-    sessionId: params.threadId,
+    threadId: params.threadId,
     turnId: params.turnId,
-    subagent: {
-      id: toolCallId,
-      status: isErr ? "failed" : "completed"
-    }
-  }
+    toolCallId,
+    failed: isErr
+  })
   const result = await runHooksEnriched(
     resolveEnabledHooksForRun(
       params.workspacePath,
@@ -1610,19 +1637,14 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
     const args = (tc.args ?? {}) as Record<string, unknown>
     const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
     const taskDescription = typeof args.description === "string" ? args.description : undefined
-    const context: HookContext = {
+    const context = buildSubagentStartHookContext({
       workspacePath: params.workspacePath,
-      sessionId: params.threadId,
+      threadId: params.threadId,
       turnId: params.turnId,
-      subagent: { id, name: subagentType, status: "started" },
-      toolName: "task",
-      toolArgs: {
-        agent_id: id,
-        agent_type: subagentType,
-        tool_call_id: id,
-        task_description: taskDescription
-      }
-    }
+      toolCallId: id,
+      subagentType,
+      taskDescription
+    })
     runHooksEnriched(
       resolveEnabledHooksForRun(
         params.workspacePath,
@@ -1636,6 +1658,69 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
       params.onHookResult
     ).catch((e) => console.warn("[Hooks] SubagentStart hook error:", e))
   }
+}
+
+/**
+ * Apply the paired subagent lifecycle hooks for one serialized stream message.
+ * All physical stream entry points (initial, resume, and interrupt-continue)
+ * use this bridge so a resumed turn cannot emit SubagentStop without first
+ * observing the corresponding task tool call as SubagentStart.
+ */
+async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
+  payload: unknown
+  workspacePath?: string
+  pluginOutputDir?: string
+  systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
+  projectCode?: string
+  projectDir?: string
+  threadId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedStartIds: Set<string>
+  firedStopIds: Set<string>
+  onHookResult?: HookResultCallback
+  onStartHookSkipped?: ScopeSkipCallback
+  onStopHookSkipped?: ScopeSkipCallback
+}): Promise<void> {
+  maybeRunSubagentStartHooksFromToolCalls({
+    toolCalls: extractSubagentStartToolCallsFromStreamPayload(params.payload),
+    workspacePath: params.workspacePath,
+    threadId: params.threadId,
+    turnId: params.turnId,
+    hookScope: params.hookScope,
+    firedStartIds: params.firedStartIds,
+    onHookResult: params.onHookResult,
+    onHookSkipped: params.onStartHookSkipped
+  })
+
+  await maybeRunSubagentStopHooksFromStreamPayload({
+    payload: params.payload,
+    workspacePath: params.workspacePath,
+    pluginOutputDir: params.pluginOutputDir,
+    systemId: params.systemId,
+    pluginWorkspace: params.pluginWorkspace,
+    featureId: params.featureId,
+    harnessProjectId: params.harnessProjectId,
+    harnessAdapterName: params.harnessAdapterName,
+    harnessAdapterVersion: params.harnessAdapterVersion,
+    harnessNodeName: params.harnessNodeName,
+    harnessNodeStatus: params.harnessNodeStatus,
+    projectCode: params.projectCode,
+    projectDir: params.projectDir,
+    threadId: params.threadId,
+    turnId: params.turnId,
+    hookScope: params.hookScope,
+    firedToolCallIds: params.firedStopIds,
+    onHookResult: params.onHookResult,
+    onHookSkipped: params.onStopHookSkipped
+  })
 }
 
 /**
@@ -2278,8 +2363,8 @@ function createHarnessAgentmdLoadStatusHandler(
     try {
       const firstSuccess = markHarnessProjectSystemConstraintsLoaded(projectId)
       if (firstSuccess) {
-        // reportProjectSnapshotNow performs a synchronous project inspect before
-        // its first await; defer it so telemetry never delays runtime creation.
+        // Defer the asynchronous snapshot report so telemetry setup never delays
+        // runtime creation on this turn.
         setImmediate(() => void reportProjectSnapshotNow(projectId))
       }
     } catch (error) {
@@ -5877,9 +5962,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Non-project threads or unparsable metadata: leave the trace untagged.
       }
       if (harnessFeatureBinding) {
-        const currentStage = resolveHarnessFeatureCurrentStage(
+        const currentStage = await resolveHarnessFeatureCurrentStage(
           harnessFeatureBinding.projectId,
           harnessFeatureBinding.slug
+        )
+        primeHarnessStageAttribution(
+          harnessFeatureBinding.projectId,
+          harnessFeatureBinding.slug,
+          currentStage
         )
         if (currentStage?.name)
           harnessFeatureBinding = {
@@ -6137,7 +6227,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         runToken,
         abortController.signal,
-        makeHookResultCallback(window, channel, turnState.turnId)
+        withHarnessStageInvalidation(
+          makeHookResultCallback(window, channel, turnState.turnId),
+          harnessFeatureBinding?.projectId,
+          harnessFeatureBinding?.slug
+        )
       )
       const onFailureFuseNotice = guardPhysicalStreamRunCallback(
         threadId,
@@ -6280,7 +6374,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
         const workspacePath = metadata.workspacePath as string | undefined
         sessionWorkspacePath = workspacePath ?? undefined
-        const harnessAgentContext = getHarnessAgentContext(metadata, {
+        const harnessAgentContext = await getHarnessAgentContext(metadata, {
           workspacePath,
           featureBinding: harnessFeatureBinding
         })
@@ -7276,6 +7370,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
 
         const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
+          // Lifecycle hooks have control-flow semantics (SubagentStop can halt
+          // the parent turn), so keep them outside the best-effort metrics/
+          // tracing catch below. A HookHaltError must reach the stream owner.
+          await maybeRunSubagentLifecycleHooksFromStreamPayload({
+            payload,
+            workspacePath: sessionWorkspacePath,
+            threadId,
+            turnId: turnState.turnId,
+            hookScope,
+            pluginOutputDir: harnessAgentContext.pluginOutputDir,
+            systemId: harnessAgentContext.systemId,
+            ...getHarnessHookContext(harnessAgentContext),
+            firedStartIds: _subagentStartFired,
+            firedStopIds: _subagentStopFired,
+            onHookResult,
+            onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+            onStopHookSkipped: onHookSkippedFactory("SubagentStop")
+          })
+
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const [msgChunk] = payload as [any]
@@ -7285,30 +7398,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
             const className = classId[classId.length - 1] || ""
             const isAI = className.includes("AI")
-            const isTool = className.includes("Tool")
             const soloTaskOwnerId =
               normalModeSubagentsEnabled
                 ? getSoloTaskOwnerIdFromStreamPayload(payload)
                 : undefined
             const isCapturedSoloTaskMessage =
               isAI && soloTaskTraceManager?.hasCapturedTask(soloTaskOwnerId) === true
-
-            // SubagentStop — a "task" tool message signals subagent completion
-            if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
-              await maybeRunSubagentStopHooksFromStreamPayload({
-                payload,
-                workspacePath: sessionWorkspacePath,
-                threadId,
-                turnId: turnState.turnId,
-                hookScope,
-                pluginOutputDir: harnessAgentContext.pluginOutputDir,
-                systemId: harnessAgentContext.systemId,
-                ...getHarnessHookContext(harnessAgentContext),
-                firedToolCallIds: _subagentStopFired,
-                onHookResult,
-                onHookSkipped: onHookSkippedFactory("SubagentStop")
-              })
-            }
 
             if (!isAI) return
 
@@ -7345,16 +7440,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
             if (!toolCalls || toolCalls.length === 0) return
-            maybeRunSubagentStartHooksFromToolCalls({
-              toolCalls,
-              workspacePath,
-              threadId,
-              turnId: turnState.turnId,
-              hookScope,
-              firedStartIds: _subagentStartFired,
-              onHookResult,
-              onHookSkipped: onHookSkippedFactory("SubagentStart")
-            })
             if (msgId && _countedAiMsgIds.has(msgId)) return
             if (msgId) _countedAiMsgIds.add(msgId)
 
@@ -7815,6 +7900,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           error: unknown,
           label: string
         ): Promise<boolean> => {
+          if (isHookHaltError(error)) throw error
           if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
             return false
           }
@@ -7933,6 +8019,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeStreamWithSideEffects(activeStream)
             break // Stream completed successfully
           } catch (midStreamErr) {
+            if (isHookHaltError(midStreamErr)) throw midStreamErr
             const currentAgent = agent
             if (!currentAgent) throw midStreamErr
             const retry = await retryStreamAfterDisconnect(
@@ -9065,7 +9152,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = metadata.workspacePath as string | undefined
-      const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+      const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
         window,
@@ -9347,7 +9434,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         runToken,
         abortController.signal,
-        makeHookResultCallback(window, channel, turnState.turnId)
+        withHarnessStageInvalidation(
+          makeHookResultCallback(window, channel, turnState.turnId),
+          harnessAgentContext.harnessProjectId,
+          harnessAgentContext.featureId
+        )
       )
       const onFailureFuseNotice = guardPhysicalStreamRunCallback(
         threadId,
@@ -9719,12 +9810,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         let resumeStableStreamMessages: unknown[] = []
         const resumeInFlightMessageIds = new Set<string>()
         let pendingResumeMessagePayloads: unknown[] = []
+        const resumeSubagentStartFired = new Set<string>()
         const resumeSubagentStopFired = new Set<string>()
 
         const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
           const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
             for (const payload of pendingResumeMessagePayloads) {
-              await maybeRunSubagentStopHooksFromStreamPayload({
+              await maybeRunSubagentLifecycleHooksFromStreamPayload({
                 payload,
                 workspacePath,
                 threadId,
@@ -9733,9 +9825,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 pluginOutputDir: harnessAgentContext.pluginOutputDir,
                 systemId: harnessAgentContext.systemId,
                 ...getHarnessHookContext(harnessAgentContext),
-                firedToolCallIds: resumeSubagentStopFired,
+                firedStartIds: resumeSubagentStartFired,
+                firedStopIds: resumeSubagentStopFired,
                 onHookResult,
-                onHookSkipped: onHookSkippedFactory("SubagentStop")
+                onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+                onStopHookSkipped: onHookSkippedFactory("SubagentStop")
               })
               stopContextCollector.processStreamChunk("messages", payload)
             }
@@ -9805,6 +9899,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeResumeStream(activeResumeStream)
             break
           } catch (midErr) {
+            if (isHookHaltError(midErr)) throw midErr
             const retry = await retryStreamAfterDisconnect(
               midErr,
               resumeStreamDisconnectRetries,
@@ -10183,7 +10278,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
-    const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+    const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
       window,
@@ -10416,7 +10511,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       threadId,
       runToken,
       abortController.signal,
-      makeHookResultCallback(window, channel, turnState.turnId)
+      withHarnessStageInvalidation(
+        makeHookResultCallback(window, channel, turnState.turnId),
+        harnessAgentContext.harnessProjectId,
+        harnessAgentContext.featureId
+      )
     )
     const onFailureFuseNotice = guardPhysicalStreamRunCallback(
       threadId,
@@ -10768,12 +10867,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         let intStableStreamMessages: unknown[] = []
         const intInFlightMessageIds = new Set<string>()
         let pendingIntMessagePayloads: unknown[] = []
+        const interruptSubagentStartFired = new Set<string>()
         const interruptSubagentStopFired = new Set<string>()
 
         const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
           const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
             for (const payload of pendingIntMessagePayloads) {
-              await maybeRunSubagentStopHooksFromStreamPayload({
+              await maybeRunSubagentLifecycleHooksFromStreamPayload({
                 payload,
                 workspacePath,
                 threadId,
@@ -10782,9 +10882,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 pluginOutputDir: harnessAgentContext.pluginOutputDir,
                 systemId: harnessAgentContext.systemId,
                 ...getHarnessHookContext(harnessAgentContext),
-                firedToolCallIds: interruptSubagentStopFired,
+                firedStartIds: interruptSubagentStartFired,
+                firedStopIds: interruptSubagentStopFired,
                 onHookResult,
-                onHookSkipped: onHookSkippedFactory("SubagentStop")
+                onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+                onStopHookSkipped: onHookSkippedFactory("SubagentStop")
               })
               stopContextCollector.processStreamChunk("messages", payload)
             }
@@ -10854,6 +10956,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await consumeInterruptStream(activeIntStream)
             break
           } catch (midErr) {
+            if (isHookHaltError(midErr)) throw midErr
             const retry = await retryStreamAfterDisconnect(
               midErr,
               intStreamDisconnectRetries,

@@ -266,6 +266,344 @@ describe("CmbCowork context compaction middleware", () => {
     expect(handler).toHaveBeenCalledTimes(1)
   })
 
+  it("uses provider-reported usage as a lower bound for proactive compaction", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("reported usage trigger")))
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1_000 },
+      keepTokens: 1
+    })
+
+    await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("short earlier request"),
+          new AIMessage({
+            content: "short earlier response",
+            usage_metadata: { input_tokens: 1_200, output_tokens: 100, total_tokens: 1_300 }
+          }),
+          new HumanMessage("continue")
+        ],
+        state: {},
+        tools: []
+      },
+      handler
+    )
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("compacts CJK history with the Python-aligned 10% keep window", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("CJK usage trigger")))
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(invoke, {
+      maxInputTokens: 32_000,
+      trigger: { type: "tokens", value: 22_808 },
+      keepTokens: 3_200
+    })
+
+    await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("write a long Chinese design document"),
+          new AIMessage({
+            content: "中".repeat(13_400),
+            usage_metadata: {
+              input_tokens: 21_293,
+              output_tokens: 7_308,
+              total_tokens: 28_601
+            }
+          }),
+          new HumanMessage("state the title")
+        ],
+        state: {},
+        tools: []
+      },
+      handler
+    )
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("adds messages after the latest reported usage when checking the trigger", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("reported usage tail")))
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1_000 },
+      keepTokens: 1
+    })
+
+    await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("short earlier request"),
+          new AIMessage({
+            content: "short earlier response",
+            response_metadata: {
+              usage: { prompt_tokens: 700, completion_tokens: 100 }
+            }
+          }),
+          new HumanMessage(`new content after the response ${"x".repeat(1_600)}`)
+        ],
+        state: {},
+        tools: []
+      },
+      handler
+    )
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps approximate counting when the provider omits usage metadata", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("unused")))
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1_000 },
+      keepTokens: 1
+    })
+
+    await middleware.wrapModelCall(
+      {
+        messages: [new HumanMessage("short request without usage metadata")],
+        state: {},
+        tools: []
+      },
+      handler
+    )
+
+    expect(invoke).not.toHaveBeenCalled()
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("serializes the tool schema only once when argument truncation changes nothing", async () => {
+    let toolSchemaSerializations = 0
+    const countingToolSchema = {
+      toJSON: () => {
+        toolSchemaSerializations += 1
+        return {
+          type: "function",
+          function: {
+            name: "read_file",
+            description: "Read a file",
+            parameters: { type: "object", properties: {} }
+          }
+        }
+      }
+    }
+    const handler = vi.fn(async () => new AIMessage("handled"))
+    const middleware = createTestMiddleware(
+      async () => new AIMessage(validSummary("must not run")),
+      {
+        trigger: { type: "tokens", value: 1_000_000 },
+        truncateArgsSettings: {
+          trigger: { type: "messages", value: 100 },
+          keep: { type: "messages", value: 1 },
+          maxLength: 10
+        }
+      }
+    )
+
+    await middleware.wrapModelCall(
+      {
+        messages: [new HumanMessage("short request")],
+        state: {},
+        tools: [countingToolSchema]
+      },
+      handler
+    )
+
+    expect(toolSchemaSerializations).toBe(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("recounts exactly once when old tool arguments are actually truncated", async () => {
+    let toolSchemaSerializations = 0
+    const countingToolSchema = {
+      toJSON: () => {
+        toolSchemaSerializations += 1
+        return {
+          type: "function",
+          function: {
+            name: "write_file",
+            description: "Write a file",
+            parameters: { type: "object", properties: {} }
+          }
+        }
+      }
+    }
+    const handler = vi.fn(async (request: SummaryRequest) => {
+      const toolCallMessage = request.messages[1]
+      expect(AIMessage.isInstance(toolCallMessage)).toBe(true)
+      expect(String((toolCallMessage as AIMessage).tool_calls?.[0]?.args.content)).toContain(
+        "truncated"
+      )
+      return new AIMessage("handled")
+    })
+    const middleware = createTestMiddleware(
+      async () => new AIMessage(validSummary("must not run")),
+      {
+        trigger: { type: "tokens", value: 1_000_000 },
+        truncateArgsSettings: {
+          trigger: { type: "messages", value: 1 },
+          keep: { type: "messages", value: 1 },
+          maxLength: 10
+        }
+      }
+    )
+
+    await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("write a file"),
+          new AIMessage({
+            content: "",
+            tool_calls: [
+              {
+                id: "write-1",
+                name: "write_file",
+                args: { content: "x".repeat(100) },
+                type: "tool_call"
+              }
+            ]
+          }),
+          new ToolMessage({ content: "written", tool_call_id: "write-1" }),
+          new HumanMessage("continue")
+        ],
+        state: {},
+        tools: [countingToolSchema]
+      },
+      handler
+    )
+
+    expect(toolSchemaSerializations).toBe(2)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not re-summarize a prior summary when the state cutoff cannot advance", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("must not run")))
+    const write = vi.fn(async (path: string) => ({ path }))
+    const handler = vi.fn(async (request: SummaryRequest) => {
+      expect(request.messages).toHaveLength(1)
+      expect(String(request.messages[0]?.content)).toContain("PRIOR_SUMMARY_SENTINEL")
+      return new AIMessage("handled")
+    })
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1 },
+      keepTokens: 1,
+      backend: { write, downloadFiles: async () => [] }
+    })
+
+    const result = await middleware.wrapModelCall(
+      {
+        messages: [new HumanMessage("OLD_RAW_MESSAGE_SENTINEL")],
+        state: {
+          _summarizationSessionId: "existing-session",
+          _summarizationEvent: {
+            cutoffIndex: 1,
+            summaryMessage: new HumanMessage({
+              content: `PRIOR_SUMMARY_SENTINEL ${"x".repeat(8_000)}`,
+              additional_kwargs: { lc_source: "summarization" }
+            }),
+            filePath: "/conversation_history/existing-session.md"
+          }
+        },
+        tools: []
+      },
+      handler
+    )
+
+    expect(result).toBeInstanceOf(AIMessage)
+    expect(invoke).not.toHaveBeenCalled()
+    expect(write).not.toHaveBeenCalled()
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not replace a prior summary when only the synthetic summary is evictable", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("must not run")))
+    const handler = vi.fn(async (request: SummaryRequest) => {
+      expect(request.messages).toHaveLength(2)
+      expect(String(request.messages[0]?.content)).toContain("PRIOR_SUMMARY_WITH_TAIL_SENTINEL")
+      expect(String(request.messages[1]?.content)).toBe("RECENT_RAW_TAIL_SENTINEL")
+      return new AIMessage("handled")
+    })
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1 },
+      keepTokens: 100
+    })
+
+    const result = await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("OLD_RAW_MESSAGE_SENTINEL"),
+          new HumanMessage("RECENT_RAW_TAIL_SENTINEL")
+        ],
+        state: {
+          _summarizationSessionId: "existing-session-with-tail",
+          _summarizationEvent: {
+            cutoffIndex: 1,
+            summaryMessage: new HumanMessage({
+              content: `PRIOR_SUMMARY_WITH_TAIL_SENTINEL ${"x".repeat(8_000)}`,
+              additional_kwargs: { lc_source: "summarization" }
+            }),
+            filePath: null
+          }
+        },
+        tools: []
+      },
+      handler
+    )
+
+    expect(result).toBeInstanceOf(AIMessage)
+    expect(invoke).not.toHaveBeenCalled()
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it("advances a chained cutoff when at least one new raw message is evicted", async () => {
+    const invoke = vi.fn(async () => new AIMessage(validSummary("advanced chained cutoff")))
+    const handler = vi.fn(async (request: SummaryRequest) => {
+      expect(request.messages).toHaveLength(2)
+      expect(String(request.messages[1]?.content)).toBe("D")
+      return new AIMessage("handled")
+    })
+    const middleware = createTestMiddleware(invoke, {
+      trigger: { type: "tokens", value: 1 },
+      keepTokens: 1
+    })
+
+    const result = await middleware.wrapModelCall(
+      {
+        messages: [
+          new HumanMessage("A"),
+          new AIMessage("B"),
+          new HumanMessage("C"),
+          new AIMessage("D")
+        ],
+        state: {
+          _summarizationSessionId: "advancing-session",
+          _summarizationEvent: {
+            cutoffIndex: 2,
+            summaryMessage: new HumanMessage({
+              content: "PRIOR_ADVANCING_SUMMARY_SENTINEL",
+              additional_kwargs: { lc_source: "summarization" }
+            }),
+            filePath: null
+          }
+        },
+        tools: []
+      },
+      handler
+    )
+
+    expect(result).toBeInstanceOf(Command)
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(1)
+    const update = (result as Command).update as Record<string, unknown>
+    expect((update._summarizationEvent as { cutoffIndex: number }).cutoffIndex).toBe(3)
+  })
+
   it("enters compaction when a compatible gateway reports a known unbranded overflow", async () => {
     const invoke = vi.fn(async () => new AIMessage(validSummary("MiniMax overflow recovery")))
     const handler = vi

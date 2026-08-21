@@ -52,11 +52,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       true
     )
 
-    const result = await orchestrator.execute(
-      "git push --force",
-      "C:/ai/CmbCoworkAgent",
-      "none"
-    )
+    const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
 
     expect(result.output).toBe("force push ok")
     expect(rawExecute).toHaveBeenCalledTimes(1)
@@ -80,11 +76,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       false
     )
 
-    const result = await orchestrator.execute(
-      "git push --force",
-      "C:/ai/CmbCoworkAgent",
-      "none"
-    )
+    const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
 
     expect(result.exitCode).toBe(1)
     expect(result.output).toContain("Command rejected")
@@ -116,5 +108,328 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(result.output).not.toContain("任务卡片")
     expect(rawExecute).not.toHaveBeenCalled()
     expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it("never offers an unsandboxed retry for an isolated worktree runtime", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true,
+      false,
+      false
+    )
+    const denied = {
+      output: "operation not permitted by sandbox",
+      exitCode: 1,
+      truncated: false
+    }
+
+    const result = await orchestrator.maybeRetryOutsideSandbox(
+      "touch escaped.txt",
+      process.cwd(),
+      "unelevated",
+      denied
+    )
+
+    expect(result).toBe(denied)
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it("fails closed for commit scope options the task-card dialog cannot reproduce", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      false
+    )
+
+    const result = await orchestrator.execute(
+      'git commit --pathspec-from-file=files.txt -m "test"',
+      process.cwd(),
+      "none"
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain("无法安全复现")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it("executes isolated worktree commits in place and blocks pushes", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "committed",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const isolatedGitMutation = vi.fn().mockResolvedValue({
+      output: "broker committed",
+      exitCode: 0,
+      truncated: false
+    })
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true,
+      false,
+      false,
+      isolatedGitMutation
+    )
+
+    const committed = await orchestrator.execute("git commit -m isolated", process.cwd(), "none")
+    const pushed = await orchestrator.execute("git push origin HEAD", process.cwd(), "none")
+
+    expect(committed.output).toBe("broker committed")
+    expect(isolatedGitMutation).toHaveBeenCalledWith("commit", "isolated", process.cwd())
+    expect(requestApproval).not.toHaveBeenCalled()
+    expect(pushed.exitCode).toBe(1)
+    expect(pushed.output).toContain("direct push")
+    expect(rawExecute).not.toHaveBeenCalled()
+
+    for (const command of [
+      "git commit --amend -m rewritten",
+      "git commit --fixup HEAD -m rewritten",
+      "git commit -m partial -- src/a.ts",
+      "git commit -m chained && git status",
+      "git add src/a.ts",
+      "cd subdir && git add -A",
+      "git -C nested-repo commit -m nested",
+      "git -C nested-repo add -A"
+    ]) {
+      const rejected = await orchestrator.execute(command, process.cwd(), "none")
+      expect(rejected.exitCode, command).toBe(1)
+      expect(rejected.output, command).toContain("Command forbidden")
+    }
+    expect(isolatedGitMutation).toHaveBeenCalledTimes(1)
+  })
+
+  it("rejects a bare commit instead of restaging unstaged hunks from indexed files", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      false,
+      false,
+      true,
+      undefined,
+      process.cwd()
+    )
+
+    const result = await orchestrator.execute('git commit -m "test"', process.cwd(), "none")
+
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain("必须指定明确文件路径")
+    expect(result.output).toContain("暂存区/未暂存片段语义")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it("projects explicit paths from a nested Git cwd to the repository operation target", async () => {
+    const workspace = process.cwd()
+    const nestedCwd = path.join(workspace, "src", "main")
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      false,
+      false,
+      true,
+      undefined,
+      workspace
+    )
+
+    await orchestrator.execute(
+      'git commit -m "test" -- agent/tool-orchestrator.ts',
+      nestedCwd,
+      "none"
+    )
+
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(requestApproval.mock.calls[0][0]).toMatchObject({
+      operation: "git_commit",
+      suggestedCommitFilePaths: ["src/main/agent/tool-orchestrator.ts"],
+      suggestedCommitFileBasePath: path.resolve(workspace),
+      suggestedGitWorktreePath: path.resolve(workspace),
+      suggestedCommitFileSelectionSource: "pathspec"
+    })
+    expect(rawExecute).not.toHaveBeenCalled()
+  })
+
+  it("returns the ignored-only auto-dismiss reason to the Agent verbatim", async () => {
+    const workspace = process.cwd()
+    const message = "Agent 指定的文件均被 Git ignore，未发起提交。"
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "approve",
+      tool_call_id: "test",
+      commitResult: { success: false, error: message }
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      false,
+      false,
+      true,
+      undefined,
+      workspace
+    )
+
+    const result = await orchestrator.execute(
+      'git commit -m "test" -- manual-tests/agent-commit-ignore/ignored-secret.log',
+      workspace,
+      "none"
+    )
+
+    expect(result).toMatchObject({ output: message, exitCode: 1 })
+    expect(rawExecute).not.toHaveBeenCalled()
+  })
+
+  it.skipIf(process.platform !== "win32")(
+    "projects MSYS absolute pathspecs from Git Bash on Windows",
+    async () => {
+      const workspace = process.cwd()
+      const msysWorkspace = `/${workspace[0].toLowerCase()}${workspace
+        .slice(2)
+        .replace(/\\/g, "/")}`
+      const rawExecute = vi.fn<RawExecuteFn>()
+      const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+        type: "reject",
+        tool_call_id: "test"
+      } satisfies ApprovalDecision)
+      const orchestrator = new ToolOrchestrator(
+        new ApprovalStore(),
+        rawExecute,
+        requestApproval,
+        false,
+        false,
+        true,
+        undefined,
+        workspace
+      )
+
+      await orchestrator.execute(
+        `git commit -m "test" -- '${msysWorkspace}/src/main/agent/tool-orchestrator.ts'`,
+        workspace,
+        "none",
+        "posix"
+      )
+
+      expect(requestApproval.mock.calls[0][0]).toMatchObject({
+        operation: "git_commit",
+        suggestedCommitFilePaths: ["src/main/agent/tool-orchestrator.ts"]
+      })
+      expect(rawExecute).not.toHaveBeenCalled()
+    }
+  )
+
+  it("never raw-executes a Git alias that can hide a commit in YOLO mode", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true
+    )
+
+    const result = await orchestrator.execute(
+      "git -c alias.ci='!git add -f .env && git commit -m bypass' ci",
+      process.cwd(),
+      "none"
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain("Git aliases")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it("uses the actual POSIX shell syntax before the YOLO raw-execute shortcut", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true
+    )
+
+    const result = await orchestrator.execute(
+      String.raw`echo \" & git commit -m x -- package.json & echo \"`,
+      process.cwd(),
+      "none",
+      "posix"
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain("串联执行")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it("never raw-executes a WSL-wrapped commit in YOLO mode", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true
+    )
+
+    const result = await orchestrator.execute(
+      "wsl git commit -m x -- package.json",
+      process.cwd(),
+      "none",
+      "posix"
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain("wrapped git commit")
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
+  it("rechecks Git routing when an approved retry changes shell syntax", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "approve",
+      tool_call_id: "retry"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true
+    )
+    const command = String.raw`echo \" ; git commit -m x -- package.json ; echo \"`
+
+    const result = await orchestrator.maybeRetryOutsideSandbox(
+      command,
+      process.cwd(),
+      "unelevated",
+      { output: "Permission denied", exitCode: 1, truncated: false },
+      "posix"
+    )
+
+    expect(result.exitCode).toBe(1)
+    expect(result.output).toContain("串联执行")
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(rawExecute).not.toHaveBeenCalled()
   })
 })

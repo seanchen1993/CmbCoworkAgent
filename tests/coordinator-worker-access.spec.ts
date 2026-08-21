@@ -213,7 +213,16 @@ async function testScopedWriteWorkerRejectsSymlinkEscape(): Promise<void> {
     const outsideDir = await mkdtemp(join(tmpdir(), "coordinator-worker-access-outside-"))
     try {
       await mkdir(join(workspace, "src"), { recursive: true })
-      await symlink(outsideDir, join(workspace, "src", "link"), "dir")
+      try {
+        await symlink(outsideDir, join(workspace, "src", "link"), "dir")
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? error.code : undefined
+        if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES")) throw error
+        console.log(
+          "SKIP coordinator worker symlink escape: Windows symlink privilege unavailable"
+        )
+        return
+      }
 
       const tools = applyCoordinatorWorkerFilesystemAccess([fakeTool("write_file")], {
         workload: "write",

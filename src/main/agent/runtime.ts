@@ -47,6 +47,11 @@ import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
+import {
+  assertWorkflowWorktreeGitOperationTarget,
+  commitWorkflowWorktree,
+  stageWorkflowWorktree
+} from "../services/git-worktree"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
 import type {
@@ -306,7 +311,10 @@ import {
   isWorkflowStructuredOutputFatalError,
   type WorkflowSubagentRuntime
 } from "./workflow/subagent"
-import { isWorkflowSubagentThreadOf } from "./workflow/types"
+import {
+  isWorkflowSubagentThreadOf,
+  type WorkflowWorktreeIsolationBoundary
+} from "./workflow/types"
 import {
   createTraceCollectorSafely,
   finishTraceInBackground,
@@ -1120,6 +1128,7 @@ export function createScopedMcpCapabilityService(
   baseContext: {
     workspacePath: string
     threadId: string
+    agentId?: string
     turnId?: string
     pluginOutputDir?: string
     systemId?: string
@@ -1132,6 +1141,8 @@ export function createScopedMcpCapabilityService(
     harnessNodeStatus?: string
     projectCode?: string
     projectDir?: string
+    workspaceHookCwd?: string
+    forceSyncWorkspaceHooks?: boolean
   }
 ): McpCapabilityService {
   const getEffectivePriority = (tool: McpCapabilityTool): number => {
@@ -1355,6 +1366,7 @@ export function createScopedMcpCapabilityService(
         toolArgs: args,
         workspacePath: baseContext.workspacePath,
         sessionId: baseContext.threadId,
+        agentId: baseContext.agentId,
         turnId: baseContext.turnId,
         pluginOutputDir: baseContext.pluginOutputDir,
         systemId: baseContext.systemId,
@@ -1367,6 +1379,8 @@ export function createScopedMcpCapabilityService(
         harnessNodeStatus: baseContext.harnessNodeStatus,
         projectCode: baseContext.projectCode,
         projectDir: baseContext.projectDir,
+        workspaceHookCwd: baseContext.workspaceHookCwd,
+        forceSyncWorkspaceHooks: baseContext.forceSyncWorkspaceHooks,
         pluginId,
         pluginName: pluginId ? getPluginName(pluginId) : undefined
       }
@@ -3714,15 +3728,22 @@ function buildWorkerStopRevisionPrompt(result: HookResult, attempt: number): str
 async function applyWorkerPromptSubmitHooks({
   prompt,
   sessionId,
+  agentId,
   workspacePath,
   onHookResult,
-  metadata
+  metadata,
+  isolatedHookContext
 }: {
   prompt: string
   sessionId: string
+  agentId: string
   workspacePath: string
   onHookResult?: HookResultCallback
   metadata?: Record<string, unknown>
+  isolatedHookContext?: Pick<
+    HookContext,
+    "workspaceHookCwd" | "forceSyncWorkspaceHooks"
+  >
 }): Promise<string> {
   let effectivePrompt = prompt
   const promptSubmitResult = await runHooksEnriched(
@@ -3732,7 +3753,9 @@ async function applyWorkerPromptSubmitHooks({
       toolArgs: { message: prompt, ...(metadata ?? {}) },
       userPrompt: prompt,
       workspacePath,
-      sessionId
+      sessionId,
+      agentId,
+      ...isolatedHookContext
     },
     onHookResult
   )
@@ -3771,15 +3794,18 @@ function observeWorkerSkillUsage(
 
 async function runWorkerStopHooksWithRevision({
   sessionId,
+  agentId,
   workspacePath,
   abortSignal,
   getStopContext,
   runRevision,
   sendNotice,
   sendError,
-  onHookResult
+  onHookResult,
+  isolatedHookContext
 }: {
   sessionId: string
+  agentId: string
   workspacePath: string
   abortSignal: AbortSignal
   getStopContext: () => {
@@ -3792,6 +3818,10 @@ async function runWorkerStopHooksWithRevision({
   sendNotice: (message: string) => void
   sendError: (message: string) => void
   onHookResult?: HookResultCallback
+  isolatedHookContext?: Pick<
+    HookContext,
+    "workspaceHookCwd" | "forceSyncWorkspaceHooks"
+  >
 }): Promise<boolean> {
   let revisionCount = 0
   while (!abortSignal.aborted) {
@@ -3801,7 +3831,9 @@ async function runWorkerStopHooksWithRevision({
       {
         workspacePath,
         sessionId,
-        stopContext: getStopContext()
+        agentId,
+        stopContext: getStopContext(),
+        ...isolatedHookContext
       },
       onHookResult
     ).catch((error) => {
@@ -4003,6 +4035,8 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 export interface CreateAgentRuntimeOptions {
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
+  /** Stable identity exposed to hooks for subagent/worker attribution. */
+  agentId?: string
   /** Physical foreground run token allowed to drain the current-run steer queue. */
   currentRunMessageQueueOwnerToken?: string
   /** Optional UI thread ID for approval prompts. Async worker runtimes keep their own checkpoint thread but surface approvals on the parent thread UI. */
@@ -4011,6 +4045,10 @@ export interface CreateAgentRuntimeOptions {
   modelId?: string
   /** Workspace path - REQUIRED for agent to operate on files */
   workspacePath: string
+  /** Immutable checkout/git boundary for a dynamic-workflow worktree agent.
+   * Its workspaceRoot moves only the agent's file view; workspacePath remains
+   * the host identity for hooks, thread data, memory and the agent registry. */
+  worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /** Extra content appended to the system prompt (e.g. HEARTBEAT.md context) */
   extraSystemPrompt?: string
   /** Plugin-provided runtime context for skill artifact paths and feature bindings. */
@@ -4172,6 +4210,7 @@ export type AgentRuntime = ReturnType<typeof createAgent>
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<DeepAgent> {
   const {
     threadId,
+    agentId,
     approvalThreadId: requestedApprovalThreadId,
     workspacePath,
     modelId,
@@ -4237,6 +4276,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     throw new Error(
       "Workspace path is required. Please select a workspace folder before running the agent."
     )
+  }
+
+  // The directory this agent's FILE TOOLS are rooted at. Equal to workspacePath for
+  // every ordinary runtime; a private git worktree for an isolated workflow agent.
+  // Host-side derivations (hooks, thread data, memory, registry, adoption) keep
+  // using workspacePath; the validated isolation boundary owns the file root.
+  const fileRoot = options.worktreeIsolation?.workspaceRoot ?? workspacePath
+  if (options.worktreeIsolation) {
+    console.log("[Runtime] Isolated file root:", fileRoot, "(host workspace:", workspacePath + ")")
   }
 
   const runtimeThreadMetadata: Record<string, unknown> = (() => {
@@ -4409,6 +4457,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const codexExePath = join(rgDir, "codex.exe")
   if (process.platform === "win32") await ensureCodexExe(codexExePath)
   const codexExists = process.platform === "win32" && (await pathExists(codexExePath))
+  // Worktrees follow the user's normal sandbox setting. The independent checkout,
+  // file root and Git guard remain active when it is "none"; a configured Codex
+  // sandbox adds defense in depth but is not required to use worktree isolation.
   const windowsSandbox = process.platform === "win32" ? getWindowsSandboxMode() : "none"
   console.log(
     `[Runtime] codex.exe: ${codexExePath}, exists: ${codexExists}, sandboxMode: ${windowsSandbox}`
@@ -4418,7 +4469,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log(`[Runtime] Loaded ${baseHooks.length} base enabled hooks`)
 
   const backend = new LocalSandbox({
-    rootDir: workspacePath,
+    // File tools are rooted in the independent checkout. Shell starts there and
+    // keeps the worktree Git guard; the user's configured OS sandbox, if any,
+    // remains an additional execution policy rather than a worktree prerequisite.
+    rootDir: fileRoot,
+    agentId,
+    worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
     timeout: 60_000,
     maxOutputBytes,
@@ -4451,6 +4507,15 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     skillHookKeys,
     skillUseTracker
   })
+  const isolatedWorkspaceHookContext: Pick<
+    HookContext,
+    "workspaceHookCwd" | "forceSyncWorkspaceHooks"
+  > = options.worktreeIsolation
+    ? {
+        workspaceHookCwd: fileRoot,
+        forceSyncWorkspaceHooks: true
+      }
+    : {}
 
   // Read-only runtimes (registry shellAccess "read_only" OR coordinator workload
   // "read_only") gate execute per-command via isReadOnlyShellCommand. The tool
@@ -4565,6 +4630,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         toolArgs: { command: req.command, reason: req.reason, filePath: req.filePath },
         workspacePath,
         sessionId: approvalThreadId,
+        agentId,
         turnId: hookTurnId,
         pluginOutputDir,
         systemId,
@@ -4577,6 +4643,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         harnessNodeStatus,
         projectCode,
         projectDir,
+        ...isolatedWorkspaceHookContext,
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
         // Lets a Notification hook know whether the user is in YOLO mode (where
         // approvals only fire for sandbox-escape) vs the default approve flow.
@@ -4613,7 +4680,32 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     rawExecute,
     requestApproval,
     yoloMode,
-    options.autoApproveFileEdits === true
+    options.autoApproveFileEdits === true,
+    !options.worktreeIsolation,
+    options.worktreeIsolation
+      ? async (operation, message, cwd) => {
+          const boundary = options.worktreeIsolation!
+          try {
+            await assertWorkflowWorktreeGitOperationTarget(boundary, cwd)
+            const output =
+              operation === "stage"
+                ? await stageWorkflowWorktree(boundary, options.abortSignal)
+                : await commitWorkflowWorktree(boundary, message ?? "", options.abortSignal)
+            return {
+              output: output || "isolated worktree changes staged",
+              exitCode: 0,
+              truncated: false
+            }
+          } catch (error) {
+            return {
+              output: error instanceof Error ? error.message : String(error),
+              exitCode: 1,
+              truncated: false
+            }
+          }
+        }
+      : undefined,
+    workspacePath
   )
   backend.setOrchestrator(orchestrator)
 
@@ -4631,7 +4723,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
-  let systemPrompt = getSystemPrompt(workspacePath, windowsSandbox, {
+  // The prompt must name the directory the agent actually works in, or an isolated
+  // agent would be told the host workspace is its root and write outside its
+  // worktree (the sandbox would refuse, so it would just fail confusingly).
+  let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
     includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
@@ -4640,7 +4735,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   let agentsPrompt: AgentsPromptRuntimeResult = {
     type: "workspace",
     prompt: null,
-    projectRoot: workspacePath,
+    projectRoot: fileRoot,
     loadedPaths: [],
     truncated: false
   }
@@ -4657,7 +4752,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       frameworkAdditionalAgentsWorkspacePaths.length > 0 || onAgentsPromptLoadStatus
         ? await loadAgentsPromptForWorkspaces(
             {
-              primaryWorkspacePath: workspacePath,
+              // AGENTS.md is tracked content, so an isolated agent reads the copy
+              // on ITS branch — the conventions that apply to the code it edits.
+              primaryWorkspacePath: fileRoot,
               additionalWorkspacePaths: frameworkAdditionalAgentsWorkspacePaths,
               includeGlobal: true
             },
@@ -4667,7 +4764,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
               totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
             }
           )
-        : await loadAgentsPromptForWorkspace(workspacePath, {
+        : await loadAgentsPromptForWorkspace(fileRoot, {
             globalMaxBytes: DEFAULT_GLOBAL_AGENTS_MAX_BYTES,
             projectMaxBytes: DEFAULT_AGENTS_MAX_BYTES,
             totalMaxBytes: DEFAULT_AGENTS_MAX_BYTES
@@ -4687,7 +4784,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         })
       }
     } else {
-      console.log("[Runtime] No AGENTS.md files discovered for workspace:", workspacePath)
+      console.log("[Runtime] No AGENTS.md files discovered for workspace:", fileRoot)
     }
   } else if (enableAgentsPrompt && normalizedHarnessAgentsPrompt) {
     console.log(
@@ -4760,13 +4857,13 @@ ${filesystemTimeContextLines}
 ${subagentShellGuidance}
 
 ### Available Tools
-- ls: list files in a directory (e.g., ls("${workspacePath}"))
+- ls: list files in a directory (e.g., ls("${fileRoot}"))
 - read_file: read a file from the filesystem
 - write_file: write to a file in the filesystem
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
 - grep: search for literal text within files (NOT regex). Do NOT use "|", ".*" or other regex syntax — call grep once per term instead.
-The workspace root is: ${workspacePath}`
+The workspace root is: ${fileRoot}`
 
   const skillLifecycleRootSources = await getEnabledSkillsSources()
   const skillsSources = await getEnabledSkillMiddlewareSources()
@@ -4830,6 +4927,7 @@ The workspace root is: ${workspacePath}`
     {
       workspacePath,
       threadId,
+      agentId,
       pluginOutputDir,
       systemId,
       pluginWorkspace,
@@ -4841,7 +4939,8 @@ The workspace root is: ${workspacePath}`
       harnessNodeStatus,
       projectCode,
       projectDir,
-      turnId: hookTurnId
+      turnId: hookTurnId,
+      ...isolatedWorkspaceHookContext
     }
   )
   // "Constrained" coordinator workers = the workload-based read_only/verify/scoped
@@ -4966,9 +5065,10 @@ The workspace root is: ${workspacePath}`
   // Conditionally inject Java LSP tool
   try {
     const lspConfig = getLspConfig()
-    if (lspConfig.enabled && detectJavaProject(workspacePath)) {
-      extraTools.push(createLspTool({ workspacePath }))
-      console.log("[Runtime] Java LSP tool injected for:", workspacePath)
+    // LSP indexes the sources the agent edits, so it follows the file root.
+    if (lspConfig.enabled && detectJavaProject(fileRoot)) {
+      extraTools.push(createLspTool({ workspacePath: fileRoot }))
+      console.log("[Runtime] Java LSP tool injected for:", fileRoot)
     }
   } catch (e) {
     console.warn("[Runtime] Failed to check LSP config:", e)
@@ -5017,6 +5117,7 @@ The workspace root is: ${workspacePath}`
   }
 
   if (isWorkflowMode) {
+    const worktreeSubagentThreads = new Set<string>()
     // Dynamic Workflows: the model writes a JS orchestration script; the run
     // executes in the BACKGROUND (detached from this turn — the manager owns
     // its abort), each agent() runs as a one-shot leaf runtime on its own
@@ -5050,11 +5151,20 @@ The workspace root is: ${workspacePath}`
             // defaults `?? "full"` below), so it still keeps them.
             const restrictedRole =
               subagentOptions.shellAccess === "read_only" || subagentOptions.shellAccess === "none"
+            // An `isolation: "worktree"` agent works inside a private checkout. Only
+            // its FILE ROOT moves — `workspacePath` below stays the run's workspace
+            // so hook configuration, thread data, memory, and registries keep the
+            // same project identity. The hook scripts needed by relative workspace
+            // hook commands are materialized into the private checkout at creation.
+            const worktreeIsolation = subagentOptions.worktreeIsolation
+            const subagentFileRoot = worktreeIsolation?.workspaceRoot ?? workspacePath
             const subagentRuntime = await createAgentRuntime({
               threadId: subagentOptions.threadId,
+              agentId: subagentOptions.agentId,
               actionStationarityTurnId: subagentOptions.threadId,
               approvalThreadId: threadId,
               workspacePath,
+              ...(worktreeIsolation ? { worktreeIsolation } : {}),
               modelId: subagentOptions.modelId,
               extraSystemPrompt: subagentOptions.extraSystemPrompt,
               noSchedulerTool: true,
@@ -5083,7 +5193,11 @@ The workspace root is: ${workspacePath}`
                     filesystemAccess: {
                       disallowedTools: subagentOptions.disallowedTools ?? [],
                       shellAccess: subagentOptions.shellAccess ?? "full",
-                      workspacePath
+                      // The access boundary must be the agent's OWN root, not the
+                      // host workspace: for an isolated agent the two differ, and
+                      // using the host here would widen the boundary to a tree the
+                      // agent is not supposed to touch.
+                      workspacePath: subagentFileRoot
                     }
                   }
                 : {}),
@@ -5095,17 +5209,25 @@ The workspace root is: ${workspacePath}`
               onFailureFuseNotice,
               hookTurnId,
               additionalTools: subagentOptions.additionalTools,
-              // All subagents of this run share the parent thread's tool-
-              // concurrency queue so their file writes serialize across the
-              // run (no two parallel agents clobber the same file); reads
-              // still run concurrently. Also serializes with any foreground
-              // edit the user makes on this thread while the run is in flight.
-              toolConcurrencyQueueId: threadId,
+              // Subagents SHARING the workspace share the parent thread's tool-
+              // concurrency queue so their file writes serialize across the run (no
+              // two parallel agents clobber the same file); reads still run
+              // concurrently. Also serializes with any foreground edit the user
+              // makes on this thread while the run is in flight.
+              //
+              // An ISOLATED agent gets its own queue, keyed on its worktree. Its
+              // writes cannot collide with anything outside that directory, so
+              // holding the shared lock would serialize a fan-out that is safe to
+              // run in parallel — which is the entire point of asking for a
+              // worktree. Writes WITHIN one worktree stay serialized, because the
+              // key is the worktree and one worktree hosts exactly one agent.
+              toolConcurrencyQueueId: worktreeIsolation?.workspaceRoot ?? threadId,
               // acceptEdits: the user approved the whole workflow at launch, so
               // its background subagents must not re-prompt per file edit
               // (shell execution stays gated).
               autoApproveFileEdits: true
             })
+            if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
             return subagentRuntime as unknown as WorkflowSubagentRuntime
           },
           cleanupThread: async (workflowThreadId: string): Promise<void> => {
@@ -5114,12 +5236,22 @@ The workspace root is: ${workspacePath}`
             // outlive the run (coordinator workers cancel theirs the same way via
             // cancelBackgroundTasks — without this a backgrounded process leaks
             // CPU/memory/file writes after the workflow completes or is cancelled).
-            LocalSandbox.cancelBackgroundTasks(workflowThreadId)
-            const cleanupResults = await Promise.allSettled([
+            const processCleanupResults = worktreeSubagentThreads.delete(workflowThreadId)
+              ? await Promise.allSettled([
+                  LocalSandbox.cancelBackgroundTasksAndWait(workflowThreadId)
+                ])
+              : (LocalSandbox.cancelBackgroundTasks(workflowThreadId), [])
+            for (const result of processCleanupResults) {
+              if (result.status === "rejected") {
+                console.warn("[Workflow] Subagent process cleanup error:", result.reason)
+              }
+            }
+            // Release resources after any worktree-specific process drain.
+            const resourceCleanupResults = await Promise.allSettled([
               LocalSandbox.revokeGrantedAclsForRun(workflowThreadId),
               closeCheckpointer(workflowThreadId)
             ])
-            for (const result of cleanupResults) {
+            for (const result of resourceCleanupResults) {
               if (result.status === "rejected") {
                 console.warn("[Workflow] Subagent cleanup error:", result.reason)
               }
@@ -5186,6 +5318,7 @@ The workspace root is: ${workspacePath}`
   const toolHookMiddleware = createToolHookMiddleware({
     workspacePath,
     threadId: options.threadId,
+    agentId,
     hookScope,
     resolveHooksForContext,
     onHookResult,
@@ -5201,6 +5334,7 @@ The workspace root is: ${workspacePath}`
     harnessNodeStatus,
     projectCode,
     projectDir,
+    ...isolatedWorkspaceHookContext,
     skipToolNames: toolHookExclusions,
     onToolFailureDecision: hookTurnId
       ? ({ toolName, toolCallId, toolArgs, signal }) =>
@@ -5413,6 +5547,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     // derive from these LocalSandbox/runtime options). SESSION_ID intentionally
     // stays the worker thread id and is not part of this bundle.
     const workerHarnessContext = {
+      agentId: workerInput.workerId,
       systemId,
       pluginRoot,
       pluginId,
@@ -5438,8 +5573,10 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
       const effectiveWorkerPrompt = await applyWorkerPromptSubmitHooks({
         prompt: workerInput.prompt,
         sessionId: workerInput.workerThreadId,
+        agentId: workerInput.workerId,
         workspacePath,
         onHookResult: workerOnHookResult,
+        isolatedHookContext: isolatedWorkspaceHookContext,
         metadata: {
           coordinatorWorkerId: workerInput.workerId,
           coordinatorWorkerRole: workerInput.role,
@@ -5774,6 +5911,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       let workerStopHookFailure: string | undefined
       const stopPassed = await runWorkerStopHooksWithRevision({
         sessionId: workerInput.workerThreadId,
+        agentId: workerInput.workerId,
         workspacePath,
         abortSignal: workerInput.abortSignal,
         getStopContext: () => ({
@@ -5799,7 +5937,8 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
           workerStopHookFailure = message
           console.warn("[CoordinatorWorker][StopHook]", message)
         },
-        onHookResult: workerOnHookResult
+        onHookResult: workerOnHookResult,
+        isolatedHookContext: isolatedWorkspaceHookContext
       })
       if (!stopPassed) {
         throw new Error(workerStopHookFailure ?? "Stop hook blocked worker completion.")
@@ -6196,6 +6335,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       const context: HookContext = {
         workspacePath,
         sessionId: threadId,
+        agentId,
         turnId: hookTurnId,
         pluginOutputDir,
         systemId,
@@ -6208,6 +6348,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
         harnessNodeStatus,
         projectCode,
         projectDir,
+        ...isolatedWorkspaceHookContext,
         toolName: input.toolName,
         toolArgs:
           input.toolArgs && typeof input.toolArgs === "object" && !Array.isArray(input.toolArgs)
@@ -6237,7 +6378,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     "[Runtime] Final skills passed to createDeepAgent:",
     JSON.stringify(mainSkillSources, null, 2)
   )
-  console.log("[Runtime] Agent created with LocalSandbox at:", workspacePath)
+  console.log("[Runtime] Agent created with LocalSandbox at:", fileRoot)
   return agent
 }
 

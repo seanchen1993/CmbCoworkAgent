@@ -17,13 +17,12 @@ export default defineConfig({
       "src/main/**/*.test.ts",
       "src/shared/**/*.test.ts",
       "src/renderer/src/components/panels/git-panel-file-tree.test.ts",
+      "src/renderer/src/lib/agent-git-commit-selection.test.ts",
       "src/renderer/src/components/dashboard/project-mode-export.test.ts",
       "src/renderer/src/components/update/release-notes.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",
-      "tests/close-to-tray.spec.ts",
-      "tests/browser/**/*.test.ts",
-      "src/renderer/src/components/panels/git-panel-file-tree.test.ts",
-      "src/renderer/src/lib/**/*.test.ts"
+      "src/renderer/src/lib/apple-intelligence-glow.test.ts",
+      "tests/close-to-tray.spec.ts"
     ]
   }
 })

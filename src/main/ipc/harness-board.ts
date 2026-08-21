@@ -21,7 +21,8 @@ import {
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
-  updateHarnessProjectMetadata
+  updateHarnessProjectMetadata,
+  resolveHarnessRunDetailCurrentStage
 } from "../harness-board/service"
 import {
   getEnterpriseProjectDetails,
@@ -34,6 +35,10 @@ import {
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
+import {
+  markHarnessStageAttributionDirty,
+  primeHarnessStageAttribution
+} from "../services/harness-stage-attribution"
 import type {
   HarnessDeployUnitSearchInput,
   HarnessDeployUnitSearchResult,
@@ -119,7 +124,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:createProject",
     async (_event, input: HarnessProjectCreateInput): Promise<HarnessProjectMetadata> => {
-      const created = createHarnessProject(input)
+      const created = await createHarnessProject(input)
       // 立即补一次快照上报，避免新建项目要等下一轮 20 分钟定时扫描才出现在运营面板。
       // 尽力而为：内部已 try/catch，不抛错、不阻断创建结果返回。
       void reportProjectSnapshotNow(created.projectId)
@@ -184,7 +189,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:createFeature",
     async (_event, input: HarnessFeatureCreateInput): Promise<HarnessFeatureCreateResult> => {
-      const result = createHarnessFeature(input)
+      const result = await createHarnessFeature(input)
       // 新建 feature 后立即补一次该项目的快照上报，让面板尽快反映新特性，无需等定时扫描。
       void reportProjectSnapshotNow(result.projectId)
       return result
@@ -204,7 +209,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:getDynamicWorkflowConfig",
     async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
-      return getHarnessDynamicWorkflowConfig(projectId)
+      return await getHarnessDynamicWorkflowConfig(projectId)
     }
   )
 
@@ -269,7 +274,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:getProjectDetail",
     async (_event, projectId: string): Promise<HarnessProjectDetailViewModel> => {
-      const detail = getHarnessProjectDetail(projectId)
+      const detail = await getHarnessProjectDetail(projectId)
       startHarnessWatchRefs(
         `project:${projectId}`,
         detail.project.projectRootPath,
@@ -287,7 +292,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     ): Promise<Record<string, HarnessProjectDetailViewModel>> => {
       const projectIds = Array.isArray(payload) ? payload : payload.projectIds
       const shouldWatchRefs = Array.isArray(payload) ? true : payload.watchRefs !== false
-      const details = getHarnessProjectDetails(projectIds)
+      const details = await getHarnessProjectDetails(projectIds)
       if (shouldWatchRefs) {
         for (const [projectId, detail] of Object.entries(details)) {
           startHarnessWatchRefs(
@@ -307,11 +312,20 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       _event,
       payload: { projectId: string; slug: string }
     ): Promise<HarnessRunDetailViewModel> => {
-      const detail = getHarnessRunDetail(payload.projectId, payload.slug)
+      const detail = await getHarnessRunDetail(payload.projectId, payload.slug)
+      // Feature-page refreshes already paid for an authoritative feature_status
+      // query, so reuse that result instead of spawning another adapter lookup
+      // before the next code generation.
+      primeHarnessStageAttribution(
+        payload.projectId,
+        payload.slug,
+        resolveHarnessRunDetailCurrentStage(detail)
+      )
       startHarnessWatchRefs(
         `run:${payload.projectId}:${payload.slug}`,
         detail.project.projectRootPath,
-        detail.run.watchRefs
+        detail.run.watchRefs,
+        { projectId: payload.projectId, featureSlug: payload.slug }
       )
       return detail
     }
@@ -320,7 +334,9 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:skipNode",
     async (_event, input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> => {
-      return skipHarnessRunNode(input)
+      const result = await skipHarnessRunNode(input)
+      markHarnessStageAttributionDirty(result.projectId, result.slug)
+      return result
     }
   )
 

@@ -143,8 +143,13 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(chat, "AgentModeSwitcher", "ChatContainer imports mode switcher")
   assertIncludes(
     chat,
-    "showWorkflow={!isProjectModeAgentContext}",
-    "project mode hides Workflow while normal chat keeps it"
+    "const disableWorkflowModeOption = false",
+    "project mode does not disable Workflow"
+  )
+  assertMatches(
+    chat,
+    /<AgentModeSwitcher\s+showWorkflow\b/,
+    "project mode and normal chat both show Workflow"
   )
   assertIncludes(
     chat,
@@ -792,9 +797,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "enableTaskTool",
     "project sessions do not layer a task-tool switch over the selected execution mode"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "{ featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }",
+    /console\.warn\("\[HarnessBoard\] Failed to build harness agent context:"[\s\S]{0,800}?\.\.\.\(harnessFeature[\s\S]{0,300}?featureId:\s*harnessFeature\.slug,[\s\S]{0,200}?harnessProjectId:\s*harnessFeature\.projectId,/,
     "Harness feature failures preserve project-mode identity for runtime policy"
   )
   assertOccurrenceCount(
@@ -2953,6 +2958,108 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
 }
 
+async function testHookAgentIdentityPlumbing(): Promise<void> {
+  const runtime = await readProjectFile("src/main/agent/runtime.ts")
+  const workflowSubagent = await readProjectFile("src/main/agent/workflow/subagent.ts")
+  const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
+  const subagentContext = await readProjectFile("src/main/hooks/subagent-context.ts")
+
+  assertIncludes(
+    runtime,
+    "agentId?: string",
+    "runtime accepts an optional hook agent identity"
+  )
+  assertIncludes(
+    runtime,
+    "rootDir: fileRoot,\n    agentId,",
+    "runtime passes agent identity into LocalSandbox"
+  )
+  assertIncludes(
+    runtime,
+    "threadId: options.threadId,\n    agentId,",
+    "runtime passes agent identity into tool-hook middleware"
+  )
+  assertIncludes(
+    runtime,
+    "agentId: baseContext.agentId",
+    "runtime passes agent identity into MCP hook contexts"
+  )
+  assertIncludes(
+    runtime,
+    "const workerHarnessContext = {\n      agentId: workerInput.workerId,",
+    "coordinator worker runtimes retain the worker id across rebuilds"
+  )
+  assertOccurrenceCount(
+    runtime,
+    "agentId: workerInput.workerId",
+    3,
+    "coordinator prompt, runtime, and Stop hooks share the worker id"
+  )
+  assertIncludes(
+    workflowSubagent,
+    'const agentId = `${request.runId}:agent:${request.agentIndex}`',
+    "workflow leaves derive a stable run-scoped agent id"
+  )
+  assertIncludes(
+    runtime,
+    "agentId: subagentOptions.agentId",
+    "workflow leaf runtime receives the stable agent id"
+  )
+  assertIncludes(
+    agentIpc,
+    "buildSubagentStopHookContext({",
+    "SubagentStop production path uses the tested context builder"
+  )
+  assertIncludes(
+    agentIpc,
+    "buildSubagentStartHookContext({",
+    "SubagentStart production path uses the tested context builder"
+  )
+  assertOccurrenceCount(
+    agentIpc,
+    "maybeRunSubagentLifecycleHooksFromStreamPayload({",
+    3,
+    "initial, resume, and interrupt-continue streams share the paired lifecycle bridge"
+  )
+  assertMatches(
+    agentIpc,
+    /const processMessagesSideEffects = async[\s\S]{0,300}?await maybeRunSubagentLifecycleHooksFromStreamPayload\(\{[\s\S]{0,900}?\}\)\s*\n\s*try \{/,
+    "initial stream runs lifecycle control flow outside the best-effort tracing catch"
+  )
+  assertMatches(
+    agentIpc,
+    /const switchToNextFailoverCandidate = async[\s\S]{0,180}?if \(isHookHaltError\(error\)\) throw error/,
+    "goal-continuation failover never reclassifies a Hook halt as a model failure"
+  )
+  assertIncludes(
+    agentIpc,
+    "catch (midStreamErr) {\n            if (isHookHaltError(midStreamErr)) throw midStreamErr",
+    "initial stream bypasses disconnect retry for Hook halts"
+  )
+  assertOccurrenceCount(
+    agentIpc,
+    "catch (midErr) {\n            if (isHookHaltError(midErr)) throw midErr",
+    2,
+    "resume and interrupt-continue bypass disconnect retry for Hook halts"
+  )
+  assertMatches(
+    agentIpc,
+    /commitPendingResumeMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*resumeSubagentStartFired/,
+    "resume stream tracks and dispatches SubagentStart independently"
+  )
+  assertMatches(
+    agentIpc,
+    /commitPendingInterruptMessageSideEffects[\s\S]{0,1200}?firedStartIds:\s*interruptSubagentStartFired/,
+    "interrupt-continue stream tracks and dispatches SubagentStart independently"
+  )
+  assertOccurrenceCount(
+    subagentContext,
+    "agentId: input.toolCallId",
+    2,
+    "SubagentStart and SubagentStop builders use the task tool-call id as agent id"
+  )
+}
+
 async function run(): Promise<void> {
   await testIpcTypesExposeAgentMode()
   console.log("PASS coordinator IPC types")
@@ -2964,6 +3071,8 @@ async function run(): Promise<void> {
   console.log("PASS coordinator workspace switch guard")
   await testRuntimeKeepsNormalAndCoordinatorSeparate()
   console.log("PASS coordinator runtime isolation")
+  await testHookAgentIdentityPlumbing()
+  console.log("PASS hook agent identity plumbing")
 }
 
 run().catch((error: Error) => {

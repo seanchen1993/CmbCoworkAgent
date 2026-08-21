@@ -29,7 +29,8 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
-import { readdir, rm, mkdir , readFile, writeFile } from "fs/promises"
+import { normalizeChatScrollSettings, type ChatScrollSettings } from "../shared/chat-scroll"
+import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type {
@@ -61,7 +62,6 @@ import {
   readPluginManifest
 } from "./plugins/manifest"
 import { getBundledBuiltinModelApiKey } from "./models/builtin-credential"
-import type { BrowserCdpConfig } from "../shared/browser-types"
 import {
   calculateMaxCompatibleOutputTokens,
   calculateSummarizationTriggerTokens
@@ -1452,6 +1452,7 @@ export function setStoredDefaultModelId(modelId: string): void {
 }
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+const CHAT_SCROLL_SETTINGS_KEY = "chatScrollSettings"
 
 export function getWindowCloseBehavior(): WindowCloseBehavior {
   try {
@@ -1465,6 +1466,23 @@ export function getWindowCloseBehavior(): WindowCloseBehavior {
 export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
   const normalized = normalizeWindowCloseBehavior(behavior)
   getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
+  return normalized
+}
+
+export function getChatScrollSettings(): ChatScrollSettings {
+  try {
+    return normalizeChatScrollSettings(
+      getSettingsStore().get(CHAT_SCROLL_SETTINGS_KEY, {}) as Partial<ChatScrollSettings>
+    )
+  } catch (error) {
+    console.warn("[Storage] Failed to load chat scroll settings; using defaults:", error)
+    return normalizeChatScrollSettings({})
+  }
+}
+
+export function setChatScrollSettings(settings: Partial<ChatScrollSettings>): ChatScrollSettings {
+  const normalized = normalizeChatScrollSettings(settings)
+  getSettingsStore().set(CHAT_SCROLL_SETTINGS_KEY, normalized)
   return normalized
 }
 
@@ -2400,81 +2418,6 @@ export function resetLspConfig(): import("./types").LspConfig {
   const defaults = defaultLspConfig()
   writeFileSync(LSP_CONFIG_FILE, JSON.stringify(defaults, null, 2))
   return defaults
-}
-
-// ── Browser CDP Config ───────────────────────────────────────────────────────
-
-const BROWSER_CDP_CONFIG_FILE = join(OPENWORK_DIR, "browser-cdp-config.json")
-
-function defaultBrowserCdpConfig(): BrowserCdpConfig {
-  return {
-    enabled: false,
-    profileImportEnabled: false
-  }
-}
-
-function parseBrowserCdpConfigRecord(parsed: Record<string, unknown>): BrowserCdpConfig {
-  const defaults = defaultBrowserCdpConfig()
-  return {
-    enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
-    profileImportEnabled:
-      typeof parsed.profileImportEnabled === "boolean"
-        ? parsed.profileImportEnabled
-        : defaults.profileImportEnabled
-  }
-}
-
-export function getBrowserCdpConfig(): BrowserCdpConfig {
-  getOpenworkDir()
-  if (!existsSync(BROWSER_CDP_CONFIG_FILE)) return defaultBrowserCdpConfig()
-  try {
-    const content = readFileSync(BROWSER_CDP_CONFIG_FILE, "utf-8")
-    const parsed = JSON.parse(content) as Record<string, unknown>
-    return parseBrowserCdpConfigRecord(parsed)
-  } catch {
-    return defaultBrowserCdpConfig()
-  }
-}
-
-export async function getBrowserCdpConfigAsync(): Promise<BrowserCdpConfig> {
-  await mkdir(OPENWORK_DIR, { recursive: true })
-  try {
-    const content = await readFile(BROWSER_CDP_CONFIG_FILE, "utf-8")
-    const parsed = JSON.parse(content) as Record<string, unknown>
-    return parseBrowserCdpConfigRecord(parsed)
-  } catch {
-    return defaultBrowserCdpConfig()
-  }
-}
-
-export function saveBrowserCdpConfig(updates: Partial<BrowserCdpConfig>): BrowserCdpConfig {
-  getOpenworkDir()
-  const current = getBrowserCdpConfig()
-  const next: BrowserCdpConfig = {
-    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
-    profileImportEnabled:
-      typeof updates.profileImportEnabled === "boolean"
-        ? updates.profileImportEnabled
-        : current.profileImportEnabled
-  }
-  writeFileSync(BROWSER_CDP_CONFIG_FILE, JSON.stringify(next, null, 2))
-  return next
-}
-
-export async function saveBrowserCdpConfigAsync(
-  updates: Partial<BrowserCdpConfig>
-): Promise<BrowserCdpConfig> {
-  await mkdir(OPENWORK_DIR, { recursive: true })
-  const current = await getBrowserCdpConfigAsync()
-  const next: BrowserCdpConfig = {
-    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
-    profileImportEnabled:
-      typeof updates.profileImportEnabled === "boolean"
-        ? updates.profileImportEnabled
-        : current.profileImportEnabled
-  }
-  await writeFile(BROWSER_CDP_CONFIG_FILE, JSON.stringify(next, null, 2))
-  return next
 }
 
 // ── Plugins ──

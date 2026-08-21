@@ -4,9 +4,10 @@
  * Extends FilesystemBackend with command execution capability.
  * Commands run in the workspace directory with configurable timeout and output limits.
  *
- * Security note: This has NO built-in safeguards except for the human-in-the-loop
- * middleware provided by the agent framework. All command approval should be
- * handled via HITL configuration.
+ * Security note: ordinary runtimes rely on the human-in-the-loop middleware and
+ * configured OS sandbox. Dynamic-workflow linked worktrees always install their
+ * file-root and Git guard; an available OS sandbox is additional defense in depth,
+ * not a prerequisite for using the independent checkout.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks"
@@ -46,10 +47,14 @@ import type { ToolOrchestrator } from "./tool-orchestrator"
 import {
   assessCommandSafety,
   classifyCommandConcurrency,
+  containsGitAddCommand,
+  getWorktreeShellIsolationViolation,
   isGitCommitCommand,
   isGitPushCommand,
-  isReadOnlyShellCommand
+  isReadOnlyShellCommand,
+  type CommandShellSyntax
 } from "./exec-policy"
+import type { WorkflowWorktreeIsolationBoundary } from "./workflow/types"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import {
   areElevatedRootsPreparedAsync,
@@ -85,11 +90,18 @@ import type { SkillLifecycleMatch, SkillLifecycleRegistry } from "./skill-lifecy
 import { getSkillActivationKey } from "./skill-lifecycle/activation"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
+import { withoutGitRepositoryOverrides } from "../services/git-environment"
 import { isMemoryStoragePath } from "../memory/paths"
 import {
+  isCodeFile,
   recordGen as recordAdoptionGen,
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
+import {
+  getHarnessStageAttributionForCodeGeneration,
+  markHarnessStageAttributionDirty,
+  type HarnessStageAttribution
+} from "../services/harness-stage-attribution"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
@@ -271,6 +283,8 @@ function tomlBasicString(value: string): string {
 export interface LocalSandboxOptions {
   /** Root directory for file operations and command execution (default: process.cwd()) */
   rootDir?: string
+  /** Dynamic-workflow checkout identity and best-effort Git/path guards. */
+  worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /** Enable virtual path mode where "/" maps to rootDir (default: false) */
   virtualMode?: boolean
   /** Maximum file size in MB for file operations (default: 10) */
@@ -324,6 +338,8 @@ export interface LocalSandboxOptions {
   pluginOutputDir?: string
   /** Optional system identifier exposed to child processes and hooks as SYSTEM_ID. */
   systemId?: string
+  /** Optional subagent identifier exposed to hooks as AGENT_ID. */
+  agentId?: string
   /** Optional harness plugin root exposed to child processes as PLUGIN_ROOT. */
   pluginRoot?: string
   /** Optional harness plugin identifier exposed to child processes as PLUGIN_ID. */
@@ -353,6 +369,10 @@ export interface LocalSandboxOptions {
 interface ExecuteRawOptions {
   background?: boolean
   cwd?: string
+  /** Worktree teardown waits for residual descendants before inspecting the checkout. */
+  waitForProcessTree?: boolean
+  /** Internal worktree lifecycle hook: receives the process-tree termination promise. */
+  onTermination?: (termination: Promise<void>) => void
   /**
    * Live partial-output callback. Invoked per stdout/stderr chunk while the
    * command is running so background tasks can expose progress before they
@@ -448,10 +468,12 @@ export class LocalSandbox
   private readonly maxOutputBytes: number
   private readonly env: Record<string, string>
   private readonly workingDir: string
+  private readonly worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   private readonly windowsSandbox: WindowsSandboxMode
   private readonly pluginOutputDir?: string
   private readonly pluginRoot?: string
   private readonly systemId?: string
+  private readonly agentId?: string
   private readonly pluginWorkspace?: string
   private readonly featureId?: string
   private readonly harnessProjectId?: string
@@ -1727,10 +1749,20 @@ export class LocalSandbox
     this.runId = options.runId ?? this.id
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
-    const baseEnv = options.env ?? ({ ...process.env } as Record<string, string>)
+    const inheritedEnv = options.env ?? ({ ...process.env } as Record<string, string>)
+    const baseEnv = options.worktreeIsolation
+      ? withoutGitRepositoryOverrides(inheritedEnv)
+      : inheritedEnv
+    if (options.worktreeIsolation) {
+      // Read-only Git inspection must not try to refresh the linked index. All
+      // intentional add/commit mutations are intercepted by the host broker.
+      baseEnv.GIT_OPTIONAL_LOCKS = "0"
+      baseEnv.GIT_TERMINAL_PROMPT = "0"
+    }
     baseEnv.SESSION_ID = this.runId
     const systemId = options.systemId?.trim()
     if (systemId) baseEnv.SYSTEM_ID = systemId
+    const agentId = options.agentId?.trim()
     const pluginRoot = options.pluginRoot?.trim()
     if (pluginRoot) baseEnv.PLUGIN_ROOT = pluginRoot
     const pluginId = options.pluginId?.trim()
@@ -1762,7 +1794,14 @@ export class LocalSandbox
       baseEnv.LC_ALL ??= "C.UTF-8"
     }
     this.env = baseEnv
-    this.workingDir = options.rootDir ?? process.cwd()
+    // A worktree boundary is canonicalized from Git's registry. Make it the
+    // execution root too: a caller may still pass the same checkout through a
+    // symlinked `rootDir`, but mixing that lexical alias with the canonical
+    // boundary would falsely reject the default cwd as outside the worktree.
+    this.workingDir = options.worktreeIsolation?.workspaceRoot ?? options.rootDir ?? process.cwd()
+    this.worktreeIsolation = options.worktreeIsolation
+      ? Object.freeze({ ...options.worktreeIsolation })
+      : undefined
     this._largeToolResultsDir = options.largeToolResultsDir
       ? path.resolve(options.largeToolResultsDir)
       : path.join(this.workingDir, ".cmbdevclaw", "large_tool_results")
@@ -1773,6 +1812,7 @@ export class LocalSandbox
     this.pluginOutputDir = options.pluginOutputDir
     this.pluginRoot = pluginRoot || undefined
     this.systemId = systemId || undefined
+    this.agentId = agentId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
     this.featureId = featureId || undefined
     this.harnessProjectId = harnessProjectId || undefined
@@ -1839,7 +1879,10 @@ export class LocalSandbox
     filePath: string,
     realpathCache: Map<string, string | null> = new Map()
   ): boolean {
-    if (this.windowsSandbox !== "elevated") return false
+    // Preserve the pre-worktree fast path for every ordinary runtime. Only an
+    // isolated checkout needs the additional `.git` pointer check when the
+    // Windows elevated sandbox is disabled.
+    if (!this.worktreeIsolation && this.windowsSandbox !== "elevated") return false
     const candidates = new Set<string>([filePath])
     try {
       const resolved = this._resolvePath(filePath)
@@ -1850,7 +1893,16 @@ export class LocalSandbox
       const realInput = this.realpathDeepestExistingCached(filePath, realpathCache)
       if (realInput) candidates.add(realInput)
     }
-    return Array.from(candidates).some((candidate) => isSensitivePath(candidate))
+    if (this.worktreeIsolation) {
+      const gitPointer = normalizeDirKey(path.join(this.worktreeIsolation.worktreeRoot, ".git"))
+      if (Array.from(candidates).some((candidate) => normalizeDirKey(candidate) === gitPointer)) {
+        return true
+      }
+    }
+    return (
+      this.windowsSandbox === "elevated" &&
+      Array.from(candidates).some((candidate) => isSensitivePath(candidate))
+    )
   }
 
   private isSensitiveSandboxPath(
@@ -2347,7 +2399,15 @@ export class LocalSandbox
 
   private resolveExecutionCwd(cwd?: string): string {
     const trimmed = cwd?.trim()
-    return trimmed ? path.resolve(this.workingDir, trimmed) : this.workingDir
+    const resolved = trimmed ? path.resolve(this.workingDir, trimmed) : this.workingDir
+    // Git resolves the isolated boundary to a canonical path. Normalize an
+    // explicitly supplied alias of that same checkout before both the lexical
+    // cwd validation and the worktree Git guard see it; otherwise `/var` vs
+    // `/private/var` (or a user symlink) is rejected despite naming the same
+    // directory. This is intentionally worktree-only so ordinary execute cwd
+    // display/behavior remains unchanged.
+    if (!this.worktreeIsolation) return resolved
+    return this.realpathDeepestExistingCached(resolved, new Map()) ?? resolved
   }
 
   private static normalizeDirBoundaryKey(dir: string): string {
@@ -2399,6 +2459,16 @@ export class LocalSandbox
         : `Invalid cwd: '${cwd}' resolves outside enabled skill '${skillMatch.name}'.`
     }
     return `Invalid cwd: '${cwd}' is outside the workspace and is not a known enabled skill directory.`
+  }
+
+  /** Worktree agents keep the normal execute-from-enabled-skill contract. The
+   * path has already passed validateExecutionCwd's lexical + realpath checks;
+   * exposing only that matched root lets the Git guard continue inspecting the
+   * command without treating the skill directory as the assigned checkout. */
+  private worktreeAdditionalExecutionRoots(cwd: string): string[] {
+    if (!this.worktreeIsolation || LocalSandbox.isPathInsideDir(cwd, this.workingDir)) return []
+    const skillMatch = this._skillLifecycleRegistry?.resolveRead(cwd, cwd)
+    return skillMatch ? [skillMatch.rootDir] : []
   }
 
   /** Toggle direct git submit command blocking when git_workflow is available. */
@@ -2478,6 +2548,23 @@ export class LocalSandbox
     return `Memory storage is managed by the background summarizer. Direct ${action} to '${filePath}' is blocked; use the Memory panel or let the conversation summary persist it.`
   }
 
+  private markHarnessStageAttributionDirty(): void {
+    markHarnessStageAttributionDirty(this.harnessProjectId, this.featureId)
+  }
+
+  private async captureHarnessStageForCodeGeneration(
+    filePath: string
+  ): Promise<HarnessStageAttribution | undefined> {
+    if (!this.harnessProjectId || !this.featureId || !isCodeFile(filePath)) return undefined
+    return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
+  }
+
+  private commandMayMutateHarnessState(command: string, cwd: string): boolean {
+    const windowsShell =
+      process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown"
+    return !isReadOnlyShellCommand(command, cwd, windowsShell)
+  }
+
   private async runHooks(event: HookEvent, context: HookContext): Promise<HookResult | null> {
     const hookContext: HookContext = {
       ...context,
@@ -2485,6 +2572,7 @@ export class LocalSandbox
         ? { pluginOutputDir: this.pluginOutputDir }
         : {}),
       ...(this.systemId && !context.systemId ? { systemId: this.systemId } : {}),
+      ...(this.agentId && !context.agentId ? { agentId: this.agentId } : {}),
       ...(this.pluginWorkspace && !context.pluginWorkspace
         ? { pluginWorkspace: this.pluginWorkspace }
         : {}),
@@ -2506,11 +2594,29 @@ export class LocalSandbox
         : {}),
       ...(this.projectCode && !context.projectCode ? { projectCode: this.projectCode } : {}),
       ...(this.projectDir && !context.projectDir ? { projectDir: this.projectDir } : {}),
+      ...(this.worktreeIsolation
+        ? {
+            workspaceHookCwd: this.workingDir,
+            forceSyncWorkspaceHooks: true
+          }
+        : {}),
       turnId: context.turnId ?? this._hookTurnId
     }
 
     const hooks = this.resolveHooks(event, hookContext)
     let result = await runHooksEnriched(hooks, event, hookContext, this._onHookResult)
+    const hasHarnessOwnedHook = hooks.some(
+      (hook) =>
+        hook.hookSourceType === "plugin" ||
+        hook.hookSourceType === "skill" ||
+        Boolean(hook.pluginRoot)
+    )
+    if (hasHarnessOwnedHook && (result || (event !== "PreToolUse" && hooks.length > 0))) {
+      // Plugin lifecycle hooks may advance the workflow without going through
+      // LocalSandbox.execute(). Invalidation is cheap; the next code mutation
+      // performs the actual adapter refresh.
+      this.markHarnessStageAttributionDirty()
+    }
     if (result) {
       this._hookScope?.activatePersistentHooks(hooks)
     }
@@ -4073,6 +4179,35 @@ export class LocalSandbox
     }
   }
 
+  /** File tools execute in the Electron process, outside the child-process OS
+   * sandbox. Resolve the existing target (or its parent for a create) so a
+   * symlinked directory cannot turn a workspace-relative write into a write to
+   * the source checkout or another worktree. Uncertainty fails closed. */
+  private async isWorktreeFileWriteBlocked(filePath: string): Promise<boolean> {
+    if (!this.worktreeIsolation) return false
+    try {
+      const resolved = this._resolvePath(filePath)
+      if (path.resolve(resolved) === path.join(this.worktreeIsolation.worktreeRoot, ".git")) {
+        return true
+      }
+      let realTarget: string
+      try {
+        const stat = await fs.lstat(resolved)
+        if (stat.isSymbolicLink()) return true
+        realTarget = await fs.realpath(resolved)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true
+        const deepest = this.realpathDeepestExistingCached(resolved, new Map())
+        if (!deepest) return true
+        realTarget = deepest
+      }
+      const relative = path.relative(this.worktreeIsolation.workspaceRoot, realTarget)
+      return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+    } catch {
+      return true
+    }
+  }
+
   /** Build a readonly-sandbox block error message for the given file and action verb. */
   private async readonlyBlockedError(filePath: string, action: string): Promise<string> {
     return (await LocalSandbox.getElevationState())
@@ -4204,6 +4339,9 @@ export class LocalSandbox
     if (this.isMemoryStorageWritePath(filePath)) {
       return { error: this.memoryStorageWriteError(filePath, "write") }
     }
+    if (await this.isWorktreeFileWriteBlocked(filePath)) {
+      return { error: `Access denied — '${filePath}' resolves outside the isolated workspace.` }
+    }
     if (await this.isWriteBlocked(filePath)) {
       return { error: await this.readonlyBlockedError(filePath, "写入") }
     }
@@ -4238,6 +4376,11 @@ export class LocalSandbox
     if (this.isMemoryStorageWritePath(effectiveFilePath)) {
       return { error: this.memoryStorageWriteError(effectiveFilePath, "write") }
     }
+    if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+      return {
+        error: `Access denied — '${effectiveFilePath}' resolves outside the isolated workspace.`
+      }
+    }
     if (await this.isWriteBlocked(effectiveFilePath)) {
       return { error: await this.readonlyBlockedError(effectiveFilePath, "写入") }
     }
@@ -4262,18 +4405,27 @@ export class LocalSandbox
     // file ⇒ prior content is empty and deletedLineCount = 0. We skip the
     // old pre-read entirely (it was wasted I/O on success and would also
     // bypass isCodeFile / size guards on failure).
+    let harnessStage: HarnessStageAttribution | undefined
     const result = await this.withFileLock(resolvedPath, async () => {
       if (this.isAborted) {
         return { error: "文件写入已取消。" }
       }
-      const r = await super.write(effectiveFilePath, effectiveContent)
-      if (!r.error) {
-        await this.recordReadTime(resolvedPath)
+      if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+        return {
+          error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+        }
       }
+      harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
+      if (this.isAborted) {
+        return { error: "文件写入已取消。" }
+      }
+      const r = await super.write(effectiveFilePath, effectiveContent)
+      if (!r.error) await this.recordReadTime(resolvedPath)
       return r
     })
     if (!result.error) {
       this._onFileMutation?.(effectiveFilePath, "write")
+      if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
       try {
         recordAdoptionGen({
@@ -4284,7 +4436,8 @@ export class LocalSandbox
           workspacePath: this.workingDir,
           // write_file only succeeds when creating a new file (see above) —
           // no prior lines could have been deleted.
-          deletedLineCount: 0
+          deletedLineCount: 0,
+          ...(harnessStage ? { harnessStage } : {})
         })
       } catch {
         // tracker must not affect tool result
@@ -4301,6 +4454,7 @@ export class LocalSandbox
       })
       return LocalSandbox.applyPostHookContext(result, postResult, "write_file")
     } catch (e) {
+      this.markHarnessStageAttributionDirty()
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       console.warn("[Hooks] PostToolUse write error:", e)
       return result
@@ -4311,49 +4465,75 @@ export class LocalSandbox
    * Override uploadFiles to enforce readonly sandbox restrictions on each file.
    */
   async uploadFiles(files: [string, Uint8Array][]): Promise<FileUploadResponse[]> {
-    // Check for both sandbox-sensitive and readonly-blocked files
-    const indexed = await Promise.all(
-      files.map(async ([filePath, content], i) => ({
-        filePath,
-        content,
-        i,
-        sandboxBlocked: this.isBlockedBySandbox(filePath),
-        memoryBlocked: this.isMemoryStorageWritePath(filePath),
-        writeBlocked: await this.isWriteBlocked(filePath)
-      }))
-    )
-    const allowed = indexed.filter((e) => !e.sandboxBlocked && !e.memoryBlocked && !e.writeBlocked)
-
-    if (allowed.length === files.length) {
-      const results = await super.uploadFiles(files)
-      results.forEach((result, index) => {
-        if (!result.error) this._onFileMutation?.(files[index][0], "upload")
-      })
+    const denied: FileOperationError = "permission_denied"
+    if (!this.worktreeIsolation) {
+      const indexed = await Promise.all(
+        files.map(async ([filePath, content], i) => ({
+          filePath,
+          content,
+          i,
+          sandboxBlocked: this.isBlockedBySandbox(filePath),
+          memoryBlocked: this.isMemoryStorageWritePath(filePath),
+          writeBlocked: await this.isWriteBlocked(filePath)
+        }))
+      )
+      const allowed = indexed.filter(
+        (entry) => !entry.sandboxBlocked && !entry.memoryBlocked && !entry.writeBlocked
+      )
+      const allowedResults =
+        allowed.length > 0
+          ? await super.uploadFiles(
+              allowed.map((entry) => [entry.filePath, entry.content] as [string, Uint8Array])
+            )
+          : []
+      const results: FileUploadResponse[] = new Array(files.length)
+      let allowedIndex = 0
+      for (const entry of indexed) {
+        if (entry.sandboxBlocked || entry.memoryBlocked || entry.writeBlocked) {
+          results[entry.i] = { path: entry.filePath, error: denied }
+        } else {
+          const response = allowedResults[allowedIndex++]
+          results[entry.i] = response
+          if (!response.error) this._onFileMutation?.(entry.filePath, "upload")
+        }
+      }
       return results
     }
-
-    // Batch-delegate all allowed files in one call
-    const allowedResults =
-      allowed.length > 0
-        ? await super.uploadFiles(
-            allowed.map((e) => [e.filePath, e.content] as [string, Uint8Array])
-          )
-        : []
-
-    // Merge results back in original order
-    const results: FileUploadResponse[] = new Array(files.length)
-    const denied: FileOperationError = "permission_denied"
-    let ai = 0
-    for (const entry of indexed) {
-      if (entry.sandboxBlocked || entry.memoryBlocked || entry.writeBlocked) {
-        results[entry.i] = { path: entry.filePath, error: denied }
-      } else {
-        const result = allowedResults[ai++]
-        results[entry.i] = result
-        if (!result.error) this._onFileMutation?.(entry.filePath, "upload")
-      }
-    }
-    return results
+    return Promise.all(
+      files.map(async ([filePath, content]) => {
+        if (
+          this.isBlockedBySandbox(filePath) ||
+          this.isMemoryStorageWritePath(filePath) ||
+          (await this.isWorktreeFileWriteBlocked(filePath)) ||
+          (await this.isWriteBlocked(filePath))
+        ) {
+          return { path: filePath, error: denied }
+        }
+        let resolvedPath: string
+        try {
+          resolvedPath = this._resolvePath(filePath)
+        } catch {
+          return { path: filePath, error: denied }
+        }
+        return this.withFileLock(resolvedPath, async () => {
+          // The batch precheck can be separated from the actual write by other
+          // uploads. Revalidate under the same per-file lock immediately before
+          // delegating so a swapped symlink parent is treated like write/edit.
+          if (
+            this.isBlockedBySandbox(filePath) ||
+            this.isMemoryStorageWritePath(filePath) ||
+            (await this.isWorktreeFileWriteBlocked(filePath)) ||
+            (await this.isWriteBlocked(filePath))
+          ) {
+            return { path: filePath, error: denied }
+          }
+          const [result] = await super.uploadFiles([[filePath, content]])
+          const response = result ?? { path: filePath, error: denied }
+          if (!response.error) this._onFileMutation?.(filePath, "upload")
+          return response
+        })
+      })
+    )
   }
 
   /**
@@ -4376,6 +4556,9 @@ export class LocalSandbox
     }
     if (this.isMemoryStorageWritePath(filePath)) {
       return { error: this.memoryStorageWriteError(filePath, "edit") }
+    }
+    if (await this.isWorktreeFileWriteBlocked(filePath)) {
+      return { error: `Access denied — '${filePath}' resolves outside the isolated workspace.` }
     }
     if (await this.isWriteBlocked(filePath)) {
       return { error: await this.readonlyBlockedError(filePath, "编辑") }
@@ -4418,6 +4601,11 @@ export class LocalSandbox
     if (this.isMemoryStorageWritePath(effectiveFilePath)) {
       return { error: this.memoryStorageWriteError(effectiveFilePath, "edit") }
     }
+    if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+      return {
+        error: `Access denied — '${effectiveFilePath}' resolves outside the isolated workspace.`
+      }
+    }
     if (await this.isWriteBlocked(effectiveFilePath)) {
       return { error: await this.readonlyBlockedError(effectiveFilePath, "编辑") }
     }
@@ -4437,7 +4625,17 @@ export class LocalSandbox
     }
     try {
       const resolvedPath = this._resolvePath(effectiveFilePath)
+      let harnessStage: HarnessStageAttribution | undefined
       const result = await this.withFileLock(resolvedPath, async () => {
+        if (this.isAborted) {
+          return { error: "文件编辑已取消。" }
+        }
+        if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+          return {
+            error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+          }
+        }
+        harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
         if (this.isAborted) {
           return { error: "文件编辑已取消。" }
         }
@@ -4464,12 +4662,18 @@ export class LocalSandbox
         if (this.isAborted) {
           return { error: "文件编辑已取消。" }
         }
+        if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+          return {
+            error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+          }
+        }
         await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
         await this.recordReadTime(resolvedPath)
         return { path: effectiveFilePath, filesUpdate: null, occurrences }
       })
       if (!result.error) {
         this._onFileMutation?.(effectiveFilePath, "edit")
+        if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
         // Adoption tracking (side-effect only, never throws).
         // Only successful edits should be counted as generated code adoption.
         try {
@@ -4487,7 +4691,8 @@ export class LocalSandbox
             // avoiding any full-file scan or retention of editor buffers.
             oldString: effectiveOldString,
             newString: effectiveNewString,
-            occurrences: result.occurrences
+            occurrences: result.occurrences,
+            ...(harnessStage ? { harnessStage } : {})
           })
         } catch {
           // tracker must not affect tool result
@@ -4509,6 +4714,7 @@ export class LocalSandbox
         })
         return LocalSandbox.applyPostHookContext(result, postResult, "edit_file")
       } catch (e) {
+        this.markHarnessStageAttributionDirty()
         if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
         console.warn("[Hooks] PostToolUse edit error:", e)
         return result
@@ -4980,6 +5186,19 @@ export class LocalSandbox
         LocalSandbox._resolvedShellPromise = null
       }
     }
+  }
+
+  private static async resolveCommandShellSyntax(
+    sandboxMode: WindowsSandboxMode
+  ): Promise<CommandShellSyntax> {
+    if (process.platform !== "win32") return "posix"
+    const shell =
+      sandboxMode === "none"
+        ? await LocalSandbox.resolveShell()
+        : (await LocalSandbox.resolveWindowsSandboxShell()).shell
+    const shellBase = path.basename(shell).replace(/\.exe$/i, "").toLowerCase()
+    if (["bash", "sh", "zsh", "fish"].includes(shellBase)) return "posix"
+    return ["pwsh", "powershell"].includes(shellBase) ? "powershell" : "cmd"
   }
 
   /** Asynchronous `which` — locate an executable on PATH without blocking the main process. */
@@ -5627,15 +5846,20 @@ export class LocalSandbox
    * Windows: taskkill /T /F (tree kill), awaits completion.
    * Unix: SIGTERM the process group, escalate to SIGKILL after 200ms.
    */
-  private static async killTree(proc: ChildProcess, exited: () => boolean): Promise<void> {
+  private static async killTree(
+    proc: ChildProcess,
+    exited: () => boolean,
+    waitForProcessTree = false
+  ): Promise<void> {
     const pid = proc.pid
-    if (!pid || exited()) {
+    if (!pid || (!waitForProcessTree && exited())) {
       console.log(`[LocalSandbox] killTree: skip (pid=${pid}, exited=${exited()})`)
       return
     }
     console.log(`[LocalSandbox] killTree: killing pid=${pid}, platform=${process.platform}`)
 
     if (process.platform === "win32") {
+      if (exited()) return
       await new Promise<void>((res) => {
         const killer = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
           stdio: "ignore",
@@ -5647,6 +5871,16 @@ export class LocalSandbox
       return
     }
 
+    if (waitForProcessTree) {
+      // A worktree shell can exit successfully after launching a redirected
+      // child. Probe its process group so checkout teardown waits only when a
+      // descendant really remains. Ordinary commands keep their legacy timing.
+      try {
+        process.kill(-pid, 0)
+      } catch {
+        if (exited()) return
+      }
+    }
     try {
       console.log(`[LocalSandbox] killTree: SIGTERM → pid=${pid}`)
       process.kill(-pid, "SIGTERM")
@@ -5658,7 +5892,21 @@ export class LocalSandbox
       }
     }
     await new Promise<void>((res) => setTimeout(res, LocalSandbox.SIGKILL_TIMEOUT_MS))
-    if (!exited()) {
+    if (waitForProcessTree) {
+      // Leader exit is not proof that a redirected descendant has stopped.
+      try {
+        process.kill(-pid, "SIGKILL")
+        console.log(`[LocalSandbox] killTree: SIGKILL → process group ${pid}`)
+      } catch {
+        if (!exited()) {
+          try {
+            proc.kill("SIGKILL")
+          } catch {
+            /* already exited */
+          }
+        }
+      }
+    } else if (!exited()) {
       console.log(
         `[LocalSandbox] killTree: SIGKILL → pid=${pid} (not exited after ${LocalSandbox.SIGKILL_TIMEOUT_MS}ms)`
       )
@@ -5725,6 +5973,9 @@ export class LocalSandbox
       lastOutputAt: number
       abortController: AbortController
       result?: LocalExecuteResponse
+      /** Resolves only after executeRaw has observed process-tree termination. */
+      completion?: Promise<void>
+      termination?: Promise<void>
     }
   >()
 
@@ -5753,10 +6004,22 @@ export class LocalSandbox
     if (cwdError) {
       return `Error: ${cwdError}`
     }
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
+    const worktreeViolation = this.worktreeIsolation
+      ? getWorktreeShellIsolationViolation(
+          effectiveCommand,
+          effectiveCwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(effectiveCwd)
+        )
+      : null
+    if (worktreeViolation) return `Command forbidden: ${worktreeViolation}`
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       return `Command forbidden: ${safety.reason}`
@@ -5781,20 +6044,40 @@ export class LocalSandbox
       return "execute blocked: this is a read-only agent — reading sensitive credential directories (~/.ssh, ~/.aws, ~/.kube, ~/.gnupg, …) is not allowed."
     }
 
-    // git commit / git push must go through the foreground orchestrator path (task-card
-    // dialog for commit; workspace:pushWorktree for push). Backgrounding them would skip
-    // that and re-introduce the sandbox credential-prompt timeout, so run synchronously
-    // through the orchestrator and return the outcome.
+    // Preserve the pre-worktree behavior for ordinary commit/push commands. They
+    // predate worktree isolation and may open an interactive task-card flow; this
+    // feature must not silently change their return shape.
     if (
       this.orchestrator &&
-      (isGitCommitCommand(effectiveCommand) || isGitPushCommand(effectiveCommand))
+      !this.worktreeIsolation &&
+      (isGitCommitCommand(effectiveCommand, shellSyntax) ||
+        isGitPushCommand(effectiveCommand, shellSyntax))
     ) {
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
+    }
+
+    // Worktree Git mutations are deliberately foreground-only. They are short,
+    // explicit state transitions and already have a guarded foreground broker;
+    // adding a second asynchronous broker would expand the lifecycle surface for
+    // no workflow benefit. Long-running builds/tests remain background-capable.
+    if (
+      this.worktreeIsolation &&
+      (containsGitAddCommand(effectiveCommand) || isGitCommitCommand(effectiveCommand))
+    ) {
+      return "Command forbidden: isolated worktree Git staging and commits must run in the foreground; retry without run_in_background"
+    }
+    if (this.worktreeIsolation && isGitPushCommand(effectiveCommand)) {
+      return "Command forbidden: direct push from an isolated workflow worktree is blocked"
     }
 
     const taskId = randomUUID().slice(0, 8)
@@ -5811,14 +6094,19 @@ export class LocalSandbox
       partialTruncated: false,
       lastOutputAt: Date.now(),
       abortController: taskAbortController,
-      result: undefined as LocalExecuteResponse | undefined
+      result: undefined as LocalExecuteResponse | undefined,
+      completion: undefined as Promise<void> | undefined,
+      termination: undefined as Promise<void> | undefined
     }
     LocalSandbox.backgroundTasks.set(taskId, task)
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
 
     // Fire and forget — don't await. Uses extended timeout for background execution.
     // Background tasks use their own AbortController (not the conversation's abortSignal)
     // so they survive conversation switches but can still be cancelled explicitly.
-    this.executeRaw(
+    const completion = this.executeRaw(
       effectiveCommand,
       undefined,
       LocalSandbox.BACKGROUND_ABSOLUTE_MAX_MS,
@@ -5843,7 +6131,15 @@ export class LocalSandbox
           } else {
             task.partialOutput += text
           }
-        }
+        },
+        ...(this.worktreeIsolation
+          ? {
+              waitForProcessTree: true,
+              onTermination: (termination: Promise<void>) => {
+                task.termination = termination
+              }
+            }
+          : {})
       }
     )
       .then(async (rawResult) => {
@@ -5860,7 +6156,8 @@ export class LocalSandbox
                 effectiveCommand,
                 effectiveCwd,
                 this.windowsSandbox,
-                rawResult
+                rawResult,
+                outsideShellSyntax
               )
               .catch((err) => {
                 console.warn(
@@ -5872,6 +6169,9 @@ export class LocalSandbox
           : rawResult
         if (task.completed) return
         task.result = result
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         // Append final output to chunks for completeness
         if (result.output) task.outputChunks.push(result.output)
         task.completed = true
@@ -5891,6 +6191,9 @@ export class LocalSandbox
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
         if (task.completed) return
+        if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+          this.markHarnessStageAttributionDirty()
+        }
         task.result = {
           output: `Error: ${err instanceof Error ? err.message : String(err)}`,
           exitCode: 1,
@@ -5905,6 +6208,7 @@ export class LocalSandbox
           10 * 60 * 1000
         )
       })
+    if (this.worktreeIsolation) task.completion = completion
 
     const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
     try {
@@ -5974,8 +6278,22 @@ export class LocalSandbox
    * Called when the user explicitly stops the current conversation.
    */
   static cancelBackgroundTasks(threadId: string): void {
+    LocalSandbox.cancelBackgroundTasksForThread(threadId)
+  }
+
+  /** Workflow worktree teardown must not inspect/delete a checkout while one of
+   * its background commands is still unwinding. Ordinary callers may keep using
+   * the void wrapper above; lifecycle cleanup awaits this stronger variant. */
+  static async cancelBackgroundTasksAndWait(threadId: string): Promise<void> {
+    const completions = LocalSandbox.cancelBackgroundTasksForThread(threadId)
+    await Promise.allSettled(completions)
+  }
+
+  private static cancelBackgroundTasksForThread(threadId: string): Promise<void>[] {
+    const completions: Promise<void>[] = []
     for (const [taskId, task] of LocalSandbox.backgroundTasks) {
-      if (task.threadId === threadId && !task.completed) {
+      if (task.threadId !== threadId) continue
+      if (!task.completed) {
         console.log(
           `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${threadId}`
         )
@@ -5997,7 +6315,10 @@ export class LocalSandbox
           10 * 60 * 1000
         )
       }
+      if (task.termination) completions.push(task.termination)
+      if (task.completion) completions.push(task.completion)
     }
+    return completions
   }
 
   async execute(command: string, cwd?: string): Promise<ExecuteResponse> {
@@ -6041,12 +6362,30 @@ export class LocalSandbox
         truncated: false
       }
     }
+    const worktreeViolation = this.worktreeIsolation
+      ? getWorktreeShellIsolationViolation(
+          effectiveCommand,
+          effectiveCwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(effectiveCwd)
+        )
+      : null
+    if (worktreeViolation) {
+      return {
+        output: `Command forbidden: ${worktreeViolation}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
+    const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
-      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly
+      enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      shellSyntax
     })
     if (safety.level === "forbidden") {
       console.log(`[LocalSandbox] execute: FORBIDDEN — ${safety.reason}`)
@@ -6095,8 +6434,13 @@ export class LocalSandbox
       const result = await this.orchestrator.execute(
         effectiveCommand,
         effectiveCwd,
-        this.windowsSandbox
+        this.windowsSandbox,
+        shellSyntax,
+        outsideShellSyntax
       )
+      if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+        this.markHarnessStageAttributionDirty()
+      }
       // Adoption tracking: react to agent rm/mv of generated files (side-effect
       // only, never throws). Only successful commands act (exitCode === 0).
       recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
@@ -6113,6 +6457,9 @@ export class LocalSandbox
     const result = await this.executeRaw(effectiveCommand, undefined, undefined, undefined, {
       cwd: effectiveCwd
     })
+    if (this.commandMayMutateHarnessState(effectiveCommand, effectiveCwd)) {
+      this.markHarnessStageAttributionDirty()
+    }
     recordAdoptionShellFileOps(effectiveCommand, this.workingDir, result.exitCode)
     const postResult = await this.runHooks("PostToolUse", {
       toolName: "execute",
@@ -6257,7 +6604,23 @@ export class LocalSandbox
           `[HarnessMode][LocalSandbox] project plugin hook sandbox bypass check: allowed=${shouldBypassSandboxForProjectPluginHook} mode=${effectiveSandboxMode} pluginRoot="${this.pluginRoot}"`
         )
       }
-      if (shouldBypassSandboxForProjectPluginHook) {
+      if (shouldBypassSandboxForProjectPluginHook && !this.worktreeIsolation) {
+        const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
+        const outsideSafety = assessCommandSafety(command, effectiveCwd, {
+          shellSyntax: outsideShellSyntax
+        })
+        if (
+          outsideSafety.level === "forbidden" ||
+          isGitCommitCommand(command, outsideShellSyntax) ||
+          isGitPushCommand(command, outsideShellSyntax)
+        ) {
+          return {
+            output:
+              `Command forbidden after project-hook shell change: ${outsideSafety.reason || "Git submit commands must use the orchestrated workflow"}`,
+            exitCode: 1,
+            truncated: false
+          }
+        }
         return this.executeRawUnserialized(
           command,
           "none",
@@ -6352,7 +6715,26 @@ export class LocalSandbox
       }
     }
 
-    if (process.platform !== "win32" || effectiveSandboxMode === "none" || backgroundExecution) {
+    const worktreeViolation = this.worktreeIsolation
+      ? getWorktreeShellIsolationViolation(
+          command,
+          effectiveCwd,
+          this.worktreeIsolation,
+          this.worktreeAdditionalExecutionRoots(effectiveCwd)
+        )
+      : null
+    if (worktreeViolation) {
+      return {
+        output: `Command forbidden: ${worktreeViolation}`,
+        exitCode: 1,
+        truncated: false
+      }
+    }
+    if (
+      process.platform !== "win32" ||
+      effectiveSandboxMode === "none" ||
+      (backgroundExecution && !this.worktreeIsolation)
+    ) {
       return this.executeRawUnserialized(
         command,
         sandboxModeOverride,
@@ -6584,7 +6966,6 @@ export class LocalSandbox
       executionCwd,
       sandboxWorkspaceRoot
     )
-
     const isReadonly = effectiveMode === "readonly"
     const elevated = isReadonly ? await LocalSandbox.getElevationState() : false
 
@@ -6746,9 +7127,14 @@ export class LocalSandbox
           )
         }
         LocalSandbox.activeProcesses.add(proc)
-
+        let termination: Promise<void> | undefined
         const killProc = (): void => {
-          void LocalSandbox.killTree(proc, () => exited)
+          termination ??= LocalSandbox.killTree(
+            proc,
+            () => exited,
+            options?.waitForProcessTree === true
+          )
+          options?.onTermination?.(termination)
         }
 
         const cmdTimeout = timeoutMs ?? this.timeout
@@ -7121,8 +7507,14 @@ export class LocalSandbox
       /** After kill, if close doesn't fire within 2s, force-resolve (like Codex IO_DRAIN_TIMEOUT). */
       let drainTimerId: ReturnType<typeof setTimeout> | null = null
 
+      let termination: Promise<void> | undefined
       const killProc = (): void => {
-        void LocalSandbox.killTree(proc, () => exited)
+        termination ??= LocalSandbox.killTree(
+          proc,
+          () => exited,
+          options?.waitForProcessTree === true
+        )
+        options?.onTermination?.(termination)
       }
 
       const cmdTimeout = timeoutMs ?? this.timeout
@@ -7303,6 +7695,17 @@ export class LocalSandbox
           `[LocalSandbox] event=close pid=${proc.pid} code=${code} signal=${signal} at +${Date.now() - onceStartMs}ms resolved=${resolved}`
         )
         exited = true
+        if (
+          options?.background === true &&
+          this.worktreeIsolation &&
+          !aborted &&
+          !timedOut &&
+          !isWindows
+        ) {
+          killProc()
+          void termination?.finally(() => collectAndResolve(code, signal as string | null))
+          return
+        }
         collectAndResolve(code, signal as string | null)
       })
 

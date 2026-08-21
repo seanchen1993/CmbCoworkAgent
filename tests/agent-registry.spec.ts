@@ -603,7 +603,7 @@ function testLevel1ToolPlumbing(): void {
   // (explicit) — so a removed tool's docs never contradict the tool list. Only
   // the unrestricted main agent (filesystemAccess undefined) keeps the full docs.
   assert(
-    RUNTIME_SRC.includes("filesystemSystemPrompt && filesystemAccess") &&
+    RUNTIME_SRC.includes("fsSystemPrompt && filesystemAccess") &&
       RUNTIME_SRC.includes("blockedToolNamesForAccess(filesystemAccess)"),
     "Level-1 cleans the fs system prompt for any restricted access (coordinator + workflow)"
   )
@@ -759,7 +759,7 @@ function testStripCustomModelPrefix(): void {
     "resolveRegistryModelInstance normalizes the custom: prefix"
   )
   assert(
-    RUNTIME_SRC.includes("not found in custom model configs; inheriting main model"),
+    RUNTIME_SRC.includes("not found in model configs; inheriting main model"),
     "registry model miss warns instead of silently inheriting"
   )
 }
@@ -878,7 +878,7 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
   )
   assert(
     RUNTIME_SRC.includes(
-      "...(mainFilesystemEnabled ? [createFsMiddleware()] : []),\n      ...postFsToolDocStripMiddleware,"
+      '...(mainFilesystemEnabled ? [createFsMiddleware("\\n")] : []),\n      ...postFsToolDocStripMiddleware,'
     ),
     "post-FS strip runs immediately after the deepagents fs middleware"
   )
@@ -1490,7 +1490,7 @@ function testDeferredInventoryGatedOnBridge(): void {
   //     a bridge-less restricted leaf never sees IDs it can't use.
   assert(
     RUNTIME_SRC.includes(
-      "if (hasInvokeDeferredTool) {\n      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"
+      "if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {\n      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"
     ),
     "runtime gates the deferred-tool inventory on the invoke bridge being available"
   )

@@ -947,6 +947,11 @@ export function ThreadSidebar(): React.JSX.Element {
       setThreadToDelete(null)
     } catch (error) {
       console.error("[ThreadSidebar] Failed to delete thread:", error)
+      toast.error(
+        error instanceof Error
+          ? error.message.replace(/^Error invoking remote method '[^']+': Error:\s*/u, "")
+          : "删除会话失败"
+      )
     }
   }, [cleanupThread, deleteThread, markRead, threadToDelete])
 

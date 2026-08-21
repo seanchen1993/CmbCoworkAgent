@@ -1056,6 +1056,56 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
     return countTokensApproximately(countedMessages, toolsArray)
   }
 
+  function reportedUsageTokens(message: AIMessage): number | null {
+    const responseMetadata = message.response_metadata as Record<string, unknown> | undefined
+    const candidates = [
+      message.usage_metadata,
+      responseMetadata?.token_usage,
+      responseMetadata?.usage,
+      message.additional_kwargs?.usage_metadata
+    ]
+
+    const finiteNonNegative = (value: unknown): number | null =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null
+
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object") continue
+      const usage = candidate as Record<string, unknown>
+      const total = finiteNonNegative(usage.total_tokens ?? usage.totalTokens)
+      if (total != null && total > 0) return total
+
+      const input = finiteNonNegative(
+        usage.input_tokens ?? usage.inputTokens ?? usage.prompt_tokens ?? usage.promptTokens
+      )
+      const output = finiteNonNegative(
+        usage.output_tokens ??
+          usage.outputTokens ??
+          usage.completion_tokens ??
+          usage.completionTokens
+      )
+      if (input != null && input > 0) return input + (output ?? 0)
+    }
+    return null
+  }
+
+  /**
+   * Anchor proactive compaction to the latest provider-reported context size,
+   * then estimate only messages appended after that response. The full local
+   * estimate remains a fallback for providers that omit usage metadata and a
+   * guard for changed system prompts or tool schemas.
+   */
+  function countTokensForTrigger(messages: BaseMessage[], approximateTotal: number): number {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (!AIMessage.isInstance(message)) continue
+      const reportedTokens = reportedUsageTokens(message)
+      if (reportedTokens == null) continue
+      const appendedTokens = countTokensApproximately(messages.slice(index + 1))
+      return Math.max(approximateTotal, Math.ceil(reportedTokens + appendedTokens))
+    }
+    return approximateTotal
+  }
+
   function compactToolResults(
     messages: BaseMessage[],
     maxInputTokens: number,
@@ -1167,11 +1217,9 @@ export function createCmbSummarizationMiddleware(options: CmbSummarizationMiddle
 
   function truncateArgs(
     messages: BaseMessage[],
-    maxInputTokens?: number,
-    systemMessage?: SystemMessage | unknown,
-    tools?: (ServerTool | ClientTool)[] | unknown[]
+    totalTokens: number,
+    maxInputTokens?: number
   ): { messages: BaseMessage[]; modified: boolean } {
-    const totalTokens = countTotalTokens(messages, systemMessage, tools)
     if (!shouldTruncateArgs(messages, totalTokens, maxInputTokens)) {
       return { messages, modified: false }
     }
@@ -1546,8 +1594,21 @@ ${summary}
         !request.state._summarizationSessionId)
         ? `session_${crypto.randomUUID().substring(0, 8)}`
         : undefined
+    const previousEvent = getValidSummarizationEvent(request.state, owner)
     const cutoffIndex = determineCutoffIndex(truncatedMessages, maxInputTokens)
-    if (cutoffIndex <= 0) return handler({ ...request, messages: truncatedMessages })
+    // DeepAgents Python refuses token-based compaction when it cannot preserve
+    // any message. CmbCowork intentionally still supports summarizing one
+    // oversized raw user/tool message, but a chained cutoff of 1 is different:
+    // effective[0] is the synthetic previous summary, so
+    // previousCutoff + 1 - 1 would not advance the raw-state cutoff at all.
+    // Re-summarizing it cannot evict new history and can otherwise create a
+    // compaction loop. Let the outer model use the current summary + tail; if
+    // that request genuinely overflows, surface the overflow instead of
+    // committing a no-progress summarization event.
+    const advancesStateCutoff = previousEvent == null || cutoffIndex > 1
+    if (cutoffIndex <= 0 || !advancesStateCutoff) {
+      return handler({ ...request, messages: truncatedMessages })
+    }
 
     const messagesToSummarize = truncatedMessages.slice(0, cutoffIndex)
     const preservedMessages = truncatedMessages.slice(cutoffIndex)
@@ -1582,7 +1643,6 @@ ${summary}
       }
     }
 
-    const previousEvent = getValidSummarizationEvent(request.state, owner)
     const summaryAttemptBudget = { used: 0 }
     const summaryResult = await summarizeMessages(
       messagesToSummarize,
@@ -1733,15 +1793,26 @@ ${summary}
       const resolvedFallbackModel = await getFallbackChatModel()
       const maxInputTokens = getMaxInputTokens(resolvedModel)
       applyModelDefaults(resolvedModel)
-      const { messages: truncatedMessages } = truncateArgs(
+      const initialTokens = countTotalTokens(
         effectiveMessages,
-        maxInputTokens,
         request.systemMessage,
         request.tools
       )
-      const totalTokens = countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
+      const { messages: truncatedMessages, modified: truncateModified } = truncateArgs(
+        effectiveMessages,
+        initialTokens,
+        maxInputTokens
+      )
+      // Match DeepAgents Python's count-once behavior: tool schema conversion
+      // is comparatively expensive, so share the initial count across argument
+      // truncation and trigger checks. Recount only when truncation changed the
+      // actual outbound messages.
+      const totalTokens = truncateModified
+        ? countTotalTokens(truncatedMessages, request.systemMessage, request.tools)
+        : initialTokens
+      const triggerTokens = countTokensForTrigger(truncatedMessages, totalTokens)
 
-      if (!shouldSummarize(truncatedMessages, totalTokens, maxInputTokens)) {
+      if (!shouldSummarize(truncatedMessages, triggerTokens, maxInputTokens)) {
         try {
           return await handler({ ...request, messages: truncatedMessages })
         } catch (error) {
