@@ -1,6 +1,7 @@
 import React, {
   useRef,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useCallback,
   useState,
@@ -8,6 +9,7 @@ import React, {
 } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
+import type { VirtuosoHandle } from "react-virtuoso"
 import {
   Send,
   Square,
@@ -87,14 +89,8 @@ import {
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
 import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
-import {
-  buildToolResultAssociations,
-  getWorkerToolUiKey
-} from "@/lib/worker-tool-result-key"
-import {
-  buildVisibleMessageLayout,
-  messageHasVisibleRow
-} from "@/lib/message-display-visibility"
+import { buildToolResultAssociations, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
+import { messageHasVisibleRow } from "@/lib/message-display-visibility"
 import { createToolDerivationMessageSelector } from "@/lib/message-render-stability"
 import {
   isCoordinatorModeMetadata,
@@ -118,7 +114,6 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
-  HITLRequest,
   Message,
   SkillMetadata,
   Thread,
@@ -127,7 +122,11 @@ import type {
   ToolCallStatus,
   UserInputResponse
 } from "@/types"
-import { MessageBubble } from "./MessageBubble"
+import {
+  CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
+  ChatMessageVirtualList,
+  type ChatApprovalDecision
+} from "./ChatMessageVirtualList"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import { ChatSearchOverlay } from "./ChatSearchOverlay"
@@ -208,7 +207,7 @@ import {
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
-import { HookLogChip, HookLogModal } from "./HookLogViews"
+import { HookLogModal } from "./HookLogViews"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
@@ -1291,158 +1290,6 @@ function ChatErrorCard({
   )
 }
 
-type ChatApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-
-interface ChatToolResultInfo {
-  content: string | unknown
-  is_error?: boolean
-}
-
-interface ChatMessageFlags {
-  showAssistantMeta: boolean[]
-  hasUserAfterHead: boolean[]
-}
-
-interface ChatMessageListProps {
-  messages: Message[]
-  perMessageFlags: ChatMessageFlags
-  hookLoggingEnabled: boolean
-  hookLogBucketByTurnId: Map<string, HookLogBucket>
-  detachedHookLogBuckets: HookLogBucket[]
-  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: (messageId: string, role: Message["role"]) => (node: HTMLDivElement | null) => void
-  isLoading: boolean
-  toolResults: Map<string, ChatToolResultInfo>
-  toolCallStates: Map<string, ToolCallState>
-  pendingApprovalToolCallKeys: Set<string>
-  pendingApproval: HITLRequest | null
-  autoApproveGitPush: boolean
-  onApprovalDecision: (decision: ChatApprovalDecision) => void
-  onEditUserMessage: (message: Message) => void
-  onSetGoalFromMessage: (text: string) => void
-  onForkFromMessage: (message: Message) => void
-  forkingMessageId: string | null
-  onOpenHookLogBucket: (turnId: string) => void
-  threadId: string
-  assistantDurationMsById: Map<string, number>
-  userSendTimeLabelById: Map<string, string>
-}
-
-const ChatMessageList = React.memo(function ChatMessageList({
-  messages,
-  perMessageFlags,
-  hookLoggingEnabled,
-  hookLogBucketByTurnId,
-  detachedHookLogBuckets,
-  contentMessageRefs,
-  setMessageRef,
-  isLoading,
-  toolResults,
-  toolCallStates,
-  pendingApprovalToolCallKeys,
-  pendingApproval,
-  autoApproveGitPush,
-  onApprovalDecision,
-  onEditUserMessage,
-  onSetGoalFromMessage,
-  onForkFromMessage,
-  forkingMessageId,
-  onOpenHookLogBucket,
-  threadId,
-  assistantDurationMsById,
-  userSendTimeLabelById
-}: ChatMessageListProps): React.JSX.Element {
-  const visibleMessageLayout = useMemo(
-    () =>
-      buildVisibleMessageLayout(messages, (message) => {
-        const hasHookLogChip =
-          hookLoggingEnabled &&
-          message.role === "user" &&
-          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-        return messageHasVisibleRow(message, hasHookLogChip)
-      }),
-    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
-  )
-
-  return (
-    <>
-      {messages.map((message, index) => {
-        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
-        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
-        const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
-        const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
-
-        const hookLogBucketForTurn =
-          hookLoggingEnabled && message.role === "user"
-            ? hookLogBucketByTurnId.get(message.id)
-            : undefined
-        const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
-
-        const navigatorRef = setMessageRef(message.id, message.role)
-        const combinedRef = (node: HTMLDivElement | null): void => {
-          navigatorRef(node)
-          if (node && message.role !== "tool") {
-            contentMessageRefs.current.set(message.id, node)
-            return
-          }
-          contentMessageRefs.current.delete(message.id)
-        }
-
-        return (
-          <div
-            key={`${message.role}:${message.id}`}
-            ref={combinedRef}
-            data-message-role={message.role}
-          >
-            <MessageBubble
-              message={message}
-              previousMessage={previousMessage}
-              isStreaming={isLastMessage && isLoading}
-              showAssistantMeta={showAssistantMeta}
-              toolResults={toolResults}
-              toolCallStates={toolCallStates}
-              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-              pendingApproval={pendingApproval}
-              autoApproveGitPush={autoApproveGitPush}
-              onApprovalDecision={onApprovalDecision}
-              onEditUserMessage={onEditUserMessage}
-              onSetGoalFromMessage={onSetGoalFromMessage}
-              onForkFromMessage={onForkFromMessage}
-              forkingMessageId={forkingMessageId}
-              threadId={threadId}
-              isLoading={isLoading}
-              hasUserAfterHead={hasUserAfterHead}
-              assistantDurationMs={assistantDurationMsById.get(message.id)}
-              userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-            />
-            {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-              <div className="mt-1 ml-12">
-                <HookLogChip
-                  bucket={hookLogBucketForTurn}
-                  onClick={() => onOpenHookLogBucket(hookLogBucketForTurn.turnId)}
-                />
-              </div>
-            )}
-          </div>
-        )
-      })}
-
-      {hookLoggingEnabled && detachedHookLogBuckets.length > 0 && (
-        <div className="flex flex-wrap justify-start gap-2 mt-1">
-          {detachedHookLogBuckets.map((bucket) => (
-            <HookLogChip
-              key={bucket.turnId}
-              bucket={bucket}
-              onClick={() => onOpenHookLogBucket(bucket.turnId)}
-            />
-          ))}
-        </div>
-      )}
-    </>
-  )
-})
-
 function SystemPromptPreviewButton({
   threadId
 }: {
@@ -1575,7 +1422,11 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null)
+  const shouldFollowOutputRef = useRef(true)
+  const initialScrollAppliedRef = useRef(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
   // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
@@ -2607,9 +2458,7 @@ export function ChatContainer({
   // workspace:pushWorktree calls before the pending approval is cleared on re-render.
   const gitPushInFlightRef = useRef<Set<string>>(new Set())
   const handleApprovalDecision = useCallback(
-    async (
-      decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-    ): Promise<void> => {
+    async (decision: ChatApprovalDecision): Promise<void> => {
       if (!pendingApproval) return
 
       // Check if this is an orchestrator-sourced approval (has requestId)
@@ -3014,7 +2863,7 @@ export function ChatContainer({
   }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
 
   // Per-message derived flags precomputed in a single O(n) reverse pass. Use
-  // the same visibility rule as ChatMessageList so invisible tool/empty rows do
+  // the same visibility rule as ChatMessageVirtualList so invisible tool/empty rows do
   // not affect assistant actions or turn boundaries.
   const perMessageFlags = useMemo(() => {
     const n = displayMessages.length
@@ -3142,11 +2991,127 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
+  useLayoutEffect(() => {
+    setScrollParent(getViewport())
+  }, [getViewport, threadId])
+
+  useEffect(() => {
+    shouldFollowOutputRef.current = true
+    initialScrollAppliedRef.current = false
+  }, [threadId])
+
+  useEffect(() => {
+    if (scrollParent || !scrollRef.current) return
+    setScrollParent(getViewport())
+  }, [getViewport, scrollParent])
+
+  const visibleMessageIndexById = useMemo(() => {
+    const indexById = new Map<string, number>()
+    let visibleIndex = 0
+    for (const message of displayMessages) {
+      const hasHookLogChip = Boolean(
+        hookLogConfig.enabled &&
+        message.role === "user" &&
+        hookLogBucketByTurnId.get(message.id)?.entries.length
+      )
+      if (!messageHasVisibleRow(message, hasHookLogChip)) continue
+      indexById.set(message.id, visibleIndex)
+      visibleIndex += 1
+    }
+    return indexById
+  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
+  const isMessageVirtualizationEnabled =
+    visibleMessageIndexById.size > CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD
+
+  useEffect(() => {
+    if (!scrollParent || isMessageVirtualizationEnabled) return
+
+    const syncAtBottom = (): void => {
+      shouldFollowOutputRef.current =
+        scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= 32
+    }
+
+    scrollParent.addEventListener("scroll", syncAtBottom, { passive: true })
+    syncAtBottom()
+    return () => scrollParent.removeEventListener("scroll", syncAtBottom)
+  }, [isMessageVirtualizationEnabled, scrollParent])
+
   const scrollToConversationBottom = useCallback((): void => {
     const viewport = getViewport()
     if (!viewport) return
-    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-  }, [getViewport])
+
+    shouldFollowOutputRef.current = true
+    initialScrollAppliedRef.current = true
+    if (isMessageVirtualizationEnabled && virtuosoRef.current) {
+      virtuosoRef.current.scrollTo({
+        top: Number.MAX_SAFE_INTEGER,
+        behavior: "auto"
+      })
+      return
+    }
+
+    const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    if (Math.abs(viewport.scrollTop - bottom) > 1) {
+      viewport.scrollTo({ top: bottom, behavior: "auto" })
+    }
+  }, [getViewport, isMessageVirtualizationEnabled])
+
+  const scrollToMessageById = useCallback(
+    (messageId: string): void => {
+      const index = visibleMessageIndexById.get(messageId)
+      if (index === undefined) return
+      const targetElement = contentMessageRefs.current.get(messageId)
+      const viewport = getViewport()
+      if (targetElement && viewport) {
+        const viewportRect = viewport.getBoundingClientRect()
+        const targetRect = targetElement.getBoundingClientRect()
+        viewport.scrollTo({
+          top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - 8),
+          behavior: "smooth"
+        })
+        return
+      }
+      virtuosoRef.current?.scrollToIndex({
+        index,
+        align: "start",
+        behavior: "smooth"
+      })
+    },
+    [getViewport, visibleMessageIndexById]
+  )
+
+  const handleInitialVirtualItemsRendered = useCallback((): void => {
+    if (initialScrollAppliedRef.current) return
+    scrollToConversationBottom()
+  }, [scrollToConversationBottom])
+
+  const handleContentHeightChanged = useCallback((): void => {
+    if (!shouldFollowOutputRef.current) return
+    scrollToConversationBottom()
+  }, [scrollToConversationBottom])
+
+  const handleVirtualAtBottomStateChange = useCallback((atBottom: boolean): void => {
+    shouldFollowOutputRef.current = atBottom
+  }, [])
+
+  useEffect(() => {
+    if (
+      !initialScrollAppliedRef.current &&
+      visibleMessageIndexById.size > 0 &&
+      !historyLoading &&
+      scrollParent &&
+      !isMessageVirtualizationEnabled
+    ) {
+      scrollToConversationBottom()
+    }
+  }, [
+    historyLoading,
+    scrollParent,
+    scrollToConversationBottom,
+    threadId,
+    visibleMessageIndexById.size,
+    isMessageVirtualizationEnabled
+  ])
 
   useEffect(() => {
     if (historyLoading || pendingApproval || pendingUserInput) return
@@ -3203,15 +3168,12 @@ export function ChatContainer({
   }, [])
 
   useEffect(() => {
-    if (!pendingApproval) return
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [pendingApproval, getViewport])
+    if (!pendingApproval || !shouldFollowOutputRef.current) return
+    scrollToConversationBottom()
+  }, [pendingApproval, scrollToConversationBottom])
 
   useEffect(() => {
-    if (!pendingUserInput || !userInputDialogLayout) return
+    if (!pendingUserInput || !userInputDialogLayout || !shouldFollowOutputRef.current) return
     const viewport = getViewport()
     if (!viewport) return
 
@@ -3226,10 +3188,10 @@ export function ChatContainer({
         const targetRect = targetElement.getBoundingClientRect()
         const scrollDelta = targetRect.bottom - targetBottom
         if (Math.abs(scrollDelta) > 1) {
-          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+          viewport.scrollBy({ top: scrollDelta, behavior: "auto" })
         }
       } else {
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
       }
     })
 
@@ -3241,16 +3203,6 @@ export function ChatContainer({
     userInputDialogLayout?.height,
     userInputDialogLayout?.top
   ])
-
-  //  滚动到底部
-  // 1.初始化
-  // 2.切换thread
-  useEffect(() => {
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [getViewport, historyLoading, threadId])
 
   // Focus input on mount
   useEffect(() => {
@@ -5717,6 +5669,92 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const chatMessageListFooter = (
+    <div
+      className="space-y-4 pt-4 pb-4"
+      style={
+        userInputScrollPadding
+          ? { paddingBottom: `${userInputScrollPadding}px` }
+          : undefined
+      }
+    >
+      {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
+      {modelRetry && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+          <div className="min-w-0 flex-1">
+            <span>
+              模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+              {modelRetry.maxRetries}
+              {modelRetry.delayMs > 0 && <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>}
+              …
+            </span>
+          </div>
+        </div>
+      )}
+      {isLoading && (
+        <div className="space-y-3">
+          {contextCompaction?.phase !== "started" && (
+            <div className="flex items-center gap-2 text-sm">
+              <div className="rainbow-spinner" />
+              <span
+                className="thinking-shimmer-text"
+                data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+              >
+                {THINKING_MESSAGES[thinkingMessageIndex]}
+              </span>
+              {streamData.isLoading && (
+                <ProcessingDuration key={threadId} startTime={activeTurnStartTime} text="已处理" />
+              )}
+            </div>
+          )}
+          {todos.length > 0 && <ChatTodos todos={todos} />}
+        </div>
+      )}
+      {workflowRun ? (
+        <WorkflowRunPanel threadId={threadId} run={workflowRun} />
+      ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
+        <WorkflowHistoryButton threadId={threadId} />
+      ) : null}
+      {hookInterruption && !isLoading && (
+        <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-300" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              {interruptionNotice?.title}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+              <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                {hookInterruption.event}
+              </span>
+              <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+            </div>
+            <div className="mt-2 text-sm text-amber-900/90 break-words dark:text-amber-100/90">
+              {hookInterruption.reason}
+            </div>
+            {hookInterruption.systemMessage && (
+              <div className="mt-2 text-xs text-amber-700/80 break-words dark:text-amber-200/80">
+                {hookInterruption.systemMessage}
+              </div>
+            )}
+            <div className="mt-2 text-xs text-muted-foreground">
+              {interruptionNotice?.explanation}
+            </div>
+          </div>
+          <button
+            onClick={clearHookInterruption}
+            className="shrink-0 rounded p-1 transition-colors hover:bg-amber-500/20"
+            aria-label="Dismiss hook notice"
+          >
+            <X className="size-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
+      {threadError && !isLoading && (
+        <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError} />
+      )}
+    </div>
+  )
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -5851,22 +5889,34 @@ export function ChatContainer({
 
       {skillIntentBanner}
       {nuxDialog}
+      {isMessageVirtualizationEnabled && (
+        <TooltipProvider delayDuration={180}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                role="img"
+                aria-label="虚拟列表已启用"
+                className="pointer-events-auto absolute right-4 top-4 z-20 block size-2.5 rounded-full bg-emerald-500 ring-2 ring-background shadow-[0_0_0_1px_rgb(16_185_129/0.3)]"
+              />
+            </TooltipTrigger>
+            <TooltipContent side="left" sideOffset={8}>
+              虚拟列表已启用
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
 
       <ChatScrollNavigator
         messages={chatScrollNavigatorMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
+        scrollToMessageById={scrollToMessageById}
       >
         {({ reserveLeftSpace, setMessageRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
-                style={
-                  userInputScrollPadding
-                    ? { paddingBottom: `${userInputScrollPadding}px` }
-                    : undefined
-                }
+                className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}
               >
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
@@ -5905,7 +5955,7 @@ export function ChatContainer({
                       onOpenMarketBySkill={handleOpenMarketBySkill}
                     />
                   )}
-                  <ChatMessageList
+                  <ChatMessageVirtualList
                     messages={displayMessages}
                     perMessageFlags={perMessageFlags}
                     hookLoggingEnabled={hookLogConfig.enabled}
@@ -5928,111 +5978,13 @@ export function ChatContainer({
                     threadId={threadId}
                     assistantDurationMsById={assistantDurationMsById}
                     userSendTimeLabelById={userSendTimeLabelById}
+                    customScrollParent={scrollParent}
+                    virtuosoRef={virtuosoRef}
+                    onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
+                    onContentHeightChanged={handleContentHeightChanged}
+                    onAtBottomStateChange={handleVirtualAtBottomStateChange}
+                    footer={chatMessageListFooter}
                   />
-
-                  {contextCompaction && (
-                    <ContextCompactionCard compaction={contextCompaction} />
-                  )}
-
-                  {/*测试git diff功能*/}
-                  {/*<DisplayDiffTest/>*/}
-
-                  {/*
-              Hook log chips now live under each user message above. The modal
-              is mounted once at component scope below so it's not bound to a
-              specific message render. Buckets without a visible user message
-              (session lifecycle, worker auto-turns, older placeholders) render
-              their chips in ChatMessageList.
-            */}
-
-                  {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
-                  {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
-                  {modelRetry && (
-                    <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 dark:border-amber-500/40 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                      <span className="inline-block size-3 mt-0.5 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <span>
-                          模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-                          {modelRetry.maxRetries}
-                          {modelRetry.delayMs > 0 && (
-                            <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
-                          )}
-                          …
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  {/* Streaming indicator and inline TODOs */}
-                  {isLoading && (
-                    <div className="space-y-3">
-                      {contextCompaction?.phase !== "started" && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <div className="rainbow-spinner" />
-                          <span
-                            className="thinking-shimmer-text"
-                            data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                          >
-                            {THINKING_MESSAGES[thinkingMessageIndex]}
-                          </span>
-                          {streamData.isLoading && (
-                            <ProcessingDuration
-                              key={threadId}
-                              startTime={activeTurnStartTime}
-                              text="已处理"
-                            />
-                          )}
-                        </div>
-                      )}
-                      {todos.length > 0 && <ChatTodos todos={todos} />}
-                    </div>
-                  )}
-                  {workflowRun ? (
-                    <WorkflowRunPanel threadId={threadId} run={workflowRun} />
-                  ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
-                    <WorkflowHistoryButton threadId={threadId} />
-                  ) : null}
-                  {hookInterruption && !isLoading && (
-                    <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-                      <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {interruptionNotice?.title}
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
-                          <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
-                            {hookInterruption.event}
-                          </span>
-                          <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
-                        </div>
-                        <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
-                          {hookInterruption.reason}
-                        </div>
-                        {hookInterruption.systemMessage && (
-                          <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
-                            {hookInterruption.systemMessage}
-                          </div>
-                        )}
-                        <div className="text-xs text-muted-foreground mt-2">
-                          {interruptionNotice?.explanation}
-                        </div>
-                      </div>
-                      <button
-                        onClick={clearHookInterruption}
-                        className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
-                        aria-label="Dismiss hook notice"
-                      >
-                        <X className="size-4 text-muted-foreground" />
-                      </button>
-                    </div>
-                  )}
-                  {/* Error state */}
-                  {threadError && !isLoading && (
-                    <ChatErrorCard
-                      error={threadError}
-                      detail={errorDetail}
-                      onDismiss={handleDismissError}
-                    />
-                  )}
                 </div>
               </div>
             </ScrollArea>

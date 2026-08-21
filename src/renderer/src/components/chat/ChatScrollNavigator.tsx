@@ -37,6 +37,7 @@ interface ChatScrollNavigatorProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   rightPanelCollapsed: boolean
   onScrollToQuestion?: () => void
+  scrollToMessageById?: (messageId: string) => void
   children: (props: ChatScrollNavigatorRenderProps) => React.ReactNode
 }
 
@@ -196,6 +197,7 @@ export function ChatScrollNavigator({
   scrollContainerRef,
   rightPanelCollapsed,
   onScrollToQuestion,
+  scrollToMessageById,
   children
 }: ChatScrollNavigatorProps): React.JSX.Element {
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -268,12 +270,16 @@ export function ChatScrollNavigator({
     (index: number): void => {
       if (index < 0 || index >= userMessageIds.length) return
 
-      const viewport = getViewport(scrollContainerRef.current)
-      if (!viewport) return
-
       const messageId = userMessageIds[index]
+      const viewport = getViewport(scrollContainerRef.current)
       const targetElement = userMessageRefs.current.get(messageId)
-      if (!targetElement) return
+      if (!viewport || !targetElement) {
+        if (!scrollToMessageById) return
+        scrollToMessageById(messageId)
+        onScrollToQuestion?.()
+        setActiveQuestionIndex(index)
+        return
+      }
 
       const targetTop = Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
       requestedUserQuestionIndexRef.current = index
@@ -287,7 +293,7 @@ export function ChatScrollNavigator({
       onScrollToQuestion?.()
       setActiveQuestionIndex(index)
     },
-    [onScrollToQuestion, scrollContainerRef, userMessageIds]
+    [onScrollToQuestion, scrollContainerRef, scrollToMessageById, userMessageIds]
   )
 
   useEffect(() => {
