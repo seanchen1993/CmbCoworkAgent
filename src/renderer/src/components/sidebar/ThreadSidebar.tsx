@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
+import { useShallow } from "zustand/react/shallow"
 import {
   Plus,
   Trash2,
@@ -42,7 +43,7 @@ import {
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
-  useAllThreadStates,
+  useThreadStateSummaries,
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
@@ -492,10 +493,33 @@ export function ThreadSidebar(): React.JSX.Element {
     showDashboardView,
     setShowDashboardView,
     dashboardAllowed
-  } = useAppStore()
+  } = useAppStore(
+    useShallow((state) => ({
+      threads: state.threads,
+      currentThreadId: state.currentThreadId,
+      createThread: state.createThread,
+      forkThread: state.forkThread,
+      listForkableCheckpoints: state.listForkableCheckpoints,
+      selectThread: state.selectThread,
+      deleteThread: state.deleteThread,
+      updateThread: state.updateThread,
+      mainView: state.mainView,
+      previousThreadId: state.previousThreadId,
+      pendingEvolution: state.pendingEvolution,
+      showCustomizeView: state.showCustomizeView,
+      setShowCustomizeView: state.setShowCustomizeView,
+      showKanbanView: state.showKanbanView,
+      setShowKanbanView: state.setShowKanbanView,
+      showHarnessBoardView: state.showHarnessBoardView,
+      setShowHarnessBoardView: state.setShowHarnessBoardView,
+      showDashboardView: state.showDashboardView,
+      setShowDashboardView: state.setShowDashboardView,
+      dashboardAllowed: state.dashboardAllowed
+    }))
+  )
 
   const { cleanupThread } = useThreadContext()
-  const allThreadStates = useAllThreadStates()
+  const threadStateSummaries = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
 
   // FIX: 发送消息后侧边栏线程时间不更新。
@@ -694,7 +718,10 @@ export function ThreadSidebar(): React.JSX.Element {
     let sortIndex = 0
 
     for (const thread of threads.filter((item) => !isHarnessProjectModeThread(item))) {
-      const path = getThreadWorkspacePath(thread, allThreadStates[thread.thread_id]?.workspacePath)
+      const path = getThreadWorkspacePath(
+        thread,
+        threadStateSummaries[thread.thread_id]?.workspacePath
+      )
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
 
@@ -722,7 +749,7 @@ export function ThreadSidebar(): React.JSX.Element {
       if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
       return a.sortIndex - b.sortIndex
     })
-  }, [allThreadStates, pinnedProjectKeys, projectNameOverrides, threads])
+  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads])
 
   const currentThreadWorkspacePath = useMemo(() => {
     if (!currentThreadId) return null
@@ -730,8 +757,11 @@ export function ThreadSidebar(): React.JSX.Element {
     const currentThread = threads.find((thread) => thread.thread_id === currentThreadId)
     if (!currentThread || isHarnessFeatureThread(currentThread)) return null
 
-    return getThreadWorkspacePath(currentThread, allThreadStates[currentThreadId]?.workspacePath)
-  }, [allThreadStates, currentThreadId, threads])
+    return getThreadWorkspacePath(
+      currentThread,
+      threadStateSummaries[currentThreadId]?.workspacePath
+    )
+  }, [currentThreadId, threadStateSummaries, threads])
 
   const toggleProject = useCallback(
     (projectKey: string) => {
@@ -744,8 +774,9 @@ export function ThreadSidebar(): React.JSX.Element {
           // 折叠即丢弃展开进度,下次展开回到默认 5 条。
           setVisibleThreadCounts((counts) => {
             if (!(projectKey in counts)) return counts
-            const { [projectKey]: _dropped, ...rest } = counts
-            return rest
+            const next = { ...counts }
+            delete next[projectKey]
+            return next
           })
         }
         persistCollapsedProjects(next)
@@ -1390,17 +1421,15 @@ export function ThreadSidebar(): React.JSX.Element {
                   unreadIds.has(thread.thread_id)
                 ).length
                 const hasContextReminderThread = project.threads.some((thread) =>
-                  Boolean(allThreadStates[thread.thread_id]?.contextReminder?.pending)
+                  Boolean(threadStateSummaries[thread.thread_id]?.hasContextReminder)
                 )
                 const hasRunningThread = project.threads.some((thread) => {
-                  const threadState = allThreadStates[thread.thread_id]
+                  const threadSummary = threadStateSummaries[thread.thread_id]
                   return (
                     (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                    Boolean(
-                      threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
-                    ) ||
-                    Boolean(threadState?.scheduledTaskLoading) ||
-                    threadState?.workflowRun?.status === "running"
+                    Boolean(threadSummary?.hasRunningCoordinatorWorker) ||
+                    Boolean(threadSummary?.scheduledTaskLoading) ||
+                    Boolean(threadSummary?.workflowRunning)
                   )
                 })
 
@@ -1576,20 +1605,20 @@ export function ThreadSidebar(): React.JSX.Element {
                         {project.threads
                           .slice(0, visibleThreadCount)
                           .map((thread) => {
-                          const threadState = allThreadStates[thread.thread_id]
+                          const threadSummary = threadStateSummaries[thread.thread_id]
                           const hasRunningCoordinatorWorker = Boolean(
-                            threadState?.coordinatorWorkers.some(
-                              (worker) => worker.status === "running"
-                            )
+                            threadSummary?.hasRunningCoordinatorWorker
                           )
                           const isLoading =
                             (allStreamLoadingStates[thread.thread_id] ?? false) ||
                             hasRunningCoordinatorWorker ||
-                            threadState?.workflowRun?.status === "running"
-                          const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
-                          const hasPendingApproval = Boolean(threadState?.pendingApproval)
-                          const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
-                          const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
+                            Boolean(threadSummary?.workflowRunning)
+                          const scheduledTaskLoading = Boolean(
+                            threadSummary?.scheduledTaskLoading
+                          )
+                          const hasPendingApproval = Boolean(threadSummary?.hasPendingApproval)
+                          const hasPendingUserInput = Boolean(threadSummary?.hasPendingUserInput)
+                          const hasContextReminder = Boolean(threadSummary?.hasContextReminder)
 
                           return (
                             <ThreadListItem

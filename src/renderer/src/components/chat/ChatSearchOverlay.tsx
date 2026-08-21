@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChevronUp, ChevronDown, X, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
+import {
+  createChatSearchMatcher,
+  type ChatSearchCorpus,
+  type ChatSearchMatch
+} from "@/lib/chat-search-matches"
 
 /**
  * In-session keyword search (Ctrl/Cmd+F) for the chat transcript.
@@ -9,12 +14,12 @@ import { cn } from "@/lib/utils"
  * over live DOM Ranges WITHOUT mutating the DOM. This is essential here: the
  * transcript is React-rendered markdown, so injecting <mark> wrappers would fight
  * React's reconciliation and corrupt the tree. Ranges become stale when React
- * replaces text nodes (e.g. during streaming), so the match set is recomputed
- * whenever `recomputeKey` changes.
+ * replaces text nodes (e.g. during streaming), so the mounted active row is
+ * repainted whenever `recomputeKey` changes. Match discovery itself uses the
+ * complete transcript data index and is independent of the bounded DOM window.
  *
- * Limitation (acceptable for a phase-1 keyword find): a match must fall within a
- * single text node. A phrase split across element boundaries (e.g. spanning a
- * **bold** run) is not matched. Most keyword/phrase searches live in one text node.
+ * A data-index match split across rendered element boundaries can still be
+ * navigated to, but the CSS highlight is limited to a single text node.
  */
 
 interface ChatSearchOverlayProps {
@@ -22,6 +27,10 @@ interface ChatSearchOverlayProps {
   onClose: () => void
   /** Returns the scrollable viewport element to search and scroll within. */
   getViewport: () => HTMLElement | null
+  /** Returns the stable-history and live-tail search indexes after the debounce. */
+  getSearchCorpus: () => ChatSearchCorpus
+  /** Ensures a virtualized message row is mounted before highlighting it. */
+  onRevealMessage: (messageId: string) => void
   /** Changes whenever the rendered transcript changes, to re-run the search. */
   recomputeKey: unknown
 }
@@ -76,7 +85,7 @@ function clearHighlights(): void {
   registry.delete(ACTIVE_HIGHLIGHT_NAME)
 }
 
-/** Walk visible text nodes in the viewport and collect ranges matching `query`. */
+/** Walk the mounted active row and collect paint ranges matching `query`. */
 function collectMatchRanges(viewport: HTMLElement, query: string): Range[] {
   const needle = query.toLowerCase()
   if (!needle) return []
@@ -120,13 +129,19 @@ export function ChatSearchOverlay({
   open,
   onClose,
   getViewport,
+  getSearchCorpus,
+  onRevealMessage,
   recomputeKey
 }: ChatSearchOverlayProps): React.JSX.Element | null {
   const [query, setQuery] = useState("")
   const [matchCount, setMatchCount] = useState(0)
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
-  const rangesRef = useRef<Range[]>([])
+  const matchesRef = useRef<ChatSearchMatch[]>([])
+  const highlightFrameRef = useRef<number | null>(null)
+  const highlightGenerationRef = useRef(0)
+  const searchMatcherRef = useRef(createChatSearchMatcher())
+  const matchedQueryRef = useRef("")
   // Mirror of activeIndex so navigation can compute the next index without a
   // setState updater — keeps updaters pure (no side effects) for StrictMode /
   // concurrent rendering, where an impure updater would run twice.
@@ -138,8 +153,9 @@ export function ChatSearchOverlay({
     setActiveIndex(next)
   }, [])
 
-  // Paint all matches + the active match, then scroll the active match into view.
-  const applyHighlights = useCallback((ranges: Range[], active: number, scroll: boolean): void => {
+  // Paint matches within the mounted active row. The global match count comes
+  // from the data index, so transcript virtualization never hides results.
+  const applyHighlights = useCallback((ranges: Range[], active: number): void => {
     const registry = getHighlightRegistry()
     const HighlightImpl = getHighlightCtor()
     if (!registry || !HighlightImpl) return
@@ -158,44 +174,92 @@ export function ChatSearchOverlay({
       // Paint the active match on top of the base highlight.
       activeHighlight.priority = 1
       registry.set(ACTIVE_HIGHLIGHT_NAME, activeHighlight)
-
-      if (scroll) {
-        // Scroll the parent element (not the Range) — with content-visibility
-        // the offscreen Range may report a zero rect, but the element box exists.
-        const anchor = activeRange.startContainer.parentElement
-        anchor?.scrollIntoView({ block: "center", behavior: "smooth" })
-      }
     } else {
       registry.delete(ACTIVE_HIGHLIGHT_NAME)
     }
   }, [])
 
+  const revealAndHighlight = useCallback(
+    (match: ChatSearchMatch, rawQuery: string, scroll: boolean): void => {
+      const generation = highlightGenerationRef.current + 1
+      highlightGenerationRef.current = generation
+      if (highlightFrameRef.current !== null) {
+        cancelAnimationFrame(highlightFrameRef.current)
+        highlightFrameRef.current = null
+      }
+      onRevealMessage(match.messageId)
+
+      const tryHighlight = (attempt: number): void => {
+        if (highlightGenerationRef.current !== generation) return
+        const viewport = getViewport()
+        const row = viewport
+          ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-chat-message-id]")).find(
+              (candidate) => candidate.dataset.chatMessageId === match.messageId
+            )
+          : undefined
+        if (!row) {
+          if (attempt >= 8) {
+            highlightFrameRef.current = null
+            return
+          }
+          highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
+          return
+        }
+
+        highlightFrameRef.current = null
+        const ranges = collectMatchRanges(row, rawQuery.trim())
+        if (apiSupported && ranges.length > 0) {
+          applyHighlights(ranges, Math.min(match.occurrenceIndex, ranges.length - 1))
+        } else {
+          clearHighlights()
+        }
+        if (scroll) row.scrollIntoView({ block: "center", behavior: "smooth" })
+      }
+
+      tryHighlight(0)
+    },
+    [apiSupported, applyHighlights, getViewport, onRevealMessage]
+  )
+
   // Recompute matches when the query, transcript, or open state changes.
   useEffect(() => {
-    if (!open || !apiSupported) return
+    if (!open) return
     const trimmed = query.trim()
 
     const timer = window.setTimeout(() => {
       const viewport = getViewport()
       if (!viewport || !trimmed) {
-        rangesRef.current = []
+        if (!trimmed) matchedQueryRef.current = ""
+        matchesRef.current = []
         setMatchCount(0)
         setActive(0)
         clearHighlights()
         return
       }
 
-      const ranges = collectMatchRanges(viewport, trimmed)
-      rangesRef.current = ranges
-      setMatchCount(ranges.length)
+      const matches = searchMatcherRef.current(getSearchCorpus(), trimmed)
+      matchesRef.current = matches
+      setMatchCount(matches.length)
       // Keep the active index in range as content streams in/out.
-      const next = ranges.length === 0 ? 0 : Math.min(activeIndexRef.current, ranges.length - 1)
+      const next = matches.length === 0 ? 0 : Math.min(activeIndexRef.current, matches.length - 1)
       setActive(next)
-      applyHighlights(ranges, next, false)
+      const activeMatch = matches[next]
+      const shouldScroll = matchedQueryRef.current !== trimmed.toLocaleLowerCase()
+      matchedQueryRef.current = trimmed.toLocaleLowerCase()
+      if (activeMatch) revealAndHighlight(activeMatch, trimmed, shouldScroll)
+      else clearHighlights()
     }, SEARCH_DEBOUNCE_MS)
 
     return () => window.clearTimeout(timer)
-  }, [open, query, recomputeKey, apiSupported, getViewport, applyHighlights, setActive])
+  }, [
+    getSearchCorpus,
+    getViewport,
+    open,
+    query,
+    recomputeKey,
+    revealAndHighlight,
+    setActive
+  ])
 
   // Focus the input when opened; seed it with the current text selection.
   useEffect(() => {
@@ -216,22 +280,36 @@ export function ChatSearchOverlay({
   // Clear highlights whenever the overlay is closed or unmounts.
   useEffect(() => {
     if (open) return
+    matchedQueryRef.current = ""
+    matchesRef.current = []
+    searchMatcherRef.current = createChatSearchMatcher()
+    highlightGenerationRef.current += 1
+    if (highlightFrameRef.current !== null) {
+      cancelAnimationFrame(highlightFrameRef.current)
+      highlightFrameRef.current = null
+    }
     clearHighlights()
   }, [open])
 
   useEffect(() => {
-    return () => clearHighlights()
+    return () => {
+      highlightGenerationRef.current += 1
+      if (highlightFrameRef.current !== null) {
+        cancelAnimationFrame(highlightFrameRef.current)
+      }
+      clearHighlights()
+    }
   }, [])
 
   const goToMatch = useCallback(
     (direction: 1 | -1): void => {
-      const ranges = rangesRef.current
-      if (ranges.length === 0) return
-      const next = (activeIndexRef.current + direction + ranges.length) % ranges.length
+      const matches = matchesRef.current
+      if (matches.length === 0) return
+      const next = (activeIndexRef.current + direction + matches.length) % matches.length
       setActive(next)
-      applyHighlights(ranges, next, true)
+      revealAndHighlight(matches[next], query, true)
     },
-    [applyHighlights, setActive]
+    [query, revealAndHighlight, setActive]
   )
 
   const handleKeyDown = useCallback(

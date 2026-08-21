@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react"
 import { createPortal } from "react-dom"
+import { useShallow } from "zustand/react/shallow"
 import * as PopoverPrimitive from "@radix-ui/react-popover"
 import {
   AlertCircle,
@@ -74,7 +75,7 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
-  useAllThreadStates,
+  useThreadStateSummaries,
   useThreadContext
 } from "@/lib/thread-context"
 import { toast } from "sonner"
@@ -466,9 +467,9 @@ type ThreadWorkspaceStateMap = Record<
   {
     workspacePath?: string | null
     scheduledTaskLoading?: boolean
-    pendingApproval?: unknown
-    pendingUserInput?: unknown
-    contextReminder?: { pending?: boolean }
+    hasPendingApproval?: boolean
+    hasPendingUserInput?: boolean
+    hasContextReminder?: boolean
   } | undefined
 >
 
@@ -4975,19 +4976,25 @@ function FeatureWorkspaceChangesPanel({
     if (groupsByThreadId.size === 0) return
     const timers = new Map<string, ReturnType<typeof setTimeout>>()
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      const group = groupsByThreadId.get(data.threadId)
-      if (!group) return
-      const existing = timers.get(group.key)
-      if (existing) {
-        clearTimeout(existing)
-      }
-      timers.set(
-        group.key,
-        setTimeout(() => {
-          timers.delete(group.key)
-          void refreshGroup(group)
-        }, 120)
+      const affectedGroups = new Map(
+        data.threadIds.flatMap((threadId) => {
+          const group = groupsByThreadId.get(threadId)
+          return group ? [[group.key, group] as const] : []
+        })
       )
+      for (const group of affectedGroups.values()) {
+        const existing = timers.get(group.key)
+        if (existing) {
+          clearTimeout(existing)
+        }
+        timers.set(
+          group.key,
+          setTimeout(() => {
+            timers.delete(group.key)
+            void refreshGroup(group)
+          }, 120)
+        )
+      }
     })
 
     return () => {
@@ -5893,7 +5900,7 @@ function FeatureDetailPage({
   const createThread = useAppStore((s) => s.createThread)
   const selectThread = useAppStore((s) => s.selectThread)
   const threads = useAppStore((s) => s.threads)
-  const allThreadStates = useAllThreadStates()
+  const allThreadStates = useThreadStateSummaries()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
@@ -6550,7 +6557,7 @@ function ProjectFeatureSidebar({
   onCancelEditing: () => void
   onEditingTitleChange: (value: string) => void
 }): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
+  const currentThreadId = useAppStore((state) => state.currentThreadId)
   const highlightThreadId = isViewingSession ? currentThreadId : null
   const scrollAreaRef = useRef<HTMLDivElement | null>(null)
   const pendingScrollRestoreRef = useRef<number | null>(null)
@@ -6639,9 +6646,9 @@ function ProjectFeatureSidebar({
     const threadState = allThreadStates[thread.thread_id]
     const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
     const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
-    const hasPendingApproval = Boolean(threadState?.pendingApproval)
-    const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
-    const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
+    const hasPendingApproval = threadState?.hasPendingApproval ?? false
+    const hasPendingUserInput = threadState?.hasPendingUserInput ?? false
+    const hasContextReminder = threadState?.hasContextReminder ?? false
 
     return (
       <ThreadListItem
@@ -7070,9 +7077,20 @@ export function HarnessBoardView({
     deleteThread,
     pluginVersion,
     bumpPluginVersion
-  } = useAppStore()
+  } = useAppStore(
+    useShallow((state) => ({
+      threads: state.threads,
+      currentThreadId: state.currentThreadId,
+      createThread: state.createThread,
+      selectThread: state.selectThread,
+      updateThread: state.updateThread,
+      deleteThread: state.deleteThread,
+      pluginVersion: state.pluginVersion,
+      bumpPluginVersion: state.bumpPluginVersion
+    }))
+  )
   const { cleanupThread } = useThreadContext()
-  const allThreadStates = useAllThreadStates()
+  const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
   const [collapsedFeatureKeys, setCollapsedFeatureKeys] = useState<Set<string>>(new Set())
   const [unreadIds, setUnreadIds] = useState<Set<string>>(() => {

@@ -88,6 +88,7 @@ export interface WorkspaceSetParams {
 
 export interface WorkspaceLoadParams {
   threadId: string
+  workspacePath?: string
 }
 
 export interface WorkspaceFileParams {
@@ -219,6 +220,28 @@ export interface Message {
   created_at: Date
   start_at?: Date
   end_at?: Date
+}
+
+export interface ThreadMessagesPageOptions {
+  /**
+   * Cursor returned by the previous page. `beforeOrdinal` and
+   * `beforeMessageId` must be supplied together so duplicate legacy ordinals
+   * cannot make pagination skip or repeat messages.
+   */
+  beforeOrdinal?: number
+  beforeMessageId?: string
+  limit?: number
+}
+
+export interface ThreadMessagesPage {
+  /** Messages are always returned in durable ascending transcript order. */
+  messages: Message[]
+  /** Cursor for the next older page, or null when the beginning was reached. */
+  beforeOrdinal: number | null
+  beforeMessageId: string | null
+  hasMore: boolean
+  /** Total durable messages for the thread, independent of the cursor. */
+  total: number
 }
 
 export interface ContentBlock {

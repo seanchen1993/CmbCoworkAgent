@@ -2,6 +2,7 @@ import { ChevronDown } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 
 const BOTTOM_DISTANCE_THRESHOLD = 32
+const MAX_VIEWPORT_ATTACH_FRAMES = 60
 
 interface ChatScrollToBottomButtonProps {
   getViewport: () => HTMLDivElement | null
@@ -38,6 +39,7 @@ export function ChatScrollToBottomButton({
     let viewport: HTMLDivElement | null = null
     let retryFrame: number | null = null
     let resizeObserver: ResizeObserver | null = null
+    let attachAttempts = 0
 
     const observeContent = (): void => {
       if (!viewport || !resizeObserver) return
@@ -55,6 +57,8 @@ export function ChatScrollToBottomButton({
     const attach = (): void => {
       viewport = getViewport()
       if (!viewport) {
+        attachAttempts += 1
+        if (attachAttempts >= MAX_VIEWPORT_ATTACH_FRAMES) return
         retryFrame = requestAnimationFrame(attach)
         return
       }

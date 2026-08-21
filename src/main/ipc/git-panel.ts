@@ -4,7 +4,7 @@ import { execFile } from "child_process"
 import { lstat, mkdir, readFile, rename, writeFile, rm, stat } from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
-import { getThread, updateThread } from "../db"
+import { getThreadCore, updateThread } from "../db"
 import { getOpenworkDir } from "../storage"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { resolveGitOperationPath } from "../services/git-repository-discovery"
@@ -1059,7 +1059,7 @@ async function getThreadWorkspaceContext(threadId: string): Promise<{
   metadata: Record<string, unknown>
   workspacePath: string | null
 }> {
-  const thread = getThread(threadId)
+  const thread = getThreadCore(threadId)
   let metadata: Record<string, unknown> = {}
   try {
     metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
@@ -1075,7 +1075,11 @@ async function getThreadWorkspaceContext(threadId: string): Promise<{
 function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
-      win.webContents.send("workspace:files-changed", { threadId, workspacePath })
+      win.webContents.send("workspace:files-changed", {
+        threadIds: [threadId],
+        workspacePath,
+        changeType: "file"
+      })
     }
   }
 }
@@ -1388,7 +1392,7 @@ async function getGitCommitHistoryForWorkspace(workspacePath: string): Promise<{
 }
 
 function getThreadWorkspacePath(threadId: string): string | null {
-  const thread = getThread(threadId)
+  const thread = getThreadCore(threadId)
   let metadata: Record<string, unknown> = {}
   try {
     metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}

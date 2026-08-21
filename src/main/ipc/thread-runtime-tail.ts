@@ -6,7 +6,11 @@ import {
   type BaseMessage,
   type ToolCall as LangChainToolCall
 } from "@langchain/core/messages"
-import { getThreadMessages } from "../db"
+import {
+  getThreadMessages,
+  getThreadMessagesAfterAnyId,
+  getThreadMessagesByIds
+} from "../db"
 import { withCheckpointer } from "../agent/runtime"
 import type { Message } from "../types"
 import {
@@ -133,8 +137,34 @@ export async function getDurableRuntimeTail(
   }
 
   const transcript = deriveCheckpointTranscriptIndex(checkpoint)
+  if (transcript.visibleMessages.length === 0) {
+    return {
+      messages: [],
+      persistedMessages: [],
+      checkpointHasInterrupt: checkpointHasInterrupt(checkpoint)
+    }
+  }
+  // The latest checkpoint boundary is normally an exact durable render id. Probe
+  // only a bounded suffix, then ask SQLite for rows after the newest match. A full
+  // transcript read remains a compatibility fallback for legacy/corrupt identity
+  // metadata, not the ordinary start/resume path.
+  const recentCheckpointIds = Array.from(
+    new Set(
+      transcript.visibleMessages.slice(-32).flatMap((message) =>
+        [message.renderId, message.id].filter((id): id is string => Boolean(id))
+      )
+    )
+  )
+  const durableCheckpointBoundaries = getThreadMessagesByIds(threadId, recentCheckpointIds)
+  const persistedMessages =
+    durableCheckpointBoundaries.length > 0
+      ? getThreadMessagesAfterAnyId(
+          threadId,
+          durableCheckpointBoundaries.map((message) => message.id)
+        )
+      : getThreadMessages(threadId)
   const persistedTail = findDurableTailMessagesAfterCheckpoint(
-    getThreadMessages(threadId),
+    persistedMessages,
     transcript.visibleMessages,
     options
   )

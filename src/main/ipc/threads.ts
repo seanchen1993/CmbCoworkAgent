@@ -6,9 +6,31 @@ import Store from "electron-store"
 import AdmZip from "adm-zip"
 import { v4 as uuid } from "uuid"
 import {
-  getAllThreads,
-  getThread,
+  getAllThreadSummaries,
+  copyThreadSubagentManifestRowsPage,
+  getThreadCore,
+  getThreadHydrationValuesJson,
+  getLegacyThreadSubagentMigrationPayload,
+  getThreadValuesJson,
+  getThreadValuesJsonPage,
   getThreadMessages,
+  getThreadMessageIdentityContext,
+  getThreadMessagesAfterAnyId,
+  getThreadMessagesByIds,
+  getThreadMessagesPage,
+  getThreadSubagentManifestAt,
+  getThreadSubagentBucketIdPage,
+  getThreadSubagentManifestForwardPage,
+  getThreadSubagentManifestJsonPage,
+  getThreadSubagentManifestPage,
+  getThreadSubagentManifestBlobReferenceHashes,
+  getThreadSubagentTextJournalChunkPage,
+  getThreadSubagentStartupManifests,
+  appendThreadSubagentManifestTextDeltas,
+  patchThreadSubagentManifestPreservingTextJournal,
+  threadSubagentManifestHasTextJournal,
+  migrateLegacyThreadSubagentManifestBuckets,
+  upsertThreadSubagentManifestMessages,
   getThreadGoalEvents,
   getThreadGoalEventsForRestore,
   addThreadGoalEvent,
@@ -18,7 +40,8 @@ import {
   mergeThreadValues as dbMergeThreadValues,
   replaceThreadMessageId,
   upsertThreadMessages,
-  deleteThread as dbDeleteThread
+  deleteThread as dbDeleteThread,
+  type ThreadRow
 } from "../db"
 import {
   withCheckpointer,
@@ -72,6 +95,7 @@ import {
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { getDefaultModel } from "./models"
+import { stopWatching } from "../services/workspace-watcher"
 import type {
   ForkableCheckpoint,
   Message,
@@ -80,6 +104,7 @@ import type {
   ThreadForkParams,
   ThreadForkResponse,
   SubagentTranscriptBlobField,
+  ThreadMessagesPageOptions,
   ThreadUpdateParams,
   ThreadValuesMergeParams
 } from "../types"
@@ -129,9 +154,9 @@ import {
   buildSubagentTranscriptStartupManifests,
   compactSubagentTranscriptManifests,
   exportSubagentTranscriptBlobValue,
+  exportSubagentTranscriptTextWithJournal,
   getSubagentTranscriptReferenceEpoch,
   hydrateSubagentTranscriptManifestPage,
-  mergeSubagentTranscriptManifestMessages,
   quarantineSubagentTranscriptBlobGcCandidates,
   removeQuarantinedSubagentTranscriptBlobs,
   scanSubagentTranscriptBlobGcCandidates,
@@ -140,8 +165,10 @@ import {
 } from "../services/subagent-transcript-content-store"
 import {
   SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY,
+  getSubagentTranscriptBlobReferenceHashKey,
   isSubagentTranscriptBlobRef
 } from "../../shared/subagent-transcript-storage"
+import { collectReferencedTranscriptHashesFromPages } from "./thread-transcript-gc-scan"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 interface ExportAttachment {
@@ -344,6 +371,14 @@ const TOOL_CALL_ARGS_LIMIT = 1200
 const TOOL_RESULT_CONTENT_LIMIT = 4000
 const MAX_FORK_DURABLE_TAIL_MESSAGES = 1_000
 const MAX_FORK_DURABLE_TAIL_BYTES = 8 * 1024 * 1024
+const FORK_MESSAGE_COPY_BATCH_SIZE = 128
+const FORK_SUBAGENT_BUCKET_PAGE_SIZE = 32
+const FORK_SUBAGENT_MESSAGE_PAGE_SIZE = 128
+
+function yieldForkColdPath(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve))
+}
+
 function parseJsonObject(raw: string | null | undefined): Record<string, unknown> | undefined {
   if (!raw) return undefined
   try {
@@ -360,7 +395,7 @@ function parseThreadValues(raw: string | null | undefined): Record<string, unkno
   return parseJsonObject(raw) ?? {}
 }
 
-function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thread {
+function serializeThreadRow(row: ThreadRow): Thread {
   return {
     thread_id: row.thread_id,
     created_at: new Date(row.created_at),
@@ -382,7 +417,57 @@ function threadValuesWithoutSubagentTranscripts(
   if (!raw) return undefined
   const values = parseThreadValues(raw)
   delete values[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+  // Durable thread_messages rows already carry start_at/end_at. These legacy
+  // lifetime maps can reach tens of thousands of entries and must not ride on
+  // every task metadata hydration/IPC response.
+  delete values.messageTimes
+  delete values.messageTimeOrder
+  delete values.internalGoalMessageTimes
+  delete values.internalGoalMessageTimeOrder
   return values
+}
+
+const checkedLegacySubagentTranscriptThreads = new Set<string>()
+
+/** One-time compatibility migration; all subsequent reads/writes are row-level. */
+function ensureSubagentTranscriptRows(threadId: string): void {
+  if (checkedLegacySubagentTranscriptThreads.has(threadId)) return
+  const migrationPayload = getLegacyThreadSubagentMigrationPayload(threadId)
+  if (!migrationPayload) return
+  if (!migrationPayload.hasLegacyValue) {
+    getThreadHydrationValuesJson(threadId)
+    checkedLegacySubagentTranscriptThreads.add(threadId)
+    return
+  }
+  const legacy = parseJsonObject(migrationPayload.legacyTranscriptsJson) ?? {}
+  const migrated = migrateLegacyThreadSubagentManifestBuckets(
+    threadId,
+    legacy,
+    migrationPayload.nextThreadValuesJson
+  )
+  if (!migrated) throw new Error("Thread not found")
+  checkedLegacySubagentTranscriptThreads.add(threadId)
+  advanceSubagentTranscriptReferenceEpoch()
+}
+
+function rowBackedSubagentTranscriptPage(
+  threadId: string,
+  subagentId: string,
+  before?: number
+): ReturnType<typeof sliceSubagentTranscriptManifestPage> {
+  const rows = getThreadSubagentManifestPage(threadId, subagentId, before, 100)
+  const selected = sliceSubagentTranscriptManifestPage(rows.messages)
+  const globalStart = rows.ordinals[selected.start] ?? rows.start
+  const selectedLastOrdinal = rows.ordinals[selected.end - 1]
+  const globalEnd = selectedLastOrdinal === undefined ? globalStart : selectedLastOrdinal + 1
+  const hasEarlierRows = selected.start > 0 || rows.hasMore
+  return {
+    ...selected,
+    start: globalStart,
+    end: globalEnd,
+    total: rows.total,
+    ...(hasEarlierRows ? { nextBefore: globalStart } : { nextBefore: undefined })
+  }
 }
 
 function mergeThreadMessageTranscripts(
@@ -418,30 +503,166 @@ function normalizeIpcMessageRole(role: unknown): Message["role"] | undefined {
     : undefined
 }
 
-function copyForkedThreadMessages(input: {
+async function copyForkedThreadMessages(input: {
   sourceThreadId: string
   targetThreadId: string
-  visibleMessages: readonly { id: string; role: string; renderId?: string; rawIndex?: number }[]
+  visibleMessages: readonly {
+    id: string
+    role: string
+    renderId?: string
+    rawIndex?: number
+    provider_source_id?: string
+    provider_occurrence?: number
+  }[]
   checkpointMessages?: CheckpointMessage[]
-}): void {
+}): Promise<void> {
   if (input.visibleMessages.length === 0) return
-  const visibleRawIndices = input.visibleMessages.flatMap((message) =>
-    typeof message.rawIndex === "number" ? [message.rawIndex] : []
-  )
-  const allowedIdentities = new Set(
-    input.visibleMessages.map((message) =>
-      getMessageProviderOccurrenceIdentity({ ...message, id: message.renderId || message.id })
+  for (
+    let offset = 0;
+    offset < input.visibleMessages.length;
+    offset += FORK_MESSAGE_COPY_BATCH_SIZE
+  ) {
+    const visibleBatch = input.visibleMessages.slice(
+      offset,
+      offset + FORK_MESSAGE_COPY_BATCH_SIZE
     )
+    const allowedIdentities = new Set(
+      visibleBatch.flatMap((message) => {
+        const role = normalizeIpcMessageRole(message.role)
+        return role
+          ? [
+              getMessageProviderOccurrenceIdentity({
+                ...message,
+                id: message.renderId || message.id,
+                role
+              })
+            ]
+          : []
+      })
+    )
+    const selectors = visibleBatch.flatMap((message) => {
+      const role = normalizeIpcMessageRole(message.role)
+      if (!role) return []
+      return [
+        {
+          messageId: message.renderId || message.id,
+          providerSourceId: message.provider_source_id,
+          providerOccurrence: message.provider_occurrence,
+          role
+        }
+      ]
+    })
+    const visibleRawIndices = visibleBatch.flatMap((message) =>
+      typeof message.rawIndex === "number" ? [message.rawIndex] : []
+    )
+    const checkpointMessages = checkpointMessagesToThreadMessages(input.checkpointMessages, {
+      visibleRawIndices
+    })
+    const persistedMessages = getThreadMessageIdentityContext(
+      input.sourceThreadId,
+      selectors,
+      1
+    ).filter((message) =>
+      allowedIdentities.has(getMessageProviderOccurrenceIdentity(message))
+    )
+    const messages = mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
+    if (messages.length > 0) {
+      // Batches are inserted in visible order, so no target-lifetime baseline
+      // is needed to preserve ordering between batches.
+      upsertThreadMessages(input.targetThreadId, messages, { preserveExistingOrder: true })
+    }
+    await yieldForkColdPath()
+  }
+}
+
+async function findForkSubagentPrompt(
+  threadId: string,
+  subagentId: string
+): Promise<Record<string, unknown> | undefined> {
+  let cursor: Parameters<typeof getThreadSubagentManifestForwardPage>[2]
+  while (true) {
+    const page = getThreadSubagentManifestForwardPage(
+      threadId,
+      subagentId,
+      cursor,
+      FORK_SUBAGENT_MESSAGE_PAGE_SIZE
+    )
+    for (const message of page.messages) {
+      if (
+        isPlainRecord(message) &&
+        typeof message.subagent_tool_call_id === "string" &&
+        typeof message.subagent_invocation_scope === "string"
+      ) {
+        return message
+      }
+    }
+    if (!page.hasMore) return undefined
+    if (!page.nextCursor) throw new Error("Subagent transcript page did not advance.")
+    cursor = page.nextCursor
+    await yieldForkColdPath()
+  }
+}
+
+function forkKeepsSubagentBucket(
+  subagentId: string,
+  prompt: Record<string, unknown> | undefined,
+  transcriptIndex: ReturnType<typeof deriveCheckpointTranscriptIndex>
+): boolean {
+  const filtered = buildFilteredThreadValues(
+    {
+      [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: {
+        [subagentId]: prompt ? [prompt] : []
+      }
+    },
+    transcriptIndex
   )
-  const checkpointMessages = checkpointMessagesToThreadMessages(input.checkpointMessages, {
-    visibleRawIndices
-  })
-  const persistedMessages = getThreadMessages(input.sourceThreadId).filter((message) =>
-    allowedIdentities.has(getMessageProviderOccurrenceIdentity(message))
-  )
-  const messages = mergeThreadMessageTranscripts(checkpointMessages, persistedMessages)
-  if (messages.length === 0) return
-  upsertThreadMessages(input.targetThreadId, messages)
+  const buckets = filtered[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+  return isPlainRecord(buckets) && hasOwnProperty(buckets, subagentId)
+}
+
+async function copyForkedSubagentTranscriptsPaged(input: {
+  sourceThreadId: string
+  targetThreadId: string
+  transcriptIndex: ReturnType<typeof deriveCheckpointTranscriptIndex>
+}): Promise<void> {
+  let afterSubagentId: string | undefined
+  while (true) {
+    const bucketPage = getThreadSubagentBucketIdPage(
+      input.sourceThreadId,
+      afterSubagentId,
+      FORK_SUBAGENT_BUCKET_PAGE_SIZE
+    )
+    for (const subagentId of bucketPage.subagentIds) {
+      const prompt = await findForkSubagentPrompt(input.sourceThreadId, subagentId)
+      if (!forkKeepsSubagentBucket(subagentId, prompt, input.transcriptIndex)) continue
+
+      let cursor: Parameters<typeof copyThreadSubagentManifestRowsPage>[0]["after"]
+      while (true) {
+        const copiedPage = await withSubagentTranscriptContentMutationLock(async () => {
+          const result = copyThreadSubagentManifestRowsPage({
+            sourceThreadId: input.sourceThreadId,
+            targetThreadId: input.targetThreadId,
+            subagentId,
+            after: cursor,
+            limit: FORK_SUBAGENT_MESSAGE_PAGE_SIZE
+          })
+          if (result.copied > 0) advanceSubagentTranscriptReferenceEpoch()
+          return result
+        })
+        if (!copiedPage.hasMore) break
+        if (!copiedPage.nextCursor) throw new Error("Subagent transcript copy did not advance.")
+        cursor = copiedPage.nextCursor
+        await yieldForkColdPath()
+      }
+      await yieldForkColdPath()
+    }
+    if (!bucketPage.hasMore) break
+    if (!bucketPage.nextAfterSubagentId) {
+      throw new Error("Subagent transcript bucket page did not advance.")
+    }
+    afterSubagentId = bucketPage.nextAfterSubagentId
+    await yieldForkColdPath()
+  }
 }
 
 function toCheckpointTimeMs(checkpoint: Checkpoint): number | null {
@@ -508,10 +729,80 @@ function isForkVisiblePersistedMessage(message: Message): boolean {
 
 function findDurableForkTailMessages(
   sourceThreadId: string,
-  visibleMessages: readonly { id: string; role: string; renderId?: string }[]
+  visibleMessages: readonly {
+    id: string
+    role: string
+    renderId?: string
+    provider_source_id?: string
+    provider_occurrence?: number
+  }[]
 ): Message[] {
+  const recentVisibleMessages = visibleMessages.slice(-32)
+  const recentIds = Array.from(
+    new Set(
+      recentVisibleMessages.flatMap((message) =>
+        [message.renderId, message.id].filter((id): id is string => Boolean(id))
+      )
+    )
+  )
+  let boundaries = getThreadMessagesByIds(sourceThreadId, recentIds)
+
+  // Provider IDs survive renderer collision renames. Use them only as a
+  // bounded compatibility fallback when none of the recent render/raw IDs is
+  // durable, then filter away the helper's small context tail.
+  if (boundaries.length === 0) {
+    const recentIdentities = new Set(
+      recentVisibleMessages.flatMap((message) => {
+        const role = normalizeIpcMessageRole(message.role)
+        return role
+          ? [
+              getMessageProviderOccurrenceIdentity({
+                ...message,
+                id: message.renderId || message.id,
+                role
+              })
+            ]
+          : []
+      })
+    )
+    const selectors = recentVisibleMessages.flatMap((message) => {
+      const role = normalizeIpcMessageRole(message.role)
+      if (!role) return []
+      return [
+        {
+          messageId: message.renderId || message.id,
+          providerSourceId: message.provider_source_id,
+          providerOccurrence: message.provider_occurrence,
+          role
+        }
+      ]
+    })
+    boundaries = getThreadMessageIdentityContext(sourceThreadId, selectors, 1).filter((message) =>
+      recentIdentities.has(getMessageProviderOccurrenceIdentity(message))
+    )
+  }
+
+  const persistedMessages =
+    boundaries.length > 0
+      ? getThreadMessagesAfterAnyId(
+          sourceThreadId,
+          boundaries.map((message) => message.id),
+          MAX_FORK_DURABLE_TAIL_MESSAGES + 1
+        )
+      : (() => {
+          const page = getThreadMessagesPage(sourceThreadId, {
+            limit: MAX_FORK_DURABLE_TAIL_MESSAGES
+          })
+          if (page.hasMore) {
+            throw new Error("当前会话尾部消息过多，无法安全物化到 fork checkpoint。")
+          }
+          return page.messages
+        })()
+  if (persistedMessages.length > MAX_FORK_DURABLE_TAIL_MESSAGES) {
+    throw new Error("当前会话尾部消息过多，无法安全物化到 fork checkpoint。")
+  }
   return findMessagesAfterCheckpointVisibleIds(
-    getThreadMessages(sourceThreadId).filter(isForkVisiblePersistedMessage),
+    persistedMessages.filter(isForkVisiblePersistedMessage),
     visibleMessages
   )
 }
@@ -1248,7 +1539,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
   const explicitMessageId = params.messageId?.trim()
 
   return withThreadRunMutationLock(sourceThreadId, async () => {
-    const sourceRow = getThread(sourceThreadId)
+    const sourceRow = getThreadCore(sourceThreadId)
     if (!sourceRow) throw new Error("源会话不存在。")
 
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
@@ -1260,6 +1551,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
     if (await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })) {
       throw new Error("当前会话仍在运行，请停止或等待完成后再 fork。")
     }
+    ensureSubagentTranscriptRows(sourceThreadId)
 
     const forkSource = await withCheckpointer(sourceThreadId, async (sourceSaver) => {
       const sourceTuple = await sourceSaver.getTuple({
@@ -1357,10 +1649,17 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       overrides: params.overrides
     })
     const transcriptIndex = deriveCheckpointTranscriptIndex(forkCheckpoint)
-    const filteredThreadValues = buildFilteredThreadValues(
-      parseThreadValues(sourceRow.thread_values),
-      transcriptIndex
-    )
+    const sourceThreadValues = parseThreadValues(getThreadValuesJson(sourceThreadId))
+    const filteredThreadValues = buildFilteredThreadValues(sourceThreadValues, transcriptIndex)
+    // Message rows are the durable timing source. Rebuilding legacy lifetime
+    // maps during a fork would reintroduce an O(history) thread_values payload.
+    delete filteredThreadValues.messageTimes
+    delete filteredThreadValues.messageTimeOrder
+    delete filteredThreadValues.internalGoalMessageTimes
+    delete filteredThreadValues.internalGoalMessageTimeOrder
+    // Subagent manifests are copied from row storage in bounded pages below.
+    // Never put an inline bucket back into the target thread_values payload.
+    delete filteredThreadValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
     const targetWorkspacePath =
       typeof targetMetadata.workspacePath === "string" ? targetMetadata.workspacePath : null
 
@@ -1413,7 +1712,12 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
         advanceSubagentTranscriptReferenceEpoch()
         return updated
       })
-      copyForkedThreadMessages({
+      await copyForkedSubagentTranscriptsPaged({
+        sourceThreadId,
+        targetThreadId,
+        transcriptIndex
+      })
+      await copyForkedThreadMessages({
         sourceThreadId,
         targetThreadId,
         visibleMessages: transcriptIndex.visibleMessages,
@@ -1449,7 +1753,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
 async function listForkableCheckpoints(threadId: string): Promise<ForkableCheckpoint[]> {
   const sourceThreadId = assertValidCheckpointThreadId(threadId)
   return withThreadRunMutationLock(sourceThreadId, async () => {
-    const sourceRow = getThread(sourceThreadId)
+    const sourceRow = getThreadCore(sourceThreadId)
     if (!sourceRow) throw new Error("源会话不存在。")
 
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
@@ -1850,7 +2154,7 @@ export async function resolveForkCheckpointForMessage(
   if (!messageId) return null
 
   return withThreadRunMutationLock(sourceThreadId, async () => {
-    const sourceRow = getThread(sourceThreadId)
+    const sourceRow = getThreadCore(sourceThreadId)
     if (!sourceRow) throw new Error("源会话不存在。")
 
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
@@ -2030,22 +2334,12 @@ function safeFileName(value: string): string {
 }
 
 async function collectReferencedTranscriptHashesBounded(): Promise<Set<string>> {
-  const hashes = new Set<string>()
-  const chunkChars = 1024 * 1024
-  const overlapChars = 160
-  for (const row of getAllThreads()) {
-    const raw = typeof row.thread_values === "string" ? row.thread_values : ""
-    for (let offset = 0; offset < raw.length; offset += chunkChars) {
-      const start = Math.max(0, offset - overlapChars)
-      const chunk = raw.slice(start, Math.min(raw.length, offset + chunkChars))
-      const pattern = /"sha256"\s*:\s*"([a-f0-9]{64})"/g
-      for (let match = pattern.exec(chunk); match; match = pattern.exec(chunk)) {
-        hashes.add(match[1])
-      }
-      await new Promise<void>((resolve) => setImmediate(resolve))
-    }
-  }
-  return hashes
+  return collectReferencedTranscriptHashesFromPages({
+    readThreadValuesPage: getThreadValuesJsonPage,
+    readManifestPage: getThreadSubagentManifestJsonPage,
+    threadPageSize: 16,
+    manifestPageSize: 128
+  })
 }
 
 function escapeMarkdown(value: string): string {
@@ -2232,15 +2526,18 @@ function checkpointMessagesToThreadMessages(
   options: { visibleRawIndices?: readonly number[] } = {}
 ): Message[] {
   if (!Array.isArray(messages)) return []
-  const visibleRawIndices = options.visibleRawIndices
-    ? new Set(options.visibleRawIndices)
-    : undefined
+  const candidates: Array<[CheckpointMessage, number]> = options.visibleRawIndices
+    ? Array.from(new Set(options.visibleRawIndices)).flatMap((index) =>
+        Number.isSafeInteger(index) && index >= 0 && index < messages.length
+          ? [[messages[index], index] as [CheckpointMessage, number]]
+          : []
+      )
+    : messages.map((message, index) => [message, index])
   const now = new Date()
-  return messages.flatMap((msg, index): Message | [] => {
+  return candidates.flatMap(([msg, index]): Message | [] => {
     const role = getMessageRole(msg)
     if (!role) return []
     const id = getCheckpointMessageId(msg, index)
-    if (visibleRawIndices && !visibleRawIndices.has(index)) return []
     const content = getCheckpointMessageTranscriptContent(msg, role)
     const rawText = stringifyContent(content)
     if (isWorkflowPlumbingTranscriptContent(rawText)) return []
@@ -2331,7 +2628,7 @@ function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // List all threads
   ipcMain.handle("threads:list", async () => {
-    const threads = getAllThreads()
+    const threads = getAllThreadSummaries()
     return threads.map((row) => ({
       thread_id: row.thread_id,
       created_at: new Date(row.created_at),
@@ -2344,19 +2641,23 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   // Get a single thread
   ipcMain.handle("threads:get", async (_event, threadId: string) => {
-    const row = getThread(threadId)
-    if (!row) return null
-    return {
-      thread_id: row.thread_id,
-      created_at: new Date(row.created_at),
-      updated_at: new Date(row.updated_at),
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-      status: row.status as Thread["status"],
-      // Large subagent fields are loaded through the dedicated hydrating API;
-      // never duplicate legacy inline payloads through this general response.
-      thread_values: threadValuesWithoutSubagentTranscripts(row.thread_values),
-      title: row.title
-    }
+    return withThreadRunMutationLock(threadId, async () => {
+      const row = getThreadCore(threadId)
+      if (!row) return null
+      // This projection atomically migrates the legacy subagent sidecar and
+      // strips lifetime timing maps before the compact value crosses IPC.
+      ensureSubagentTranscriptRows(threadId)
+      const hydrationValues = getThreadHydrationValuesJson(threadId)
+      return {
+        thread_id: row.thread_id,
+        created_at: new Date(row.created_at),
+        updated_at: new Date(row.updated_at),
+        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        status: row.status as Thread["status"],
+        thread_values: threadValuesWithoutSubagentTranscripts(hydrationValues),
+        title: row.title
+      }
+    })
   })
 
   ipcMain.handle("threads:messages", async (_event, threadId: string) => {
@@ -2364,11 +2665,28 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   })
 
   ipcMain.handle(
+    "threads:messages-page",
+    async (
+      _event,
+      {
+        threadId,
+        options
+      }: { threadId: string; options?: ThreadMessagesPageOptions }
+    ) => {
+      return getThreadMessagesPage(threadId, options)
+    }
+  )
+
+  ipcMain.handle(
     "threads:appendMessages",
     async (_event, { threadId, messages }: { threadId: string; messages: Message[] }) => {
       return withThreadRunMutationLock(threadId, async () => {
         if (!Array.isArray(messages)) return { count: 0 }
-        const count = upsertThreadMessages(threadId, messages.map(normalizeIpcThreadMessage))
+        const count = upsertThreadMessages(
+          threadId,
+          messages.map(normalizeIpcThreadMessage),
+          { preserveExistingOrder: true }
+        )
         return { count }
       })
     }
@@ -2519,7 +2837,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       const updateData: Parameters<typeof dbUpdateThread>[1] = {}
 
       if (updates.metadata !== undefined) {
-        const currentThread = getThread(threadId)
+        const currentThread = getThreadCore(threadId)
         const currentMetadata = currentThread?.metadata
           ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
           : {}
@@ -2534,15 +2852,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       if (updates.status !== undefined) updateData.status = updates.status
       if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
       if (updates.thread_values !== undefined) {
-        const currentThread = getThread(threadId)
-        const currentValues = parseThreadValues(currentThread?.thread_values)
+        ensureSubagentTranscriptRows(threadId)
+        getThreadHydrationValuesJson(threadId)
         const safeValues = { ...updates.thread_values }
-        if (Object.prototype.hasOwnProperty.call(currentValues, SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY)) {
-          safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY] =
-            currentValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
-        } else {
-          delete safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
-        }
+        delete safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        delete safeValues.messageTimes
+        delete safeValues.messageTimeOrder
+        delete safeValues.internalGoalMessageTimes
+        delete safeValues.internalGoalMessageTimeOrder
         updateData.thread_values = JSON.stringify(safeValues)
       }
 
@@ -2557,8 +2874,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     "threads:mergeThreadValues",
     async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
       return withThreadRunMutationLock(threadId, async () => {
+        ensureSubagentTranscriptRows(threadId)
+        getThreadHydrationValuesJson(threadId)
         const safePatch = { ...patch }
         delete safePatch[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
+        delete safePatch.messageTimes
+        delete safePatch.messageTimeOrder
+        delete safePatch.internalGoalMessageTimes
+        delete safePatch.internalGoalMessageTimeOrder
         const row = dbMergeThreadValues(threadId, safePatch)
         if (!row) throw new Error("Thread not found")
 
@@ -2569,14 +2892,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle("threads:getSubagentTranscripts", async (_event, threadId: string) => {
     return withThreadRunMutationLock(threadId, async () => {
-      const row = getThread(threadId)
-      if (!row) return {}
-      const threadValues = parseThreadValues(row.thread_values)
-      const rawTranscripts = threadValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
-      // Startup is a read-only index path. Never migrate or hydrate the full
-      // unbounded history here: a legacy thread may contain thousands of large
-      // inline rows, and sidecar I/O failure must not block the main chat.
-      return buildSubagentTranscriptStartupManifests(rawTranscripts)
+      if (!getThreadCore(threadId)) return {}
+      ensureSubagentTranscriptRows(threadId)
+      return buildSubagentTranscriptStartupManifests(
+        getThreadSubagentStartupManifests(threadId)
+      )
     })
   })
 
@@ -2591,25 +2911,19 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }: { threadId: string; subagentId: string; before?: number }
     ) => {
       const page = await withThreadRunMutationLock(threadId, async () => {
-        const row = getThread(threadId)
-        if (!row || !subagentId) return sliceSubagentTranscriptManifestPage([], before)
-        const threadValues = parseThreadValues(row.thread_values)
-        const rawTranscripts = threadValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
-        const transcriptRecord =
-          rawTranscripts && typeof rawTranscripts === "object" && !Array.isArray(rawTranscripts)
-            ? (rawTranscripts as Record<string, unknown>)
-            : {}
-        const bucket = transcriptRecord[subagentId]
-        let selectedPage = sliceSubagentTranscriptManifestPage(bucket, before)
+        if (!getThreadCore(threadId) || !subagentId) {
+          return sliceSubagentTranscriptManifestPage([], before)
+        }
+        ensureSubagentTranscriptRows(threadId)
+        let selectedPage = rowBackedSubagentTranscriptPage(threadId, subagentId, before)
         if (
           !selectedPage.deferredHydration ||
-          !Array.isArray(bucket) ||
           selectedPage.start >= selectedPage.end
         ) {
           return selectedPage
         }
 
-        const deferredMessage = bucket[selectedPage.start]
+        const deferredMessage = selectedPage.messages[0]
         const hasSidecar =
           deferredMessage &&
           typeof deferredMessage === "object" &&
@@ -2633,17 +2947,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           if (!compacted.changed || !Array.isArray(compactedBucket) || !compactedBucket[0]) {
             return selectedPage
           }
-          const updatedBucket = [...bucket]
-          updatedBucket[selectedPage.start] = compactedBucket[0]
-          const updatedRow = dbMergeThreadValues(threadId, {
-            [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: {
-              ...transcriptRecord,
-              [subagentId]: updatedBucket
-            }
-          })
-          if (!updatedRow) throw new Error("Thread not found")
+          upsertThreadSubagentManifestMessages(threadId, subagentId, [compactedBucket[0]])
           advanceSubagentTranscriptReferenceEpoch()
-          return sliceSubagentTranscriptManifestPage(updatedBucket, before)
+          return rowBackedSubagentTranscriptPage(threadId, subagentId, before)
         })
         return selectedPage
       })
@@ -2704,10 +3010,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         if (!(["content", "reasoning", "tool_calls"] as const).includes(field)) {
           return { success: false, error: "Invalid transcript field" }
         }
-        const ref = await withThreadRunMutationLock(threadId, async () => {
-          const row = getThread(threadId)
+        const canExport = await withThreadRunMutationLock(threadId, async () => {
           if (
-            !row ||
+            !getThreadCore(threadId) ||
             !subagentId ||
             !expectedMessageId ||
             !Number.isSafeInteger(messageIndex) ||
@@ -2715,25 +3020,14 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           ) {
             return undefined
           }
-          const rawTranscripts = parseThreadValues(row.thread_values)[
-            SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
-          ]
-          const bucket =
-            rawTranscripts && typeof rawTranscripts === "object" && !Array.isArray(rawTranscripts)
-              ? (rawTranscripts as Record<string, unknown>)[subagentId]
-              : undefined
-          if (!Array.isArray(bucket)) return undefined
-          const message = bucket[messageIndex]
+          ensureSubagentTranscriptRows(threadId)
+          const message = getThreadSubagentManifestAt(threadId, subagentId, messageIndex)
           if (!message || typeof message !== "object" || Array.isArray(message)) return undefined
           if ((message as Record<string, unknown>).id !== expectedMessageId) return undefined
           const candidate = (message as Record<string, unknown>)[`${field}_ref`]
-          if (!isSubagentTranscriptBlobRef(candidate, field)) return undefined
-          await withSubagentTranscriptContentMutationLock(async () => {
-            releasePin = acquireSubagentTranscriptBlobReadPin(candidate)
-          })
-          return candidate
+          return isSubagentTranscriptBlobRef(candidate, field)
         })
-        if (!ref) return { success: false, error: "完整内容引用不存在或已失效" }
+        if (!canExport) return { success: false, error: "完整内容引用不存在或已失效" }
 
         const win = BrowserWindow.fromWebContents(event.sender) ?? BrowserWindow.getFocusedWindow()
         const result = await dialog.showSaveDialog(win ?? BrowserWindow.getAllWindows()[0], {
@@ -2742,7 +3036,38 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           filters: [{ name: "JSON", extensions: ["json"] }]
         })
         if (result.canceled || !result.filePath) return { success: false, canceled: true }
-        await exportSubagentTranscriptBlobValue(ref, result.filePath)
+        const exported = await withThreadRunMutationLock(threadId, async () => {
+          if (!getThreadCore(threadId)) return false
+          const message = getThreadSubagentManifestAt(threadId, subagentId, messageIndex)
+          if (!message || typeof message !== "object" || Array.isArray(message)) return false
+          const record = message as Record<string, unknown>
+          if (record.id !== expectedMessageId) return false
+          const ref = record[`${field}_ref`]
+          if (!isSubagentTranscriptBlobRef(ref, field)) return false
+          await withSubagentTranscriptContentMutationLock(async () => {
+            releasePin = acquireSubagentTranscriptBlobReadPin(ref)
+          })
+          const journalLength = Number(record[`subagent_${field}_delta_journal_length`]) || 0
+          if ((field === "content" || field === "reasoning") && journalLength > 0) {
+            await exportSubagentTranscriptTextWithJournal(
+              ref,
+              result.filePath!,
+              (afterFragmentId) =>
+                getThreadSubagentTextJournalChunkPage(
+                  threadId,
+                  subagentId,
+                  expectedMessageId,
+                  field,
+                  afterFragmentId,
+                  128
+                )
+            )
+          } else {
+            await exportSubagentTranscriptBlobValue(ref, result.filePath!)
+          }
+          return true
+        })
+        if (!exported) return { success: false, error: "完整内容引用不存在或已失效" }
         return { success: true, filePath: result.filePath }
       } catch (error) {
         console.warn("[Threads] Failed to export subagent transcript blob:", error)
@@ -2764,64 +3089,93 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     ) => {
       return withThreadRunMutationLock(threadId, async () => {
         return withSubagentTranscriptContentMutationLock(async () => {
-          const currentRow = getThread(threadId)
-          if (!currentRow) throw new Error("Thread not found")
-          const currentTranscripts = parseThreadValues(currentRow.thread_values)[
-            SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
-          ]
-          const currentRecord =
-            currentTranscripts &&
-            typeof currentTranscripts === "object" &&
-            !Array.isArray(currentTranscripts)
-              ? (currentTranscripts as Record<string, unknown>)
-              : {}
-          const compacted = await compactSubagentTranscriptManifests(transcripts)
-          const mergedManifests = Object.fromEntries(
-            Object.entries(compacted.manifests).map(([subagentId, incomingMessages]) => [
-              subagentId,
-              mergeSubagentTranscriptManifestMessages(
-                currentRecord[subagentId],
-                incomingMessages
-              )
-            ])
-          )
-          const row = dbMergeThreadValues(threadId, {
-            [SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: mergedManifests
-          })
-          if (!row) throw new Error("Thread not found")
-          advanceSubagentTranscriptReferenceEpoch()
-          // The database needs each full merged bucket, but the renderer only
-          // needs refs/metadata for rows in this delta. Returning a 20k-row
-          // bucket for one changed message recreates the structured-clone stall
-          // the sidecar channel is intended to avoid.
-          return Object.fromEntries(
-            Object.entries(compacted.manifests).map(([subagentId, incomingMessages]) => {
-              const mergedMessages = Array.isArray(mergedManifests[subagentId])
-                ? (mergedManifests[subagentId] as unknown[])
-                : []
-              const mergedById = new Map(
-                mergedMessages.flatMap((message) =>
-                  message &&
-                  typeof message === "object" &&
-                  !Array.isArray(message) &&
-                  typeof (message as Record<string, unknown>).id === "string"
-                    ? [[(message as Record<string, unknown>).id as string, message] as const]
-                    : []
+          if (!getThreadCore(threadId)) throw new Error("Thread not found")
+          ensureSubagentTranscriptRows(threadId)
+          const persistedRows: Record<string, unknown[]> = {}
+          let referenceMutationCommitted = false
+          try {
+            for (const [subagentId, incomingMessages] of Object.entries(transcripts)) {
+              if (!Array.isArray(incomingMessages)) continue
+              const persisted: unknown[] = []
+              for (const incomingMessage of incomingMessages) {
+                const incomingRecord =
+                  !!incomingMessage &&
+                  typeof incomingMessage === "object" &&
+                  !Array.isArray(incomingMessage)
+                    ? (incomingMessage as Record<string, unknown>)
+                    : undefined
+                const hasTextDelta =
+                  !!incomingRecord &&
+                  Object.prototype.hasOwnProperty.call(incomingRecord, "subagent_text_deltas")
+                const messageId =
+                  typeof incomingRecord?.id === "string" ? incomingRecord.id.trim() : ""
+                const hasDurableTextJournal =
+                  !!messageId &&
+                  threadSubagentManifestHasTextJournal(threadId, subagentId, messageId)
+                const carriesProjectedTextRef =
+                  isSubagentTranscriptBlobRef(incomingRecord?.content_ref, "content") ||
+                  isSubagentTranscriptBlobRef(incomingRecord?.reasoning_ref, "reasoning")
+                const preserveTextJournal =
+                  hasTextDelta || (hasDurableTextJournal && carriesProjectedTextRef)
+                if (preserveTextJournal) {
+                  const previousReferenceHashKey = getThreadSubagentManifestBlobReferenceHashes(
+                    threadId,
+                    subagentId,
+                    messageId
+                  ).join("\n")
+                  const compacted = await compactSubagentTranscriptManifests({
+                    [subagentId]: [
+                      {
+                        ...incomingRecord,
+                        subagent_preserve_text_journal: true
+                      }
+                    ]
+                  })
+                  const compactedMessage = Array.isArray(compacted.manifests[subagentId])
+                    ? compacted.manifests[subagentId][0]
+                    : undefined
+                  const updated = hasTextDelta
+                    ? appendThreadSubagentManifestTextDeltas(
+                        threadId,
+                        subagentId,
+                        compactedMessage
+                      )
+                    : patchThreadSubagentManifestPreservingTextJournal(
+                        threadId,
+                        subagentId,
+                        compactedMessage
+                      )
+                  if (updated === undefined) {
+                    throw new Error(
+                      "Subagent transcript journal patch rejected; retry authoritative snapshot"
+                    )
+                  }
+                  if (
+                    getSubagentTranscriptBlobReferenceHashKey(updated) !== previousReferenceHashKey
+                  ) {
+                    referenceMutationCommitted = true
+                  }
+                  persisted.push(updated)
+                  continue
+                }
+                const compacted = await compactSubagentTranscriptManifests({
+                  [subagentId]: [incomingMessage]
+                })
+                const compactedMessages = compacted.manifests[subagentId]
+                const upserted = upsertThreadSubagentManifestMessages(
+                  threadId,
+                  subagentId,
+                  Array.isArray(compactedMessages) ? compactedMessages : []
                 )
-              )
-              const responseRows = Array.isArray(incomingMessages)
-                ? incomingMessages.flatMap((message) =>
-                    message &&
-                    typeof message === "object" &&
-                    !Array.isArray(message) &&
-                    typeof (message as Record<string, unknown>).id === "string"
-                      ? [mergedById.get((message as Record<string, unknown>).id as string) ?? message]
-                      : [message]
-                  )
-                : []
-              return [subagentId, responseRows] as const
-            })
-          )
+                if (upserted.length > 0) referenceMutationCommitted = true
+                persisted.push(...upserted)
+              }
+              persistedRows[subagentId] = persisted
+            }
+            return persistedRows
+          } finally {
+            if (referenceMutationCommitted) advanceSubagentTranscriptReferenceEpoch()
+          }
         })
       })
     }
@@ -2950,7 +3304,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       clearToolConcurrencyLocksForThread(threadId)
       // Fire SessionEnd before teardown so hooks can observe a valid thread
       // record. No-op if SessionStart never fired for this thread.
-      const existingThread = getThread(threadId)
+      const existingThread = getThreadCore(threadId)
       if (existingThread?.metadata) {
         try {
           const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
@@ -3036,6 +3390,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)
+      checkedLegacySubagentTranscriptThreads.delete(threadId)
+      // Detach the deleted task from its shared physical workspace watcher so
+      // subscriber lists and per-change IPC fan-out cannot grow forever.
+      stopWatching(threadId)
       // Revoke foreground ownership and synchronously drop every buffered
       // transcript before the event loop can deliver a late chunk from a run
       // that exceeded the bounded cancellation wait.
@@ -3192,9 +3550,28 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
+  // Renderer hydration needs only small runtime channels (todos, interrupts,
+  // etc.). Keep the full latest-checkpoint API above for worker/fork callers
+  // that intentionally need channel_values.messages.
+  ipcMain.handle("threads:latest-checkpoint-runtime-state", async (_event, threadId: string) => {
+    try {
+      const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+      return await withCheckpointer(normalizedThreadId, async (checkpointer) => {
+        return (
+          (await checkpointer.getLatestRuntimeTuple({
+            configurable: { thread_id: normalizedThreadId }
+          })) ?? null
+        )
+      })
+    } catch (e) {
+      console.warn("Failed to get latest thread checkpoint runtime state:", e)
+      return null
+    }
+  })
+
   ipcMain.handle("threads:exportSession", async (event, threadId: string) => {
     try {
-      const row = getThread(threadId)
+      const row = getThreadCore(threadId)
       if (!row) return { success: false, error: "Thread not found" }
 
       const latestCheckpoint = await getLatestCheckpoint(threadId)

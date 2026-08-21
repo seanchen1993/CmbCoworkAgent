@@ -1,18 +1,18 @@
 import { ipcMain, type IpcMain } from "electron"
 import { setWorkflowAgentStreamInterest, workflowRunManager } from "../agent/workflow/run-manager"
 import {
-  byNewestRun,
-  listWorkflowRuns,
-  loadWorkflowRun,
+  hasUndeliveredWorkflowRunAsync,
+  listWorkflowRunsPage,
+  loadWorkflowRunAsync,
   markWorkflowRunInterrupted,
   readAgentToolStream,
   toRunSummary,
   updateWorkflowWorktreeRecord,
   updateWorkflowWorktreeRecords
 } from "../agent/workflow/run-store"
+import type { WorkflowRunListPage } from "../agent/workflow/run-store"
 import type {
   PersistedWorkflowRun,
-  WorkflowRunSummary,
   WorkflowWorktreeRecord
 } from "../agent/workflow/types"
 import {
@@ -25,7 +25,7 @@ import {
   mergeWorkflowWorktree,
   recoverInterruptedWorkflowWorktree
 } from "../services/git-worktree"
-import { getThread } from "../db"
+import { getThreadCore } from "../db"
 import {
   assertWorktreeActionPayload,
   type WorkflowWorktreeActionResponse
@@ -40,7 +40,7 @@ import {
  */
 
 function resolveWorkspacePath(threadId: string): string | null {
-  const thread = getThread(threadId)
+  const thread = getThreadCore(threadId)
   if (!thread?.metadata) return null
   try {
     const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
@@ -266,40 +266,44 @@ async function reconcileWorktreeRecordsForRenderer(
 export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
   ipc.handle(
     "workflow:list-runs",
-    async (_event, { threadId }: { threadId: string }): Promise<WorkflowRunSummary[]> => {
+    async (
+      _event,
+      {
+        threadId,
+        cursor,
+        limit
+      }: { threadId: string; cursor?: string | null; limit?: number }
+    ): Promise<WorkflowRunListPage> => {
       const workspacePath = resolveWorkspacePath(threadId)
-      if (!workspacePath) return []
+      if (!workspacePath) return { runs: [], nextCursor: null }
       // Reconcile any crash-remnant "running" runs (not the in-process active
       // one) so the history list doesn't show perpetual "运行中" rows either.
       const activeRunId = workflowRunManager.activeRunId(threadId)
       // A flush-failed run finished but its disk copy is a stale "running" — show its
       // true in-memory terminal summary, and never reconcile it to "aborted" (#4).
-      const withSnapshots = (list: WorkflowRunSummary[]): WorkflowRunSummary[] => {
-        const merged = list.map((s) => {
-          const snapshot = workflowRunManager.getFlushFailedRun(s.runId)
-          return snapshot ? toRunSummary(snapshot) : s
-        })
-        // A run whose INITIAL persist also failed has no disk file to enumerate, so
-        // it's absent from `list` — append those memory-only snapshots so the worst
-        // disk-fault case (the one most needing triage) stays visible in history. (#5)
-        const seen = new Set(merged.map((s) => s.runId))
-        for (const snap of workflowRunManager.listFlushFailedRuns(threadId)) {
-          if (!seen.has(snap.runId)) merged.push(toRunSummary(snap))
-        }
-        return merged.sort(byNewestRun)
-      }
-      const summaries = listWorkflowRuns(workspacePath, threadId)
-      const zombies = summaries.filter(
+      const overlays = workflowRunManager.listFlushFailedRuns(threadId).map(toRunSummary)
+      const page = await listWorkflowRunsPage(workspacePath, threadId, {
+        cursor,
+        limit,
+        overlays
+      })
+      const zombies = page.runs.filter(
         (s) =>
           s.status === "running" &&
           s.runId !== activeRunId &&
           !workflowRunManager.getFlushFailedRun(s.runId)
       )
-      if (zombies.length === 0) return withSnapshots(summaries)
-      await Promise.all(
+      if (zombies.length === 0) return page
+      const reconciled = await Promise.all(
         zombies.map((s) => markWorkflowRunInterrupted(workspacePath, threadId, s.runId))
       )
-      return withSnapshots(listWorkflowRuns(workspacePath, threadId))
+      const reconciledById = new Map(
+        reconciled.flatMap((run) => (run ? [[run.runId, toRunSummary(run)] as const] : []))
+      )
+      return {
+        ...page,
+        runs: page.runs.map((summary) => reconciledById.get(summary.runId) ?? summary)
+      }
     }
   )
 
@@ -320,7 +324,7 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
         void workflowRunManager.retryPersistFlushFailedRun(workspacePath, threadId, runId)
         return stripJournalForRenderer(recovered)
       }
-      let run = loadWorkflowRun(workspacePath, threadId, runId)
+      let run = await loadWorkflowRunAsync(workspacePath, threadId, runId)
       // Same zombie reconciliation as hydrate, for runs opened from history.
       if (run && run.status === "running" && workflowRunManager.activeRunId(threadId) !== runId) {
         run = await markWorkflowRunInterrupted(workspacePath, threadId, runId)
@@ -348,7 +352,7 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
       const performAction = async (): Promise<WorkflowWorktreeActionResponse> => {
         const run =
           workflowRunManager.getFlushFailedRun(payload.runId) ??
-          loadWorkflowRun(workspacePath, payload.threadId, payload.runId)
+          (await loadWorkflowRunAsync(workspacePath, payload.threadId, payload.runId))
         if (!run) throw new Error("workflow run was not found")
         if (run.threadId !== payload.threadId) throw new Error("workflow run ownership mismatch")
         if (run.status === "running") {
@@ -494,7 +498,7 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
       // though the sidecar was written. Fall back to disk for the normal (flushed) path.
       const run =
         workflowRunManager.getFlushFailedRun(runId) ??
-        loadWorkflowRun(workspacePath, threadId, runId)
+        (await loadWorkflowRunAsync(workspacePath, threadId, runId))
       const toolStreamKey = run?.agents.find((agent) => agent.index === agentIndex)?.toolStreamKey
       if (toolStreamKey === undefined) return null
       return readAgentToolStream(workspacePath, threadId, runId, toolStreamKey)
@@ -509,25 +513,23 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
         return { latestRun: null, activeRunId: null, hasPendingNotification: false }
       }
       const activeRunId = workflowRunManager.activeRunId(threadId) ?? null
-      const summaries = listWorkflowRuns(workspacePath, threadId)
+      const overlays = workflowRunManager.listFlushFailedRuns(threadId).map(toRunSummary)
+      const latestPage = await listWorkflowRunsPage(workspacePath, threadId, {
+        limit: 1,
+        overlays
+      })
       // Pick the genuinely-newest run. Active wins; otherwise compare the newest DISK
       // run against the newest memory-only flush-failed snapshot — a run whose INITIAL
       // persist also failed has no disk row, so summaries[0] alone would surface a
       // STALE older run instead of the just-failed one that most needs triage. (#5)
-      const memLatest = workflowRunManager
-        .listFlushFailedRuns(threadId)
-        .filter((s) => !summaries.some((d) => d.runId === s.runId))
-        .sort(byNewestRun)[0]
-      const diskLatest = summaries[0]
-      const latestRunId =
-        activeRunId ??
-        (memLatest && (!diskLatest || byNewestRun(memLatest, diskLatest) < 0)
-          ? memLatest.runId
-          : diskLatest?.runId)
-      let latestRun = latestRunId ? loadWorkflowRun(workspacePath, threadId, latestRunId) : null
+      const latestRunId = activeRunId ?? latestPage.runs[0]?.runId
       // A flush-failed run's disk copy is stale; use its true in-memory terminal
-      // state (#4 boundary) instead of reconciling it to "aborted".
+      // state (#4 boundary) instead of parsing the potentially-large stale file
+      // or reconciling it to "aborted".
       const recovered = latestRunId ? workflowRunManager.getFlushFailedRun(latestRunId) : undefined
+      let latestRun =
+        recovered ??
+        (latestRunId ? await loadWorkflowRunAsync(workspacePath, threadId, latestRunId) : null)
       if (recovered && latestRunId) {
         // Retry the disk write-back (disk may have recovered) — real retry entry (#3).
         void workflowRunManager.retryPersistFlushFailedRun(workspacePath, threadId, latestRunId)
@@ -544,7 +546,16 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
       // wedged report one more chance — same at-least-once spirit as the
       // restart-resets-the-budget rule. The mode-exit guards use the stricter
       // deliverable/in-flight semantics instead (hasDeliverablePendingNotification).
+      const mightHavePendingNotification =
+        overlays.some(
+          (summary) =>
+            summary.status !== "running" && summary.notificationDelivered !== true
+        ) || (await hasUndeliveredWorkflowRunAsync(workspacePath, threadId))
+      // Preserve the manager's exact in-flight/flush-failure semantics, but only
+      // invoke its legacy synchronous scan when the compact index proves a pending
+      // candidate can exist. The normal all-delivered hydrate path stays async/O(1).
       const hasPendingNotification =
+        mightHavePendingNotification &&
         workflowRunManager.findPendingNotification(workspacePath, threadId) !== null
       latestRun = await reconcileWorktreeRecordsForRenderer(workspacePath, threadId, latestRun)
       return {

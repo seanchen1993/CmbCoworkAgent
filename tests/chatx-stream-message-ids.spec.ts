@@ -552,6 +552,44 @@ function testNonSubagentCustomEventsAreUnchanged(): void {
   assertEqual(namespaced, event, "non-subagent custom events should be returned unchanged")
 }
 
+function testSnapshotAndSubagentPatchIdsAreScopedByChatXTurn(): void {
+  const snapshot = namespaceChatXStreamEventIds(
+    {
+      type: "custom",
+      data: {
+        type: "coordinator_ai_snapshot_message",
+        assistantMessage: { id: "rewritten-assistant", content: "replacement" }
+      }
+    },
+    "msg-snapshot"
+  )
+  if (snapshot.type !== "custom") throw new Error("expected custom snapshot event")
+  const assistantMessage = snapshot.data.assistantMessage as Record<string, unknown>
+  assertEqual(
+    assistantMessage.id,
+    getChatXAssistantMessageId("msg-snapshot", "rewritten-assistant"),
+    "rewrite snapshots must target the ChatX-scoped assistant id"
+  )
+
+  const patch = namespaceChatXStreamEventIds(
+    {
+      type: "custom",
+      data: {
+        type: "subagent_delta",
+        subagentId: "raw-subagent",
+        subagentPatch: { currentTool: "read_file" }
+      }
+    },
+    "msg-snapshot"
+  )
+  if (patch.type !== "custom") throw new Error("expected custom subagent patch")
+  assertEqual(
+    patch.data.subagentId,
+    getChatXToolCallId("msg-snapshot", "raw-subagent"),
+    "targeted subagent patches must use the same ChatX execution namespace"
+  )
+}
+
 function testChatXSubagentStorageIdentitySurvivesForkFiltering(): void {
   const turnId = "fork-turn"
   const rawTaskId = "raw-chatx-task"
@@ -658,6 +696,7 @@ testRepeatedProviderSubagentIdsAreScopedByChatXTurn()
 testSubagentStreamEventsUseMatchingScopedSubagentId()
 testRepeatedProviderSubagentStreamIdsAreScopedByChatXTurn()
 testNonSubagentCustomEventsAreUnchanged()
+testSnapshotAndSubagentPatchIdsAreScopedByChatXTurn()
 testFullMessagesUseNearestChatXUserTurn()
 testFullMessagesScopeToolCallPairsByTurn()
 testFullMessagesPlainUserClearsActiveChatXTurn()

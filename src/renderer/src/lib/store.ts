@@ -670,6 +670,94 @@ function resolveWorkerFocusContent(
   return preferIncomingContent(existingMessage.content, incomingMessage.content)
 }
 
+const normalizedWorkerFocusMessageArrays = new WeakSet<readonly Message[]>()
+
+function workerProviderIdentityExactlyMatches(existing: Message, incoming: Message): boolean {
+  const existingSourceId = existing.provider_source_id?.trim() || undefined
+  const incomingSourceId = incoming.provider_source_id?.trim() || undefined
+  return (
+    existingSourceId === incomingSourceId &&
+    getMessageProviderOccurrence(existing) === getMessageProviderOccurrence(incoming)
+  )
+}
+
+/**
+ * Common live assistant chunks already arrive as a cumulative snapshot for the
+ * same final array entry. Once an array has passed the full reconciliation path,
+ * update that tail without rescanning up to 2,000 historical messages.
+ */
+export function mergeWorkerFocusTailUpdate(
+  existingMessages: Message[],
+  incomingMessage: Message
+): Message[] | undefined {
+  const existing = existingMessages.at(-1)
+  if (
+    !existing ||
+    existing.role !== "assistant" ||
+    incomingMessage.role !== "assistant" ||
+    existing.id !== incomingMessage.id ||
+    !workerProviderIdentityExactlyMatches(existing, incomingMessage)
+  ) {
+    return undefined
+  }
+
+  existingMessages[existingMessages.length - 1] = {
+    ...existing,
+    ...incomingMessage,
+    id: existing.id,
+    content: resolveWorkerFocusContent(existing, incomingMessage),
+    reasoning: incomingMessage.reasoning ?? existing.reasoning,
+    tool_calls: mergeWorkerToolCalls(existing.tool_calls, incomingMessage.tool_calls),
+    tool_call_id: incomingMessage.tool_call_id ?? existing.tool_call_id,
+    name: incomingMessage.name ?? existing.name,
+    status: incomingMessage.status ?? existing.status,
+    is_error: incomingMessage.is_error ?? existing.is_error
+  }
+  return existingMessages
+}
+
+function rememberNormalizedWorkerFocusMessages(messages: Message[]): Message[] {
+  normalizedWorkerFocusMessageArrays.add(messages)
+  return messages
+}
+
+/**
+ * Reuse the panel's already-merged prefix only when its tail was the exact
+ * previous live object. A checkpoint-enriched/replay-aligned tail deliberately
+ * falls back to the full panel merge so sparse-history semantics stay intact.
+ */
+export function applyWorkerFocusTailUpdateToMergedMessages(
+  previousMergedMessages: Message[],
+  previousLiveTail: Message | undefined,
+  nextLiveMessages: readonly Message[]
+): Message[] | undefined {
+  const nextLiveTail = nextLiveMessages.at(-1)
+  if (
+    !previousLiveTail ||
+    !nextLiveTail ||
+    previousLiveTail.id !== nextLiveTail.id ||
+    previousLiveTail.role !== nextLiveTail.role
+  ) {
+    return undefined
+  }
+
+  // With no separately hydrated history the merged view can be the live array
+  // itself. The store has already replaced its tail in place, so no work remains.
+  if (previousMergedMessages === nextLiveMessages) return previousMergedMessages
+
+  const previousMergedTail = previousMergedMessages.at(-1)
+  if (
+    previousMergedTail !== previousLiveTail ||
+    previousLiveTail.id !== nextLiveTail.id ||
+    previousLiveTail.role !== nextLiveTail.role
+  ) {
+    return undefined
+  }
+
+  previousMergedMessages[previousMergedMessages.length - 1] = nextLiveTail
+  return previousMergedMessages
+}
+
 function preferIncomingContent(
   existing: Message["content"] | undefined,
   incoming: Message["content"] | undefined
@@ -780,6 +868,7 @@ interface AppState {
   workerFocusView: WorkerFocusView | null
   workerFocusMessagesThreadId: string | null
   workerFocusMessages: Message[]
+  workerFocusMessagesContentVersion: number
   openWorkerFocusView: (view: WorkerFocusView) => void
   closeWorkerFocusView: () => void
   appendWorkerFocusMessage: (workerThreadId: string, message: Message) => void
@@ -959,6 +1048,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   workerFocusView: null,
   workerFocusMessagesThreadId: null,
   workerFocusMessages: [],
+  workerFocusMessagesContentVersion: 0,
   subagentFocusView: null,
   workflowAgentFocusView: null,
   workflowAgentFocusSnapshot: null,
@@ -1204,6 +1294,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       workerFocusView: view,
       workerFocusMessagesThreadId: view.workerThreadId,
       workerFocusMessages: [],
+      workerFocusMessagesContentVersion: 0,
       subagentFocusView: null,
       workflowAgentFocusView: null
     })
@@ -1213,7 +1304,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       workerFocusView: null,
       workerFocusMessagesThreadId: null,
-      workerFocusMessages: []
+      workerFocusMessages: [],
+      workerFocusMessagesContentVersion: 0
     })
   },
 
@@ -1275,6 +1367,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (state.workerFocusView?.workerThreadId !== workerThreadId) return {}
       const existingMessages =
         state.workerFocusMessagesThreadId === workerThreadId ? state.workerFocusMessages : []
+      const fastTailMessages =
+        !options?.orderedSnapshot &&
+        messages.length === 1 &&
+        normalizedWorkerFocusMessageArrays.has(existingMessages)
+          ? mergeWorkerFocusTailUpdate(existingMessages, messages[0])
+          : undefined
+      if (fastTailMessages) {
+        return {
+          workerFocusMessagesThreadId: workerThreadId,
+          workerFocusMessages: rememberNormalizedWorkerFocusMessages(fastTailMessages),
+          workerFocusMessagesContentVersion: state.workerFocusMessagesContentVersion + 1
+        }
+      }
       const normalizedExistingMessages = normalizeCompleteMessageIds(
         enrichWorkerProvisionalProviderIdentities(existingMessages, messages)
       )
@@ -1581,7 +1686,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       )
       return {
         workerFocusMessagesThreadId: workerThreadId,
-        workerFocusMessages: prunedMessages
+        workerFocusMessages: rememberNormalizedWorkerFocusMessages(prunedMessages),
+        workerFocusMessagesContentVersion: state.workerFocusMessagesContentVersion + 1
       }
     })
   },

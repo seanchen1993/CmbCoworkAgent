@@ -8,7 +8,7 @@ import {
   unlinkSync,
   writeFileSync
 } from "fs"
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "fs/promises"
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "fs/promises"
 import { basename, dirname, join, resolve } from "path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import type {
@@ -94,6 +94,9 @@ export function deleteWorkflowRunsForThread(workspacePath: string, threadId: str
   } catch (error) {
     console.warn("[Workflow] Failed to delete run artifacts for thread:", error)
   }
+  const indexPath = workflowRunIndexFilePath(workspacePath, threadId)
+  workflowRunIndexCaches.delete(indexPath)
+  workflowRunIndexMutationChains.delete(indexPath)
 }
 
 export function runFilePath(workspacePath: string, threadId: string, runId: string): string {
@@ -449,10 +452,11 @@ export function toRunSummary(run: PersistedWorkflowRun): WorkflowRunSummary {
     workflowName: run.workflowName,
     description: run.description,
     status: run.status,
-    stats: run.stats,
+    stats: { ...run.stats },
     startedAt: run.startedAt,
     completedAt: run.completedAt,
-    agentCount: run.agents.length
+    agentCount: run.agents.length,
+    notificationDelivered: run.notificationDelivered === true
   }
 }
 
@@ -479,6 +483,535 @@ export function byNewestRun(
 ): number {
   if (a.startedAt !== b.startedAt) return a.startedAt < b.startedAt ? 1 : -1
   return a.runId < b.runId ? 1 : -1
+}
+
+const WORKFLOW_RUN_LIST_DEFAULT_LIMIT = 50
+const WORKFLOW_RUN_LIST_MAX_LIMIT = 100
+const WORKFLOW_RUN_SUMMARY_BACKFILL_CONCURRENCY = 8
+const WORKFLOW_RUN_INDEX_VERSION = 1
+
+interface WorkflowRunIndexEntry {
+  runId: string
+  startedAt: string
+  status?: WorkflowRunSummary["status"]
+  notificationDelivered?: boolean
+}
+
+interface WorkflowRunIndexFile {
+  version: 1
+  entries: WorkflowRunIndexEntry[]
+  pendingNotificationRunIds?: string[]
+}
+
+interface WorkflowRunIndexCache {
+  entries: Map<string, WorkflowRunIndexEntry>
+  summaries: Map<string, WorkflowRunSummary>
+  sortedEntries: WorkflowRunIndexEntry[] | null
+  /** null means a legacy index still needs one async summary pass. */
+  pendingNotificationRunIds: Set<string> | null
+  discovered: boolean
+  ready: Promise<void>
+  discoveryPromise: Promise<void> | null
+}
+
+export interface WorkflowRunListPage {
+  runs: WorkflowRunSummary[]
+  nextCursor: string | null
+}
+
+export interface WorkflowRunListOptions {
+  cursor?: string | null
+  limit?: number
+  overlays?: readonly WorkflowRunSummary[]
+}
+
+const workflowRunIndexCaches = new Map<string, WorkflowRunIndexCache>()
+const workflowRunIndexMutationChains = new Map<string, Promise<void>>()
+
+export function workflowRunIndexFilePath(workspacePath: string, threadId: string): string {
+  return join(getWorkflowRunsDir(workspacePath, threadId), "runs.index")
+}
+
+function isWorkflowRunSummary(value: unknown): value is WorkflowRunSummary {
+  if (!value || typeof value !== "object") return false
+  const summary = value as Partial<WorkflowRunSummary>
+  return (
+    typeof summary.runId === "string" &&
+    isValidWorkflowRunId(summary.runId) &&
+    typeof summary.workflowName === "string" &&
+    typeof summary.startedAt === "string" &&
+    typeof summary.status === "string" &&
+    typeof summary.agentCount === "number" &&
+    typeof summary.notificationDelivered === "boolean" &&
+    !!summary.stats &&
+    typeof summary.stats === "object"
+  )
+}
+
+function decodeWorkflowRunCursor(cursor: string | null | undefined): WorkflowRunIndexEntry | null {
+  if (!cursor) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+      runId?: unknown
+      startedAt?: unknown
+    }
+    if (
+      typeof parsed.runId !== "string" ||
+      !isValidWorkflowRunId(parsed.runId) ||
+      typeof parsed.startedAt !== "string"
+    ) {
+      return null
+    }
+    return { runId: parsed.runId, startedAt: parsed.startedAt }
+  } catch {
+    return null
+  }
+}
+
+function encodeWorkflowRunCursor(entry: WorkflowRunIndexEntry): string {
+  return Buffer.from(JSON.stringify(entry), "utf8").toString("base64url")
+}
+
+function normalizeWorkflowRunListLimit(limit: number | undefined): number {
+  if (!Number.isFinite(limit)) return WORKFLOW_RUN_LIST_DEFAULT_LIMIT
+  return Math.max(1, Math.min(WORKFLOW_RUN_LIST_MAX_LIMIT, Math.floor(limit!)))
+}
+
+export function selectWorkflowRunPage<T extends { runId: string; startedAt: string }>(
+  orderedRuns: readonly T[],
+  cursorValue?: string | null,
+  requestedLimit?: number
+): { items: T[]; nextCursor: string | null } {
+  const cursor = decodeWorkflowRunCursor(cursorValue)
+  let start = 0
+  if (cursor) {
+    // First item strictly OLDER than the stable tuple. New runs inserted before
+    // the cursor therefore never duplicate or shift an already-viewed page.
+    let low = 0
+    let high = orderedRuns.length
+    while (low < high) {
+      const middle = low + Math.floor((high - low) / 2)
+      if (byNewestRun(orderedRuns[middle], cursor) <= 0) low = middle + 1
+      else high = middle
+    }
+    start = low
+  }
+  const limit = normalizeWorkflowRunListLimit(requestedLimit)
+  const items = orderedRuns.slice(start, start + limit)
+  const hasMore = start + items.length < orderedRuns.length
+  return {
+    items,
+    nextCursor:
+      hasMore && items.length > 0 ? encodeWorkflowRunCursor(items[items.length - 1]) : null
+  }
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(values.length)
+  let nextIndex = 0
+  const worker = async (): Promise<void> => {
+    while (nextIndex < values.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await mapper(values[index])
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, values.length) }, () => worker())
+  )
+  return results
+}
+
+function getWorkflowRunIndexCache(
+  workspacePath: string,
+  threadId: string
+): WorkflowRunIndexCache {
+  const indexPath = workflowRunIndexFilePath(workspacePath, threadId)
+  const existing = workflowRunIndexCaches.get(indexPath)
+  if (existing) return existing
+
+  const cache: WorkflowRunIndexCache = {
+    entries: new Map(),
+    summaries: new Map(),
+    sortedEntries: null,
+    pendingNotificationRunIds: null,
+    discovered: false,
+    ready: Promise.resolve(),
+    discoveryPromise: null
+  }
+  cache.ready = (async () => {
+    try {
+      const parsed = JSON.parse(await readFile(indexPath, "utf8")) as Partial<WorkflowRunIndexFile>
+      if (parsed.version !== WORKFLOW_RUN_INDEX_VERSION || !Array.isArray(parsed.entries)) return
+      for (const entry of parsed.entries) {
+        if (
+          entry &&
+          typeof entry.runId === "string" &&
+          isValidWorkflowRunId(entry.runId) &&
+          typeof entry.startedAt === "string"
+        ) {
+          cache.entries.set(entry.runId, {
+            runId: entry.runId,
+            startedAt: entry.startedAt,
+            ...(typeof entry.status === "string"
+              ? { status: entry.status as WorkflowRunSummary["status"] }
+              : {}),
+            ...(typeof entry.notificationDelivered === "boolean"
+              ? { notificationDelivered: entry.notificationDelivered }
+              : {})
+          })
+        }
+      }
+      if (Array.isArray(parsed.pendingNotificationRunIds)) {
+        cache.pendingNotificationRunIds = new Set(
+          parsed.pendingNotificationRunIds.filter(
+            (runId): runId is string =>
+              typeof runId === "string" && isValidWorkflowRunId(runId)
+          )
+        )
+      }
+    } catch {
+      // Missing/corrupt index is rebuilt asynchronously from per-run summaries.
+    }
+  })()
+  workflowRunIndexCaches.set(indexPath, cache)
+  return cache
+}
+
+async function writeWorkflowRunIndex(
+  workspacePath: string,
+  threadId: string,
+  cache: WorkflowRunIndexCache
+): Promise<void> {
+  const indexPath = workflowRunIndexFilePath(workspacePath, threadId)
+  const temp = `${indexPath}.${randomUUID()}.tmp`
+  const payload: WorkflowRunIndexFile = {
+    version: WORKFLOW_RUN_INDEX_VERSION,
+    entries: Array.from(cache.entries.values()).sort(byNewestRun),
+    ...(cache.pendingNotificationRunIds
+      ? { pendingNotificationRunIds: Array.from(cache.pendingNotificationRunIds) }
+      : {})
+  }
+  try {
+    await writeFile(temp, JSON.stringify(payload))
+    await rename(temp, indexPath)
+  } finally {
+    await unlink(temp).catch(() => undefined)
+  }
+}
+
+async function withWorkflowRunIndexMutation(
+  workspacePath: string,
+  threadId: string,
+  task: (cache: WorkflowRunIndexCache) => Promise<void>
+): Promise<void> {
+  const indexPath = workflowRunIndexFilePath(workspacePath, threadId)
+  const previous = workflowRunIndexMutationChains.get(indexPath) ?? Promise.resolve()
+  const operation = previous.then(async () => {
+    const cache = getWorkflowRunIndexCache(workspacePath, threadId)
+    await cache.ready
+    await task(cache)
+  })
+  const tail = operation.catch(() => undefined)
+  workflowRunIndexMutationChains.set(indexPath, tail)
+  try {
+    await operation
+  } finally {
+    if (workflowRunIndexMutationChains.get(indexPath) === tail) {
+      workflowRunIndexMutationChains.delete(indexPath)
+    }
+  }
+}
+
+async function writeWorkflowRunSummarySidecar(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  srcMtime: number,
+  summary: WorkflowRunSummary
+): Promise<void> {
+  const sidecarPath = summaryFilePath(workspacePath, threadId, runId)
+  const temp = `${sidecarPath}.${randomUUID()}.tmp`
+  try {
+    await writeFile(
+      temp,
+      JSON.stringify({ version: 1, srcMtime, summary })
+    )
+    await rename(temp, sidecarPath)
+  } finally {
+    await unlink(temp).catch(() => undefined)
+  }
+}
+
+async function persistWorkflowRunSummaryArtifacts(
+  workspacePath: string,
+  threadId: string,
+  run: PersistedWorkflowRun
+): Promise<void> {
+  try {
+    const summary = toRunSummary(run)
+    const srcMtime = (await stat(runFilePath(workspacePath, threadId, run.runId))).mtimeMs
+    await writeWorkflowRunSummarySidecar(
+      workspacePath,
+      threadId,
+      run.runId,
+      srcMtime,
+      summary
+    )
+    await withWorkflowRunIndexMutation(workspacePath, threadId, async (cache) => {
+      cache.summaries.set(run.runId, summary)
+      let pendingMembershipChanged = false
+      if (cache.pendingNotificationRunIds) {
+        if (summary.status !== "running" && summary.notificationDelivered !== true) {
+          if (!cache.pendingNotificationRunIds.has(run.runId)) {
+            cache.pendingNotificationRunIds.add(run.runId)
+            pendingMembershipChanged = true
+          }
+        } else {
+          pendingMembershipChanged = cache.pendingNotificationRunIds.delete(run.runId)
+        }
+      }
+      const current = cache.entries.get(run.runId)
+      const indexMetadataChanged =
+        current?.startedAt !== run.startedAt ||
+        current?.status !== summary.status ||
+        current?.notificationDelivered !== summary.notificationDelivered
+      if (!indexMetadataChanged) {
+        // The pending-notification set is persisted with the index even when the
+        // stable ordering tuple did not change (for example, notification ack).
+        if (pendingMembershipChanged) {
+          await writeWorkflowRunIndex(workspacePath, threadId, cache)
+        }
+        return
+      }
+      cache.entries.set(run.runId, {
+        runId: run.runId,
+        startedAt: run.startedAt,
+        status: summary.status,
+        notificationDelivered: summary.notificationDelivered
+      })
+      if (current?.startedAt !== run.startedAt) cache.sortedEntries = null
+      await writeWorkflowRunIndex(workspacePath, threadId, cache)
+    })
+  } catch (error) {
+    console.warn(`[Workflow] Failed to update summary index for ${run.runId}:`, error)
+  }
+}
+
+function removeWorkflowRunsFromSummaryIndex(
+  workspacePath: string,
+  threadId: string,
+  runIds: readonly string[]
+): void {
+  if (runIds.length === 0) return
+  void withWorkflowRunIndexMutation(workspacePath, threadId, async (cache) => {
+    let changed = false
+    for (const runId of runIds) {
+      changed = cache.entries.delete(runId) || changed
+      cache.summaries.delete(runId)
+      cache.pendingNotificationRunIds?.delete(runId)
+    }
+    if (!changed) return
+    cache.sortedEntries = null
+    await writeWorkflowRunIndex(workspacePath, threadId, cache)
+  }).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("[Workflow] Failed to prune workflow summary index:", error)
+    }
+  })
+}
+
+async function readWorkflowRunSummaryAsync(
+  workspacePath: string,
+  threadId: string,
+  runId: string
+): Promise<WorkflowRunSummary | null> {
+  const runPath = runFilePath(workspacePath, threadId, runId)
+  let srcMtime: number
+  try {
+    srcMtime = (await stat(runPath)).mtimeMs
+  } catch {
+    return null
+  }
+  try {
+    const parsed = JSON.parse(
+      await readFile(summaryFilePath(workspacePath, threadId, runId), "utf8")
+    ) as { srcMtime?: unknown; summary?: unknown }
+    if (parsed.srcMtime === srcMtime && isWorkflowRunSummary(parsed.summary)) {
+      return parsed.summary
+    }
+  } catch {
+    // Legacy run without a fresh sidecar is repaired below.
+  }
+  const run = await loadWorkflowRunAsync(workspacePath, threadId, runId)
+  if (!run) return null
+  const summary = toRunSummary(run)
+  await writeWorkflowRunSummarySidecar(
+    workspacePath,
+    threadId,
+    runId,
+    srcMtime,
+    summary
+  ).catch(() => undefined)
+  return summary
+}
+
+async function ensureWorkflowRunIndexDiscovered(
+  workspacePath: string,
+  threadId: string
+): Promise<WorkflowRunIndexCache> {
+  const cache = getWorkflowRunIndexCache(workspacePath, threadId)
+  await cache.ready
+  if (cache.discovered) return cache
+  if (!cache.discoveryPromise) {
+    cache.discoveryPromise = withWorkflowRunIndexMutation(
+      workspacePath,
+      threadId,
+      async (mutable) => {
+        if (mutable.discovered) return
+        const dir = getWorkflowRunsDir(workspacePath, threadId)
+        let files: string[]
+        try {
+          files = await readdir(dir)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+          mutable.entries.clear()
+          mutable.summaries.clear()
+          mutable.sortedEntries = []
+          mutable.pendingNotificationRunIds = new Set()
+          mutable.discovered = true
+          return
+        }
+        const runIds = files.flatMap((file) => {
+          if (!file.endsWith(".json") || file.endsWith(".bak")) return []
+          const runId = file.slice(0, -".json".length)
+          return isValidWorkflowRunId(runId) ? [runId] : []
+        })
+        const runIdSet = new Set(runIds)
+        let changed = false
+        for (const runId of mutable.entries.keys()) {
+          if (runIdSet.has(runId)) continue
+          mutable.entries.delete(runId)
+          mutable.summaries.delete(runId)
+          mutable.pendingNotificationRunIds?.delete(runId)
+          changed = true
+        }
+        // Legacy entries lack notification metadata. Running/pending entries are
+        // also revalidated once per process so a crash between run.json and index
+        // renames cannot hide a newly-terminal result or retain an already-acked one.
+        const missing = runIds.filter((runId) => {
+          const entry = mutable.entries.get(runId)
+          return (
+            !entry ||
+            entry.status === undefined ||
+            entry.notificationDelivered === undefined ||
+            entry.status === "running" ||
+            entry.notificationDelivered === false
+          )
+        })
+        const repaired = await mapWithConcurrency(
+          missing,
+          WORKFLOW_RUN_SUMMARY_BACKFILL_CONCURRENCY,
+          async (runId) => ({
+            runId,
+            summary: await readWorkflowRunSummaryAsync(workspacePath, threadId, runId)
+          })
+        )
+        for (const { runId, summary } of repaired) {
+          if (!summary) continue
+          mutable.entries.set(runId, {
+            runId,
+            startedAt: summary.startedAt,
+            status: summary.status,
+            notificationDelivered: summary.notificationDelivered
+          })
+          mutable.summaries.set(runId, summary)
+          changed = true
+        }
+        const pendingNotificationRunIds = new Set(
+          Array.from(mutable.entries.values()).flatMap((entry) =>
+            entry.status !== undefined &&
+            entry.status !== "running" &&
+            entry.notificationDelivered === false
+              ? [entry.runId]
+              : []
+          )
+        )
+        if (
+          !mutable.pendingNotificationRunIds ||
+          mutable.pendingNotificationRunIds.size !== pendingNotificationRunIds.size ||
+          Array.from(pendingNotificationRunIds).some(
+            (runId) => !mutable.pendingNotificationRunIds?.has(runId)
+          )
+        ) {
+          mutable.pendingNotificationRunIds = pendingNotificationRunIds
+          changed = true
+        }
+        mutable.discovered = true
+        if (changed) {
+          mutable.sortedEntries = null
+          await writeWorkflowRunIndex(workspacePath, threadId, mutable)
+        }
+      }
+    ).finally(() => {
+      cache.discoveryPromise = null
+    })
+  }
+  await cache.discoveryPromise
+  return cache
+}
+
+/** Async, stable-cursor history API used by IPC. It never calls synchronous fs APIs. */
+export async function listWorkflowRunsPage(
+  workspacePath: string,
+  threadId: string,
+  options: WorkflowRunListOptions = {}
+): Promise<WorkflowRunListPage> {
+  const cache = await ensureWorkflowRunIndexDiscovered(workspacePath, threadId)
+  const overlays = new Map((options.overlays ?? []).map((summary) => [summary.runId, summary]))
+  const orderedById = new Map(cache.entries)
+  for (const summary of overlays.values()) {
+    orderedById.set(summary.runId, { runId: summary.runId, startedAt: summary.startedAt })
+  }
+  const entries =
+    overlays.size === 0
+      ? (cache.sortedEntries ??= Array.from(orderedById.values()).sort(byNewestRun))
+      : Array.from(orderedById.values()).sort(byNewestRun)
+  const selectedPage = selectWorkflowRunPage(entries, options.cursor, options.limit)
+  const selected = selectedPage.items
+  const loaded = await mapWithConcurrency(
+    selected,
+    WORKFLOW_RUN_SUMMARY_BACKFILL_CONCURRENCY,
+    async (entry) => {
+      const overlay = overlays.get(entry.runId)
+      if (overlay) return overlay
+      const cached = cache.summaries.get(entry.runId)
+      if (cached) return cached
+      const summary = await readWorkflowRunSummaryAsync(workspacePath, threadId, entry.runId)
+      if (summary) cache.summaries.set(entry.runId, summary)
+      return summary
+    }
+  )
+  const runs = loaded.filter((summary): summary is WorkflowRunSummary => summary !== null)
+  return {
+    runs,
+    nextCursor: selectedPage.nextCursor
+  }
+}
+
+/** Async preflight for hydrate. It walks compact summaries in bounded batches,
+ * so the common all-delivered case never falls back to the legacy synchronous
+ * full-directory notification scan. */
+export async function hasUndeliveredWorkflowRunAsync(
+  workspacePath: string,
+  threadId: string
+): Promise<boolean> {
+  const cache = await ensureWorkflowRunIndexDiscovered(workspacePath, threadId)
+  return (cache.pendingNotificationRunIds?.size ?? 0) > 0
 }
 
 /** Lists persisted runs for a thread, newest first. Tolerates corrupt files. */
@@ -677,7 +1210,7 @@ async function setWorkflowRunNotified(
   return withRunFileMutation(path, async () => {
     let temp: string | undefined
     try {
-      const run = loadWorkflowRun(workspacePath, threadId, runId)
+      const run = await loadWorkflowRunAsync(workspacePath, threadId, runId)
       if (!run || run.status === "running") return false
       // Instance fence. A resume REUSES the runId, and the error notification itself
       // tells the model to resume — so the resume is launched INSIDE the very turn
@@ -697,6 +1230,7 @@ async function setWorkflowRunNotified(
       await writeFile(temp, json)
       await rename(temp, path)
       temp = undefined
+      await persistWorkflowRunSummaryArtifacts(workspacePath, threadId, run)
       return true
     } catch (error) {
       console.warn("[Workflow] Failed to set run notification flag:", error)
@@ -750,7 +1284,7 @@ export async function markWorkflowRunInterrupted(
   return withRunFileMutation(target, async () => {
     let temp: string | undefined
     try {
-      const run = loadWorkflowRun(workspacePath, threadId, runId)
+      const run = await loadWorkflowRunAsync(workspacePath, threadId, runId)
       if (!run || run.status !== "running") return run
       run.status = "aborted"
       run.error = run.error ?? "Workflow was interrupted (app restarted before it finished)"
@@ -783,10 +1317,11 @@ export async function markWorkflowRunInterrupted(
       await writeFile(temp, json)
       await rename(temp, target)
       temp = undefined
+      await persistWorkflowRunSummaryArtifacts(workspacePath, threadId, run)
       return run
     } catch (error) {
       console.warn("[Workflow] Failed to reconcile interrupted run:", error)
-      return loadWorkflowRun(workspacePath, threadId, runId)
+      return loadWorkflowRunAsync(workspacePath, threadId, runId)
     } finally {
       if (temp) await unlink(temp).catch(() => undefined)
     }
@@ -856,7 +1391,7 @@ export async function persistRecoveredRun(
       ) {
         recoveredRun = { ...run, resultSidecarStatus: "unavailable" }
       }
-      const current = loadWorkflowRun(workspacePath, threadId, run.runId)
+      const current = await loadWorkflowRunAsync(workspacePath, threadId, run.runId)
       if (current?.startedAt === recoveredRun.startedAt) {
         // A notification ack or worktree action may have landed while this
         // flush-failed snapshot waited for recovery. Preserve those newer terminal
@@ -895,6 +1430,7 @@ export async function persistRecoveredRun(
       await writeFile(backupTemp, json)
       await rename(backupTemp, backupPath)
       backupTemp = undefined
+      await persistWorkflowRunSummaryArtifacts(workspacePath, threadId, recoveredRun)
       return true
     } catch (error) {
       console.warn(`[Workflow] Failed to write back recovered run ${run.runId}:`, error)
@@ -936,6 +1472,7 @@ export function pruneWorkflowRuns(
       })
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
     const manifestRunIds = new Set(protectedRunIds)
+    const removedRunIds: string[] = []
     for (const stale of runs.slice(keep)) {
       // NEVER prune a still-running run, or a terminal run whose completion
       // notification was never delivered: an undelivered run keeps its original
@@ -1010,7 +1547,11 @@ export function pruneWorkflowRuns(
       } catch {
         /* best-effort cleanup */
       }
+      if (!existsSync(runFilePath(workspacePath, threadId, stale.runId))) {
+        removedRunIds.push(stale.runId)
+      }
     }
+    removeWorkflowRunsFromSummaryIndex(workspacePath, threadId, removedRunIds)
   } catch (error) {
     console.warn("[Workflow] Run prune failed:", error)
   }
@@ -1057,6 +1598,33 @@ export function loadWorkflowRunForResume(
   }
 }
 
+/** Async resume reader for Electron main-process call paths. It preserves the
+ * fail-closed journal semantics above without synchronously parsing a potentially
+ * large run or replay sidecar on the event loop. */
+export async function loadWorkflowRunForResumeAsync(
+  workspacePath: string,
+  threadId: string,
+  runId: string
+): Promise<PersistedWorkflowRun | null> {
+  const run = await loadWorkflowRunAsync(workspacePath, threadId, runId)
+  if (!run) return null
+  if (run.journal.length > 0) return run
+  const journalPath = journalFilePath(workspacePath, threadId, runId)
+  try {
+    const parsed = JSON.parse(await readFile(journalPath, "utf8"))
+    if (Array.isArray(parsed)) {
+      run.journal = parsed
+      return run
+    }
+    return run.agents.length > 0 ? null : run
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(`[Workflow] Failed to read journal sidecar ${journalPath}:`, error)
+    }
+    return run.agents.length > 0 ? null : run
+  }
+}
+
 export function loadWorkflowRun(
   workspacePath: string,
   threadId: string,
@@ -1073,6 +1641,28 @@ export function loadWorkflowRun(
       }
     } catch (error) {
       console.warn(`[Workflow] Failed to read run file ${candidate}:`, error)
+    }
+  }
+  return null
+}
+
+/** Async run reader for renderer/IPC paths. Runtime compatibility paths retain
+ * `loadWorkflowRun`, while Electron handlers avoid synchronous disk I/O. */
+export async function loadWorkflowRunAsync(
+  workspacePath: string,
+  threadId: string,
+  runId: string
+): Promise<PersistedWorkflowRun | null> {
+  if (!isValidWorkflowRunId(runId)) return null
+  const path = runFilePath(workspacePath, threadId, runId)
+  for (const candidate of [path, `${path}.bak`]) {
+    try {
+      const parsed = JSON.parse(await readFile(candidate, "utf8")) as PersistedWorkflowRun
+      if (parsed && parsed.version === 1 && parsed.runId === runId) return parsed
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn(`[Workflow] Failed to read run file ${candidate}:`, error)
+      }
     }
   }
   return null
@@ -1102,7 +1692,7 @@ export async function updateWorkflowWorktreeRecords(
   }
   const target = runFilePath(workspacePath, threadId, runId)
   return withRunFileMutation(target, async () => {
-    const run = loadWorkflowRun(workspacePath, threadId, runId)
+    const run = await loadWorkflowRunAsync(workspacePath, threadId, runId)
     if (!run) return null
     const worktrees = run.worktrees ?? []
     const indexById = new Map(worktrees.map((candidate, index) => [candidate.id, index]))
@@ -1419,6 +2009,7 @@ export function createWorkflowRunStore(options: {
       }
       await writeFile(`${path}.tmp`, json)
       await rename(`${path}.tmp`, path)
+      await persistWorkflowRunSummaryArtifacts(workspacePath, threadId, state)
       if (withBak) {
         // .bak is only written on the final flush — mid-run the atomic
         // tmp+rename already protects the primary file, and skipping the

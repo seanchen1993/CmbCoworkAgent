@@ -19,6 +19,10 @@ interface Candidate {
 }
 
 const RECOVERY_SUFFIXES = ["", ".flush.tmp", ".tmp", ".bak", ".bak.tmp"]
+const NATIVE_SQLITE_SIDECAR_SUFFIXES = ["-wal", "-shm"]
+const RECOVERY_SIDECAR_SUFFIXES = RECOVERY_SUFFIXES.flatMap((recoverySuffix) =>
+  NATIVE_SQLITE_SIDECAR_SUFFIXES.map((sidecarSuffix) => `${recoverySuffix}${sidecarSuffix}`)
+)
 
 /** Every fixed-suffix variant a durable sqlite file can leave on disk: the
  * recovery candidates plus the transient `.recovery.tmp` used while restoring.
@@ -27,7 +31,13 @@ const RECOVERY_SUFFIXES = ["", ".flush.tmp", ".tmp", ".bak", ".bak.tmp"]
  * (that resurrection is exactly the workflow-resume thread-collision bug).
  * Timestamped `.corrupt.<ts>` / `.bak.<ts>` quarantine files are intentionally
  * NOT listed: they are never recovery candidates, and are kept for forensics. */
-const DURABLE_FILE_SUFFIXES = [...RECOVERY_SUFFIXES, ".recovery.tmp"]
+const DURABLE_FILE_SUFFIXES = [
+  ...RECOVERY_SUFFIXES,
+  ".recovery.tmp",
+  ...RECOVERY_SIDECAR_SUFFIXES,
+  ".recovery.tmp-wal",
+  ".recovery.tmp-shm"
+]
 
 // Deletion order: sidecars FIRST, live file LAST. If the process crashes between
 // unlinks, the leftover state is "live present, some sidecars gone" — safe, the
@@ -43,7 +53,7 @@ const VARIANT_MATCH_ORDER = [...DURABLE_FILE_SUFFIXES].sort((a, b) => b.length -
  * recovery candidates, but they can hold a full checkpoint transcript — thread
  * deletion must remove them too: "delete" means the data is gone, not merely
  * unrecoverable. */
-const QUARANTINE_RE = /\.sqlite\.(?:corrupt|bak)\.\d+$/
+const QUARANTINE_RE = /\.sqlite\.(?:corrupt|bak)\.\d+(?:-(?:wal|shm))?$/
 
 /** If `filename` is a quarantine archive of a durable sqlite file, return the
  * base name (without `.sqlite.corrupt.<ts>` / `.sqlite.bak.<ts>`); else null. */
@@ -239,7 +249,13 @@ export async function openRecoveredSqliteDatabase(
 
 export function sqliteFileSize(path: string): number | null {
   try {
-    return statSync(path).size
+    let size = statSync(path).size
+    try {
+      size += statSync(`${path}-wal`).size
+    } catch {
+      // WAL absent or already checkpointed.
+    }
+    return size
   } catch {
     return null
   }

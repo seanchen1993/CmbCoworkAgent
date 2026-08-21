@@ -2,10 +2,10 @@ import { createHash, randomUUID } from "crypto"
 import { createReadStream } from "fs"
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "fs/promises"
 import { join } from "path"
-import { pipeline } from "stream/promises"
 import { getSubagentTranscriptContentDir } from "../storage"
 import {
   SUBAGENT_TRANSCRIPT_INLINE_BYTES,
+  SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT,
   SUBAGENT_TRANSCRIPT_STARTUP_TOTAL_BYTES,
   fingerprintSubagentTranscriptContent,
   isSubagentTranscriptBlobRef,
@@ -171,13 +171,81 @@ export async function exportSubagentTranscriptBlobValue(
   const output = await open(targetPath, "wx", 0o600)
   let completed = false
   try {
-    await pipeline(
-      createReadStream(path, {
+    const valueStream = createReadStream(path, {
+      start: valueStart,
+      end: valueStart + ref.bytes - 1
+    })
+    for await (const chunk of valueStream) await output.write(chunk as Buffer)
+    await output.sync()
+    completed = true
+  } finally {
+    await output.close().catch(() => undefined)
+    if (!completed) await rm(targetPath, { force: true }).catch(() => undefined)
+  }
+}
+
+export interface SubagentTranscriptTextJournalPage {
+  chunks: string[]
+  hasMore: boolean
+  nextAfterFragmentId?: number
+}
+
+/**
+ * Stream a string sidecar plus its SQLite suffix journal as one JSON string.
+ * Neither the base nor the journal is joined/materialized in JavaScript.
+ */
+export async function exportSubagentTranscriptTextWithJournal(
+  ref: SubagentTranscriptBlobRef,
+  targetPath: string,
+  loadPage: (afterFragmentId?: number) => SubagentTranscriptTextJournalPage
+): Promise<void> {
+  if (ref.kind !== "content" && ref.kind !== "reasoning") {
+    throw new Error("Only transcript text fields can have a suffix journal")
+  }
+  const { path, valueStart } = await verifyBlobForStreaming(ref)
+  if (ref.bytes < 2) throw new Error("Transcript text blob is not a JSON string")
+  const source = await open(path, "r")
+  try {
+    const quotes = Buffer.alloc(2)
+    const first = await source.read(quotes, 0, 1, valueStart)
+    const last = await source.read(quotes, 1, 1, valueStart + ref.bytes - 1)
+    if (
+      first.bytesRead !== 1 ||
+      last.bytesRead !== 1 ||
+      quotes[0] !== 0x22 ||
+      quotes[1] !== 0x22
+    ) {
+      throw new Error("Transcript text blob is not a JSON string")
+    }
+  } finally {
+    await source.close()
+  }
+
+  const output = await open(targetPath, "wx", 0o600)
+  let completed = false
+  try {
+    // Copy the serialized base including its opening quote, but not its closing quote.
+    if (ref.bytes > 1) {
+      const baseStream = createReadStream(path, {
         start: valueStart,
-        end: valueStart + ref.bytes - 1
-      }),
-      output.createWriteStream({ autoClose: false })
-    )
+        end: valueStart + ref.bytes - 2
+      })
+      for await (const chunk of baseStream) await output.write(chunk as Buffer)
+    }
+    let afterFragmentId: number | undefined
+    while (true) {
+      const page = loadPage(afterFragmentId)
+      for (const chunk of page.chunks) {
+        const serialized = JSON.stringify(chunk)
+        await output.write(Buffer.from(serialized.slice(1, -1), "utf8"))
+      }
+      if (!page.hasMore) break
+      if (page.nextAfterFragmentId === undefined) {
+        throw new Error("Transcript journal page did not advance")
+      }
+      afterFragmentId = page.nextAfterFragmentId
+    }
+    await output.write(Buffer.from('"', "utf8"))
     await output.sync()
     completed = true
   } finally {
@@ -253,6 +321,10 @@ async function writeBlob(
 async function compactMessage(rawMessage: unknown): Promise<{ value: unknown; changed: boolean }> {
   if (!isRecord(rawMessage)) return { value: rawMessage, changed: false }
   const message: UnknownRecord = { ...rawMessage }
+  const forceLiveTextSidecars = message.subagent_live_text_bootstrap === true
+  const preserveTextJournal = message.subagent_preserve_text_journal === true
+  delete message.subagent_live_text_bootstrap
+  delete message.subagent_preserve_text_journal
   let changed = false
 
   const existingContentRef = isSubagentTranscriptBlobRef(message.content_ref, "content")
@@ -315,6 +387,7 @@ async function compactMessage(rawMessage: unknown): Promise<{ value: unknown; ch
     )
   }
   if (
+    !preserveTextJournal &&
     message.role === "assistant" &&
     typeof message.id === "string" &&
     message.id.startsWith("subagent-final-")
@@ -353,7 +426,10 @@ async function compactMessage(rawMessage: unknown): Promise<{ value: unknown; ch
     }
   } else if (message.content !== undefined) {
     const { serializedValue } = blobRefForValue(message.content, "content")
-    if (Buffer.byteLength(serializedValue, "utf8") > SUBAGENT_TRANSCRIPT_INLINE_BYTES) {
+    if (
+      forceLiveTextSidecars ||
+      Buffer.byteLength(serializedValue, "utf8") > SUBAGENT_TRANSCRIPT_INLINE_BYTES
+    ) {
       message.content_ref = await writeBlob(message.content, "content")
       if (typeof message.content === "string") {
         message.content_full_length = message.content.length
@@ -380,7 +456,10 @@ async function compactMessage(rawMessage: unknown): Promise<{ value: unknown; ch
     }
   } else if (typeof message.reasoning === "string") {
     const { serializedValue } = blobRefForValue(message.reasoning, "reasoning")
-    if (Buffer.byteLength(serializedValue, "utf8") > SUBAGENT_TRANSCRIPT_INLINE_BYTES) {
+    if (
+      forceLiveTextSidecars ||
+      Buffer.byteLength(serializedValue, "utf8") > SUBAGENT_TRANSCRIPT_INLINE_BYTES
+    ) {
       message.reasoning_ref = await writeBlob(message.reasoning, "reasoning")
       message.reasoning_full_length = message.reasoning.length
       message.reasoning = projectSubagentTranscriptContentForStorage(message.reasoning)
@@ -471,10 +550,25 @@ export function sliceSubagentTranscriptManifestPage(
   let deferredHydration = false
   const estimatedHydrationBytes = (value: unknown): number => {
     if (!isRecord(value)) return Buffer.byteLength(serializeBlobValue(value), "utf8")
+    if (
+      value.subagent_content_delta_journal_omitted === true ||
+      value.subagent_reasoning_delta_journal_omitted === true
+    ) {
+      return Number.MAX_SAFE_INTEGER
+    }
     // Count the complete manifest row as well as every value that sidecar
     // hydration can expand. Otherwise a legacy row with tiny content but a
     // multi-megabyte description/alias can bypass the IPC clone budget.
     let bytes = Buffer.byteLength(serializeBlobValue(value), "utf8")
+    for (const key of [
+      "subagent_content_delta_journal_length",
+      "subagent_reasoning_delta_journal_length"
+    ] as const) {
+      const journalLength = value[key]
+      if (typeof journalLength === "number" && Number.isSafeInteger(journalLength)) {
+        bytes += Math.max(0, journalLength)
+      }
+    }
     for (const [field, kind] of [
       ["content", "content"],
       ["reasoning", "reasoning"],
@@ -788,13 +882,15 @@ export function buildSubagentTranscriptStartupManifests(
   byteLimit: number = SUBAGENT_TRANSCRIPT_STARTUP_TOTAL_BYTES
 ): Record<string, unknown> {
   if (!isRecord(transcripts)) return {}
-  const candidates = Object.entries(transcripts).map(([subagentId, rawMessages], index) => {
-    const messages = startupBucket(rawMessages, subagentId)
-    const hasFinal = messages.some(
-      (message) => isRecord(message) && message.id === `subagent-final-${subagentId}`
-    )
-    return { subagentId, rawMessages, messages, hasFinal, index }
-  })
+  const candidates = Object.entries(transcripts)
+    .slice(0, SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT)
+    .map(([subagentId, rawMessages], index) => {
+      const messages = startupBucket(rawMessages, subagentId)
+      const hasFinal = messages.some(
+        (message) => isRecord(message) && message.id === `subagent-final-${subagentId}`
+      )
+      return { subagentId, rawMessages, messages, hasFinal, index }
+    })
   candidates.sort((left, right) => {
     if (left.hasFinal !== right.hasFinal) return left.hasFinal ? 1 : -1
     return right.index - left.index
@@ -815,13 +911,13 @@ export function buildSubagentTranscriptStartupManifests(
         "utf8"
       )
     }
-    // Card/index metadata is irreducible and always returned so no transcript
-    // becomes unreachable. The budget bounds optional text/tool previews.
+    // Card/index metadata is irreducible for this bounded startup page. Older
+    // buckets remain reachable through the focused transcript page API.
     accepted.set(candidate.subagentId, messages)
     usedBytes += entryBytes
   }
   return Object.fromEntries(
-    Object.keys(transcripts).flatMap((subagentId) => {
+    candidates.flatMap(({ subagentId }) => {
       const messages = accepted.get(subagentId)
       return messages ? [[subagentId, messages] as const] : []
     })
@@ -1009,12 +1105,28 @@ export function mergeSubagentTranscriptManifestMessages(
 async function hydrateMessage(rawMessage: unknown): Promise<unknown> {
   if (!isRecord(rawMessage)) return rawMessage
   const message: UnknownRecord = { ...rawMessage }
+  const contentJournal =
+    typeof message.subagent_content_delta_journal === "string"
+      ? message.subagent_content_delta_journal
+      : ""
+  const reasoningJournal =
+    typeof message.subagent_reasoning_delta_journal === "string"
+      ? message.subagent_reasoning_delta_journal
+      : ""
+  delete message.subagent_content_delta_journal
+  delete message.subagent_reasoning_delta_journal
+  delete message.subagent_content_delta_journal_length
+  delete message.subagent_reasoning_delta_journal_length
+  delete message.subagent_content_delta_journal_omitted
+  delete message.subagent_reasoning_delta_journal_omitted
   const contentRef = isSubagentTranscriptBlobRef(message.content_ref, "content")
     ? message.content_ref
     : undefined
   if (contentRef) {
     try {
-      message.content = await readBlob(contentRef)
+      const content = await readBlob(contentRef)
+      message.content =
+        typeof content === "string" && contentJournal ? `${content}${contentJournal}` : content
       delete message.content_is_projection
     } catch (error) {
       console.warn("[SubagentTranscriptStore] Failed to hydrate content blob:", error)
@@ -1027,7 +1139,7 @@ async function hydrateMessage(rawMessage: unknown): Promise<unknown> {
     try {
       const reasoning = await readBlob(reasoningRef)
       if (typeof reasoning === "string") {
-        message.reasoning = reasoning
+        message.reasoning = reasoningJournal ? `${reasoning}${reasoningJournal}` : reasoning
         delete message.reasoning_is_projection
       }
     } catch (error) {

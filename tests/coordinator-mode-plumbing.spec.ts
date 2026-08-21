@@ -632,7 +632,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "const hasRunningWorker = state.coordinatorWorkers.some(",
+    "const hasRunningWorker = workers.some(",
     "thread context tracks unresolved coordinator threads by running workers or pending terminal notifications"
   )
   assertIncludes(
@@ -652,7 +652,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertMatches(
     threadContext,
-    /if \(isThreadMetadataExplicitNormalMode\(threadId\) && !isEnvironmentCoordinatorMode\) \{\s*return false\s*\}/,
+    /if \(isThreadMetadataExplicitNormalMode\(threadId\) && !isEnvironmentCoordinatorMode\) \{\s*delete coordinatorNotificationAttemptsRef\.current\[threadId\][\s\S]*?return\s*\}/,
     "thread context lets unresolved terminal notifications drop out of the periodic refresh loop when explicit normal mode suppresses coordinator auto-runs"
   )
   assertIncludes(
@@ -787,6 +787,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
 
 async function testMainResolvesAndPersistsMode(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
+  const streamSerialization = await readProjectFile("src/main/ipc/stream-data-serialization.ts")
   assertIncludes(
     agentIpc,
     'return agentMode === "normal" && metadata.subagentsEnabled === false',
@@ -1359,27 +1360,27 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "agent IPC avoids sending worker updates to destroyed windows"
   )
   assertIncludes(
-    agentIpc,
+    streamSerialization,
     "function sanitizeStreamDataForRenderer",
     "agent IPC sanitizes stream payloads before renderer IPC"
   )
   assertIncludes(
-    agentIpc,
-    "sanitizeValuesMessagesForRenderer(messages)",
+    streamSerialization,
+    "sanitizeValuesMessagesForRenderer(",
     "agent IPC keeps only current-turn values-mode messages before renderer IPC"
   )
-  assertIncludes(
-    agentIpc,
-    'type === "human" || type === "user"',
+  assertMatches(
+    streamSerialization,
+    /type === "human"[\s\S]{0,80}type === "user"/,
     "agent IPC recognizes plain values-mode human messages while trimming history"
   )
   assertIncludes(
-    agentIpc,
+    streamSerialization,
     ".slice(currentTurnStart)",
     "agent IPC avoids forwarding full values-mode message history"
   )
   assertIncludes(
-    agentIpc,
+    streamSerialization,
     "cmb_worker_snapshot_index",
     "agent IPC preserves original checkpoint indexes for worker values fallback IDs"
   )
@@ -1399,16 +1400,37 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "agent IPC compares raw checkpoint message text before trace truncation"
   )
   const stableValuesSanitizations =
-    agentIpc.match(/sanitizeStreamDataForRenderer\(mode, serialized\)/g)?.length ?? 0
+    agentIpc.match(/\{ messages: latestValuesSnapshot\.messages \}/g)?.length ?? 0
   assert(
     stableValuesSanitizations === 3,
-    "invoke, resume, and interrupt sanitize stable values before retaining them"
+    "invoke, resume, and interrupt retain complete values only for exceptional reset paths"
+  )
+  assertSourceOrder(
+    streamSerialization,
+    "messages.slice(currentTurnBoundary)",
+    'serializeProjectedStreamData(projected.data, projected.valuesMessageIndexOffset, "full")',
+    "values-mode history is projected before LangChain data is serialized"
+  )
+  assertIncludes(
+    streamSerialization,
+    "createStreamDataSerializer",
+    "foreground and background runs can serialize append/tail values without revisiting the turn"
   )
   assertSourceOrder(
     agentIpc,
-    "const serialized = serializeStreamData(stream.data)",
-    "data = sanitizeStreamDataForRenderer(stream.mode, serialized)",
-    "focused worker stream serializes LangChain values before renderer sanitization"
+    "const serialized = focusedWorker.serialize(stream.mode, stream.data)",
+    "data = sanitizeStreamDataForRenderer(",
+    "focused worker stream uses its run-scoped serializer before renderer sanitization"
+  )
+  assertIncludes(
+    agentIpc,
+    "focusedWorker.serialize = createStreamDataSerializer()",
+    "focused worker stream resets incremental provenance at worker turn boundaries"
+  )
+  assertIncludes(
+    agentIpc,
+    '...(stream.mode === "values" && { valuesSnapshotKind })',
+    "focused worker stream forwards append/tail snapshot semantics to the renderer"
   )
   assertNotIncludes(
     agentIpc,
@@ -1417,7 +1439,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "data: sanitizeStreamDataForRenderer(mode, payload)",
+    "data: sanitizeStreamDataForRenderer(mode, payload, valuesMessageIndexOffset)",
     "normal invoke stream sanitizes renderer payloads"
   )
   assertIncludes(
@@ -1672,7 +1694,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     agentIpc,
     "isCoordinatorWorkerStreamChunk(mode, data, threadId)",
-    "const serialized = serializeStreamData(data)",
+    "} = serializeForRun(mode, data)",
     "agent IPC filters async worker chunks before serializing payloads for renderer forwarding"
   )
   assertIncludes(
@@ -2249,8 +2271,13 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "const valuesContext = createWorkerValuesSnapshotContext(",
-    "runtime precomputes a shared values-mode stream context once per chunk"
+    "workerValuesSnapshotAccumulator = new WorkerValuesSnapshotAccumulator(effectiveWorkerPrompt)",
+    "runtime creates one values-mode accumulator per worker turn"
+  )
+  assertIncludes(
+    runtime,
+    "workerValuesSnapshotAccumulator?.createContext(mode, data)",
+    "runtime reuses the values-mode accumulator across stream chunks"
   )
   assertIncludes(
     runtime,
@@ -2755,7 +2782,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertSourceOrder(
     heartbeatService,
     "reviveRetiredThread(threadId)",
-    "const existing = dbGetThread(threadId)",
+    "const existing = dbGetThreadCore(threadId)",
     "heartbeat revives UNCONDITIONALLY (before the row-exists branch) — a row-missing-only revive deadlocks when a deletion's late retire re-tombstones a mid-deletion recreation"
   )
   assertMatches(

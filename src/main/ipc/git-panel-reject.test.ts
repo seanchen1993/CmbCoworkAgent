@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const dbMock = vi.hoisted(() => {
   let metadata = "{}"
   return {
-    getThread: vi.fn(() => ({ thread_id: "thread-test", metadata })),
+    getThreadCore: vi.fn(() => ({ thread_id: "thread-test", metadata })),
     updateThread: vi.fn((_threadId: string, updates: { metadata?: string }) => {
       if (typeof updates.metadata === "string") metadata = updates.metadata
       return { thread_id: "thread-test", metadata }
@@ -27,7 +27,7 @@ vi.mock("electron", () => ({
 }))
 
 vi.mock("../db", () => ({
-  getThread: dbMock.getThread,
+  getThreadCore: dbMock.getThreadCore,
   updateThread: dbMock.updateThread
 }))
 

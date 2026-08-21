@@ -1,6 +1,7 @@
 import React, {
   useRef,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useCallback,
   useState,
@@ -82,20 +83,20 @@ import {
   type HookLogBucket,
   type ApiErrorDetailState
 } from "@/lib/thread-context"
-import {
-  filterCoordinatorNoiseMessages,
-  isCoordinatorNotificationPrompt
-} from "@/lib/message-display-helpers"
-import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
+import { filterCoordinatorNoiseMessages } from "@/lib/message-display-helpers"
 import {
   buildToolResultAssociations,
   getWorkerToolUiKey
 } from "@/lib/worker-tool-result-key"
 import {
-  buildVisibleMessageLayout,
   messageHasVisibleRow
 } from "@/lib/message-display-visibility"
-import { createToolDerivationMessageSelector } from "@/lib/message-render-stability"
+import {
+  areMessageRenderFieldsEqual,
+  areMessageToolRenderInputsEqual,
+  createIncrementalToolDerivationProjector,
+  type IncrementalToolDerivationProjection
+} from "@/lib/message-render-stability"
 import {
   isCoordinatorModeMetadata,
   isMultiModeMetadata,
@@ -135,7 +136,7 @@ import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreat
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
-import { uploadChatData, ChatReportPayload } from "@/api"
+import { uploadChatData } from "@/api"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
@@ -176,14 +177,11 @@ import {
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
-import {
-  liveStreamMessageRole,
-  normalizeLiveStreamMessageIds,
-  normalizeLiveStreamMessageContent,
-  stringifyMessageContentForReport,
-  type LiveStreamMessage as StreamMessage
-} from "@/lib/live-stream-messages"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
+import {
+  buildLatestChatReportBatch,
+  type ChatReportBatch
+} from "@/lib/chat-report-batch"
 import {
   markChatReportUploadFailed,
   markChatReportUploadSucceeded,
@@ -204,6 +202,27 @@ import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
+import {
+  CHAT_MESSAGE_WINDOW_SHIFT,
+  createPrependAnchoredChatMessageWindow,
+  createTailChatMessageWindow,
+  isTailChatMessageWindow,
+  reconcileChatMessageWindow,
+  revealChatMessageIndex,
+  shiftChatMessageWindow,
+  type ChatMessageWindow
+} from "@/lib/chat-message-window"
+import type { ChatSearchCorpus, ChatSearchDocument } from "@/lib/chat-search-matches"
+import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import {
+  createDynamicLiveVisibilityProjector,
+  createLiveDisplayMessageProjector
+} from "@/lib/live-display-message-projection"
+import {
+  deriveChatMessageWindowRows,
+  findPreviousVisibleChatMessageIndex,
+  type ChatMessageWindowRenderRow
+} from "@/lib/chat-visible-index"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
@@ -771,9 +790,13 @@ function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
   )
 }
 
-function useStableToolDerivationMessages(messages: readonly Message[]): readonly Message[] {
-  const [selectStableMessages] = useState(createToolDerivationMessageSelector)
-  return selectStableMessages(messages)
+function useStableToolDerivationMessages(
+  messages: readonly Message[],
+  changedMessages: readonly Message[],
+  structureVersion: number
+): IncrementalToolDerivationProjection {
+  const [projectMessages] = useState(createIncrementalToolDerivationProjector)
+  return projectMessages(messages, changedMessages, structureVersion)
 }
 
 const THINKING_MESSAGES = [
@@ -893,22 +916,6 @@ const ROTATING_WORDS = [
   "部署上线"
 ]
 
-const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
-const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
-
-type MessageTimeValue = {
-  start_at?: string
-  end_at?: string
-}
-
-type MessageTimeMap = Record<string, MessageTimeValue>
-
-const messageTimeOrderEntries = (
-  updates: MessageTimeMap
-): Array<MessageTimeValue & { id: string }> => {
-  return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
-}
-
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -921,6 +928,107 @@ const getMessageText = (content: Message["content"]): string => {
     })
     .filter(Boolean)
     .join("\n")
+}
+
+function stringifyChatSearchValue(value: unknown): string {
+  if (typeof value === "string") return value
+  if (value == null) return ""
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function cleanUserAttachmentMarkupForDisplay(message: Message): Message {
+  if (
+    message.role !== "user" ||
+    typeof message.content !== "string" ||
+    !message.content.includes("<attachment ")
+  ) {
+    return message
+  }
+
+  const fileNames: string[] = []
+  const textOnly = message.content
+    .replace(
+      /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
+      (_match, name: string) => {
+        const decoded = name
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"')
+        fileNames.push(`📎 ${decoded}`)
+        return ""
+      }
+    )
+    .trim()
+  const content = fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
+  return { ...message, content }
+}
+
+interface ThreadDisplayBaselineCacheEntry {
+  contentVersion: number
+  sourceLength: number
+  sourceTailSnapshot: Message | undefined
+  sourceTailProjected: boolean
+  baseline: Message[]
+}
+
+const threadDisplayBaselineCache = new WeakMap<
+  readonly Message[],
+  ThreadDisplayBaselineCacheEntry
+>()
+
+function getThreadDisplayBaseline(
+  messages: readonly Message[],
+  contentVersion: number
+): Message[] {
+  const cached = threadDisplayBaselineCache.get(messages)
+  if (cached?.contentVersion === contentVersion) return cached.baseline
+  const sourceTail = messages.at(-1)
+  if (
+    cached &&
+    cached.sourceLength === messages.length &&
+    cached.sourceTailSnapshot &&
+    sourceTail &&
+    cached.sourceTailSnapshot.id === sourceTail.id &&
+    cached.sourceTailSnapshot.role === sourceTail.role &&
+    cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
+  ) {
+    const projectedTail = filterCoordinatorNoiseMessages(
+      isVisibleCheckpointTranscriptMessage(sourceTail)
+        ? [cleanUserAttachmentMarkupForDisplay(sourceTail)]
+        : []
+    )
+    if (!cached.sourceTailProjected && projectedTail.length === 0) {
+      cached.contentVersion = contentVersion
+      cached.sourceTailSnapshot = sourceTail
+      return cached.baseline
+    }
+    if (
+      cached.sourceTailProjected &&
+      projectedTail.length === 1 &&
+      cached.baseline.at(-1)?.id === sourceTail.id
+    ) {
+      cached.baseline[cached.baseline.length - 1] = projectedTail[0]
+      cached.contentVersion = contentVersion
+      cached.sourceTailSnapshot = sourceTail
+      return cached.baseline
+    }
+  }
+  const baseline = filterCoordinatorNoiseMessages(
+    messages.filter(isVisibleCheckpointTranscriptMessage).map(cleanUserAttachmentMarkupForDisplay)
+  )
+  threadDisplayBaselineCache.set(messages, {
+    contentVersion,
+    sourceLength: messages.length,
+    sourceTailSnapshot: sourceTail,
+    sourceTailProjected: Boolean(sourceTail && baseline.at(-1)?.id === sourceTail.id),
+    baseline
+  })
+  return baseline
 }
 
 type ForkDestinationMode = "local" | "workspace"
@@ -1293,14 +1401,18 @@ interface ChatToolResultInfo {
   is_error?: boolean
 }
 
-interface ChatMessageFlags {
-  showAssistantMeta: boolean[]
-  hasUserAfterHead: boolean[]
-}
+type ChatMessageWindowRow = ChatMessageWindowRenderRow<Message>
 
 interface ChatMessageListProps {
   messages: Message[]
-  perMessageFlags: ChatMessageFlags
+  windowRows: ChatMessageWindowRow[]
+  messageWindow: ChatMessageWindow
+  onLoadOlder: () => void
+  onLoadNewer: () => void
+  onLoadEarlierHistoryPage: () => void
+  historyHasMore: boolean
+  historyPageLoading: boolean
+  historyRemainingCount: number
   hookLoggingEnabled: boolean
   hookLogBucketByTurnId: Map<string, HookLogBucket>
   detachedHookLogBuckets: HookLogBucket[]
@@ -1323,9 +1435,157 @@ interface ChatMessageListProps {
   userSendTimeLabelById: Map<string, string>
 }
 
+interface ChatMessageRowProps {
+  message: Message
+  previousMessage: Message | null
+  isLastMessage: boolean
+  hasUserAfterHead: boolean
+  showAssistantMeta: boolean
+  hookLogBucket?: HookLogBucket
+  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
+  setMessageRef: ChatMessageListProps["setMessageRef"]
+  isLoading: boolean
+  toolResults: Map<string, ChatToolResultInfo>
+  toolCallStates: Map<string, ToolCallState>
+  pendingApprovalToolCallKeys: Set<string>
+  pendingApproval: HITLRequest | null
+  autoApproveGitPush: boolean
+  onApprovalDecision: ChatMessageListProps["onApprovalDecision"]
+  onEditUserMessage: ChatMessageListProps["onEditUserMessage"]
+  onSetGoalFromMessage: ChatMessageListProps["onSetGoalFromMessage"]
+  onForkFromMessage: ChatMessageListProps["onForkFromMessage"]
+  forkingMessageId: string | null
+  onOpenHookLogBucket: ChatMessageListProps["onOpenHookLogBucket"]
+  threadId: string
+  assistantDurationMs?: number
+  userSendTimeLabel: string | null
+}
+
+function ChatMessageRowImpl({
+  message,
+  previousMessage,
+  isLastMessage,
+  hasUserAfterHead,
+  showAssistantMeta,
+  hookLogBucket,
+  contentMessageRefs,
+  setMessageRef,
+  isLoading,
+  toolResults,
+  toolCallStates,
+  pendingApprovalToolCallKeys,
+  pendingApproval,
+  autoApproveGitPush,
+  onApprovalDecision,
+  onEditUserMessage,
+  onSetGoalFromMessage,
+  onForkFromMessage,
+  forkingMessageId,
+  onOpenHookLogBucket,
+  threadId,
+  assistantDurationMs,
+  userSendTimeLabel
+}: ChatMessageRowProps): React.JSX.Element {
+  const navigatorRef = useMemo(
+    () => setMessageRef(message.id, message.role),
+    [message.id, message.role, setMessageRef]
+  )
+  const contentMessageRefMap = contentMessageRefs.current
+  const combinedRef = useCallback(
+    (node: HTMLDivElement | null): void => {
+      navigatorRef(node)
+      if (node && message.role !== "tool") {
+        contentMessageRefMap.set(message.id, node)
+        return
+      }
+      contentMessageRefMap.delete(message.id)
+    },
+    [contentMessageRefMap, message.id, message.role, navigatorRef]
+  )
+  const handleOpenHookLogBucket = useCallback(() => {
+    if (hookLogBucket) onOpenHookLogBucket(hookLogBucket.turnId)
+  }, [hookLogBucket, onOpenHookLogBucket])
+
+  return (
+    <div
+      ref={combinedRef}
+      data-chat-message-row=""
+      data-chat-message-id={message.id}
+      data-message-role={message.role}
+    >
+      <MessageBubble
+        message={message}
+        previousMessage={previousMessage}
+        isStreaming={isLastMessage && isLoading}
+        showAssistantMeta={showAssistantMeta}
+        toolResults={toolResults}
+        toolCallStates={toolCallStates}
+        pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
+        pendingApproval={pendingApproval}
+        autoApproveGitPush={autoApproveGitPush}
+        onApprovalDecision={onApprovalDecision}
+        onEditUserMessage={onEditUserMessage}
+        onSetGoalFromMessage={onSetGoalFromMessage}
+        onForkFromMessage={onForkFromMessage}
+        forkingMessageId={forkingMessageId}
+        threadId={threadId}
+        isLoading={isLoading}
+        hasUserAfterHead={hasUserAfterHead}
+        assistantDurationMs={assistantDurationMs}
+        userSendTimeLabel={userSendTimeLabel}
+      />
+      {hookLogBucket && hookLogBucket.entries.length > 0 && (
+        <div className="mt-1 ml-12">
+          <HookLogChip bucket={hookLogBucket} onClick={handleOpenHookLogBucket} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function areChatMessageRowPropsEqual(
+  previous: Readonly<ChatMessageRowProps>,
+  next: Readonly<ChatMessageRowProps>
+): boolean {
+  return (
+    areMessageRenderFieldsEqual(previous.message, next.message) &&
+    (previous.previousMessage?.role ?? null) === (next.previousMessage?.role ?? null) &&
+    previous.isLastMessage === next.isLastMessage &&
+    previous.hasUserAfterHead === next.hasUserAfterHead &&
+    previous.showAssistantMeta === next.showAssistantMeta &&
+    previous.hookLogBucket === next.hookLogBucket &&
+    previous.contentMessageRefs === next.contentMessageRefs &&
+    previous.setMessageRef === next.setMessageRef &&
+    previous.isLoading === next.isLoading &&
+    previous.pendingApproval === next.pendingApproval &&
+    previous.autoApproveGitPush === next.autoApproveGitPush &&
+    previous.onApprovalDecision === next.onApprovalDecision &&
+    previous.onEditUserMessage === next.onEditUserMessage &&
+    previous.onSetGoalFromMessage === next.onSetGoalFromMessage &&
+    previous.onForkFromMessage === next.onForkFromMessage &&
+    previous.forkingMessageId === next.forkingMessageId &&
+    previous.onOpenHookLogBucket === next.onOpenHookLogBucket &&
+    previous.threadId === next.threadId &&
+    previous.assistantDurationMs === next.assistantDurationMs &&
+    previous.userSendTimeLabel === next.userSendTimeLabel &&
+    areMessageToolRenderInputsEqual(previous.message, previous, next)
+  )
+}
+
+const ChatMessageRow = React.memo(ChatMessageRowImpl, areChatMessageRowPropsEqual)
+
+const DETACHED_HOOK_LOG_WINDOW_SIZE = 80
+
 const ChatMessageList = React.memo(function ChatMessageList({
   messages,
-  perMessageFlags,
+  windowRows,
+  messageWindow,
+  onLoadOlder,
+  onLoadNewer,
+  onLoadEarlierHistoryPage,
+  historyHasMore,
+  historyPageLoading,
+  historyRemainingCount,
   hookLoggingEnabled,
   hookLogBucketByTurnId,
   detachedHookLogBuckets,
@@ -1347,91 +1607,138 @@ const ChatMessageList = React.memo(function ChatMessageList({
   assistantDurationMsById,
   userSendTimeLabelById
 }: ChatMessageListProps): React.JSX.Element {
-  const visibleMessageLayout = useMemo(
-    () =>
-      buildVisibleMessageLayout(messages, (message) => {
-        const hasHookLogChip =
-          hookLoggingEnabled &&
-          message.role === "user" &&
-          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-        return messageHasVisibleRow(message, hasHookLogChip)
-      }),
-    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
+  const [detachedHookLogOffsetFromTail, setDetachedHookLogOffsetFromTail] = useState(0)
+  const detachedHookLogEnd = Math.max(
+    0,
+    detachedHookLogBuckets.length - detachedHookLogOffsetFromTail
+  )
+  const detachedHookLogStart = Math.max(
+    0,
+    detachedHookLogEnd - DETACHED_HOOK_LOG_WINDOW_SIZE
+  )
+  const renderedDetachedHookLogBuckets = detachedHookLogBuckets.slice(
+    detachedHookLogStart,
+    detachedHookLogEnd
   )
 
   return (
     <>
-      {messages.map((message, index) => {
-        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
-        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
-        const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
-        const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
-
+      {messageWindow.startIndex > 0 && (
+        <button
+          type="button"
+          data-chat-window-boundary="older"
+          onClick={onLoadOlder}
+          className="mx-auto flex rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          加载更早的 {Math.min(CHAT_MESSAGE_WINDOW_SHIFT, messageWindow.startIndex)} 条消息
+        </button>
+      )}
+      {messageWindow.startIndex === 0 && historyHasMore && (
+        <button
+          type="button"
+          data-chat-history-boundary="older"
+          onClick={onLoadEarlierHistoryPage}
+          disabled={historyPageLoading}
+          className="mx-auto flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+        >
+          {historyPageLoading && <Loader2 className="size-3 animate-spin" />}
+          {historyPageLoading
+            ? "正在加载更早消息"
+            : `加载更早的 ${Math.max(1, Math.min(500, historyRemainingCount))} 条消息`}
+        </button>
+      )}
+      {windowRows.map((row) => {
+        const { message } = row
         const hookLogBucketForTurn =
           hookLoggingEnabled && message.role === "user"
             ? hookLogBucketByTurnId.get(message.id)
             : undefined
-        const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
-
-        const navigatorRef = setMessageRef(message.id, message.role)
-        const combinedRef = (node: HTMLDivElement | null): void => {
-          navigatorRef(node)
-          if (node && message.role !== "tool") {
-            contentMessageRefs.current.set(message.id, node)
-            return
-          }
-          contentMessageRefs.current.delete(message.id)
-        }
 
         return (
-          <div
+          <ChatMessageRow
             key={`${message.role}:${message.id}`}
-            ref={combinedRef}
-            data-message-role={message.role}
-          >
-            <MessageBubble
-              message={message}
-              previousMessage={previousMessage}
-              isStreaming={isLastMessage && isLoading}
-              showAssistantMeta={showAssistantMeta}
-              toolResults={toolResults}
-              toolCallStates={toolCallStates}
-              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-              pendingApproval={pendingApproval}
-              autoApproveGitPush={autoApproveGitPush}
-              onApprovalDecision={onApprovalDecision}
-              onEditUserMessage={onEditUserMessage}
-              onSetGoalFromMessage={onSetGoalFromMessage}
-              onForkFromMessage={onForkFromMessage}
-              forkingMessageId={forkingMessageId}
-              threadId={threadId}
-              isLoading={isLoading}
-              hasUserAfterHead={hasUserAfterHead}
-              assistantDurationMs={assistantDurationMsById.get(message.id)}
-              userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-            />
-            {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-              <div className="mt-1 ml-12">
-                <HookLogChip
-                  bucket={hookLogBucketForTurn}
-                  onClick={() => onOpenHookLogBucket(hookLogBucketForTurn.turnId)}
-                />
-              </div>
-            )}
-          </div>
+            message={message}
+            previousMessage={row.previousMessage}
+            isLastMessage={row.isLastMessage}
+            hasUserAfterHead={row.hasUserAfterHead}
+            showAssistantMeta={row.showAssistantMeta}
+            hookLogBucket={hookLogBucketForTurn}
+            contentMessageRefs={contentMessageRefs}
+            setMessageRef={setMessageRef}
+            isLoading={isLoading}
+            toolResults={toolResults}
+            toolCallStates={toolCallStates}
+            pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
+            pendingApproval={pendingApproval}
+            autoApproveGitPush={autoApproveGitPush}
+            onApprovalDecision={onApprovalDecision}
+            onEditUserMessage={onEditUserMessage}
+            onSetGoalFromMessage={onSetGoalFromMessage}
+            onForkFromMessage={onForkFromMessage}
+            forkingMessageId={forkingMessageId}
+            onOpenHookLogBucket={onOpenHookLogBucket}
+            threadId={threadId}
+            assistantDurationMs={assistantDurationMsById.get(message.id)}
+            userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
+          />
         )
       })}
 
-      {hookLoggingEnabled && detachedHookLogBuckets.length > 0 && (
-        <div className="flex flex-wrap justify-start gap-2 mt-1">
-          {detachedHookLogBuckets.map((bucket) => (
-            <HookLogChip
-              key={bucket.turnId}
-              bucket={bucket}
-              onClick={() => onOpenHookLogBucket(bucket.turnId)}
-            />
-          ))}
+      {messageWindow.endIndex < messages.length && (
+        <button
+          type="button"
+          data-chat-window-boundary="newer"
+          onClick={onLoadNewer}
+          className="mx-auto flex rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          加载更新的 {Math.min(CHAT_MESSAGE_WINDOW_SHIFT, messages.length - messageWindow.endIndex)} 条消息
+        </button>
+      )}
+
+      {hookLoggingEnabled &&
+        messageWindow.endIndex >= messages.length &&
+        detachedHookLogBuckets.length > 0 && (
+        <div className="mt-1 space-y-2">
+          <div className="flex flex-wrap justify-start gap-2">
+            {renderedDetachedHookLogBuckets.map((bucket) => (
+              <HookLogChip
+                key={bucket.turnId}
+                bucket={bucket}
+                onClick={() => onOpenHookLogBucket(bucket.turnId)}
+              />
+            ))}
+          </div>
+          <div className="flex justify-center gap-2 text-xs text-muted-foreground">
+            {detachedHookLogStart > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setDetachedHookLogOffsetFromTail((offset) =>
+                    Math.min(
+                      detachedHookLogBuckets.length,
+                      offset + DETACHED_HOOK_LOG_WINDOW_SIZE
+                    )
+                  )
+                }
+                className="rounded-full border border-border/70 px-2 py-0.5 hover:bg-muted"
+              >
+                更早的 Hook 日志
+              </button>
+            )}
+            {detachedHookLogOffsetFromTail > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setDetachedHookLogOffsetFromTail((offset) =>
+                    Math.max(0, offset - DETACHED_HOOK_LOG_WINDOW_SIZE)
+                  )
+                }
+                className="rounded-full border border-border/70 px-2 py-0.5 hover:bg-muted"
+              >
+                更新的 Hook 日志
+              </button>
+            )}
+          </div>
         </div>
       )}
     </>
@@ -1659,8 +1966,9 @@ export function ChatContainer({
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryQueuesRef = useRef<
-    Record<string, Array<{ messages: Message[]; attempt: number }>>
+    Record<string, Array<{ batch: ChatReportBatch; attempt: number }>>
   >({})
+  const chatReportDisposedRef = useRef(false)
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
   const stream = streamData.stream
@@ -1731,7 +2039,20 @@ export function ChatContainer({
     rightPanelCollapsed,
     pluginVersion,
     requestOpenRightPanelSystemConstraints
-  } = useAppStore()
+  } = useAppStore(
+    useShallow((state) => ({
+      threads: state.threads,
+      models: state.models,
+      createThread: state.createThread,
+      forkThread: state.forkThread,
+      updateThread: state.updateThread,
+      generateTitleForFirstMessage: state.generateTitleForFirstMessage,
+      setShowCustomizeView: state.setShowCustomizeView,
+      rightPanelCollapsed: state.rightPanelCollapsed,
+      pluginVersion: state.pluginVersion,
+      requestOpenRightPanelSystemConstraints: state.requestOpenRightPanelSystemConstraints
+    }))
+  )
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null)
   const currentThread = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
@@ -1921,6 +2242,7 @@ export function ChatContainer({
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    messagesContentVersion,
     queuedMessages,
     queueAutoDrainSuppressed,
     toolCallStates,
@@ -1946,6 +2268,10 @@ export function ChatContainer({
     workflowRun,
     scheduledTaskLoading,
     historyLoading,
+    historyPageLoading,
+    historyHasMore,
+    historyMessageTotal,
+    historyLoadedMessageCount,
     scheduledTaskId,
     modelRetry,
     contextCompaction,
@@ -1960,6 +2286,7 @@ export function ChatContainer({
     clearFinishedWorkflowRun,
     appendMessage,
     syncDurableTranscript,
+    loadEarlierMessages,
     removeLocalMessage,
     addQueuedMessage,
     prependQueuedMessage,
@@ -2462,46 +2789,31 @@ export function ChatContainer({
   }, [])
 
   const uploadLoChatDataForThread = useCallback(
-    async (targetThreadId: string, msgs: Message[], attempt = 0) => {
-      const lastMsg = msgs[msgs.length - 1]
-      if (!lastMsg || lastMsg.role === "user") return
-
-      let lUidx = -1
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === "user") {
-          lUidx = i
-          break
-        }
-      }
-      if (lUidx === -1) return
-
-      const tailMessages = msgs.slice(lUidx)
+    async (targetThreadId: string, batch: ChatReportBatch, attempt = 0) => {
+      if (chatReportDisposedRef.current) return
       const reservedIds = reserveChatReportMessageIds(
         targetThreadId,
-        tailMessages.map((msg) => msg.id)
+        batch.messageIds
       )
       if (reservedIds.length === 0) return
 
-      const payload: ChatReportPayload[] = tailMessages.map((msg) => ({
-        role: msg.role,
-        content: stringifyMessageContentForReport(msg.content)
-      }))
       try {
-        await uploadChatData(targetThreadId, payload)
+        await uploadChatData(targetThreadId, batch.payload)
         markChatReportUploadSucceeded(targetThreadId, reservedIds)
       } catch (error) {
         markChatReportUploadFailed(targetThreadId, reservedIds)
-        if (attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS) {
+        if (!chatReportDisposedRef.current && attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS) {
           const retryQueue = (chatReportRetryQueuesRef.current[targetThreadId] ??= [])
-          retryQueue.push({ messages: tailMessages, attempt: attempt + 1 })
+          retryQueue.push({ batch, attempt: attempt + 1 })
           if (!chatReportRetryTimersRef.current[targetThreadId]) {
             const retryThreadId = targetThreadId
             const retryDelayMs = Math.min(CHAT_REPORT_RETRY_DELAY_MS * 2 ** attempt, 30_000)
             chatReportRetryTimersRef.current[retryThreadId] = window.setTimeout(() => {
               delete chatReportRetryTimersRef.current[retryThreadId]
+              if (chatReportDisposedRef.current) return
               const retryItems = chatReportRetryQueuesRef.current[retryThreadId]?.splice(0) ?? []
               for (const retryItem of retryItems) {
-                void uploadLoChatDataForThread(retryThreadId, retryItem.messages, retryItem.attempt)
+                void uploadLoChatDataForThread(retryThreadId, retryItem.batch, retryItem.attempt)
               }
             }, retryDelayMs)
           }
@@ -2514,16 +2826,34 @@ export function ChatContainer({
 
   const scheduleChatReportUpload = useCallback(
     (targetThreadId: string, msgs: Message[]) => {
+      const batch = buildLatestChatReportBatch(msgs)
+      if (!batch) return
       const existingTimer = chatReportUploadTimersRef.current[targetThreadId]
       if (existingTimer) window.clearTimeout(existingTimer)
-      const messagesForUpload = msgs.slice()
       chatReportUploadTimersRef.current[targetThreadId] = window.setTimeout(() => {
         delete chatReportUploadTimersRef.current[targetThreadId]
-        void uploadLoChatDataForThread(targetThreadId, messagesForUpload)
+        if (chatReportDisposedRef.current) return
+        void uploadLoChatDataForThread(targetThreadId, batch)
       }, CHAT_REPORT_UPLOAD_DEBOUNCE_MS)
     },
     [uploadLoChatDataForThread]
   )
+
+  useEffect(() => {
+    chatReportDisposedRef.current = false
+    return () => {
+      chatReportDisposedRef.current = true
+      for (const timer of Object.values(chatReportUploadTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      for (const timer of Object.values(chatReportRetryTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      chatReportUploadTimersRef.current = {}
+      chatReportRetryTimersRef.current = {}
+      chatReportRetryQueuesRef.current = {}
+    }
+  }, [])
 
   // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
   // "none", so this remains dormant unless the setup flow is re-enabled later.
@@ -2856,102 +3186,103 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [appleIntelligenceGlowEnabled, isLoading])
 
-  const displayMessages = useMemo(() => {
-    const normalizedLiveMessages = normalizeLiveStreamMessageIds(
-      threadMessages.map((message) => ({
-        id: message.id,
-        type:
-          message.role === "user"
-            ? "human"
-            : message.role === "assistant"
-              ? "ai"
-              : message.role
-      })),
-      streamData.liveMessages || []
-    )
-    const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-    const liveReasoningById = new Map<string, string>()
-    for (const liveMessage of normalizedLiveMessages) {
-      if (
-        liveMessage.id &&
-        liveStreamMessageRole(liveMessage.type) === "assistant" &&
-        typeof liveMessage.reasoning === "string" &&
-        liveMessage.reasoning.trim()
-      ) {
-        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
-      }
-    }
-    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
-      if (message.role !== "assistant" || message.reasoning) return message
-      const liveReasoning = liveReasoningById.get(message.id)
-      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
-    })
-    const streamingMsgs: Message[] = normalizedLiveMessages
-      .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
-      .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
-      .map((streamMsg) => {
-        const role = liveStreamMessageRole(streamMsg.type)
-
-        return {
-          id: streamMsg.id,
-          role,
-          content: normalizeLiveStreamMessageContent(streamMsg.content),
-          ...(role === "assistant" && streamMsg.reasoning
-            ? { reasoning: streamMsg.reasoning }
-            : {}),
-          tool_calls: streamMsg.tool_calls,
-          ...(role === "tool" &&
-            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" &&
-            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
-          created_at: streamMsg.start_at ?? streamMsg.end_at ?? new Date(),
-          ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
-          ...(streamMsg.end_at && { end_at: streamMsg.end_at })
-        }
-      })
-
-    // Clean up attachment XML tags in user messages for display
-    const allMessages = reconcileMessageDisplayOrder(
-      [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
-        isVisibleCheckpointTranscriptMessage
-      ),
-      streamData.messages
-    )
-    const cleanedMessages = allMessages.map((msg) => {
-      if (
-        msg.role !== "user" ||
-        typeof msg.content !== "string" ||
-        !msg.content.includes("<attachment ")
-      )
-        return msg
-      // Extract filenames and user text separately, then reorder: filenames first
-      const fileNames: string[] = []
-      const textOnly = msg.content
-        .replace(
-          /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
-          (_match, name) => {
-            const decoded = name
-              .replace(/&amp;/g, "&")
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .replace(/&quot;/g, '"')
-            fileNames.push(`📎 ${decoded}`)
-            return ""
-          }
-        )
-        .trim()
-      const cleaned =
-        fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
-      return { ...msg, content: cleaned }
-    })
-    return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages, streamData.messages])
-
-  const chatScrollNavigatorMessages = useMemo(
-    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
-    [threadMessages]
+  const threadDisplayBaseline = useMemo(
+    () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
+    [messagesContentVersion, threadMessages]
   )
+  const [projectLiveDisplayMessages] = useState(createLiveDisplayMessageProjector)
+  const liveDisplayProjection = projectLiveDisplayMessages(
+    threadMessages,
+    streamData.liveMessages || []
+  )
+  const liveDisplayMessages = liveDisplayProjection.messages
+  const [chatMessageProjectors] = useState(
+    () => new WeakMap<Message[], ReturnType<typeof createChatMessageProjector>>()
+  )
+  let projectChatMessages = chatMessageProjectors.get(threadDisplayBaseline)
+  if (!projectChatMessages) {
+    projectChatMessages = createChatMessageProjector()
+    chatMessageProjectors.set(threadDisplayBaseline, projectChatMessages)
+  }
+  const displayMessageProjection = projectChatMessages(
+    threadDisplayBaseline,
+    liveDisplayMessages,
+    streamData.messages,
+    messagesContentVersion,
+    liveDisplayProjection
+  )
+  const displayMessages = displayMessageProjection.messages
+  const displayMessagesContentVersion = displayMessageProjection.contentVersion
+  const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  const stableMessageIndexProjection = useMemo(
+    () => {
+      const visibleIndexes: number[] = []
+      const userMessageIds = new Set<string>()
+      let lastUserIndex = -1
+      let previousVisibleIndex = -1
+      let requiresSort = false
+
+      for (const message of threadDisplayBaseline) {
+        if (message.role === "user") userMessageIds.add(message.id)
+        const displayIndex = displayMessageProjection.indexById.get(message.id)
+        if (displayIndex === undefined) continue
+        if (message.role === "user") lastUserIndex = Math.max(lastUserIndex, displayIndex)
+        const hasHookLogChip = Boolean(
+          hookLogConfig.enabled &&
+            message.role === "user" &&
+            hookLogBucketByTurnId.get(message.id)?.entries.length
+        )
+        if (!messageHasVisibleRow(message, hasHookLogChip)) continue
+        if (displayIndex < previousVisibleIndex) requiresSort = true
+        previousVisibleIndex = displayIndex
+        visibleIndexes.push(displayIndex)
+      }
+      if (requiresSort) visibleIndexes.sort((left, right) => left - right)
+      return { visibleIndexes, userMessageIds, lastUserIndex }
+    },
+    [
+      displayMessageProjection.indexById,
+      displayMessagesStructureVersion,
+      hookLogBucketByTurnId,
+      hookLogConfig.enabled,
+      threadDisplayBaseline
+    ]
+  )
+  const orderedStableVisibleMessageIndexes = stableMessageIndexProjection.visibleIndexes
+  const stableVisibleMessageIndexes = useMemo(
+    () => new Set(orderedStableVisibleMessageIndexes),
+    [orderedStableVisibleMessageIndexes]
+  )
+  const hasHookLogChipForMessage = useCallback(
+    (message: Message): boolean =>
+      Boolean(
+        hookLogConfig.enabled &&
+          message.role === "user" &&
+          hookLogBucketByTurnId.get(message.id)?.entries.length
+      ),
+    [hookLogBucketByTurnId, hookLogConfig.enabled]
+  )
+  const [projectDynamicLiveVisibility] = useState(createDynamicLiveVisibilityProjector)
+  const dynamicVisibilityProjection = projectDynamicLiveVisibility({
+    live: liveDisplayProjection,
+    displayMessages,
+    displayIndexById: displayMessageProjection.indexById,
+    displayContentVersion: displayMessagesContentVersion,
+    displayStructureVersion: displayMessagesStructureVersion,
+    hasHookLogChip: hasHookLogChipForMessage
+  })
+  const dynamicVisibilityByIndex = dynamicVisibilityProjection.byIndex
+  const orderedDynamicVisibleMessageIndexes =
+    dynamicVisibilityProjection.orderedVisibleIndexes
+  const liveLastUserMessageIndex = liveDisplayProjection.lastUserMessageId
+    ? displayMessageProjection.indexById.get(liveDisplayProjection.lastUserMessageId)
+    : undefined
+  const lastUserMessageIndex = Math.max(
+    stableMessageIndexProjection.lastUserIndex,
+    liveLastUserMessageIndex ?? -1
+  )
+
+  const chatScrollNavigatorMessages = threadDisplayBaseline
 
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
@@ -2960,72 +3291,39 @@ export function ChatContainer({
   const searchRecomputeKey = useMemo(() => {
     const last = displayMessages[displayMessages.length - 1]
     const lastTextLength = last ? getMessageText(last.content).length : 0
-    return `${displayMessages.length}:${isLoading}:${lastTextLength}`
-  }, [displayMessages, isLoading])
+    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}:${lastTextLength}`
+  }, [displayMessages, displayMessagesContentVersion, isLoading])
 
   const detachedHookLogBuckets = useMemo(() => {
-    const userMessageIds = new Set(
-      displayMessages.filter((message) => message.role === "user").map((message) => message.id)
-    )
+    // A content-only assistant token changes liveDisplayMessages, but cannot
+    // attach or detach a hook bucket. Rebuild this history-sized membership
+    // index only when the projected transcript structure changes.
+    const userMessageIds = new Set<string>()
+    for (const message of displayMessages) {
+      if (message.role === "user") userMessageIds.add(message.id)
+    }
     return hookLogBuckets.filter(
       (bucket) => bucket.entries.length > 0 && !userMessageIds.has(bucket.turnId)
     )
-  }, [displayMessages, hookLogBuckets])
+  }, [displayMessages, displayMessagesStructureVersion, hookLogBuckets])
 
-  const lastContentMessageId = useMemo(() => {
-    // Match what actually renders: ordinary empty messages are skipped, while
-    // an empty user row with Hook entries still owns a visible chip and scroll
-    // anchor. Returning a skipped row would make precise alignment fall back to
-    // scroll-to-bottom; omitting the Hook-only row would anchor one turn early.
-    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
-      const message = displayMessages[index]
-      const hasHookLogChip = Boolean(
-        hookLogConfig.enabled &&
-        message.role === "user" &&
-        hookLogBucketByTurnId.get(message.id)?.entries.length
-      )
-      if (messageHasVisibleRow(message, hasHookLogChip)) return message.id
-    }
-    return null
-  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
-
-  // Per-message derived flags precomputed in a single O(n) reverse pass. Use
-  // the same visibility rule as ChatMessageList so invisible tool/empty rows do
-  // not affect assistant actions or turn boundaries.
-  const perMessageFlags = useMemo(() => {
-    const n = displayMessages.length
-    const showAssistantMeta: boolean[] = new Array(n)
-    const hasUserAfterHead: boolean[] = new Array(n)
-    let nextVisibleRole: string | null = null
-    let userAfter = false
-    for (let index = n - 1; index >= 0; index -= 1) {
-      const message = displayMessages[index]
-      hasUserAfterHead[index] = userAfter
-      const hasHookLogChip =
-        hookLogConfig.enabled &&
-        message.role === "user" &&
-        Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-      if (!messageHasVisibleRow(message, hasHookLogChip)) {
-        showAssistantMeta[index] = false
-        continue
-      }
-      showAssistantMeta[index] =
-        message.role !== "assistant" || nextVisibleRole === null || nextVisibleRole !== "assistant"
-      if (message.role === "user") userAfter = true
-      nextVisibleRole = message.role
-    }
-    return { showAssistantMeta, hasUserAfterHead }
-  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
-
-  const toolDerivationMessages = useStableToolDerivationMessages(displayMessages)
+  // Ordinary assistant tokens update only the changed display slot. Keep the
+  // tool projection stable and replace a slot only when that changed row is
+  // itself tool-relevant.
+  const toolDerivationProjection = useStableToolDerivationMessages(
+    displayMessages,
+    displayMessageProjection.changedMessages,
+    displayMessagesStructureVersion
+  )
+  const toolDerivationMessages = toolDerivationProjection.messages
   const toolResults = useMemo(
     () => buildToolResultAssociations(toolDerivationMessages),
-    [toolDerivationMessages]
+    [toolDerivationMessages, toolDerivationProjection.version]
   )
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
     () => buildMessageBubbleTimingMeta(displayMessages),
-    [displayMessages]
+    [displayMessages, displayMessagesStructureVersion]
   )
 
   const { toolCallDisplayStates, pendingApprovalToolCallKeys } = useMemo(() => {
@@ -3109,7 +3407,154 @@ export function ChatContainer({
       toolCallDisplayStates: nextStates,
       pendingApprovalToolCallKeys: approvalKeys
     }
-  }, [isLoading, pendingApproval, toolCallStates, toolDerivationMessages, toolResults])
+  }, [
+    isLoading,
+    pendingApproval,
+    toolCallStates,
+    toolDerivationMessages,
+    toolDerivationProjection.version,
+    toolResults
+  ])
+
+  const buildSearchDocument = useCallback(
+    (message: Message, sortIndex: number): ChatSearchDocument | null => {
+      const hookLogBucket =
+        hookLogConfig.enabled && message.role === "user"
+          ? hookLogBucketByTurnId.get(message.id)
+          : undefined
+      const hasHookLogChip = Boolean(hookLogBucket?.entries.length)
+      if (!messageHasVisibleRow(message, hasHookLogChip)) return null
+
+      const parts = [getMessageText(message.content), message.reasoning ?? ""]
+      for (const [toolCallIndex, toolCall] of (message.tool_calls ?? []).entries()) {
+        parts.push(toolCall.name, stringifyChatSearchValue(toolCall.args))
+        const toolResult = toolResults.get(
+          getWorkerToolUiKey(message.id, toolCall.id, toolCallIndex)
+        )
+        if (toolResult) parts.push(stringifyChatSearchValue(toolResult.content))
+      }
+      if (hookLogBucket?.entries.length) {
+        parts.push(stringifyChatSearchValue(hookLogBucket.entries))
+      }
+      return {
+        messageId: message.id,
+        text: parts.filter(Boolean).join("\n"),
+        sortIndex
+      }
+    },
+    [hookLogBucketByTurnId, hookLogConfig.enabled, toolResults]
+  )
+  const stableSearchDocumentsRef = useRef<{
+    baseline: readonly Message[]
+    indexById: ReadonlyMap<string, number>
+    buildDocument: typeof buildSearchDocument
+    documents: readonly ChatSearchDocument[]
+  } | null>(null)
+  const dynamicSearchDocumentsRef = useRef<{
+    liveStructureVersion: number
+    liveContentVersion: number
+    displayIndexById: ReadonlyMap<string, number>
+    buildDocument: typeof buildSearchDocument
+    documents: ChatSearchDocument[]
+    documentIndexById: Map<string, number>
+  } | null>(null)
+  const getSearchCorpus = useCallback((): ChatSearchCorpus => {
+    const cached = stableSearchDocumentsRef.current
+    let stableDocuments = cached?.documents
+    if (
+      !cached ||
+      cached.baseline !== threadDisplayBaseline ||
+      cached.indexById !== displayMessageProjection.indexById ||
+      cached.buildDocument !== buildSearchDocument
+    ) {
+      stableDocuments = threadDisplayBaseline
+        .flatMap((message) => {
+          const sortIndex = displayMessageProjection.indexById.get(message.id)
+          if (sortIndex === undefined) return []
+          const document = buildSearchDocument(message, sortIndex)
+          return document ? [document] : []
+        })
+        .sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+      stableSearchDocumentsRef.current = {
+        baseline: threadDisplayBaseline,
+        indexById: displayMessageProjection.indexById,
+        buildDocument: buildSearchDocument,
+        documents: stableDocuments
+      }
+    }
+    let dynamicCache = dynamicSearchDocumentsRef.current
+    const rebuildDynamicDocuments = (): typeof dynamicCache => {
+      const documents = liveDisplayMessages
+        .flatMap((liveMessage) => {
+          const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+          if (sortIndex === undefined) return []
+          const message = displayMessages[sortIndex]
+          const document = message ? buildSearchDocument(message, sortIndex) : null
+          return document ? [document] : []
+        })
+        .sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+      dynamicCache = {
+        liveStructureVersion: liveDisplayProjection.structureVersion,
+        liveContentVersion: liveDisplayProjection.contentVersion,
+        displayIndexById: displayMessageProjection.indexById,
+        buildDocument: buildSearchDocument,
+        documents,
+        documentIndexById: new Map(
+          documents.map((document, index) => [document.messageId, index])
+        )
+      }
+      dynamicSearchDocumentsRef.current = dynamicCache
+      return dynamicCache
+    }
+    if (
+      !dynamicCache ||
+      dynamicCache.liveStructureVersion !== liveDisplayProjection.structureVersion ||
+      dynamicCache.displayIndexById !== displayMessageProjection.indexById ||
+      dynamicCache.buildDocument !== buildSearchDocument
+    ) {
+      dynamicCache = rebuildDynamicDocuments()
+    } else if (dynamicCache.liveContentVersion !== liveDisplayProjection.contentVersion) {
+      let requiresRebuild = false
+      for (const liveMessage of liveDisplayProjection.changedMessages) {
+        const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+        if (sortIndex === undefined) {
+          requiresRebuild = true
+          break
+        }
+        const message = displayMessages[sortIndex]
+        const document = message ? buildSearchDocument(message, sortIndex) : null
+        const documentIndex = dynamicCache.documentIndexById.get(liveMessage.id)
+        if (!document || documentIndex === undefined) {
+          requiresRebuild = true
+          break
+        }
+        dynamicCache.documents[documentIndex] = document
+      }
+      if (requiresRebuild) {
+        dynamicCache = rebuildDynamicDocuments()
+      } else {
+        dynamicCache.liveContentVersion = liveDisplayProjection.contentVersion
+      }
+    }
+    return {
+      stableDocuments: stableDocuments ?? [],
+      dynamicDocuments: dynamicCache?.documents ?? [],
+      dynamicMessageIds: liveDisplayProjection.messageIds
+    }
+  }, [
+    buildSearchDocument,
+    displayMessageProjection.indexById,
+    displayMessages,
+    displayMessagesContentVersion,
+    liveDisplayProjection,
+    liveDisplayMessages,
+    threadDisplayBaseline
+  ])
+  const closeSearch = useCallback((): void => {
+    stableSearchDocumentsRef.current = null
+    dynamicSearchDocumentsRef.current = null
+    setSearchOpen(false)
+  }, [])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
@@ -3118,10 +3563,244 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  const scrollToConversationBottom = useCallback((): void => {
+  const [messageWindow, setMessageWindow] = useState<ChatMessageWindow>(() =>
+    createTailChatMessageWindow(0)
+  )
+  const messageWindowThreadIdRef = useRef(threadId)
+  const followMessageWindowTailRef = useRef(true)
+  const pendingWindowAnchorRef = useRef<{ messageId: string; viewportTop: number } | null>(null)
+  const pendingDurableHistoryAnchorRef = useRef<{
+    threadId: string
+    messageId: string
+    viewportTop: number
+    previousMessageCount: number
+  } | null>(null)
+  const displayMessageCountRef = useRef(displayMessages.length)
+  displayMessageCountRef.current = displayMessages.length
+  const displayMessageIndexById = displayMessageProjection.indexById
+  const lastVisibleMessageIndex = findPreviousVisibleChatMessageIndex(
+    displayMessages.length,
+    orderedStableVisibleMessageIndexes,
+    dynamicVisibilityByIndex,
+    orderedDynamicVisibleMessageIndexes
+  )
+  const lastContentMessageId =
+    lastVisibleMessageIndex === null ? null : displayMessages[lastVisibleMessageIndex]?.id ?? null
+  const windowRows = useMemo<ChatMessageWindowRow[]>(
+    () =>
+      deriveChatMessageWindowRows(
+        displayMessages,
+        messageWindow.startIndex,
+        messageWindow.endIndex,
+        orderedStableVisibleMessageIndexes,
+        stableVisibleMessageIndexes,
+        dynamicVisibilityByIndex,
+        lastUserMessageIndex,
+        orderedDynamicVisibleMessageIndexes
+      ),
+    [
+    displayMessages,
+    displayMessagesContentVersion,
+    dynamicVisibilityByIndex,
+    lastUserMessageIndex,
+    messageWindow.endIndex,
+    messageWindow.startIndex,
+    orderedStableVisibleMessageIndexes,
+    orderedDynamicVisibleMessageIndexes,
+    stableVisibleMessageIndexes
+    ]
+  )
+  const renderedMessageIds = useMemo(
+    () => new Set(windowRows.map((row) => row.message.id)),
+    [windowRows]
+  )
+  const renderedRowIds = useMemo(
+    () => windowRows.map((row) => row.message.id),
+    [windowRows]
+  )
+  const messageWindowAtTail = isTailChatMessageWindow(messageWindow, displayMessages.length)
+
+  useLayoutEffect(() => {
+    if (messageWindowThreadIdRef.current !== threadId) {
+      messageWindowThreadIdRef.current = threadId
+      followMessageWindowTailRef.current = true
+      pendingWindowAnchorRef.current = null
+      pendingDurableHistoryAnchorRef.current = null
+      setMessageWindow(createTailChatMessageWindow(displayMessages.length))
+      return
+    }
+    const durableAnchor = pendingDurableHistoryAnchorRef.current
+    if (durableAnchor?.threadId === threadId && !historyPageLoading) {
+      pendingDurableHistoryAnchorRef.current = null
+      if (displayMessages.length > durableAnchor.previousMessageCount) {
+        const anchorIndex = displayMessageIndexById.get(durableAnchor.messageId)
+        const nextWindow = createPrependAnchoredChatMessageWindow(
+          anchorIndex ?? displayMessages.length - durableAnchor.previousMessageCount,
+          displayMessages.length
+        )
+        pendingWindowAnchorRef.current = {
+          messageId: durableAnchor.messageId,
+          viewportTop: durableAnchor.viewportTop
+        }
+        followMessageWindowTailRef.current = false
+        setMessageWindow(nextWindow)
+        return
+      }
+    }
+    setMessageWindow((previous) =>
+      reconcileChatMessageWindow(
+        previous,
+        displayMessages.length,
+        followMessageWindowTailRef.current
+      )
+    )
+  }, [displayMessageIndexById, displayMessages.length, historyPageLoading, threadId])
+
+  useLayoutEffect(() => {
+    const pendingAnchor = pendingWindowAnchorRef.current
+    if (!pendingAnchor) return
+    const viewport = getViewport()
+    const target = contentMessageRefs.current.get(pendingAnchor.messageId)
+    if (!viewport || !target) return
+    pendingWindowAnchorRef.current = null
+    const nextViewportTop = target.getBoundingClientRect().top
+    viewport.scrollTop += nextViewportTop - pendingAnchor.viewportTop
+  }, [getViewport, messageWindow])
+
+  const shiftMessageWindow = useCallback(
+    (direction: "older" | "newer"): void => {
+      const viewport = getViewport()
+      const anchorId =
+        direction === "older"
+          ? renderedRowIds[0]
+          : renderedRowIds[renderedRowIds.length - 1]
+      const anchor = anchorId ? contentMessageRefs.current.get(anchorId) : null
+      pendingWindowAnchorRef.current =
+        anchorId && anchor
+          ? { messageId: anchorId, viewportTop: anchor.getBoundingClientRect().top }
+          : null
+      followMessageWindowTailRef.current = false
+      setMessageWindow((previous) => {
+        const next = shiftChatMessageWindow(previous, displayMessages.length, direction)
+        if (
+          next.startIndex === previous.startIndex &&
+          next.endIndex === previous.endIndex
+        ) {
+          pendingWindowAnchorRef.current = null
+          return previous
+        }
+        return next
+      })
+      if (!viewport) pendingWindowAnchorRef.current = null
+    },
+    [displayMessages.length, getViewport, renderedRowIds]
+  )
+  const loadOlderMessages = useCallback(
+    () => shiftMessageWindow("older"),
+    [shiftMessageWindow]
+  )
+  const loadNewerMessages = useCallback(
+    () => shiftMessageWindow("newer"),
+    [shiftMessageWindow]
+  )
+  const loadEarlierHistoryPage = useCallback(async (): Promise<void> => {
+    if (historyPageLoading || !historyHasMore) return
+    const anchorId = renderedRowIds[0]
+    const anchor = anchorId ? contentMessageRefs.current.get(anchorId) : null
+    const request = anchorId && anchor
+      ? {
+          threadId,
+          messageId: anchorId,
+          viewportTop: anchor.getBoundingClientRect().top,
+          previousMessageCount: displayMessages.length
+        }
+      : null
+    pendingDurableHistoryAnchorRef.current = request
+    const prependedCount = await loadEarlierMessages()
+    if (
+      prependedCount === 0 &&
+      pendingDurableHistoryAnchorRef.current === request
+    ) {
+      pendingDurableHistoryAnchorRef.current = null
+    }
+  }, [
+    displayMessages.length,
+    historyHasMore,
+    historyPageLoading,
+    loadEarlierMessages,
+    renderedRowIds,
+    threadId
+  ])
+  const historyRemainingCount = Math.max(
+    0,
+    historyMessageTotal - historyLoadedMessageCount
+  )
+
+  const revealMessage = useCallback(
+    (messageId: string): void => {
+      const messageIndex = displayMessageIndexById.get(messageId)
+      if (messageIndex === undefined) return
+      followMessageWindowTailRef.current = messageIndex >= displayMessages.length - 1
+      pendingWindowAnchorRef.current = null
+      setMessageWindow((previous) =>
+        revealChatMessageIndex(previous, messageIndex, displayMessages.length)
+      )
+    },
+    [displayMessageIndexById, displayMessages.length]
+  )
+
+  useEffect(() => {
     const viewport = getViewport()
     if (!viewport) return
-    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    let frame: number | null = null
+    const measureAndShift = (): void => {
+      frame = null
+      const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      followMessageWindowTailRef.current = messageWindowAtTail && distanceFromBottom < 96
+      if (viewport.scrollTop < 160 && messageWindow.startIndex > 0) {
+        shiftMessageWindow("older")
+      } else if (distanceFromBottom < 160 && messageWindow.endIndex < displayMessages.length) {
+        shiftMessageWindow("newer")
+      }
+    }
+    const handleScroll = (): void => {
+      const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+      followMessageWindowTailRef.current = messageWindowAtTail && distanceFromBottom < 96
+      if (frame === null) frame = window.requestAnimationFrame(measureAndShift)
+    }
+    viewport.addEventListener("scroll", handleScroll, { passive: true })
+    return () => {
+      viewport.removeEventListener("scroll", handleScroll)
+      if (frame !== null) window.cancelAnimationFrame(frame)
+    }
+  }, [
+    displayMessages.length,
+    getViewport,
+    messageWindow.endIndex,
+    messageWindow.startIndex,
+    messageWindowAtTail,
+    shiftMessageWindow
+  ])
+
+  useEffect(() => {
+    if (!messageWindowAtTail || !followMessageWindowTailRef.current) return
+    const frame = window.requestAnimationFrame(() => {
+      const viewport = getViewport()
+      if (!viewport || !followMessageWindowTailRef.current) return
+      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [getViewport, messageWindowAtTail, searchRecomputeKey])
+
+  const scrollToConversationBottom = useCallback((): void => {
+    followMessageWindowTailRef.current = true
+    pendingWindowAnchorRef.current = null
+    setMessageWindow(createTailChatMessageWindow(displayMessageCountRef.current))
+    window.requestAnimationFrame(() => {
+      const viewport = getViewport()
+      if (!viewport) return
+      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    })
   }, [getViewport])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
@@ -3143,14 +3822,15 @@ export function ChatContainer({
 
   useEffect(() => {
     if (!pendingApproval) return
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [pendingApproval, getViewport])
+    scrollToConversationBottom()
+  }, [pendingApproval, scrollToConversationBottom])
 
   useEffect(() => {
     if (!pendingUserInput || !userInputDialogLayout) return
+    if (!messageWindowAtTail) {
+      scrollToConversationBottom()
+      return
+    }
     const viewport = getViewport()
     if (!viewport) return
 
@@ -3176,7 +3856,9 @@ export function ChatContainer({
   }, [
     getViewport,
     lastContentMessageId,
+    messageWindowAtTail,
     pendingUserInput,
+    scrollToConversationBottom,
     userInputDialogLayout?.height,
     userInputDialogLayout?.top
   ])
@@ -3185,11 +3867,8 @@ export function ChatContainer({
   // 1.初始化
   // 2.切换thread
   useEffect(() => {
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [getViewport, historyLoading, threadId])
+    scrollToConversationBottom()
+  }, [historyLoading, scrollToConversationBottom, threadId])
 
   // Focus input on mount
   useEffect(() => {
@@ -3458,7 +4137,7 @@ export function ChatContainer({
   const appendVisibleUserMessageWithTime = useCallback(
     async (
       content: string,
-      options: { persistTiming?: boolean; id?: string } = {}
+      options: { id?: string } = {}
     ): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
@@ -3470,25 +4149,9 @@ export function ChatContainer({
         end_at: userStartAt
       }
       appendMessage(userMessage)
-      if (options.persistTiming === false) return userMessage
-
-      const userMessageTime: MessageTimeMap = {
-        [userMessage.id]: {
-          start_at: userStartAt.toISOString(),
-          end_at: userStartAt.toISOString()
-        }
-      }
-      try {
-        await window.api.threads.mergeThreadValues(threadId, {
-          [MESSAGE_TIMES_THREAD_VALUE_KEY]: userMessageTime,
-          [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(userMessageTime)
-        })
-      } catch (error) {
-        console.warn("[ChatContainer] Failed to save user message time:", error)
-      }
       return userMessage
     },
-    [appendMessage, getViewport, threadId]
+    [appendMessage]
   )
 
   const showGoalControlNotice = useCallback((rawMessage?: string): void => {
@@ -3543,7 +4206,7 @@ export function ChatContainer({
       setMentionedFiles([])
       setSelectedSkill(null)
       insertLog("send: /goal resume")
-      await appendVisibleUserMessageWithTime("/goal resume", { persistTiming: false })
+      await appendVisibleUserMessageWithTime("/goal resume")
       await stream.submit(
         {
           messages: [{ type: "human", content: "/goal resume" }]
@@ -4045,9 +4708,7 @@ export function ChatContainer({
       if (shouldAppendVisibleUserMessage) {
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
-        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent, {
-          persistTiming: !isGoalSlashInput
-        })
+        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent)
         visibleUserMessage = await visibleUserMessagePromise
       }
 
@@ -4501,7 +5162,6 @@ export function ChatContainer({
       // a new orphaned "ghost" user bubble behind every attempt (appendMessage upserts
       // by id, so re-using queued.id makes a retry replace the same bubble instead).
       const visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
-        persistTiming: true,
         id: queued.id
       })
       if (isFirstMessage) {
@@ -5662,8 +6322,10 @@ export function ChatContainer({
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         open={searchOpen}
-        onClose={() => setSearchOpen(false)}
+        onClose={closeSearch}
         getViewport={getViewport}
+        getSearchCorpus={getSearchCorpus}
+        onRevealMessage={revealMessage}
         recomputeKey={searchRecomputeKey}
       />
 
@@ -5793,6 +6455,8 @@ export function ChatContainer({
 
       <ChatScrollNavigator
         messages={chatScrollNavigatorMessages}
+        renderedMessageIds={renderedMessageIds}
+        onRevealMessage={revealMessage}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
       >
@@ -5846,7 +6510,14 @@ export function ChatContainer({
                   )}
                   <ChatMessageList
                     messages={displayMessages}
-                    perMessageFlags={perMessageFlags}
+                    windowRows={windowRows}
+                    messageWindow={messageWindow}
+                    onLoadOlder={loadOlderMessages}
+                    onLoadNewer={loadNewerMessages}
+                    onLoadEarlierHistoryPage={loadEarlierHistoryPage}
+                    historyHasMore={historyHasMore}
+                    historyPageLoading={historyPageLoading}
+                    historyRemainingCount={historyRemainingCount}
                     hookLoggingEnabled={hookLogConfig.enabled}
                     hookLogBucketByTurnId={hookLogBucketByTurnId}
                     detachedHookLogBuckets={detachedHookLogBuckets}

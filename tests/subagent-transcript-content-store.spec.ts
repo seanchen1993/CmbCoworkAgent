@@ -424,8 +424,8 @@ function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
   const startup = store.buildSubagentTranscriptStartupManifests(transcripts, 2)
   assert.deepEqual(
     Object.keys(startup),
-    Object.keys(transcripts),
-    "an exhausted preview budget must still return identity/card rows for every bucket"
+    Object.keys(transcripts).reverse(),
+    "the bounded recent-first startup page must return its card rows in chronological order"
   )
   for (const [id, rawMessages] of Object.entries(startup)) {
     assert(Array.isArray(rawMessages) && rawMessages.length === 2)

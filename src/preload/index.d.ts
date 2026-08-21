@@ -48,6 +48,8 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMessagesPage,
+  ThreadMessagesPageOptions,
   SubagentTranscriptPage,
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
@@ -109,6 +111,7 @@ import type {
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
+import type { WorkspaceFilesChangedPayload } from "../shared/workspace-files-changed"
 import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent,
@@ -875,6 +878,7 @@ interface CustomAPI {
         mode: "messages" | "values"
         data: unknown
         workerTurn?: number
+        valuesSnapshotKind?: "full" | "append" | "tail"
       }) => void
     ) => () => void
     onCoordinatorWorkerHook: (threadId: string, callback: (envelope: unknown) => void) => () => void
@@ -894,7 +898,10 @@ interface CustomAPI {
     ) => Promise<{ prompt: string | null; updatedAt: number | null }>
   }
   workflows: {
-    listRuns: (threadId: string) => Promise<unknown[]>
+    listRuns: (
+      threadId: string,
+      options?: { cursor?: string | null; limit?: number }
+    ) => Promise<{ runs: unknown[]; nextCursor: string | null }>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
     worktreeAction: (
@@ -955,6 +962,10 @@ interface CustomAPI {
     ) => Promise<Record<string, unknown>>
     delete: (threadId: string) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
+    getMessagesPage: (
+      threadId: string,
+      options?: ThreadMessagesPageOptions
+    ) => Promise<ThreadMessagesPage>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
     replaceMessageId: (
       threadId: string,
@@ -967,6 +978,7 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
+    getLatestCheckpointRuntimeState: (threadId: string) => Promise<unknown | null>
     getGoalEvents: (
       threadId: string,
       options?: { restore?: boolean; limit?: number }
@@ -1188,7 +1200,7 @@ interface CustomAPI {
     get: (threadId?: string) => Promise<string | null>
     set: (threadId: string | undefined, path: string | null) => Promise<string | null>
     select: (threadId?: string) => Promise<string | null>
-    loadFromDisk: (threadId: string) => Promise<{
+    loadFromDisk: (threadId: string, workspacePath?: string) => Promise<{
       success: boolean
       files: Array<{
         path: string
@@ -1452,7 +1464,7 @@ interface CustomAPI {
       error?: string
     }>
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
+      callback: (data: WorkspaceFilesChangedPayload) => void
     ) => () => void
   }
   pet: {

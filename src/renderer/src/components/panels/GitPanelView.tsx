@@ -827,7 +827,7 @@ export function GitPanelView({
     if (!threadId) return
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadId !== threadId) return
+      if (!data.threadIds.includes(threadId)) return
       if (rejectInFlightRef.current || Date.now() < suppressFileChangeRefreshUntilRef.current) {
         return
       }

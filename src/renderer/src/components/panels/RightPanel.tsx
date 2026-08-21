@@ -1,4 +1,14 @@
-import { useState, useRef, useCallback, useEffect, useMemo, memo, lazy, Suspense } from "react"
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useSyncExternalStore,
+  memo,
+  lazy,
+  Suspense
+} from "react"
 import {
   ListTodo,
   FolderTree,
@@ -40,15 +50,19 @@ import { toast } from "sonner"
 import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
 import {
-  useThreadState,
+  useThreadActions,
+  useThreadStateSelector,
   useThreadStream,
   type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import {
   hasLoadedWorkspaceFiles,
+  getWorkspaceFilePathRevision,
   loadWorkspaceFilesDeduped,
-  markWorkspaceFilesStale
+  markWorkspaceFilesStale,
+  normalizeWorkspaceFileKey,
+  subscribeWorkspaceFilePathChanges
 } from "@/lib/workspace-file-load"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
@@ -63,6 +77,11 @@ import {
   getSystemConstraintsLoadCounts,
   SystemConstraintsPanel
 } from "@/components/panels/SystemConstraintsPanel"
+import {
+  createCompletedResourceProjector,
+  getPathExtension,
+  type ResourceMessage
+} from "@/lib/latest-completed-resource"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -222,6 +241,70 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
   )
 }
 
+const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
+  threadId,
+  moduleMode,
+  onApplyPreview
+}: {
+  threadId: string
+  moduleMode: RightPanelProps["moduleMode"]
+  onApplyPreview: (path: string, switchToPreview: boolean) => void
+}): null {
+  const streamData = useThreadStream(threadId)
+  const persistedMessages =
+    useThreadStateSelector(threadId, (state) => state.messages) ?? []
+  const [projectCompletedResources] = useState(() => createCompletedResourceProjector())
+  const previousLoadingRef = useRef(false)
+  const lastAppliedPreviewKeyRef = useRef<string | null>(null)
+  const lastRecordedBatchKeyRef = useRef<string | null>(null)
+  const lastAutoSwitchedBatchKeyRef = useRef<string | null>(null)
+  const { latestResourceEvent, latestCompletedLlmBatch } = projectCompletedResources(
+    persistedMessages,
+    (streamData.messages as ResourceMessage[] | undefined) ?? []
+  )
+
+  useEffect(() => {
+    const wasLoading = previousLoadingRef.current
+    const isLoading = streamData.isLoading
+    previousLoadingRef.current = isLoading
+    if (!(wasLoading && !isLoading) || !latestResourceEvent) return
+
+    const applyPreviewUpdate = (switchToPreview: boolean): void => {
+      if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
+      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
+      onApplyPreview(latestResourceEvent.path, switchToPreview)
+    }
+    if (
+      latestCompletedLlmBatch?.files.length &&
+      lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
+    ) {
+      lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
+      applyPreviewUpdate(moduleMode !== "git")
+      return
+    }
+    applyPreviewUpdate(moduleMode !== "git")
+  }, [
+    latestCompletedLlmBatch,
+    latestResourceEvent,
+    moduleMode,
+    onApplyPreview,
+    streamData.isLoading
+  ])
+
+  useEffect(() => {
+    if (!latestCompletedLlmBatch?.files.length) return
+    if (lastRecordedBatchKeyRef.current === latestCompletedLlmBatch.batchKey) return
+    lastRecordedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
+    window.api.workspace
+      .recordLlmModifiedFiles(threadId, latestCompletedLlmBatch.files)
+      .catch((error) => {
+        console.error("[RightPanel] Failed to record LLM modified files:", error)
+      })
+  }, [latestCompletedLlmBatch, threadId])
+
+  return null
+})
+
 export function RightPanel({
   threadId,
   moduleMode,
@@ -254,17 +337,24 @@ export function RightPanel({
     { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
     currentThreadId
   )
-  const threadState = useThreadState(currentThreadId)
-  const streamData = useThreadStream(currentThreadId ?? "")
-  const todos = threadState?.todos ?? []
-  const workspaceFiles = threadState?.workspaceFiles ?? []
-  const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
-  const coordinatorWorkers = useMemo(
-    () => threadState?.coordinatorWorkers ?? [],
-    [threadState?.coordinatorWorkers]
+  const todos = useThreadStateSelector(currentThreadId, (state) => state.todos) ?? []
+  const workspaceFiles =
+    useThreadStateSelector(currentThreadId, (state) => state.workspaceFiles) ?? []
+  const subagents =
+    useThreadStateSelector(currentThreadId, (state) => state.subagents) ?? []
+  const coordinatorWorkers =
+    useThreadStateSelector(currentThreadId, (state) => state.coordinatorWorkers) ?? []
+  const workspacePath = useThreadStateSelector(
+    currentThreadId,
+    (state) => state.workspacePath
+  )
+  const gitContext = useThreadStateSelector(currentThreadId, (state) => state.gitContext)
+  const harnessAgentmdLoadStatus = useThreadStateSelector(
+    currentThreadId,
+    (state) => state.harnessAgentmdLoadStatus
   )
   const systemConstraintCounts = getSystemConstraintsLoadCounts(
-    showSystemConstraints ? threadState?.harnessAgentmdLoadStatus : null
+    showSystemConstraints ? harnessAgentmdLoadStatus : null
   )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
@@ -273,11 +363,7 @@ export function RightPanel({
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
   const [previewReloadToken, setPreviewReloadToken] = useState(0)
-  const lastAppliedPreviewKeyRef = useRef<string | null>(null)
-  const lastRecordedBatchKeyRef = useRef<string | null>(null)
-  const lastAutoSwitchedBatchKeyRef = useRef<string | null>(null)
   const lastThreadIdRef = useRef<string | null>(null)
-  const prevStreamLoadingRef = useRef(false)
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
   const [systemConstraintsOpen, setSystemConstraintsOpen] = useState(false)
@@ -372,8 +458,8 @@ export function RightPanel({
         if (cancelled) return
         setLspConfig(cfg)
 
-        const workspacePath = cfg.enabled ? (threadState?.workspacePath ?? null) : null
-        const currentStatus = await window.api.lsp.getStatus(workspacePath)
+        const currentWorkspacePath = cfg.enabled ? (workspacePath ?? null) : null
+        const currentStatus = await window.api.lsp.getStatus(currentWorkspacePath)
         if (!cancelled) {
           setLspStatus(currentStatus)
         }
@@ -391,7 +477,7 @@ export function RightPanel({
       cancelled = true
       unsubscribe()
     }
-  }, [threadState?.workspacePath])
+  }, [workspacePath])
 
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
@@ -455,7 +541,7 @@ export function RightPanel({
 
     const statusText = !lspConfig.enabled
       ? "已禁用"
-      : currentThreadId && !threadState?.workspacePath
+      : currentThreadId && !workspacePath
         ? "未关联工作目录"
         : (lspStatus?.statusText ?? "已停止")
 
@@ -473,7 +559,7 @@ export function RightPanel({
     )
 
     return <span className={statusClass}>{statusText}</span>
-  }, [currentThreadId, lspConfig, lspStatus, threadState?.workspacePath])
+  }, [currentThreadId, lspConfig, lspStatus, workspacePath])
 
   // Auto-clear only for "done" phase (3 s brief confirmation).
   // "error" is intentionally NOT auto-cleared — it stays visible so the user
@@ -495,10 +581,12 @@ export function RightPanel({
 
   const loadHooks = useCallback(async (): Promise<void> => {
     try {
-      const workspacePath = threadState?.workspacePath ?? null
+      const currentWorkspacePath = workspacePath ?? null
       const [globalHooks, workspaceHooks, pluginHooks, skillHooks] = await Promise.all([
         window.api.hooks.list(),
-        workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([]),
+        currentWorkspacePath
+          ? window.api.hooks.workspace.list(currentWorkspacePath)
+          : Promise.resolve([]),
         window.api.plugins.listHooks(),
         window.api.hooks.skills.list()
       ])
@@ -527,7 +615,7 @@ export function RightPanel({
     } catch (error) {
       console.error("[RightPanel] Failed to load hooks:", error)
     }
-  }, [threadState?.workspacePath])
+  }, [workspacePath])
 
   useEffect(() => {
     void loadHooks()
@@ -549,148 +637,27 @@ export function RightPanel({
     return cleanup
   }, [currentThreadId, loadHooks])
 
-  const latestResourceEvent = useMemo(() => {
-    const persisted = threadState?.messages ?? []
-    const streaming =
-      (streamData.messages as
-        | Array<{
-            id?: string
-            tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }>
-          }>
-        | undefined) ?? []
-    const all = [
-      ...persisted.map((m) => ({ source: "persisted" as const, message: m })),
-      ...streaming.map((m) => ({ source: "streaming" as const, message: m }))
-    ]
-
-    const completedToolCallIds = new Set<string>()
-    for (const item of all) {
-      const message = item.message as {
-        role?: string
-        type?: string
-        tool_call_id?: string
-      }
-      if ((message.role === "tool" || message.type === "tool") && message.tool_call_id) {
-        completedToolCallIds.add(message.tool_call_id)
-      }
-    }
-
-    for (let i = all.length - 1; i >= 0; i--) {
-      const current = all[i]
-      const toolCalls = current.message?.tool_calls || []
-      for (let j = toolCalls.length - 1; j >= 0; j--) {
-        const tool = toolCalls[j] as { id?: string; name: string; args?: Record<string, unknown> }
-        if (!tool.id || !completedToolCallIds.has(tool.id)) {
-          continue
-        }
-        const event = buildPreviewEvent(tool, current.message?.id ?? `m-${i}`, j)
-        if (event) {
-          return { ...event, source: current.source }
-        }
-      }
-    }
-    return null
-  }, [threadState?.messages, streamData.messages])
-
-  const latestCompletedLlmBatch = useMemo(() => {
-    const persisted = threadState?.messages ?? []
-    const streaming =
-      (streamData.messages as
-        | Array<{
-            id?: string
-            tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }>
-          }>
-        | undefined) ?? []
-    const all = [
-      ...persisted.map((m) => ({ message: m })),
-      ...streaming.map((m) => ({ message: m }))
-    ]
-    const completedToolCallIds = new Set<string>()
-    for (const item of all) {
-      const message = item.message as { role?: string; type?: string; tool_call_id?: string }
-      if ((message.role === "tool" || message.type === "tool") && message.tool_call_id) {
-        completedToolCallIds.add(message.tool_call_id)
-      }
-    }
-    for (let i = all.length - 1; i >= 0; i--) {
-      const msg = all[i].message
-      const toolCalls = msg?.tool_calls || []
-      const files = new Set<string>()
-      const toolIds: string[] = []
-      for (const tool of toolCalls) {
-        if (!tool?.id || !completedToolCallIds.has(tool.id)) continue
-        const filePath = getToolCallFilePath(tool)
-        if (filePath) {
-          files.add(filePath)
-          toolIds.push(tool.id)
-        }
-      }
-      if (files.size > 0) {
-        const messageId = msg?.id || `m-${i}`
-        return {
-          batchKey: `${messageId}:${toolIds.sort().join(",")}`,
-          files: Array.from(files)
-        }
-      }
-    }
-    return null
-  }, [threadState?.messages, streamData.messages])
-
-  useEffect(() => {
-    const wasLoading = prevStreamLoadingRef.current
-    const isLoading = streamData.isLoading
-    prevStreamLoadingRef.current = isLoading
-
-    const applyPreviewUpdate = (switchToPreview: boolean): void => {
-      if (!latestResourceEvent) return
-      if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
-      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-      setPreviewPath(latestResourceEvent.path)
-      setPreviewReloadToken((v) => v + 1)
-      if (switchToPreview) {
-        onRequestPreviewMode?.()
-      }
-    }
-
-    // Render preview when this round finishes: true -> false
-    if (!(wasLoading && !isLoading)) return
-    if (
-      latestCompletedLlmBatch?.files?.length &&
-      lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
-    ) {
-      lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-      // Never auto-open git panel. If user is already on git, only refresh preview data silently.
-      applyPreviewUpdate(moduleMode !== "git")
-      return
-    }
-
-    // For non-edit resource events, respect current panel choice:
-    // if user stays on git panel, don't switch away; otherwise keep preview behavior.
-    applyPreviewUpdate(moduleMode !== "git")
-  }, [
-    streamData.isLoading,
-    latestResourceEvent,
-    latestCompletedLlmBatch,
-    onRequestPreviewMode,
-    moduleMode
-  ])
+  const applyStreamPreview = useCallback(
+    (path: string, switchToPreview: boolean): void => {
+      setPreviewPath(path)
+      setPreviewReloadToken((version) => version + 1)
+      if (switchToPreview) onRequestPreviewMode?.()
+    },
+    [onRequestPreviewMode]
+  )
 
   useEffect(() => {
     if (!currentThreadId) return
     if (lastThreadIdRef.current !== currentThreadId) {
       lastThreadIdRef.current = currentThreadId
       setPreviewPath(null)
-      lastAppliedPreviewKeyRef.current = null
-      lastRecordedBatchKeyRef.current = null
-      lastAutoSwitchedBatchKeyRef.current = null
-      prevStreamLoadingRef.current = false
     }
   }, [currentThreadId])
 
   useEffect(() => {
     if (!currentThreadId) return
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadId === currentThreadId && previewPath) {
+      if (data.threadIds.includes(currentThreadId) && previewPath) {
         setPreviewReloadToken((v) => v + 1)
       }
     })
@@ -712,18 +679,6 @@ export function RightPanel({
       onPreviewFullscreenChange?.(false)
     }
   }, [moduleMode, previewPath, onPreviewFullscreenChange])
-
-  useEffect(() => {
-    if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
-      return
-    if (lastRecordedBatchKeyRef.current === latestCompletedLlmBatch.batchKey) return
-    lastRecordedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-    window.api.workspace
-      .recordLlmModifiedFiles(currentThreadId, latestCompletedLlmBatch.files)
-      .catch((error) => {
-        console.error("[RightPanel] Failed to record LLM modified files:", error)
-      })
-  }, [currentThreadId, latestCompletedLlmBatch])
 
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
@@ -1228,6 +1183,21 @@ export function RightPanel({
     !hooksOpen &&
     !lspOpen
 
+  const handleOpenGitFileFolder = useCallback(
+    async (filePath: string): Promise<void> => {
+      try {
+        const resolved = resolvePreviewPaths(filePath, workspacePath ?? null)
+        const platform = await window.electron.ipcRenderer.invoke("get-platform")
+        const normalizedPath =
+          platform === "win32" ? resolved.fullPath.replace(/\//g, "\\") : resolved.fullPath
+        await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
+      } catch (error) {
+        console.error("[GitPanel] Failed to show item in folder:", error)
+      }
+    },
+    [workspacePath]
+  )
+
   return (
     <aside
       ref={containerRef}
@@ -1236,6 +1206,14 @@ export function RightPanel({
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
+      {currentThreadId && (
+        <RightPanelStreamEffects
+          key={currentThreadId}
+          threadId={currentThreadId}
+          moduleMode={moduleMode}
+          onApplyPreview={applyStreamPreview}
+        />
+      )}
       {moduleMode === "preview" && (
         <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-background">
           <div className="bg-background h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
@@ -1243,7 +1221,7 @@ export function RightPanel({
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
                 filePath={previewPath}
-                workspacePath={threadState?.workspacePath ?? null}
+                workspacePath={workspacePath ?? null}
                 threadId={currentThreadId ?? ""}
                 reloadToken={previewReloadToken}
                 onReload={() => setPreviewReloadToken((v) => v + 1)}
@@ -1283,24 +1261,9 @@ export function RightPanel({
               <GitPanelView
                 key={currentThreadId ?? "git-panel-empty-thread"}
                 threadId={currentThreadId ?? ""}
-                workspacePath={threadState?.workspacePath ?? null}
-                initialGitContext={threadState?.gitContext ?? null}
-                onOpenFileFolder={async (filePath) => {
-                  try {
-                    const resolved = resolvePreviewPaths(
-                      filePath,
-                      threadState?.workspacePath ?? null
-                    )
-                    const platform = await window.electron.ipcRenderer.invoke("get-platform")
-                    const normalizedPath =
-                      platform === "win32"
-                        ? resolved.fullPath.replace(/\//g, "\\")
-                        : resolved.fullPath
-                    await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
-                  } catch (error) {
-                    console.error("[GitPanel] Failed to show item in folder:", error)
-                  }
-                }}
+                workspacePath={workspacePath ?? null}
+                initialGitContext={gitContext ?? null}
+                onOpenFileFolder={handleOpenGitFileFolder}
               />
             </Suspense>
           </div>
@@ -1369,7 +1332,7 @@ export function RightPanel({
                   className="overflow-auto right-panel-scroll"
                   style={{ height: heights.systemConstraints }}
                 >
-                  <SystemConstraintsPanel state={threadState?.harnessAgentmdLoadStatus} />
+                  <SystemConstraintsPanel state={harnessAgentmdLoadStatus} />
                 </div>
               )}
             </div>
@@ -1516,8 +1479,7 @@ const STATUS_CONFIG = {
 }
 
 function TasksContent({ threadId }: { threadId: string | null }): React.JSX.Element {
-  const threadState = useThreadState(threadId)
-  const todos = threadState?.todos ?? []
+  const todos = useThreadStateSelector(threadId, (state) => state.todos) ?? []
   const [completedExpanded, setCompletedExpanded] = useState(false)
 
   if (todos.length === 0) {
@@ -1621,46 +1583,6 @@ function TaskItem({ todo }: { todo: Todo }): React.JSX.Element {
   )
 }
 
-const RESOURCE_PREVIEW_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "svg",
-  "bmp",
-  "ico",
-  "pdf",
-  "doc",
-  "docx",
-  "md",
-  "markdown",
-  "mdx",
-  "html",
-  "htm"
-])
-
-function getPathExtension(filePath: string): string {
-  const fileName = filePath.split(/[\\/]/).pop() || filePath
-  const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : ""
-  return ext || ""
-}
-
-function isResourcePreviewPath(filePath: string): boolean {
-  const ext = getPathExtension(filePath)
-  return RESOURCE_PREVIEW_EXTENSIONS.has(ext)
-}
-
-function getToolCallFilePath(toolCall: {
-  name: string
-  args?: Record<string, unknown>
-}): string | null {
-  if (toolCall.name !== "write_file" && toolCall.name !== "edit_file") return null
-  const raw = toolCall.args?.path ?? toolCall.args?.file_path
-  if (typeof raw !== "string" || !raw.trim()) return null
-  return raw
-}
-
 function isAbsolutePath(filePath: string): boolean {
   return /^(?:[a-zA-Z]:[\\/]|\/)/.test(filePath)
 }
@@ -1694,65 +1616,13 @@ function resolvePreviewPaths(
   }
 }
 
-interface CodeDiffPayload {
-  oldValue: string
-  newValue: string
-}
-
-interface PreviewEvent {
-  path: string
-  key: string
-  codeDiff?: CodeDiffPayload
-}
-
-function buildPreviewEvent(
-  toolCall: { id?: string; name: string; args?: Record<string, unknown> },
-  messageId: string,
-  toolIndex: number
-): PreviewEvent | null {
-  const filePath = getToolCallFilePath(toolCall)
-  if (!filePath) return null
-
-  const ext = getPathExtension(filePath).toLowerCase()
-  const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
-  const htmlLike = ext === "html" || ext === "htm"
-  const typeInfo = getFileType(filePath.split(/[\\/]/).pop() || filePath)
-  const codeLike = typeInfo.type === "code" && !markdownLike && !htmlLike
-
-  const isResource = isResourcePreviewPath(filePath)
-  if (!isResource && !codeLike) return null
-
-  const key = `${messageId}:${toolCall.id ?? `t-${toolIndex}`}:${filePath}`
-
-  if (!codeLike) {
-    return { path: filePath, key }
-  }
-
-  const args = toolCall.args || {}
-  const oldValue = ((args.old_string ?? args.old_str) as string | undefined) || ""
-  const newValue = ((args.new_string ?? args.new_str ?? args.content) as string | undefined) || ""
-
-  if (toolCall.name === "write_file") {
-    return {
-      path: filePath,
-      key,
-      codeDiff: { oldValue: "", newValue }
-    }
-  }
-
-  return {
-    path: filePath,
-    key,
-    codeDiff: { oldValue, newValue }
-  }
-}
-
 function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Element {
-  const threadState = useThreadState(threadId)
-  const workspaceFiles = threadState?.workspaceFiles ?? []
-  const workspacePath = threadState?.workspacePath ?? null
-  const setWorkspacePath = threadState?.setWorkspacePath
-  const setWorkspaceFiles = threadState?.setWorkspaceFiles
+  const workspaceFiles =
+    useThreadStateSelector(threadId, (state) => state.workspaceFiles) ?? []
+  const workspacePath = useThreadStateSelector(threadId, (state) => state.workspacePath)
+  const threadActions = useThreadActions(threadId)
+  const setWorkspacePath = threadActions?.setWorkspacePath
+  const setWorkspaceFiles = threadActions?.setWorkspaceFiles
 
   // Load workspace path and files for current thread
   useEffect(() => {
@@ -1770,17 +1640,25 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
           // A cached tree may have missed changes while its watcher was evicted.
           // Re-arm the watcher and refresh once only when it had to be recreated.
           const watcherResult = await window.api.workspace.ensureWatching(threadId)
-          if (cancelled || !watcherResult.success || !watcherResult.restarted) return
-          markWorkspaceFilesStale(threadId, path)
+          if (cancelled) return
+          if (watcherResult.success && watcherResult.restarted) {
+            markWorkspaceFilesStale(threadId, path)
+          }
         }
 
-        // No successful scan for this exact thread/path, or the watcher was
-        // recreated after eviction. Share an in-flight background scan.
+        // Reuse the path-level cached tree (including its files array), or
+        // share an in-flight scan. A recreated watcher invalidates the cache
+        // above because changes may have been missed while it was evicted.
         const result = await loadWorkspaceFilesDeduped(threadId, path)
         if (cancelled) return
         // Guard against writing a stale scan (workspace switched mid-load):
         // only accept results that match the path we resolved.
-        if (result.success && result.files && result.workspacePath === path) {
+        if (
+          result.success &&
+          result.files &&
+          result.workspacePath &&
+          normalizeWorkspaceFileKey(result.workspacePath) === normalizeWorkspaceFileKey(path)
+        ) {
           setWorkspaceFiles(result.files)
         }
       }
@@ -1799,52 +1677,6 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
     // an empty workspace is still considered loaded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
-
-  // Listen for file changes from the workspace watcher
-  useEffect(() => {
-    if (!threadId || !setWorkspaceFiles) return
-    // Guards against an in-flight callback (started before a workspace switch)
-    // writing back after the effect re-ran for the new path. The closure's
-    // `workspacePath === result.workspacePath` check passes for the old path,
-    // so a flag set in cleanup is required to actually discard the stale write.
-    let cancelled = false
-
-    const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only reload if the event is for the current thread and its workspace.
-      if (data.threadId !== threadId) return
-      if (workspacePath && data.workspacePath && data.workspacePath !== workspacePath) return
-
-      const targetPath = workspacePath ?? data.workspacePath
-      if (!targetPath) return
-
-      console.log("[FilesContent] Files changed, reloading...", {
-        threadId: data.threadId,
-        workspacePath: data.workspacePath
-      })
-      // A real file-change notification requests one trailing pass if another
-      // scan is already in progress, so changes that landed mid-scan are kept.
-      markWorkspaceFilesStale(threadId, targetPath)
-      try {
-        const result = await loadWorkspaceFilesDeduped(threadId, targetPath, {
-          requestTrailingRescan: true
-        })
-        if (cancelled) return
-        if (result.success && result.files && result.workspacePath === targetPath) {
-          setWorkspaceFiles(result.files)
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error("[FilesContent] Failed to refresh workspace files:", error)
-        }
-      }
-    })
-
-    return () => {
-      cancelled = true
-      cleanup()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, workspacePath])
 
   return (
     <div className="flex flex-col h-full">
@@ -2110,24 +1942,20 @@ interface TreeNode {
   name: string
   path: string
   is_dir: boolean
-  size?: number
+  file?: FileInfo
   children: TreeNode[]
 }
+
+// File arrays are shared by every task on the same physical workspace. Cache
+// their immutable tree structure too, so switching tasks or reopening the
+// panel does not rebuild/sort a 50k-file tree.
+const fileTreeCache = new WeakMap<FileInfo[], TreeNode[]>()
 
 function buildFileTree(files: FileInfo[]): TreeNode[] {
   const root: TreeNode[] = []
   const nodeMap = new Map<string, TreeNode>()
 
-  // Sort files so directories come first, then alphabetically
-  const sortedFiles = [...files].sort((a, b) => {
-    const aIsDir = a.is_dir ?? false
-    const bIsDir = b.is_dir ?? false
-    if (aIsDir && !bIsDir) return -1
-    if (!aIsDir && bIsDir) return 1
-    return a.path.localeCompare(b.path)
-  })
-
-  for (const file of sortedFiles) {
+  for (const file of files) {
     // Normalize path - remove leading slash
     const normalizedPath = file.path.startsWith("/") ? file.path.slice(1) : file.path
     const parts = normalizedPath.split("/")
@@ -2137,7 +1965,7 @@ function buildFileTree(files: FileInfo[]): TreeNode[] {
       name: fileName,
       path: file.path,
       is_dir: file.is_dir ?? false,
-      size: file.size,
+      file,
       children: []
     }
 
@@ -2188,10 +2016,19 @@ function buildFileTree(files: FileInfo[]): TreeNode[] {
   return root
 }
 
+function getOrBuildFileTree(files: FileInfo[]): TreeNode[] {
+  const cached = fileTreeCache.get(files)
+  if (cached) return cached
+  const tree = buildFileTree(files)
+  fileTreeCache.set(files, tree)
+  return tree
+}
+
 function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | null }): React.JSX.Element {
-  const threadState = useThreadState(threadId)
-  const openFile = threadState?.openFile
-  const tree = useMemo(() => buildFileTree(files), [files])
+  const openFile = useThreadActions(threadId)?.openFile
+  const workspacePath =
+    useThreadStateSelector(threadId, (state) => state.workspacePath) ?? ""
+  const tree = useMemo(() => getOrBuildFileTree(files), [files])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const toggleExpand = useCallback((path: string) => {
@@ -2216,6 +2053,7 @@ function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | n
           expanded={expanded}
           onToggle={toggleExpand}
           openFile={openFile}
+          workspacePath={workspacePath}
         />
       ))}
     </div>
@@ -2228,14 +2066,33 @@ const FileTreeNode = memo(
     depth,
     expanded,
     onToggle,
-    openFile
+    openFile,
+    workspacePath
   }: {
     node: TreeNode
     depth: number
     expanded: Set<string>
     onToggle: (path: string) => void
     openFile?: (path: string, name: string) => void
+    workspacePath: string
   }): React.JSX.Element {
+    useSyncExternalStore(
+      useCallback(
+        (listener) =>
+          node.is_dir || !workspacePath
+            ? () => undefined
+            : subscribeWorkspaceFilePathChanges(workspacePath, node.path, listener),
+        [node.is_dir, node.path, workspacePath]
+      ),
+      useCallback(
+        () =>
+          node.is_dir || !workspacePath
+            ? 0
+            : getWorkspaceFilePathRevision(workspacePath, node.path),
+        [node.is_dir, node.path, workspacePath]
+      ),
+      () => 0
+    )
     const isExpanded = expanded.has(node.path)
     const hasChildren = node.children.length > 0
     const paddingLeft = 8 + depth * 16
@@ -2279,9 +2136,9 @@ const FileTreeNode = memo(
           <span className="truncate flex-1">{node.name}</span>
 
           {/* Size for files */}
-          {!node.is_dir && node.size !== undefined && (
+          {!node.is_dir && node.file?.size !== undefined && (
             <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
-              {formatSize(node.size)}
+              {formatSize(node.file.size)}
             </span>
           )}
         </div>
@@ -2297,6 +2154,7 @@ const FileTreeNode = memo(
               expanded={expanded}
               onToggle={onToggle}
               openFile={openFile}
+              workspacePath={workspacePath}
             />
           ))}
       </>
@@ -2312,6 +2170,7 @@ const FileTreeNode = memo(
       (!isExpanded || prevProps.expanded === nextProps.expanded) &&
       prevProps.openFile === nextProps.openFile &&
       prevProps.onToggle === nextProps.onToggle &&
+      prevProps.workspacePath === nextProps.workspacePath &&
       prevProps.depth === nextProps.depth
     )
   }
@@ -2521,9 +2380,9 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   )
   const canMutateCurrentThreadState = threadId === storeCurrentThreadId
   const retryInFlightRef = useRef(false)
-  const threadState = useThreadState(threadId)
-  const subagents = threadState?.subagents ?? []
-  const coordinatorWorkers = threadState?.coordinatorWorkers ?? []
+  const subagents = useThreadStateSelector(threadId, (state) => state.subagents) ?? []
+  const coordinatorWorkers =
+    useThreadStateSelector(threadId, (state) => state.coordinatorWorkers) ?? []
   const hasRunningCoordinatorWorker = coordinatorWorkers.some(
     (worker) => worker.status === "running"
   )

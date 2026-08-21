@@ -52,6 +52,8 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMessagesPage,
+  ThreadMessagesPageOptions,
   SubagentTranscriptPage,
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
@@ -60,6 +62,10 @@ import {
   classifyAgentStreamDelivery,
   resolveAgentStreamRequestChannel
 } from "../shared/agent-stream-channel"
+import {
+  normalizeWorkspaceFilesChangedPayload,
+  type WorkspaceFilesChangedPayload
+} from "../shared/workspace-files-changed"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -527,12 +533,19 @@ const api = {
         mode: "messages" | "values"
         data: unknown
         workerTurn?: number
+        valuesSnapshotKind?: "full" | "append" | "tail"
       }) => void
     ): (() => void) => {
       const channel = `agent:coordinator-worker-stream:${threadId}`
       const handler = (
         _: unknown,
-        data: { type: "stream"; mode: "messages" | "values"; data: unknown; workerTurn?: number }
+        data: {
+          type: "stream"
+          mode: "messages" | "values"
+          data: unknown
+          workerTurn?: number
+          valuesSnapshotKind?: "full" | "append" | "tail"
+        }
       ): void => {
         callback(data)
       }
@@ -591,8 +604,15 @@ const api = {
     }
   },
   workflows: {
-    listRuns: (threadId: string): Promise<unknown[]> => {
-      return ipcRenderer.invoke("workflow:list-runs", { threadId }) as Promise<unknown[]>
+    listRuns: (
+      threadId: string,
+      options?: { cursor?: string | null; limit?: number }
+    ): Promise<{ runs: unknown[]; nextCursor: string | null }> => {
+      return ipcRenderer.invoke("workflow:list-runs", {
+        threadId,
+        cursor: options?.cursor,
+        limit: options?.limit
+      }) as Promise<{ runs: unknown[]; nextCursor: string | null }>
     },
     getRun: (threadId: string, runId: string): Promise<unknown | null> => {
       return ipcRenderer.invoke("workflow:get-run", { threadId, runId }) as Promise<unknown | null>
@@ -739,6 +759,12 @@ const api = {
     getMessages: (threadId: string): Promise<Message[]> => {
       return ipcRenderer.invoke("threads:messages", threadId)
     },
+    getMessagesPage: (
+      threadId: string,
+      options?: ThreadMessagesPageOptions
+    ): Promise<ThreadMessagesPage> => {
+      return ipcRenderer.invoke("threads:messages-page", { threadId, options })
+    },
     appendMessages: (threadId: string, messages: Message[]): Promise<{ count: number }> => {
       return ipcRenderer.invoke("threads:appendMessages", { threadId, messages })
     },
@@ -760,6 +786,9 @@ const api = {
     },
     getLatestCheckpoint: (threadId: string): Promise<unknown | null> => {
       return ipcRenderer.invoke("threads:latest-checkpoint", threadId)
+    },
+    getLatestCheckpointRuntimeState: (threadId: string): Promise<unknown | null> => {
+      return ipcRenderer.invoke("threads:latest-checkpoint-runtime-state", threadId)
     },
     getGoalEvents: (
       threadId: string,
@@ -1157,7 +1186,8 @@ const api = {
       return ipcRenderer.invoke("workspace:select", threadId)
     },
     loadFromDisk: (
-      threadId: string
+      threadId: string,
+      workspacePath?: string
     ): Promise<{
       success: boolean
       files: Array<{
@@ -1169,7 +1199,7 @@ const api = {
       workspacePath?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:loadFromDisk", { threadId })
+      return ipcRenderer.invoke("workspace:loadFromDisk", { threadId, workspacePath })
     },
     ensureWatching: (threadId: string): Promise<{ success: boolean; restarted?: boolean }> => {
       return ipcRenderer.invoke("workspace:ensureWatching", { threadId })
@@ -1637,10 +1667,11 @@ const api = {
     },
     // Listen for file changes in the workspace
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
+      callback: (data: WorkspaceFilesChangedPayload) => void
     ): (() => void) => {
-      const handler = (_: unknown, data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }): void => {
-        callback(data)
+      const handler = (_: unknown, data: unknown): void => {
+        const payload = normalizeWorkspaceFilesChangedPayload(data)
+        if (payload) callback(payload)
       }
       ipcRenderer.on("workspace:files-changed", handler)
       // Return cleanup function

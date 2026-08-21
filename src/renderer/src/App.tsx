@@ -266,7 +266,8 @@ function App(): React.JSX.Element {
         useAppStore
           .getState()
           .appendWorkerFocusMessages(workerThreadId, messages, {
-            orderedSnapshot: event.mode === "values"
+            orderedSnapshot:
+              event.mode === "values" && (event.valuesSnapshotKind ?? "full") === "full"
           })
       }
     })
@@ -577,15 +578,25 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     const cleanupFs = window.api.workspace.onFilesChanged((data) => {
-      const changedThreadId = data.threadId
-      if (!changedThreadId) return
-      // Keep current behavior: when user is already in current thread's Git panel, don't raise notice.
-      if (rightModule === "git" && changedThreadId === activeRightPanelThreadId) return
-      setThreadPendingGitDiff(changedThreadId, true)
+      // One physical-workspace event can affect many tasks. Fold every badge
+      // update into one React state transaction; ThreadProvider owns the one
+      // shared file-tree invalidation/scan.
+      setPendingGitDiffByThread((previous) => {
+        let next = previous
+        for (const threadId of data.threadIds) {
+          // Keep current behavior: when the user is already viewing this task's
+          // Git panel, do not raise a redundant notice for it.
+          if (rightModule === "git" && threadId === activeRightPanelThreadId) continue
+          if (previous[threadId] === true) continue
+          if (next === previous) next = { ...previous }
+          next[threadId] = true
+        }
+        return next
+      })
     })
 
     return cleanupFs
-  }, [activeRightPanelThreadId, rightModule, setThreadPendingGitDiff])
+  }, [activeRightPanelThreadId, rightModule])
 
   // Reset drag start on mouse up
   useEffect(() => {

@@ -256,7 +256,7 @@ import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreads, initializeDatabase, flush } from "./db"
+import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
 import {
   hasActiveScheduledTaskRuns,
   startScheduler,
@@ -678,7 +678,7 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
   const workspaces: string[] = []
   const seen = new Set<string>()
 
-  for (const thread of getAllThreads().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+  for (const thread of getAllThreadSummaries().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
