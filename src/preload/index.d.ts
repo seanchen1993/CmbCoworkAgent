@@ -1290,7 +1290,11 @@ interface CustomAPI {
     }>
     getGitPanelMeta: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: {
+        worktreePath?: string
+        includeSummary?: boolean
+        includePushability?: boolean
+      }
     ) => Promise<{
       success: boolean
       isWorktree: boolean

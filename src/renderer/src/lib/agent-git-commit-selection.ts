@@ -21,8 +21,10 @@ export function shouldAutoDismissEmptyAgentCommitSelection(options: {
   selectedPathCount: number
   loading: boolean
   failed: boolean
+  targetSelectionRequired?: boolean
 }): boolean {
   return (
+    !options.targetSelectionRequired &&
     options.selectionSource === "pathspec" &&
     options.suggestedPathCount > 0 &&
     options.selectedPathCount === 0 &&
@@ -97,6 +99,12 @@ function isAbsoluteFsPath(filePath: string, referencePath?: string): boolean {
     return referencePath ? fsPathParts(referencePath).caseInsensitive : true
   }
   return filePath.startsWith("/") || filePath.startsWith("\\\\")
+}
+
+function normalizeMsysAbsolutePath(filePath: string, referencePath?: string): string {
+  if (!referencePath || !fsPathParts(referencePath).caseInsensitive) return filePath
+  const match = filePath.match(/^\/([A-Za-z])(?:\/(.*))?$/)
+  return match ? `${match[1]}:/${match[2] || ""}` : filePath
 }
 
 function resolveFsPath(basePath: string, filePath: string): string {
@@ -182,15 +190,19 @@ function normalizeSuggestedCommitPath(
     return pathWithoutMagic
   }
   if (repositoryRelative && !repositoryRootPath) return ""
+  const referencePath = basePath ?? targetWorktreePath ?? workspacePath ?? repositoryRootPath
+  const resolvedPathWithoutMagic = repositoryRelative
+    ? pathWithoutMagic
+    : normalizeMsysAbsolutePath(pathWithoutMagic, referencePath)
   const absolutePath = repositoryRelative
     ? resolveFsPath(repositoryRootPath as string, pathWithoutMagic)
     : isAbsoluteFsPath(
-          pathWithoutMagic,
-          basePath ?? targetWorktreePath ?? workspacePath ?? repositoryRootPath
+          resolvedPathWithoutMagic,
+          referencePath
         )
-      ? collapseFsPath(pathWithoutMagic)
+      ? collapseFsPath(resolvedPathWithoutMagic)
       : basePath
-        ? resolveFsPath(basePath, pathWithoutMagic)
+        ? resolveFsPath(basePath, resolvedPathWithoutMagic)
         : null
   if (!absolutePath) return pathWithoutMagic
   if (targetWorktreePath) {
