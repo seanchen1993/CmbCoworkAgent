@@ -239,6 +239,33 @@ export class ImRemoteGrantStore {
     return this.getThreadGrant(threadId)!
   }
 
+  /**
+   * Rebind active desktop Threads after the gateway has authoritatively
+   * synchronized a replacement direct-chat route. Revoked and suspended
+   * grants remain untouched; advancing grantVersion fences targets captured
+   * under the previous route.
+   */
+  async rebindActiveThreadGrants(routeInput: ImGrantRouteIdentity): Promise<number> {
+    const identity = route(routeInput)
+    const database = this.dependencies.getDatabase()
+    database.run(
+      `UPDATE im_thread_grants
+       SET conversation_key = ?, grant_version = grant_version + 1,
+           suspend_reason = NULL, updated_at = ?
+       WHERE principal_id = ? AND state = 'active' AND conversation_key <> ?`,
+      [
+        identity.conversationKey,
+        this.dependencies.now(),
+        identity.principalId,
+        identity.conversationKey
+      ]
+    )
+    const rebound = database.getRowsModified()
+    if (rebound > 0) this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+    return rebound
+  }
+
   async enableFeatureGrant(input: {
     principalId: string
     projectId: string

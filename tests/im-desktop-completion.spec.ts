@@ -178,6 +178,72 @@ async function testOutboxAndGatewayFailuresNeverEscapeObserver(): Promise<void> 
   }
 }
 
+async function testInboundConfirmedRouteRebindsGrantAndRejectedProactiveReply(): Promise<void> {
+  const context = await createContext()
+  try {
+    await context.observer.observe({
+      source: "desktop",
+      threadId: "thread-1",
+      finalAssistantMessageId: "assistant-stale-route",
+      finalText: "需要改投到当前招乎会话"
+    })
+    await context.observer.observe({
+      source: "desktop",
+      threadId: "thread-1",
+      finalAssistantMessageId: "assistant-route-sync-pending",
+      finalText: "等待真实入站消息确认路由"
+    })
+    const [rejected, deferred] = context.events.listOutbox()
+    await context.events.markOutboxSending(rejected.outboxId)
+    await context.events.markOutboxFailed(rejected.outboxId, "ROUTE_NOT_FOUND")
+    await context.events.markOutboxSending(deferred.outboxId)
+    await context.events.rescheduleOutbox(
+      deferred.outboxId,
+      Date.parse("2026-07-29T08:01:00.000Z"),
+      "ROUTE_SYNC_PENDING"
+    )
+
+    // SYNC_STATE can contain multiple historical ACTIVE routes. The App must
+    // not migrate anything until a real inbound event confirms one of them.
+    assert.equal(context.grants.getThreadGrant("thread-1")!.conversationKey, "conversation-1")
+    assert.deepEqual(
+      context.events.listOutbox().map((reply) => reply.state),
+      ["failed", "pending"]
+    )
+
+    // This is the route carried by the next REMOTE_EVENT.
+    const currentRoute = {
+      principalId: "principal-1",
+      conversationKey: "conversation-current"
+    }
+    await context.conversations.ensureConversation(currentRoute)
+    assert.equal(await context.grants.rebindActiveThreadGrants(currentRoute), 1)
+    assert.equal(
+      await context.events.rerouteUnacceptedProactiveReplies({
+        fromConversationKeys: ["conversation-1"],
+        toConversationKey: currentRoute.conversationKey
+      }),
+      2
+    )
+
+    const grant = context.grants.getThreadGrant("thread-1")!
+    assert.equal(grant.conversationKey, currentRoute.conversationKey)
+    assert.equal(grant.grantVersion, 2)
+    const rerouted = context.events.listOutbox()
+    assert.equal(rerouted.length, 2)
+    assert(
+      rerouted.every(
+        (reply) =>
+          reply.conversationKey === currentRoute.conversationKey &&
+          reply.state === "pending" &&
+          reply.reasonCode === null
+      )
+    )
+  } finally {
+    context.database.close()
+  }
+}
+
 function testDesktopEntrypointsUseNarrowCompletionSeam(): void {
   const source = readFileSync(resolve(__dirname, "../src/main/ipc/agent.ts"), "utf8")
   assert.equal(
@@ -205,6 +271,7 @@ async function main(): Promise<void> {
     testStableDesktopDeliveryIsDurableAndIdempotent,
     testRevocationAndRouteChangeFailClosed,
     testOutboxAndGatewayFailuresNeverEscapeObserver,
+    testInboundConfirmedRouteRebindsGrantAndRejectedProactiveReply,
     testDesktopEntrypointsUseNarrowCompletionSeam
   ]) {
     await test()

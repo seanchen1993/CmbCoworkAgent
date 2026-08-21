@@ -70,6 +70,8 @@ async function main(): Promise<void> {
   const receivedTypes: string[] = []
   const remoteEvents: RemoteImEventV1[] = []
   const revokedEventIds: string[] = []
+  let routesReconciledBeforeOnline = false
+  let confirmedProactiveRoute: string | null = null
   let mismatchNextPermit = false
   let missingRobotHelloCount = 0
   server.on("connection", (connected, request) => {
@@ -121,6 +123,11 @@ async function main(): Promise<void> {
                   principalId: "opaque-principal",
                   conversationKey: "conversation-remote",
                   state: "active"
+                },
+                {
+                  principalId: "opaque-principal",
+                  conversationKey: "conversation-historical",
+                  state: "active"
                 }
               ]
             }
@@ -167,21 +174,42 @@ async function main(): Promise<void> {
     token: () => "identity-token-do-not-log",
     appVersion: "test",
     onRemoteEvent: (event) => {
+      confirmedProactiveRoute = event.conversationKey
       remoteEvents.push(event)
     },
     onLeaseRevoked: (payload) => {
       if (typeof payload.eventId === "string") revokedEventIds.push(payload.eventId)
-    }
+    },
+    onRoutesSynchronized: (routes, principalId) => {
+      assert.equal(client.getStatus().connectionState, "connecting")
+      assert.equal(principalId, "opaque-principal")
+      assert.equal(routes.length, 2)
+      routesReconciledBeforeOnline = true
+    },
+    isProactiveRouteConfirmed: (conversationKey, principalId) =>
+      principalId === "opaque-principal" && conversationKey === confirmedProactiveRoute
   })
   client.start()
   await waitFor(() => client.isAuthenticated(), "authenticated WSS")
   assert.equal(authorization, "Bearer identity-token-do-not-log")
   assert.equal(client.getStatus().lastHandshakeStatus, 101)
   assert(receivedTypes.includes("HELLO"))
-  await waitFor(() => client.getStatus().routes.length === 1, "route sync")
+  await waitFor(() => client.getStatus().routes.length === 2, "route sync")
   assert.equal(client.getStatus().principalId, "opaque-principal")
   assert.equal(client.getStatus().routes[0].principalId, "opaque-principal")
   assert.equal(client.getStatus().routes[0].state, "active")
+  assert.equal(routesReconciledBeforeOnline, true)
+  await assert.rejects(
+    client.submitReply({
+      schemaVersion: 1,
+      deliveryId: "delivery-before-route-confirmation",
+      conversationKey: "conversation-remote",
+      idempotencyKey: "delivery-before-route-confirmation:reply:0",
+      segment: { index: 0, count: 1 },
+      message: { type: "text", content: "must wait for real ingress" }
+    }),
+    /同步会话路由/
+  )
 
   const event: RemoteImEventV1 = {
     schemaVersion: 1,
@@ -244,6 +272,16 @@ async function main(): Promise<void> {
     message: { type: "text", content: "done" }
   })
   assert.equal(reply.platformReplyId, "platform-reply-1")
+
+  const proactiveReply = await client.submitReply({
+    schemaVersion: 1,
+    deliveryId: "delivery-after-route-confirmation",
+    conversationKey: event.conversationKey,
+    idempotencyKey: "delivery-after-route-confirmation:reply:0",
+    segment: { index: 0, count: 1 },
+    message: { type: "text", content: "route confirmed by inbound event" }
+  })
+  assert.equal(proactiveReply.platformReplyId, "platform-reply-1")
 
   socket!.send(
     JSON.stringify({

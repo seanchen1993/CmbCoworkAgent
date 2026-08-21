@@ -62,6 +62,11 @@ export interface ImGatewayWsClientOptions {
   onRemoteEvent: (event: RemoteImEventV1) => void | Promise<void>
   onLeaseRevoked?: (payload: Record<string, unknown>) => void | Promise<void>
   onAuthenticationRequired?: (rejectedToken: string) => boolean | Promise<boolean>
+  onRoutesSynchronized?: (
+    routes: readonly BuiltinRobotRouteStatus[],
+    principalId: string
+  ) => void | Promise<void>
+  isProactiveRouteConfirmed?: (conversationKey: string, principalId: string) => boolean
   onStatusChange?: (status: ImGatewayWsStatus) => void
   now?: () => number
 }
@@ -224,6 +229,19 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   }
 
   submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult> {
+    const principalId = this.status.principalId
+    if (
+      !reply.eventId &&
+      (!this.isAuthenticated() ||
+        !principalId ||
+        this.options.isProactiveRouteConfirmed?.(reply.conversationKey, principalId) === false)
+    ) {
+      return Promise.reject(
+        new ImGatewayCommandError("统一机器人正在同步会话路由", {
+          reasonCode: "ROUTE_SYNC_PENDING"
+        })
+      )
+    }
     if (this.replyCommandByIdempotencyKey.has(reply.idempotencyKey)) {
       return Promise.reject(
         new ImGatewayCommandError("同一回复正在等待网关确认", {
@@ -503,7 +521,9 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         this.authenticationRefreshInFlight = false
         this.authenticationRefreshAttempted = false
         this.updateStatus({
-          connectionState: "online",
+          // The session is authenticated, but durable replies must not drain
+          // until SYNC_STATE has reconciled the gateway's authoritative route.
+          connectionState: "connecting",
           authenticationFailed: false,
           sessionId,
           principalId,
@@ -512,7 +532,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           reconnectAttempt: 0
         })
         this.startHeartbeat(heartbeatIntervalSeconds)
-        this.syncCommandId = this.sendCommand("SYNC_REQUEST", {})
+        this.syncCommandId = this.sendEnvelope("SYNC_REQUEST", {})
         return
       }
       case "REMOTE_EVENT": {
@@ -538,7 +558,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           throw new ImGatewayProtocolError("SYNC_STATE correlation does not match")
         }
         this.syncCommandId = null
-        this.updateRoutes(payload)
+        await this.updateRoutes(payload)
         return
       case "LEASE_REVOKED":
         if (!messageId) throw new ImGatewayProtocolError("LEASE_REVOKED missing messageId")
@@ -653,7 +673,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     )
   }
 
-  private updateRoutes(payload: Record<string, unknown>): void {
+  private async updateRoutes(payload: Record<string, unknown>): Promise<void> {
     assertOnlyKeys(payload, ["routes"], "SYNC_STATE payload")
     const routes = Array.isArray(payload.routes) ? payload.routes : []
     if (!Array.isArray(payload.routes)) {
@@ -682,7 +702,15 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         state
       })
     }
-    this.updateStatus({ routes: normalized })
+    const principalId = this.status.principalId
+    if (!principalId) {
+      throw new ImGatewayProtocolError("SYNC_STATE arrived before WELCOME")
+    }
+    await this.options.onRoutesSynchronized?.(
+      normalized.map((route) => ({ ...route })),
+      principalId
+    )
+    this.updateStatus({ connectionState: "online", routes: normalized })
   }
 
   private resolveError(payload: Record<string, unknown>, commandId: string | null): void {
@@ -771,7 +799,9 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     payload: Record<string, unknown>,
     commandId = randomUUID()
   ): string {
-    if (!this.isAuthenticated()) throw new ImGatewayCommandError("统一机器人当前未连接")
+    if (!this.status.sessionId || !this.status.principalId) {
+      throw new ImGatewayCommandError("统一机器人当前未连接")
+    }
     return this.sendEnvelope(type, payload, commandId)
   }
 

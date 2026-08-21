@@ -855,6 +855,51 @@ export class ImEventStore {
     return interrupted
   }
 
+  /**
+   * Move proactive notices that are known not to have been accepted onto a
+   * replacement route. Event replies and result-unknown deliveries are never
+   * rewritten because their original conversation/idempotency fence is final.
+   */
+  async rerouteUnacceptedProactiveReplies(input: {
+    fromConversationKeys: readonly string[]
+    toConversationKey: string
+  }): Promise<number> {
+    const toConversationKey = input.toConversationKey.trim()
+    if (!toConversationKey) throw new Error("toConversationKey is required")
+    const fromConversationKeys = [
+      ...new Set(input.fromConversationKeys.map((key) => key.trim()).filter(Boolean))
+    ].filter((key) => key !== toConversationKey)
+    if (fromConversationKeys.length === 0) {
+      await this.dependencies.flushStrict()
+      return 0
+    }
+
+    const database = this.dependencies.getDatabase()
+    const now = this.dependencies.now()
+    let rerouted = 0
+    withImTransaction(database, () => {
+      for (const fromConversationKey of fromConversationKeys) {
+        database.run(
+          `UPDATE im_reply_outbox
+           SET conversation_key = ?, state = 'pending', next_attempt_at = ?,
+               reason_code = NULL, updated_at = ?
+           WHERE event_id IS NULL AND conversation_key = ?
+             AND (
+               (state = 'pending' AND (
+                 attempt_count = 0 OR reason_code = 'ROUTE_SYNC_PENDING'
+               ))
+               OR (state = 'failed' AND reason_code = 'ROUTE_NOT_FOUND')
+             )`,
+          [toConversationKey, now, now, fromConversationKey]
+        )
+        rerouted += database.getRowsModified()
+      }
+    })
+    if (rerouted > 0) this.dependencies.markDirty()
+    await this.dependencies.flushStrict()
+    return rerouted
+  }
+
   listOutbox(state?: ImReplyOutboxState): ImReplyOutboxRecord[] {
     const rows = state
       ? readAll<ImReplyOutboxRow>(

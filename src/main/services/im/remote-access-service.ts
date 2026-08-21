@@ -134,6 +134,12 @@ export class ImRemoteAccessService {
     })
   }
 
+  /** Align local desktop grants with a route confirmed by sync or real ingress. */
+  async reconcileAuthoritativeRoute(route: ImGrantRouteIdentity): Promise<number> {
+    await this.dependencies.conversations.ensureConversation(route)
+    return this.dependencies.grants.rebindActiveThreadGrants(route)
+  }
+
   async disableThread(threadId: string): Promise<ImThreadGrantRecord | null> {
     const grant = await this.dependencies.grants.revokeThreadGrant(threadId)
     if (grant) await this.suspendTargetsForGrant(grant.grantId, "REMOTE_GRANT_REVOKED")

@@ -26,6 +26,8 @@ import type { ImGrantRouteIdentity } from "./remote-grant-store"
 
 type StatusListener = (status: BuiltinRobotStatus) => void
 
+const ROUTE_RECONCILIATION_ERROR = "远程会话路由自动修复失败；收到下一条招乎消息时会重试。"
+
 function environmentGatewayUrl(): string | null {
   const env = (
     import.meta as ImportMeta & {
@@ -92,6 +94,8 @@ export class BuiltinRobotManager {
   }
   private managerError: string | null = null
   private activeIdentityToken: string | null = null
+  private confirmedRoute: ImGrantRouteIdentity | null = null
+  private routeReconciliation: Promise<void> = Promise.resolve()
 
   start(appVersion?: string): Promise<void> {
     if (appVersion?.trim()) this.appVersion = appVersion.trim()
@@ -365,6 +369,15 @@ export class BuiltinRobotManager {
       onRemoteEvent: async (event) => {
         const service = this.service
         if (!service) return
+        // When an older gateway reports more than one ACTIVE route, the sync
+        // payload cannot identify which one belongs to the current robot. A
+        // real inbound event can: its route has just been used by the platform
+        // to reach this desktop session. Reconcile before routing the message
+        // so grants and safe, definitively rejected proactive replies follow it.
+        await this.confirmAuthoritativeRoute({
+          principalId: event.principalId,
+          conversationKey: event.conversationKey
+        })
         await service.receiveEvent(event)
         notifyRemoteThreadChanged()
         this.emitStatus()
@@ -378,6 +391,33 @@ export class BuiltinRobotManager {
         if (eventId && this.service) await this.service.handleLeaseRevoked(eventId, reasonCode)
         this.emitStatus()
       },
+      onRoutesSynchronized: async (routes, principalId) => {
+        const activeRoutes = routes.filter(
+          (route) => route.principalId === principalId && route.state === "active"
+        )
+        if (activeRoutes.length === 1) {
+          await this.confirmAuthoritativeRoute({
+            principalId,
+            conversationKey: activeRoutes[0].conversationKey
+          })
+          return
+        }
+
+        // Keep a route learned from a real inbound event across a transport
+        // reconnect only while the gateway still advertises it. Otherwise fail
+        // closed until the next inbound message confirms the current route.
+        const confirmed = this.confirmedRoute
+        if (
+          !confirmed ||
+          confirmed.principalId !== principalId ||
+          !activeRoutes.some((route) => route.conversationKey === confirmed.conversationKey)
+        ) {
+          this.confirmedRoute = null
+        }
+      },
+      isProactiveRouteConfirmed: (conversationKey, principalId) =>
+        this.confirmedRoute?.principalId === principalId &&
+        this.confirmedRoute.conversationKey === conversationKey,
       onStatusChange: (status) => {
         this.gatewayStatus = status
         this.emitStatus()
@@ -425,6 +465,8 @@ export class BuiltinRobotManager {
     this.service = null
     this.client = null
     this.activeIdentityToken = null
+    this.confirmedRoute = null
+    this.routeReconciliation = Promise.resolve()
     if (service) await service.stop().catch(() => undefined)
     client?.stop()
     this.gatewayStatus = {
@@ -487,6 +529,16 @@ export class BuiltinRobotManager {
     const candidates = this.gatewayStatus.routes.filter(
       (route) => route.principalId === principalId && route.state === "active"
     )
+    const confirmed = this.confirmedRoute
+    if (confirmed?.principalId === principalId) {
+      const status = candidates.find(
+        (route) => route.conversationKey === confirmed.conversationKey
+      ) ?? {
+        ...confirmed,
+        state: "active" as const
+      }
+      return { route: { ...confirmed }, status: { ...status }, reason: null }
+    }
     if (candidates.length === 0) {
       return {
         route: null,
@@ -506,6 +558,31 @@ export class BuiltinRobotManager {
       status: { ...status },
       reason: null
     }
+  }
+
+  private confirmAuthoritativeRoute(route: ImGrantRouteIdentity): Promise<void> {
+    const operation = this.routeReconciliation.then(async () => {
+      this.confirmedRoute = { ...route }
+      const staleConversationKeys = imConversationStateStore
+        .listConversations()
+        .filter(
+          (conversation) =>
+            conversation.principalId === route.principalId &&
+            conversation.conversationKey !== route.conversationKey
+        )
+        .map((conversation) => conversation.conversationKey)
+      await imRemoteAccessService.reconcileAuthoritativeRoute(route)
+      await imEventStore.rerouteUnacceptedProactiveReplies({
+        fromConversationKeys: staleConversationKeys,
+        toConversationKey: route.conversationKey
+      })
+      if (this.managerError === ROUTE_RECONCILIATION_ERROR) this.managerError = null
+    })
+    this.routeReconciliation = operation.catch(() => {
+      this.managerError = ROUTE_RECONCILIATION_ERROR
+      this.emitStatus()
+    })
+    return this.routeReconciliation
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
