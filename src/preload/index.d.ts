@@ -136,9 +136,11 @@ import type {
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { ChatScrollSettings } from "../shared/chat-scroll"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
@@ -152,6 +154,9 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
+  getChatScrollSettings: () => Promise<ChatScrollSettings>
+  setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
+  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
