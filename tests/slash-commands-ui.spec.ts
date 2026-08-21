@@ -18,7 +18,9 @@ import {
 import {
   BUILTIN_BROWSER_COMMAND_ID,
   formatBuiltinBrowserPrompt,
-  parseBuiltinBrowserPrompt
+  getBuiltinBrowserPromptPrefix,
+  parseBuiltinBrowserPrompt,
+  setBuiltinBrowserScreenshotEnabled
 } from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
 import type { SkillMetadata } from "../src/renderer/src/types.ts"
 
@@ -158,11 +160,12 @@ function testSelectedBrowserKeepsPopoverClosed(): void {
 }
 
 function testBuiltinBrowserPromptFormatting(): void {
+  setBuiltinBrowserScreenshotEnabled(false)
   const formatted = formatBuiltinBrowserPrompt("打开百度并搜索 CMB")
   assertEqual(
     formatted,
-    "使用内置浏览器 browser_*工具：打开百度并搜索 CMB",
-    "built-in browser prompt should use the exact transport prefix"
+    "使用内置浏览器 browser_*工具（不允许使用截图功能）：打开百度并搜索 CMB",
+    "built-in browser prompt should block screenshots by default"
   )
   assertEqual(
     parseBuiltinBrowserPrompt(formatted).visibleText,
@@ -174,20 +177,25 @@ function testBuiltinBrowserPromptFormatting(): void {
     true,
     "built-in browser prompt should expose the browser tag state"
   )
+
+  setBuiltinBrowserScreenshotEnabled(true)
+  assertEqual(
+    getBuiltinBrowserPromptPrefix(),
+    "使用内置浏览器 browser_*工具：",
+    "enabled screenshot prompt should omit the screenshot restriction"
+  )
+  assertEqual(
+    formatBuiltinBrowserPrompt("打开百度并搜索 CMB"),
+    "使用内置浏览器 browser_*工具：打开百度并搜索 CMB",
+    "enabled screenshot prompt should keep the original browser prefix"
+  )
+  setBuiltinBrowserScreenshotEnabled(false)
 }
 
 function testGoalSlashInputDetectionForRuntimeControls(): void {
   assertEqual(isGoalSlashCommandInput("/goal"), true, "bare /goal should be recognized")
-  assertEqual(
-    isGoalSlashCommandInput("  /goal pause  "),
-    true,
-    "/goal pause should be recognized"
-  )
-  assertEqual(
-    isGoalSlashCommandInput("/goal clear"),
-    true,
-    "/goal clear should be recognized"
-  )
+  assertEqual(isGoalSlashCommandInput("  /goal pause  "), true, "/goal pause should be recognized")
+  assertEqual(isGoalSlashCommandInput("/goal clear"), true, "/goal clear should be recognized")
   assertEqual(isGoalSlashCommandInput("/go"), false, "partial command should not be recognized")
   assertEqual(
     isGoalSlashCommandInput("/goalish"),

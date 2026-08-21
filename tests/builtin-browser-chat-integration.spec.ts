@@ -13,7 +13,10 @@ import {
   shouldRemoveBuiltinBrowserChipWithBackspace,
   stripBuiltinBrowserPrompt
 } from "../src/renderer/src/features/builtin-browser/chat-integration.ts"
-import { BUILTIN_BROWSER_PROMPT_PREFIX } from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
+import {
+  formatBuiltinBrowserPrompt,
+  setBuiltinBrowserScreenshotEnabled
+} from "../src/renderer/src/features/builtin-browser/builtin-browser.ts"
 
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
@@ -22,9 +25,10 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
 }
 
 function testBrowserTransportAndTranscriptFormatting(): void {
+  setBuiltinBrowserScreenshotEnabled(false)
   assertEqual(
     formatBuiltinBrowserTransportMessage("打开 example.com", true),
-    `${BUILTIN_BROWSER_PROMPT_PREFIX}打开 example.com`,
+    formatBuiltinBrowserPrompt("打开 example.com"),
     "browser transport formatting should add the browser prompt prefix"
   )
   assertEqual(
@@ -53,7 +57,7 @@ function testBrowserOnlyTitleFallback(): void {
 
 function testStripBrowserPrompt(): void {
   assertEqual(
-    stripBuiltinBrowserPrompt(`${BUILTIN_BROWSER_PROMPT_PREFIX}检查登录页`),
+    stripBuiltinBrowserPrompt(formatBuiltinBrowserPrompt("检查登录页")),
     "检查登录页",
     "display and copy paths should strip the browser prompt prefix"
   )
