@@ -733,6 +733,43 @@ function copyForkGitMetadataIfWorkspaceMatches(input: {
   if (gitContext) targetMetadata.gitContext = gitContext
 }
 
+function copyForkHarnessMetadata(input: {
+  sourceMetadata: Record<string, unknown>
+  targetMetadata: Record<string, unknown>
+}): void {
+  const { sourceMetadata, targetMetadata } = input
+  const harnessFeature = sourceMetadata.harnessFeature
+  const hasHarnessFeature =
+    isPlainRecord(harnessFeature) &&
+    typeof harnessFeature.projectId === "string" &&
+    harnessFeature.projectId.trim().length > 0 &&
+    typeof harnessFeature.slug === "string" &&
+    harnessFeature.slug.trim().length > 0
+
+  if (hasHarnessFeature) {
+    targetMetadata.harnessFeature = { ...harnessFeature }
+  }
+
+  const harnessProjectSession = sourceMetadata.harnessProjectSession
+  const hasHarnessProjectSession =
+    isPlainRecord(harnessProjectSession) &&
+    typeof harnessProjectSession.projectId === "string" &&
+    harnessProjectSession.projectId.trim().length > 0 &&
+    typeof harnessProjectSession.kind === "string" &&
+    harnessProjectSession.kind.trim().length > 0
+
+  if (hasHarnessProjectSession) {
+    targetMetadata.harnessProjectSession = { ...harnessProjectSession }
+  }
+
+  if (
+    (hasHarnessFeature || hasHarnessProjectSession) &&
+    typeof sourceMetadata.disableAgentsPrompt === "boolean"
+  ) {
+    targetMetadata.disableAgentsPrompt = sourceMetadata.disableAgentsPrompt
+  }
+}
+
 function isValidForkWorkspacePath(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0
 }
@@ -909,6 +946,7 @@ function buildForkMetadata(input: {
     workspacePath,
     hasWorkspacePathOverride
   })
+  copyForkHarnessMetadata({ sourceMetadata, targetMetadata: next })
 
   const model = overrides?.model ?? sourceMetadata.model
   if (typeof model === "string" && model.trim()) next.model = model

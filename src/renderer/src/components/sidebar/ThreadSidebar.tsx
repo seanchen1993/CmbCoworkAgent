@@ -39,6 +39,7 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
+import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
@@ -57,7 +58,7 @@ import {
   ContextMenuTrigger
 } from "@/components/ui/context-menu"
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
-import type { ForkableCheckpoint, Thread, ThreadForkOverrides } from "@/types"
+import type { Thread } from "@/types"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
@@ -67,7 +68,6 @@ const PROJECT_NAME_OVERRIDES_STORAGE_KEY = "threads:projectNameOverrides"
 const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
 type SidebarTab = "chat" | "project"
-type ForkDestinationMode = "local" | "workspace"
 
 interface ThreadProject {
   key: string
@@ -135,35 +135,6 @@ function formatCompactTime(date: Date | string): string {
   const day = d.getDate()
   if (d.getFullYear() === now.getFullYear()) return `${month}/${day}`
   return `${String(d.getFullYear()).slice(2)}/${month}/${day}`
-}
-
-function formatCheckpointTime(value?: string): string {
-  if (!value) return "未知时间"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "未知时间"
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date)
-}
-
-function getForkUnstableReasonLabel(reason?: ForkableCheckpoint["unstableReason"]): string {
-  switch (reason) {
-    case "interrupt":
-      return "中断中"
-    case "pending_approval":
-      return "等待审批"
-    case "pending_writes":
-      return "写入未完成"
-    case "in_progress_turn":
-      return "运行中"
-    case "missing_boundary_marker":
-      return "非完成边界"
-    default:
-      return "不可 fork"
-  }
 }
 
 function getDisplayThreadTitle(thread: Thread): string {
@@ -476,7 +447,6 @@ export function ThreadSidebar(): React.JSX.Element {
     currentThreadId,
     createThread,
     forkThread,
-    listForkableCheckpoints,
     selectThread,
     deleteThread,
     updateThread,
@@ -575,19 +545,10 @@ export function ThreadSidebar(): React.JSX.Element {
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [forkingThreadId, setForkingThreadId] = useState<string | null>(null)
   const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
-  const [forkCheckpoints, setForkCheckpoints] = useState<ForkableCheckpoint[]>([])
-  const [selectedForkCheckpoint, setSelectedForkCheckpoint] =
-    useState<ForkableCheckpoint | null>(null)
-  const [forkDestinationMode, setForkDestinationMode] =
-    useState<ForkDestinationMode>("local")
-  const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
-  const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
-  const [loadingForkCheckpoints, setLoadingForkCheckpoints] = useState(false)
   const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
   const [projectToRename, setProjectToRename] = useState<ThreadProject | null>(null)
   const exportingThreadIdRef = useRef<string | null>(null)
   const forkingThreadIdRef = useRef<string | null>(null)
-  const forkCheckpointRequestRef = useRef(0)
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
   const {
@@ -998,119 +959,14 @@ export function ThreadSidebar(): React.JSX.Element {
     [forkThread, markRead]
   )
 
-  const openForkCheckpointDialog = useCallback(
-    async (thread: Thread): Promise<void> => {
-      const requestId = forkCheckpointRequestRef.current + 1
-      forkCheckpointRequestRef.current = requestId
-      setForkDialogThread(thread)
-      setForkCheckpoints([])
-      setSelectedForkCheckpoint(null)
-      setForkDestinationMode("local")
-      setForkWorkspacePath(null)
-      setSelectingForkWorkspace(false)
-      setLoadingForkCheckpoints(true)
-      try {
-        const checkpoints = await listForkableCheckpoints(thread.thread_id)
-        if (forkCheckpointRequestRef.current !== requestId) return
-        setForkCheckpoints(checkpoints)
-        setSelectedForkCheckpoint(
-          checkpoints.find((checkpoint) => checkpoint.isStableTurnBoundary) ?? null
-        )
-      } catch (error) {
-        if (forkCheckpointRequestRef.current !== requestId) return
-        toast.error(error instanceof Error ? error.message : "读取 checkpoint 失败")
-      } finally {
-        if (forkCheckpointRequestRef.current === requestId) {
-          setLoadingForkCheckpoints(false)
-        }
-      }
-    },
-    [listForkableCheckpoints]
-  )
-
-  const handleSelectForkWorkspace = useCallback(async (): Promise<string | null> => {
-    if (selectingForkWorkspace) return forkWorkspacePath
-    setSelectingForkWorkspace(true)
-    try {
-      const path = await window.api.workspace.select()
-      if (path) {
-        setForkDestinationMode("workspace")
-        setForkWorkspacePath(path)
-      }
-      return path
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "选择工作区失败")
-      return null
-    } finally {
-      setSelectingForkWorkspace(false)
-    }
-  }, [forkWorkspacePath, selectingForkWorkspace])
-
-  const resetForkCheckpointDialog = useCallback((): void => {
-    forkCheckpointRequestRef.current += 1
-    setForkDialogThread(null)
-    setForkCheckpoints([])
-    setSelectedForkCheckpoint(null)
-    setForkDestinationMode("local")
-    setForkWorkspacePath(null)
-    setSelectingForkWorkspace(false)
-    setLoadingForkCheckpoints(false)
+  const openForkCheckpointDialog = useCallback((thread: Thread): void => {
+    setForkDialogThread(thread)
   }, [])
 
-  const handleForkCheckpoint = useCallback(
-    async (): Promise<void> => {
-      if (
-        !forkDialogThread ||
-        !selectedForkCheckpoint ||
-        forkingThreadIdRef.current ||
-        !selectedForkCheckpoint.isStableTurnBoundary
-      ) {
-        return
-      }
-
-      let selectedWorkspacePath = forkWorkspacePath
-      if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
-        selectedWorkspacePath = await handleSelectForkWorkspace()
-        if (!selectedWorkspacePath) return
-      }
-
-      const overrides: ThreadForkOverrides | undefined =
-        forkDestinationMode === "workspace"
-          ? { workspacePath: selectedWorkspacePath }
-          : undefined
-
-      const sourceThreadId = forkDialogThread.thread_id
-      forkingThreadIdRef.current = sourceThreadId
-      setForkingThreadId(sourceThreadId)
-      try {
-        const forked = await forkThread({
-          sourceThreadId,
-          checkpointId: selectedForkCheckpoint.checkpointId,
-          overrides
-        })
-        markRead(forked.thread_id)
-        resetForkCheckpointDialog()
-        toast.success("已从历史 checkpoint 创建新会话")
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Fork 会话失败")
-      } finally {
-        if (forkingThreadIdRef.current === sourceThreadId) {
-          forkingThreadIdRef.current = null
-          setForkingThreadId(null)
-        }
-      }
-    },
-    [
-      forkDestinationMode,
-      forkThread,
-      forkWorkspacePath,
-      forkDialogThread,
-      handleSelectForkWorkspace,
-      markRead,
-      resetForkCheckpointDialog,
-      selectedForkCheckpoint
-    ]
-  )
+  const handleForkCheckpointBusyChange = useCallback((threadId: string | null): void => {
+    forkingThreadIdRef.current = threadId
+    setForkingThreadId(threadId)
+  }, [])
 
   const confirmDeleteProject = useCallback(async () => {
     if (!projectToDelete) return
@@ -1146,14 +1002,6 @@ export function ThreadSidebar(): React.JSX.Element {
         // ignore — version display is non-critical
       })
   }, [])
-
-  const isForkDialogForking = forkDialogThread
-    ? forkingThreadId === forkDialogThread.thread_id
-    : false
-  const forkDialogBusy = isForkDialogForking || selectingForkWorkspace
-  const forkDialogCurrentWorkspacePath = forkDialogThread
-    ? getThreadWorkspacePath(forkDialogThread)
-    : null
 
   return (
     <aside className="flex h-full w-full flex-col border-r border-border bg-sidebar overflow-hidden">
@@ -1703,164 +1551,16 @@ export function ThreadSidebar(): React.JSX.Element {
           <UpdateActionButton variant="tag" className="ml-1" />
         </div>
       </div>
-      <Dialog
-        open={!!forkDialogThread}
-        onOpenChange={(open) => {
-          if (!open && !forkDialogBusy) resetForkCheckpointDialog()
-        }}
-      >
-        <DialogContent className="flex max-h-[80vh] flex-col gap-0 p-0 sm:max-w-lg">
-          <DialogHeader className="border-b border-border px-5 py-4">
-            <DialogTitle className="text-base">从 checkpoint fork</DialogTitle>
-            <DialogDescription className="truncate">
-              {forkDialogThread ? getDisplayThreadTitle(forkDialogThread) : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 space-y-2 overflow-y-auto p-3">
-            {loadingForkCheckpoints ? (
-              <div className="flex h-28 items-center justify-center text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-              </div>
-            ) : forkCheckpoints.length === 0 ? (
-              <div className="px-3 py-8 text-center text-sm text-muted-foreground">
-                暂无可 fork 的 checkpoint
-              </div>
-            ) : (
-              forkCheckpoints.map((checkpoint) => {
-                const selected =
-                  selectedForkCheckpoint?.checkpointId === checkpoint.checkpointId
-                const disabled = !checkpoint.isStableTurnBoundary || forkDialogBusy
-                return (
-                  <button
-                    key={checkpoint.checkpointId}
-                    type="button"
-                    disabled={disabled}
-                    className={cn(
-                      "w-full rounded-sm border border-border px-3 py-2 text-left transition-colors",
-                      disabled
-                        ? "cursor-not-allowed bg-muted/30 opacity-60"
-                        : selected
-                          ? "border-primary bg-primary/10"
-                          : "hover:border-primary/40 hover:bg-accent/60"
-                    )}
-                    onClick={() => setSelectedForkCheckpoint(checkpoint)}
-                  >
-                    <div className="mb-1 flex min-w-0 items-center gap-2 text-xs">
-                      <span className="shrink-0 text-muted-foreground">
-                        {formatCheckpointTime(checkpoint.createdAt)}
-                      </span>
-                      <span className="shrink-0 text-muted-foreground">
-                        {checkpoint.messageCount} 条消息
-                      </span>
-                      <span
-                        className={cn(
-                          "ml-auto shrink-0 rounded-sm px-1.5 py-0.5 text-[10px]",
-                          checkpoint.isStableTurnBoundary
-                            ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
-                            : "bg-muted text-muted-foreground"
-                        )}
-                      >
-                        {checkpoint.isStableTurnBoundary
-                          ? "可 fork"
-                          : getForkUnstableReasonLabel(checkpoint.unstableReason)}
-                      </span>
-                    </div>
-                    <div className="truncate text-sm text-foreground">
-                      {checkpoint.lastMessagePreview || "无可见消息"}
-                    </div>
-                    {checkpoint.lastUserMessagePreview ? (
-                      <div className="mt-1 truncate text-xs text-muted-foreground">
-                        用户：{checkpoint.lastUserMessagePreview}
-                      </div>
-                    ) : null}
-                  </button>
-                )
-              })
-            )}
-          </div>
-          <div className="space-y-3 border-t border-border p-3">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                disabled={forkDialogBusy}
-                onClick={() => setForkDestinationMode("local")}
-                className={cn(
-                  "rounded-sm border px-3 py-2 text-left transition-colors",
-                  forkDestinationMode === "local"
-                    ? "border-primary bg-primary/10"
-                    : "border-border hover:bg-accent"
-                )}
-              >
-                <div className="text-sm font-medium">派生到本地</div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {getWorkspaceName(forkDialogCurrentWorkspacePath)}
-                </div>
-              </button>
-              <button
-                type="button"
-                disabled={forkDialogBusy}
-                onClick={() => setForkDestinationMode("workspace")}
-                className={cn(
-                  "rounded-sm border px-3 py-2 text-left transition-colors",
-                  forkDestinationMode === "workspace"
-                    ? "border-primary bg-primary/10"
-                    : "border-border hover:bg-accent"
-                )}
-              >
-                <div className="text-sm font-medium">派生到其他工作区</div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {forkWorkspacePath ? getWorkspaceName(forkWorkspacePath) : "选择一个本地工作区路径"}
-                </div>
-              </button>
-            </div>
-            {forkDestinationMode === "workspace" ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={forkDialogBusy}
-                onClick={() => void handleSelectForkWorkspace()}
-                className="w-full justify-start"
-              >
-                {selectingForkWorkspace ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <FolderOpen className="size-4" />
-                )}
-                {forkWorkspacePath || "选择工作区文件夹"}
-              </Button>
-            ) : null}
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={forkDialogBusy}
-                onClick={resetForkCheckpointDialog}
-              >
-                取消
-              </Button>
-              <Button
-                type="button"
-                disabled={!selectedForkCheckpoint || forkDialogBusy}
-                onClick={() => void handleForkCheckpoint()}
-              >
-                {forkDialogBusy ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <GitFork className="size-4" />
-                )}
-                {forkDialogBusy
-                  ? selectingForkWorkspace
-                    ? "选择中"
-                    : "正在 fork"
-                  : forkDestinationMode === "workspace" && !forkWorkspacePath
-                    ? "选择工作区并 Fork"
-                    : "Fork"}
-              </Button>
-            </DialogFooter>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {forkDialogThread ? (
+        <ThreadForkCheckpointDialog
+          key={forkDialogThread.thread_id}
+          thread={forkDialogThread}
+          displayTitle={getDisplayThreadTitle(forkDialogThread)}
+          onClose={() => setForkDialogThread(null)}
+          onForked={(forkedThread) => markRead(forkedThread.thread_id)}
+          onForkingChange={handleForkCheckpointBusyChange}
+        />
+      ) : null}
       <Dialog open={!!threadToDelete} onOpenChange={(open) => !open && setThreadToDelete(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
