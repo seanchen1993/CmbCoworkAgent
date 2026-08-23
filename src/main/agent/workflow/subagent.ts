@@ -31,6 +31,7 @@ import {
   TRACE_REASONING_MAX_CHARS,
   truncateReasoningForTrace
 } from "../../../shared/model-reasoning"
+import { getAgentGraphRecursionLimit } from "../../../shared/agent-runtime-limits"
 
 const STRUCTURED_OUTPUT_FATAL_ERROR = Symbol.for("cmb.workflow.structured_output.fatal")
 // Explicitly marks a structured-output failure as "retry on a fresh session" so the
@@ -429,7 +430,7 @@ async function runOnce(
       // generation exceeds 60s (e.g. write_file of a large file). consumeValuesStream
       // skips non-"values" chunks, so the token stream is otherwise ignored.
       streamMode: ["values", "messages"] as Array<"values" | "messages">,
-      recursionLimit: 1000
+      recursionLimit: getAgentGraphRecursionLimit()
     }
     const stopAfterStructuredAccepted =
       request.schema === undefined

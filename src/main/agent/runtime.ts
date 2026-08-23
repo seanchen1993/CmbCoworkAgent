@@ -65,6 +65,12 @@ import {
   calculateSummarizationKeepTokens,
   calculateSummarizationTriggerTokens
 } from "../../shared/model-token-budget"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+import {
+  DEFAULT_AGENT_OUTPUT_STYLE,
+  resolveAgentOutputStyle,
+  type AgentOutputStyle
+} from "../../shared/agent-output-style"
 import {
   createAgent,
   createMiddleware,
@@ -95,6 +101,8 @@ import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
 import {
+  getOutputStylePrompt,
+  getOutputStyleTurnReminder,
   MEMORY_SYSTEM_PROMPT,
   renderBaseSystemPrompt,
   renderInjectedToolUsagePrompt,
@@ -1538,6 +1546,80 @@ export function createSkillHookContextMiddleware(
   })
 }
 
+export function createOutputStyleTurnReminderMiddleware(
+  outputStyle: AgentOutputStyle
+): ReturnType<typeof createMiddleware> {
+  const reminder = getOutputStyleTurnReminder(outputStyle)
+  const reminderContent = reminder ? `<system-reminder>\n${reminder}\n</system-reminder>` : null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const appendReminder = (content: any): any =>
+    typeof content === "string"
+      ? `${content}\n\n${reminderContent}`
+      : [...content, { type: "text" as const, text: reminderContent }]
+
+  return createMiddleware({
+    name: "outputStyleTurnReminder",
+    // Mirror Claude Code's output-style attachment normalization without
+    // persisting the reminder: merge into the current user turn, or smoosh into
+    // the last tool result. Never append a standalone HumanMessage after a tool
+    // result — compatible models can interpret that as a fresh user turn and
+    // stop the agent loop. Unexpected message shapes use an ephemeral system
+    // fallback so the reminder remains model-visible without changing history.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapModelCall: (request: any, handler: any) => {
+      if (!reminderContent) return handler(request)
+      const messages = Array.isArray(request.messages) ? request.messages : []
+      const lastMessage = messages[messages.length - 1]
+      const lastType = lastMessage?._getType?.()
+
+      if (lastMessage instanceof HumanMessage || lastType === "human") {
+        const outboundLastMessage = new HumanMessage({
+          content: appendReminder(lastMessage.content),
+          id: lastMessage.id,
+          name: lastMessage.name,
+          additional_kwargs: lastMessage.additional_kwargs,
+          response_metadata: lastMessage.response_metadata
+        })
+        return handler({
+          ...request,
+          messages: [...messages.slice(0, -1), outboundLastMessage]
+        })
+      }
+
+      if (lastMessage instanceof ToolMessage || lastType === "tool") {
+        const outboundLastMessage = new ToolMessage({
+          content: appendReminder(lastMessage.content),
+          tool_call_id: lastMessage.tool_call_id,
+          id: lastMessage.id,
+          name: lastMessage.name,
+          status: lastMessage.status,
+          artifact: lastMessage.artifact,
+          metadata: lastMessage.metadata,
+          additional_kwargs: lastMessage.additional_kwargs,
+          response_metadata: lastMessage.response_metadata
+        })
+        return handler({
+          ...request,
+          messages: [...messages.slice(0, -1), outboundLastMessage]
+        })
+      }
+
+      return handler({
+        ...request,
+        systemMessage: request.systemMessage
+          ? request.systemMessage.concat(`\n\n${reminderContent}`)
+          : new SystemMessage(reminderContent)
+      })
+    }
+  })
+}
+
+export function createConciseOutputStyleTurnReminderMiddleware(): ReturnType<
+  typeof createMiddleware
+> {
+  return createOutputStyleTurnReminderMiddleware("concise")
+}
+
 /** Best-effort extraction of the command string from an execute tool call's args
  * (object or JSON string). Returns null if not determinable — then we let the
  * call through (assessCommandSafety can't judge what it can't see, and the normal
@@ -1920,7 +2002,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     // adapter keeps createDeepAgent oblivious to that wiring.
     onToolFailureSignal,
     onFinalSystemPrompt,
-    onFailureFuseNotice
+    onFailureFuseNotice,
+    outputStyle,
+    conciseModeEnabled = false
   }: {
     onFinalSystemPrompt?: (prompt: string) => void
     onTaskSubagentPromptsResolved?: (prompts: Array<{ name: string; systemPrompt: string }>) => void
@@ -1937,8 +2021,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   const loopGuardsEnabled = areAgentLoopGuardsEnabled()
 
-  // --- systemPrompt handling (identical to original) ---
-  const finalSystemPrompt = systemPrompt
+  const effectiveOutputStyle = resolveAgentOutputStyle(outputStyle, conciseModeEnabled)
+  const outputStylePrompt = getOutputStylePrompt(effectiveOutputStyle)
+
+  // Preserve the existing assembled prompt exactly when the default style is selected.
+  const assembledSystemPrompt = systemPrompt
     ? typeof systemPrompt === "string"
       ? `${systemPrompt}\n\n${BASE_PROMPT}`
       : new SystemMessage({
@@ -1950,6 +2037,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           ]
         })
     : BASE_PROMPT
+  const finalSystemPrompt = outputStylePrompt
+    ? typeof assembledSystemPrompt === "string"
+      ? `${assembledSystemPrompt}\n\n${outputStylePrompt}`
+      : assembledSystemPrompt.concat(`\n\n${outputStylePrompt}`)
+    : assembledSystemPrompt
   if (typeof finalSystemPrompt === "string") {
     onFinalSystemPrompt?.(finalSystemPrompt)
   }
@@ -2585,6 +2677,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           })
         ]
       : []
+  const outputStyleTurnReminderMiddleware = outputStylePrompt
+    ? [createOutputStyleTurnReminderMiddleware(effectiveOutputStyle)]
+    : []
 
   return createAgent({
     model,
@@ -2652,6 +2747,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...memoryMiddlewareArray,
       ...(interruptOn ? [humanInTheLoopMiddleware({ interruptOn })] : []),
       ...customMiddleware,
+      ...outputStyleTurnReminderMiddleware,
       ...systemPromptPreviewCaptureMiddleware
     ],
     ...(responseFormat != null && { responseFormat }),
@@ -3987,6 +4083,10 @@ function applyDeployUnitMappingsToAgentmdLoadStatus(
 export interface CreateAgentRuntimeOptions {
   /** Thread ID - REQUIRED for per-thread checkpointing */
   threadId: string
+  /** Per-thread output style. Applied only to the foreground normal-mode main agent. */
+  outputStyle?: AgentOutputStyle
+  /** Legacy compatibility for threads created before outputStyle was introduced. */
+  conciseModeEnabled?: boolean
   /** Stable identity exposed to hooks for subagent/worker attribution. */
   agentId?: string
   /** Physical foreground run token allowed to drain the current-run steer queue. */
@@ -4218,6 +4318,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const approvalThreadId = requestedApprovalThreadId ?? threadId
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
+  const outputStyle =
+    agentMode === "normal"
+      ? resolveAgentOutputStyle(options.outputStyle, options.conciseModeEnabled === true)
+      : DEFAULT_AGENT_OUTPUT_STYLE
   const mainSubagentsEnabled = !isCoordinatorMode && !disableSubagents
 
   if (!threadId) {
@@ -5577,7 +5681,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         callbacks: [],
         signal: workerInput.abortSignal,
         streamMode: ["messages", "values"] as ("messages" | "values")[],
-        recursionLimit: 1000
+        recursionLimit: getAgentGraphRecursionLimit()
       }
       const consumeWorkerStream = async (stream: AsyncIterable<unknown>): Promise<void> => {
         for await (const chunk of stream) {
@@ -6208,6 +6312,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     checkpointer,
     backend,
     systemPrompt,
+    outputStyle,
     onFinalSystemPrompt,
     filesystemSystemPrompt,
     subagentExtraSystemPrompt: taskSubagentExtraSystemPrompt,
