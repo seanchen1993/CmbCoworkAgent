@@ -118,6 +118,7 @@ import type {
   WindowCloseBehavior
 } from "../shared/close-to-tray"
 import type { ChatScrollSettings } from "../shared/chat-scroll"
+import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
@@ -138,6 +139,10 @@ interface ElectronAPI {
   getChatScrollSettings: () => Promise<ChatScrollSettings>
   setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
   onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
+  getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void

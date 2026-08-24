@@ -327,6 +327,68 @@ exec "$CMB_REAL_GIT" "$@"
   }
 }
 
+async function testSourceSnapshotHonorsWorkflowCancellation(): Promise<void> {
+  const repo = makeRepo()
+  const wrapperRoot = makeAppDataRoot()
+  try {
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim()
+    const wrapper = join(wrapperRoot, "git")
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--porcelain=v2" ]; then
+    exec sleep 30
+  fi
+done
+exec "$CMB_REAL_GIT" "$@"
+`
+    )
+    chmodSync(wrapper, 0o755)
+    const moduleUrl = pathToFileURL(
+      join(process.cwd(), "src", "main", "services", "git-worktree.ts")
+    ).href
+    const probe = `
+      const { prepareWorkflowWorktreeSource } = await import(${JSON.stringify(moduleUrl)});
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 100);
+      const startedAt = Date.now();
+      try {
+        await prepareWorkflowWorktreeSource(${JSON.stringify(repo)}, controller.signal);
+        console.log(JSON.stringify({ ok: true, elapsedMs: Date.now() - startedAt }));
+      } catch (error) {
+        console.log(JSON.stringify({
+          ok: false,
+          elapsedMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error)
+        }));
+      }
+    `
+    const output = execFileSync(
+      process.execPath,
+      [...process.execArgv, "--input-type=module", "-e", probe],
+      {
+        encoding: "utf8",
+        timeout: 5_000,
+        env: {
+          ...process.env,
+          PATH: `${wrapperRoot}:${process.env.PATH ?? ""}`,
+          CMB_REAL_GIT: realGit
+        }
+      }
+    ).trim()
+    const result = JSON.parse(output) as { ok: boolean; elapsedMs: number; error?: string }
+    assert(!result.ok, `cancelled source capture must fail, got ${output}`)
+    assert(
+      result.elapsedMs < 3_000,
+      `cancelled source capture must not wait for the configured long timeout, got ${output}`
+    )
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(wrapperRoot, { recursive: true, force: true })
+  }
+}
+
 async function testWorkspaceHookFilesAreMaterializedWithoutDirtyingWorktree(): Promise<void> {
   const repo = makeRepo()
   const appDataRoot = makeAppDataRoot()
@@ -1305,6 +1367,108 @@ async function testDiffMergeAndDiscardOperations(): Promise<void> {
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(appDataRoot, { recursive: true, force: true })
+  }
+}
+
+async function testCancellationAfterSourceAdvanceStillFinishesMerge(): Promise<void> {
+  const repo = makeRepo()
+  const appDataRoot = makeAppDataRoot()
+  const wrapperRoot = makeAppDataRoot()
+  try {
+    const ledger = new WorkflowWorktreeLedger({
+      workspacePath: repo,
+      runId: "wf_cancel_after_advance",
+      appDataRoot
+    })
+    const info = await ledger.acquire("cancel-after-advance")
+    writeFileSync(join(info.directory, "delivered.txt"), "delivered\n")
+    git(info.directory, ["add", "delivered.txt"])
+    git(info.directory, ["commit", "-m", "deliver before cancellation"])
+    await ledger.settle(info, { succeeded: true })
+    const ready = (await listWorkflowWorktreeRecords(info.commonDir, appDataRoot)).find(
+      (record) => record.id === info.name
+    )
+    assert(ready?.status === "ready", "committed deliverable should be ready before merge")
+
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim()
+    const wrapper = join(wrapperRoot, "git")
+    const signalMarker = join(wrapperRoot, "cancelled-after-update-ref")
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh
+is_update_ref=0
+for arg in "$@"; do
+  if [ "$arg" = "update-ref" ]; then is_update_ref=1; fi
+done
+"$CMB_REAL_GIT" "$@"
+code=$?
+if [ "$code" -eq 0 ] && [ "$is_update_ref" -eq 1 ] && [ ! -e "$CMB_SIGNAL_MARKER" ]; then
+  : > "$CMB_SIGNAL_MARKER"
+  kill -USR2 "$PPID"
+fi
+exit "$code"
+`
+    )
+    chmodSync(wrapper, 0o755)
+
+    const moduleUrl = pathToFileURL(
+      join(process.cwd(), "src", "main", "services", "git-worktree.ts")
+    ).href
+    const probe = `
+      const { mergeWorkflowWorktree } = await import(${JSON.stringify(moduleUrl)});
+      const controller = new AbortController();
+      process.once("SIGUSR2", () => controller.abort());
+      try {
+        const outcome = await mergeWorkflowWorktree({
+          workspacePath: ${JSON.stringify(repo)},
+          record: ${JSON.stringify(ready)},
+          appDataRoot: ${JSON.stringify(appDataRoot)},
+          signal: controller.signal
+        });
+        console.log(JSON.stringify({
+          ok: true,
+          status: outcome.record.status,
+          aborted: controller.signal.aborted
+        }));
+      } catch (error) {
+        console.log(JSON.stringify({
+          ok: false,
+          aborted: controller.signal.aborted,
+          error: error instanceof Error ? error.message : String(error)
+        }));
+      }
+    `
+    const output = execFileSync(
+      process.execPath,
+      [...process.execArgv, "--input-type=module", "-e", probe],
+      {
+        encoding: "utf8",
+        timeout: 15_000,
+        env: {
+          ...process.env,
+          PATH: `${wrapperRoot}:${process.env.PATH ?? ""}`,
+          CMB_REAL_GIT: realGit,
+          CMB_SIGNAL_MARKER: signalMarker
+        }
+      }
+    ).trim()
+    const result = JSON.parse(output) as {
+      ok: boolean
+      status?: string
+      aborted: boolean
+      error?: string
+    }
+    assert(result.aborted, `test must cancel immediately after update-ref, got ${output}`)
+    assert(result.ok, `post-CAS cancellation must not fail the completed merge: ${output}`)
+    assert(result.status === "merged", `post-CAS cancellation must finish as merged: ${output}`)
+    assert(
+      readFileSync(join(repo, "delivered.txt"), "utf8") === "delivered\n",
+      "the source checkout must contain the integrated deliverable"
+    )
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(appDataRoot, { recursive: true, force: true })
+    rmSync(wrapperRoot, { recursive: true, force: true })
   }
 }
 
@@ -3013,6 +3177,7 @@ async function main(): Promise<void> {
   await testDetachedSourceFailsBeforeProvisioning()
   await testCreateDoesNotMutateGitConfig()
   await testSourceSnapshotRejectsConcurrentBranchSwitch()
+  await testSourceSnapshotHonorsWorkflowCancellation()
   await testWorkspaceHookFilesAreMaterializedWithoutDirtyingWorktree()
   await testTrackedWorkspaceHookSymlinkStaysPristine()
   await testDirtySourceFailsClosed()
@@ -3035,6 +3200,7 @@ async function main(): Promise<void> {
   await testLedgerRetriesSourcePreparationAfterFailure()
   await testLedgerFreezesFanoutBase()
   await testDiffMergeAndDiscardOperations()
+  await testCancellationAfterSourceAdvanceStillFinishesMerge()
   await testConcurrentActionsStayMonotonic()
   await testAtomicIntegrationCrashWindowIsRecoverable()
   await testMergedTerminalStateSurvivesCleanupPersistenceFailure()
@@ -3065,7 +3231,7 @@ async function main(): Promise<void> {
   testWorktreePromptMatchesRuntimeBoundary()
   testGitEnvironmentOverridesAreRemoved()
 
-  console.log("PASS workflow-worktree (58 tests)")
+  console.log("PASS workflow-worktree (60 tests)")
 }
 
 main().catch((error) => {

@@ -26,6 +26,7 @@ import { emitAppAttention } from "../app-attention-events"
 import { trackEvent } from "./event-reporter"
 import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 // A cleared timeout may already have a callback queued in the event loop. Each
@@ -417,7 +418,7 @@ async function executeHeartbeat(): Promise<void> {
         configurable: { thread_id: threadId },
         signal: controller.signal,
         streamMode: ["messages", "values"],
-        recursionLimit: 1000
+        recursionLimit: getAgentGraphRecursionLimit()
       }
     )
 

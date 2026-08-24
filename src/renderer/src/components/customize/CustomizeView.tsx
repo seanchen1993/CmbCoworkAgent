@@ -160,7 +160,9 @@ export function CustomizeView(): React.JSX.Element {
   const { setShowCustomizeView, customizeInitialTab, pendingEvolution, currentThreadId, threads } =
     useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
-    customizeInitialTab === "commitPolicy" ? "skills" : (customizeInitialTab as CustomizeTab) || "skills"
+    customizeInitialTab === "commitPolicy"
+      ? "skills"
+      : (customizeInitialTab as CustomizeTab) || "general"
   )
   const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>({
     basic: true,
@@ -180,7 +182,9 @@ export function CustomizeView(): React.JSX.Element {
     let cancelled = false
     queueMicrotask(() => {
       if (!cancelled) {
-        setActiveTab(customizeInitialTab === "commitPolicy" ? "skills" : customizeInitialTab as CustomizeTab)
+        setActiveTab(
+          customizeInitialTab === "commitPolicy" ? "skills" : (customizeInitialTab as CustomizeTab)
+        )
       }
     })
     return () => {

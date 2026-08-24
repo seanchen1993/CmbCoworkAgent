@@ -8,6 +8,7 @@ import {
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
 import type { ChatScrollSettings } from "../shared/chat-scroll"
+import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 import type {
   Thread,
   Message,
@@ -188,6 +189,10 @@ const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed
 const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
 const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
 const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
+const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
@@ -260,6 +265,23 @@ const electronAPI = {
     ipcRenderer.on(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
     return () => ipcRenderer.removeListener(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
   },
+  getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(AGENT_RUNTIME_SETTINGS_GET_CHANNEL) as Promise<AgentRuntimeSettings>,
+  setAgentRuntimeRecursionLimit: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
+  setWorkflowWorktreeTimeoutMinutes: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
+  setWorkflowWorktreeRemoveTimeoutMinutes: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
       callback(data)

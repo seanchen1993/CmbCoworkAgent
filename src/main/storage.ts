@@ -30,6 +30,14 @@ import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./ty
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
 import { normalizeChatScrollSettings, type ChatScrollSettings } from "../shared/chat-scroll"
+import {
+  isAgentGraphRecursionLimit,
+  isWorkflowWorktreeRemoveTimeoutMinutes,
+  isWorkflowWorktreeTimeoutMinutes,
+  normalizeAgentGraphRecursionLimit,
+  normalizeWorkflowWorktreeRemoveTimeoutMinutes,
+  normalizeWorkflowWorktreeTimeoutMinutes
+} from "../shared/agent-runtime-limits"
 import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -1487,6 +1495,72 @@ export function setChatScrollSettings(settings: Partial<ChatScrollSettings>): Ch
   const normalized = normalizeChatScrollSettings(settings)
   getSettingsStore().set(CHAT_SCROLL_SETTINGS_KEY, normalized)
   return normalized
+}
+
+const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"
+
+export function getStoredAgentGraphRecursionLimit(): number {
+  try {
+    return normalizeAgentGraphRecursionLimit(
+      getSettingsStore().get(AGENT_GRAPH_RECURSION_LIMIT_KEY)
+    )
+  } catch (error) {
+    console.warn("[Storage] Failed to load agent graph recursion limit; using default:", error)
+    return normalizeAgentGraphRecursionLimit(undefined)
+  }
+}
+
+export function setStoredAgentGraphRecursionLimit(value: unknown): number {
+  if (!isAgentGraphRecursionLimit(value)) {
+    throw new Error("Agent graph recursion limit must be an integer between 25 and 100000")
+  }
+  getSettingsStore().set(AGENT_GRAPH_RECURSION_LIMIT_KEY, value)
+  return value
+}
+
+const WORKFLOW_WORKTREE_TIMEOUT_MINUTES_KEY = "workflowWorktreeTimeoutMinutes"
+
+export function getStoredWorkflowWorktreeTimeoutMinutes(): number {
+  try {
+    return normalizeWorkflowWorktreeTimeoutMinutes(
+      getSettingsStore().get(WORKFLOW_WORKTREE_TIMEOUT_MINUTES_KEY)
+    )
+  } catch (error) {
+    console.warn("[Storage] Failed to load workflow worktree timeout; using default:", error)
+    return normalizeWorkflowWorktreeTimeoutMinutes(undefined)
+  }
+}
+
+export function setStoredWorkflowWorktreeTimeoutMinutes(value: unknown): number {
+  if (!isWorkflowWorktreeTimeoutMinutes(value)) {
+    throw new Error("Workflow worktree timeout must be an integer between 1 and 120 minutes")
+  }
+  getSettingsStore().set(WORKFLOW_WORKTREE_TIMEOUT_MINUTES_KEY, value)
+  return value
+}
+
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_KEY = "workflowWorktreeRemoveTimeoutMinutes"
+
+export function getStoredWorkflowWorktreeRemoveTimeoutMinutes(): number {
+  try {
+    return normalizeWorkflowWorktreeRemoveTimeoutMinutes(
+      getSettingsStore().get(WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_KEY)
+    )
+  } catch (error) {
+    console.warn(
+      "[Storage] Failed to load workflow worktree removal timeout; using default:",
+      error
+    )
+    return normalizeWorkflowWorktreeRemoveTimeoutMinutes(undefined)
+  }
+}
+
+export function setStoredWorkflowWorktreeRemoveTimeoutMinutes(value: unknown): number {
+  if (!isWorkflowWorktreeRemoveTimeoutMinutes(value)) {
+    throw new Error("Workflow worktree removal timeout must be an integer between 1 and 10 minutes")
+  }
+  getSettingsStore().set(WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_KEY, value)
+  return value
 }
 
 /** Enabled expert-library agent names (专家团 opt-ins), persisted in the shared

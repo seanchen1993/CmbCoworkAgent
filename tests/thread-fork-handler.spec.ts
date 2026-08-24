@@ -1085,6 +1085,8 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
       title: "Source thread",
       model: "test-model",
       memoryEnabled: true,
+      conciseModeEnabled: true,
+      outputStyle: "learning",
       agentMode: "normal"
     })
     db.updateThread(sourceThreadId, {
@@ -1154,6 +1156,16 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
     assert.equal(forked.sourceThreadId, sourceThreadId, "response should identify the source")
     assert.equal(forked.sourceCheckpointId, checkpointId, "response should identify checkpoint")
     assert.equal(forked.sourceCheckpointNs, "", "fork should stay in the root checkpoint namespace")
+    assert.equal(
+      forked.thread.metadata?.conciseModeEnabled,
+      true,
+      "fork should preserve an explicitly enabled concise mode"
+    )
+    assert.equal(
+      forked.thread.metadata?.outputStyle,
+      "learning",
+      "fork should preserve a valid explicit output style"
+    )
 
     const targetRow = db.getThread(targetThreadId)
     assert(targetRow, "target thread row should exist")

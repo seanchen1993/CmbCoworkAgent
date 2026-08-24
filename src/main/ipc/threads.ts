@@ -81,6 +81,7 @@ import {
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
+import { isAgentOutputStyle } from "../../shared/agent-output-style"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import {
   deleteProjectThreadDataDirectory,
@@ -1024,6 +1025,43 @@ function copyForkGitMetadataIfWorkspaceMatches(input: {
   if (gitContext) targetMetadata.gitContext = gitContext
 }
 
+function copyForkHarnessMetadata(input: {
+  sourceMetadata: Record<string, unknown>
+  targetMetadata: Record<string, unknown>
+}): void {
+  const { sourceMetadata, targetMetadata } = input
+  const harnessFeature = sourceMetadata.harnessFeature
+  const hasHarnessFeature =
+    isPlainRecord(harnessFeature) &&
+    typeof harnessFeature.projectId === "string" &&
+    harnessFeature.projectId.trim().length > 0 &&
+    typeof harnessFeature.slug === "string" &&
+    harnessFeature.slug.trim().length > 0
+
+  if (hasHarnessFeature) {
+    targetMetadata.harnessFeature = { ...harnessFeature }
+  }
+
+  const harnessProjectSession = sourceMetadata.harnessProjectSession
+  const hasHarnessProjectSession =
+    isPlainRecord(harnessProjectSession) &&
+    typeof harnessProjectSession.projectId === "string" &&
+    harnessProjectSession.projectId.trim().length > 0 &&
+    typeof harnessProjectSession.kind === "string" &&
+    harnessProjectSession.kind.trim().length > 0
+
+  if (hasHarnessProjectSession) {
+    targetMetadata.harnessProjectSession = { ...harnessProjectSession }
+  }
+
+  if (
+    (hasHarnessFeature || hasHarnessProjectSession) &&
+    typeof sourceMetadata.disableAgentsPrompt === "boolean"
+  ) {
+    targetMetadata.disableAgentsPrompt = sourceMetadata.disableAgentsPrompt
+  }
+}
+
 function isValidForkWorkspacePath(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0
 }
@@ -1200,6 +1238,7 @@ function buildForkMetadata(input: {
     workspacePath,
     hasWorkspacePathOverride
   })
+  copyForkHarnessMetadata({ sourceMetadata, targetMetadata: next })
 
   const model = overrides?.model ?? sourceMetadata.model
   if (typeof model === "string" && model.trim()) next.model = model
@@ -1214,6 +1253,11 @@ function buildForkMetadata(input: {
 
   const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
   if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
+
+  if (isAgentOutputStyle(sourceMetadata.outputStyle)) {
+    next.outputStyle = sourceMetadata.outputStyle
+  }
+  if (sourceMetadata.conciseModeEnabled === true) next.conciseModeEnabled = true
 
   const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
   next.title = nextTitle
