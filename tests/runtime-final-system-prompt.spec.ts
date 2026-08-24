@@ -24,7 +24,8 @@ import {
   EXPLANATORY_OUTPUT_STYLE_PROMPT,
   EXPLANATORY_OUTPUT_STYLE_TURN_REMINDER,
   LEARNING_OUTPUT_STYLE_PROMPT,
-  LEARNING_OUTPUT_STYLE_TURN_REMINDER
+  LEARNING_OUTPUT_STYLE_TURN_REMINDER,
+  OUTPUT_STYLE_IDENTITY_PROMPT
 } from "../src/main/agent/system-prompt.ts"
 import type { HarnessFeatureAgentContext } from "../src/main/harness-board/service.ts"
 import type { AgentOutputStyle } from "../src/shared/agent-output-style.ts"
@@ -439,11 +440,16 @@ async function testConciseOutputStyleContract(): Promise<void> {
     !defaultPrompt.includes(CONCISE_OUTPUT_STYLE_PROMPT),
     "disabled concise mode must not inject the output style"
   )
+  assert(
+    !defaultPrompt.includes(OUTPUT_STYLE_IDENTITY_PROMPT),
+    "default mode must preserve the original identity framing"
+  )
 
   const concisePrompt = captureFinalSystemPrompt(runtimePrompt, true)
   assert(
-    concisePrompt === `${defaultPrompt}\n\n${CONCISE_OUTPUT_STYLE_PROMPT}`,
-    "enabled concise mode should append the style after the fully assembled system prompt"
+    concisePrompt ===
+      `${OUTPUT_STYLE_IDENTITY_PROMPT}\n\n${defaultPrompt}\n\n${CONCISE_OUTPUT_STYLE_PROMPT}`,
+    "enabled concise mode should use Claude Code's output-style identity framing"
   )
   assert(
     countOccurrences(concisePrompt, CONCISE_OUTPUT_STYLE_PROMPT) === 1,
@@ -716,8 +722,8 @@ async function testAdditionalOutputStyleContracts(): Promise<void> {
   for (const { style, prompt, reminder } of styles) {
     const styledPrompt = captureFinalSystemPrompt(runtimePrompt, false, style)
     assert(
-      styledPrompt === `${defaultPrompt}\n\n${prompt}`,
-      `${style} should append its full style after the assembled system prompt`
+      styledPrompt === `${OUTPUT_STYLE_IDENTITY_PROMPT}\n\n${defaultPrompt}\n\n${prompt}`,
+      `${style} should use Claude Code's output-style identity framing`
     )
     assert(
       countOccurrences(styledPrompt, prompt) === 1,
@@ -751,6 +757,10 @@ async function testAdditionalOutputStyleContracts(): Promise<void> {
   ]) {
     assert(!defaultPrompt.includes(prompt), "default output style must not inject any style prompt")
   }
+  assert(
+    !defaultPrompt.includes(OUTPUT_STYLE_IDENTITY_PROMPT),
+    "default output style must not inject Claude Code's style identity framing"
+  )
 }
 
 function printFinalPrompt(label: string, prompt: string): void {

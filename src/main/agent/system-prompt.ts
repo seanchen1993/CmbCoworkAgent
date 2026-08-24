@@ -7,6 +7,9 @@
  */
 import type { AgentOutputStyle } from "../../shared/agent-output-style"
 
+export const OUTPUT_STYLE_IDENTITY_PROMPT =
+  'You are an interactive agent that helps users according to your "Output Style" below, which describes how you should respond to user queries. Use the instructions below and the tools available to you to assist the user.'
+
 const SUBAGENT_SYSTEM_PROMPT_SECTION = `## Working with Subagents (task tool)
 When delegating to subagents:
 - **Use filesystem for large I/O**: If input/output is large (>500 words), communicate via files
@@ -121,6 +124,7 @@ Example TodoList flow:
 ### After Contributions
 Share one insight connecting their code to broader patterns or system effects. Avoid praise or repetition.
 
+## Insights
 ${EXPLANATORY_FEATURE_PROMPT}`
 
 export const LEARNING_OUTPUT_STYLE_TURN_REMINDER =

@@ -104,6 +104,7 @@ import {
   getOutputStylePrompt,
   getOutputStyleTurnReminder,
   MEMORY_SYSTEM_PROMPT,
+  OUTPUT_STYLE_IDENTITY_PROMPT,
   renderBaseSystemPrompt,
   renderInjectedToolUsagePrompt,
   renderAvailableDeferredToolsPrompt
@@ -2039,8 +2040,16 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     : BASE_PROMPT
   const finalSystemPrompt = outputStylePrompt
     ? typeof assembledSystemPrompt === "string"
-      ? `${assembledSystemPrompt}\n\n${outputStylePrompt}`
-      : assembledSystemPrompt.concat(`\n\n${outputStylePrompt}`)
+      ? `${OUTPUT_STYLE_IDENTITY_PROMPT}\n\n${assembledSystemPrompt}\n\n${outputStylePrompt}`
+      : new SystemMessage({
+          content: [
+            { type: "text" as const, text: OUTPUT_STYLE_IDENTITY_PROMPT },
+            ...(typeof assembledSystemPrompt.content === "string"
+              ? [{ type: "text" as const, text: assembledSystemPrompt.content }]
+              : assembledSystemPrompt.content),
+            { type: "text" as const, text: outputStylePrompt }
+          ]
+        })
     : assembledSystemPrompt
   if (typeof finalSystemPrompt === "string") {
     onFinalSystemPrompt?.(finalSystemPrompt)

@@ -147,9 +147,12 @@ function OutputStyleSwitcherImpl({
           disabled={disabled || Boolean(pendingStyle)}
           aria-label={`当前会话表达风格：${activeOption.label}`}
           title={`当前会话表达风格：${activeOption.label}（仅 Solo/Multi）`}
-          className="h-8 gap-1.5 px-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+          className={cn(
+            "h-8 gap-1.5 px-1.5 text-xs transition-colors hover:bg-muted/60",
+            activeOption.iconClassName
+          )}
         >
-          <span className={cn("grid size-5 place-items-center", activeOption.iconClassName)}>
+          <span className="grid size-5 place-items-center">
             {pendingStyle ? (
               <Loader2 className="size-3.5 animate-spin" />
             ) : (
