@@ -42,7 +42,10 @@ export class WorkflowWorktreeLedger {
    * promise, so a later branch switch cannot split one run across baselines. */
   private source(): Promise<WorkflowWorktreeSource> {
     if (!this.sourcePromise) {
-      const pending = prepareWorkflowWorktreeSource(this.options.workspacePath)
+      const pending = prepareWorkflowWorktreeSource(
+        this.options.workspacePath,
+        this.options.signal
+      )
       this.sourcePromise = pending
       // A transient dirty/read failure happened before any base was frozen or
       // checkout was created. Let a later isolated call retry after the user

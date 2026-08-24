@@ -58,6 +58,7 @@ import {
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
+import { isAgentOutputStyle } from "../../shared/agent-output-style"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import {
   deleteProjectThreadDataDirectory,
@@ -961,6 +962,11 @@ function buildForkMetadata(input: {
 
   const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
   if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
+
+  if (isAgentOutputStyle(sourceMetadata.outputStyle)) {
+    next.outputStyle = sourceMetadata.outputStyle
+  }
+  if (sourceMetadata.conciseModeEnabled === true) next.conciseModeEnabled = true
 
   const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
   next.title = nextTitle
