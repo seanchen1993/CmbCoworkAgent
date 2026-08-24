@@ -19,6 +19,8 @@ type AgentRunImplementation = (
   delivery: AgentRunDelivery
 ) => Promise<void>
 
+type ActiveAgentRunInspector = (threadId: string) => boolean
+
 /**
  * Runtime injection keeps this service independent from the IPC-heavy agent.ts module:
  * agent.ts registers the implementation during Main startup, while IPC and managed-mode
@@ -27,9 +29,18 @@ type AgentRunImplementation = (
  * ESM import cycle.
  */
 let agentRunImplementation: AgentRunImplementation | null = null
+let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 
 export function registerAgentRunImplementation(implementation: AgentRunImplementation): void {
   agentRunImplementation = implementation
+}
+
+export function registerActiveAgentRunInspector(inspector: ActiveAgentRunInspector): void {
+  activeAgentRunInspector = inspector
+}
+
+export function hasActiveTopLevelAgentRun(threadId: string): boolean {
+  return activeAgentRunInspector(threadId)
 }
 
 export function createBrowserWindowAgentRunDelivery(window: BrowserWindow): AgentRunDelivery {

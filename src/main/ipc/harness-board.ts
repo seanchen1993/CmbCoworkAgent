@@ -1,4 +1,4 @@
-import type { IpcMain } from "electron"
+import { BrowserWindow, type IpcMain } from "electron"
 import {
   archiveHarnessProject,
   createHarnessFeature,
@@ -11,6 +11,7 @@ import {
   getHarnessKnowledgePreview,
   getHarnessLocalAgentmdDeployUnitMappings,
   getHarnessProjectPublicAgentmdDeployUnits,
+  getHarnessProjectRootPath,
   getHarnessRunDetail,
   listHarnessAdapters,
   listHarnessProjects,
@@ -21,7 +22,6 @@ import {
   skipHarnessRunNode,
   syncHarnessProjectConstraints,
   updateHarnessFeatureDeployUnits,
-  updateHarnessFeatureAutoMode,
   updateHarnessProjectMetadata,
   resolveHarnessRunDetailCurrentStage
 } from "../harness-board/service"
@@ -34,6 +34,11 @@ import {
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
 import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
+import { managedRunStore } from "../harness-board/managed-run-store"
+import {
+  createBrowserWindowAgentRunDelivery
+} from "../agent/agent-run-service"
+import { managedRunController } from "../harness-board/managed-run-controller"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import {
@@ -66,10 +71,17 @@ import type {
   HarnessDynamicWorkflowConfig,
   HarnessKnowledgePreviewResult,
   HarnessFeatureDeployUnitBinding,
-  HarnessFeatureAutoModeUpdateInput,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
+} from "../../shared/harness-board-types"
+import type {
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunStartInput,
+  ManagedRunStopInput,
+  ManagedRunSummary
 } from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
@@ -209,12 +221,21 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
-    "harnessBoard:updateFeatureAutoMode",
-    async (
-      _event,
-      input: HarnessFeatureAutoModeUpdateInput
-    ): Promise<HarnessFeatureDeployUnitBinding> => {
-      return updateHarnessFeatureAutoMode(input)
+    "harnessBoard:startManagedRun",
+    async (event, input: ManagedRunStartInput): Promise<ManagedRunSummary> => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (!window) throw new Error("没有可用的应用主窗口，无法开始托管")
+      return managedRunController.start({
+        ...input,
+        delivery: createBrowserWindowAgentRunDelivery(window)
+      })
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:stopManagedRun",
+    async (_event, input: ManagedRunStopInput): Promise<boolean> => {
+      return managedRunController.stop(input)
     }
   )
 
@@ -266,7 +287,9 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:deleteProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
+      const projectDirectory = getHarnessProjectRootPath(projectId)
       const deleted = deleteHarnessProject(projectId)
+      managedRunStore.removeProject(projectId, projectDirectory)
       // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
       // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
       void purgeProjectAnalytics(projectId)
@@ -340,6 +363,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         { projectId: payload.projectId, featureSlug: payload.slug }
       )
       return detail
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getManagedRunEvents",
+    async (
+      _event,
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ): Promise<ManagedRunEventsPage> => {
+      return managedRunStore.listEvents(input, input.cursor, input.limit)
     }
   )
 

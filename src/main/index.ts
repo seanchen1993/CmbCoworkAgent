@@ -239,6 +239,12 @@ import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
+import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
+import {
+  getHarnessProjectRootPath,
+  listHarnessManagedRunProjectDirectories
+} from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
@@ -795,6 +801,11 @@ if (!gotTheLock) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
+    configureManagedRunProjectDirectories({
+      resolveProjectDirectory: getHarnessProjectRootPath,
+      listProjectDirectories: listHarnessManagedRunProjectDirectories
+    })
+
     // Periodically upsert Harness Board project/feature status into the event
     // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
     // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
@@ -803,6 +814,7 @@ if (!gotTheLock) {
 
     // Initialize database
     await initializeDatabase()
+    recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)

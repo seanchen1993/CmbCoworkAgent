@@ -89,7 +89,6 @@ import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessFeatureDeployUnitBinding,
-  HarnessFeatureAutoModeUpdateInput,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -101,9 +100,16 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
-  AutoModeStateChangedEvent,
   HarnessDynamicWorkflowConfig,
-  HarnessWatchRefChangedEvent
+  HarnessWatchRefChangedEvent,
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunChangeEvent,
+  ManagedRunStartInput,
+  ManagedRunStopInput,
+  ManagedRunSummary,
+  ManagedRunThreadCreatedEvent
 } from "../shared/harness-board-types"
 import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
@@ -3730,13 +3736,10 @@ const api = {
         "harnessBoard:updateFeatureDeployUnits",
         input
       ) as Promise<HarnessFeatureDeployUnitBinding>,
-    updateFeatureAutoMode: (
-      input: HarnessFeatureAutoModeUpdateInput
-    ): Promise<HarnessFeatureDeployUnitBinding> =>
-      ipcRenderer.invoke(
-        "harnessBoard:updateFeatureAutoMode",
-        input
-      ) as Promise<HarnessFeatureDeployUnitBinding>,
+    startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>
+      ipcRenderer.invoke("harnessBoard:startManagedRun", input) as Promise<ManagedRunSummary>,
+    stopManagedRun: (input: ManagedRunStopInput): Promise<boolean> =>
+      ipcRenderer.invoke("harnessBoard:stopManagedRun", input) as Promise<boolean>,
     getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
       ipcRenderer.invoke(
         "harnessBoard:getDynamicWorkflowConfig",
@@ -3792,19 +3795,28 @@ const api = {
       ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<
         string | null
       >,
+    getManagedRunEvents: (
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ): Promise<ManagedRunEventsPage> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRunEvents", input) as Promise<ManagedRunEventsPage>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
       const handler = (_event: unknown, payload: HarnessWatchRefChangedEvent): void =>
         callback(payload)
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
     },
-    onAutoModeStateChanged: (
-      callback: (event: AutoModeStateChangedEvent) => void
+    onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void): (() => void) => {
+      const handler = (_event: unknown, payload: ManagedRunChangeEvent): void => callback(payload)
+      ipcRenderer.on("harnessBoard:managedRunChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:managedRunChanged", handler)
+    },
+    onManagedRunThreadCreated: (
+      callback: (event: ManagedRunThreadCreatedEvent) => void
     ): (() => void) => {
-      const handler = (_event: unknown, payload: AutoModeStateChangedEvent): void =>
+      const handler = (_event: unknown, payload: ManagedRunThreadCreatedEvent): void =>
         callback(payload)
-      ipcRenderer.on("harnessBoard:autoModeStateChanged", handler)
-      return () => ipcRenderer.removeListener("harnessBoard:autoModeStateChanged", handler)
+      ipcRenderer.on("harnessBoard:managedRunThreadCreated", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
     }
   },
   update: {

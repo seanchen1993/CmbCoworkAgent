@@ -66,12 +66,9 @@ import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
-  AUTO_MODE_CANCELLED_MESSAGE,
-  AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY,
   normalizeHarnessAgentmdLoadStatus,
   type HarnessAgentmdLoadStatusItem,
-  type ManagedAutoSendStreamStartEvent,
-  type PendingAutoDraft
+  type ManagedAutoSendStreamStartEvent
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
@@ -147,7 +144,6 @@ import {
 import { mergeSubagentSnapshotWithHistory } from "./subagent-state"
 import { disableChatReportUploadForThread } from "./chat-report-upload-cache"
 import { queueStorageKey } from "./queued-message-content"
-import { resolveHarnessNextActionSkill } from "./harness-next-action"
 
 const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
@@ -162,30 +158,6 @@ type LiveMessageTimeMap = Record<string, { start_at: Date; end_at?: Date }>
 type PendingVisibleMessageCommit = {
   message: Message
   time: MessageTimeMap[string]
-}
-
-function readPendingAutoDraft(
-  threadId: string,
-  threadValues?: Record<string, unknown>
-): PendingAutoDraft | null {
-  const value = threadValues?.[AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY]
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  if (record.targetThreadId !== threadId) return null
-  const slashSkill = typeof record.slashSkill === "string" ? record.slashSkill.trim() : ""
-  const userMessage = typeof record.userMessage === "string" ? record.userMessage : undefined
-  return {
-    targetThreadId: threadId,
-    ...(slashSkill ? { slashSkill } : {}),
-    ...(userMessage !== undefined ? { userMessage } : {})
-  }
-}
-
-function readHarnessProjectId(metadata?: Record<string, unknown>): string | null {
-  const value = metadata?.harnessFeature
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null
-  const projectId = (value as Record<string, unknown>).projectId
-  return typeof projectId === "string" && projectId.trim() ? projectId.trim() : null
 }
 
 type LiveStreamAccumulator = {
@@ -2441,48 +2413,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     []
   )
 
-  const restorePendingAutoDraft = useCallback(
-    async (
-      threadId: string,
-      metadata?: Record<string, unknown>,
-      threadValues?: Record<string, unknown>
-    ): Promise<void> => {
-      const pendingDraft = readPendingAutoDraft(threadId, threadValues)
-      if (!pendingDraft) return
-
-      let draftSkill: SkillMetadata | null = null
-      if (pendingDraft.slashSkill) {
-        const projectId = readHarnessProjectId(metadata)
-        if (!projectId) {
-          console.warn(
-            `[ThreadContext] Cannot restore managed draft for ${threadId}: missing Harness project`
-          )
-          return
-        }
-        draftSkill = await resolveHarnessNextActionSkill(projectId, pendingDraft.slashSkill)
-        if (!draftSkill) {
-          console.warn(
-            `[ThreadContext] Cannot restore managed draft for ${threadId}: skill ${pendingDraft.slashSkill} is unavailable`
-          )
-          return
-        }
-      }
-
-      const currentState =
-        threadStatesRef.current[threadId] ?? normalizeThreadState(createDefaultThreadState())
-      if (currentState.draftInput.trim() || currentState.draftSkill) return
-
-      updateThreadState(threadId, () => ({
-        draftInput: pendingDraft.userMessage ?? "",
-        draftSkill
-      }))
-      await window.api.threads.mergeThreadValues(threadId, {
-        [AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY]: null
-      })
-    },
-    [updateThreadState]
-  )
-
   const saveSubagentTranscripts = useCallback(
     (
       threadId: string,
@@ -4712,9 +4642,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             subagentTranscriptHydrationSucceeded = true
           }
           const metadata = thread.metadata || {}
-          void restorePendingAutoDraft(threadId, metadata, thread.thread_values).catch((error) => {
-            console.warn(`[ThreadContext] Failed to restore managed draft for ${threadId}:`, error)
-          })
           actions.setGitContext(getGitContextFromMetadata(metadata))
           if (metadata.workspacePath) {
             const workspacePath = metadata.workspacePath as string
@@ -5240,7 +5167,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       handleStreamUpdate,
       loadWorkspaceFilesInBackground,
       mergeHydratedSubagentTranscripts,
-      restorePendingAutoDraft,
       scheduleCoordinatorNotificationTurn,
       scheduleSubagentTranscriptHydrationRetry,
       scheduleSubagentTranscriptsPersist,
@@ -5848,36 +5774,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   }, [initializeThread])
 
   useEffect(() => {
-    return window.api.harnessBoard.onAutoModeStateChanged((event) => {
-      const targetThreadIds = new Set(
-        [
-          ...event.results.map((result) => result.targetThreadId),
-          ...event.pendingDrafts.map((draft) => draft.targetThreadId)
-        ].filter((threadId): threadId is string => Boolean(threadId))
-      )
+    return window.api.harnessBoard.onManagedRunThreadCreated((event) => {
       void useAppStore
         .getState()
         .refreshThreads()
         .then(() => {
-          for (const targetThreadId of targetThreadIds) {
-            if (initializedThreadsRef.current.has(targetThreadId)) {
-              loadThreadHistory(targetThreadId)
-            } else {
-              initializeThread(targetThreadId)
-            }
+          if (initializedThreadsRef.current.has(event.threadId)) {
+            loadThreadHistory(event.threadId)
+          } else {
+            initializeThread(event.threadId)
           }
         })
         .catch((error) => {
           console.warn("[ThreadProvider] Failed to refresh managed-mode threads:", error)
         })
-
-      if (
-        event.messages === AUTO_MODE_CANCELLED_MESSAGE &&
-        event.results.length === 0 &&
-        event.pendingDrafts.length === 0
-      ) {
-        toast.info(AUTO_MODE_CANCELLED_MESSAGE)
-      }
     })
   }, [initializeThread, loadThreadHistory])
 

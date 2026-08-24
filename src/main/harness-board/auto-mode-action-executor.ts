@@ -1,5 +1,5 @@
 import { v4 as uuid } from "uuid"
-import { getThread, mergeThreadValues, upsertThreadMessages } from "../db"
+import { getThread, upsertThreadMessages } from "../db"
 import {
   startAgentRun,
   type AgentRunDelivery
@@ -11,44 +11,44 @@ import { createThreadService } from "../services/thread-service"
 import { generateTitle } from "../services/title-generator"
 import { getDisabledSkills } from "../storage"
 import type { AgentInvokeParams, SkillMetadata } from "../types"
-import { getHarnessProjectAdapterSnapshot } from "./service"
+import {
+  getHarnessProjectAdapterSnapshot,
+  getHarnessProjectSessionWorkspacePath
+} from "./service"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
 import {
   AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
-  AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY,
   HARNESS_SOURCE,
   type HarnessAdapterSnapshot,
-  type AutoModeNextAction,
-  type AutoNextStepAction,
   type ManagedAutoSendStreamStartEvent,
-  type ManagedActionResult,
-  type PendingAutoDraft
+  type ManagedRunSessionAction
 } from "../../shared/harness-board-types"
-
-export interface ManagedActionExecutionContext {
-  eventId: string
-  sourceThreadId: string
-  projectId: string
-  featureId: string
-  messages: string
-}
-
-export interface ExecuteManagedActionsInput {
-  context: ManagedActionExecutionContext
-  actions: AutoNextStepAction[]
-  delivery: AgentRunDelivery
-}
-
-export interface ExecuteManagedActionsResult {
-  results: ManagedActionResult[]
-  pendingDrafts: PendingAutoDraft[]
-}
 
 interface PreparedHarnessMessage {
   modelMessage: string
   displayMessage: string
   userMessageId: string
+}
+
+export class ManagedActionValidationError extends Error {
+  constructor(
+    readonly reasonCode: string,
+    message: string
+  ) {
+    super(message)
+    this.name = "ManagedActionValidationError"
+  }
+}
+
+export interface CreateManagedHarnessSessionInput {
+  projectId: string
+  featureId: string
+  runId: string
+  nodeId: string
+  nextAction: ManagedRunSessionAction
+  workspacePath?: string | null
+  delivery: AgentRunDelivery
 }
 
 function parseThreadMetadata(threadId: string): Record<string, unknown> {
@@ -63,14 +63,6 @@ function parseThreadMetadata(threadId: string): Record<string, unknown> {
   } catch {
     throw new Error(`会话 metadata 无法解析：${threadId}`)
   }
-}
-
-function getSourceWorkspacePath(sourceThreadId: string): string {
-  const workspacePath = parseThreadMetadata(sourceThreadId).workspacePath
-  if (typeof workspacePath !== "string" || !workspacePath.trim()) {
-    throw new Error("来源会话缺少 workspacePath")
-  }
-  return workspacePath.trim()
 }
 
 function normalizePluginIdentity(value: string | null | undefined): string {
@@ -120,7 +112,6 @@ async function resolveHarnessSkill(
   const matches = [...localSkills, ...pluginSkills].filter((skill) => {
     if (normalizeSkillId(skill.name) !== normalizedSlashSkill) return false
     if (isLocalSkillDisabled(skill, disabledSkillIds)) return false
-    if (!preferredPlugin) return true
     return !isPluginSkill(skill) || isPreferredPluginSkill(skill, preferredPlugin)
   })
   return (
@@ -130,24 +121,37 @@ async function resolveHarnessSkill(
 
 async function prepareHarnessMessage(
   projectId: string,
-  nextAction: AutoModeNextAction
+  nextAction: ManagedRunSessionAction
 ): Promise<PreparedHarnessMessage> {
-  const userMessage = nextAction.userMessage?.trim() ?? ""
-  const slashSkill = nextAction.slashSkill?.trim() ?? ""
-  let skillBlock = ""
-  if (slashSkill) {
-    const skill = await resolveHarnessSkill(projectId, slashSkill)
-    if (!skill) {
-      throw new Error(`未找到当前 Harness 插件可用的 Skill：${slashSkill}`)
-    }
-    skillBlock = formatSkillUseBlock({
-      name: skill.name,
-      path: skill.path,
-      description: skill.description,
-      metadata: skill.metadata,
-      allowedTools: skill.allowedTools
-    })
+  const userMessage = nextAction.userMessage.trim()
+  const slashSkill = nextAction.slashSkill.trim()
+  if (!slashSkill) {
+    throw new ManagedActionValidationError(
+      "next_action_missing_slash_skill",
+      "当前节点的 nextAction 缺少 slashSkill"
+    )
   }
+  if (!userMessage) {
+    throw new ManagedActionValidationError(
+      "next_action_missing_user_message",
+      "当前节点的 nextAction 缺少 userMessage"
+    )
+  }
+  let skillBlock = ""
+  const skill = await resolveHarnessSkill(projectId, slashSkill)
+  if (!skill) {
+    throw new ManagedActionValidationError(
+      "next_action_skill_unavailable",
+      `未找到当前 Harness 插件或本地可用的 Skill：${slashSkill}`
+    )
+  }
+  skillBlock = formatSkillUseBlock({
+    name: skill.name,
+    path: skill.path,
+    description: skill.description,
+    metadata: skill.metadata,
+    allowedTools: skill.allowedTools
+  })
   const modelMessage = [userMessage, skillBlock].filter(Boolean).join("\n\n")
   return {
     modelMessage,
@@ -237,88 +241,69 @@ async function startManagedAgentRun(
   })
 }
 
-async function resolveActionTargetThreadId(
-  action: AutoNextStepAction,
-  context: ManagedActionExecutionContext
-): Promise<string | undefined> {
-  if (action.actionType === "complete") return undefined
-  if (action.actionType === "continue_current_session") return context.sourceThreadId
+export async function sendManagedProviderRetry(
+  threadId: string,
+  delivery: AgentRunDelivery
+): Promise<void> {
+  await startManagedAgentRun(
+    threadId,
+    {
+      modelMessage: "继续当前任务",
+      displayMessage: "继续当前任务（ManagedRun 模型服务重试）",
+      userMessageId: uuid()
+    },
+    delivery
+  )
+}
 
+export async function sendManagedBizRetryReuseThread(
+  threadId: string,
+  delivery: AgentRunDelivery
+): Promise<void> {
+  await startManagedAgentRun(
+    threadId,
+    {
+      modelMessage: "继续当前任务",
+      displayMessage: "继续当前任务（ManagedRun 业务重试）",
+      userMessageId: uuid()
+    },
+    delivery
+  )
+}
+
+export async function createAndStartManagedHarnessSession(
+  input: CreateManagedHarnessSessionInput
+): Promise<{ threadId: string }> {
+  const prepared = await prepareHarnessMessage(input.projectId, input.nextAction)
+  const thread = await createManagedHarnessSession(input)
+  try {
+    await startManagedAgentRun(thread.threadId, prepared, input.delivery)
+  } catch (error) {
+    throw new Error(
+      `无法启动 ManagedRun 会话 ${thread.threadId}：${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+  return thread
+}
+
+export async function createManagedHarnessSession(
+  input: CreateManagedHarnessSessionInput
+): Promise<{ threadId: string }> {
   const workspacePath =
-    action.sessionWorkspace?.trim() || getSourceWorkspacePath(context.sourceThreadId)
-  const titleSource = action.nextAction.autoSend
-    ? (action.nextAction.userMessage?.trim() ?? "")
-    : ""
+    input.workspacePath === null
+      ? null
+      : input.workspacePath?.trim() || getHarnessProjectSessionWorkspacePath(input.projectId)
+  const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const thread = await createThreadService({
     workspacePath,
     ...(titleSource ? { title: generateTitle(titleSource) } : {}),
     harnessFeature: {
-      projectId: context.projectId,
-      slug: context.featureId,
-      source: HARNESS_SOURCE
+      projectId: input.projectId,
+      slug: input.featureId,
+      source: HARNESS_SOURCE,
+      runId: input.runId,
+      nodeId: input.nodeId
     }
   })
-  return thread.thread_id
-}
-
-function persistPendingAutoDraft(draft: PendingAutoDraft): void {
-  const thread = mergeThreadValues(draft.targetThreadId, {
-    [AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY]: draft
-  })
-  if (!thread) {
-    throw new Error(`无法保存托管草稿，会话不存在：${draft.targetThreadId}`)
-  }
-}
-
-export async function executeManagedActions({
-  context,
-  actions,
-  delivery
-}: ExecuteManagedActionsInput): Promise<ExecuteManagedActionsResult> {
-  const results: ManagedActionResult[] = []
-  const pendingDrafts: PendingAutoDraft[] = []
-
-  for (const [actionIndex, action] of actions.entries()) {
-    let targetThreadId: string | undefined
-    try {
-      const prepared =
-        action.actionType !== "complete" && action.nextAction.autoSend
-          ? await prepareHarnessMessage(context.projectId, action.nextAction)
-          : undefined
-      targetThreadId = await resolveActionTargetThreadId(action, context)
-      if (action.actionType !== "complete" && targetThreadId) {
-        if (prepared) {
-          await startManagedAgentRun(targetThreadId, prepared, delivery)
-        } else {
-          const pendingDraft: PendingAutoDraft = {
-            targetThreadId,
-            ...(action.nextAction.slashSkill ? { slashSkill: action.nextAction.slashSkill } : {}),
-            ...(action.nextAction.userMessage !== undefined
-              ? { userMessage: action.nextAction.userMessage }
-              : {})
-          }
-          persistPendingAutoDraft(pendingDraft)
-          pendingDrafts.push(pendingDraft)
-        }
-      }
-      results.push({
-        eventId: context.eventId,
-        actionIndex,
-        actionType: action.actionType,
-        status: "succeeded",
-        ...(targetThreadId ? { targetThreadId } : {})
-      })
-    } catch (error) {
-      results.push({
-        eventId: context.eventId,
-        actionIndex,
-        actionType: action.actionType,
-        status: "failed",
-        ...(targetThreadId ? { targetThreadId } : {}),
-        message: error instanceof Error ? error.message : String(error)
-      })
-    }
-  }
-
-  return { results, pendingDrafts }
+  return { threadId: thread.thread_id }
 }

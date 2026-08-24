@@ -91,7 +91,6 @@ export interface HarnessAdapterRegistryItem extends HarnessAdapterSnapshot {
   developerSapId?: string
   organizationName?: string
   pullKnowledgeAvailable?: boolean
-  supportsAutoNextStep: boolean
   boardCompatibility: HarnessBoardCompatibility
 }
 
@@ -152,7 +151,6 @@ export interface HarnessFeatureDeployUnitBinding {
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
-  autoMode: boolean
 }
 
 function normalizeHarnessText(value: unknown): string {
@@ -366,10 +364,13 @@ export interface HarnessFeatureDeployUnitUpdateInput {
   selectedDeployUnits: HarnessDeployUnitMapping[]
 }
 
-export interface HarnessFeatureAutoModeUpdateInput {
+export interface ManagedRunStartInput {
   projectId: string
   featureId: string
-  autoMode: boolean
+}
+
+export interface ManagedRunStopInput extends ManagedRunStartInput {
+  runId: string
 }
 
 export interface HarnessSkipNodeInput {
@@ -438,6 +439,163 @@ export interface HarnessSessionBinding {
   source: string
 }
 
+export type ManagedRunStatus = "running" | "failed" | "completed" | "cancelled"
+export type ManagedRunViewStatus = ManagedRunStatus | "corrupt"
+
+export const MANAGED_RUN_STATUS_LABELS: Record<ManagedRunViewStatus, string> = {
+  running: "托管运行中",
+  failed: "托管失败",
+  completed: "托管已完成",
+  cancelled: "托管已取消",
+  corrupt: "托管记录损坏"
+}
+
+export interface ManagedRunIdentity {
+  projectId: string
+  featureId: string
+  runId: string
+}
+
+export interface ManagedRunSnapshot {
+  version: 2
+  runId: string
+  projectId: string
+  featureId: string
+  status: ManagedRunStatus
+  currentSession?: {
+    threadId: string
+    workspacePath?: string
+  }
+  decisionBaseline?: {
+    nodeId: string
+    featureStateHash: string
+    featureStatus: HarnessFeatureStatus
+    nodeStatus: HarnessNodeStatus
+    nextActionHash: string
+  }
+  providerRetryCount: number
+  bizRetryCount: number
+  nextRetryAt?: string
+  failureReason?: string
+  cancellationReason?: string
+  startedAt: string
+  updatedAt: string
+  completedAt?: string
+  lastDecision?: {
+    decision: string
+    reasonCode?: string
+    summary?: string
+    facts?: ManagedRunDecisionFacts
+    rule?: string
+    createTime: string
+  }
+}
+
+export type ManagedRunDecisionChangedField =
+  | "currentNode"
+  | "featureStatus"
+  | "currentNodeStatus"
+  | "nextAction"
+
+export type ManagedBizRetryMode = "reuse_thread" | "new_thread"
+
+export interface ManagedRunDecisionFacts {
+  currentNodeId: string
+  featureStatus: HarnessFeatureStatus
+  currentNodeStatus: HarnessNodeStatus
+  slashSkill?: string
+  changedFields: ManagedRunDecisionChangedField[]
+  initialInspection: boolean
+  previousNodeId?: string
+  bizRetryCount: number
+  providerRetryCount: number
+  contextInputTokens?: number
+  contextMaxTokens?: number
+  contextUsageRatio?: number
+  contextReuseThreshold?: number
+  contextReusable?: boolean
+  terminalOutcome?: AgentTurnEndEvent["outcome"]
+  terminalReason?: string
+}
+
+export type ManagedRunEventType =
+  | "run_started"
+  | "feature_inspected"
+  | "decision_made"
+  | "session_created"
+  | "session_started"
+  | "session_completed"
+  | "provider_retry_scheduled"
+  | "provider_retry_sent"
+  | "provider_retry_reset"
+  | "biz_retry_reuse_thread"
+  | "biz_retry_new_thread"
+  | "run_cancelled"
+  | "run_failed"
+  | "run_completed"
+
+export interface ManagedRunEvent {
+  version: 2
+  eventId: string
+  createTime: string
+  type: ManagedRunEventType
+  runId: string
+  scope: "global" | "stage"
+  source?: "feature_status" | "agent_end_reason" | "controller_policy" | "managed_run"
+  nodeId?: string
+  featureStatus?: HarnessFeatureStatus
+  nodeStatus?: HarnessNodeStatus
+  slashSkill?: string
+  threadId?: string
+  workspacePath?: string
+  sourceThreadId?: string
+  targetThreadId?: string
+  decision?: string
+  reasonCode?: string
+  decisionFacts?: ManagedRunDecisionFacts
+  decisionRule?: string
+  outcome?: AgentTurnEndEvent["outcome"]
+  endReason?: AgentTurnEndEvent["endReason"]
+  summary?: string
+  [key: string]: unknown
+}
+
+export interface ManagedRunSummary extends Omit<ManagedRunSnapshot, "status"> {
+  status: ManagedRunViewStatus
+  corrupt?: boolean
+}
+
+export interface ManagedRunEventsPage {
+  events: ManagedRunEvent[]
+  nextCursor?: ManagedRunEventCursor
+  hasMore: boolean
+}
+
+export type ManagedRunEventCursor = string
+
+export interface ManagedRunChangeEvent {
+  projectId: string
+  featureId: string
+  run: ManagedRunSummary
+}
+
+export interface ManagedRunThreadCreatedEvent {
+  projectId: string
+  featureId: string
+  runId: string
+  threadId: string
+}
+
+export interface ManagedFeatureStatusSnapshot {
+  featureStatus: HarnessFeatureStatus
+  currentNodeId: string
+  currentNodeStatus: HarnessNodeStatus
+  isFinalNode: boolean
+  nextAction?: HarnessWorkflowNextAction
+  featureStateHash: string
+  nextActionHash: string
+}
+
 export interface HarnessWatchRef {
   path: string
   purpose: "run-list" | "run-state" | "artifacts" | "hook-log" | string
@@ -484,7 +642,6 @@ export interface HarnessProjectDetailViewModel {
     workspacePath: string
     sessionWorkspacePath?: string
     projectRootPath: string
-    supportsAutoNextStep: boolean
   }
   adapterSnapshot: {
     mode: "project"
@@ -554,57 +711,11 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
   }
 }
 
-export type AutoNextStepEvent = AgentTurnEndEvent
-
-export interface AutoModeNextAction {
-  slashSkill?: string
-  userMessage?: string
-  autoSend: boolean
+export interface ManagedRunSessionAction {
+  slashSkill: string
+  userMessage: string
 }
 
-export interface ContinueCurrentSessionAction {
-  actionType: "continue_current_session"
-  nextAction: AutoModeNextAction
-}
-
-export interface CreateNewSessionAction {
-  actionType: "create_new_session"
-  sessionWorkspace?: string
-  nextAction: AutoModeNextAction
-}
-
-export interface CompleteAction {
-  actionType: "complete"
-}
-
-export type AutoNextStepAction =
-  | ContinueCurrentSessionAction
-  | CreateNewSessionAction
-  | CompleteAction
-
-export interface AutoNextStepResult {
-  ok: boolean
-  messages: string
-  action: AutoNextStepAction[]
-}
-
-export interface ManagedActionResult {
-  eventId: string
-  actionIndex: number
-  actionType: AutoNextStepAction["actionType"]
-  status: "succeeded" | "failed"
-  targetThreadId?: string
-  message?: string
-}
-
-export interface PendingAutoDraft {
-  targetThreadId: string
-  slashSkill?: string
-  userMessage?: string
-}
-
-export const AUTO_MODE_PENDING_DRAFT_THREAD_VALUE_KEY = "harnessAutoModePendingDraft"
-export const AUTO_MODE_CANCELLED_MESSAGE = "当前会话托管模式已暂停，输入消息后继续"
 export const AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL =
   "harnessBoard:managedAutoSendStreamStarted"
 
@@ -613,16 +724,6 @@ export interface ManagedAutoSendStreamStartEvent {
   threadId: string
   streamRequestId: string
   agentMode?: "normal" | "coordinator" | "workflow"
-}
-
-export interface AutoModeStateChangedEvent {
-  eventId: string
-  projectId: string
-  featureId: string
-  sourceThreadId: string
-  messages: string
-  results: ManagedActionResult[]
-  pendingDrafts: PendingAutoDraft[]
 }
 
 export interface HarnessWorkflowStateDefinition {
@@ -730,7 +831,6 @@ export interface HarnessRunDetailViewModel {
     workspacePath: string
     sessionWorkspacePath?: string
     projectRootPath: string
-    supportsAutoNextStep: boolean
   }
   adapterSnapshot: {
     mode: "run"
@@ -755,11 +855,11 @@ export interface HarnessRunDetailViewModel {
     featureStatusLabel?: string
     overallStatus?: HarnessStatus
     skipNodeAvailable: boolean
-    autoMode: boolean
     selectedDeployUnits: HarnessDeployUnitMapping[]
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
+    managedRun?: ManagedRunSummary
   }
   sessions: HarnessSessionBinding[]
 }

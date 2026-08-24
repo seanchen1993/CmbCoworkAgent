@@ -334,6 +334,7 @@ import type {
 import { emitAppAttention } from "../app-attention-events"
 import {
   createBrowserWindowAgentRunDelivery,
+  registerActiveAgentRunInspector,
   registerAgentRunImplementation,
   startAgentRun,
   type AgentRunDelivery
@@ -408,7 +409,10 @@ function createAutoModeTerminal(
   }
 }
 
-async function isAgentTurnAwaitingContinuation(threadId: string): Promise<boolean> {
+async function isAgentTurnAwaitingContinuation(
+  threadId: string,
+  options: { ignorePendingWrites?: boolean } = {}
+): Promise<boolean> {
   if (hasPendingApprovalForThread(threadId)) return true
 
   try {
@@ -417,7 +421,10 @@ async function isAgentTurnAwaitingContinuation(threadId: string): Promise<boolea
         configurable: { thread_id: threadId, checkpoint_ns: "" }
       })
       if (!tuple) return false
-      return checkpointHasInterrupt(tuple.checkpoint) || (tuple.pendingWrites?.length ?? 0) > 0
+      return (
+        checkpointHasInterrupt(tuple.checkpoint) ||
+        (!options.ignorePendingWrites && (tuple.pendingWrites?.length ?? 0) > 0)
+      )
     })
   } catch (error) {
     console.warn("[AutoMode] Failed to inspect terminal checkpoint:", {
@@ -437,7 +444,15 @@ async function queueAutoModeAgentTurnEnd(input: {
   isStillCurrent: () => boolean
 }): Promise<void> {
   if (!input.isStillCurrent()) return
-  if (await isAgentTurnAwaitingContinuation(input.threadId)) {
+  // A failed Provider turn can leave checkpoint pendingWrites behind even though
+  // it is not awaiting user input. Keep real interrupts/approvals protected, but
+  // let provider_error reach ManagedRunController for its own bounded retry policy.
+  const isProviderError = input.terminal.endReason.code === "provider_error"
+  if (
+    await isAgentTurnAwaitingContinuation(input.threadId, {
+      ignorePendingWrites: isProviderError
+    })
+  ) {
     console.info("[AutoMode] Agent turn is awaiting continuation; terminal event skipped:", {
       threadId: input.threadId,
       turnId: input.turnId
@@ -5518,6 +5533,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       })
     }
   )
+
+  registerActiveAgentRunInspector(hasActiveAgentRun)
 
   registerAgentRunImplementation(
     async (

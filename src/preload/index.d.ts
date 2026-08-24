@@ -78,7 +78,6 @@ import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
   HarnessFeatureDeployUnitBinding,
-  HarnessFeatureAutoModeUpdateInput,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
@@ -90,10 +89,17 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
-  AutoModeStateChangedEvent,
   ManagedAutoSendStreamStartEvent,
   HarnessDynamicWorkflowConfig,
-  HarnessWatchRefChangedEvent
+  HarnessWatchRefChangedEvent,
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunChangeEvent,
+  ManagedRunStartInput,
+  ManagedRunStopInput,
+  ManagedRunSummary,
+  ManagedRunThreadCreatedEvent
 } from "../shared/harness-board-types"
 import type {
   FeatureGateCheckOptions,
@@ -2527,9 +2533,8 @@ interface CustomAPI {
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
-    updateFeatureAutoMode: (
-      input: HarnessFeatureAutoModeUpdateInput
-    ) => Promise<HarnessFeatureDeployUnitBinding>
+    startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
+    stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
@@ -2547,8 +2552,14 @@ interface CustomAPI {
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
+    getManagedRunEvents: (
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ) => Promise<ManagedRunEventsPage>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
-    onAutoModeStateChanged: (callback: (event: AutoModeStateChangedEvent) => void) => () => void
+    onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void) => () => void
+    onManagedRunThreadCreated: (
+      callback: (event: ManagedRunThreadCreatedEvent) => void
+    ) => () => void
   }
   update: {
     check: () => Promise<
