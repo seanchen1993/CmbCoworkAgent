@@ -555,6 +555,9 @@ interface DashboardProjectModeFeature {
   statusLabel?: string
   currentNodeStatusLabel?: string
   summary?: string
+  codeStats?: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
 }
 
 interface DashboardProjectModeSkillCount {
@@ -633,6 +636,8 @@ interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 
@@ -789,7 +794,6 @@ interface DashboardProjectModeConstraintReadStats {
   traceCount: number
   successfulReadCount: number
   distinctFileCount: number
-  partialReadCount: number
   filesTruncated: boolean
   files: Array<{ path: string; traceCount: number }>
 }
@@ -798,6 +802,11 @@ interface DashboardProjectModeHookStats {
   executionCount: number
   blockedCount: number
   byEvent: Array<{ event: string; count: number }>
+}
+
+interface DashboardProjectModeOperationalDetails {
+  constraintFiles: Array<{ path: string; traceCount: number }>
+  hookEvents: Array<{ event: string; count: number }>
 }
 
 interface DashboardProjectModeFeatureNode {
@@ -2290,6 +2299,15 @@ interface CustomAPI {
       featureSlug: string,
       range: { from: string; to: string }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
+    projectModeOperationalDetails: (
+      scope: { projectId: string; featureSlug?: string; nodeName?: string },
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: DashboardProjectModeOperationalDetails
+      error?: string
+    }>
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }

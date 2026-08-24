@@ -76,8 +76,7 @@ describe("LocalSandbox system-constraint telemetry", () => {
         harnessProjectId: "project-1",
         harnessFeatureSlug: "feature-1",
         harnessNodeName: "Dev-代码实现",
-        constraintFile: "sys/project.md",
-        partial: true
+        constraintFile: "sys/project.md"
       })
     )
 

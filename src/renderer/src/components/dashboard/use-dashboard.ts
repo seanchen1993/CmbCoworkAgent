@@ -456,6 +456,10 @@ export interface DashboardProjectModeFeature {
   summary?: string
   /** This-range code adoption sliced to this feature; absent/null if no code data. */
   codeStats?: DashboardCodeStats | null
+  /** Successful plugin system-constraint reads aggregated across this feature's stages. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions aggregated across this feature's stages. */
+  hookExecutions?: DashboardProjectModeHookStats | null
 }
 
 /** Sub-row of a stage: conversations + code adoption for one node status (进行中/已完成/...). */
@@ -469,7 +473,6 @@ export interface DashboardProjectModeConstraintReadStats {
   traceCount: number
   successfulReadCount: number
   distinctFileCount: number
-  partialReadCount: number
   filesTruncated: boolean
   files: Array<{ path: string; traceCount: number }>
 }
@@ -479,6 +482,21 @@ export interface DashboardProjectModeHookStats {
   blockedCount: number
   byEvent: Array<{ event: string; count: number }>
 }
+
+export interface DashboardProjectModeOperationalDetails {
+  constraintFiles: Array<{ path: string; traceCount: number }>
+  hookEvents: Array<{ event: string; count: number }>
+}
+
+export interface DashboardProjectModeOperationalDetailScope {
+  projectId: string
+  featureSlug?: string
+  nodeName?: string
+}
+
+export type DashboardProjectModeOperationalDetailsLoader = (
+  scope: DashboardProjectModeOperationalDetailScope
+) => Promise<DashboardProjectModeOperationalDetails>
 
 /** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
 export interface DashboardProjectModeFeatureNode {
@@ -597,6 +615,10 @@ export interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  /** Successful plugin system-constraint reads aggregated across all project features/stages. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions aggregated across all project features/stages. */
+  hookExecutions?: DashboardProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 

@@ -65,6 +65,8 @@ import {
   type DashboardUserListItem,
   type DashboardProjectModeFeature,
   type DashboardProjectModeFeatureNode,
+  type DashboardProjectModeOperationalDetailScope,
+  type DashboardProjectModeOperationalDetails,
   type DashboardPluginAggregate,
   type DashboardProjectModeData,
   type DashboardAwardSkillContribution,
@@ -3727,6 +3729,21 @@ export function DashboardView(): React.JSX.Element {
     [range]
   )
 
+  const loadProjectOperationalDetails = useCallback(
+    async (
+      scope: DashboardProjectModeOperationalDetailScope
+    ): Promise<DashboardProjectModeOperationalDetails> => {
+      const res = await window.api.dashboard.projectModeOperationalDetails(scope, range, {
+        upperOrgLv1: selectedOrgLv1List
+      })
+      if (!res.success || !res.data) {
+        throw new Error(res.error ?? "获取运行明细失败")
+      }
+      return res.data as DashboardProjectModeOperationalDetails
+    },
+    [range, selectedOrgLv1List]
+  )
+
   // 插件聚合的按阶段细分，跟随面板当前时间范围（range 变化即得到新回调，展开中的细分会重拉）。
   const loadPluginAggregateNodes = useCallback(
     async (adapterName: string): Promise<DashboardProjectModeFeatureNode[]> => {
@@ -5194,6 +5211,7 @@ export function DashboardView(): React.JSX.Element {
                 onOpenFeatureCommits={handleProjectOpenFeatureCommits}
                 onOpenProjectCommits={handleProjectOpenProjectCommits}
                 loadFeatureNodes={loadProjectFeatureNodes}
+                loadOperationalDetails={loadProjectOperationalDetails}
                 loadPluginAggregate={loadPluginAggregateNodes}
                 fetchAdapterProjectPage={fetchAdapterProjectPage}
                 onSkillClick={handleSkillClick}

@@ -3234,6 +3234,12 @@ const api = {
       range: { from: string; to: string }
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeFeatureNodes", projectId, featureSlug, range),
+    projectModeOperationalDetails: (
+      scope: { projectId: string; featureSlug?: string; nodeName?: string },
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectModeOperationalDetails", scope, range, opts),
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }

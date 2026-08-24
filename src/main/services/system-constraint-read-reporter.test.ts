@@ -19,15 +19,14 @@ const baseRecord: SystemConstraintReadRecord = {
   pluginName: "Plugin One",
   harnessAdapterName: "adapter-1",
   harnessAdapterVersion: "1.0.0",
-  constraintFile: "sys/project.md",
-  partial: false
+  constraintFile: "sys/project.md"
 }
 
 describe("SystemConstraintReadAccumulator", () => {
   it("emits one summary per trace and stage while preserving read/file counts", () => {
     const accumulator = new SystemConstraintReadAccumulator()
     accumulator.record(baseRecord)
-    accumulator.record({ ...baseRecord, partial: true })
+    accumulator.record(baseRecord)
     accumulator.record({ ...baseRecord, constraintFile: "sys/stages/code.md" })
     accumulator.record({
       ...baseRecord,
@@ -64,7 +63,6 @@ describe("SystemConstraintReadAccumulator", () => {
         constraintFiles: ["sys/project.md", "sys/stages/code.md", "sys/stages/review.md"],
         successfulReadCount: 4,
         distinctFileCount: 3,
-        partialReadCount: 1,
         filesTruncated: false,
         traceOutcome: "success"
       }
@@ -78,5 +76,27 @@ describe("SystemConstraintReadAccumulator", () => {
 
     expect(accumulator.flushTrace("trace-1", undefined, emit)).toBe(1)
     expect(accumulator.flushTrace("trace-1", undefined, emit)).toBe(0)
+  })
+
+  it("reports every distinct constraint file without truncating the detail list", () => {
+    const accumulator = new SystemConstraintReadAccumulator()
+    for (let index = 0; index < 80; index++) {
+      accumulator.record({
+        ...baseRecord,
+        constraintFile: `sys/rules/${String(index).padStart(2, "0")}.md`
+      })
+    }
+
+    const emitted: Array<Record<string, unknown>> = []
+    accumulator.flushTrace("trace-1", "success", (_eventName, _category, properties = {}) => {
+      emitted.push(properties)
+    })
+
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0]).toMatchObject({
+      distinctFileCount: 80,
+      filesTruncated: false
+    })
+    expect(emitted[0].constraintFiles).toHaveLength(80)
   })
 })

@@ -2,7 +2,6 @@ import { nowIsoLocal } from "../util/local-time"
 import { trackEvent, type EventCategory } from "./event-reporter"
 
 export const SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT = "harness.system_constraint.read_summary"
-const MAX_REPORTED_CONSTRAINT_FILES = 64
 const MAX_PENDING_TRACES = 2_048
 const MAX_PENDING_AGE_MS = 6 * 60 * 60 * 1_000
 const PRUNE_INTERVAL_MS = 60 * 1_000
@@ -22,14 +21,12 @@ export interface SystemConstraintReadRecord {
   harnessAdapterName?: string
   harnessAdapterVersion?: string
   constraintFile: string
-  partial: boolean
 }
 
 interface SummaryBucket {
-  context: Omit<SystemConstraintReadRecord, "constraintFile" | "partial">
+  context: Omit<SystemConstraintReadRecord, "constraintFile">
   constraintFiles: Set<string>
   successfulReadCount: number
-  partialReadCount: number
   firstReadAt: string
   lastReadAt: string
   updatedAtMs: number
@@ -87,7 +84,6 @@ export class SystemConstraintReadAccumulator {
     if (existing) {
       existing.constraintFiles.add(constraintFile)
       existing.successfulReadCount += 1
-      if (input.partial) existing.partialReadCount += 1
       existing.lastReadAt = now
       existing.updatedAtMs = nowMs
       return
@@ -111,7 +107,6 @@ export class SystemConstraintReadAccumulator {
       },
       constraintFiles: new Set([constraintFile]),
       successfulReadCount: 1,
-      partialReadCount: input.partial ? 1 : 0,
       firstReadAt: now,
       lastReadAt: now,
       updatedAtMs: nowMs
@@ -131,15 +126,13 @@ export class SystemConstraintReadAccumulator {
 
     let emitted = 0
     for (const bucket of traceBuckets.values()) {
-      const allFiles = [...bucket.constraintFiles].sort((a, b) => a.localeCompare(b))
-      const constraintFiles = allFiles.slice(0, MAX_REPORTED_CONSTRAINT_FILES)
+      const constraintFiles = [...bucket.constraintFiles].sort((a, b) => a.localeCompare(b))
       emit(SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT, "harness", {
         ...bucket.context,
         constraintFiles,
         successfulReadCount: bucket.successfulReadCount,
-        distinctFileCount: allFiles.length,
-        partialReadCount: bucket.partialReadCount,
-        filesTruncated: allFiles.length > constraintFiles.length,
+        distinctFileCount: constraintFiles.length,
+        filesTruncated: false,
         firstReadAt: bucket.firstReadAt,
         lastReadAt: bucket.lastReadAt,
         ...(normalize(outcome) ? { traceOutcome: normalize(outcome) } : {})

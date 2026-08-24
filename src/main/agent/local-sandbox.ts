@@ -2517,10 +2517,7 @@ export class LocalSandbox
     return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
   }
 
-  private async recordPluginSystemConstraintRead(
-    resolvedPath: string,
-    partial: boolean
-  ): Promise<void> {
+  private async recordPluginSystemConstraintRead(resolvedPath: string): Promise<void> {
     if (!this.pluginRoot || !this.traceId || !this.harnessProjectId || !this.featureId) {
       return
     }
@@ -2544,8 +2541,7 @@ export class LocalSandbox
         pluginName: this.pluginName,
         harnessAdapterName: this.harnessAdapterName,
         harnessAdapterVersion: this.harnessAdapterVersion,
-        constraintFile,
-        partial
+        constraintFile
       })
     } catch (error) {
       console.warn("[SystemConstraintRead] Failed to record read telemetry:", error)
@@ -3971,10 +3967,7 @@ export class LocalSandbox
         hookVisibleResult
       )
       if (formattedLines.length > 0) {
-        await this.recordPluginSystemConstraintRead(
-          resolvedPath,
-          hasMore || truncatedByOutputBudget
-        )
+        await this.recordPluginSystemConstraintRead(resolvedPath)
       }
       return finalResult
     } catch (e: unknown) {
