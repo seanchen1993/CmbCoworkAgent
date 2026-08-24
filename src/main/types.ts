@@ -244,6 +244,45 @@ export interface ThreadMessagesPage {
   total: number
 }
 
+export interface ThreadMessageSearchOptions {
+  /**
+   * Cursor returned by the previous search page. Both fields must be supplied
+   * together so duplicate legacy ordinals cannot skip or repeat messages.
+   */
+  beforeOrdinal?: number
+  beforeMessageId?: string
+  /** Maximum matches returned by one bounded database scan. */
+  limit?: number
+}
+
+export interface ThreadMessageSearchMatch {
+  messageId: string
+  ordinal: number
+  role: Message["role"]
+  createdAt: number
+  /** Non-overlapping occurrences, matching the renderer's existing search semantics. */
+  occurrenceCount: number
+  /** Query-centred, bounded plain-text preview. */
+  preview: string
+}
+
+export interface ThreadMessageSearchPage {
+  /** Matches are returned from newest to oldest. */
+  matches: ThreadMessageSearchMatch[]
+  /** Cursor for continuing toward older durable messages. */
+  beforeOrdinal: number | null
+  beforeMessageId: string | null
+  /**
+   * True when more durable search space remains. A later page can legitimately
+   * contain no matches because each call scans a bounded transcript window.
+   */
+  hasMore: boolean
+  /** Number of durable message headers inspected by this page. */
+  scanned: number
+  /** True when an individual oversized row could not be inspected within the hard byte budget. */
+  truncated: boolean
+}
+
 export interface ContentBlock {
   type: "text" | "image" | "tool_use" | "tool_result"
   text?: string

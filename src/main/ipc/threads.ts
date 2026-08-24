@@ -18,6 +18,7 @@ import {
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
   getThreadMessagesPage,
+  searchThreadMessages,
   getThreadSubagentManifestAt,
   getThreadSubagentBucketIdPage,
   getThreadSubagentManifestForwardPage,
@@ -104,6 +105,7 @@ import type {
   ThreadForkParams,
   ThreadForkResponse,
   SubagentTranscriptBlobField,
+  ThreadMessageSearchOptions,
   ThreadMessagesPageOptions,
   ThreadUpdateParams,
   ThreadValuesMergeParams
@@ -2674,6 +2676,20 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }: { threadId: string; options?: ThreadMessagesPageOptions }
     ) => {
       return getThreadMessagesPage(threadId, options)
+    }
+  )
+
+  ipcMain.handle(
+    "threads:search-messages",
+    async (
+      _event,
+      {
+        threadId,
+        query,
+        options
+      }: { threadId: string; query: string; options?: ThreadMessageSearchOptions }
+    ) => {
+      return searchThreadMessages(threadId, query, options)
     }
   )
 

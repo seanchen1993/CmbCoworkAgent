@@ -59,6 +59,12 @@ assert.deepEqual(
     { messageId: "m2", occurrenceIndex: 0 }
   ]
 )
+assert.equal(
+  findChatSearchMatches([{ messageId: "bounded", text: "x".repeat(20_000) }], "x", 1_001)
+    .length,
+  1_001,
+  "renderer search must not allocate one match object per occurrence in a huge message"
+)
 
 const baselineTarget: Message[] = Array.from({ length: 10_000 }, (_, index) => ({
   id: `stable-${index}`,

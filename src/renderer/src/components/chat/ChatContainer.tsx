@@ -129,11 +129,19 @@ import type {
 import {
   CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
   ChatMessageVirtualList,
+  shouldVirtualizeChatMessageList,
   type ChatApprovalDecision
 } from "./ChatMessageVirtualList"
-import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import {
+  ChatScrollNavigator,
+  createChatScrollQuestionRevisionProjector
+} from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
-import { ChatSearchOverlay } from "./ChatSearchOverlay"
+import {
+  ChatSearchOverlay,
+  type DurableChatSearchOptions,
+  type DurableChatSearchPage
+} from "./ChatSearchOverlay"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -166,10 +174,6 @@ import {
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
-import {
-  CHAT_AUTO_SCROLL_ALWAYS,
-  normalizeChatAutoScrollMessageLimit
-} from "../../../../shared/chat-scroll"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
@@ -218,9 +222,46 @@ import {
 import {
   mergeVisibleChatMessageIndexes
 } from "@/lib/chat-visible-index"
+import {
+  chatScrollTailMessageIdentity,
+  classifyChatScrollTailChange,
+  shouldMarkChatTailContentGrowth
+} from "@/lib/chat-scroll-tail-change"
+import { buildBoundedChatSearchText } from "@/lib/bounded-chat-search-text"
+import {
+  createChatScrollState,
+  isChatScrollDetached,
+  mergeChatScrollEffects,
+  shouldFollowChatOutput,
+  transitionChatScroll,
+  type ChatScrollEffect,
+  type ChatScrollEvent,
+  type ChatScrollState,
+  type ChatScrollTransition
+} from "../../../../shared/chat-scroll-controller"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+const CHAT_AT_BOTTOM_THRESHOLD_PX = 32
+const CHAT_SCROLL_UP_DETACH_DELTA_PX = 1
+const CHAT_USER_SCROLL_INTENT_WINDOW_MS = 350
+const CHAT_BOTTOM_SETTLE_MAX_FRAMES = 60
+const CHAT_FOLLOW_SETTLE_MAX_FRAMES = 12
+const CHAT_HISTORY_ANCHOR_MAX_FRAMES = 120
+const CHAT_HISTORY_ANCHOR_STABLE_FRAMES = 12
+const CHAT_LOCAL_SEARCH_HISTORY_LIMIT = 500
+const CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT = 4 * 1024 * 1024
+
+interface PendingDurableHistoryAnchor {
+  threadId: string
+  generation: number
+  messageId: string
+  viewportTop: number
+  previousMessageCount: number
+  previousLoadedMessageCount: number
+  attempt: number
+  stableFrames: number
+}
 
 function interruptionNoticeCopy(event: string, action: string): {
   title: string
@@ -925,16 +966,6 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
-function stringifyChatSearchValue(value: unknown): string {
-  if (typeof value === "string") return value
-  if (value == null) return ""
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
 function cleanUserAttachmentMarkupForDisplay(message: Message): Message {
   if (
     message.role !== "user" ||
@@ -1522,8 +1553,36 @@ export function ChatContainer({
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
-  const shouldFollowOutputRef = useRef(true)
-  const initialScrollAppliedRef = useRef(false)
+  const chatScrollStateRef = useRef<ChatScrollState | null>(null)
+  if (chatScrollStateRef.current === null) {
+    chatScrollStateRef.current = createChatScrollState(threadId)
+  }
+  const [chatScrollUiState, setChatScrollUiState] = useState(() => ({
+    generation: chatScrollStateRef.current?.generation ?? 0,
+    mode: chatScrollStateRef.current?.mode ?? "initializing",
+    hasUnread: chatScrollStateRef.current?.hasUnread ?? false,
+    unreadCount: chatScrollStateRef.current?.unreadCount ?? 0
+  }))
+  const pendingBottomScrollEffectRef = useRef<ChatScrollEffect | null>(null)
+  const bottomScrollFrameRef = useRef<number | null>(null)
+  const bottomSettleAttemptRef = useRef(0)
+  const bottomSettleEffectKeyRef = useRef("")
+  const lastVisibleMessageIndexRef = useRef(-1)
+  const messageVirtualizationEnabledRef = useRef(false)
+  const lastObservedScrollTopRef = useRef(0)
+  const upwardUserScrollIntentUntilRef = useRef(0)
+  const downwardUserScrollIntentUntilRef = useRef(0)
+  const scrollbarUserIntentActiveRef = useRef(false)
+  const chatContentSnapshotRef = useRef<{
+    threadId: string
+    visibleCount: number
+    lastMessageId: string | null
+    lastMessageIdentity: string | null
+    loadedMessageCount: number
+    contentVersion: number
+    structureVersion: number
+  } | null>(null)
+  const pendingDurableHistoryAnchorRef = useRef<PendingDurableHistoryAnchor | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -1561,8 +1620,6 @@ export function ChatContainer({
   )
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
-  const chatScrollSettings = useAppStore((state) => state.chatScrollSettings)
-  const chatScrollLimitNoticeKeyRef = useRef<string | null>(null)
   const [glowVisible, setGlowVisible] = useState(false)
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
@@ -2867,6 +2924,15 @@ export function ChatContainer({
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  const [projectChatScrollQuestionRevision] = useState(
+    createChatScrollQuestionRevisionProjector
+  )
+  const chatScrollQuestionStructureRevision = projectChatScrollQuestionRevision({
+    scopeKey: threadId,
+    messages: displayMessages,
+    structureVersion: displayMessagesStructureVersion,
+    changedMessages: displayMessageProjection.changedMessages
+  })
   const stableMessageIndexProjection = useMemo(
     () => {
       const visibleIndexes: number[] = []
@@ -2931,34 +2997,14 @@ export function ChatContainer({
     liveLastUserMessageIndex ?? -1
   )
 
-  const chatScrollNavigatorMessages = threadDisplayBaseline
+  const chatScrollNavigatorMessages = displayMessages
 
-  // Key that drives in-session search re-matching. Message count and isLoading
-  // stay constant while tokens append to the SAME streaming message, so fold in
-  // the last message's text length — otherwise search misses text that is still
-  // being streamed until the run ends.
+  // Keep closed search off the token hot path. The content projector already exposes a cheap
+  // scalar version, so search can refresh live text without re-joining block-array content here.
   const searchRecomputeKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}:${lastTextLength}`
-  }, [displayMessages, displayMessagesContentVersion, isLoading])
-
-  const chatAutoScrollTriggerKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    const lastReasoningLength =
-      last && typeof last.reasoning === "string" ? last.reasoning.length : 0
-    const lastToolCallCount = Array.isArray(last?.tool_calls) ? last.tool_calls.length : 0
-    return [
-      displayMessages.length,
-      isLoading ? 1 : 0,
-      last?.id ?? "",
-      lastTextLength,
-      lastReasoningLength,
-      lastToolCallCount,
-      queuedMessages.length
-    ].join(":")
-  }, [displayMessages, isLoading, queuedMessages.length])
+    if (!searchOpen) return "closed"
+    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}`
+  }, [displayMessages.length, displayMessagesContentVersion, isLoading, searchOpen])
 
   const detachedHookLogBuckets = useMemo(() => {
     // A content-only assistant token changes liveDisplayMessages, but cannot
@@ -3110,20 +3156,20 @@ export function ChatContainer({
       const hasHookLogChip = Boolean(hookLogBucket?.entries.length)
       if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
-      const parts = [getMessageText(message.content), message.reasoning ?? ""]
+      const parts: unknown[] = [message.content, message.reasoning ?? ""]
       for (const [toolCallIndex, toolCall] of (message.tool_calls ?? []).entries()) {
-        parts.push(toolCall.name, stringifyChatSearchValue(toolCall.args))
+        parts.push(toolCall.name, toolCall.args)
         const toolResult = toolResults.get(
           getWorkerToolUiKey(message.id, toolCall.id, toolCallIndex)
         )
-        if (toolResult) parts.push(stringifyChatSearchValue(toolResult.content))
+        if (toolResult) parts.push(toolResult.content)
       }
       if (hookLogBucket?.entries.length) {
-        parts.push(stringifyChatSearchValue(hookLogBucket.entries))
+        parts.push(hookLogBucket.entries)
       }
       return {
         messageId: message.id,
-        text: parts.filter(Boolean).join("\n"),
+        text: buildBoundedChatSearchText(parts),
         sortIndex
       }
     },
@@ -3152,14 +3198,35 @@ export function ChatContainer({
       cached.indexById !== displayMessageProjection.indexById ||
       cached.buildDocument !== buildSearchDocument
     ) {
-      stableDocuments = threadDisplayBaseline
-        .flatMap((message) => {
-          const sortIndex = displayMessageProjection.indexById.get(message.id)
-          if (sortIndex === undefined) return []
-          const document = buildSearchDocument(message, sortIndex)
-          return document ? [document] : []
-        })
-        .sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+      // The durable search API covers the complete persisted transcript. Keep the renderer-side
+      // corpus bounded to the already-visible recent page so opening search after paging through a
+      // very long task cannot synchronously stringify and index the entire hydrated history.
+      const documents: ChatSearchDocument[] = []
+      let textUnits = 0
+      const startIndex = Math.max(0, threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+      for (
+        let messageIndex = threadDisplayBaseline.length - 1;
+        messageIndex >= startIndex;
+        messageIndex -= 1
+      ) {
+        const message = threadDisplayBaseline[messageIndex]
+        const sortIndex = displayMessageProjection.indexById.get(message.id)
+        if (sortIndex === undefined) continue
+        const document = buildSearchDocument(message, sortIndex)
+        if (!document) continue
+        if (
+          documents.length > 0 &&
+          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          break
+        }
+        documents.push(document)
+        textUnits += document.text.length
+        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+      }
+      stableDocuments = documents.sort(
+        (left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0)
+      )
       stableSearchDocumentsRef.current = {
         baseline: threadDisplayBaseline,
         indexById: displayMessageProjection.indexById,
@@ -3169,15 +3236,31 @@ export function ChatContainer({
     }
     let dynamicCache = dynamicSearchDocumentsRef.current
     const rebuildDynamicDocuments = (): typeof dynamicCache => {
-      const documents = liveDisplayMessages
-        .flatMap((liveMessage) => {
-          const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
-          if (sortIndex === undefined) return []
-          const message = displayMessages[sortIndex]
-          const document = message ? buildSearchDocument(message, sortIndex) : null
-          return document ? [document] : []
-        })
-        .sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+      const documents: ChatSearchDocument[] = []
+      let textUnits = 0
+      const startIndex = Math.max(0, liveDisplayMessages.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+      for (
+        let liveIndex = liveDisplayMessages.length - 1;
+        liveIndex >= startIndex;
+        liveIndex -= 1
+      ) {
+        const liveMessage = liveDisplayMessages[liveIndex]
+        const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+        if (sortIndex === undefined) continue
+        const message = displayMessages[sortIndex]
+        const document = message ? buildSearchDocument(message, sortIndex) : null
+        if (!document) continue
+        if (
+          documents.length > 0 &&
+          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          break
+        }
+        documents.push(document)
+        textUnits += document.text.length
+        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+      }
+      documents.sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
       dynamicCache = {
         liveStructureVersion: liveDisplayProjection.structureVersion,
         liveContentVersion: liveDisplayProjection.contentVersion,
@@ -3252,10 +3335,44 @@ export function ChatContainer({
     setScrollParent(getViewport())
   }, [getViewport, threadId])
 
-  useEffect(() => {
-    shouldFollowOutputRef.current = true
-    initialScrollAppliedRef.current = false
+  const applyChatScrollEvent = useCallback((event: ChatScrollEvent): ChatScrollTransition => {
+    const current = chatScrollStateRef.current ?? createChatScrollState(threadId)
+    const transition = transitionChatScroll(current, event)
+    chatScrollStateRef.current = transition.state
+    setChatScrollUiState((previous) => {
+      if (
+        previous.generation === transition.state.generation &&
+        previous.mode === transition.state.mode &&
+        previous.hasUnread === transition.state.hasUnread &&
+        previous.unreadCount === transition.state.unreadCount
+      ) {
+        return previous
+      }
+      return {
+        generation: transition.state.generation,
+        mode: transition.state.mode,
+        hasUnread: transition.state.hasUnread,
+        unreadCount: transition.state.unreadCount
+      }
+    })
+    return transition
   }, [threadId])
+
+  useLayoutEffect(() => {
+    if (bottomScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(bottomScrollFrameRef.current)
+      bottomScrollFrameRef.current = null
+    }
+    applyChatScrollEvent({ type: "THREAD_RESET", threadId })
+    pendingBottomScrollEffectRef.current = null
+    bottomSettleAttemptRef.current = 0
+    bottomSettleEffectKeyRef.current = ""
+    lastObservedScrollTopRef.current = 0
+    upwardUserScrollIntentUntilRef.current = 0
+    downwardUserScrollIntentUntilRef.current = 0
+    scrollbarUserIntentActiveRef.current = false
+    chatContentSnapshotRef.current = null
+  }, [applyChatScrollEvent, threadId])
 
   useEffect(() => {
     if (scrollParent || !scrollRef.current) return
@@ -3270,66 +3387,320 @@ export function ChatContainer({
     })
     return indexById
   }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
-  const isMessageVirtualizationEnabled =
-    visibleMessageIndexes.length > CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD
-  const [renderedMessageIdList, setRenderedMessageIdList] = useState<readonly string[]>([])
-  const handleRenderedMessageIdsChange = useCallback((nextIds: readonly string[]): void => {
-    setRenderedMessageIdList((previous) => {
-      if (
-        previous.length === nextIds.length &&
-        previous.every((messageId, index) => messageId === nextIds[index])
-      ) {
-        return previous
-      }
-      return [...nextIds]
-    })
-  }, [])
-  const renderedMessageIds = useMemo(
-    () => new Set(renderedMessageIdList),
-    [renderedMessageIdList]
+  const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
+    visibleMessageIndexes.length
   )
-  const pendingDurableHistoryAnchorRef = useRef<{
-    threadId: string
-    messageId: string
-    viewportTop: number
-    previousMessageCount: number
-  } | null>(null)
-
+  lastVisibleMessageIndexRef.current = visibleMessageIndexes.length - 1
+  messageVirtualizationEnabledRef.current = isMessageVirtualizationEnabled
   useEffect(() => {
-    setRenderedMessageIdList([])
     pendingDurableHistoryAnchorRef.current = null
   }, [threadId])
 
-  useEffect(() => {
-    if (!scrollParent || isMessageVirtualizationEnabled) return
-    const syncAtBottom = (): void => {
-      shouldFollowOutputRef.current =
-        scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight <= 32
-    }
-    scrollParent.addEventListener("scroll", syncAtBottom, { passive: true })
-    syncAtBottom()
-    return () => scrollParent.removeEventListener("scroll", syncAtBottom)
-  }, [isMessageVirtualizationEnabled, scrollParent])
+  const scheduleBottomScrollEffect = useCallback(
+    (effect: ChatScrollEffect): void => {
+      pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+        pendingBottomScrollEffectRef.current,
+        effect
+      )
+      if (bottomScrollFrameRef.current !== null) return
+
+      const run = (): void => {
+        bottomScrollFrameRef.current = null
+        const pending = pendingBottomScrollEffectRef.current
+        pendingBottomScrollEffectRef.current = null
+        const state = chatScrollStateRef.current
+        if (!pending || !state || pending.generation !== state.generation) return
+
+        const viewport = getViewport()
+        const lastVisibleIndex = lastVisibleMessageIndexRef.current
+        if (!viewport || lastVisibleIndex < 0) {
+          applyChatScrollEvent({
+            type:
+              pending.reason === "content-appended" || pending.reason === "content-grown"
+                ? "PROGRAMMATIC_SCROLL_END"
+                : "SCROLL_TO_BOTTOM_FAILED",
+            generation: pending.generation
+          })
+          return
+        }
+
+        if (messageVirtualizationEnabledRef.current && virtuosoRef.current) {
+          virtuosoRef.current.scrollToIndex({
+            index: lastVisibleIndex,
+            align: "end",
+            behavior: "auto"
+          })
+        }
+        // The Virtuoso footer lives after the last indexed message (queued rows, loading state,
+        // approvals, user-input cards). scrollToIndex mounts/measures the last row; this final
+        // bounded write includes the footer and is skipped when the viewport is already settled.
+        const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        if (Math.abs(viewport.scrollTop - bottom) > 1) {
+          viewport.scrollTo({ top: bottom, behavior: "auto" })
+        }
+
+        const distanceToBottom =
+          viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+          bottomSettleAttemptRef.current = 0
+          applyChatScrollEvent({
+            type: "BOTTOM_CONFIRMED",
+            generation: pending.generation
+          })
+          return
+        }
+
+        const longSettle =
+          pending.reason === "initial-position" ||
+          pending.reason === "return-to-bottom" ||
+          pending.reason === "restore-complete"
+        const settleKey = `${pending.generation}:${pending.reason}`
+        if (bottomSettleEffectKeyRef.current !== settleKey) {
+          bottomSettleEffectKeyRef.current = settleKey
+          bottomSettleAttemptRef.current = 0
+        }
+        const settleLimit = longSettle
+          ? CHAT_BOTTOM_SETTLE_MAX_FRAMES
+          : CHAT_FOLLOW_SETTLE_MAX_FRAMES
+        if (
+          bottomSettleAttemptRef.current < settleLimit
+        ) {
+          bottomSettleAttemptRef.current += 1
+          pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+            pendingBottomScrollEffectRef.current,
+            pending
+          )
+          bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+          return
+        }
+
+        bottomSettleAttemptRef.current = 0
+        bottomSettleEffectKeyRef.current = ""
+        applyChatScrollEvent({
+          type: longSettle ? "SCROLL_TO_BOTTOM_FAILED" : "PROGRAMMATIC_SCROLL_END",
+          generation: pending.generation
+        })
+      }
+
+      bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+    },
+    [applyChatScrollEvent, getViewport]
+  )
+
+  const runChatScrollTransition = useCallback(
+    (transition: ChatScrollTransition): ChatScrollState => {
+      if (transition.state.mode === "restoring" || isChatScrollDetached(transition.state)) {
+        pendingBottomScrollEffectRef.current = null
+        if (bottomScrollFrameRef.current !== null) {
+          window.cancelAnimationFrame(bottomScrollFrameRef.current)
+          bottomScrollFrameRef.current = null
+        }
+      }
+      for (const effect of transition.effects) scheduleBottomScrollEffect(effect)
+      return transition.state
+    },
+    [scheduleBottomScrollEffect]
+  )
+
+  const dispatchChatScrollEvent = useCallback(
+    (event: ChatScrollEvent): ChatScrollState => {
+      let nextState = runChatScrollTransition(applyChatScrollEvent(event))
+      // A real user gesture during page-anchor restoration owns the viewport. Cancel the restore
+      // session immediately so its next animation frame cannot pull the reader back to the old
+      // anchor after wheel/touch/keyboard navigation.
+      if (event.type === "USER_DETACH" && pendingDurableHistoryAnchorRef.current) {
+        pendingDurableHistoryAnchorRef.current = null
+        nextState = runChatScrollTransition(
+          applyChatScrollEvent({ type: "RESTORE_END", generation: nextState.generation })
+        )
+      }
+      return nextState
+    },
+    [applyChatScrollEvent, runChatScrollTransition]
+  )
 
   const scrollToConversationBottom = useCallback((): void => {
-    const viewport = getViewport()
-    if (!viewport) return
-    shouldFollowOutputRef.current = true
-    initialScrollAppliedRef.current = true
-    if (isMessageVirtualizationEnabled && virtuosoRef.current) {
-      virtuosoRef.current.scrollTo({ top: Number.MAX_SAFE_INTEGER, behavior: "auto" })
-      return
+    dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+  }, [dispatchChatScrollEvent])
+
+  useEffect(() => {
+    return () => {
+      pendingBottomScrollEffectRef.current = null
+      if (bottomScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomScrollFrameRef.current)
+        bottomScrollFrameRef.current = null
+      }
     }
-    const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-    if (Math.abs(viewport.scrollTop - bottom) > 1) {
-      viewport.scrollTo({ top: bottom, behavior: "auto" })
+  }, [])
+  const searchDurableMessages = useCallback(
+    (
+      query: string,
+      options: DurableChatSearchOptions
+    ): Promise<DurableChatSearchPage> => {
+      return window.api.threads.searchMessages(threadId, query, options)
+    },
+    [threadId]
+  )
+
+  useEffect(() => {
+    if (!scrollParent) return
+    lastObservedScrollTopRef.current = scrollParent.scrollTop
+
+    const confirmOrDetachFromScroll = (): void => {
+      const previousTop = lastObservedScrollTopRef.current
+      const nextTop = scrollParent.scrollTop
+      const distanceToBottom =
+        scrollParent.scrollHeight - nextTop - scrollParent.clientHeight
+      lastObservedScrollTopRef.current = nextTop
+
+      if (
+        nextTop < previousTop - CHAT_SCROLL_UP_DETACH_DELTA_PX &&
+        performance.now() <= upwardUserScrollIntentUntilRef.current
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+        return
+      }
+      if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+        const state = chatScrollStateRef.current
+        // Explicit wheel/touch/keyboard/scrollbar handlers own detachment. Do not let the scroll
+        // event immediately re-attach a detached reader while the viewport is still moving up
+        // inside the at-bottom threshold. Downward movement to the bottom still re-attaches.
+        if (
+          state &&
+          isChatScrollDetached(state) &&
+          (nextTop <= previousTop + CHAT_SCROLL_UP_DETACH_DELTA_PX ||
+            (performance.now() > downwardUserScrollIntentUntilRef.current &&
+              !scrollbarUserIntentActiveRef.current))
+        ) {
+          return
+        }
+        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+      }
     }
-  }, [getViewport, isMessageVirtualizationEnabled])
+    const cancelPendingHistoryAnchorFromUserGesture = (): void => {
+      const anchor = pendingDurableHistoryAnchorRef.current
+      if (!anchor) return
+      dispatchChatScrollEvent({
+        type: "USER_DETACH",
+        source: "user-input",
+        generation: anchor.generation
+      })
+    }
+    const detachFromExplicitWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (event.deltaY > 0) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+    const scrollRoot = scrollRef.current
+    const detachFromScrollbarPointer = (event: PointerEvent): void => {
+      if (
+        event.composedPath().some(
+          (target) =>
+            target instanceof HTMLElement && target.hasAttribute("data-scroll-area-scrollbar")
+        )
+      ) {
+        scrollbarUserIntentActiveRef.current = true
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      }
+    }
+    const clearScrollbarPointerIntent = (): void => {
+      scrollbarUserIntentActiveRef.current = false
+    }
+    let lastTouchY: number | null = null
+    const rememberTouchPosition = (event: TouchEvent): void => {
+      lastTouchY = event.touches[0]?.clientY ?? null
+    }
+    const detachFromTouchScroll = (event: TouchEvent): void => {
+      const nextTouchY = event.touches[0]?.clientY ?? null
+      if (lastTouchY !== null && nextTouchY !== null && nextTouchY > lastTouchY + 1) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (lastTouchY !== null && nextTouchY !== null && nextTouchY < lastTouchY - 1) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+      lastTouchY = nextTouchY
+    }
+    const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
+      if (!chatRootRef.current.contains(document.activeElement) && document.activeElement !== document.body) {
+        return
+      }
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
+      if (
+        event.key === "ArrowUp" ||
+        event.key === "PageUp" ||
+        event.key === "Home" ||
+        (event.key === " " && event.shiftKey)
+      ) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (
+        event.key === "ArrowDown" ||
+        event.key === "PageDown" ||
+        event.key === "End" ||
+        (event.key === " " && !event.shiftKey)
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+
+    scrollParent.addEventListener("scroll", confirmOrDetachFromScroll, { passive: true })
+    scrollParent.addEventListener("wheel", detachFromExplicitWheel, { passive: true })
+    scrollRoot?.addEventListener("pointerdown", detachFromScrollbarPointer, {
+      capture: true,
+      passive: true
+    })
+    scrollParent.addEventListener("touchstart", rememberTouchPosition, { passive: true })
+    scrollParent.addEventListener("touchmove", detachFromTouchScroll, { passive: true })
+    window.addEventListener("keydown", detachFromKeyboardScroll, true)
+    window.addEventListener("pointerup", clearScrollbarPointerIntent, true)
+    window.addEventListener("pointercancel", clearScrollbarPointerIntent, true)
+    window.addEventListener("blur", clearScrollbarPointerIntent)
+    confirmOrDetachFromScroll()
+    return () => {
+      scrollParent.removeEventListener("scroll", confirmOrDetachFromScroll)
+      scrollParent.removeEventListener("wheel", detachFromExplicitWheel)
+      scrollRoot?.removeEventListener("pointerdown", detachFromScrollbarPointer, true)
+      scrollParent.removeEventListener("touchstart", rememberTouchPosition)
+      scrollParent.removeEventListener("touchmove", detachFromTouchScroll)
+      window.removeEventListener("keydown", detachFromKeyboardScroll, true)
+      window.removeEventListener("pointerup", clearScrollbarPointerIntent, true)
+      window.removeEventListener("pointercancel", clearScrollbarPointerIntent, true)
+      window.removeEventListener("blur", clearScrollbarPointerIntent)
+    }
+  }, [dispatchChatScrollEvent, scrollParent])
 
   const scrollToMessageById = useCallback(
     (messageId: string): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
       const viewport = getViewport()
       if (targetElement && viewport) {
@@ -3343,85 +3714,132 @@ export function ChatContainer({
       }
       virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
     },
-    [getViewport, visibleMessageIndexById]
+    [dispatchChatScrollEvent, getViewport, visibleMessageIndexById]
   )
   const revealMessage = useCallback(
     (messageId: string): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
-      const viewport = getViewport()
-      if (targetElement && viewport) {
-        const viewportRect = viewport.getBoundingClientRect()
-        const targetRect = targetElement.getBoundingClientRect()
-        viewport.scrollTo({
-          top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - 8),
-          behavior: "auto"
-        })
-        return
-      }
-      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "auto" })
+      if (targetElement) return
+      virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
     },
-    [getViewport, visibleMessageIndexById]
+    [dispatchChatScrollEvent, visibleMessageIndexById]
   )
+  const handleScrollToQuestion = useCallback((): void => {
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+  }, [dispatchChatScrollEvent])
 
   const handleInitialVirtualItemsRendered = useCallback((): void => {
-    if (initialScrollAppliedRef.current) return
-    scrollToConversationBottom()
-  }, [scrollToConversationBottom])
+    if (historyLoading) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent, historyLoading, visibleMessageIndexes.length])
 
   const handleContentHeightChanged = useCallback((): void => {
-    if (!shouldFollowOutputRef.current) return
-    scrollToConversationBottom()
-  }, [scrollToConversationBottom])
+    const state = chatScrollStateRef.current
+    if (
+      visibleMessageIndexes.length === 0 ||
+      !state ||
+      state.generation !== chatScrollUiState.generation ||
+      !shouldFollowChatOutput(state)
+    ) {
+      return
+    }
+    dispatchChatScrollEvent({
+      type: "CONTENT_GROWN",
+      generation: chatScrollUiState.generation
+    })
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent, visibleMessageIndexes.length])
 
   const handleVirtualAtBottomStateChange = useCallback((atBottom: boolean): void => {
-    shouldFollowOutputRef.current = atBottom
-  }, [])
+    const state = chatScrollStateRef.current
+    // Virtuoso may report `true` when a row collapses or a late measurement shortens content.
+    // That is layout, not proof that a detached reader intentionally returned to the bottom.
+    // Manual downward scrolling is confirmed by the viewport scroll listener; the button changes
+    // mode to following before its programmatic settle, so both intentional paths still work.
+    if (atBottom && state && !isChatScrollDetached(state)) {
+      dispatchChatScrollEvent({
+        type: "BOTTOM_CONFIRMED",
+        generation: chatScrollUiState.generation
+      })
+    }
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent])
 
   useEffect(() => {
-    if (
-      !initialScrollAppliedRef.current &&
-      visibleMessageIndexes.length > 0 &&
-      !historyLoading &&
-      scrollParent &&
-      !isMessageVirtualizationEnabled
-    ) {
-      scrollToConversationBottom()
-    }
+    if (historyLoading || !scrollParent) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
   }, [
+    chatScrollUiState.generation,
+    dispatchChatScrollEvent,
     historyLoading,
-    isMessageVirtualizationEnabled,
     scrollParent,
-    scrollToConversationBottom,
     threadId,
     visibleMessageIndexes.length
   ])
 
   const loadEarlierHistoryPage = useCallback(async (): Promise<void> => {
     if (historyPageLoading || !historyHasMore) return
-    const anchorId = renderedMessageIdList[0]
-    const anchor = anchorId ? contentMessageRefs.current.get(anchorId) : null
+    const generation = chatScrollStateRef.current?.generation
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input", generation })
+    dispatchChatScrollEvent({ type: "RESTORE_BEGIN", generation })
+    const viewport = getViewport()
+    const viewportTop = viewport?.getBoundingClientRect().top ?? 0
+    let anchor: HTMLElement | null = null
+    let anchorDistance = Number.POSITIVE_INFINITY
+    for (const candidate of viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []) {
+      const distance = Math.abs(candidate.getBoundingClientRect().top - viewportTop)
+      if (distance < anchorDistance) {
+        anchor = candidate
+        anchorDistance = distance
+      }
+    }
+    const anchorId = anchor?.dataset.chatMessageId
     const request =
       anchorId && anchor
         ? {
             threadId,
+            generation: generation ?? 0,
             messageId: anchorId,
             viewportTop: anchor.getBoundingClientRect().top,
-            previousMessageCount: displayMessages.length
+            previousMessageCount: displayMessages.length,
+            previousLoadedMessageCount: historyLoadedMessageCount,
+            attempt: 0,
+            stableFrames: 0
           }
         : null
     pendingDurableHistoryAnchorRef.current = request
-    const prependedCount = await loadEarlierMessages()
-    if (prependedCount === 0 && pendingDurableHistoryAnchorRef.current === request) {
-      pendingDurableHistoryAnchorRef.current = null
+    try {
+      const prependedCount = await loadEarlierMessages()
+      if (prependedCount === 0 || !request) {
+        if (pendingDurableHistoryAnchorRef.current === request) {
+          pendingDurableHistoryAnchorRef.current = null
+        }
+        dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      }
+    } catch (error) {
+      if (pendingDurableHistoryAnchorRef.current === request) {
+        pendingDurableHistoryAnchorRef.current = null
+      }
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      toast.error(error instanceof Error ? error.message : "加载更早消息失败")
     }
   }, [
+    dispatchChatScrollEvent,
     displayMessages.length,
+    getViewport,
+    historyLoadedMessageCount,
     historyHasMore,
     historyPageLoading,
     loadEarlierMessages,
-    renderedMessageIdList,
     threadId
   ])
   const historyRemainingCount = Math.max(
@@ -3432,71 +3850,118 @@ export function ChatContainer({
   useLayoutEffect(() => {
     const anchor = pendingDurableHistoryAnchorRef.current
     if (!anchor || anchor.threadId !== threadId || historyPageLoading) return
-    if (displayMessages.length <= anchor.previousMessageCount) return
-    pendingDurableHistoryAnchorRef.current = null
-    const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+    if (displayMessages.length <= anchor.previousMessageCount) {
+      if (historyLoadedMessageCount <= anchor.previousLoadedMessageCount) return
+      pendingDurableHistoryAnchorRef.current = null
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+      return
+    }
     let frame: number | null = null
-    const restoreAnchor = (attempt: number): void => {
+    const finishRestore = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
+      pendingDurableHistoryAnchorRef.current = null
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+    }
+    const restoreAnchor = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
       const viewport = getViewport()
-      const target = contentMessageRefs.current.get(anchor.messageId)
+      const target =
+        contentMessageRefs.current.get(anchor.messageId) ??
+        Array.from(
+          viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []
+        ).find((candidate) => candidate.dataset.chatMessageId === anchor.messageId)
       if (viewport && target) {
-        viewport.scrollTop += target.getBoundingClientRect().top - anchor.viewportTop
-        return
+        const delta = target.getBoundingClientRect().top - anchor.viewportTop
+        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        if (anchor.stableFrames >= CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+          finishRestore()
+          return
+        }
       }
-      if (attempt === 0 && visibleIndex !== undefined) {
+      const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+      if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
         virtuosoRef.current?.scrollToIndex({ index: visibleIndex, align: "start", behavior: "auto" })
       }
-      if (attempt < 8) {
-        frame = window.requestAnimationFrame(() => restoreAnchor(attempt + 1))
+      anchor.attempt += 1
+      if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
+        frame = window.requestAnimationFrame(restoreAnchor)
+      } else {
+        finishRestore()
       }
     }
-    frame = window.requestAnimationFrame(() => restoreAnchor(0))
+    frame = window.requestAnimationFrame(restoreAnchor)
     return () => {
       if (frame !== null) window.cancelAnimationFrame(frame)
     }
   }, [
+    dispatchChatScrollEvent,
     displayMessages.length,
     getViewport,
+    historyLoadedMessageCount,
     historyPageLoading,
     threadId,
     visibleMessageIndexById
   ])
 
   useEffect(() => {
-    if (historyLoading || pendingApproval || pendingUserInput) return
+    const lastVisibleMessageIndex = visibleMessageIndexes.at(-1)
+    const lastVisibleMessage =
+      lastVisibleMessageIndex === undefined ? undefined : displayMessages[lastVisibleMessageIndex]
+    const nextSnapshot = {
+      threadId,
+      visibleCount: visibleMessageIndexes.length,
+      lastMessageId: lastVisibleMessage?.id ?? null,
+      lastMessageIdentity: chatScrollTailMessageIdentity(lastVisibleMessage),
+      loadedMessageCount: historyLoadedMessageCount,
+      contentVersion: displayMessagesContentVersion,
+      structureVersion: displayMessagesStructureVersion
+    }
+    const previous = chatContentSnapshotRef.current
+    chatContentSnapshotRef.current = nextSnapshot
+    if (historyLoading || !previous || previous.threadId !== threadId) return
 
-    const configuredLimit = normalizeChatAutoScrollMessageLimit(
-      chatScrollSettings.autoScrollMessageLimit
-    )
-    if (
-      configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS &&
-      displayMessages.length > configuredLimit
-    ) {
-      const noticeKey = `${threadId}:${configuredLimit}`
-      if (chatScrollLimitNoticeKeyRef.current !== noticeKey) {
-        chatScrollLimitNoticeKeyRef.current = noticeKey
-        toast.warning(
-          `会话消息已超过 ${configuredLimit} 条，已暂停自动置底。可前往“自定义 / 基础功能 / 通用”调整自动置底消息数量。`
-        )
-      }
+    const tailChange = classifyChatScrollTailChange({
+      previous,
+      current: nextSnapshot,
+      displayMessages,
+      visibleMessageIndexes,
+      visibleMessageIndexById
+    })
+
+    if (tailChange.appendedMessageCount > 0) {
+      dispatchChatScrollEvent({
+        type: "CONTENT_APPENDED",
+        unreadMessages: tailChange.unreadMessageCount
+      })
       return
     }
-
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    if (shouldMarkChatTailContentGrowth({
+      change: tailChange,
+      currentTail: lastVisibleMessage,
+      contentVersionChanged: nextSnapshot.contentVersion !== previous.contentVersion,
+      structureVersionChanged: nextSnapshot.structureVersion !== previous.structureVersion,
+      changedTail: displayMessageProjection.changedMessages.some(
+        (message) => message.id === nextSnapshot.lastMessageId
+      )
+    })) {
+      const state = chatScrollStateRef.current
+      if (state && isChatScrollDetached(state)) {
+        dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+      }
     }
   }, [
-    chatAutoScrollTriggerKey,
-    chatScrollSettings.autoScrollMessageLimit,
-    displayMessages.length,
-    getViewport,
+    dispatchChatScrollEvent,
+    displayMessageProjection.changedMessages,
+    displayMessages,
+    displayMessagesContentVersion,
+    displayMessagesStructureVersion,
+    historyLoadedMessageCount,
     historyLoading,
-    pendingApproval,
-    pendingUserInput,
-    threadId
+    threadId,
+    visibleMessageIndexById,
+    visibleMessageIndexes,
+    visibleMessageIndexes.length
   ])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
@@ -3517,16 +3982,31 @@ export function ChatContainer({
   }, [])
 
   useEffect(() => {
-    if (!pendingApproval || !shouldFollowOutputRef.current) return
-    scrollToConversationBottom()
-  }, [pendingApproval, scrollToConversationBottom])
+    const state = chatScrollStateRef.current
+    if (!pendingApproval || !state || !shouldFollowChatOutput(state)) return
+    dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+  }, [dispatchChatScrollEvent, pendingApproval])
 
   useEffect(() => {
-    if (!pendingUserInput || !userInputDialogLayout || !shouldFollowOutputRef.current) return
+    const state = chatScrollStateRef.current
+    if (!pendingUserInput || !userInputDialogLayout || !state || !shouldFollowChatOutput(state)) {
+      return
+    }
     const viewport = getViewport()
     if (!viewport) return
+    const generation = state.generation
+    dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_BEGIN", generation })
 
     const frame = requestAnimationFrame(() => {
+      const currentState = chatScrollStateRef.current
+      if (
+        !currentState ||
+        currentState.generation !== generation ||
+        !shouldFollowChatOutput(currentState)
+      ) {
+        dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+        return
+      }
       const targetElement = lastContentMessageId
         ? contentMessageRefs.current.get(lastContentMessageId)
         : null
@@ -3542,10 +4022,15 @@ export function ChatContainer({
       } else {
         viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
       }
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
     })
 
-    return () => cancelAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(frame)
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+    }
   }, [
+    dispatchChatScrollEvent,
     getViewport,
     lastContentMessageId,
     pendingUserInput,
@@ -6094,6 +6579,7 @@ export function ChatContainer({
         getViewport={getViewport}
         getSearchCorpus={getSearchCorpus}
         onRevealMessage={revealMessage}
+        searchDurableMessages={searchDurableMessages}
         recomputeKey={searchRecomputeKey}
       />
 
@@ -6220,7 +6706,7 @@ export function ChatContainer({
 
       {skillIntentBanner}
       {nuxDialog}
-      {isMessageVirtualizationEnabled && (
+      {visibleMessageIndexes.length > CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD && (
         <TooltipProvider delayDuration={180}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -6239,13 +6725,14 @@ export function ChatContainer({
 
       <ChatScrollNavigator
         messages={chatScrollNavigatorMessages}
-        renderedMessageIds={renderedMessageIds}
+        questionStructureRevision={chatScrollQuestionStructureRevision}
         onRevealMessage={revealMessage}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
+        onScrollToQuestion={handleScrollToQuestion}
         scrollToMessageById={scrollToMessageById}
       >
-        {({ reserveLeftSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
@@ -6297,7 +6784,6 @@ export function ChatContainer({
                     historyHasMore={historyHasMore}
                     historyPageLoading={historyPageLoading}
                     historyRemainingCount={historyRemainingCount}
-                    onRenderedMessageIdsChange={handleRenderedMessageIdsChange}
                     hookLoggingEnabled={hookLogConfig.enabled}
                     hookLogBucketByTurnId={hookLogBucketByTurnId}
                     detachedHookLogBuckets={detachedHookLogBuckets}
@@ -6320,6 +6806,13 @@ export function ChatContainer({
                     userSendTimeLabelById={userSendTimeLabelById}
                     customScrollParent={scrollParent}
                     virtuosoRef={virtuosoRef}
+                    navigatorVirtualRangeRef={virtualRangeRef}
+                    initialTopMostItemIndex={
+                      chatScrollUiState.mode === "initializing" ||
+                      chatScrollUiState.mode === "following"
+                        ? { index: "LAST", align: "end", behavior: "auto" }
+                        : undefined
+                    }
                     onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
                     onContentHeightChanged={handleContentHeightChanged}
                     onAtBottomStateChange={handleVirtualAtBottomStateChange}
@@ -6665,9 +7158,10 @@ export function ChatContainer({
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
-                  getViewport={getViewport}
+                  visible={chatScrollUiState.mode === "detached"}
+                  hasUnread={chatScrollUiState.hasUnread}
+                  unreadCount={chatScrollUiState.unreadCount}
                   onScrollToBottom={scrollToConversationBottom}
-                  resetKey={threadId}
                 />
                 <SlashCommandPopover
                   mode={slash.mode}

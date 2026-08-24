@@ -23,7 +23,14 @@ import {
   getMessageRoleCollisionSourceId,
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
-import type { Message, ThreadMessagesPage, ThreadMessagesPageOptions } from "../types"
+import type {
+  Message,
+  ThreadMessageSearchMatch,
+  ThreadMessageSearchOptions,
+  ThreadMessageSearchPage,
+  ThreadMessagesPage,
+  ThreadMessagesPageOptions
+} from "../types"
 import { mergeSubagentTranscriptManifestMessages } from "../services/subagent-transcript-content-store"
 import {
   isSubagentTranscriptBlobRef,
@@ -54,6 +61,17 @@ const THREAD_SUBAGENT_PAGE_JOURNAL_CHAR_BUDGET = 8 * 1024 * 1024
 export const DEFAULT_THREAD_MESSAGES_PAGE_LIMIT = 500
 const MAX_THREAD_MESSAGES_PAGE_LIMIT = 1_000
 export const THREAD_MESSAGES_PAGE_BYTE_BUDGET = 4 * 1024 * 1024
+export const DEFAULT_THREAD_MESSAGE_SEARCH_LIMIT = 50
+export const MAX_THREAD_MESSAGE_SEARCH_LIMIT = 100
+// Durable search runs synchronously in Electron's main process. Keep each IPC
+// window small enough that even rows at the 120k transcript limit cannot hold
+// the event loop for a perceptible interval; callers continue through the
+// compound cursor for older history.
+export const THREAD_MESSAGE_SEARCH_SCAN_LIMIT = 32
+export const THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET = 512 * 1024
+export const THREAD_MESSAGE_SEARCH_QUERY_LIMIT = 256
+export const THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT = 320
+export const THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET = 128 * 1024
 
 function textChunkEnd(text: string, start: number, maxCodeUnits: number): number {
   let end = Math.min(text.length, start + Math.max(0, maxCodeUnits))
@@ -1300,6 +1318,428 @@ export function getThreadMessagesPage(
     beforeMessageId: hasMore && oldestRow ? oldestRow.message_id : null,
     hasMore,
     total
+  }
+}
+
+function normalizeThreadMessageSearchLimit(limit: number | undefined): number {
+  if (!Number.isFinite(limit) || limit === undefined || limit <= 0) {
+    return DEFAULT_THREAD_MESSAGE_SEARCH_LIMIT
+  }
+  return Math.min(MAX_THREAD_MESSAGE_SEARCH_LIMIT, Math.max(1, Math.floor(limit)))
+}
+
+interface ThreadMessageSearchCandidate {
+  messageId: string
+  ordinal: number
+  role: ThreadMessageRole
+  createdAt: number
+  contentJson: string
+  toolCallsJson: string | null
+}
+
+interface ThreadMessageSearchTextResult {
+  occurrenceCount: number
+  matchPosition: number
+}
+
+function parseThreadMessageSearchJson(raw: string | null): {
+  valid: boolean
+  value: unknown
+} {
+  if (raw === null || raw === "") return { valid: false, value: undefined }
+  try {
+    return { valid: true, value: JSON.parse(raw) }
+  } catch {
+    return { valid: false, value: undefined }
+  }
+}
+
+function threadMessageSearchJsonScalar(value: unknown): string {
+  if (typeof value === "string") return value
+  if (typeof value === "number" || typeof value === "boolean") return String(value)
+  if (value === null || value === undefined) return ""
+  try {
+    return JSON.stringify(value) ?? ""
+  } catch {
+    return ""
+  }
+}
+
+/** Reproduce the searchable projection without SQLite building group_concat copies. */
+function buildThreadMessageSearchDocument(
+  contentJson: string,
+  toolCallsJson: string | null
+): string {
+  const content = parseThreadMessageSearchJson(contentJson)
+  let searchText = ""
+  if (content.valid && typeof content.value === "string") {
+    searchText = content.value
+  } else if (content.valid && Array.isArray(content.value)) {
+    searchText = content.value
+      .map((block) => {
+        if (!block || typeof block !== "object") return ""
+        const record = block as Record<string, unknown>
+        if (record.type === "text" && typeof record.text === "string") return record.text
+        return typeof record.content === "string" ? record.content : ""
+      })
+      .join("\n")
+  }
+
+  const toolCalls = parseThreadMessageSearchJson(toolCallsJson)
+  if (!toolCalls.valid || !Array.isArray(toolCalls.value)) return searchText
+  const toolText = toolCalls.value
+    .map((toolCall) => {
+      if (!toolCall || typeof toolCall !== "object") return "\n"
+      const record = toolCall as Record<string, unknown>
+      return `${threadMessageSearchJsonScalar(record.name)}\n${threadMessageSearchJsonScalar(record.args)}`
+    })
+    .join("\n")
+  return `${searchText}\n${toolText}`
+}
+
+/** Find and count non-overlapping occurrences while allocating one normalized copy. */
+function inspectThreadMessageSearchText(
+  searchText: string,
+  normalizedQuery: string
+): ThreadMessageSearchTextResult {
+  const normalizedText = searchText.toLowerCase()
+  const matchPosition = normalizedText.indexOf(normalizedQuery)
+  if (matchPosition < 0) return { occurrenceCount: 0, matchPosition: -1 }
+
+  let occurrenceCount = 0
+  let offset = matchPosition
+  while (offset >= 0) {
+    occurrenceCount += 1
+    offset = normalizedText.indexOf(normalizedQuery, offset + normalizedQuery.length)
+  }
+  return { occurrenceCount, matchPosition }
+}
+
+function threadMessageSearchPreview(searchText: string, matchPosition: number): string {
+  return searchText.slice(
+    Math.max(0, matchPosition - 80),
+    Math.max(0, matchPosition - 80) + THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT
+  )
+}
+
+/**
+ * Search one bounded durable-transcript window. SQLite reads compact headers
+ * first; only a candidate/byte-bounded suffix is projected and inspected. Empty
+ * match pages can still carry a cursor, so callers continue toward older messages
+ * until `hasMore` is false without one IPC blocking on the whole transcript.
+ */
+export function searchThreadMessages(
+  threadId: string,
+  rawQuery: string,
+  options: ThreadMessageSearchOptions = {}
+): ThreadMessageSearchPage {
+  const normalizedThreadId = typeof threadId === "string" ? threadId.trim() : ""
+  const query = typeof rawQuery === "string" ? rawQuery.trim().toLowerCase() : ""
+  if (query.length > THREAD_MESSAGE_SEARCH_QUERY_LIMIT) {
+    throw new RangeError(
+      `Thread message search query exceeds ${THREAD_MESSAGE_SEARCH_QUERY_LIMIT} characters`
+    )
+  }
+  if (!normalizedThreadId || !query) {
+    return {
+      matches: [],
+      beforeOrdinal: null,
+      beforeMessageId: null,
+      hasMore: false,
+      scanned: 0,
+      truncated: false
+    }
+  }
+
+  const hasBeforeOrdinal =
+    Number.isSafeInteger(options.beforeOrdinal) && (options.beforeOrdinal ?? -1) >= 0
+  const normalizedBeforeMessageId = options.beforeMessageId?.trim() ?? ""
+  const hasBeforeMessageId = normalizedBeforeMessageId.length > 0
+  if (hasBeforeOrdinal !== hasBeforeMessageId) {
+    throw new Error(
+      "Thread message search cursor requires beforeOrdinal and beforeMessageId together"
+    )
+  }
+
+  const database = getDb()
+  const cursorPredicate = hasBeforeOrdinal
+    ? "AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id < ?))"
+    : ""
+  const cursorBindings: Array<string | number> = hasBeforeOrdinal
+    ? [
+        normalizedThreadId,
+        options.beforeOrdinal!,
+        options.beforeOrdinal!,
+        normalizedBeforeMessageId
+      ]
+    : [normalizedThreadId]
+
+  // Read only compact headers here. The extra row establishes whether another
+  // bounded scan window exists without touching its content_json value.
+  const candidateStatement = database.prepare(
+    `SELECT
+       m.message_id,
+       m.ordinal,
+       1024
+         + length(CAST(m.content_json AS BLOB))
+         + length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
+         + COALESCE(fragments.total_chars * 4, 0) AS estimated_bytes
+     FROM thread_messages AS m
+     LEFT JOIN thread_message_fragment_states AS fragments
+       ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+     WHERE m.thread_id = ?
+       ${cursorPredicate}
+     ORDER BY m.ordinal DESC, m.message_id DESC
+     LIMIT ?`
+  )
+  candidateStatement.bind([...cursorBindings, THREAD_MESSAGE_SEARCH_SCAN_LIMIT + 1])
+  const candidateHeaders: Array<{
+    messageId: string
+    ordinal: number
+    estimatedBytes: number
+  }> = []
+  try {
+    while (candidateStatement.step()) {
+      const row = candidateStatement.getAsObject() as {
+        message_id?: unknown
+        ordinal?: unknown
+        estimated_bytes?: unknown
+      }
+      if (typeof row.message_id !== "string") continue
+      candidateHeaders.push({
+        messageId: row.message_id,
+        ordinal: Number(row.ordinal) || 0,
+        estimatedBytes: Math.max(0, Number(row.estimated_bytes) || 0)
+      })
+    }
+  } finally {
+    candidateStatement.free()
+  }
+
+  const firstCandidate = candidateHeaders[0]
+  if (
+    firstCandidate &&
+    firstCandidate.estimatedBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
+  ) {
+    // A single legal structured message can be larger than the per-call budget. Parsing it would
+    // put an unbounded synchronous burst on Electron's main thread. Skip this row transparently
+    // and continue from the next ordinal; `truncated` keeps this visible to the renderer.
+    const hasMore = candidateHeaders.length > 1
+    return {
+      matches: [],
+      beforeOrdinal: hasMore ? firstCandidate.ordinal : null,
+      beforeMessageId: hasMore ? firstCandidate.messageId : null,
+      hasMore,
+      scanned: 1,
+      truncated: true
+    }
+  }
+
+  const selectedCandidates: typeof candidateHeaders = []
+  let selectedCandidateBytes = 0
+  for (const candidate of candidateHeaders) {
+    if (selectedCandidates.length >= THREAD_MESSAGE_SEARCH_SCAN_LIMIT) break
+    if (
+      selectedCandidates.length > 0 &&
+      selectedCandidateBytes + candidate.estimatedBytes >
+        THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
+    ) {
+      break
+    }
+    selectedCandidates.push(candidate)
+    selectedCandidateBytes += candidate.estimatedBytes
+  }
+  if (selectedCandidates.length === 0) {
+    return {
+      matches: [],
+      beforeOrdinal: null,
+      beforeMessageId: null,
+      hasMore: false,
+      scanned: 0,
+      truncated: false
+    }
+  }
+
+  const limit = normalizeThreadMessageSearchLimit(options.limit)
+  const candidateRowsStatement = database.prepare(
+    `SELECT
+       m.message_id,
+       m.ordinal,
+       m.role,
+       m.created_at,
+       m.content_json,
+       m.tool_calls_json
+     FROM thread_messages AS m
+     WHERE m.thread_id = ?
+       ${cursorPredicate}
+     ORDER BY m.ordinal DESC, m.message_id DESC
+     LIMIT ?`
+  )
+  candidateRowsStatement.bind([...cursorBindings, selectedCandidates.length])
+  const candidates: ThreadMessageSearchCandidate[] = []
+  try {
+    while (candidateRowsStatement.step()) {
+      const row = candidateRowsStatement.getAsObject() as {
+        message_id?: unknown
+        ordinal?: unknown
+        role?: unknown
+        created_at?: unknown
+        content_json?: unknown
+        tool_calls_json?: unknown
+      }
+      if (
+        typeof row.message_id !== "string" ||
+        !isMessageRole(row.role) ||
+        typeof row.content_json !== "string"
+      ) {
+        continue
+      }
+      candidates.push({
+        messageId: row.message_id,
+        ordinal: Number(row.ordinal) || 0,
+        role: row.role,
+        createdAt: Number(row.created_at) || 0,
+        contentJson: row.content_json,
+        toolCallsJson: typeof row.tool_calls_json === "string" ? row.tool_calls_json : null
+      })
+    }
+  } finally {
+    candidateRowsStatement.free()
+  }
+
+  const headersById = new Map(
+    selectedCandidates.map((candidate, index) => [candidate.messageId, { candidate, index }])
+  )
+  const fragmentStatement = database.prepare(
+    `SELECT f.content_text
+     FROM thread_message_fragments AS f
+     WHERE f.thread_id = ? AND f.message_id = ?
+     ORDER BY f.fragment_id ASC`
+  )
+  const rawMatches: ThreadMessageSearchMatch[] = []
+  let inspectedBytes = 0
+  let advancedCandidateCount = 0
+  let lastAdvancedCandidate: (typeof selectedCandidates)[number] | null = null
+  let truncatedRows = false
+  try {
+    for (const candidate of candidates) {
+      const header = headersById.get(candidate.messageId)
+      if (!header) continue
+      const baseBytes =
+        1024 +
+        Buffer.byteLength(candidate.contentJson, "utf8") +
+        Buffer.byteLength(candidate.toolCallsJson ?? "", "utf8")
+      if (baseBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
+        truncatedRows = true
+        advancedCandidateCount = header.index + 1
+        lastAdvancedCandidate = header.candidate
+        continue
+      }
+
+      const fragments: string[] = []
+      let candidateBytes = baseBytes
+      fragmentStatement.bind([normalizedThreadId, candidate.messageId])
+      while (fragmentStatement.step()) {
+        const row = fragmentStatement.getAsObject() as { content_text?: unknown }
+        if (typeof row.content_text !== "string") continue
+        candidateBytes += Buffer.byteLength(row.content_text, "utf8")
+        if (candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
+        fragments.push(row.content_text)
+      }
+
+      if (candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
+        truncatedRows = true
+        advancedCandidateCount = header.index + 1
+        lastAdvancedCandidate = header.candidate
+        continue
+      }
+      if (inspectedBytes + candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
+      inspectedBytes += candidateBytes
+
+      const documentText = buildThreadMessageSearchDocument(
+        candidate.contentJson,
+        candidate.toolCallsJson
+      )
+      const documentMatch = inspectThreadMessageSearchText(documentText, query)
+      let occurrenceCount = documentMatch.occurrenceCount
+      let preview =
+        documentMatch.matchPosition >= 0
+          ? threadMessageSearchPreview(documentText, documentMatch.matchPosition)
+          : ""
+      let previousText = documentText
+      for (const fragment of fragments) {
+        const boundary =
+          query.length > 1
+            ? previousText.slice(Math.max(0, previousText.length - query.length + 1))
+            : ""
+        const fragmentWindow = `${boundary}${fragment}`
+        const fragmentMatch = inspectThreadMessageSearchText(fragmentWindow, query)
+        occurrenceCount += fragmentMatch.occurrenceCount
+        if (!preview && fragmentMatch.matchPosition >= 0) {
+          preview = threadMessageSearchPreview(fragmentWindow, fragmentMatch.matchPosition)
+        }
+        previousText = fragment
+      }
+
+      advancedCandidateCount = header.index + 1
+      lastAdvancedCandidate = header.candidate
+      if (occurrenceCount > 0) {
+        rawMatches.push({
+          messageId: candidate.messageId,
+          ordinal: candidate.ordinal,
+          role: candidate.role,
+          createdAt: candidate.createdAt,
+          occurrenceCount,
+          preview
+        })
+        if (rawMatches.length >= limit + 1) break
+      }
+    }
+  } finally {
+    fragmentStatement.free()
+  }
+
+  // Reserve envelope/cursor space, then measure exact JSON bytes for every
+  // returned match. This keeps renderer IPC bounded even for escape-heavy text.
+  const matches: ThreadMessageSearchMatch[] = []
+  let responseBytes = 8 * 1024
+  let truncatedMatches = false
+  for (const match of rawMatches) {
+    if (matches.length >= limit) {
+      truncatedMatches = true
+      break
+    }
+    const matchBytes = Buffer.byteLength(JSON.stringify(match), "utf8") + 1
+    if (
+      matches.length > 0 &&
+      responseBytes + matchBytes > THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET
+    ) {
+      truncatedMatches = true
+      break
+    }
+    matches.push(match)
+    responseBytes += matchBytes
+  }
+  if (rawMatches.length > matches.length) truncatedMatches = true
+
+  let beforeOrdinal: number | null = null
+  let beforeMessageId: string | null = null
+  if (truncatedMatches && matches.length > 0) {
+    const lastMatch = matches[matches.length - 1]
+    beforeOrdinal = lastMatch.ordinal
+    beforeMessageId = lastMatch.messageId
+  } else if (lastAdvancedCandidate && candidateHeaders.length > advancedCandidateCount) {
+    beforeOrdinal = lastAdvancedCandidate.ordinal
+    beforeMessageId = lastAdvancedCandidate.messageId
+  }
+
+  return {
+    matches,
+    beforeOrdinal,
+    beforeMessageId,
+    hasMore: beforeOrdinal !== null && beforeMessageId !== null,
+    scanned: advancedCandidateCount,
+    truncated: truncatedRows
   }
 }
 

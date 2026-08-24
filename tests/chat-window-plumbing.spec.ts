@@ -45,32 +45,57 @@ async function main(): Promise<void> {
   assert.match(virtualList, /const DETACHED_HOOK_LOG_WINDOW_SIZE = 80/)
   assert.match(virtualList, /data-chat-history-boundary="older"/)
   assert.match(virtualList, /data=\{visibleMessageIndexes\}/)
-  assert.match(virtualList, /rangeChanged=/)
+  assert.match(virtualList, /rangeChanged=\{handleVirtualRangeChanged\}/)
+  assert.match(
+    virtualList,
+    /const handleVirtualRangeChanged[\s\S]*navigatorVirtualRangeRef\.current = resolveChatScrollVirtualRangeSnapshot/
+  )
+  assert.match(navigator, /userMessageRefs\.current\.keys\(\)/)
   assert.match(virtualList, /increaseViewportBy=\{\{ top: 600, bottom: 900 \}\}/)
   assert.match(virtualList, /React\.memo\(ChatMessageRowImpl, areChatMessageRowPropsEqual\)/)
   assert.match(container, /pendingDurableHistoryAnchorRef/)
+  assert.match(container, /if \(!target && anchor\.attempt === 0 && visibleIndex !== undefined\)/)
+  assert.match(container, /pendingDurableHistoryAnchorRef\.current = null[\s\S]*RESTORE_END/)
+  assert.match(
+    container,
+    /const cancelPendingHistoryAnchorFromUserGesture[\s\S]*generation: anchor\.generation/,
+    "wheel, touch, and keyboard input must cancel an active history-anchor restore"
+  )
+  assert.ok(
+    (container.match(/cancelPendingHistoryAnchorFromUserGesture\(\)/g) ?? []).length >= 6,
+    "all wheel, touch, and keyboard directions must cancel an active history-anchor restore"
+  )
   assert.match(container, /virtuosoRef\.current\?\.scrollToIndex/)
 
-  assert.match(navigator, /const markerWindowSize = 120/)
+  assert.match(navigator, /CHAT_SCROLL_MARKER_WINDOW_SIZE = 120/)
+  assert.match(navigator, /const ChatScrollMarkerRail = memo\(/)
   assert.match(navigator, /renderedQuestionIndexes/)
-  assert.match(navigator, /for \(const messageId of renderedMessageIds\)/)
+  assert.match(navigator, /for \(const messageId of userMessageRefs\.current\.keys\(\)\)/)
   assert.doesNotMatch(
     navigator,
     /userMessageIds\.flatMap/,
     "ordinary window updates must not scan every historical question"
   )
-  assert.match(navigator, /if \(!mountedTarget && scrollToMessageById\)/)
-  assert.match(navigator, /if \(!targetElement\) onRevealMessage\(messageId\)/)
+  assert.match(navigator, /if \(!mountedTarget && scrollToMessageByIdRef\.current\)/)
+  assert.match(navigator, /if \(!targetElement\) onRevealMessageRef\.current\(messageId\)/)
 
-  assert.match(search, /createChatSearchMatcher\(\)/)
+  assert.match(search, /createChatSearchMatcher\(CHAT_SEARCH_RESULT_LIMIT \+ 1\)/)
+  assert.match(container, /searchDurableMessages=\{searchDurableMessages\}/)
+  assert.match(container, /CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT/)
   assert.match(search, /onRevealMessage\(match\.messageId\)/)
   assert.match(search, /querySelectorAll<HTMLElement>\("\[data-chat-message-id\]"\)/)
 
-  assert.match(
-    scrollToBottomButton,
-    /attachAttempts\s*>=\s*MAX_VIEWPORT_ATTACH_FRAMES/,
-    "a missing Radix viewport must not leave an unbounded animation-frame retry loop"
-  )
+  assert.match(container, /transitionChatScroll\(current, event\)/)
+  assert.match(container, /initialTopMostItemIndex=/)
+  assert.match(container, /scrollToIndex\(\{\s*index: lastVisibleIndex,\s*align: "end"/)
+  assert.doesNotMatch(container, /Number\.MAX_SAFE_INTEGER/)
+  assert.doesNotMatch(container, /bottomDistance <= 200/)
+  assert.match(container, /data-scroll-area-scrollbar/)
+  assert.match(container, /downwardUserScrollIntentUntilRef/)
+  assert.match(container, /scrollbarUserIntentActiveRef/)
+  assert.match(scrollToBottomButton, /hasUnread: boolean/)
+  assert.match(scrollToBottomButton, /unreadCount: number/)
+  assert.doesNotMatch(scrollToBottomButton, /ResizeObserver|requestAnimationFrame/)
 
   console.log("chat window plumbing contracts passed")
 }

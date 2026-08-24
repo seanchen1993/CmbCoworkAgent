@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Loader2 } from "lucide-react"
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
+import {
+  Virtuoso,
+  type FlatIndexLocationWithAlign,
+  type ListRange,
+  type VirtuosoHandle
+} from "react-virtuoso"
 import type { HookLogBucket } from "@/lib/thread-context"
 import {
   areMessageRenderFieldsEqual,
@@ -9,6 +14,10 @@ import {
 import type { HITLRequest, Message, ToolCallState } from "@/types"
 import { HookLogChip } from "./HookLogViews"
 import { MessageBubble } from "./MessageBubble"
+import type {
+  ChatScrollVirtualRangeRef,
+  ChatScrollVirtualRangeSnapshot
+} from "./ChatScrollNavigator"
 
 export type ChatApprovalDecision =
   | "approve"
@@ -25,6 +34,60 @@ export interface ChatToolResultInfo {
 export const CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD = 100
 const DETACHED_HOOK_LOG_WINDOW_SIZE = 80
 
+export type ChatMessageVirtualInitialLocation = FlatIndexLocationWithAlign | number
+
+// eslint-disable-next-line react-refresh/only-export-components
+export const shouldVirtualizeChatMessageList = (visibleMessageCount: number): boolean => {
+  // Keep one list implementation for the whole lifetime of a non-empty conversation. Switching
+  // from plain DOM to Virtuoso at message 101 loses the user's anchor while streaming or paging.
+  return visibleMessageCount > 0
+}
+
+function clampVirtualItemIndex(index: number, itemCount: number): number {
+  const lastIndex = Math.max(0, Math.floor(itemCount) - 1)
+  if (!Number.isFinite(index)) return lastIndex
+  return Math.min(lastIndex, Math.max(0, Math.floor(index)))
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export const resolveChatMessageVirtualInitialLocation = (
+  location: ChatMessageVirtualInitialLocation | undefined,
+  itemCount: number
+): ChatMessageVirtualInitialLocation | undefined => {
+  if (location === undefined || itemCount <= 0) return undefined
+  if (typeof location === "number") return clampVirtualItemIndex(location, itemCount)
+  if (location.index === "LAST") return location
+
+  const index = clampVirtualItemIndex(location.index, itemCount)
+  return index === location.index ? location : { ...location, index }
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function resolveChatScrollVirtualRangeSnapshot(
+  messages: readonly Message[],
+  visibleMessageIndexes: readonly number[],
+  { startIndex, endIndex }: ListRange
+): ChatScrollVirtualRangeSnapshot | null {
+  const firstMessageIndex = visibleMessageIndexes[startIndex]
+  const lastMessageIndex = visibleMessageIndexes[endIndex]
+  const firstMessage = messages[firstMessageIndex]
+  return firstMessageIndex === undefined || lastMessageIndex === undefined
+    ? null
+    : {
+        firstMessageIndex,
+        firstMessageIdentity: firstMessage
+          ? [
+              firstMessage.role,
+              firstMessage.id,
+              firstMessage.tool_call_id ?? "",
+              firstMessage.provider_source_id ?? "",
+              firstMessage.provider_occurrence ?? ""
+            ].join(":")
+          : "",
+        lastMessageIndex
+      }
+}
+
 export interface ChatMessageVirtualListProps {
   messages: Message[]
   visibleMessageIndexes: readonly number[]
@@ -34,7 +97,6 @@ export interface ChatMessageVirtualListProps {
   historyPageLoading: boolean
   historyRemainingCount: number
   onLoadEarlierHistoryPage: () => void
-  onRenderedMessageIdsChange: (messageIds: readonly string[]) => void
   hookLoggingEnabled: boolean
   hookLogBucketByTurnId: Map<string, HookLogBucket>
   detachedHookLogBuckets: HookLogBucket[]
@@ -57,6 +119,12 @@ export interface ChatMessageVirtualListProps {
   userSendTimeLabelById: Map<string, string>
   customScrollParent: HTMLDivElement | null
   virtuosoRef: React.RefObject<VirtuosoHandle | null>
+  navigatorVirtualRangeRef: ChatScrollVirtualRangeRef
+  /**
+   * Initial location in the projected `visibleMessageIndexes` list. React Virtuoso reads this
+   * only when its virtual list mounts; subsequent follow/restore decisions belong to the parent.
+   */
+  initialTopMostItemIndex?: ChatMessageVirtualInitialLocation
   onInitialVirtualItemsRendered: () => void
   onContentHeightChanged: () => void
   onAtBottomStateChange: (atBottom: boolean) => void
@@ -253,7 +321,6 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   historyPageLoading,
   historyRemainingCount,
   onLoadEarlierHistoryPage,
-  onRenderedMessageIdsChange,
   hookLoggingEnabled,
   hookLogBucketByTurnId,
   detachedHookLogBuckets,
@@ -276,23 +343,45 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   userSendTimeLabelById,
   customScrollParent,
   virtuosoRef,
+  navigatorVirtualRangeRef,
+  initialTopMostItemIndex,
   onInitialVirtualItemsRendered,
   onContentHeightChanged,
   onAtBottomStateChange,
   footer
 }: ChatMessageVirtualListProps): React.JSX.Element | null {
-  const shouldVirtualize =
-    visibleMessageIndexes.length > CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD
-  const initialVirtualItemsRenderedRef = useRef(false)
+  const shouldVirtualize = shouldVirtualizeChatMessageList(visibleMessageIndexes.length)
+  const initialVirtualItemsRenderedThreadRef = useRef<string | null>(null)
   const [detachedHookLogOffsetFromTail, setDetachedHookLogOffsetFromTail] = useState(0)
 
   useEffect(() => {
-    initialVirtualItemsRenderedRef.current = false
-  }, [shouldVirtualize, threadId])
+    if (shouldVirtualize && customScrollParent) return
+    initialVirtualItemsRenderedThreadRef.current = null
+  }, [customScrollParent, shouldVirtualize])
+
+  const resolvedInitialTopMostItemIndex = useMemo(
+    () =>
+      resolveChatMessageVirtualInitialLocation(
+        initialTopMostItemIndex,
+        visibleMessageIndexes.length
+      ),
+    [initialTopMostItemIndex, visibleMessageIndexes.length]
+  )
+
+  const handleVirtualRangeChanged = useCallback(
+    (range: ListRange): void => {
+      navigatorVirtualRangeRef.current = resolveChatScrollVirtualRangeSnapshot(
+        messages,
+        visibleMessageIndexes,
+        range
+      )
+    },
+    [messages, navigatorVirtualRangeRef, visibleMessageIndexes]
+  )
 
   const handleItemsRendered = (): void => {
-    if (initialVirtualItemsRenderedRef.current) return
-    initialVirtualItemsRenderedRef.current = true
+    if (initialVirtualItemsRenderedThreadRef.current === threadId) return
+    initialVirtualItemsRenderedThreadRef.current = threadId
     onInitialVirtualItemsRendered()
   }
 
@@ -302,10 +391,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       if (!message) return null
       const previousMessageIndex = visibleMessageIndexes[visibleIndex - 1]
       const previousMessage =
-        previousMessageIndex === undefined ? null : messages[previousMessageIndex] ?? null
+        previousMessageIndex === undefined ? null : (messages[previousMessageIndex] ?? null)
       const nextMessageIndex = visibleMessageIndexes[visibleIndex + 1]
       const nextMessage =
-        nextMessageIndex === undefined ? null : messages[nextMessageIndex] ?? null
+        nextMessageIndex === undefined ? null : (messages[nextMessageIndex] ?? null)
       const hookLogBucket =
         hookLoggingEnabled && message.role === "user"
           ? hookLogBucketByTurnId.get(message.id)
@@ -368,32 +457,11 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     ]
   )
 
-  const publishRenderedRange = useCallback(
-    (startIndex: number, endIndex: number): void => {
-      const messageIds: string[] = []
-      for (let index = startIndex; index <= endIndex; index += 1) {
-        const messageIndex = visibleMessageIndexes[index]
-        const message = messageIndex === undefined ? undefined : messages[messageIndex]
-        if (message) messageIds.push(message.id)
-      }
-      onRenderedMessageIdsChange(messageIds)
-    },
-    [messages, onRenderedMessageIdsChange, visibleMessageIndexes]
-  )
-
-  useEffect(() => {
-    if (shouldVirtualize) return
-    publishRenderedRange(0, visibleMessageIndexes.length - 1)
-  }, [publishRenderedRange, shouldVirtualize, visibleMessageIndexes.length])
-
   const detachedHookLogEnd = Math.max(
     0,
     detachedHookLogBuckets.length - detachedHookLogOffsetFromTail
   )
-  const detachedHookLogStart = Math.max(
-    0,
-    detachedHookLogEnd - DETACHED_HOOK_LOG_WINDOW_SIZE
-  )
+  const detachedHookLogStart = Math.max(0, detachedHookLogEnd - DETACHED_HOOK_LOG_WINDOW_SIZE)
   const renderedDetachedHookLogBuckets = detachedHookLogBuckets.slice(
     detachedHookLogStart,
     detachedHookLogEnd
@@ -469,16 +537,19 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   }, [customScrollParent, onContentHeightChanged, shouldVirtualize])
 
   if (!shouldVirtualize || !customScrollParent) {
+    const canRenderPlainRows =
+      !shouldVirtualize || visibleMessageIndexes.length <= CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD
     return (
       <VirtuosoMessageListWrapper>
         {historyHeader}
-        {visibleMessageIndexes.map((messageIndex, visibleIndex) => (
-          <React.Fragment
-            key={`${messages[messageIndex]?.role ?? "message"}:${messages[messageIndex]?.id ?? messageIndex}`}
-          >
-            {renderMessage(visibleIndex, messageIndex)}
-          </React.Fragment>
-        ))}
+        {canRenderPlainRows &&
+          visibleMessageIndexes.map((messageIndex, visibleIndex) => (
+            <React.Fragment
+              key={`${messages[messageIndex]?.role ?? "message"}:${messages[messageIndex]?.id ?? messageIndex}`}
+            >
+              {renderMessage(visibleIndex, messageIndex)}
+            </React.Fragment>
+          ))}
         {footerContent}
       </VirtuosoMessageListWrapper>
     )
@@ -490,6 +561,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       ref={virtuosoRef}
       data={visibleMessageIndexes}
       customScrollParent={customScrollParent}
+      initialTopMostItemIndex={resolvedInitialTopMostItemIndex}
       alignToBottom
       atBottomThreshold={32}
       followOutput={() => false}
@@ -501,7 +573,7 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
         return message ? `${message.role}:${message.id}` : messageIndex
       }}
       itemsRendered={handleItemsRendered}
-      rangeChanged={({ startIndex, endIndex }) => publishRenderedRange(startIndex, endIndex)}
+      rangeChanged={handleVirtualRangeChanged}
       totalListHeightChanged={onContentHeightChanged}
       context={{ header: historyHeader, footer: footerContent }}
       components={chatVirtualListComponents}

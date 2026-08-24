@@ -1,86 +1,18 @@
 import { ChevronDown } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
-
-const BOTTOM_DISTANCE_THRESHOLD = 32
-const MAX_VIEWPORT_ATTACH_FRAMES = 60
 
 interface ChatScrollToBottomButtonProps {
-  getViewport: () => HTMLDivElement | null
+  visible: boolean
+  hasUnread: boolean
+  unreadCount: number
   onScrollToBottom: () => void
-  resetKey?: string
 }
 
 export function ChatScrollToBottomButton({
-  getViewport,
-  onScrollToBottom,
-  resetKey
+  visible,
+  hasUnread,
+  unreadCount,
+  onScrollToBottom
 }: ChatScrollToBottomButtonProps): React.JSX.Element | null {
-  const [visible, setVisible] = useState(false)
-  const frameRef = useRef<number | null>(null)
-
-  const updateVisibility = useCallback((): void => {
-    if (frameRef.current !== null) return
-
-    frameRef.current = requestAnimationFrame(() => {
-      frameRef.current = null
-      const viewport = getViewport()
-      if (!viewport) {
-        setVisible(false)
-        return
-      }
-
-      const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      const nextVisible = distanceToBottom > BOTTOM_DISTANCE_THRESHOLD
-      setVisible((current) => (current === nextVisible ? current : nextVisible))
-    })
-  }, [getViewport])
-
-  useEffect(() => {
-    let viewport: HTMLDivElement | null = null
-    let retryFrame: number | null = null
-    let resizeObserver: ResizeObserver | null = null
-    let attachAttempts = 0
-
-    const observeContent = (): void => {
-      if (!viewport || !resizeObserver) return
-      resizeObserver.disconnect()
-      resizeObserver.observe(viewport)
-
-      if (visible) return
-
-      const lastChild = viewport.lastElementChild
-      const virtualSpacer = lastChild?.getAttribute("aria-hidden") === "true" ? lastChild : null
-      const content = virtualSpacer ?? viewport.firstElementChild
-      if (content instanceof HTMLElement) resizeObserver.observe(content)
-    }
-
-    const attach = (): void => {
-      viewport = getViewport()
-      if (!viewport) {
-        attachAttempts += 1
-        if (attachAttempts >= MAX_VIEWPORT_ATTACH_FRAMES) return
-        retryFrame = requestAnimationFrame(attach)
-        return
-      }
-
-      resizeObserver = new ResizeObserver(updateVisibility)
-      viewport.addEventListener("scroll", updateVisibility, { passive: true })
-      observeContent()
-      updateVisibility()
-    }
-
-    attach()
-    return () => {
-      if (retryFrame !== null) cancelAnimationFrame(retryFrame)
-      if (frameRef.current !== null) {
-        cancelAnimationFrame(frameRef.current)
-        frameRef.current = null
-      }
-      viewport?.removeEventListener("scroll", updateVisibility)
-      resizeObserver?.disconnect()
-    }
-  }, [getViewport, resetKey, updateVisibility, visible])
-
   if (!visible) return null
 
   return (
@@ -94,6 +26,14 @@ export function ChatScrollToBottomButton({
       title="回到会话底部"
     >
       <ChevronDown className="size-4" />
+      {hasUnread && (
+        <span
+          className="absolute -right-2 -top-2 min-w-5 rounded-full bg-primary px-1 text-center text-[10px] font-semibold leading-5 text-primary-foreground"
+          aria-label={unreadCount > 0 ? `${unreadCount} 条未读消息` : "有未读更新"}
+        >
+          {unreadCount > 99 ? "99+" : unreadCount > 0 ? unreadCount : "•"}
+        </span>
+      )}
     </button>
   )
 }
