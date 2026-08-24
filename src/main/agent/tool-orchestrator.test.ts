@@ -1,5 +1,7 @@
 import { tmpdir } from "os"
 import path from "path"
+import { execFileSync } from "child_process"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import { describe, expect, it, vi } from "vitest"
 import { ApprovalStore } from "./approval-store"
 import { ToolOrchestrator, type RawExecuteFn, type RequestApprovalFn } from "./tool-orchestrator"
@@ -13,6 +15,28 @@ vi.mock("electron", () => ({
 }))
 
 describe("ToolOrchestrator YOLO git behavior", () => {
+  function initRepository(repoPath: string): void {
+    mkdirSync(repoPath, { recursive: true })
+    const git = (args: string[]): void => {
+      execFileSync("git", args, {
+        cwd: repoPath,
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@t",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@t"
+        }
+      })
+    }
+    git(["init", "-q"])
+    writeFileSync(path.join(repoPath, "file.txt"), "initial\n")
+    git(["add", "."])
+    git(["commit", "-q", "-m", "initial"])
+    writeFileSync(path.join(repoPath, "file.txt"), "changed\n")
+  }
   it("runs git merge without an approval prompt in YOLO mode", async () => {
     const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
       output: "merge ok",
@@ -110,6 +134,35 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
+  it("never offers an unsandboxed retry for an isolated worktree runtime", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true,
+      false,
+      false
+    )
+    const denied = {
+      output: "operation not permitted by sandbox",
+      exitCode: 1,
+      truncated: false
+    }
+
+    const result = await orchestrator.maybeRetryOutsideSandbox(
+      "touch escaped.txt",
+      process.cwd(),
+      "unelevated",
+      denied
+    )
+
+    expect(result).toBe(denied)
+    expect(rawExecute).not.toHaveBeenCalled()
+    expect(requestApproval).not.toHaveBeenCalled()
+  })
+
   it("fails closed for commit scope options the task-card dialog cannot reproduce", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
@@ -132,6 +185,55 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
+  it("executes isolated worktree commits in place and blocks pushes", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "committed",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>()
+    const isolatedGitMutation = vi.fn().mockResolvedValue({
+      output: "broker committed",
+      exitCode: 0,
+      truncated: false
+    })
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      true,
+      false,
+      false,
+      isolatedGitMutation
+    )
+
+    const committed = await orchestrator.execute("git commit -m isolated", process.cwd(), "none")
+    const pushed = await orchestrator.execute("git push origin HEAD", process.cwd(), "none")
+
+    expect(committed.output).toBe("broker committed")
+    expect(isolatedGitMutation).toHaveBeenCalledWith("commit", "isolated", process.cwd())
+    expect(requestApproval).not.toHaveBeenCalled()
+    expect(pushed.exitCode).toBe(1)
+    expect(pushed.output).toContain("direct push")
+    expect(rawExecute).not.toHaveBeenCalled()
+
+    for (const command of [
+      "git commit --amend -m rewritten",
+      "git commit --fixup HEAD -m rewritten",
+      "git commit -m partial -- src/a.ts",
+      "git commit -m chained && git status",
+      "git add src/a.ts",
+      "cd subdir && git add -A",
+      "git -C nested-repo commit -m nested",
+      "git -C nested-repo add -A"
+    ]) {
+      const rejected = await orchestrator.execute(command, process.cwd(), "none")
+      expect(rejected.exitCode, command).toBe(1)
+      expect(rejected.output, command).toContain("Command forbidden")
+    }
+    expect(isolatedGitMutation).toHaveBeenCalledTimes(1)
+  })
+
   it("rejects a bare commit instead of restaging unstaged hunks from indexed files", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
@@ -141,6 +243,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       requestApproval,
       false,
       false,
+      true,
+      undefined,
       process.cwd()
     )
 
@@ -167,6 +271,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       requestApproval,
       false,
       false,
+      true,
+      undefined,
       workspace
     )
 
@@ -187,6 +293,93 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(rawExecute).not.toHaveBeenCalled()
   })
 
+  it("routes a commit from a multi-repository parent to a target-selection approval", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "agent-multi-repo-"))
+    try {
+      const repoA = path.join(workspace, "repo-a")
+      const repoB = path.join(workspace, "repo-b")
+      initRepository(repoA)
+      initRepository(repoB)
+      const rawExecute = vi.fn<RawExecuteFn>()
+      const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+        type: "reject",
+        tool_call_id: "test"
+      } satisfies ApprovalDecision)
+      const orchestrator = new ToolOrchestrator(
+        new ApprovalStore(),
+        rawExecute,
+        requestApproval,
+        false,
+        false,
+        true,
+        undefined,
+        workspace
+      )
+
+      await orchestrator.execute(
+        'git commit -m "test" -- repo-a/file.txt',
+        workspace,
+        "none"
+      )
+
+      expect(requestApproval).toHaveBeenCalledTimes(1)
+      expect(requestApproval.mock.calls[0][0]).toMatchObject({
+        operation: "git_commit",
+        suggestedCommitFilePaths: ["repo-a/file.txt"],
+        suggestedCommitFileBasePath: path.resolve(workspace),
+        suggestedGitWorktreePath: undefined,
+        suggestedGitRepositories: [
+          { path: path.resolve(repoA), displayPath: "repo-a" },
+          { path: path.resolve(repoB), displayPath: "repo-b" }
+        ]
+      })
+      expect(rawExecute).not.toHaveBeenCalled()
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it("infers the only repository below a non-Git parent without showing a target selector", async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "agent-single-child-repo-"))
+    try {
+      const repository = path.join(workspace, "repo-a")
+      initRepository(repository)
+      const rawExecute = vi.fn<RawExecuteFn>()
+      const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+        type: "reject",
+        tool_call_id: "test"
+      } satisfies ApprovalDecision)
+      const orchestrator = new ToolOrchestrator(
+        new ApprovalStore(),
+        rawExecute,
+        requestApproval,
+        false,
+        false,
+        true,
+        undefined,
+        workspace
+      )
+
+      await orchestrator.execute(
+        'git commit -m "test" -- repo-a/file.txt',
+        workspace,
+        "none"
+      )
+
+      expect(requestApproval).toHaveBeenCalledTimes(1)
+      expect(requestApproval.mock.calls[0][0]).toMatchObject({
+        operation: "git_commit",
+        suggestedCommitFilePaths: ["file.txt"],
+        suggestedCommitFileBasePath: path.resolve(repository),
+        suggestedGitWorktreePath: path.resolve(repository),
+        suggestedGitRepositories: undefined
+      })
+      expect(rawExecute).not.toHaveBeenCalled()
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
   it("returns the ignored-only auto-dismiss reason to the Agent verbatim", async () => {
     const workspace = process.cwd()
     const message = "Agent 指定的文件均被 Git ignore，未发起提交。"
@@ -202,6 +395,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       requestApproval,
       false,
       false,
+      true,
+      undefined,
       workspace
     )
 
@@ -233,6 +428,8 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         requestApproval,
         false,
         false,
+        true,
+        undefined,
         workspace
       )
 

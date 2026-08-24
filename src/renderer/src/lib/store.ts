@@ -19,6 +19,10 @@ import {
   normalizeCompleteMessageIds,
   normalizeMessageRoleCollisionIds
 } from "../../../shared/message-role-collision"
+import {
+  normalizeChatScrollSettings,
+  type ChatScrollSettings
+} from "../../../shared/chat-scroll"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -770,6 +774,7 @@ interface AppState {
 
   // Settings dialog state
   settingsOpen: boolean
+  chatScrollSettings: ChatScrollSettings
 
   // Sidebar state
   sidebarCollapsed: boolean
@@ -857,6 +862,8 @@ interface AppState {
 
   // Settings actions
   setSettingsOpen: (open: boolean) => void
+  setChatScrollSettings: (settings: ChatScrollSettings) => void
+  loadChatScrollSettings: () => Promise<void>
 
   // Sidebar actions
   toggleSidebar: () => void
@@ -954,6 +961,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   providers: [],
   rightPanelTab: "todos",
   settingsOpen: false,
+  chatScrollSettings: normalizeChatScrollSettings({}),
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
   rightPanelWorkRequest: null,
@@ -1175,6 +1183,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Settings actions
   setSettingsOpen: (open: boolean) => {
     set({ settingsOpen: open })
+  },
+
+  setChatScrollSettings: (settings: ChatScrollSettings) => {
+    set({ chatScrollSettings: normalizeChatScrollSettings(settings) })
+  },
+
+  loadChatScrollSettings: async () => {
+    try {
+      const chatScrollSettings = await window.electron.getChatScrollSettings()
+      get().setChatScrollSettings(chatScrollSettings)
+    } catch (error) {
+      console.warn("[Store] Failed to load chat scroll settings; using defaults:", error)
+    }
   },
 
   // Sidebar actions

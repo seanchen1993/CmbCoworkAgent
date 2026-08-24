@@ -9,13 +9,14 @@ import {
   writeFileSync
 } from "fs"
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "fs/promises"
-import { basename, join, resolve } from "path"
+import { basename, dirname, join, resolve } from "path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import type {
   PersistedWorkflowRun,
   WorkflowAgentStateRecord,
   WorkflowJournalEntry,
-  WorkflowRunSummary
+  WorkflowRunSummary,
+  WorkflowWorktreeRecord
 } from "./types"
 import { WORKFLOW_RESULT_SIDECAR_MAX_BYTES, WORKFLOW_RUN_ID_PATTERN } from "./types"
 
@@ -522,6 +523,42 @@ export function listWorkflowRuns(workspacePath: string, threadId: string): Workf
   }
 }
 
+/** Thread deletion must not erase the only UI recovery route for retained agent
+ * work. Corrupt/unreadable run files fail closed by reporting an unresolved item. */
+export function countUnresolvedWorkflowWorktrees(
+  workspacePath: string,
+  threadId: string,
+  options: { failClosedOnUnreadable?: boolean } = {}
+): number {
+  const failClosed = options.failClosedOnUnreadable ?? true
+  const dir = getWorkflowRunsDir(workspacePath, threadId)
+  if (!existsSync(dir)) return 0
+  let unresolved = 0
+  let files: string[]
+  try {
+    files = readdirSync(dir)
+  } catch {
+    return failClosed ? 1 : 0
+  }
+  for (const file of files) {
+    if (!file.endsWith(".json") || file.endsWith(".bak")) continue
+    const runId = file.slice(0, -".json".length)
+    if (!isValidWorkflowRunId(runId)) continue
+    const run = loadWorkflowRun(workspacePath, threadId, runId)
+    if (!run) {
+      if (failClosed) unresolved += 1
+      continue
+    }
+    unresolved += (run.worktrees ?? []).filter(
+      (record) =>
+        (record.status !== "merged" && record.status !== "discarded") ||
+        record.cleanupPending === true ||
+        existsSync(record.directory)
+    ).length
+  }
+  return unresolved
+}
+
 /**
  * The newest terminal run whose completion notification has not been delivered,
  * or null. It `stat`s the dir entries (no JSON parse) to order by recency, then
@@ -581,6 +618,44 @@ export function findUndeliveredTerminalRun(
   }
 }
 
+const runFileMutationChains = new Map<string, Promise<void>>()
+
+const TERMINAL_WORKTREE_STATUSES = new Set(["merged", "discarded"])
+
+/** Keep durable worktree state monotonic when recovery/UI/reconciliation writers
+ * meet. A terminal decision is irreversible. For non-terminal records the
+ * manifest timestamp is authoritative, so an older inspection cannot put a
+ * worktree back into ready/running after integration or recovery advanced it. */
+export function newerWorkflowWorktreeRecord(
+  current: WorkflowWorktreeRecord | undefined,
+  incoming: WorkflowWorktreeRecord
+): WorkflowWorktreeRecord {
+  if (!current) return incoming
+  const currentTerminal = TERMINAL_WORKTREE_STATUSES.has(current.status)
+  const incomingTerminal = TERMINAL_WORKTREE_STATUSES.has(incoming.status)
+  if (currentTerminal) {
+    if (incoming.status !== current.status) return current
+    return incoming.updatedAt >= current.updatedAt ? incoming : current
+  }
+  if (incomingTerminal) return incoming
+  return incoming.updatedAt >= current.updatedAt ? incoming : current
+}
+
+async function withRunFileMutation<T>(target: string, task: () => Promise<T>): Promise<T> {
+  const previous = runFileMutationChains.get(target) ?? Promise.resolve()
+  const operation = previous.then(task, task)
+  const tail = operation.then(
+    () => undefined,
+    () => undefined
+  )
+  runFileMutationChains.set(target, tail)
+  try {
+    return await operation
+  } finally {
+    if (runFileMutationChains.get(target) === tail) runFileMutationChains.delete(target)
+  }
+}
+
 /**
  * Sets a TERMINAL run's notification-delivered flag. Safe to call outside an
  * active store: a terminal run's store has flushed and released its generation,
@@ -598,31 +673,38 @@ async function setWorkflowRunNotified(
   // this to gate follow-up work — e.g. only drain the NEXT pending notification
   // once delivered=true actually hit disk, never on a write error (otherwise the
   // still-undelivered run would be re-selected and double-reported).
-  try {
-    const run = loadWorkflowRun(workspacePath, threadId, runId)
-    if (!run || run.status === "running") return false
-    // Instance fence. A resume REUSES the runId, and the error notification itself
-    // tells the model to resume — so the resume is launched INSIDE the very turn
-    // that will later ack that error notification. A sub-second resumed run reaches
-    // terminal before the ack lands, so the status!=="running" guard above lets the
-    // stale ack through and it marks the NEW run delivered, permanently swallowing
-    // that run's own completion notification. `startedAt` is minted fresh on every
-    // launch, so a mismatch proves this ack belongs to a superseded instance whose
-    // record is already overwritten: no-op, and report settled (nothing to persist;
-    // the new run stays undelivered and its notification still fires).
-    if (expectedStartedAt !== undefined && run.startedAt !== expectedStartedAt) return true
-    if (Boolean(run.notificationDelivered) === delivered) return true // already in the target state
-    run.notificationDelivered = delivered
-    run.updatedAt = new Date().toISOString()
-    const path = runFilePath(workspacePath, threadId, runId)
-    const json = JSON.stringify(run)
-    await writeFile(`${path}.tmp`, json)
-    await rename(`${path}.tmp`, path)
-    return true
-  } catch (error) {
-    console.warn("[Workflow] Failed to set run notification flag:", error)
-    return false
-  }
+  const path = runFilePath(workspacePath, threadId, runId)
+  return withRunFileMutation(path, async () => {
+    let temp: string | undefined
+    try {
+      const run = loadWorkflowRun(workspacePath, threadId, runId)
+      if (!run || run.status === "running") return false
+      // Instance fence. A resume REUSES the runId, and the error notification itself
+      // tells the model to resume — so the resume is launched INSIDE the very turn
+      // that will later ack that error notification. A sub-second resumed run reaches
+      // terminal before the ack lands, so the status!=="running" guard above lets the
+      // stale ack through and it marks the NEW run delivered, permanently swallowing
+      // that run's own completion notification. `startedAt` is minted fresh on every
+      // launch, so a mismatch proves this ack belongs to a superseded instance whose
+      // record is already overwritten: no-op, and report settled (nothing to persist;
+      // the new run stays undelivered and its notification still fires).
+      if (expectedStartedAt !== undefined && run.startedAt !== expectedStartedAt) return true
+      if (Boolean(run.notificationDelivered) === delivered) return true // already in the target state
+      run.notificationDelivered = delivered
+      run.updatedAt = new Date().toISOString()
+      const json = JSON.stringify(run)
+      temp = `${path}.notification-${randomUUID()}.tmp`
+      await writeFile(temp, json)
+      await rename(temp, path)
+      temp = undefined
+      return true
+    } catch (error) {
+      console.warn("[Workflow] Failed to set run notification flag:", error)
+      return false
+    } finally {
+      if (temp) await unlink(temp).catch(() => undefined)
+    }
+  })
 }
 
 /** Marks a run's completion notification as delivered (at-most-once gate).
@@ -664,44 +746,51 @@ export async function markWorkflowRunInterrupted(
   threadId: string,
   runId: string
 ): Promise<PersistedWorkflowRun | null> {
-  try {
-    const run = loadWorkflowRun(workspacePath, threadId, runId)
-    if (!run || run.status !== "running") return run
-    run.status = "aborted"
-    run.error = run.error ?? "Workflow was interrupted (app restarted before it finished)"
-    run.notificationDelivered = true
-    const completedAt = run.completedAt ?? new Date().toISOString()
-    run.completedAt = completedAt
-    run.updatedAt = new Date().toISOString()
-    let interruptedAgents = 0
-    for (const agent of run.agents) {
-      if (agent.status === "running") {
-        agent.status = "error"
-        agent.error = agent.error ?? "interrupted"
-        agent.endedAt = agent.endedAt ?? new Date().toISOString()
-        interruptedAgents += 1
+  const target = runFilePath(workspacePath, threadId, runId)
+  return withRunFileMutation(target, async () => {
+    let temp: string | undefined
+    try {
+      const run = loadWorkflowRun(workspacePath, threadId, runId)
+      if (!run || run.status !== "running") return run
+      run.status = "aborted"
+      run.error = run.error ?? "Workflow was interrupted (app restarted before it finished)"
+      run.notificationDelivered = true
+      const completedAt = run.completedAt ?? new Date().toISOString()
+      run.completedAt = completedAt
+      run.updatedAt = new Date().toISOString()
+      let interruptedAgents = 0
+      for (const agent of run.agents) {
+        if (agent.status === "running") {
+          agent.status = "error"
+          agent.error = agent.error ?? "interrupted"
+          agent.endedAt = agent.endedAt ?? new Date().toISOString()
+          interruptedAgents += 1
+        }
       }
-    }
-    // Keep the displayed stats consistent with the reconciled agent states: the
-    // interrupted in-flight agents count as failed, and a never-finalized run
-    // has durationMs 0 — fill it from the start→interrupt span.
-    run.stats.agentsFailed += interruptedAgents
-    if (run.stats.durationMs === 0) {
-      const startedMs = Date.parse(run.startedAt)
-      const endedMs = Date.parse(completedAt)
-      if (Number.isFinite(startedMs) && Number.isFinite(endedMs) && endedMs >= startedMs) {
-        run.stats.durationMs = endedMs - startedMs
+      // Keep the displayed stats consistent with the reconciled agent states: the
+      // interrupted in-flight agents count as failed, and a never-finalized run
+      // has durationMs 0 — fill it from the start→interrupt span.
+      run.stats.agentsFailed += interruptedAgents
+      if (run.stats.durationMs === 0) {
+        const startedMs = Date.parse(run.startedAt)
+        const endedMs = Date.parse(completedAt)
+        if (Number.isFinite(startedMs) && Number.isFinite(endedMs) && endedMs >= startedMs) {
+          run.stats.durationMs = endedMs - startedMs
+        }
       }
+      const json = JSON.stringify(run)
+      temp = `${target}.interrupted-${randomUUID()}.tmp`
+      await writeFile(temp, json)
+      await rename(temp, target)
+      temp = undefined
+      return run
+    } catch (error) {
+      console.warn("[Workflow] Failed to reconcile interrupted run:", error)
+      return loadWorkflowRun(workspacePath, threadId, runId)
+    } finally {
+      if (temp) await unlink(temp).catch(() => undefined)
     }
-    const path = runFilePath(workspacePath, threadId, runId)
-    const json = JSON.stringify(run)
-    await writeFile(`${path}.tmp`, json)
-    await rename(`${path}.tmp`, path)
-    return run
-  } catch (error) {
-    console.warn("[Workflow] Failed to reconcile interrupted run:", error)
-    return loadWorkflowRun(workspacePath, threadId, runId)
-  }
+  })
 }
 
 /**
@@ -739,42 +828,83 @@ export async function persistRecoveredRun(
   if (isStale()) {
     return isDeadIncarnation()
   }
-  try {
-    await mkdir(getWorkflowRunsDir(workspacePath, threadId), { recursive: true })
-    // Post-await recheck: a deletion landing DURING the mkdir already swept the
-    // dir; writing now would rebuild it as an orphan (mirrors doWrite). Remove
-    // the empty dir our mkdir may have rebuilt — tombstone-active only; an
-    // epoch-only mismatch means a revived incarnation may own the dir.
-    if (isStale()) {
-      const dir = getWorkflowRunsDir(workspacePath, threadId)
-      // Dir-tombstone-only rm (see sweepRacedRunDir): a bare id-set hit is a
-      // rollback-able deletion ATTEMPT — the dir may still belong to the
-      // surviving thread and must not be touched.
-      if (disposedRunDirs.has(dir)) sweepRacedRunDir(dir)
-      return isDeadIncarnation()
+  const target = runFilePath(workspacePath, threadId, run.runId)
+  return withRunFileMutation(target, async () => {
+    if (isStale()) return isDeadIncarnation()
+    let journalTemp: string | undefined
+    let runTemp: string | undefined
+    let backupTemp: string | undefined
+    try {
+      await mkdir(getWorkflowRunsDir(workspacePath, threadId), { recursive: true })
+      // Post-await recheck: a deletion landing DURING the mkdir already swept the
+      // dir; writing now would rebuild it as an orphan (mirrors doWrite). Remove
+      // the empty dir our mkdir may have rebuilt — tombstone-active only; an
+      // epoch-only mismatch means a revived incarnation may own the dir.
+      if (isStale()) {
+        const dir = getWorkflowRunsDir(workspacePath, threadId)
+        // Dir-tombstone-only rm (see sweepRacedRunDir): a bare id-set hit is a
+        // rollback-able deletion ATTEMPT — the dir may still belong to the
+        // surviving thread and must not be touched.
+        if (disposedRunDirs.has(dir)) sweepRacedRunDir(dir)
+        return isDeadIncarnation()
+      }
+      const journalPath = journalFilePath(workspacePath, threadId, run.runId)
+      let recoveredRun = run
+      if (
+        run.resultSidecarStatus === "available" &&
+        !isReadableJsonFile(workflowResultFilePath(workspacePath, threadId, run.runId))
+      ) {
+        recoveredRun = { ...run, resultSidecarStatus: "unavailable" }
+      }
+      const current = loadWorkflowRun(workspacePath, threadId, run.runId)
+      if (current?.startedAt === recoveredRun.startedAt) {
+        // A notification ack or worktree action may have landed while this
+        // flush-failed snapshot waited for recovery. Preserve those newer terminal
+        // facts instead of overwriting the entire run with the stale snapshot.
+        const currentById = new Map((current.worktrees ?? []).map((record) => [record.id, record]))
+        const recoveredWorktrees = (recoveredRun.worktrees ?? []).map((record) =>
+          newerWorkflowWorktreeRecord(currentById.get(record.id), record)
+        )
+        recoveredRun = {
+          ...recoveredRun,
+          notificationDelivered:
+            Boolean(recoveredRun.notificationDelivered) || Boolean(current.notificationDelivered),
+          // The terminal in-memory snapshot owns membership: an absent id may
+          // have been deliberately removed after a pristine worktree cleanup.
+          // Disk can contribute a newer state only for ids the snapshot retains.
+          worktrees: recoveredWorktrees
+        }
+      }
+      const json = JSON.stringify({ ...recoveredRun, journal: [] })
+      // Journal first, run.json second — same crash-safe ordering as doWrite (#3): a
+      // crash between the renames leaves journal>=run.json (resume re-runs nothing),
+      // never run.json>journal (which would re-execute completed edit agents twice).
+      journalTemp = `${journalPath}.recovered-${randomUUID()}.tmp`
+      await writeFile(journalTemp, JSON.stringify(recoveredRun.journal ?? []))
+      await rename(journalTemp, journalPath)
+      journalTemp = undefined
+      runTemp = `${target}.recovered-${randomUUID()}.tmp`
+      await writeFile(runTemp, json)
+      await rename(runTemp, target)
+      runTemp = undefined
+      // A recovered terminal snapshot is just as authoritative as a normal
+      // final flush. Keep the fallback in step so a later damaged primary file
+      // cannot resurrect an older worktree state.
+      const backupPath = `${target}.bak`
+      backupTemp = `${backupPath}.recovered-${randomUUID()}.tmp`
+      await writeFile(backupTemp, json)
+      await rename(backupTemp, backupPath)
+      backupTemp = undefined
+      return true
+    } catch (error) {
+      console.warn(`[Workflow] Failed to write back recovered run ${run.runId}:`, error)
+      return false
+    } finally {
+      if (journalTemp) await unlink(journalTemp).catch(() => undefined)
+      if (runTemp) await unlink(runTemp).catch(() => undefined)
+      if (backupTemp) await unlink(backupTemp).catch(() => undefined)
     }
-    const path = runFilePath(workspacePath, threadId, run.runId)
-    const journalPath = journalFilePath(workspacePath, threadId, run.runId)
-    let recoveredRun = run
-    if (
-      run.resultSidecarStatus === "available" &&
-      !isReadableJsonFile(workflowResultFilePath(workspacePath, threadId, run.runId))
-    ) {
-      recoveredRun = { ...run, resultSidecarStatus: "unavailable" }
-    }
-    const json = JSON.stringify({ ...recoveredRun, journal: [] })
-    // Journal first, run.json second — same crash-safe ordering as doWrite (#3): a
-    // crash between the renames leaves journal>=run.json (resume re-runs nothing),
-    // never run.json>journal (which would re-execute completed edit agents twice).
-    await writeFile(`${journalPath}.tmp`, JSON.stringify(recoveredRun.journal ?? []))
-    await rename(`${journalPath}.tmp`, journalPath)
-    await writeFile(`${path}.tmp`, json)
-    await rename(`${path}.tmp`, path)
-    return true
-  } catch (error) {
-    console.warn(`[Workflow] Failed to write back recovered run ${run.runId}:`, error)
-    return false
-  }
+  })
 }
 
 /**
@@ -786,7 +916,8 @@ export async function persistRecoveredRun(
 export function pruneWorkflowRuns(
   workspacePath: string,
   threadId: string,
-  keep: number = MAX_RUNS_PER_THREAD
+  keep: number = MAX_RUNS_PER_THREAD,
+  protectedRunIds: Iterable<string> = []
 ): void {
   try {
     const dir = getWorkflowRunsDir(workspacePath, threadId)
@@ -804,6 +935,7 @@ export function pruneWorkflowRuns(
         return { runId: file.slice(0, -".json".length), mtimeMs }
       })
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const manifestRunIds = new Set(protectedRunIds)
     for (const stale of runs.slice(keep)) {
       // NEVER prune a still-running run, or a terminal run whose completion
       // notification was never delivered: an undelivered run keeps its original
@@ -812,7 +944,33 @@ export function pruneWorkflowRuns(
       // silently lose the run's result (no notification, no resume). If it can't
       // be loaded, keep it (fail safe). Only terminal + delivered runs are pruned.
       const run = loadWorkflowRun(workspacePath, threadId, stale.runId)
-      if (!run || run.status === "running" || !run.notificationDelivered) continue
+      const hasUnresolvedWorktrees =
+        run?.worktrees?.some((record) => {
+          if (record.status !== "merged" && record.status !== "discarded") return true
+          if (existsSync(record.directory)) return true
+          // A terminal manifest outlives checkout removal until run history has
+          // durably observed it. Keep that run so restart reconciliation still
+          // has a route to finalize a branch-only/tombstone cleanup.
+          const identity = createHash("sha256").update(record.id).digest("hex").slice(0, 16)
+          try {
+            return readdirSync(join(dirname(record.directory), ".records")).some((file) =>
+              file.endsWith(`-${identity}.json`)
+            )
+          } catch (error) {
+            // ENOENT means the ownership store is genuinely absent. Any other
+            // read failure is unknown state and must retain the run fail-closed.
+            return (error as NodeJS.ErrnoException).code !== "ENOENT"
+          }
+        }) ?? false
+      if (
+        !run ||
+        run.status === "running" ||
+        !run.notificationDelivered ||
+        hasUnresolvedWorktrees ||
+        manifestRunIds.has(stale.runId)
+      ) {
+        continue
+      }
       for (const suffix of [
         ".json",
         ".json.bak",
@@ -920,6 +1078,66 @@ export function loadWorkflowRun(
   return null
 }
 
+/** Atomically update one durable worktree entry on a terminal run without
+ * touching the split journal sidecar. IPC rejects active runs before calling
+ * this, so the live WorkflowRunStore cannot race this writer. Calls from two UI
+ * windows are still serialized per run file here. */
+export async function updateWorkflowWorktreeRecord(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  record: WorkflowWorktreeRecord
+): Promise<PersistedWorkflowRun | null> {
+  return updateWorkflowWorktreeRecords(workspacePath, threadId, runId, [record])
+}
+
+export async function updateWorkflowWorktreeRecords(
+  workspacePath: string,
+  threadId: string,
+  runId: string,
+  records: WorkflowWorktreeRecord[]
+): Promise<PersistedWorkflowRun | null> {
+  if (!isValidWorkflowRunId(runId) || records.some((record) => record.runId !== runId)) {
+    return null
+  }
+  const target = runFilePath(workspacePath, threadId, runId)
+  return withRunFileMutation(target, async () => {
+    const run = loadWorkflowRun(workspacePath, threadId, runId)
+    if (!run) return null
+    const worktrees = run.worktrees ?? []
+    const indexById = new Map(worktrees.map((candidate, index) => [candidate.id, index]))
+    for (const record of records) {
+      const index = indexById.get(record.id)
+      if (index === undefined) {
+        indexById.set(record.id, worktrees.length)
+        worktrees.push(record)
+      } else {
+        worktrees[index] = newerWorkflowWorktreeRecord(worktrees[index], record)
+      }
+    }
+    run.worktrees = worktrees
+    run.updatedAt = new Date().toISOString()
+    const json = JSON.stringify({ ...run, journal: [] })
+    const temp = `${target}.worktree-${randomUUID()}.tmp`
+    try {
+      await writeFile(temp, json)
+      await rename(temp, target)
+      // loadWorkflowRun automatically falls back to this backup if the primary
+      // file is damaged. Terminal worktree actions happen after the normal final
+      // flush, so keep the fallback current with their Merge/Discard/Cleanup state.
+      try {
+        await writeFile(`${target}.bak`, json)
+      } catch {
+        // The primary terminal record is durable; preserve the existing
+        // best-effort backup behavior used by the normal final flush.
+      }
+      return run
+    } finally {
+      await unlink(temp).catch(() => undefined)
+    }
+  })
+}
+
 export interface WorkflowRunStore {
   /** Mutate-and-save. Saves are throttled; pending state always lands via flush(). */
   update(mutator: (run: PersistedWorkflowRun) => void): void
@@ -949,6 +1167,9 @@ export interface WorkflowRunStore {
    * reload or crash right after the tool returns can still find the run file.
    */
   readonly whenInitialPersisted: Promise<boolean>
+  /** True only when disk contains this live store's current run incarnation.
+   * A resumed run reuses runId, so existence alone is not a sufficient fence. */
+  isCurrentSnapshotPersisted(): boolean
 }
 
 const SAVE_THROTTLE_MS = 500
@@ -1296,6 +1517,10 @@ export function createWorkflowRunStore(options: {
   return {
     state,
     whenInitialPersisted,
+    isCurrentSnapshotPersisted() {
+      const persisted = loadWorkflowRun(workspacePath, threadId, state.runId)
+      return persisted?.threadId === threadId && persisted.startedAt === state.startedAt
+    },
     update(mutator) {
       mutator(state)
       scheduleSave()

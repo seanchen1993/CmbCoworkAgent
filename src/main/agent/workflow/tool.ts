@@ -14,6 +14,7 @@ import {
   generateWorkflowRunId,
   isValidWorkflowRunId,
   isWorkflowRunDirDisposed,
+  loadWorkflowRun,
   loadWorkflowRunForResume,
   sha256Hex
 } from "./run-store"
@@ -203,6 +204,24 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // an await, so display I/O can never stall the launch.
       if (invalidatedReason) clearAllAgentToolStreams(workspacePath, threadId, runId)
 
+      // Approval can remain open while another window merges/discards/cleans a
+      // retained deliverable. Re-read the reused run immediately before launch;
+      // carrying the pre-approval snapshot forward would resurrect a terminal
+      // worktree as ready/recoverable in the new run.json and live panel.
+      const recoveredResumeRun = resume.run
+        ? workflowRunManager.getFlushFailedRun(runId)
+        : undefined
+      const latestResumeRun = resume.run
+        ? recoveredResumeRun?.threadId === threadId
+          ? recoveredResumeRun
+          : loadWorkflowRun(workspacePath, threadId, runId)
+        : null
+      if (resume.run && !latestResumeRun) {
+        throw new Error(
+          `Workflow ${runId} changed or disappeared while approval was pending; reload it before resuming.`
+        )
+      }
+
       const launch = workflowRunManager.launch({
         threadId,
         workspacePath,
@@ -213,6 +232,8 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         args: effectiveArgs,
         tokenBudget: input.tokenBudget ?? null,
         resumeJournal: effectiveResumeJournal,
+        existingWorktrees: latestResumeRun?.worktrees,
+        resumed: resume.run !== null,
         resumeNote: effectiveResumeNote,
         subagentDeps,
         runExclusiveFileWrite: options.runExclusiveFileWrite
@@ -221,8 +242,9 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // Make the run durable BEFORE telling the model it launched: the initial
       // snapshot persist is eager but async, so without this a reload/crash right
       // after this turn could find no run file (no panel entry, no resume). A write
-      // fault never BLOCKS the launch (the run is already executing in memory), but
-      // the result tells us whether to warn the user that the run isn't durable.
+      // fault never blocks shared-workspace execution, but isolated worktree calls
+      // fail closed until this durable index exists so they cannot leave a
+      // manifest-only checkout with no history/recovery entry.
       const initialPersisted = await launch.whenInitialPersisted
 
       return JSON.stringify(
@@ -237,7 +259,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
             ? {}
             : {
                 warning:
-                  "Could not write the initial run state to disk (disk full / permissions?). The workflow is running, but it may NOT be resumable or appear in history — tell the user."
+                  "Could not write the initial run state to disk (disk full / permissions?). The workflow may not be resumable or appear in history, and isolated worktree agents will fail closed — tell the user."
               }),
           note: "The workflow now runs in the background; live progress is visible to the user in the workflow panel. Its outcome will arrive later as an internal <task-notification> message. Briefly tell the user what was launched and END your turn — do not poll, and do not call the workflow tool again for this task."
         },
@@ -461,7 +483,16 @@ function resolveResumeRun(
       note: `resumeFromRunId "${requested}" is not a valid run id (expected wf_…)`
     }
   }
-  const run = loadWorkflowRunForResume(workspacePath, threadId, requested)
+  // A final disk flush can fail after the journal has advanced. In that narrow,
+  // same-process recovery window, the manager's snapshot is the authoritative
+  // complete run; reading the older run.json/journal pair would re-run agents that
+  // already completed. After restart no such snapshot exists, so disk remains the
+  // recovery source as before.
+  const snapshot = workflowRunManager.getFlushFailedRun(requested)
+  const run =
+    snapshot?.threadId === threadId
+      ? snapshot
+      : loadWorkflowRunForResume(workspacePath, threadId, requested)
   if (!run) {
     return {
       run: null,

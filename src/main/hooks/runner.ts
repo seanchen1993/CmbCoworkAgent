@@ -77,6 +77,12 @@ export interface HookContext {
   hookSourceType?: HookConfig["hookSourceType"]
   hookSourceRoot?: string
   hookSourcePath?: string
+  /** Internal override used only by isolated worktree runtimes. */
+  workspaceHookCwd?: string
+  /** An isolated worktree may be removed as soon as its agent settles. Run
+   * workspace hooks synchronously there so an async hook cannot write after
+   * checkout cleanup has started. */
+  forceSyncWorkspaceHooks?: boolean
   /** User prompt text for UserPromptSubmit — exposed as USER_PROMPT env and prompt in stdin JSON */
   userPrompt?: string
   /** Skill lifecycle context for PreSkillUse/PostSkillUse. */
@@ -179,7 +185,19 @@ export interface HookContext {
  * sync so the UI's reported cwd is always what the hook actually saw.
  */
 export function getCommandCwd(context: HookContext): string {
+  // Workspace hooks are loaded from the source checkout, but an isolated agent's
+  // explicit workspaceHookCwd is its linked checkout. Run relative commands there;
+  // hookSourceRoot remains available in env/stdin for locating hook-owned files.
+  if (context.hookSourceType === "workspace" && context.workspaceHookCwd) {
+    return context.workspaceHookCwd
+  }
   return context.hookSourceRoot ?? context.workspacePath ?? process.cwd()
+}
+
+function getInvocationWorkspace(context: HookContext): string | undefined {
+  return context.hookSourceType === "workspace" && context.workspaceHookCwd
+    ? context.workspaceHookCwd
+    : context.workspacePath
 }
 
 /**
@@ -393,10 +411,11 @@ function buildHookEnv(
   }
   // toolResult is already a JSON string from upstream — passing as-is avoids double encoding.
   setBestEffortJsonEnv(env, "TOOL_RESULT", context.toolResult)
-  if (context.workspacePath) {
-    env.WORKSPACE_PATH = context.workspacePath
+  const invocationWorkspace = getInvocationWorkspace(context)
+  if (invocationWorkspace) {
+    env.WORKSPACE_PATH = invocationWorkspace
     // Claude Code compatibility — the canonical env var hooks expect
-    env.CLAUDE_PROJECT_DIR = context.workspacePath
+    env.CLAUDE_PROJECT_DIR = invocationWorkspace
   }
   if (context.pluginOutputDir) env.PLUGIN_OUTPUT_DIR = context.pluginOutputDir
   if (context.pluginWorkspace) env.PLUGIN_WORKSPACE = context.pluginWorkspace
@@ -430,9 +449,10 @@ function buildHookStdinPayload(event: HookEvent, context: HookContext, hook: Hoo
     session_id: context.sessionId ?? "",
     cwd: getCommandCwd(context)
   }
-  if (context.workspacePath) {
-    payload.workspace = context.workspacePath
-    payload.workspace_path = context.workspacePath
+  const invocationWorkspace = getInvocationWorkspace(context)
+  if (invocationWorkspace) {
+    payload.workspace = invocationWorkspace
+    payload.workspace_path = invocationWorkspace
   }
   const userContext = buildHookUserContext(hook)
   if (userContext) payload.user_context = userContext
@@ -843,6 +863,7 @@ function buildPromptHookUserMessage(
   hook: HookConfig
 ): string {
   const userContext = buildHookUserContext(hook, { includeTokens: false })
+  const invocationWorkspace = getInvocationWorkspace(context) ?? ""
   return JSON.stringify(
     {
       hook_event_name: event,
@@ -867,8 +888,8 @@ function buildPromptHookUserMessage(
       ...(context.permissionMode ? { permission_mode: context.permissionMode } : {}),
       ...(context.agentId ? { agent_id: context.agentId } : {}),
       ...(context.stopContext ? { stop_context: context.stopContext } : {}),
-      workspace: context.workspacePath ?? "",
-      workspace_path: context.workspacePath ?? ""
+      workspace: invocationWorkspace,
+      workspace_path: invocationWorkspace
     },
     null,
     2
@@ -1159,7 +1180,11 @@ async function executeHook(
   // Setup owns workspace initialisation state, so its caller must observe the
   // real exit code before writing setup-state or starting SessionStart. Even
   // if a workspace/CC-imported config says async:true, run Setup synchronously.
-  if (hook.async === true && event !== "Setup") {
+  if (
+    hook.async === true &&
+    event !== "Setup" &&
+    !(context.hookSourceType === "workspace" && context.forceSyncWorkspaceHooks)
+  ) {
     void executeSyncHook(hook, env, context, event)
       .then((late) => {
         const finalLate: HookResult = {

@@ -2,16 +2,17 @@
  * Dynamic Workflows prompt text.
  *
  * WORKFLOW_TOOL_DESCRIPTION is Claude Code's shipped workflow tool description
- * (ccVersion 2.1.178) kept close to verbatim for its proven quality, with ONLY
- * two kinds of edits: (1) CC-only "ghost" features cmbcowork's engine lacks are
+ * (ccVersion 2.1.229) kept close to verbatim for its proven quality, with ONLY
+ * three kinds of edits: (1) CC-only "ghost" features cmbcowork's engine lacks are
  * corrected so the model isn't steered into no-ops/throws — no `effort`, no
- * worktree isolation, no by-name/saved workflows, no "ultracode"/system-reminder
- * opt-in, no `/workflows` command, `Agent` tool -> `task`, StructuredOutput ->
+ * by-name/saved workflows, no "ultracode"/system-reminder opt-in, no
+ * `/workflows` command, `Agent` tool -> `task`, StructuredOutput ->
  * structured_output, concurrency default, `<runId>.journal` resume; (2)
  * cmbcowork-only strengths CC lacks are added — the glob/readFile/writeFile/
  * exists workspace helpers, the main-process await-driven rule, the JSON-Schema
- * subset, and the pre-launch validate-fix-retry. CC's structure, wording, and
- * examples are otherwise left intact.
+ * subset, and the pre-launch validate-fix-retry; and (3) Cmb's optional worktree
+ * feature is described only by its script-facing contract. CC's structure,
+ * wording, and examples are otherwise left intact.
  *
  * The subagent prompts and the workflow-mode section below stay deliberately
  * compact: the backing models are mid-tier, so short rules plus concrete
@@ -59,11 +60,11 @@ Common single-phase workflows you can chain across turns:
 - **Design** — judge panel of N independent approaches → scored synthesis
 - **Review** — dimensions → find → adversarially verify (example below)
 - **Research** — multi-modal sweep → deep-read → synthesize
-- **Migrate** — discover sites → transform each → verify
+- **Migrate** — discover sites → transform each (worktree isolation) → verify
 
 For larger work, run several in sequence — read each result before deciding the next phase. You stay in the loop; each workflow is one well-scoped fan-out.
 
-Pass the script inline via \`script\` — do not write it to a file first. Every launch automatically persists its script to a file under the session directory and returns the path in the tool result. To iterate on a workflow, edit that file with write_file/edit_file and re-invoke the workflow tool with \`{scriptPath: "<path>"}\` instead of resending the full script. The tool validates the script before launching; if it reports a syntax error (the offending line is marked with »HERE») or a meta/structure problem, fix exactly what it names and call again with the corrected script.
+Pass the script inline via \`script\` — do not write it to a file first. Every launch automatically persists its script in the workspace's workflow storage and returns the path in the tool result. To iterate on a workflow, edit that file with write_file/edit_file and re-invoke the workflow tool with \`{scriptPath: "<path>"}\` instead of resending the full script. The tool validates the script before launching; if it reports a syntax error (the offending line is marked with »HERE») or a meta/structure problem, fix exactly what it names and call again with the corrected script.
 
 Every script must begin with \`export const meta = {...}\`:
   export const meta = {
@@ -82,7 +83,7 @@ Every script must begin with \`export const meta = {...}\`:
 The \`meta\` object must be a PURE LITERAL — no variables, function calls, spreads, or template interpolation. Required fields: \`name\`, \`description\`. Optional: \`whenToUse\` (shown in the workflow list), \`phases\`. Use the SAME phase titles in meta.phases as in phase() calls — titles are matched exactly; a phase() call with no matching meta entry just gets its own progress group. Add \`model\` to a phase entry when that phase uses a specific model override.
 
 Script body hooks:
-- agent(prompt: string, opts?: {label?: string, phase?: string, schema?: object, model?: string, agentType?: string}): Promise<any> — spawn a subagent. Without schema, returns its final text as a string. With schema (a JSON Schema), the subagent is forced to call the structured_output tool and agent() returns the validated object — no parsing needed. Returns null if the user skips the agent mid-run or the subagent dies on a terminal API error after retries (filter with .filter(Boolean)). opts.label overrides the display label. opts.phase explicitly assigns this agent to a progress group (use this inside pipeline()/parallel() stages to avoid races on the global phase() state — same phase string → same group box). opts.model overrides the model for this agent call. Default to omitting it — the agent inherits the main-loop model (the resolved session model), which is almost always correct. Only set it when you're highly confident a different tier fits the task; when unsure, omit. opts.agentType uses a custom subagent type (e.g. 'Explore', 'code-reviewer') instead of the default workflow subagent — see the agentType catalogue appended below; composes with schema (the role's system prompt gets the structured_output instruction appended).
+- agent(prompt: string, opts?: {label?: string, phase?: string, schema?: object, model?: string, agentType?: string, isolation?: 'worktree'}): Promise<any> — spawn a subagent. Without schema, returns its final text as a string. With schema (a JSON Schema), the subagent is forced to call the structured_output tool and agent() returns the validated object — no parsing needed. Isolation never changes this return shape: access schema fields directly. Returns null if the user skips the agent mid-run or the subagent dies on a terminal API error after retries (filter with .filter(Boolean)). opts.label overrides the display label. opts.phase explicitly assigns this agent to a progress group (use this inside pipeline()/parallel() stages to avoid races on the global phase() state — same phase string → same group box). opts.model overrides the model for this agent call. Default to omitting it — the agent inherits the main-loop model (the resolved session model), which is almost always correct. Only set it when you're highly confident a different tier fits the task; when unsure, omit. opts.agentType uses a custom subagent type (e.g. 'Explore', 'code-reviewer') instead of the default workflow subagent — see the agentType catalogue appended below; composes with schema (the role's system prompt gets the structured_output instruction appended). opts.isolation: 'worktree' runs the agent in its own git worktree on a fresh branch — see "Isolated agents" below.
 - pipeline(items, stage1, stage2, ...): Promise<any[]> — run each item through all stages independently, NO barrier between stages. Item A can be in stage 3 while item B is still in stage 1. This is the DEFAULT for multi-stage work. Wall-clock = slowest single-item chain, not sum-of-slowest-per-stage. Every stage callback receives (prevResult, originalItem, index) — use originalItem/index in later stages to label work without threading context through stage 1's return value. A recoverable stage error drops that item to \`null\` and skips its remaining stages; fatal workflow errors (abort, token budget exhausted, agent/count caps, child workflow fatal errors) still reject and abort the workflow.
 - parallel(thunks: Array<() => Promise<any>>): Promise<any[]> — run tasks concurrently. This is a BARRIER: awaits all thunks before returning. A recoverable thunk failure (or recoverable agent error) resolves to \`null\` in the result array, so \`.filter(Boolean)\` before using the results; fatal workflow errors (abort, token budget exhausted, agent/count caps, child workflow fatal errors) still reject and abort the workflow. Use ONLY when you genuinely need all results together.
 - log(message: string): void — emit a progress message to the user (shown as a narrator line above the progress tree)
@@ -99,8 +100,16 @@ Scripts are plain JavaScript, NOT TypeScript — type annotations (\`: string[]\
 
 Concurrency guidance:
 - Use parallel()/pipeline() freely for independent read-only research.
-- Avoid parallel write-heavy agents that may edit overlapping files; split by file area or serialize dependent edits.
+- Avoid parallel write-heavy agents that touch overlapping files. Split by file area or serialize dependent edits.
 - Verification can run in parallel only when it checks independent or already-completed file areas.
+
+## Isolated agents (opts.isolation: 'worktree')
+
+\`agent(prompt, {isolation: 'worktree'})\` runs that agent in an independent Git working copy on a fresh branch from a frozen, clean source commit. It has extra setup-time and disk cost per agent, so use it ONLY when agents mutate files in parallel and would otherwise conflict; it is unnecessary overhead for read-only work. Agents in one fan-out do not see sibling changes, so complete prerequisites before launching dependent work.
+
+Isolation never changes the return value: schema calls return their validated object and other calls return final text. A pristine checkout is removed; a changed checkout is retained in Cmb's workflow panel for review and resolution. If a worktree cannot be provisioned safely, the call returns \`null\` and never falls back to the shared workspace.
+
+For a deliverable you intend to Merge in Cmb, tell the isolated agent to commit its changes and leave its worktree clean. Do not ask isolated agents to push. This is repository-edit isolation, not a sandbox for untrusted code or network access.
 
 DEFAULT TO pipeline(). Only reach for a barrier (parallel between stages) when you genuinely need ALL prior-stage results together.
 
@@ -200,7 +209,7 @@ Use this tool for multi-step orchestration where control flow should be determin
 
 ## Resume
 
-The tool result includes a runId. To resume after a pause, kill, or script edit, relaunch the workflow tool with {scriptPath, resumeFromRunId} — completed agent() results replay from the run's <runId>.journal, matched by content (prompt/opts) not position, so the unchanged prefix returns instantly and the first edited/new call onward runs live. Same script + same args → 100% cache hit; a changed script or args discards the journal and re-runs from scratch. Date.now()/Date()/Math.random()/argless new Date() are unavailable in scripts (they would break this) — stamp results after the workflow returns, or pass timestamps via args.`
+The tool result includes a runId. To resume after a pause, kill, or script edit, relaunch the workflow tool with {scriptPath, resumeFromRunId} — completed agent() results replay from the run's <runId>.journal, matched by content (prompt/opts) not position, so the unchanged prefix returns instantly and the first edited/new call onward runs live. Same script + same args → 100% cache hit; a changed script or args discards the journal and re-runs from scratch. Isolated (worktree) agents are never journaled — their deliverable is a checkout the journal can't reconstruct, so a resume re-runs them in a fresh worktree. Date.now()/Date()/Math.random()/argless new Date() are unavailable in scripts (they would break this) — stamp results after the workflow returns, or pass timestamps via args.`
 
 export const WORKFLOW_MODE_SYSTEM_PROMPT = `
 

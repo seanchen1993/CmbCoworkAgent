@@ -117,8 +117,6 @@ type UserInfoLite = {
   ystId?: string
 }
 
-const SKILL_EVAL_DOC_URL = "https://doc.cmbchina.com/f/v?id=_41lRJE"
-
 // ─────────────────────────────────────────────────────────
 // Time control bar
 // ─────────────────────────────────────────────────────────
@@ -4123,7 +4121,7 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleSkillEvalDocOpen = useCallback(() => {
-    void window.electron.openExternal(SKILL_EVAL_DOC_URL)
+    void window.electron.openManagedLink("skillEvalDoc")
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {

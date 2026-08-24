@@ -11,6 +11,7 @@ import {
   ChevronRight,
   CheckCircle2,
   Circle,
+  CircleDot,
   CircleDashed,
   CircleHelp,
   FileText,
@@ -64,6 +65,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
+import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheckpointDialog"
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
@@ -1188,7 +1190,7 @@ function ProjectPluginUpdateButton({
   )
 }
 
-function statusIcon(status: HarnessStatus): React.JSX.Element {
+function statusIcon(status: HarnessStatus, animateActive = true): React.JSX.Element {
   if (status.uiKind === "pending") {
     return <CircleDashed className="size-4 text-muted-foreground" />
   }
@@ -1196,7 +1198,11 @@ function statusIcon(status: HarnessStatus): React.JSX.Element {
     return <CheckCircle2 className="size-4 text-status-nominal" />
   }
   if (status.uiKind === "active") {
-    return <Loader2 className="size-4 animate-spin text-status-info" />
+    return animateActive ? (
+      <Loader2 className="size-4 animate-spin text-status-info" />
+    ) : (
+      <CircleDot className="size-4 text-status-info" />
+    )
   }
   if (status.uiKind === "warning" || status.uiKind === "blocked") {
     return <ShieldAlert className="size-4 text-status-warning" />
@@ -5306,7 +5312,7 @@ function ProjectConstraintSyncPanel({
           size="sm"
           className="h-auto min-w-0 px-0 py-0 text-xs"
           onClick={() => {
-            void window.electron.openExternal("https://doc.cmbchina.com/f/v?id=zfGMOW")
+            void window.electron.openManagedLink("knowledgeGuide")
           }}
         >
           知识库使用指引
@@ -5777,6 +5783,7 @@ function ProjectSessionPage({
   deleted,
   onBackToList,
   onBackToProject,
+  onHarnessSessionCreated,
   hasPendingGitDiffNotice,
   onRequestOpenGitPanel,
   onDismissGitChangeNotice,
@@ -5787,6 +5794,7 @@ function ProjectSessionPage({
   deleted?: boolean
   onBackToList: () => void
   onBackToProject: () => void
+  onHarnessSessionCreated?: (threadId: string) => void
   hasPendingGitDiffNotice?: boolean
   onRequestOpenGitPanel?: () => void
   onDismissGitChangeNotice?: () => void
@@ -5822,6 +5830,7 @@ function ProjectSessionPage({
           chatSurface="harness-feature-session"
           readOnlyReason={readOnlyReason}
           hasPendingGitDiffNotice={hasPendingGitDiffNotice}
+          onHarnessSessionCreated={onHarnessSessionCreated}
           onRequestOpenGitPanel={onRequestOpenGitPanel}
           onDismissGitChangeNotice={onDismissGitChangeNotice}
           onThreadGitStatusChange={onThreadGitStatusChange}
@@ -5939,6 +5948,7 @@ function FeatureDetailPage({
   const selectThread = useAppStore((s) => s.selectThread)
   const threads = useAppStore((s) => s.threads)
   const allThreadStates = useAllThreadStates()
+  const allStreamLoadingStates = useAllStreamLoadingStates()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const managedSessionTitles = useMemo(
     () =>
@@ -6002,6 +6012,21 @@ function FeatureDetailPage({
       : isViewingSession
         ? activeSessionThreadId ?? null
         : null
+  const featureSessionThreadIds = useMemo(() => {
+    const threadIds = new Set(detail?.sessions.map((session) => session.threadId) ?? [])
+    if (selectedSessionThreadId) threadIds.add(selectedSessionThreadId)
+    return [...threadIds]
+  }, [detail?.sessions, selectedSessionThreadId])
+  const hasRunningFeatureSession = featureSessionThreadIds.some(
+    (threadId) => allStreamLoadingStates[threadId] === true
+  )
+  const shouldAnimateStageNode = (node: HarnessRunNode | null): boolean => Boolean(
+    detail &&
+    node &&
+    node.id === detail.run.currentNodeId &&
+    node.status.uiKind === "active" &&
+    hasRunningFeatureSession
+  )
   const activeSessionThreadIdForView =
     activeDetailTab === "session" ? selectedSessionThreadId : null
   const effectiveActiveDetailTab = activeSessionThreadIdForView ? "session" : "feature"
@@ -6179,7 +6204,9 @@ function FeatureDetailPage({
             )}
           >
             <span className="flex min-w-0 items-start gap-2">
-              <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
+              <span className="mt-0.5 shrink-0">
+                {statusIcon(node.status, shouldAnimateStageNode(node))}
+              </span>
               <span className="min-w-0 flex-1">
                 <span className="block line-clamp-2 text-[12px] font-semibold leading-[1.35]">
                   {node.label}
@@ -6274,7 +6301,11 @@ function FeatureDetailPage({
                     )}
                   >
                     <div className="flex min-w-0 items-start gap-2">
-                      {currentNode ? statusIcon(currentNode.status) : <Circle className="size-4 text-muted-foreground" />}
+                      {currentNode ? (
+                        statusIcon(currentNode.status, shouldAnimateStageNode(currentNode))
+                      ) : (
+                        <Circle className="size-4 text-muted-foreground" />
+                      )}
                       <div className="min-w-0 flex-1">
                         <span className="block truncate text-[13px] font-semibold">{group.label}</span>
                         <span className="mt-1 block truncate text-[11px] text-muted-foreground">
@@ -6565,7 +6596,11 @@ function FeatureDetailPage({
                   <div className={harnessKickerClassName}>Current stage</div>
                   <div className="mt-2.5 flex min-w-0 items-start gap-2.5">
                     <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border border-status-info/20 bg-status-info/10">
-                      {selectedNode ? statusIcon(selectedNode.status) : <Circle className="size-4 text-muted-foreground" />}
+                      {selectedNode ? (
+                        statusIcon(selectedNode.status, shouldAnimateStageNode(selectedNode))
+                      ) : (
+                        <Circle className="size-4 text-muted-foreground" />
+                      )}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[13px] font-semibold">
@@ -6645,6 +6680,7 @@ function ProjectFeatureSidebar({
   isViewingSession,
   unreadIds,
   exportingThreadId,
+  forkingThreadId,
   editingThreadId,
   editingTitle,
   scrollTopRef,
@@ -6657,6 +6693,8 @@ function ProjectFeatureSidebar({
   onRunFinished,
   onDeleteSession,
   onExportSession,
+  onForkSession,
+  onForkSessionFromCheckpoint,
   onStartEditing,
   onSaveTitle,
   onCancelEditing,
@@ -6675,6 +6713,7 @@ function ProjectFeatureSidebar({
   isViewingSession: boolean
   unreadIds: Set<string>
   exportingThreadId: string | null
+  forkingThreadId: string | null
   editingThreadId: string | null
   editingTitle: string
   scrollTopRef: MutableRefObject<number>
@@ -6691,6 +6730,8 @@ function ProjectFeatureSidebar({
   onRunFinished: (threadId: string) => void
   onDeleteSession: (thread: Thread) => void
   onExportSession: (thread: Thread) => void
+  onForkSession: (thread: Thread) => void
+  onForkSessionFromCheckpoint: (thread: Thread) => void
   onStartEditing: (thread: Thread) => void
   onSaveTitle: () => void
   onCancelEditing: () => void
@@ -6798,6 +6839,7 @@ function ProjectFeatureSidebar({
         hasContextReminder={hasContextReminder}
         scheduledTaskLoading={scheduledTaskLoading}
         isExporting={exportingThreadId === thread.thread_id}
+        isForking={forkingThreadId === thread.thread_id}
         isSelected={highlightThreadId === thread.thread_id}
         isEditing={editingThreadId === thread.thread_id}
         isUnread={unreadIds.has(thread.thread_id)}
@@ -6811,6 +6853,8 @@ function ProjectFeatureSidebar({
         onRunFinished={() => onRunFinished(thread.thread_id)}
         onDelete={() => onDeleteSession(thread)}
         onExport={() => void onExportSession(thread)}
+        onFork={() => onForkSession(thread)}
+        onForkFromCheckpoint={() => onForkSessionFromCheckpoint(thread)}
         onStartEditing={() => onStartEditing(thread)}
         onSaveTitle={onSaveTitle}
         onCancelEditing={onCancelEditing}
@@ -7211,6 +7255,7 @@ export function HarnessBoardView({
     threads,
     currentThreadId,
     createThread,
+    forkThread,
     selectThread,
     updateThread,
     deleteThread,
@@ -7232,10 +7277,13 @@ export function HarnessBoardView({
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
+  const [forkingThreadId, setForkingThreadId] = useState<string | null>(null)
+  const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
   const [sidebarThreadToDelete, setSidebarThreadToDelete] = useState<Thread | null>(null)
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const [creatingProjectSessionProjectId, setCreatingProjectSessionProjectId] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
+  const forkingThreadIdRef = useRef<string | null>(null)
   const projectsRef = useRef(projects)
   const enterpriseProjectDetailsByCodeRef = useRef(enterpriseProjectDetailsByCode)
   const enterpriseProjectDetailQueueRef = useRef<Set<string>>(new Set())
@@ -9141,6 +9189,63 @@ export function HarnessBoardView({
     [exportingThreadId]
   )
 
+  const activateForkedHarnessThread = useCallback(
+    async (thread: Thread): Promise<void> => {
+      const feature = readThreadHarnessFeature(thread)
+      const projectSession = readThreadHarnessProjectSession(thread)
+
+      if (feature) {
+        const projectDeleted = !projectsRef.current.some(
+          (project) => project.projectId === feature.projectId
+        )
+        openFeatureDetail(
+          feature.projectId,
+          feature.slug,
+          thread.thread_id,
+          projectDeleted
+        )
+      } else if (projectSession) {
+        const projectDeleted = !projectsRef.current.some(
+          (project) => project.projectId === projectSession.projectId
+        )
+        openProjectSession(projectSession.projectId, thread.thread_id, projectDeleted)
+      }
+
+      markRead(thread.thread_id)
+      await selectThread(thread.thread_id, { preserveView: true })
+    },
+    [markRead, openFeatureDetail, openProjectSession, selectThread]
+  )
+
+  const handleForkSidebarThread = useCallback(
+    async (thread: Thread): Promise<void> => {
+      if (forkingThreadIdRef.current) return
+      forkingThreadIdRef.current = thread.thread_id
+      setForkingThreadId(thread.thread_id)
+      try {
+        const forkedThread = await forkThread(
+          { sourceThreadId: thread.thread_id },
+          { preserveView: true }
+        )
+        await activateForkedHarnessThread(forkedThread)
+        toast.success("已从当前 checkpoint 创建新会话")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Fork 会话失败")
+      } finally {
+        if (forkingThreadIdRef.current === thread.thread_id) {
+          forkingThreadIdRef.current = null
+          setForkingThreadId(null)
+        }
+      }
+    },
+    [activateForkedHarnessThread, forkThread]
+  )
+
+  const handleForkCheckpointBusyChange = useCallback((threadId: string | null): void => {
+    forkingThreadIdRef.current = threadId
+    setForkingThreadId(threadId)
+  }, [])
+
   const confirmDeleteSidebarThread = useCallback(
     async (): Promise<void> => {
       if (!sidebarThreadToDelete) return
@@ -9261,6 +9366,14 @@ export function HarnessBoardView({
     setIsViewingSession(true)
   }, [])
 
+  const handleActiveProjectSessionChange = useCallback((threadId: string): void => {
+    setSelectedProjectSession((current) => {
+      if (!current || current.threadId === threadId) return current
+      return { ...current, threadId }
+    })
+    setIsViewingSession(true)
+  }, [])
+
   const sidebarPortalNode = useHarnessSidebarPortalNode()
   const projectListSelected =
     selectedProjectId === null && selectedFeature === null && selectedProjectSession === null
@@ -9299,6 +9412,7 @@ export function HarnessBoardView({
               isViewingSession={isViewingSession}
               unreadIds={unreadIds}
               exportingThreadId={exportingThreadId}
+              forkingThreadId={forkingThreadId}
               editingThreadId={editingThreadId}
               editingTitle={editingTitle}
               scrollTopRef={projectSidebarScrollTopRef}
@@ -9328,6 +9442,8 @@ export function HarnessBoardView({
               onRunFinished={handleRunFinished}
               onDeleteSession={setSidebarThreadToDelete}
               onExportSession={(thread) => void handleExportSidebarThread(thread)}
+              onForkSession={(thread) => void handleForkSidebarThread(thread)}
+              onForkSessionFromCheckpoint={setForkDialogThread}
               onStartEditing={(thread) => {
                 setEditingThreadId(thread.thread_id)
                 setEditingTitle(thread.title || "")
@@ -9336,6 +9452,17 @@ export function HarnessBoardView({
               onCancelEditing={cancelSidebarThreadEditing}
               onEditingTitleChange={setEditingTitle}
             />
+            {forkDialogThread ? (
+              <ThreadForkCheckpointDialog
+                key={forkDialogThread.thread_id}
+                thread={forkDialogThread}
+                displayTitle={getThreadTitle(forkDialogThread)}
+                preserveView
+                onClose={() => setForkDialogThread(null)}
+                onForked={activateForkedHarnessThread}
+                onForkingChange={handleForkCheckpointBusyChange}
+              />
+            ) : null}
           </div>,
           sidebarPortalNode
         )
@@ -9427,6 +9554,7 @@ export function HarnessBoardView({
           deleted={selectedProjectSession.deleted}
           onBackToList={handleBackToProjectList}
           onBackToProject={handleBackToProject}
+          onHarnessSessionCreated={handleActiveProjectSessionChange}
           hasPendingGitDiffNotice={hasPendingGitDiffNotice}
           onRequestOpenGitPanel={onRequestOpenGitPanel}
           onDismissGitChangeNotice={onDismissGitChangeNotice}
