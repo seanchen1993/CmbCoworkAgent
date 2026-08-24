@@ -7775,6 +7775,10 @@ export function ChatContainer({
                             }
                             onChange={handleAgentModeChange}
                           />
+                          <ThreadRemoteAccessSwitcher
+                            threadId={threadId}
+                            onOpenSettings={handleOpenRobotSettings}
+                          />
                           <div className="w-px h-4 bg-border mx-1" />
                           <WorkspacePicker
                             threadId={threadId}
@@ -7925,10 +7929,6 @@ export function ChatContainer({
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
                       <SystemPromptPreviewButton threadId={threadId} />
-                      <ThreadRemoteAccessSwitcher
-                        threadId={threadId}
-                        onOpenSettings={handleOpenRobotSettings}
-                      />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
                         <ContextUsageIndicator

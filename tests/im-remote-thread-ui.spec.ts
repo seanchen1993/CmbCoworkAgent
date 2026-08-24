@@ -110,6 +110,21 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(!robotPanel.includes("设备版本"))
   assert(chat.includes("ThreadRemoteAccessSwitcher"))
   assert(chat.includes('setShowCustomizeView(true, "robot")'))
+  const agentModeSwitcherIndex = chat.indexOf("<AgentModeSwitcher")
+  const remoteAccessSwitcherIndex = chat.indexOf("<ThreadRemoteAccessSwitcher")
+  const workspacePickerIndex = chat.indexOf("<WorkspacePicker", agentModeSwitcherIndex)
+  const composerBottomPanelIndex = chat.indexOf("{/*chat container bottom panel */}")
+  assert(
+    agentModeSwitcherIndex < remoteAccessSwitcherIndex &&
+      remoteAccessSwitcherIndex < workspacePickerIndex &&
+      remoteAccessSwitcherIndex < composerBottomPanelIndex,
+    "the Zhaohu access entry must sit in the composer toolbar after execution mode"
+  )
+  assert.equal(
+    chat.match(/<ThreadRemoteAccessSwitcher/gu)?.length,
+    1,
+    "the Zhaohu access entry must not also remain in the lower status bar"
+  )
   assert(remoteAccessSwitcher.includes("当前会话接入招乎"))
   assert(remoteAccessSwitcher.includes("window.api.builtinRobot.getRemoteAccess()"))
   assert(remoteAccessSwitcher.includes("window.api.builtinRobot.setThreadRemoteAccess"))
@@ -134,10 +149,36 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(harnessBoard.includes("关闭后，下方已经接入的会话仍由各自的会话开关管理"))
 }
 
+function testRemoteTurnMirrorsCompleteRendererLifecycle(): void {
+  const remoteRunner = source("src/main/services/im/remote-runner.ts")
+  const rendererMirror = source("src/main/agent/renderer-stream-mirror.ts")
+  const streamConverter = source("src/main/agent/stream-converter.ts")
+
+  assert(
+    remoteRunner.includes('mirrorStandardTurnStreamToRenderer(threadId, { type: "started" })'),
+    "a remote turn must explicitly start the passive renderer stream"
+  )
+  assert(
+    /signal\.aborted \|\| completionSucceeded[\s\S]*\? \{ type: "done" \}[\s\S]*type: "error"/u.test(
+      remoteRunner
+    ),
+    "every completed, cancelled, or failed remote turn must terminate the passive renderer stream"
+  )
+  assert(
+    remoteRunner.indexOf("await flushStrict().catch") <
+      remoteRunner.lastIndexOf("mirrorStandardTurnStreamToRenderer("),
+    "the terminal renderer event must follow durable transcript flushing"
+  )
+  assert(rendererMirror.includes("event: SchedulerRendererEvent"))
+  assert(streamConverter.includes("export type SchedulerLifecycleEvent"))
+}
+
 testRemoteInboxIsReadOnlyAtRendererAndMainBoundary()
 console.log("PASS testRemoteInboxIsReadOnlyAtRendererAndMainBoundary")
 testRemoteThreadsHaveStableSourceAndModeLabels()
 console.log("PASS testRemoteThreadsHaveStableSourceAndModeLabels")
 testEnabledDesktopThreadsAreSortedFirst()
 console.log("PASS testEnabledDesktopThreadsAreSortedFirst")
+testRemoteTurnMirrorsCompleteRendererLifecycle()
+console.log("PASS testRemoteTurnMirrorsCompleteRendererLifecycle")
 console.log("im-remote-thread-ui.spec.ts passed")

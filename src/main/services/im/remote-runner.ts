@@ -324,8 +324,10 @@ export async function executePreparedRemoteStandardTurn(
   const releasePin = pinCheckpointer(threadId)
   let agent: DeepAgent | null = null
   let completionSucceeded = false
+  let terminalError: unknown = null
   updateThread(threadId, { status: "busy" })
   notifyRemoteThreadChanged()
+  mirrorStandardTurnStreamToRenderer(threadId, { type: "started" })
   const streamConsumer = new StandardTurnStreamConsumer(
     threadId,
     (streamEvent) => mirrorStandardTurnStreamToRenderer(threadId, streamEvent),
@@ -466,6 +468,7 @@ export async function executePreparedRemoteStandardTurn(
     completionSucceeded = true
     return finalText
   } catch (error) {
+    terminalError = error
     if (!(error instanceof ImPreparedPromptRejectedError)) {
       await tracer.finish(
         signal.aborted ? "cancelled" : "error",
@@ -481,6 +484,16 @@ export async function executePreparedRemoteStandardTurn(
       status: signal.aborted ? "interrupted" : completionSucceeded ? "idle" : "error"
     })
     await flushStrict().catch(() => undefined)
+    mirrorStandardTurnStreamToRenderer(
+      threadId,
+      signal.aborted || completionSucceeded
+        ? { type: "done" }
+        : {
+            type: "error",
+            error:
+              terminalError instanceof Error ? terminalError.message : "远程任务执行失败"
+          }
+    )
     notifyRemoteThreadChanged()
   }
 }

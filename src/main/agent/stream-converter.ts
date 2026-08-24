@@ -58,6 +58,13 @@ export type SchedulerEvent =
     }
   | { type: "todos"; todos: Array<{ id?: string; content?: string; status?: string }> }
 
+export type SchedulerLifecycleEvent =
+  | { type: "started" }
+  | { type: "done" }
+  | { type: "error"; error: string }
+
+export type SchedulerRendererEvent = SchedulerEvent | SchedulerLifecycleEvent
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
