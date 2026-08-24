@@ -110,7 +110,6 @@ import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import { ChatMessageCount } from "./ChatMessageCount"
 import {
   getSystemConstraintsLoadCounts,
   hasNoLoadedSystemConstraints,
@@ -7656,7 +7655,6 @@ export function ChatContainer({
                   {/*chat container bottom panel */}
                   <div className={"flex items-center justify-between"}>
                     <div className={"flex items-center gap-2"}>
-                      <ChatMessageCount count={displayMessages.length} />
                       {yoloMode && (
                         <button
                           type="button"
