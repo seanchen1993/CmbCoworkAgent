@@ -596,7 +596,8 @@ function OperationalTelemetry({
   detailTitle,
   detailDescription,
   loadDetails,
-  detailScope
+  detailScope,
+  triggerVariant = "summary"
 }: {
   constraint?: DashboardProjectModeConstraintReadStats | null
   hooks?: DashboardProjectModeHookStats | null
@@ -604,6 +605,7 @@ function OperationalTelemetry({
   detailDescription: string
   loadDetails?: DashboardProjectModeOperationalDetailsLoader
   detailScope?: DashboardProjectModeOperationalDetailScope
+  triggerVariant?: "summary" | "table"
 }): React.JSX.Element | null {
   const [detailOpen, setDetailOpen] = useState(false)
   const [loadedDetails, setLoadedDetails] = useState<{
@@ -661,7 +663,12 @@ function OperationalTelemetry({
     >
       <button
         type="button"
-        className="flex w-full items-center justify-between gap-3 rounded bg-muted/30 px-2 py-1.5 text-left text-[10px] transition-colors hover:bg-muted/50"
+        className={cn(
+          "flex w-full items-center rounded text-[10px] transition-colors hover:bg-muted/50",
+          triggerVariant === "table"
+            ? "justify-end gap-1 px-1 py-1 text-right"
+            : "justify-between gap-3 bg-muted/30 px-2 py-1.5 text-left"
+        )}
         title={`点击查看${detailTitle}`}
         onClick={(event) => {
           event.stopPropagation()
@@ -669,14 +676,23 @@ function OperationalTelemetry({
           requestCompleteDetails()
         }}
       >
-        <div className="flex min-w-0 items-center gap-4 text-muted-foreground">
+        <div
+          className={cn(
+            "min-w-0 text-muted-foreground",
+            triggerVariant === "table"
+              ? "flex flex-col items-end gap-0.5"
+              : "flex items-center gap-4"
+          )}
+        >
           {constraint ? (
             <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
               <span className="font-medium text-foreground/80">系统约束</span>
               <span>{formatNumber(constraint.successfulReadCount)} 次有效读取</span>
             </span>
           ) : null}
-          {constraint && hooks ? <span className="h-3 w-px shrink-0 bg-border" /> : null}
+          {constraint && hooks && triggerVariant === "summary" ? (
+            <span className="h-3 w-px shrink-0 bg-border" />
+          ) : null}
           {hooks ? (
             <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
               <span className="font-medium text-foreground/80">运行时 Hook</span>
@@ -925,7 +941,9 @@ function isStageBucketsEmpty(buckets: DashboardStageBuckets): boolean {
 function StageBucketCaliberHint(): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div>对话按每轮开始时、代码按实际生成时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
+      <div>
+        对话按每轮开始时、代码按实际生成时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：
+      </div>
       {STAGE_BUCKET_VIEW.map(({ bucket }) => (
         <div key={bucket}>
           <span className="font-medium">{STAGE_BUCKET_LABELS[bucket]}</span>：
@@ -1444,6 +1462,21 @@ function ProjectRow({
         <td className="px-3 py-2 text-right tabular-nums">
           <ProjectStageAdoptionRates buckets={project.stageBuckets} />
         </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          {project.systemConstraintReads || project.hookExecutions ? (
+            <OperationalTelemetry
+              constraint={project.systemConstraintReads}
+              hooks={project.hookExecutions}
+              detailTitle="项目运行详情"
+              detailDescription={project.name}
+              loadDetails={loadOperationalDetails}
+              detailScope={{ projectId: project.projectId }}
+              triggerVariant="table"
+            />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
           {creatorId && creatorId !== creatorName ? (
@@ -1471,7 +1504,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={14} className="px-3 py-3">
+          <td colSpan={15} className="px-3 py-3">
             <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -1936,7 +1969,8 @@ function ProjectListSection({
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
             项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段会话数、DEV
             关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
-            流程采纳率按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
+            流程采纳率、系统约束读取与运行时 Hook
+            按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
       )}
@@ -2011,7 +2045,7 @@ function ProjectListSection({
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full min-w-[2080px] table-fixed text-xs">
+        <table className="w-full min-w-[2280px] table-fixed text-xs">
           {/*
            * Keep column allocation deterministic across macOS and Windows.
            * With table-layout:auto, CJK body text has a one-glyph min-content
@@ -2030,6 +2064,7 @@ function ProjectListSection({
             <col className="w-[160px]" />
             <col className="w-[142px]" />
             <col className="w-[178px]" />
+            <col className="w-[190px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
             <col className="w-[140px]" />
@@ -2038,10 +2073,7 @@ function ProjectListSection({
           <thead>
             <tr className="whitespace-nowrap border-b border-border bg-muted/30 text-muted-foreground">
               <th
-                className={cn(
-                  PROJECT_LIST_PROJECT_COLUMN_CLASS,
-                  "px-3 py-2 text-left font-medium"
-                )}
+                className={cn(PROJECT_LIST_PROJECT_COLUMN_CLASS, "px-3 py-2 text-left font-medium")}
               >
                 项目
               </th>
@@ -2088,6 +2120,12 @@ function ProjectListSection({
               >
                 Harness / VibeCoding 采纳率
               </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内，插件系统约束文件的有效读取次数与项目模式运行时 Hook 触发次数"
+              >
+                系统约束 / 运行时 Hook
+              </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
               <SortableTh
@@ -2121,7 +2159,7 @@ function ProjectListSection({
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={15} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -2131,7 +2169,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={14} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={15} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -2139,12 +2177,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={14} className="h-[49px]" />
+                  <td colSpan={15} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={15} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>
