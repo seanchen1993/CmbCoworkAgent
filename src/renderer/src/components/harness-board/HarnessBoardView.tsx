@@ -11,6 +11,7 @@ import {
   ChevronRight,
   CheckCircle2,
   Circle,
+  CircleDot,
   CircleDashed,
   CircleHelp,
   FileText,
@@ -1149,7 +1150,7 @@ function ProjectPluginUpdateButton({
   )
 }
 
-function statusIcon(status: HarnessStatus): React.JSX.Element {
+function statusIcon(status: HarnessStatus, animateActive = true): React.JSX.Element {
   if (status.uiKind === "pending") {
     return <CircleDashed className="size-4 text-muted-foreground" />
   }
@@ -1157,7 +1158,11 @@ function statusIcon(status: HarnessStatus): React.JSX.Element {
     return <CheckCircle2 className="size-4 text-status-nominal" />
   }
   if (status.uiKind === "active") {
-    return <Loader2 className="size-4 animate-spin text-status-info" />
+    return animateActive ? (
+      <Loader2 className="size-4 animate-spin text-status-info" />
+    ) : (
+      <CircleDot className="size-4 text-status-info" />
+    )
   }
   if (status.uiKind === "warning" || status.uiKind === "blocked") {
     return <ShieldAlert className="size-4 text-status-warning" />
@@ -5898,6 +5903,7 @@ function FeatureDetailPage({
   const selectThread = useAppStore((s) => s.selectThread)
   const threads = useAppStore((s) => s.threads)
   const allThreadStates = useAllThreadStates()
+  const allStreamLoadingStates = useAllStreamLoadingStates()
   const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
@@ -5949,6 +5955,21 @@ function FeatureDetailPage({
       : isViewingSession
         ? activeSessionThreadId ?? null
         : null
+  const featureSessionThreadIds = useMemo(() => {
+    const threadIds = new Set(detail?.sessions.map((session) => session.threadId) ?? [])
+    if (selectedSessionThreadId) threadIds.add(selectedSessionThreadId)
+    return [...threadIds]
+  }, [detail?.sessions, selectedSessionThreadId])
+  const hasRunningFeatureSession = featureSessionThreadIds.some(
+    (threadId) => allStreamLoadingStates[threadId] === true
+  )
+  const shouldAnimateStageNode = (node: HarnessRunNode | null): boolean => Boolean(
+    detail &&
+    node &&
+    node.id === detail.run.currentNodeId &&
+    node.status.uiKind === "active" &&
+    hasRunningFeatureSession
+  )
   const activeSessionThreadIdForView =
     activeDetailTab === "session" ? selectedSessionThreadId : null
   const effectiveActiveDetailTab = activeSessionThreadIdForView ? "session" : "feature"
@@ -6076,7 +6097,9 @@ function FeatureDetailPage({
             )}
           >
             <span className="flex min-w-0 items-start gap-2">
-              <span className="mt-0.5 shrink-0">{statusIcon(node.status)}</span>
+              <span className="mt-0.5 shrink-0">
+                {statusIcon(node.status, shouldAnimateStageNode(node))}
+              </span>
               <span className="min-w-0 flex-1">
                 <span className="block line-clamp-2 text-[12px] font-semibold leading-[1.35]">
                   {node.label}
@@ -6171,7 +6194,11 @@ function FeatureDetailPage({
                     )}
                   >
                     <div className="flex min-w-0 items-start gap-2">
-                      {currentNode ? statusIcon(currentNode.status) : <Circle className="size-4 text-muted-foreground" />}
+                      {currentNode ? (
+                        statusIcon(currentNode.status, shouldAnimateStageNode(currentNode))
+                      ) : (
+                        <Circle className="size-4 text-muted-foreground" />
+                      )}
                       <div className="min-w-0 flex-1">
                         <span className="block truncate text-[13px] font-semibold">{group.label}</span>
                         <span className="mt-1 block truncate text-[11px] text-muted-foreground">
@@ -6423,7 +6450,11 @@ function FeatureDetailPage({
                   <div className={harnessKickerClassName}>Current stage</div>
                   <div className="mt-2.5 flex min-w-0 items-start gap-2.5">
                     <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border border-status-info/20 bg-status-info/10">
-                      {selectedNode ? statusIcon(selectedNode.status) : <Circle className="size-4 text-muted-foreground" />}
+                      {selectedNode ? (
+                        statusIcon(selectedNode.status, shouldAnimateStageNode(selectedNode))
+                      ) : (
+                        <Circle className="size-4 text-muted-foreground" />
+                      )}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[13px] font-semibold">
