@@ -2832,7 +2832,7 @@ function isHarnessSessionContextOk(value: unknown): boolean {
   return value === true
 }
 
-export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
+export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team" | "workflow"
 
 export interface HarnessAgentConfig {
   agentMode?: HarnessRuntimeAgentMode
@@ -2893,7 +2893,8 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
   const agentMode =
     value.agentMode === "solo" ||
     value.agentMode === "multi" ||
-    value.agentMode === "agent_team"
+    value.agentMode === "agent_team" ||
+    value.agentMode === "workflow"
       ? value.agentMode
       : undefined
   const normalizeStringList = (input: unknown): string[] => {

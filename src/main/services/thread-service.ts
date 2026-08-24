@@ -74,6 +74,7 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
         nextMetadata.subagentsEnabled = true
       }
       if (initialAgentMode === "agent_team") nextMetadata.agentMode = "coordinator"
+      if (initialAgentMode === "workflow") nextMetadata.agentMode = "workflow"
     } catch (error) {
       console.warn("[Threads] Failed to apply Harness initial agent mode:", error)
     }
