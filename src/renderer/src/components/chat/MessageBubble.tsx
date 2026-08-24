@@ -159,6 +159,13 @@ function normalizeToolCallForDisplay<T extends { name: string; args?: Record<str
 }
 
 function stripThinkBlocksForDisplay(text: string): string {
+  // The normal provider contract already delivers reasoning separately. Avoid
+  // running three whole-string regex passes over the growing answer merely
+  // because a separate reasoning field exists. Legacy inline think blocks are
+  // emitted at the beginning/end, so a bounded marker probe selects the slow
+  // compatibility path without scanning an ordinary cumulative answer.
+  const markerProbe = `${text.slice(0, 64)}${text.slice(-64)}`.toLocaleLowerCase()
+  if (!markerProbe.includes("<think") && !markerProbe.includes("</think>")) return text
   return text
     .replace(/<think>[\s\S]*?<\/think>\s*/gi, "")
     .replace(/^\s*<think>[\s\S]*$/i, "")
@@ -621,32 +628,41 @@ function MessageBubbleImpl({
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
-  const reasoningText = !isUser ? normalizeVisibleReasoningText(message.reasoning) : ""
+  const reasoningText = useMemo(
+    () => (!isUser ? normalizeVisibleReasoningText(message.reasoning) : ""),
+    [isUser, message.reasoning]
+  )
+  const displayMessageContent = useMemo<Message["content"]>(() => {
+    if (isUser || !reasoningText) return message.content
+    if (typeof message.content === "string") {
+      return stripThinkBlocksForDisplay(message.content)
+    }
+    if (!Array.isArray(message.content)) return message.content
+    let changed = false
+    const projected = message.content.map((block) => {
+      if (block.type !== "text" || !block.text) return block
+      const text = stripThinkBlocksForDisplay(block.text)
+      if (text === block.text) return block
+      changed = true
+      return { ...block, text }
+    })
+    return changed ? projected : message.content
+  }, [isUser, message.content, reasoningText])
   const visibleAssistantContentText = useMemo(() => {
     if (isUser) return ""
-    if (typeof message.content === "string") {
-      return reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
+    if (typeof displayMessageContent === "string") {
+      return displayMessageContent
     }
-    if (!Array.isArray(message.content)) return ""
-    return message.content
+    if (!Array.isArray(displayMessageContent)) return ""
+    return displayMessageContent
       .map((block) => {
         if (block.type !== "text" || !block.text) return ""
-        return reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+        return block.text
       })
       .join("\n")
-  }, [isUser, message.content, reasoningText])
+  }, [displayMessageContent, isUser])
   const hasVisibleAssistantContent = visibleAssistantContentText.trim().length > 0
   const hasToolCalls = Boolean(message.tool_calls?.length)
-
-  useEffect(() => {
-    if (
-      message.role !== "user" &&
-      typeof message.content === "string" &&
-      message.content.includes("改用编辑方式整体替换文件内容。")
-    ) {
-      console.log(message, "message///")
-    }
-  }, [message])
 
   // 测量用户消息内容高度,超过阈值才启用折叠。气泡宽度是 max-w-[80%],会随窗口/
   // 侧栏开合变化,因此除内容变化外还用 ResizeObserver 在宽度变化时重测——否则窄时
@@ -808,9 +824,8 @@ function MessageBubbleImpl({
       return renderGoalUserControlContent(goalUserControlMessage)
     }
 
-    if (typeof message.content === "string") {
-      const displayContent =
-        !isUser && reasoningText ? stripThinkBlocksForDisplay(message.content) : message.content
+    if (typeof displayMessageContent === "string") {
+      const displayContent = displayMessageContent
       // Empty content (after potentially stripping the trailing skill-use block below)
       if (!displayContent.trim()) {
         return null
@@ -833,11 +848,10 @@ function MessageBubbleImpl({
     }
 
     // Handle content blocks
-    const renderedBlocks = message.content
+    const renderedBlocks = displayMessageContent
       .map((block, index) => {
         if (block.type === "text" && block.text) {
-          const displayText =
-            !isUser && reasoningText ? stripThinkBlocksForDisplay(block.text) : block.text
+          const displayText = block.text
           if (!displayText.trim()) return null
           // Use streaming markdown for assistant text blocks
           if (isUser) {

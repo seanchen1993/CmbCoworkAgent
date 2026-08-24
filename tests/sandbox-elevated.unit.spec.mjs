@@ -1159,7 +1159,7 @@ test("pending command approvals can be restored after renderer reload", () => {
   )
   assert.match(
     approvalListenerSection,
-    /getPendingApprovals\(threadId\)[\s\S]*if \(!initializedThreadsRef\.current\.has\(threadId\)\) return/,
+    /getPendingApprovals\(threadId\)[\s\S]*if \(!isCurrentListenerEpoch\(\)\) return/,
     "late pending approval snapshots should not recreate cleaned-up thread state"
   )
 })
@@ -2169,7 +2169,7 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
   // list-runs shows the in-memory terminal summary, not the stale "running" disk row.
   assert.match(
     workflowsIpcSource,
-    /const withSnapshots[\s\S]*?toRunSummary\(snapshot\)/,
+    /const overlays = workflowRunManager\.listFlushFailedRuns\(threadId\)\.map\(toRunSummary\)[\s\S]*?listWorkflowRunsPage\([\s\S]*?overlays/,
     "list-runs surfaces the flush-failed run's true terminal summary"
   )
   // ack kicks the backlog when EITHER delivered persisted or the flush-failed
@@ -2321,13 +2321,13 @@ test("flush-failed run with NO disk file is still surfaced in history + hydrate 
   )
   assert.match(
     workflowsIpcSource,
-    /listFlushFailedRuns\(threadId\)[\s\S]*?if \(!seen\.has\(snap\.runId\)\) merged\.push\(toRunSummary\(snap\)\)/,
+    /listFlushFailedRuns\(threadId\)\.map\(toRunSummary\)[\s\S]*?listWorkflowRunsPage\([\s\S]*?overlays/,
     "list-runs appends memory-only snapshots that are absent from the disk listing"
   )
   assert.match(
     workflowsIpcSource,
-    /memLatest && \(!diskLatest \|\| byNewestRun\(memLatest, diskLatest\) < 0\)/,
-    "hydrate picks the genuinely-newest run (byNewestRun tie-break) — a memory-only snapshot can beat a STALE disk run, not just fill a blank panel"
+    /const latestPage = await listWorkflowRunsPage\(workspacePath, threadId, \{[\s\S]*?overlays[\s\S]*?const latestRunId = activeRunId \?\? latestPage\.runs\[0\]\?\.runId/,
+    "hydrate picks the newest overlay-aware page entry, so a memory-only snapshot can beat a stale disk run"
   )
 })
 
@@ -2485,7 +2485,7 @@ test("retained worktrees pin only their owning workspace until explicitly resolv
 test("flush-failed worktree recovery paths remain actionable", () => {
   assert.match(
     workflowsIpcSource,
-    /getFlushFailedRun\(payload\.runId\) \?\?[\s\S]*?loadWorkflowRun\(workspacePath, payload\.threadId, payload\.runId\)/,
+    /getFlushFailedRun\(payload\.runId\) \?\?[\s\S]*?loadWorkflowRunAsync\(workspacePath, payload\.threadId, payload\.runId\)/,
     "worktree actions must use the same in-memory terminal run shown by workflow:get-run"
   )
   assert.match(

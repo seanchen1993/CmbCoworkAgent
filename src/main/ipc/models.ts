@@ -18,6 +18,7 @@ import type {
 import { LocalSandbox } from "../agent/local-sandbox"
 import {
   buildGitignoreMatcher,
+  recordWorkspaceDirectorySnapshot,
   setActiveWatchedThread,
   startWatching,
   stopWatching
@@ -40,6 +41,7 @@ import {
   type DiscoveredGitRepository,
   resolveGitOperationPath
 } from "../services/git-repository-discovery"
+import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
 
 const execFileAsync = promisify(execFile)
 
@@ -262,10 +264,18 @@ function trackGitEventWithSkills(
     })
 }
 
-function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): void {
+function notifyWorkspaceFilesChanged(
+  threadId: string,
+  workspacePath: string,
+  changeType: "file" | "meta" = "file"
+): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
-      win.webContents.send("workspace:files-changed", { threadId, workspacePath })
+      win.webContents.send("workspace:files-changed", {
+        threadIds: [threadId],
+        workspacePath,
+        changeType
+      })
     }
   }
 }
@@ -1819,8 +1829,8 @@ async function resolveThreadWorkspaceContext(threadId: string): Promise<{
   worktreeBranch: string | null
   repositories: DiscoveredGitRepository[]
 }> {
-  const { getThread } = await import("../db")
-  const thread = getThread(threadId)
+  const { getThreadCore } = await import("../db")
+  const thread = getThreadCore(threadId)
   let metadata: Record<string, unknown> = {}
   try {
     metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
@@ -2955,7 +2965,11 @@ function createEmptyGitChangedFilesSummary(
 export async function buildGitPanelMetaState(
   threadId: string,
   context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>,
-  options?: { worktreePath?: string }
+  options?: {
+    worktreePath?: string
+    includeSummary?: boolean
+    includePushability?: boolean
+  }
 ): Promise<GitPanelMetaStatePayload> {
   if (!context.workspacePath) {
     return createEmptyGitPanelMetaState(threadId, { error: "未配置工作区" })
@@ -2967,33 +2981,35 @@ export async function buildGitPanelMetaState(
     })
   }
 
-  const repos = await getContextGitRepositories(context)
-  if (!options?.worktreePath && repos.length > 1) {
-    const summaries: Array<{ hasPendingDiff: boolean; changedFiles: number }> = new Array(
-      repos.length
-    )
-    await runWithConcurrency(
-      repos.map((repo, index) => ({ repo, index })),
-      GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
-      async ({ repo, index }) => {
-        summaries[index] = await getGitPanelSummaryQuick(repo.repoPath).catch(() => ({
-          hasPendingDiff: false,
-          changedFiles: 0
-        }))
+  if (!options?.worktreePath) {
+    const repos = await getContextGitRepositories(context)
+    if (repos.length > 1) {
+      const summaries: Array<{ hasPendingDiff: boolean; changedFiles: number }> = new Array(
+        repos.length
+      )
+      await runWithConcurrency(
+        repos.map((repo, index) => ({ repo, index })),
+        GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
+        async ({ repo, index }) => {
+          summaries[index] = await getGitPanelSummaryQuick(repo.repoPath).catch(() => ({
+            hasPendingDiff: false,
+            changedFiles: 0
+          }))
+        }
+      )
+      const changedFilesTotal = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
+      return {
+        success: true,
+        isWorktree: false,
+        isGitRepo: true,
+        taskId: threadId,
+        changedFilesTotal,
+        hasPendingDiff: changedFilesTotal > 0,
+        hasPushableCommit: false,
+        pendingCommits: [],
+        trackedFiles: getTrackedLlmFiles(context.metadata),
+        worktreeBranch: `${repos.length} 个仓库`
       }
-    )
-    const changedFilesTotal = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
-    return {
-      success: true,
-      isWorktree: false,
-      isGitRepo: true,
-      taskId: threadId,
-      changedFilesTotal,
-      hasPendingDiff: changedFilesTotal > 0,
-      hasPushableCommit: false,
-      pendingCommits: [],
-      trackedFiles: getTrackedLlmFiles(context.metadata),
-      worktreeBranch: `${repos.length} 个仓库`
     }
   }
 
@@ -3008,27 +3024,46 @@ export async function buildGitPanelMetaState(
   const workspacePath = target.worktreePath
   const tracked = getTrackedLlmFiles(context.metadata)
   const cacheKey = getCacheKeyForPath(workspacePath)
-  const summaryPromise = getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
-    getGitPanelSummaryQuick(workspacePath)
-  )
-  const branchPromise = options?.worktreePath
-    ? getCurrentBranchCached(workspacePath, { silent: true })
-    : context.worktreeBranch
-    ? Promise.resolve(context.worktreeBranch)
-    : getCurrentBranchCached(workspacePath, { silent: true })
+  const summaryPromise =
+    options?.includeSummary === false
+      ? Promise.resolve({ hasPendingDiff: false, changedFiles: 0 })
+      : getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
+          getGitPanelSummaryQuick(workspacePath)
+        )
+  const targetMatchesContext =
+    getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
+  const isWorktreePromise = targetMatchesContext
+    ? Promise.resolve(context.isWorktree)
+    : detectIsWorktreePath(workspacePath)
+  const branchPromise =
+    options?.worktreePath || !targetMatchesContext
+      ? getCurrentBranchCached(workspacePath, { silent: true })
+      : context.worktreeBranch
+        ? Promise.resolve(context.worktreeBranch)
+        : getCurrentBranchCached(workspacePath, { silent: true })
 
   const worktreeBranch = await branchPromise
-  const pushabilityPromise = worktreeBranch
-    ? getPushabilitySnapshot(workspacePath, worktreeBranch, context.worktreeBaseCommit, {
-      silent: true
-    })
-    : Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
+  const pushabilityPromise =
+    options?.includePushability === false
+      ? Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
+      : worktreeBranch
+        ? getPushabilitySnapshot(
+            workspacePath,
+            worktreeBranch,
+            targetMatchesContext ? context.worktreeBaseCommit : null,
+            { silent: true }
+          )
+        : Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
 
-  const [summary, pushability] = await Promise.all([summaryPromise, pushabilityPromise])
+  const [summary, pushability, isWorktree] = await Promise.all([
+    summaryPromise,
+    pushabilityPromise,
+    isWorktreePromise
+  ])
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     changedFilesTotal: summary.changedFiles,
@@ -3097,16 +3132,21 @@ async function buildGitChangedFilesSummary(
     })
   }
   const tracked = getTrackedLlmFiles(context.metadata)
-  const changedFileEntries = await getChangedFileEntriesForGitOps(target.worktreePath, tracked, {
-    silent: true,
-    includeAllWhenNoTracked: true,
-    combineMoves: false
-  })
+  const [changedFileEntries, isWorktree] = await Promise.all([
+    getChangedFileEntriesForGitOps(target.worktreePath, tracked, {
+      silent: true,
+      includeAllWhenNoTracked: true,
+      combineMoves: false
+    }),
+    getCacheKeyForPath(target.worktreePath) === getCacheKeyForPath(context.workspacePath)
+      ? Promise.resolve(context.isWorktree)
+      : detectIsWorktreePath(target.worktreePath)
+  ])
   const files = changedFileEntries.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     files,
@@ -3259,21 +3299,26 @@ export async function buildGitPanelDiffState(
   }
 
   const tracked = getTrackedLlmFiles(context.metadata)
-  const state = await buildGitPanelState(target.worktreePath, tracked, {
-    silent: true,
-    // Git Panel is a workspace review surface. llmModifiedFiles can seed commit
-    // attribution, but it must not hide user-created or manually edited files.
-    includeAllWhenNoTracked: true,
-    includeDiffs: options?.includeDiffs ?? true,
-    includeChangedFiles: options?.includeChangedFiles ?? true,
-    statusUntrackedMode: options?.statusUntrackedMode,
-    visibleFileLimit: options?.visibleFileLimit
-  })
+  const [state, isWorktree] = await Promise.all([
+    buildGitPanelState(target.worktreePath, tracked, {
+      silent: true,
+      // Git Panel is a workspace review surface. llmModifiedFiles can seed commit
+      // attribution, but it must not hide user-created or manually edited files.
+      includeAllWhenNoTracked: true,
+      includeDiffs: options?.includeDiffs ?? true,
+      includeChangedFiles: options?.includeChangedFiles ?? true,
+      statusUntrackedMode: options?.statusUntrackedMode,
+      visibleFileLimit: options?.visibleFileLimit
+    }),
+    getCacheKeyForPath(target.worktreePath) === getCacheKeyForPath(context.workspacePath)
+      ? Promise.resolve(context.isWorktree)
+      : detectIsWorktreePath(target.worktreePath)
+  ])
   const changedFilesTotal = state.changedFilesTotal
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     files: state.files,
@@ -3355,6 +3400,11 @@ export async function buildGitPanelFileDiffState(
     })
   }
 
+  const isWorktree =
+    getCacheKeyForPath(targetWorktreePath) === getCacheKeyForPath(context.workspacePath)
+      ? context.isWorktree
+      : await detectIsWorktreePath(targetWorktreePath)
+
   const diff = await buildGitPanelFileDiff(targetWorktreePath, requestedPath, {
     silent: true
   })
@@ -3362,7 +3412,7 @@ export async function buildGitPanelFileDiffState(
   if (!diff) {
     return {
       success: true,
-      isWorktree: context.isWorktree,
+      isWorktree,
       isGitRepo: true,
       taskId: threadId,
       file: {
@@ -3378,7 +3428,7 @@ export async function buildGitPanelFileDiffState(
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     file: {
@@ -3796,8 +3846,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
 
     // Get from thread metadata via threads:get
-    const { getThread } = await import("../db")
-    const thread = getThread(threadId)
+    const { getThreadCore } = await import("../db")
+    const thread = getThreadCore(threadId)
     if (!thread?.metadata) return null
 
     const metadata = JSON.parse(thread.metadata)
@@ -3821,8 +3871,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         return newPath
       }
 
-      const { getThread, updateThread } = await import("../db")
-      const thread = getThread(threadId)
+      const { getThreadCore, updateThread } = await import("../db")
+      const thread = getThreadCore(threadId)
       if (!thread) return null
 
       const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
@@ -3858,8 +3908,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     let preferredPath: string | null = null
 
     if (threadId) {
-      const { getThread } = await import("../db")
-      const thread = getThread(threadId)
+      const { getThreadCore } = await import("../db")
+      const thread = getThreadCore(threadId)
       if (thread?.metadata) {
         try {
           const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
@@ -3892,8 +3942,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const selectedPath = result.filePaths[0]
 
     if (threadId) {
-      const { getThread, updateThread } = await import("../db")
-      const thread = getThread(threadId)
+      const { getThreadCore, updateThread } = await import("../db")
+      const thread = getThreadCore(threadId)
       if (thread) {
         const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, selectedPath)
@@ -3919,8 +3969,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   })
 
   // Load files from disk into the workspace view
-  ipcMain.handle("workspace:loadFromDisk", async (_event, { threadId }: WorkspaceLoadParams) => {
-    const { getThread } = await import("../db")
+  ipcMain.handle("workspace:loadFromDisk", async (_event, params: WorkspaceLoadParams) => {
+    const { threadId, workspacePath: requestedWorkspacePath } = params
+    const { getThreadCore } = await import("../db")
     // Always skip node_modules, the dominant machine-generated directory.
     // `dist`/`out`/`build` are intentionally NOT hardcoded here: in many
     // projects they hold artifacts the user may want to browse. Instead we
@@ -3930,13 +3981,31 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const ignoredWorkspaceDirs = new Set(["node_modules"])
 
     // Get workspace path from thread metadata
-    const thread = getThread(threadId)
+    const thread = getThreadCore(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-    const workspacePath = metadata.workspacePath as string | null
+    const persistedWorkspacePath = metadata.workspacePath as string | null
 
-    if (!workspacePath) {
+    if (!persistedWorkspacePath) {
       return { success: false, error: "No workspace folder linked", files: [] }
     }
+
+    // Reject an IPC request whose originating thread switched paths before
+    // dispatch. Otherwise the renderer could cache the new tree under the old
+    // shared workspace key.
+    if (
+      requestedWorkspacePath &&
+      normalizeWorkspacePathKey(path.resolve(requestedWorkspacePath)) !==
+        normalizeWorkspacePathKey(path.resolve(persistedWorkspacePath))
+    ) {
+      return {
+        success: false,
+        error: "Workspace changed before file scan started",
+        files: [],
+        workspacePath: persistedWorkspacePath
+      }
+    }
+
+    const workspacePath = requestedWorkspacePath || persistedWorkspacePath
 
     // Respect the workspace's own .gitignore — but for directories only, so
     // individual gitignored files (e.g. logs, .env) stay visible in the tree
@@ -4020,10 +4089,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       // The scan can take a while; if the thread's workspace switched in the
       // meantime, don't point the watcher back at the now-stale path. The
       // renderer also discards stale results via result.workspacePath.
-      const latestThread = getThread(threadId)
+      const latestThread = getThreadCore(threadId)
       const latestMetadata = latestThread?.metadata ? JSON.parse(latestThread.metadata) : {}
-      if ((latestMetadata.workspacePath as string | null) === workspacePath) {
+      const latestWorkspacePath = latestMetadata.workspacePath as string | null
+      if (
+        latestWorkspacePath &&
+        normalizeWorkspacePathKey(path.resolve(latestWorkspacePath)) ===
+          normalizeWorkspacePathKey(path.resolve(workspacePath))
+      ) {
         startWatching(threadId, workspacePath)
+        recordWorkspaceDirectorySnapshot(workspacePath, files)
       }
 
       return {
@@ -4041,13 +4116,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   })
 
   // Ensure the workspace watcher is active for a thread without re-scanning the
-  // tree. The renderer caches the file tree per thread and skips loadFromDisk on
-  // revisit, but the watcher may have been evicted by the LRU cap meanwhile —
+  // tree. The renderer caches the file tree per workspace and skips loadFromDisk
+  // on revisit, but the watcher may have been evicted by the LRU cap meanwhile —
   // call this on thread activation to re-arm it. startWatching is idempotent
   // (same-path calls are a no-op).
   ipcMain.handle("workspace:ensureWatching", async (_event, { threadId }: WorkspaceLoadParams) => {
-    const { getThread } = await import("../db")
-    const thread = getThread(threadId)
+    const { getThreadCore } = await import("../db")
+    const thread = getThreadCore(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string | null
     if (!workspacePath) return { success: false }
@@ -4068,8 +4143,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     async (_event, { threadId }: { threadId: string | null }) => {
       setActiveWatchedThread(threadId)
       if (!threadId) return { success: true, restarted: false }
-      const { getThread } = await import("../db")
-      const thread = getThread(threadId)
+      const { getThreadCore } = await import("../db")
+      const thread = getThreadCore(threadId)
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       const workspacePath = metadata.workspacePath as string | null
       if (!workspacePath) return { success: true, restarted: false }
@@ -4085,10 +4160,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:readFile",
     async (_event, { threadId, filePath }: WorkspaceFileParams) => {
-      const { getThread } = await import("../db")
+      const { getThreadCore } = await import("../db")
 
       // Get workspace path from thread metadata
-      const thread = getThread(threadId)
+      const thread = getThreadCore(threadId)
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       const workspacePath = metadata.workspacePath as string | null
 
@@ -4166,8 +4241,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
       if (threadId) {
         try {
-          const { getThread, updateThread } = await import("../db")
-          const thread = getThread(threadId)
+          const { getThreadCore, updateThread } = await import("../db")
+          const thread = getThreadCore(threadId)
           if (thread) {
             let metadata: Record<string, unknown> = {}
             try {
@@ -4258,9 +4333,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
 
         // Validate sender owns the thread (prevent cross-window abuse)
-        const { getThread } = await import("../db")
-        const thread = getThread(threadId)
-        if (!thread) {
+        const { threadExists } = await import("../db")
+        if (!threadExists(threadId)) {
           return { success: false, error: "线程不存在" }
         }
 
@@ -4360,8 +4434,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         baseCommit?: string
       }
     ) => {
-      const { getThread, updateThread } = await import("../db")
-      const thread = getThread(threadId)
+      const { getThreadCore, updateThread } = await import("../db")
+      const thread = getThreadCore(threadId)
       if (!thread) return
       let metadata: Record<string, unknown> = {}
       try {
@@ -4393,8 +4467,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   // Clear worktree context from thread metadata
   ipcMain.handle("workspace:clearWorktreeContext", async (_event, threadId: string) => {
-    const { getThread, updateThread } = await import("../db")
-    const thread = getThread(threadId)
+    const { getThreadCore, updateThread } = await import("../db")
+    const thread = getThreadCore(threadId)
     if (!thread) return
     let metadata: Record<string, unknown> = {}
     try {
@@ -4417,8 +4491,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:recordLlmModifiedFiles",
     async (_event, { threadId, files }: { threadId: string; files: string[] }) => {
-      const { getThread, updateThread } = await import("../db")
-      const thread = getThread(threadId)
+      const { getThreadCore, updateThread } = await import("../db")
+      const thread = getThreadCore(threadId)
       if (!thread) return { success: false, error: "Thread not found" }
       let metadata: Record<string, unknown> = {}
       try {
@@ -4463,18 +4537,31 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "workspace:getGitPanelMeta",
-    async (_event, { threadId, options }: { threadId: string; options?: { worktreePath?: string } }) => {
-    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-    try {
-      context = await resolveThreadWorkspaceContext(threadId)
-      return await buildGitPanelMetaState(threadId, context, options)
-    } catch (e) {
-      return createEmptyGitPanelMetaState(threadId, {
-        isWorktree: Boolean(context?.isWorktree),
-        isGitRepo: Boolean(context?.isGitRepo),
-        error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
-      })
-    }
+    async (
+      _event,
+      {
+        threadId,
+        options
+      }: {
+        threadId: string
+        options?: {
+          worktreePath?: string
+          includeSummary?: boolean
+          includePushability?: boolean
+        }
+      }
+    ) => {
+      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+      try {
+        context = await resolveThreadWorkspaceContext(threadId)
+        return await buildGitPanelMetaState(threadId, context, options)
+      } catch (e) {
+        return createEmptyGitPanelMetaState(threadId, {
+          isWorktree: Boolean(context?.isWorktree),
+          isGitRepo: Boolean(context?.isGitRepo),
+          error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
+        })
+      }
     }
   )
 
@@ -4628,16 +4715,21 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
       const workspacePath = target.worktreePath
       const cacheKey = getCacheKeyForPath(workspacePath)
-      const { hasPendingDiff, changedFiles } = await getCachedPromise(
-        summaryCache,
-        cacheKey,
-        GIT_CONTEXT_CACHE_TTL_MS,
-        () => getGitPanelSummaryQuick(workspacePath)
-      )
+      const [{ hasPendingDiff, changedFiles }, isWorktree] = await Promise.all([
+        getCachedPromise(
+          summaryCache,
+          cacheKey,
+          GIT_CONTEXT_CACHE_TTL_MS,
+          () => getGitPanelSummaryQuick(workspacePath)
+        ),
+        getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
+          ? Promise.resolve(context.isWorktree)
+          : detectIsWorktreePath(workspacePath)
+      ])
       logGitStep(threadId, "summary", `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`)
       return {
         success: true,
-        isWorktree: context.isWorktree,
+        isWorktree,
         isGitRepo: true,
         hasPendingDiff,
         changedFiles
@@ -4764,8 +4856,8 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           worktreePath,
           tracked
         ).catch(() => [])
-        const { getThread, updateThread } = await import("../db")
-        const thread = getThread(threadId)
+        const { getThreadCore, updateThread } = await import("../db")
+        const thread = getThreadCore(threadId)
         if (thread) {
           let metadata: Record<string, unknown> = {}
           try {
@@ -4780,12 +4872,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           })
           updateThread(threadId, { metadata: JSON.stringify(metadata) })
         }
-        notifyWorkspaceFilesChanged(threadId, worktreePath)
+        notifyWorkspaceFilesChanged(threadId, worktreePath, "meta")
         if (
           context.workspacePath &&
           path.resolve(context.workspacePath) !== path.resolve(worktreePath)
         ) {
-          notifyWorkspaceFilesChanged(threadId, context.workspacePath)
+          notifyWorkspaceFilesChanged(threadId, context.workspacePath, "meta")
         }
         logGitStep(threadId, "commit", "提交成功")
 
@@ -4918,12 +5010,12 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         }
 
         steps.push({ step: "final", status: "ok", detail: "推送成功" })
-        notifyWorkspaceFilesChanged(threadId, worktreePath)
+        notifyWorkspaceFilesChanged(threadId, worktreePath, "meta")
         if (
           context.workspacePath &&
           path.resolve(context.workspacePath) !== path.resolve(worktreePath)
         ) {
-          notifyWorkspaceFilesChanged(threadId, context.workspacePath)
+          notifyWorkspaceFilesChanged(threadId, context.workspacePath, "meta")
         }
         logGitStep(threadId, "push", "推送流程成功")
 
@@ -5012,7 +5104,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         logGitStep(threadId, "pull", `[${label}] 执行 pull --rebase origin ${branch}`)
         try {
           await runGit(worktreePath, ["pull", "--rebase", "origin", branch])
-          notifyWorkspaceFilesChanged(threadId, worktreePath)
           return { success: true, detail: `${label}: 拉取成功` }
         } catch (pullError) {
           if (isMissingRemoteBranchError(pullError)) {
@@ -5041,6 +5132,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           for (const repo of repos) {
             results.push(await pullOne(repo.repoPath, repo.displayPath))
           }
+          // One pull action may touch many nested repositories. Publish one
+          // conservative workspace rescan after the whole batch, not one per
+          // repository plus an aggregate duplicate.
           notifyWorkspaceFilesChanged(threadId, context.workspacePath)
           const failed = results.filter((result) => !result.success)
           const detail = results.map((result) => result.detail).join("\n")
@@ -5059,6 +5153,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
       const result = await pullOne(target.worktreePath, path.basename(target.worktreePath))
       if (!result.success) return { success: false, error: result.detail }
+      notifyWorkspaceFilesChanged(threadId, target.worktreePath)
       if (context.workspacePath && path.resolve(context.workspacePath) !== path.resolve(target.worktreePath)) {
         notifyWorkspaceFilesChanged(threadId, context.workspacePath)
       }
@@ -5076,10 +5171,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:readBinaryFile",
     async (_event, { threadId, filePath }: WorkspaceFileParams) => {
-      const { getThread } = await import("../db")
+      const { getThreadCore } = await import("../db")
 
       // Get workspace path from thread metadata
-      const thread = getThread(threadId)
+      const thread = getThreadCore(threadId)
       const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
       const workspacePath = metadata.workspacePath as string | null
 

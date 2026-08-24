@@ -14,11 +14,15 @@ import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
 import { getWorkspaceSelectionErrorMessage } from "@/lib/workspace-utils"
+import {
+  loadWorkspaceFilesDeduped,
+  markWorkspaceFilesStale
+} from "@/lib/workspace-file-load"
 import type { FileInfo } from "@/types"
 import { toast } from "sonner"
 
 export function FilesystemPanel() {
-  const { currentThreadId } = useAppStore()
+  const currentThreadId = useAppStore((state) => state.currentThreadId)
   const threadState = useThreadState(currentThreadId)
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
@@ -53,29 +57,6 @@ export function FilesystemPanel() {
     }
   }, [workspacePath])
 
-  // Listen for file changes from the main process
-  useEffect(() => {
-    if (!setWorkspaceFiles) return
-
-    const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only refresh if this is the current thread
-      if (data.threadId === currentThreadId) {
-        console.log("[FilesystemPanel] Files changed, refreshing...")
-        try {
-          const result = await window.api.workspace.loadFromDisk(data.threadId)
-          if (result.success) {
-            setWorkspaceFiles(result.files)
-          }
-        } catch (e) {
-          console.error("[FilesystemPanel] Error refreshing files:", e)
-        }
-      }
-    })
-
-    return cleanup
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentThreadId])
-
   // Handle selecting a workspace folder
   async function handleSelectFolder() {
     if (!currentThreadId || !setWorkspacePath || !setWorkspaceFiles) return
@@ -86,7 +67,10 @@ export function FilesystemPanel() {
       if (path) {
         setWorkspacePath(path)
         // Load files from disk
-        const result = await window.api.workspace.loadFromDisk(currentThreadId)
+        markWorkspaceFilesStale(currentThreadId, path)
+        const result = await loadWorkspaceFilesDeduped(currentThreadId, path, {
+          requestTrailingRescan: true
+        })
         if (result.success) {
           setWorkspaceFiles(result.files)
         }
@@ -101,11 +85,14 @@ export function FilesystemPanel() {
 
   // Handle refreshing files from disk
   async function handleRefresh() {
-    if (!currentThreadId || !setWorkspaceFiles) return
+    if (!currentThreadId || !setWorkspaceFiles || !workspacePath) return
 
     setLoading(true)
     try {
-      const result = await window.api.workspace.loadFromDisk(currentThreadId)
+      markWorkspaceFilesStale(currentThreadId, workspacePath)
+      const result = await loadWorkspaceFilesDeduped(currentThreadId, workspacePath, {
+        requestTrailingRescan: true
+      })
       if (result.success) {
         setWorkspaceFiles(result.files)
       }

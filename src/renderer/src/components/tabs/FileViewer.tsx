@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useRef, useCallback } from "react"
 import { Loader2, AlertCircle, FileCode } from "lucide-react"
-import { useThreadState } from "@/lib/thread-context"
+import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
 import { CodeViewer } from "./CodeViewer"
 import { ImageViewer } from "./ImageViewer"
@@ -60,17 +60,19 @@ export function FileViewer({
   reloadToken,
   previewMode
 }: FileViewerProps): React.JSX.Element | null {
-  const threadState = useThreadState(threadId ?? null)
+  const cacheKey = externalFullPath || filePath
+  const cachedContent = useThreadStateSelector(
+    externalFullPath ? null : (threadId ?? null),
+    (state) => state.fileContents[cacheKey]
+  )
+  const setThreadFileContents = useThreadActions(threadId ?? null)?.setFileContents
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [binaryContent, setBinaryContent] = useState<string | null>(null)
   const [externalTextContent, setExternalTextContent] = useState<string | undefined>()
   const [fileSize, setFileSize] = useState<number | undefined>()
-  const cacheKey = externalFullPath || filePath
   const displayPath = externalFullPath || filePath
-  const fileContents = threadState?.fileContents ?? {}
-  const setThreadFileContents = threadState?.setFileContents
-  const content = externalFullPath ? externalTextContent : fileContents[cacheKey]
+  const content = (externalFullPath ? externalTextContent : cachedContent) ?? undefined
 
   // Get file type info
   const fileName = displayPath.split("/").pop() || displayPath

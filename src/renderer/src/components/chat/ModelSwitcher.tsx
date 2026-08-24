@@ -1,4 +1,5 @@
 import { useState, useEffect, memo } from "react"
+import { useShallow } from "zustand/react/shallow"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
@@ -33,7 +34,13 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
   const [routingModeLoaded, setRoutingModeLoaded] = useState(false)
   const [defaultModelId, setDefaultModelId] = useState("")
 
-  const { models, loadModels, loadProviders } = useAppStore()
+  const { models, loadModels, loadProviders } = useAppStore(
+    useShallow((state) => ({
+      models: state.models,
+      loadModels: state.loadModels,
+      loadProviders: state.loadProviders
+    }))
+  )
   const { currentModel, restoreCurrentModel, setCurrentModel, routingResult } =
     useCurrentThread(threadId)
 

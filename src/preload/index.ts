@@ -7,6 +7,7 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { ChatScrollSettings } from "../shared/chat-scroll"
 import type {
   Thread,
   Message,
@@ -52,6 +53,8 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMessagesPage,
+  ThreadMessagesPageOptions,
   SubagentTranscriptPage,
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
@@ -60,6 +63,10 @@ import {
   classifyAgentStreamDelivery,
   resolveAgentStreamRequestChannel
 } from "../shared/agent-stream-channel"
+import {
+  normalizeWorkspaceFilesChangedPayload,
+  type WorkspaceFilesChangedPayload
+} from "../shared/workspace-files-changed"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -178,6 +185,9 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
 const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
@@ -203,6 +213,8 @@ function notifyForAgentStreamEvent(event: unknown, threadId?: string): void {
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") =>
+    ipcRenderer.invoke("managed-links:open", id) as Promise<void>,
   openLoginWindow: () => ipcRenderer.invoke("open-login-window"),
   closeLoginWindow: () => ipcRenderer.invoke("close-login-window"),
   openLoginPage: () => ipcRenderer.invoke("open-login-page"),
@@ -235,6 +247,18 @@ const electronAPI = {
     }
     ipcRenderer.on(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
     return () => ipcRenderer.removeListener(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
+  },
+  getChatScrollSettings: (): Promise<ChatScrollSettings> =>
+    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_GET_CHANNEL) as Promise<ChatScrollSettings>,
+  setChatScrollSettings: (settings: Partial<ChatScrollSettings>): Promise<ChatScrollSettings> =>
+    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_SET_CHANNEL, settings) as Promise<ChatScrollSettings>,
+  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => {
+    const handler = (_event: unknown, settings: unknown): void => {
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) return
+      callback(settings as ChatScrollSettings)
+    }
+    ipcRenderer.on(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
   },
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
@@ -525,12 +549,19 @@ const api = {
         mode: "messages" | "values"
         data: unknown
         workerTurn?: number
+        valuesSnapshotKind?: "full" | "append" | "tail"
       }) => void
     ): (() => void) => {
       const channel = `agent:coordinator-worker-stream:${threadId}`
       const handler = (
         _: unknown,
-        data: { type: "stream"; mode: "messages" | "values"; data: unknown; workerTurn?: number }
+        data: {
+          type: "stream"
+          mode: "messages" | "values"
+          data: unknown
+          workerTurn?: number
+          valuesSnapshotKind?: "full" | "append" | "tail"
+        }
       ): void => {
         callback(data)
       }
@@ -589,8 +620,15 @@ const api = {
     }
   },
   workflows: {
-    listRuns: (threadId: string): Promise<unknown[]> => {
-      return ipcRenderer.invoke("workflow:list-runs", { threadId }) as Promise<unknown[]>
+    listRuns: (
+      threadId: string,
+      options?: { cursor?: string | null; limit?: number }
+    ): Promise<{ runs: unknown[]; nextCursor: string | null }> => {
+      return ipcRenderer.invoke("workflow:list-runs", {
+        threadId,
+        cursor: options?.cursor,
+        limit: options?.limit
+      }) as Promise<{ runs: unknown[]; nextCursor: string | null }>
     },
     getRun: (threadId: string, runId: string): Promise<unknown | null> => {
       return ipcRenderer.invoke("workflow:get-run", { threadId, runId }) as Promise<unknown | null>
@@ -737,6 +775,12 @@ const api = {
     getMessages: (threadId: string): Promise<Message[]> => {
       return ipcRenderer.invoke("threads:messages", threadId)
     },
+    getMessagesPage: (
+      threadId: string,
+      options?: ThreadMessagesPageOptions
+    ): Promise<ThreadMessagesPage> => {
+      return ipcRenderer.invoke("threads:messages-page", { threadId, options })
+    },
     appendMessages: (threadId: string, messages: Message[]): Promise<{ count: number }> => {
       return ipcRenderer.invoke("threads:appendMessages", { threadId, messages })
     },
@@ -758,6 +802,9 @@ const api = {
     },
     getLatestCheckpoint: (threadId: string): Promise<unknown | null> => {
       return ipcRenderer.invoke("threads:latest-checkpoint", threadId)
+    },
+    getLatestCheckpointRuntimeState: (threadId: string): Promise<unknown | null> => {
+      return ipcRenderer.invoke("threads:latest-checkpoint-runtime-state", threadId)
     },
     getGoalEvents: (
       threadId: string,
@@ -1155,7 +1202,8 @@ const api = {
       return ipcRenderer.invoke("workspace:select", threadId)
     },
     loadFromDisk: (
-      threadId: string
+      threadId: string,
+      workspacePath?: string
     ): Promise<{
       success: boolean
       files: Array<{
@@ -1167,7 +1215,7 @@ const api = {
       workspacePath?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:loadFromDisk", { threadId })
+      return ipcRenderer.invoke("workspace:loadFromDisk", { threadId, workspacePath })
     },
     ensureWatching: (threadId: string): Promise<{ success: boolean; restarted?: boolean }> => {
       return ipcRenderer.invoke("workspace:ensureWatching", { threadId })
@@ -1323,7 +1371,11 @@ const api = {
     },
     getGitPanelMeta: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: {
+        worktreePath?: string
+        includeSummary?: boolean
+        includePushability?: boolean
+      }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -1635,10 +1687,11 @@ const api = {
     },
     // Listen for file changes in the workspace
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
+      callback: (data: WorkspaceFilesChangedPayload) => void
     ): (() => void) => {
-      const handler = (_: unknown, data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }): void => {
-        callback(data)
+      const handler = (_: unknown, data: unknown): void => {
+        const payload = normalizeWorkspaceFilesChangedPayload(data)
+        if (payload) callback(payload)
       }
       ipcRenderer.on("workspace:files-changed", handler)
       // Return cleanup function

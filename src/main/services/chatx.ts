@@ -13,8 +13,8 @@ import { purgeThreadCheckpointArtifacts } from "../storage"
 import {
   createThread as dbCreateThread,
   deleteThread as dbDeleteThread,
-  getAllThreads,
-  getThread
+  getAllThreadSummaries,
+  getThreadCore
 } from "../db/index"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
@@ -24,6 +24,7 @@ import type { ChatXRobotConfig } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import { getChatXUserMessageId, namespaceChatXStreamEventIds } from "./chatx-stream-ids"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
+import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -125,7 +126,7 @@ function dedup(msgId: string): boolean {
  * Thread metadata stores `chatxChatId` and `chatxSender`.
  */
 function findChatXThread(chatId: string, sender: string): string | null {
-  const threads = getAllThreads()
+  const threads = getAllThreadSummaries()
   for (const t of threads) {
     if (!t.metadata) continue
     try {
@@ -333,7 +334,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
   let repliedWithContent = false
 
   try {
-    const thread = getThread(threadId)
+    const thread = getThreadCore(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string
 
@@ -360,6 +361,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
 
     const currentTurnUserMessageId = getChatXUserMessageId(msg.msgId)
     const converter = new StreamConverter(`chatx:${msg.msgId}`, currentTurnUserMessageId)
+    const serializeForRun = createStreamDataSerializer()
 
     const stream = await agent.stream(
       {
@@ -377,20 +379,28 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     for await (const chunk of stream) {
       if (abortController.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
-      const serialized = JSON.parse(JSON.stringify(data))
-      const events = converter.processChunk(mode, serialized)
+      const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } =
+        serializeForRun(mode, data)
+      const events = converter.processChunk(mode, serialized, {
+        valuesMessageIndexOffset,
+        valuesSnapshotScope: "turn",
+        valuesSnapshotKind
+      })
       for (const evt of events) {
         const chatxEvent = namespaceChatXStreamEventIds(evt, msg.msgId)
         broadcastToChannel(channel, chatxEvent)
-        if (chatxEvent.type === "full-messages") {
+        if (chatxEvent.type === "full-messages" || chatxEvent.type === "turn-messages") {
           // 只取最后一条没有 tool_calls 的 assistant 消息（即最终回复，不含中间工具推理）
-          const finalMsgs = chatxEvent.messages.filter(
-            (m) =>
-              m.role === "assistant" &&
-              (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
-          )
-          const last = finalMsgs[finalMsgs.length - 1]
-          if (last?.content?.trim()) lastAssistantText = last.content.trim()
+          for (let index = chatxEvent.messages.length - 1; index >= 0; index -= 1) {
+            const candidate = chatxEvent.messages[index]
+            if (
+              candidate.role === "assistant" &&
+              (!Array.isArray(candidate.tool_calls) || candidate.tool_calls.length === 0)
+            ) {
+              if (candidate.content.trim()) lastAssistantText = candidate.content.trim()
+              break
+            }
+          }
         }
       }
       hasStreamedContent = true

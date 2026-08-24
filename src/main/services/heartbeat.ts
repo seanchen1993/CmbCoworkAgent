@@ -17,7 +17,7 @@ import {
 import { reviveWorkflowThread } from "../agent/workflow/run-store"
 import {
   createThread as dbCreateThread,
-  getThread as dbGetThread,
+  getThreadCore as dbGetThreadCore,
   updateThread as dbUpdateThread
 } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
@@ -25,6 +25,7 @@ import { notifyIfBackground } from "./notify"
 import { emitAppAttention } from "../app-attention-events"
 import { trackEvent } from "./event-reporter"
 import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
+import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 
 let tickTimer: ReturnType<typeof setTimeout> | null = null
 // A cleared timeout may already have a callback queued in the event loop. Each
@@ -361,7 +362,7 @@ async function executeHeartbeat(): Promise<void> {
     // hydrates empty and the footer falls back to models[0]. The live routing_result
     // event above covers the running case; this covers the idle case. effectiveModelId
     // is guaranteed non-empty here by the gate above.
-    const existing = dbGetThread(threadId)
+    const existing = dbGetThreadCore(threadId)
     if (!existing) {
       dbCreateThread(threadId, {
         workspacePath: config.workDir,
@@ -409,6 +410,7 @@ async function executeHeartbeat(): Promise<void> {
     })
 
     const converter = new StreamConverter()
+    const serializeForRun = createStreamDataSerializer()
     const stream = await agent.stream(
       { messages: [new HumanMessage(config.prompt)] },
       {
@@ -444,11 +446,24 @@ async function executeHeartbeat(): Promise<void> {
     for await (const chunk of stream) {
       if (controller.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
-      const serialized = JSON.parse(JSON.stringify(data))
-      const events = converter.processChunk(mode, serialized)
+      const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } =
+        serializeForRun(mode, data)
+      const events = converter.processChunk(mode, serialized, {
+        valuesMessageIndexOffset,
+        valuesSnapshotScope: "turn",
+        valuesSnapshotKind
+      })
       for (const evt of events) {
         broadcastToChannel(channel, evt)
-        if ("content" in evt && typeof evt.content === "string") {
+        if (
+          evt.type === "custom" &&
+          evt.data.type === "coordinator_ai_snapshot_message" &&
+          evt.data.assistantMessage &&
+          typeof evt.data.assistantMessage === "object" &&
+          typeof (evt.data.assistantMessage as { content?: unknown }).content === "string"
+        ) {
+          fullReply = (evt.data.assistantMessage as { content: string }).content
+        } else if ("content" in evt && typeof evt.content === "string") {
           fullReply += evt.content
         }
       }

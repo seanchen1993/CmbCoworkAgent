@@ -29,6 +29,7 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
+import { normalizeChatScrollSettings, type ChatScrollSettings } from "../shared/chat-scroll"
 import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
@@ -66,7 +67,10 @@ import {
   calculateSummarizationTriggerTokens
 } from "../shared/model-token-budget"
 
-const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
+const configuredOpenworkDir = process.env.CMB_COWORK_AGENT_HOME?.trim()
+const OPENWORK_DIR = configuredOpenworkDir
+  ? resolve(configuredOpenworkDir)
+  : join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
 const CUSTOM_API_KEY_PREFIX = "CUSTOM_API_KEY__"
@@ -1451,6 +1455,7 @@ export function setStoredDefaultModelId(modelId: string): void {
 }
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+const CHAT_SCROLL_SETTINGS_KEY = "chatScrollSettings"
 
 export function getWindowCloseBehavior(): WindowCloseBehavior {
   try {
@@ -1464,6 +1469,23 @@ export function getWindowCloseBehavior(): WindowCloseBehavior {
 export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
   const normalized = normalizeWindowCloseBehavior(behavior)
   getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
+  return normalized
+}
+
+export function getChatScrollSettings(): ChatScrollSettings {
+  try {
+    return normalizeChatScrollSettings(
+      getSettingsStore().get(CHAT_SCROLL_SETTINGS_KEY, {}) as Partial<ChatScrollSettings>
+    )
+  } catch (error) {
+    console.warn("[Storage] Failed to load chat scroll settings; using defaults:", error)
+    return normalizeChatScrollSettings({})
+  }
+}
+
+export function setChatScrollSettings(settings: Partial<ChatScrollSettings>): ChatScrollSettings {
+  const normalized = normalizeChatScrollSettings(settings)
+  getSettingsStore().set(CHAT_SCROLL_SETTINGS_KEY, normalized)
   return normalized
 }
 

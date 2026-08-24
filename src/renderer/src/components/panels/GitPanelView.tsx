@@ -305,6 +305,7 @@ export function GitPanelView({
   const suppressFileChangeRefreshUntilRef = useRef(0)
   const rejectDialogRequestIdRef = useRef(0)
   const pushMetaRequestIdRef = useRef(0)
+  const commitMetaRequestIdRef = useRef(0)
   const [metaLoading, setMetaLoading] = useState(true)
   const [diffLoading, setDiffLoading] = useState(true)
   const [running, setRunning] = useState<"commit" | "push" | "reject" | null>(null)
@@ -328,6 +329,7 @@ export function GitPanelView({
   const [collapsedRepositoryPaths, setCollapsedRepositoryPaths] = useState<Set<string>>(new Set())
   const [collapsedDirectoryPaths, setCollapsedDirectoryPaths] = useState<Set<string>>(new Set())
   const [activeRepositoryPath, setActiveRepositoryPath] = useState(ALL_REPOSITORIES_VALUE)
+  const [commitRepositoryPath, setCommitRepositoryPath] = useState<string | null>(null)
   const [repositoryPickerOpen, setRepositoryPickerOpen] = useState(false)
   // 单文件 diff 缓存：只保留当前展开文件的 diff 内容，展开新文件时清除旧缓存
   const [currentFileDiff, setCurrentFileDiff] = useState<string | null>(null)
@@ -349,6 +351,8 @@ export function GitPanelView({
   const [diffState, setDiffState] = useState<GitPanelDiffState | null>(null)
   const [pushMetaState, setPushMetaState] = useState<GitPanelMetaState | null>(null)
   const [pushMetaLoading, setPushMetaLoading] = useState(false)
+  const [commitMetaState, setCommitMetaState] = useState<GitPanelMetaState | null>(null)
+  const [commitMetaLoading, setCommitMetaLoading] = useState(false)
 
   useEffect(() => {
     activeThreadIdRef.current = threadId
@@ -367,9 +371,13 @@ export function GitPanelView({
     setRejectDialogSelectionSeed(0)
     rejectDialogRequestIdRef.current += 1
     pushMetaRequestIdRef.current += 1
+    commitMetaRequestIdRef.current += 1
     rejectInFlightRef.current = false
     suppressFileChangeRefreshUntilRef.current = 0
     setCommitHistory([])
+    setCommitRepositoryPath(null)
+    setCommitMetaState(null)
+    setCommitMetaLoading(false)
     setExpandedFilePath(null)
     setSelectedFilePaths(new Set())
     setCollapsedRepositoryPaths(new Set())
@@ -511,19 +519,37 @@ export function GitPanelView({
     if (!hasMultipleRepositories || activeRepositoryPath === ALL_REPOSITORIES_VALUE) return null
     return repositories.find((repo) => repo.path === activeRepositoryPath) ?? null
   }, [activeRepositoryPath, hasMultipleRepositories, repositories])
+  const commitRepository = useMemo(() => {
+    if (!hasMultipleRepositories || !commitRepositoryPath) return null
+    return repositories.find((repo) => repo.path === commitRepositoryPath) ?? null
+  }, [commitRepositoryPath, hasMultipleRepositories, repositories])
   const activeRepositoryLabel = activeRepository?.displayPath ?? "全部仓库"
   const visibleDiffFiles = useMemo(() => {
     const files = diffState?.files ?? []
     if (!activeRepository) return files
     return files.filter((file) => isFileInRepository(file.path, activeRepository))
   }, [activeRepository, diffState?.files])
+  const getSelectedOperationPaths = useCallback(
+    (): string[] =>
+      (diffState?.files ?? []).flatMap((file) => {
+        if (!selectedFilePaths.has(file.path)) return []
+        if (file.status === "renamed" && file.previousPath) {
+          return [file.previousPath, file.path]
+        }
+        return [file.path]
+      }),
+    [diffState?.files, selectedFilePaths]
+  )
 
   const selectActiveRepository = useCallback((repositoryPath: string): void => {
     setActiveRepositoryPath(repositoryPath)
     setRepositoryPickerOpen(false)
     pushMetaRequestIdRef.current += 1
+    commitMetaRequestIdRef.current += 1
     setPushMetaState(null)
     setPushMetaLoading(false)
+    setCommitMetaState(null)
+    setCommitMetaLoading(false)
     setSubmitAction(null)
   }, [])
 
@@ -616,6 +642,7 @@ export function GitPanelView({
       if (activeRepositoryPath !== ALL_REPOSITORIES_VALUE) {
         setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
       }
+      if (commitRepositoryPath !== null) setCommitRepositoryPath(null)
       return
     }
     if (
@@ -624,7 +651,13 @@ export function GitPanelView({
     ) {
       setActiveRepositoryPath(ALL_REPOSITORIES_VALUE)
     }
-  }, [activeRepositoryPath, hasMultipleRepositories, repositories])
+    if (
+      commitRepositoryPath !== null &&
+      !repositories.some((repo) => repo.path === commitRepositoryPath)
+    ) {
+      setCommitRepositoryPath(null)
+    }
+  }, [activeRepositoryPath, commitRepositoryPath, hasMultipleRepositories, repositories])
 
   useEffect(() => {
     const files = visibleDiffFiles
@@ -679,9 +712,70 @@ export function GitPanelView({
   }, [])
 
   const openCommitDialog = useCallback(() => {
+    const selectedOperationPaths = getSelectedOperationPaths()
+    const inferredRepository = resolveActionRepository(selectedOperationPaths)
+    commitMetaRequestIdRef.current += 1
     resetCommitForm()
+    setCommitRepositoryPath(inferredRepository?.path ?? null)
+    setCommitMetaState(null)
+    setCommitMetaLoading(Boolean(inferredRepository))
     setSubmitAction("commit")
-  }, [resetCommitForm])
+  }, [getSelectedOperationPaths, resetCommitForm, resolveActionRepository])
+
+  const selectCommitRepository = useCallback((repositoryPath: string): void => {
+    commitMetaRequestIdRef.current += 1
+    setCommitMetaState(null)
+    setCommitMetaLoading(true)
+    setCommitRepositoryPath(repositoryPath)
+  }, [])
+
+  useEffect(() => {
+    if (submitAction !== "commit" || !threadId || !commitRepository) {
+      commitMetaRequestIdRef.current += 1
+      setCommitMetaLoading(false)
+      setCommitMetaState(null)
+      return
+    }
+
+    const requestId = ++commitMetaRequestIdRef.current
+    setCommitMetaLoading(true)
+    setCommitMetaState(null)
+    void window.api.workspace
+      .getGitPanelMeta(threadId, {
+        worktreePath: commitRepository.path,
+        includeSummary: false,
+        includePushability: false
+      })
+      .then((result) => {
+        if (
+          requestId !== commitMetaRequestIdRef.current ||
+          activeThreadIdRef.current !== threadId
+        ) {
+          return
+        }
+        setCommitMetaState(result)
+        if (!result.success && result.error) showToast(result.error, "error")
+      })
+      .catch((metaError) => {
+        if (
+          requestId !== commitMetaRequestIdRef.current ||
+          activeThreadIdRef.current !== threadId
+        ) {
+          return
+        }
+        const message = metaError instanceof Error ? metaError.message : "读取目标仓库信息失败"
+        setCommitMetaState(null)
+        showToast(message, "error")
+      })
+      .finally(() => {
+        if (
+          requestId === commitMetaRequestIdRef.current &&
+          activeThreadIdRef.current === threadId
+        ) {
+          setCommitMetaLoading(false)
+        }
+      })
+  }, [commitRepository, showToast, submitAction, threadId])
 
   useEffect(() => {
     if (submitAction !== "commit" || !threadId) return
@@ -827,7 +921,7 @@ export function GitPanelView({
     if (!threadId) return
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadId !== threadId) return
+      if (!data.threadIds.includes(threadId)) return
       if (rejectInFlightRef.current || Date.now() < suppressFileChangeRefreshUntilRef.current) {
         return
       }
@@ -944,13 +1038,22 @@ export function GitPanelView({
         return
       }
 
-      const selectedPaths = (diffState?.files ?? []).flatMap((file) => {
-        if (!selectedFilePaths.has(file.path)) return []
-        if (file.status === "renamed" && file.previousPath) {
-          return [file.previousPath, file.path]
-        }
-        return [file.path]
-      })
+      const actionRepository = action === "commit" ? commitRepository : activeRepository
+      if (hasMultipleRepositories && !actionRepository) {
+        showToast(
+          action === "commit"
+            ? "请在提交窗口中选择目标仓库"
+            : "请先在“操作仓库”中选择要推送的子仓库",
+          "error"
+        )
+        return
+      }
+      const selectedOperationPaths = getSelectedOperationPaths()
+      const selectedPaths = actionRepository
+        ? selectedOperationPaths.filter((filePath) =>
+          isFileInRepository(filePath, actionRepository)
+        )
+        : selectedOperationPaths
 
       if (action === "commit" && selectedPaths.length === 0) {
         showToast("请至少选择 1 个文件", "error")
@@ -972,18 +1075,6 @@ export function GitPanelView({
         return
       }
 
-      const actionRepository = action === "commit"
-        ? resolveActionRepository(selectedPaths)
-        : activeRepository
-      if (hasMultipleRepositories && !actionRepository) {
-        showToast(
-          action === "commit"
-            ? "请先在“操作仓库”中选择一个子仓库，或只勾选同一仓库的文件"
-            : "请先在“操作仓库”中选择要推送的子仓库",
-          "error"
-        )
-        return
-      }
       const requestSelectedPaths = toRepositoryRelativePaths(selectedPaths, actionRepository)
 
       const finalMessage =
@@ -1051,11 +1142,10 @@ export function GitPanelView({
       commitType,
       commitMessage,
       diffState?.hasPendingDiff,
-      diffState?.files,
       activeRepository,
+      commitRepository,
+      getSelectedOperationPaths,
       hasMultipleRepositories,
-      resolveActionRepository,
-      selectedFilePaths,
       refresh,
       showToast,
       toRepositoryRelativePaths,
@@ -1162,6 +1252,23 @@ export function GitPanelView({
         { additions: 0, deletions: 0, fileCount: selectedFiles.length }
       ),
     [selectedFiles]
+  )
+  const commitSelectedFiles = useMemo(() => {
+    if (!hasMultipleRepositories) return selectedFiles
+    if (!commitRepository) return []
+    return selectedFiles.filter((file) => isFileInRepository(file.path, commitRepository))
+  }, [commitRepository, hasMultipleRepositories, selectedFiles])
+  const commitSelectedTotals = useMemo(
+    () =>
+      commitSelectedFiles.reduce(
+        (acc, file) => {
+          acc.additions += file.additions
+          acc.deletions += file.deletions
+          return acc
+        },
+        { additions: 0, deletions: 0, fileCount: commitSelectedFiles.length }
+      ),
+    [commitSelectedFiles]
   )
   const allVisibleFilesSelected = visibleDiffFiles.length
     ? selectedFiles.length === visibleDiffFiles.length
@@ -2104,21 +2211,38 @@ export function GitPanelView({
       <GitCommitDialog
         open={submitAction === "commit"}
         running={running === "commit"}
-        branch={metaState?.worktreeBranch || "-"}
-        fileCount={hasPending ? selectedTotals.fileCount : (diffState?.totals.fileCount ?? 0)}
-        additions={hasPending ? selectedTotals.additions : (diffState?.totals.additions ?? 0)}
-        deletions={hasPending ? selectedTotals.deletions : (diffState?.totals.deletions ?? 0)}
+        branch={
+          hasMultipleRepositories
+            ? commitMetaState?.worktreeBranch || "-"
+            : metaState?.worktreeBranch || "-"
+        }
+        fileCount={commitSelectedTotals.fileCount}
+        additions={commitSelectedTotals.additions}
+        deletions={commitSelectedTotals.deletions}
         cardNumber={commitCardNumber}
         commitType={commitType}
         commitMessage={commitMessage}
         commitHistory={commitHistory}
         preferredTaskText={branchName}
+        repositories={repositories}
+        repositoryPath={commitRepositoryPath}
+        repositoryLoading={commitMetaLoading}
+        isWorktree={
+          hasMultipleRepositories
+            ? Boolean(commitMetaState?.isWorktree)
+            : Boolean(metaState?.isWorktree)
+        }
         onOpenChange={(open) => {
           if (!open) {
+            commitMetaRequestIdRef.current += 1
             resetCommitForm()
+            setCommitRepositoryPath(null)
+            setCommitMetaState(null)
+            setCommitMetaLoading(false)
             setSubmitAction(null)
           }
         }}
+        onRepositoryPathChange={selectCommitRepository}
         onCardNumberChange={handleCommitCardNumberChange}
         onCommitTypeChange={(value) => setCommitType(value as CommitType)}
         onCommitMessageChange={setCommitMessage}

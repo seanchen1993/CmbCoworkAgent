@@ -17,6 +17,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { useCurrentThread } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
+import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
 
 interface WorkspacePickerProps {
   threadId: string
@@ -262,7 +263,10 @@ function WorkspacePickerImpl({
       setWorktreeBranch(result.branch)
       setWorktreeBaseBranch(result.baseBranch ?? null)
       setMode("worktree")
-      const diskResult = await window.api.workspace.loadFromDisk(threadId)
+      markWorkspaceFilesStale(threadId, result.path)
+      const diskResult = await loadWorkspaceFilesDeduped(threadId, result.path, {
+        requestTrailingRescan: true
+      })
       if (diskResult.success && diskResult.files) setWorkspaceFiles(diskResult.files)
       setCreatingWorktree(false)
       setBranchName("")

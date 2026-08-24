@@ -34,6 +34,8 @@ export interface ChatScrollNavigatorRenderProps {
 
 interface ChatScrollNavigatorProps {
   messages: Message[]
+  renderedMessageIds: ReadonlySet<string>
+  onRevealMessage: (messageId: string) => void
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   rightPanelCollapsed: boolean
   onScrollToQuestion?: () => void
@@ -180,6 +182,27 @@ function getChatScrollQuestions(messages: Message[]): ChatScrollQuestion[] {
   return questions
 }
 
+interface ChatScrollQuestionProjection {
+  questions: ChatScrollQuestion[]
+  userMessageIds: string[]
+  questionIndexByMessageId: Map<string, number>
+}
+
+const chatScrollQuestionProjectionCache = new WeakMap<Message[], ChatScrollQuestionProjection>()
+
+function getChatScrollQuestionProjection(messages: Message[]): ChatScrollQuestionProjection {
+  const cached = chatScrollQuestionProjectionCache.get(messages)
+  if (cached) return cached
+  const questions = getChatScrollQuestions(messages)
+  const userMessageIds = questions.map((question) => question.id)
+  const questionIndexByMessageId = new Map(
+    userMessageIds.map((messageId, index) => [messageId, index])
+  )
+  const projection = { questions, userMessageIds, questionIndexByMessageId }
+  chatScrollQuestionProjectionCache.set(messages, projection)
+  return projection
+}
+
 function getViewport(scrollContainer: HTMLDivElement | null): HTMLDivElement | null {
   return scrollContainer?.querySelector(
     "[data-radix-scroll-area-viewport]"
@@ -194,6 +217,8 @@ function getElementTopInViewport(element: HTMLElement, viewport: HTMLElement): n
 
 export function ChatScrollNavigator({
   messages,
+  renderedMessageIds,
+  onRevealMessage,
   scrollContainerRef,
   rightPanelCollapsed,
   onScrollToQuestion,
@@ -203,15 +228,27 @@ export function ChatScrollNavigator({
   const userMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const requestedUserQuestionIndexRef = useRef<number | null>(null)
   const requestedUserQuestionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingRevealFrameRef = useRef<number | null>(null)
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(-1)
 
-  const questions = useMemo<ChatScrollQuestion[]>(
-    () => getChatScrollQuestions(messages),
+  const questionProjection = useMemo(
+    () => getChatScrollQuestionProjection(messages),
     [messages]
   )
-
-  const userMessageIds = useMemo(() => questions.map((question) => question.id), [questions])
+  const { questions, questionIndexByMessageId, userMessageIds } = questionProjection
+  const renderedQuestionIndexes = useMemo(
+    () => {
+      const indexes: number[] = []
+      for (const messageId of renderedMessageIds) {
+        const index = questionIndexByMessageId.get(messageId)
+        if (index !== undefined) indexes.push(index)
+      }
+      indexes.sort((left, right) => left - right)
+      return indexes
+    },
+    [questionIndexByMessageId, renderedMessageIds]
+  )
 
   const setMessageRef = useCallback<MessageRefSetter>(
     (messageId: string, role: Message["role"]) =>
@@ -227,61 +264,56 @@ export function ChatScrollNavigator({
 
   const getCurrentUserQuestionIndex = useCallback((): number => {
     const viewport = getViewport(scrollContainerRef.current)
-    if (!viewport || userMessageIds.length === 0) return -1
+    if (!viewport || renderedQuestionIndexes.length === 0) return -1
 
     const { scrollTop, scrollHeight, clientHeight } = viewport
     const nearBottom = scrollHeight - scrollTop - clientHeight < 80
     const viewportAnchor = scrollTop + 24
     const viewportBottomAnchor = scrollTop + clientHeight - 80
-    // Read the viewport rect once instead of once per message.
+    // User rows are in transcript order, so their top positions are monotonic.
+    // Binary search avoids forcing layout for every historical question on each
+    // scroll frame. With the 240-row transcript window this needs at most about
+    // eight rect reads, regardless of total history length.
     const viewportTop = viewport.getBoundingClientRect().top
     const topOf = (element: HTMLElement): number =>
       element.getBoundingClientRect().top - viewportTop + scrollTop
-    let currentIndex = -1
-
-    for (let index = 0; index < userMessageIds.length; index += 1) {
-      const messageId = userMessageIds[index]
-      const targetElement = userMessageRefs.current.get(messageId)
-      if (!targetElement) continue
-
-      const top = topOf(targetElement)
-      if (top <= viewportAnchor) {
-        currentIndex = index
-      } else {
-        break
+    const findLastQuestionAtOrBefore = (anchor: number): number => {
+      let low = 0
+      let high = renderedQuestionIndexes.length - 1
+      let result = -1
+      while (low <= high) {
+        const renderedIndex = Math.floor((low + high) / 2)
+        const index = renderedQuestionIndexes[renderedIndex]
+        const targetElement = userMessageRefs.current.get(userMessageIds[index])
+        if (!targetElement) {
+          // The transcript window contains at most a few hundred rows. Restrict
+          // the fallback to that bounded set instead of scanning full history.
+          for (const fallbackIndex of renderedQuestionIndexes) {
+            const fallbackElement = userMessageRefs.current.get(userMessageIds[fallbackIndex])
+            if (!fallbackElement) continue
+            if (topOf(fallbackElement) <= anchor) result = fallbackIndex
+            else break
+          }
+          return result
+        }
+        if (topOf(targetElement) <= anchor) {
+          result = index
+          low = renderedIndex + 1
+        } else {
+          high = renderedIndex - 1
+        }
       }
+      return result
     }
 
-    if (nearBottom) {
-      for (let index = userMessageIds.length - 1; index >= 0; index -= 1) {
-        const messageId = userMessageIds[index]
-        const targetElement = userMessageRefs.current.get(messageId)
-        if (!targetElement) continue
-
-        const top = topOf(targetElement)
-        if (top <= viewportBottomAnchor) return index
-      }
-    }
-
-    return currentIndex
-  }, [scrollContainerRef, userMessageIds])
+    return findLastQuestionAtOrBefore(nearBottom ? viewportBottomAnchor : viewportAnchor)
+  }, [renderedQuestionIndexes, scrollContainerRef, userMessageIds])
 
   const scrollToUserQuestionByIndex = useCallback(
     (index: number): void => {
       if (index < 0 || index >= userMessageIds.length) return
 
       const messageId = userMessageIds[index]
-      const viewport = getViewport(scrollContainerRef.current)
-      const targetElement = userMessageRefs.current.get(messageId)
-      if (!viewport || !targetElement) {
-        if (!scrollToMessageById) return
-        scrollToMessageById(messageId)
-        onScrollToQuestion?.()
-        setActiveQuestionIndex(index)
-        return
-      }
-
-      const targetTop = Math.max(0, getElementTopInViewport(targetElement, viewport) - 8)
       requestedUserQuestionIndexRef.current = index
       if (requestedUserQuestionTimerRef.current) {
         clearTimeout(requestedUserQuestionTimerRef.current)
@@ -289,11 +321,46 @@ export function ChatScrollNavigator({
       requestedUserQuestionTimerRef.current = setTimeout(() => {
         requestedUserQuestionIndexRef.current = null
       }, 700)
-      viewport.scrollTo({ top: targetTop, behavior: "smooth" })
-      onScrollToQuestion?.()
       setActiveQuestionIndex(index)
+
+      const mountedTarget = userMessageRefs.current.get(messageId)
+      if (!mountedTarget && scrollToMessageById) {
+        scrollToMessageById(messageId)
+        onScrollToQuestion?.()
+        return
+      }
+
+      const scrollWhenMounted = (attempt: number): void => {
+        const nextViewport = getViewport(scrollContainerRef.current)
+        const targetElement = userMessageRefs.current.get(messageId)
+        if (nextViewport && targetElement) {
+          pendingRevealFrameRef.current = null
+          const targetTop = Math.max(0, getElementTopInViewport(targetElement, nextViewport) - 8)
+          nextViewport.scrollTo({ top: targetTop, behavior: "smooth" })
+          onScrollToQuestion?.()
+          return
+        }
+        if (attempt >= 8) {
+          pendingRevealFrameRef.current = null
+          return
+        }
+        pendingRevealFrameRef.current = requestAnimationFrame(() => scrollWhenMounted(attempt + 1))
+      }
+
+      const targetElement = userMessageRefs.current.get(messageId)
+      if (!targetElement) onRevealMessage(messageId)
+      if (pendingRevealFrameRef.current !== null) {
+        cancelAnimationFrame(pendingRevealFrameRef.current)
+      }
+      scrollWhenMounted(0)
     },
-    [onScrollToQuestion, scrollContainerRef, scrollToMessageById, userMessageIds]
+    [
+      onRevealMessage,
+      onScrollToQuestion,
+      scrollContainerRef,
+      scrollToMessageById,
+      userMessageIds
+    ]
   )
 
   useEffect(() => {
@@ -327,6 +394,9 @@ export function ChatScrollNavigator({
     return () => {
       if (requestedUserQuestionTimerRef.current) {
         clearTimeout(requestedUserQuestionTimerRef.current)
+      }
+      if (pendingRevealFrameRef.current !== null) {
+        cancelAnimationFrame(pendingRevealFrameRef.current)
       }
     }
   }, [])
@@ -445,6 +515,19 @@ export function ChatScrollNavigator({
     dense: 8
   }[density]
 
+  const markerCenterIndex =
+    hoveredIndex ?? (activeQuestionIndex >= 0 ? activeQuestionIndex : questions.length - 1)
+  const markerWindowSize = 120
+  const markerWindowStart = Math.max(
+    0,
+    Math.min(
+      questions.length - markerWindowSize,
+      markerCenterIndex - Math.floor(markerWindowSize / 2)
+    )
+  )
+  const markerWindowEnd = Math.min(questions.length, markerWindowStart + markerWindowSize)
+  const markerQuestions = questions.slice(markerWindowStart, markerWindowEnd)
+
   const getRidgeDistance = (index: number): number | null => {
     if (hoveredIndex === null) return null
     const distance = Math.abs(index - hoveredIndex)
@@ -553,7 +636,18 @@ export function ChatScrollNavigator({
                 "pointer-events-auto relative flex max-h-[62vh] w-9 flex-col items-start gap-px overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               )}
             >
-              {questions.map((question, index) => {
+              {markerWindowStart > 0 && (
+                <button
+                  type="button"
+                  aria-label="加载更早的提问导航"
+                  onClick={() => scrollToUserQuestionByIndex(markerWindowStart - 1)}
+                  className="flex h-5 w-full items-center justify-center text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  ···
+                </button>
+              )}
+              {markerQuestions.map((question, markerIndex) => {
+                const index = markerWindowStart + markerIndex
                 const isActive = index === activeQuestionIndex
                 const hasRequestedUserInput = question.userInputRequests.length > 0
                 const ridgeDistance = getRidgeDistance(index)
@@ -596,6 +690,16 @@ export function ChatScrollNavigator({
                   </button>
                 )
               })}
+              {markerWindowEnd < questions.length && (
+                <button
+                  type="button"
+                  aria-label="加载更新的提问导航"
+                  onClick={() => scrollToUserQuestionByIndex(markerWindowEnd)}
+                  className="flex h-5 w-full items-center justify-center text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  ···
+                </button>
+              )}
             </div>
             {hoveredIndex !== null && (
               <PopoverAnchor asChild>

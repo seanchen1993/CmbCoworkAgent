@@ -59,6 +59,7 @@ const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
 const physicalStreamRunSetup = read("src/main/agent/physical-stream-run-setup.ts")
 const agentIpc = read("src/main/ipc/agent.ts")
+const streamTranscriptFlush = read("src/main/ipc/stream-transcript-flush.ts")
 const threadsIpc = read("src/main/ipc/threads.ts")
 const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
@@ -629,18 +630,35 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "function flushPendingStreamTranscriptMessages("
   )
   assert(transcriptFlushStart >= 0, "stream transcript flush helper exists")
-  const transcriptFlushBody = agentIpc.slice(transcriptFlushStart, transcriptFlushStart + 1800)
+  const transcriptFlushBody = agentIpc.slice(transcriptFlushStart, transcriptFlushStart + 5000)
   assertSourceOrder(
     transcriptFlushBody,
     "try {",
-    "const baselineMessages = getThreadMessages(threadId)",
-    "baseline reads run inside the buffer-restoration boundary"
+    "const resolved = resolveStreamTranscriptFlush({",
+    "stream batches enter the run-scoped identity resolver inside the restoration boundary"
   )
   assertSourceOrder(
     transcriptFlushBody,
-    "const messages = coalesceQueuedStreamMessages(baselineMessages, pending.messages)",
+    "currentAssistantIdentity: streamTranscriptAssistantIdentities.get(pendingKey)",
+    "getThreadMessageIdentityContext(",
+    "the resolver receives both the run identity and a bounded durable identity context"
+  )
+  assertNotIncludes(
+    transcriptFlushBody,
+    "getThreadMessages(threadId)",
+    "stream transcript fallback must not parse the lifetime transcript"
+  )
+  assertSourceOrder(
+    transcriptFlushBody,
+    "appendThreadMessageTextDelta(threadId, messages[0])",
+    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
+    "content-only batches append fragments before the structural fallback"
+  )
+  assertSourceOrder(
+    transcriptFlushBody,
+    "upsertThreadMessages(threadId, messages, { preserveExistingOrder })",
     "} catch (error) {",
-    "message normalization runs inside the buffer-restoration boundary"
+    "both incremental persistence paths run inside the buffer-restoration boundary"
   )
   assertSourceOrder(
     transcriptFlushBody,
@@ -684,14 +702,44 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "the strict steering flush targets the current physical run"
   )
   assertIncludes(
-    agentIpc,
+    streamTranscriptFlush,
     "mergeIncrementalMessageContent(existing, incoming)",
     "main transcript coalescing uses block-aware delta merging"
   )
+  const physicalForwardStart = agentIpc.indexOf(
+    "function persistAndForwardPhysicalRunStreamChunk("
+  )
+  const physicalForwardBody = agentIpc.slice(physicalForwardStart, physicalForwardStart + 1800)
   assertIncludes(
-    agentIpc,
+    physicalForwardBody,
+    "persistStreamTranscriptChunk(threadId, runToken, mode, payload)",
+    "physical token streams arm the bounded 250ms transcript flush window"
+  )
+  assertNotIncludes(
+    physicalForwardBody,
+    "deferFlush: true",
+    "long model outputs must not retain every token delta until the terminal values event"
+  )
+  assertIncludes(
+    streamTranscriptFlush,
     'if (incomingMode === "snapshot") return incoming',
     "known cumulative afterModel observations replace rather than append"
+  )
+  assertSourceOrder(
+    streamTranscriptFlush,
+    "if (currentAssistantIdentity) {",
+    "const baselineMessages = loadBaselineMessages()",
+    "a stable run identity is attempted before the full-transcript fallback"
+  )
+  assertIncludes(
+    streamTranscriptFlush,
+    "provider_occurrence: identity.providerOccurrence",
+    "ordinary chunks carry the stable provider tuple into targeted upserts"
+  )
+  assertIncludes(
+    agentIpc,
+    "streamTranscriptAssistantIdentities.delete(runKey)",
+    "terminal run cleanup releases cached assistant identities"
   )
   assertIncludes(
     agentIpc,
@@ -725,8 +773,8 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
   assertIncludes(
     electronTransport,
-    "return mergeStreamToolCallArgs(accumulated, chunk)",
-    "renderer delegates tool-call args semantics to the shared policy"
+    'return mergeStreamToolCallArgs(accumulated, chunk, wireMode ?? "auto")',
+    "renderer delegates explicit delta/snapshot tool-call args semantics to the shared policy"
   )
   const physicalSideEffectGuardCount =
     agentIpc.split(
@@ -1458,7 +1506,7 @@ function testRetryReusesStableMessageId(): void {
   // duplicating it.
   assertIncludes(
     chat,
-    "appendVisibleUserMessageWithTime(displayContent, {\n        persistTiming: true,\n        id: queued.id\n      })",
+    "appendVisibleUserMessageWithTime(displayContent, {\n        id: queued.id\n      })",
     "queued-send reuses queued.id for the optimistic bubble across retries"
   )
 }
@@ -1733,8 +1781,13 @@ function testSteerAcknowledgementIsDurableAndReconciled(): void {
   )
   assertIncludes(
     threadContext,
-    "mergeDurableTranscriptSnapshot(persistedMessages, state.messages)",
-    "durable transcript order is the baseline during lost-notification recovery"
+    "mergeLatestThreadMessagePage(\n          state.messages,\n          persistedMessages,",
+    "lost-notification recovery merges a bounded durable page without replacing loaded history"
+  )
+  assertNotIncludes(
+    threadContext,
+    "window.api.threads.getMessages(threadId)",
+    "lost-notification recovery must not fetch the lifetime durable transcript"
   )
   assertNotIncludes(
     chat,
@@ -1755,7 +1808,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
     "the queue captures the raw model response before afterModel receives a trimmed state copy"
   )
   const notifierStart = runtime.indexOf("setCurrentRunInjectionNotifier(async")
-  const notifierBody = runtime.slice(notifierStart, notifierStart + 8000)
+  const notifierBody = runtime.slice(notifierStart, notifierStart + 12_000)
   assertSourceOrder(
     notifierBody,
     "const completedAssistantMessage = context?.completedAssistantMessage",
@@ -1775,9 +1828,14 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   )
   assertSourceOrder(
     notifierBody,
-    "const durableMessagesBeforeCompletedAssistant = getThreadMessages(threadId)",
+    "const durableMessagesBeforeCompletedAssistant = getThreadMessageIdentityContext(",
     "replaceThreadMessageId(",
     "the pre-afterModel durable partial is captured before its raw id is rekeyed"
+  )
+  assertNotIncludes(
+    notifierBody,
+    "getThreadMessages(threadId)",
+    "afterModel steering must not parse the lifetime durable transcript"
   )
   assertIncludes(
     notifierBody,
@@ -1793,7 +1851,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   assertSourceOrder(
     notifierBody,
     "!replaceThreadMessageId(",
-    "const persistedCount = upsertThreadMessages(threadId, transcriptMessages)",
+    "const persistedCount = upsertThreadMessages(threadId, transcriptMessages, {",
     "the exact provider occurrence is rekeyed before the stable final row is persisted"
   )
   assertIncludes(
@@ -1857,7 +1915,7 @@ function testAfterModelSteerPersistsPrecedingAssistantReply(): void {
   assertSourceOrder(
     threadContext,
     "const aliasedRawMessages = applyLiveStreamMessageIdAliases(",
-    "const normalizedRawMessages = normalizeAppendedLiveStreamMessageIds(",
+    "return accumulator.normalizeMessageIds(",
     "SDK cumulative snapshots apply renderer aliases before occurrence normalization"
   )
   assertIncludes(

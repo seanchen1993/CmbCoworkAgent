@@ -51,6 +51,7 @@
     "test:goal:integration": "npx tsx tests/goal-ipc-e2e.spec.ts",
     "test:goal": "npm run test:goal:unit && npm run test:goal:integration",
     "test:goal:e2e": "RUN_GOAL_E2E_REAL_MODEL=1 npx tsx tests/goal-ipc-e2e.spec.ts",
+    "test:git:e2e": "npm run build && node --experimental-strip-types tests/git-multi-repo-commit-e2e.spec.ts",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
     "dev:mock-task-cards": "node -e \"const { spawnSync } = require('child_process'); process.env.CMB_TASK_CARDS_MOCK = '1'; const result = spawnSync('electron-vite', ['dev'], { stdio: 'inherit', shell: true, env: process.env }); process.exit(result.status ?? 1)\"",

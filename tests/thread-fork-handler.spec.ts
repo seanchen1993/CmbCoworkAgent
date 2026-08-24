@@ -34,12 +34,35 @@ async function withTempHome(run: () => Promise<void>): Promise<void> {
   try {
     await run()
   } finally {
+    // Native SQLite keeps Windows file handles until both the runtime
+    // checkpointer cache and the global DB are explicitly closed.
+    try {
+      const { closeRuntime } = await import("../src/main/agent/runtime.ts")
+      await closeRuntime()
+    } catch {
+      // Preserve the test's original failure; this is best-effort harness cleanup.
+    }
+    try {
+      const db = await import("../src/main/db/index.ts")
+      await db.closeDatabase()
+    } catch {
+      // Preserve the test's original failure.
+    }
     if (previousHome === undefined) delete process.env.HOME
     else process.env.HOME = previousHome
     if (previousUserProfile === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = previousUserProfile
     await rm(home, { recursive: true, force: true })
   }
+}
+
+async function closeAndDeleteThreadCheckpoint(
+  threadId: string,
+  deleteCheckpoint: (threadId: string) => void
+): Promise<void> {
+  const { closeCheckpointer } = await import("../src/main/agent/runtime.ts")
+  await closeCheckpointer(threadId)
+  deleteCheckpoint(threadId)
 }
 
 function makeCheckpoint(id: string, ts = "2026-07-08T01:00:00.000Z"): Checkpoint {
@@ -240,7 +263,7 @@ async function testResolveMessageForkSkipsHiddenRawTailCheckpoint(): Promise<voi
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -295,7 +318,7 @@ async function testResolveMessageForkReturnsNewestStableCheckpoint(): Promise<vo
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -375,10 +398,10 @@ async function testResolveAndForkRoleCollisionAssistantBoundary(): Promise<void>
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -447,10 +470,10 @@ async function testResolveAndForkSameRoleDuplicateAssistantBoundary(): Promise<v
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -513,10 +536,10 @@ async function testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId(): Pr
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -577,7 +600,7 @@ async function testResolveMessageForkMatchesSparseToolAssistantSnapshot(): Promi
     assert.equal(resolved?.resolvedMessageId, "assistant-1")
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -688,11 +711,11 @@ async function testResolveMessageForkUsesCheckpointModeForInterruptedToolTail():
     if (targetThreadId) {
       await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -803,10 +826,10 @@ async function testResolveAndForkLegacyMessageBeforeFirstMarker(): Promise<void>
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -925,7 +948,7 @@ async function testUnmarkedCheckpointBetweenMarkersIsNotForkable(): Promise<void
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1019,24 +1042,29 @@ async function testForkWaitsForQueuedRendererThreadMutations(): Promise<void> {
       messageTimes?: Record<string, unknown>
       messageTimeOrder?: Array<{ id?: string }>
     }
-    assert.deepEqual(
+    assert.equal(
       targetValues.messageTimes,
-      { "assistant-1": { created_at: "2026-07-08T01:00:04.000Z" } },
-      "fork should see queued renderer thread_values before filtering"
+      undefined,
+      "fork should not copy deprecated lifetime message-time maps"
     )
-    assert.deepEqual(
-      targetValues.messageTimeOrder?.map((entry) => entry.id),
-      ["user-1", "assistant-1"],
-      "fork should preserve queued renderer message time order"
+    assert.equal(
+      targetValues.messageTimeOrder,
+      undefined,
+      "durable message rows replace the legacy message-time order"
+    )
+    assert.equal(
+      targetAssistant?.created_at.toISOString(),
+      "2026-07-08T01:00:04.000Z",
+      "fork should preserve queued renderer row-level message timing"
     )
   } finally {
     releaseLock?.()
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1196,10 +1224,10 @@ async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<v
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1227,7 +1255,10 @@ async function testForkCopiesOnlyReferencedLargeToolResults(): Promise<void> {
     })
 
     const historicalCheckpointId = "fork-large-result-historical-checkpoint"
-    const historicalCheckpoint = makeCheckpoint(historicalCheckpointId)
+    const historicalCheckpoint = makeCheckpoint(
+      historicalCheckpointId,
+      "2026-07-08T01:00:00.000Z"
+    )
     ;(historicalCheckpoint.channel_values as Record<string, unknown>).messages = [
       { id: "user-old", type: "human", content: "inspect the older large result" },
       {
@@ -1247,7 +1278,7 @@ async function testForkCopiesOnlyReferencedLargeToolResults(): Promise<void> {
       { id: "assistant-old-final", type: "ai", content: "The older inspection is complete." }
     ]
 
-    const checkpoint = makeCheckpoint(checkpointId)
+    const checkpoint = makeCheckpoint(checkpointId, "2026-07-08T01:00:02.000Z")
     ;(checkpoint.channel_values as Record<string, unknown>).messages = [
       { id: "user-1", type: "human", content: "inspect the large result" },
       {
@@ -1288,6 +1319,20 @@ async function testForkCopiesOnlyReferencedLargeToolResults(): Promise<void> {
     )
     await sourceSaver.flushStrict()
     await sourceSaver.close()
+
+    const sourceVerifier = new SqlJsSaver(getThreadCheckpointPath(sourceThreadId), undefined, {
+      maxRootCheckpoints: 3
+    })
+    const sourceTuple = await sourceVerifier.getTuple({
+      configurable: { thread_id: sourceThreadId, checkpoint_ns: "" }
+    })
+    await sourceVerifier.close()
+    assert.equal(sourceTuple?.checkpoint.id, checkpointId)
+    assert.equal(
+      ((sourceTuple?.checkpoint.channel_values as { messages?: unknown[] }).messages ?? []).length,
+      4,
+      "native checkpoint reopen must hydrate the external tool-result transcript"
+    )
 
     const sourceDataDirectory = await getProjectThreadDataDirectory(workspace, sourceThreadId)
     const sourceLargeResultsDirectory = join(sourceDataDirectory, "large_tool_results")
@@ -1343,11 +1388,11 @@ async function testForkCopiesOnlyReferencedLargeToolResults(): Promise<void> {
     if (targetThreadId) {
       await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await rm(workspace, { recursive: true, force: true })
     await db.closeDatabase()
   }
@@ -1504,11 +1549,11 @@ async function testForkThreadCopiesHistoricalForkableCheckpoints(): Promise<void
     if (targetThreadId) {
       await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1667,7 +1712,7 @@ async function testForkedBranchesRemainIndependentWhenForkedAgain(): Promise<voi
       if (!threadId) continue
       await closeCheckpointer(threadId)
       db.deleteThread(threadId)
-      deleteThreadCheckpoint(threadId)
+      await closeAndDeleteThreadCheckpoint(threadId, deleteThreadCheckpoint)
     }
     await db.closeDatabase()
   }
@@ -1828,10 +1873,10 @@ async function testInterruptedDurableTailForkIsConsistentAndComplete(): Promise<
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -1956,10 +2001,10 @@ async function testUnsafeLatestDurableTailDoesNotHideHistoricalForks(): Promise<
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -2016,10 +2061,10 @@ async function testForkLatestAllowsUserInterruptedPendingWritesBoundary(): Promi
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -2070,7 +2115,7 @@ async function testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra(): Promise<
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -2108,7 +2153,7 @@ async function testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker(): Pr
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -2171,7 +2216,7 @@ async function testForkOverrideValidationRejectsInconsistentTargetMetadata(): Pr
     )
   } finally {
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -2258,10 +2303,10 @@ async function testForkCopiesGoalStateAndEvents(): Promise<void> {
   } finally {
     if (targetThreadId) {
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }
@@ -2373,11 +2418,11 @@ async function testHistoricalForkDoesNotCopyFutureGoalStateAndEvents(): Promise<
     if (targetThreadId) {
       await closeCheckpointer(targetThreadId)
       db.deleteThread(targetThreadId)
-      deleteThreadCheckpoint(targetThreadId)
+      await closeAndDeleteThreadCheckpoint(targetThreadId, deleteThreadCheckpoint)
     }
     await closeCheckpointer(sourceThreadId)
     db.deleteThread(sourceThreadId)
-    deleteThreadCheckpoint(sourceThreadId)
+    await closeAndDeleteThreadCheckpoint(sourceThreadId, deleteThreadCheckpoint)
     await db.closeDatabase()
   }
 }

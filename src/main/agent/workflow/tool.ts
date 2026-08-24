@@ -14,8 +14,8 @@ import {
   generateWorkflowRunId,
   isValidWorkflowRunId,
   isWorkflowRunDirDisposed,
-  loadWorkflowRun,
-  loadWorkflowRunForResume,
+  loadWorkflowRunAsync,
+  loadWorkflowRunForResumeAsync,
   sha256Hex
 } from "./run-store"
 import { MAX_WORKFLOW_SCRIPT_BYTES, validateWorkflowScript } from "./script"
@@ -150,7 +150,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // Resolve the resume target first so its persisted script can serve as the
       // script source when the model passes only resumeFromRunId (self-contained
       // resume — it need not re-send the script).
-      const resume = resolveResumeRun(workspacePath, threadId, input.resumeFromRunId)
+      const resume = await resolveResumeRun(workspacePath, threadId, input.resumeFromRunId)
       const source = resolveScriptSource(workspacePath, input, resume.run?.script, resume.note)
       const parsed = validateWorkflowScript(source.script)
       const runId = resume.run?.runId ?? generateWorkflowRunId()
@@ -214,7 +214,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       const latestResumeRun = resume.run
         ? recoveredResumeRun?.threadId === threadId
           ? recoveredResumeRun
-          : loadWorkflowRun(workspacePath, threadId, runId)
+          : await loadWorkflowRunAsync(workspacePath, threadId, runId)
         : null
       if (resume.run && !latestResumeRun) {
         throw new Error(
@@ -470,11 +470,11 @@ function resolveScriptSource(
   )
 }
 
-function resolveResumeRun(
+async function resolveResumeRun(
   workspacePath: string,
   threadId: string,
   resumeFromRunId: string | undefined
-): { run: PersistedWorkflowRun | null; note?: string } {
+): Promise<{ run: PersistedWorkflowRun | null; note?: string }> {
   if (!resumeFromRunId) return { run: null }
   const requested = resumeFromRunId.trim()
   if (!isValidWorkflowRunId(requested)) {
@@ -492,7 +492,7 @@ function resolveResumeRun(
   const run =
     snapshot?.threadId === threadId
       ? snapshot
-      : loadWorkflowRunForResume(workspacePath, threadId, requested)
+      : await loadWorkflowRunForResumeAsync(workspacePath, threadId, requested)
   if (!run) {
     return {
       run: null,

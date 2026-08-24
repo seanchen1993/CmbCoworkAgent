@@ -312,8 +312,13 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     compactTranscriptHandler,
-    "return buildSubagentTranscriptStartupManifests(rawTranscripts)",
-    "history startup returns a read-only bounded transcript index"
+    "getThreadSubagentStartupManifests(threadId)",
+    "history startup returns the bounded row-backed transcript index"
+  )
+  assertIncludes(
+    compactTranscriptHandler,
+    "ensureSubagentTranscriptRows(threadId)",
+    "history startup atomically migrates the one legacy inline sidecar"
   )
   assertNotIncludes(
     compactTranscriptHandler,
@@ -322,8 +327,8 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadIpc.slice(focusedTranscriptHandlerStart),
-    "sliceSubagentTranscriptManifestPage(bucket, before)",
-    "focused transcript IPC selects a bounded page before hydration"
+    "rowBackedSubagentTranscriptPage(threadId, subagentId, before)",
+    "focused transcript IPC selects a bounded row page before hydration"
   )
   assertIncludes(
     threadIpc.slice(focusedTranscriptHandlerStart),
@@ -342,13 +347,13 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "const subagentPrefix = `${threadId}:subagent:`",
-    "thread context targets subagent accumulator keys during cleanup"
+    "const subagentKeys = schedulerSubagentStreamKeysRef.current[threadId]",
+    "thread context targets its registered subagent accumulator keys during cleanup"
   )
   assertIncludes(
     threadContext,
-    "key.startsWith(subagentPrefix)",
-    "thread context removes subagent accumulator keys during cleanup"
+    "for (const key of subagentKeys) delete schedulerStreamingRef.current[key]",
+    "thread context removes registered subagent accumulator keys during cleanup"
   )
   assertIncludes(
     threadContext,
@@ -427,7 +432,7 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "const hasRunningWorker = state.coordinatorWorkers.some(",
+    "const hasRunningWorker = workers.some(",
     "thread context polls unresolved coordinator threads, not just strictly running workers"
   )
   assertIncludes(
@@ -437,17 +442,17 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "worker.notification_acknowledged === false &&\n            worker.suppress_notification_auto_run !== true",
+    "worker.notification_acknowledged === false &&",
     "thread context treats only unsuppressed unacknowledged terminal coordinator notifications as unresolved from running workers"
   )
   assertIncludes(
     threadContext,
-    "if (!initializedThreadsRef.current.has(threadId)) return false",
+    "initializedThreadsRef.current.has(threadId)",
     "thread context does not keep background polling alive for cold unresolved coordinator threads that cannot auto-run yet"
   )
   assertIncludes(
     threadContext,
-    "if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode)",
+    "!isThreadMetadataExplicitNormalMode(threadId) ||",
     "thread context drops unresolved terminal notifications out of background polling when explicit normal mode suppresses coordinator auto-runs"
   )
   assertIncludes(
@@ -457,12 +462,12 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "if (updateKeys.length === 0) return prev",
+    "updateKeys.length === 0 ||",
     "thread context should not allocate a new thread state for empty updates"
   )
   assertIncludes(
     threadContext,
-    "Object.is(currentState[key], updates[key])",
+    "!updateKeys.some((key) => !Object.is(current[key], updates[key]))",
     "thread context should skip state updates when values are unchanged"
   )
   assertIncludes(
@@ -715,7 +720,7 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   )
   assertIncludes(
     subagentStreamPanel,
-    "const parentIsRunning = focusedStream.isLoading || threadState?.scheduledTaskLoading === true",
+    "const parentIsRunning = focusedStream.isLoading || scheduledTaskLoading",
     "subagent transcript panel checks the parent run before showing a live status"
   )
   assertIncludes(
@@ -765,12 +770,12 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   )
   assertIncludes(
     sidebar,
-    'worker.status === "running"',
-    "sidebar checks for running coordinator workers"
+    "threadSummary?.hasRunningCoordinatorWorker",
+    "sidebar reads the O(1) coordinator-worker summary instead of scanning workers"
   )
   assertMatches(
     sidebar,
-    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*hasRunningCoordinatorWorker/u,
+    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*hasRunningCoordinatorWorker\s*\|\|\s*Boolean\(threadSummary\?\.workflowRunning\)/u,
     "sidebar keeps spinner active after main stream completes while worker is running"
   )
   assertSourceOrder(
