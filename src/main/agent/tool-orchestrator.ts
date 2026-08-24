@@ -529,7 +529,7 @@ export class ToolOrchestrator {
     const suggestedCommitMessage = extractGitCommitMessage(command, shellSyntax)
     const gitCommandCwd = resolveGitCommandCwd(command, cwd, shellSyntax)
     const workspaceBoundary = this.workspacePath ?? cwd
-    const gitCommandCwdError = await validateGitOperationCwd(
+    const gitCommandCwdError = await validateGitCommandCwd(
       workspaceBoundary,
       gitCommandCwd,
       "commit"
@@ -541,26 +541,6 @@ export class ToolOrchestrator {
         truncated: false
       }
     }
-    const gitRoot = await getGitRootForPath(gitCommandCwd)
-    if (!gitRoot) {
-      return {
-        output: "Git 仓库根目录在提交前发生变化；为避免提交到错误仓库，本次操作已取消。",
-        exitCode: 1,
-        truncated: false
-      }
-    }
-    const [representedGitRoot, realWorkspace, realGitRoot] =
-      await Promise.all([
-        representExistingPathWithinWorkspace(workspaceBoundary, gitRoot),
-        resolveExistingDirForBoundary(workspaceBoundary),
-        resolveExistingDirForBoundary(gitRoot)
-      ])
-    const operationTarget =
-      realWorkspace.exists &&
-      realGitRoot.exists &&
-      isPathInsideOrSame(realGitRoot.path, realWorkspace.path)
-        ? representedGitRoot
-        : path.resolve(workspaceBoundary)
     const extractedPathspecs = Array.from(
       new Set(extractGitCommitPathspecs(command, shellSyntax))
     )
@@ -573,19 +553,78 @@ export class ToolOrchestrator {
         truncated: false
       }
     }
-    const suggestedCommitFilePaths = await projectExplicitPathsToTarget(
-      gitRoot,
-      gitCommandCwd,
-      operationTarget,
-      extractedPathspecs,
-      shellSyntax
-    )
-    if (!suggestedCommitFilePaths) {
-      return {
-        output: "无法可靠映射 Git 提交路径；为避免提交到错误范围，本次操作已取消。",
-        exitCode: 1,
-        truncated: false
+
+    let gitRoot = await getGitRootForPath(gitCommandCwd)
+    let operationTarget: string | undefined
+    let suggestedGitRepositories: ApprovalRequest["suggestedGitRepositories"]
+    let suggestedCommitFilePaths: string[]
+    let suggestedCommitFileBasePath: string
+
+    if (!gitRoot) {
+      const repositories = await discoverWorkspaceGitRepositories(gitCommandCwd)
+      if (repositories.length === 0) {
+        return {
+          output: "当前目录不是 Git 仓库，且未发现可提交的子仓库。",
+          exitCode: 1,
+          truncated: false
+        }
       }
+      if (repositories.length > 1) {
+        suggestedGitRepositories = repositories.map((repository) => ({
+          path: repository.repoPath,
+          displayPath: repository.displayPath,
+          gitRoot: repository.gitRoot
+        }))
+        suggestedCommitFilePaths = extractedPathspecs
+        suggestedCommitFileBasePath = gitCommandCwd
+      } else {
+        gitRoot = repositories[0].gitRoot
+        operationTarget = repositories[0].repoPath
+        suggestedCommitFileBasePath = operationTarget
+        const projectedPaths = await projectExplicitPathsToTarget(
+          gitRoot,
+          gitCommandCwd,
+          operationTarget,
+          extractedPathspecs,
+          shellSyntax
+        )
+        if (!projectedPaths) {
+          return {
+            output: "无法可靠映射 Git 提交路径；为避免提交到错误范围，本次操作已取消。",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        suggestedCommitFilePaths = projectedPaths
+      }
+    } else {
+      const [representedGitRoot, realWorkspace, realGitRoot] = await Promise.all([
+        representExistingPathWithinWorkspace(workspaceBoundary, gitRoot),
+        resolveExistingDirForBoundary(workspaceBoundary),
+        resolveExistingDirForBoundary(gitRoot)
+      ])
+      operationTarget =
+        realWorkspace.exists &&
+        realGitRoot.exists &&
+        isPathInsideOrSame(realGitRoot.path, realWorkspace.path)
+          ? representedGitRoot
+          : path.resolve(workspaceBoundary)
+      suggestedCommitFileBasePath = operationTarget
+      const projectedPaths = await projectExplicitPathsToTarget(
+        gitRoot,
+        gitCommandCwd,
+        operationTarget,
+        extractedPathspecs,
+        shellSyntax
+      )
+      if (!projectedPaths) {
+        return {
+          output: "无法可靠映射 Git 提交路径；为避免提交到错误范围，本次操作已取消。",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      suggestedCommitFilePaths = projectedPaths
     }
     console.log(
       `[Orchestrator] git commit → task-card dialog (cwd=${cwd}, gitCwd=${gitCommandCwd})`
@@ -599,8 +638,9 @@ export class ToolOrchestrator {
       cwd,
       suggestedCommitMessage,
       suggestedCommitFilePaths,
-      suggestedCommitFileBasePath: operationTarget,
+      suggestedCommitFileBasePath,
       suggestedGitWorktreePath: operationTarget,
+      suggestedGitRepositories,
       suggestedCommitFileSelectionSource: "pathspec",
       reason: "Git 提交需要选择任务卡片并确认",
       allowed_decisions: ["approve", "reject"],

@@ -152,6 +152,12 @@ export interface AgentCommitOutcome {
   error?: string
 }
 
+export interface AgentGitRepositoryOption {
+  path: string
+  displayPath: string
+  gitRoot: string
+}
+
 interface AgentGitCommitDialogProps {
   /** The git_commit approval request, or null when no commit is pending. */
   open: boolean
@@ -165,6 +171,8 @@ interface AgentGitCommitDialogProps {
   suggestedFileBasePath?: string
   /** Preferred Git operation target, normally the repository root. */
   suggestedGitWorktreePath?: string
+  /** Concrete targets when the Agent invoked commit from a multi-repository parent. */
+  suggestedGitRepositories?: AgentGitRepositoryOption[]
   /** Where suggestedFilePaths came from. */
   suggestedFileSelectionSource?: "pathspec" | "staged"
   /** Called after the commit succeeds; the parent resolves the approval with the result. */
@@ -187,6 +195,7 @@ export function AgentGitCommitDialog({
   suggestedFilePaths,
   suggestedFileBasePath,
   suggestedGitWorktreePath,
+  suggestedGitRepositories = [],
   suggestedFileSelectionSource,
   onCommitted,
   onCancel
@@ -195,9 +204,15 @@ export function AgentGitCommitDialog({
   const diffListRequestIdRef = useRef(0)
   const emptySelectionResolvedRef = useRef(false)
   const { cardNumber, handleCardNumberChange, persistNow } = useWorkspaceTaskCard(workspacePath)
+  const [selectedGitWorktreePath, setSelectedGitWorktreePath] = useState<string | undefined>(() => {
+    if (suggestedGitWorktreePath) return suggestedGitWorktreePath
+    return suggestedGitRepositories.length === 1 ? suggestedGitRepositories[0].path : undefined
+  })
+  const repositorySelectionRequired = suggestedGitRepositories.length > 1
+  const repositoryMissing = repositorySelectionRequired && !selectedGitWorktreePath
   const commitWorktreePath = resolveCommitWorktreePath(
     workspacePath,
-    suggestedGitWorktreePath
+    selectedGitWorktreePath
   )
   // Seed type + message from the agent's suggestion. The parent remounts this dialog
   // (via a key tied to the approval id) for each new commit, so lazy initializers give
@@ -222,7 +237,7 @@ export function AgentGitCommitDialog({
   } | null>(null)
   // Starts true so the first paint shows "加载中"; the fetch's finally clears it. The
   // dialog is remounted per commit (keyed on the approval id), so this re-initializes.
-  const [diffLoading, setDiffLoading] = useState(true)
+  const [diffLoading, setDiffLoading] = useState(!repositorySelectionRequired)
   const [diffError, setDiffError] = useState<string | null>(null)
   // Per-file lazy diff loading: only the file the user is viewing has its patch fetched.
   const [fileDiffLoadingPaths, setFileDiffLoadingPaths] = useState<Set<string>>(new Set())
@@ -233,7 +248,7 @@ export function AgentGitCommitDialog({
     () =>
       buildInitialSelectedPaths([], initialSuggestedFilePaths, undefined, {
         suggestedBasePath: initialSuggestedFileBasePath,
-        repositoryRootPath: suggestedGitWorktreePath,
+        repositoryRootPath: selectedGitWorktreePath,
         suggestedPathKind: initialFileSelectionSource,
         workspacePath,
         targetWorktreePath: commitWorktreePath
@@ -246,8 +261,17 @@ export function AgentGitCommitDialog({
       diffListRequestIdRef.current += 1
       return
     }
+    if (repositoryMissing) {
+      diffListRequestIdRef.current += 1
+      setDiff(null)
+      setDiffLoading(false)
+      setDiffError(null)
+      return
+    }
     const requestId = ++diffListRequestIdRef.current
     let cancelled = false
+    setDiff(null)
+    setDiffLoading(true)
     setDiffError(null)
     window.api.workspace
       // 仅拉取文件列表与统计，diff 正文等用户在右侧查看某文件时再按需加载，
@@ -275,7 +299,7 @@ export function AgentGitCommitDialog({
         setSelectedCommitPaths(
           buildInitialSelectedPaths(res.files ?? [], initialSuggestedFilePaths, res.changedFiles ?? [], {
             suggestedBasePath: initialSuggestedFileBasePath,
-            repositoryRootPath: suggestedGitWorktreePath,
+            repositoryRootPath: selectedGitWorktreePath,
             suggestedPathKind: initialFileSelectionSource,
             workspacePath,
             targetWorktreePath: commitWorktreePath
@@ -297,7 +321,8 @@ export function AgentGitCommitDialog({
     initialSuggestedFilePaths,
     initialSuggestedFileBasePath,
     initialFileSelectionSource,
-    suggestedGitWorktreePath,
+    selectedGitWorktreePath,
+    repositoryMissing,
     workspacePath,
     commitWorktreePath
   ])
@@ -430,14 +455,15 @@ export function AgentGitCommitDialog({
   const fileSelectionBlocked = fileSelectionPending || fileSelectionFailed || fileSelectionMissing
 
   useEffect(() => {
-    if (emptySelectionResolvedRef.current || !diff) return
+    if (emptySelectionResolvedRef.current || repositoryMissing || !diff) return
     if (
       !shouldAutoDismissEmptyAgentCommitSelection({
         selectionSource: initialFileSelectionSource,
         suggestedPathCount: suggestedFilePathCount,
         selectedPathCount: selectedCommitFilePaths.length,
         loading: fileSelectionPending,
-        failed: fileSelectionFailed
+        failed: fileSelectionFailed,
+        targetSelectionRequired: repositorySelectionRequired
       })
     ) {
       return
@@ -450,6 +476,8 @@ export function AgentGitCommitDialog({
     fileSelectionPending,
     initialFileSelectionSource,
     onCommitted,
+    repositoryMissing,
+    repositorySelectionRequired,
     selectedCommitFilePaths.length,
     suggestedFilePathCount
   ])
@@ -460,7 +488,7 @@ export function AgentGitCommitDialog({
   )
 
   const handleSubmit = async (): Promise<void> => {
-    if (running || cardMissing || messageMissing || fileSelectionBlocked) return
+    if (running || repositoryMissing || cardMissing || messageMissing || fileSelectionBlocked) return
     setRunning(true)
     setError(null)
     try {
@@ -527,6 +555,53 @@ export function AgentGitCommitDialog({
           <div className="text-xs text-muted-foreground">
             Agent 想要提交当前工作区改动。请选择任务卡片并确认，将按 CMB 规范生成 commit message。
           </div>
+          {repositorySelectionRequired && (
+            <div className="space-y-1.5 border-t border-border/60 pt-2">
+              <div className="flex items-center justify-between text-xs">
+                <label htmlFor="agent-commit-repository" className="font-medium text-foreground">
+                  提交仓库
+                </label>
+                <span className={repositoryMissing ? "text-destructive" : "text-muted-foreground"}>
+                  必填
+                </span>
+              </div>
+              <Select
+                value={selectedGitWorktreePath}
+                onValueChange={(value) => {
+                  diffListRequestIdRef.current += 1
+                  emptySelectionResolvedRef.current = false
+                  setDiff(null)
+                  setDiffLoading(true)
+                  setDiffError(null)
+                  setSelectedCommitPaths(new Set())
+                  setSelectedFilePath(null)
+                  setSelectedGitWorktreePath(value)
+                }}
+                disabled={running}
+              >
+                <SelectTrigger
+                  id="agent-commit-repository"
+                  className={cn(
+                    "w-full bg-background",
+                    repositoryMissing &&
+                      "border-destructive/50 focus-visible:ring-destructive/40"
+                  )}
+                >
+                  <SelectValue placeholder="选择本次 Commit 的目标仓库" />
+                </SelectTrigger>
+                <SelectContent>
+                  {suggestedGitRepositories.map((repository) => (
+                    <SelectItem key={repository.path} value={repository.path}>
+                      {repository.displayPath}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="text-[11px] leading-5 text-muted-foreground">
+                Agent 从多仓库父目录发起提交。选择目标后才会加载该仓库的变更，避免误提交到其他仓库。
+              </div>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-3 text-xs">
             <span className="text-muted-foreground">变更</span>
             <span className="font-medium">
@@ -767,7 +842,9 @@ export function AgentGitCommitDialog({
           <Button
             type="button"
             className="w-full h-9"
-            disabled={running || cardMissing || messageMissing || fileSelectionBlocked}
+            disabled={
+              running || repositoryMissing || cardMissing || messageMissing || fileSelectionBlocked
+            }
             onClick={() => void handleSubmit()}
           >
             {running ? (

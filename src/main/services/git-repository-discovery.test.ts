@@ -58,6 +58,22 @@ describe("discoverWorkspaceGitRepositories", () => {
     expect(repositories.every((repo) => repo.isWorkspaceRoot === false)).toBe(true)
   })
 
+  it("discovers both a main checkout and its linked worktree below a non-Git parent", async () => {
+    const workspace = createWorkspace()
+    const mainRepo = join(workspace, "main")
+    const linkedWorktree = join(workspace, "linked")
+    initRepo(mainRepo)
+    gitIn(mainRepo, ["worktree", "add", "-q", "-b", "linked-test", linkedWorktree])
+
+    const repositories = await discoverWorkspaceGitRepositories(workspace)
+
+    expect(repositories.map((repo) => repo.displayPath)).toEqual(["linked", "main"])
+    expect(repositories.map((repo) => repo.repoPath)).toEqual([
+      realpathSync(linkedWorktree),
+      realpathSync(mainRepo)
+    ])
+  })
+
   it("keeps the existing single-repo behavior when the workspace itself is a Git repo", async () => {
     const workspace = createWorkspace()
     initRepo(workspace)

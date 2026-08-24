@@ -674,6 +674,86 @@ describe("buildGitPanelDiffState — workspace review scope", () => {
     }
   })
 
+  it("reports worktree metadata for the selected repository instead of the parent workspace", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "gitpanel-worktree-target-"))
+    try {
+      const temporaryRepo = createRepo("gitpanel-worktree-main-")
+      const mainRepo = join(workspace, "main")
+      const linkedWorktree = join(workspace, "linked")
+      renameSync(temporaryRepo, mainRepo)
+      writeFileSync(join(mainRepo, "tracked.txt"), "initial\n")
+      gitIn(mainRepo, ["add", "."])
+      gitIn(mainRepo, ["commit", "-q", "-m", "initial"])
+      gitIn(mainRepo, ["worktree", "add", "-q", "-b", "linked-test", linkedWorktree])
+      writeFileSync(join(linkedWorktree, "tracked.txt"), "changed in worktree\n")
+
+      const repositories = await discoverWorkspaceGitRepositories(workspace)
+      const context = {
+        workspacePath: workspace,
+        isGitRepo: true,
+        isWorktree: false,
+        metadata: {},
+        repositories
+      } as GitPanelTestContext
+
+      const [mainMeta, linkedMeta, linkedDiff] = await Promise.all([
+        buildGitPanelMetaState("thread-main", context, { worktreePath: mainRepo }),
+        buildGitPanelMetaState("thread-linked", context, { worktreePath: linkedWorktree }),
+        buildGitPanelDiffState("thread-linked", context, {
+          worktreePath: linkedWorktree,
+          includeDiffs: false
+        })
+      ])
+
+      expect(mainMeta.isWorktree).toBe(false)
+      expect(linkedMeta.isWorktree).toBe(true)
+      expect(linkedMeta.worktreeBranch).toBe("linked-test")
+      expect(linkedDiff.isWorktree).toBe(true)
+      expect(linkedDiff.files.map((file) => file.path)).toContain("tracked.txt")
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps linked-worktree identity when it is the only repository below a parent", async () => {
+    const workspace = mkdtempSync(join(tmpdir(), "gitpanel-single-worktree-parent-"))
+    const mainRepo = createRepo("gitpanel-single-worktree-main-")
+    const linkedWorktree = join(workspace, "linked")
+    try {
+      writeFileSync(join(mainRepo, "tracked.txt"), "initial\n")
+      gitIn(mainRepo, ["add", "."])
+      gitIn(mainRepo, ["commit", "-q", "-m", "initial"])
+      gitIn(mainRepo, ["worktree", "add", "-q", "-b", "only-linked", linkedWorktree])
+
+      const repositories = await discoverWorkspaceGitRepositories(workspace)
+      const context = {
+        workspacePath: workspace,
+        isGitRepo: true,
+        isWorktree: false,
+        metadata: {},
+        repositories
+      } as GitPanelTestContext
+
+      expect(repositories).toHaveLength(1)
+      const [meta, diff] = await Promise.all([
+        buildGitPanelMetaState("thread-single-linked", context),
+        buildGitPanelDiffState("thread-single-linked", context, { includeDiffs: false })
+      ])
+
+      expect(meta.isWorktree).toBe(true)
+      expect(meta.worktreeBranch).toBe("only-linked")
+      expect(diff.isWorktree).toBe(true)
+    } finally {
+      try {
+        gitIn(mainRepo, ["worktree", "remove", "--force", linkedWorktree])
+      } catch {
+        // Cleanup still removes both temporary roots if Git already detached the worktree.
+      }
+      rmSync(workspace, { recursive: true, force: true })
+      rmSync(mainRepo, { recursive: true, force: true })
+    }
+  })
+
   it("keeps later repositories visible when each repo applies its own file limit", async () => {
     const workspace = mkdtempSync(join(tmpdir(), "gitpanel-multi-repo-limit-"))
     try {

@@ -46,6 +46,9 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
 const EVENT_CATEGORIES = new Set<EventCategory>([
@@ -279,9 +282,11 @@ import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "
 import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import {
+  getChatScrollSettings,
   getOpenworkDir,
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
+  setChatScrollSettings,
   setKeepAwakeEnabled,
   setWindowCloseBehavior
 } from "./storage"
@@ -456,6 +461,16 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
     mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
   }
   return savedBehavior
+}
+
+function saveChatScrollSettings(
+  settings: Parameters<typeof setChatScrollSettings>[0]
+): ReturnType<typeof setChatScrollSettings> {
+  const savedSettings = setChatScrollSettings(settings)
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, savedSettings)
+  }
+  return savedSettings
 }
 
 function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
@@ -884,6 +899,31 @@ if (!gotTheLock) {
         throw new Error("Invalid window close behavior")
       }
       return saveWindowCloseBehavior(behavior)
+    })
+
+    ipcMain.handle(CHAT_SCROLL_SETTINGS_GET_CHANNEL, (event) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Chat scroll settings are only available to the main window")
+      }
+      return getChatScrollSettings()
+    })
+
+    ipcMain.handle(CHAT_SCROLL_SETTINGS_SET_CHANNEL, (event, settings: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Chat scroll settings are only available to the main window")
+      }
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+        throw new Error("Invalid chat scroll settings")
+      }
+      return saveChatScrollSettings(settings as Parameters<typeof setChatScrollSettings>[0])
     })
 
     ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
