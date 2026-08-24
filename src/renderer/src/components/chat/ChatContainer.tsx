@@ -106,6 +106,7 @@ import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
+import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
@@ -2765,6 +2766,11 @@ export function ChatContainer({
           suggestedCommitFilePaths?: string[]
           suggestedCommitFileBasePath?: string
           suggestedGitWorktreePath?: string
+          suggestedGitRepositories?: Array<{
+            path: string
+            displayPath: string
+            gitRoot: string
+          }>
           suggestedCommitFileSelectionSource?: "pathspec" | "staged"
         })
       | null
@@ -5599,14 +5605,21 @@ export function ChatContainer({
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
         ? undefined
         : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
+    const preserveHarnessView = surface !== "default"
     setForkingMessageId(messageForkTarget.message.id)
     try {
-      await forkThread({
-        sourceThreadId: messageForkTarget.sourceThreadId,
-        checkpointId: messageForkTarget.checkpoint.checkpointId,
-        ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
-        overrides
-      })
+      const forkedThread = await forkThread(
+        {
+          sourceThreadId: messageForkTarget.sourceThreadId,
+          checkpointId: messageForkTarget.checkpoint.checkpointId,
+          ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
+          overrides
+        },
+        preserveHarnessView ? { preserveView: true } : undefined
+      )
+      if (preserveHarnessView) {
+        onHarnessSessionCreated?.(forkedThread.thread_id)
+      }
       toast.success("已从这条消息创建新会话")
       resetMessageForkDialog()
     } catch (error) {
@@ -5623,7 +5636,9 @@ export function ChatContainer({
     forkingMessageId,
     handleSelectForkWorkspace,
     messageForkTarget,
-    resetMessageForkDialog
+    onHarnessSessionCreated,
+    resetMessageForkDialog,
+    surface
   ])
 
   const handleEditGoal = useCallback((): void => {
@@ -6919,6 +6934,7 @@ export function ChatContainer({
                         suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
                         suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
                         suggestedGitWorktreePath={agentCommitApproval?.suggestedGitWorktreePath}
+                        suggestedGitRepositories={agentCommitApproval?.suggestedGitRepositories}
                         suggestedFileSelectionSource={
                           agentCommitApproval?.suggestedCommitFileSelectionSource
                         }
@@ -6943,6 +6959,9 @@ export function ChatContainer({
                         </button>
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                      {(agentMode === "normal" || agentMode === "multi") && (
+                        <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
+                      )}
                       <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (

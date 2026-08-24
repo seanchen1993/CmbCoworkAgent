@@ -660,7 +660,10 @@ const path = require("path")
 const crypto = require("crypto")
 const childProcess = require("child_process")
 
-const OPENWORK_DIR = path.join(os.homedir(), ".cmbcoworkagent")
+const CONFIGURED_OPENWORK_DIR = (process.env.CMB_COWORK_AGENT_HOME || "").trim()
+const OPENWORK_DIR = CONFIGURED_OPENWORK_DIR
+  ? path.resolve(CONFIGURED_OPENWORK_DIR)
+  : path.join(os.homedir(), ".cmbcoworkagent")
 const EVENTS_DIR = path.join(OPENWORK_DIR, "git-hooks", "events")
 const CURRENT_SNAPSHOT_FILE = "cmbdevclaw-adoption-current"
 const STAGED_BLOB_MAX_BYTES = 8 * 1024 * 1024

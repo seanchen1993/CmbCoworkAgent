@@ -24,6 +24,7 @@ import type { ChatXRobotConfig } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import { getChatXUserMessageId, namespaceChatXStreamEventIds } from "./chatx-stream-ids"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -369,7 +370,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
         configurable: { thread_id: threadId },
         signal: abortController.signal,
         streamMode: ["messages", "values"],
-        recursionLimit: 1000
+        recursionLimit: getAgentGraphRecursionLimit()
       }
     )
 
