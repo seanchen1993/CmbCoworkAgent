@@ -35,6 +35,9 @@ describe("Agent git commit selection", () => {
     expect(shouldAutoDismissEmptyAgentCommitSelection({ ...base, failed: true })).toBe(false)
     expect(shouldAutoDismissEmptyAgentCommitSelection({ ...base, selectedPathCount: 1 })).toBe(false)
     expect(
+      shouldAutoDismissEmptyAgentCommitSelection({ ...base, targetSelectionRequired: true })
+    ).toBe(false)
+    expect(
       shouldAutoDismissEmptyAgentCommitSelection({ ...base, selectionSource: "staged" })
     ).toBe(false)
   })
@@ -234,6 +237,44 @@ describe("Agent git commit selection", () => {
     )
 
     expect(Array.from(selected)).toEqual(["src/staged.ts"])
+  })
+
+  it("projects a parent-workspace pathspec only into the selected repository", () => {
+    const options = {
+      suggestedBasePath: "C:/workspace",
+      workspacePath: "C:/workspace",
+      repositoryRootPath: "C:/workspace/repo-a",
+      targetWorktreePath: "C:/workspace/repo-a",
+      suggestedPathKind: "pathspec" as const
+    }
+
+    expect(
+      Array.from(
+        buildInitialSelectedPaths([], ["repo-a/src/index.ts"], ["src/index.ts"], options)
+      )
+    ).toEqual(["src/index.ts"])
+    expect(
+      Array.from(
+        buildInitialSelectedPaths([], ["repo-b/src/index.ts"], ["src/index.ts"], options)
+      )
+    ).toEqual([])
+  })
+
+  it("maps an MSYS absolute pathspec into a selected repository on Windows paths", () => {
+    const selected = buildInitialSelectedPaths(
+      [],
+      ["/c/workspace/repo-a/src/index.ts"],
+      ["src/index.ts"],
+      {
+        suggestedBasePath: "C:/workspace",
+        workspacePath: "C:/workspace",
+        repositoryRootPath: "C:/workspace/repo-a",
+        targetWorktreePath: "C:/workspace/repo-a",
+        suggestedPathKind: "pathspec"
+      }
+    )
+
+    expect(Array.from(selected)).toEqual(["src/index.ts"])
   })
 
   it("uses the repository root as the target for pathspecs from a nested cwd", () => {

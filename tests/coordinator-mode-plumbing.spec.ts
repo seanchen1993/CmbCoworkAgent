@@ -163,6 +163,46 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
+    'agentMode === "normal" || agentMode === "multi"',
+    "output style UI is available only for Solo and Multi"
+  )
+  const outputStyleSwitcher = await readProjectFile(
+    "src/renderer/src/components/chat/OutputStyleSwitcher.tsx"
+  )
+  assertIncludes(
+    outputStyleSwitcher,
+    "outputStyle: nextStyle",
+    "output style is persisted per thread"
+  )
+  assertIncludes(
+    outputStyleSwitcher,
+    'conciseModeEnabled: nextStyle === "concise"',
+    "new output style writes preserve legacy concise compatibility"
+  )
+  const runtime = await readProjectFile("src/main/agent/runtime.ts")
+  assertIncludes(
+    runtime,
+    'agentMode === "normal"',
+    "runtime hard-gates output styles to Solo/Multi's shared normal mode"
+  )
+  assertIncludes(
+    runtime,
+    ": DEFAULT_AGENT_OUTPUT_STYLE",
+    "Agent Team and Workflow runtimes always keep the default output style"
+  )
+  assertIncludes(
+    runtime,
+    "resolveAgentOutputStyle(options.outputStyle, options.conciseModeEnabled === true)",
+    "runtime resolves the explicit style while retaining legacy concise threads"
+  )
+  const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
+  assertIncludes(
+    agentIpc,
+    "return resolveThreadOutputStyle(metadata)",
+    "invalid or missing output-style metadata falls back through the shared resolver"
+  )
+  assertIncludes(
+    chat,
     'agent_mode: submitAgentMode === "multi" ? "normal" : submitAgentMode',
     "renderer does not widen the IPC agent-mode contract for Multi"
   )
@@ -2971,7 +3011,7 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
   )
   assertIncludes(
     runtime,
-    "rootDir: workspacePath,\n    agentId,",
+    "rootDir: fileRoot,\n    agentId,",
     "runtime passes agent identity into LocalSandbox"
   )
   assertIncludes(

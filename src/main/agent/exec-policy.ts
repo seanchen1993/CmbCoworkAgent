@@ -6,14 +6,21 @@
  * and command_might_be_dangerous().
  */
 
+import { realpathSync } from "node:fs"
 import path from "node:path"
 import type { ExecSafetyLevel } from "../types"
+import { isGitRepositoryOverrideEnvironmentVariable } from "../services/git-environment"
+import type { WorkflowWorktreeIsolationBoundary } from "./workflow/types"
 import {
   isKnownSafeWindowsCommand,
   isReadOnlyWindowsCommand,
   type WindowsShellKind
 } from "./windows-safe-commands"
-import { BUILD_TOOL_EXECUTABLES, isReadOnlyBuildToolInvocation, hasUnsafeWriteFlag } from "./read-only-build-tool"
+import {
+  BUILD_TOOL_EXECUTABLES,
+  isReadOnlyBuildToolInvocation,
+  hasUnsafeWriteFlag
+} from "./read-only-build-tool"
 
 export interface SafetyAssessment {
   level: ExecSafetyLevel
@@ -1600,6 +1607,419 @@ function resolveShellCdTarget(currentCwd: string, segment: string): string | nul
   return path.resolve(currentCwd, normalizeMsysPathForWindows(target))
 }
 
+/** Common, direct operations that violate this product's transient-branch
+ * contract. This is intentionally an accident guard, not an exhaustive model
+ * of every Git plumbing command (matching MiMo Code's worktree guard). */
+const WORKTREE_ALWAYS_BLOCKED_GIT_COMMANDS = new Set([
+  "push",
+  "update-ref",
+  "gc",
+  "pack-refs"
+])
+
+function firstGitPositionalArgument(args: string[]): string | undefined {
+  return args.find((arg) => !arg.startsWith("-"))?.toLowerCase()
+}
+
+/** Recovery-only forms operate on an already in-progress merge/rebase in this
+ * worktree. They do not start cross-branch integration, and leaving them
+ * blocked would strand an agent after an otherwise permitted `git pull`. */
+const WORKTREE_GIT_IN_PROGRESS_RECOVERY_OPTIONS = new Set([
+  "--abort",
+  "--continue",
+  "--quit",
+  "--skip",
+  "--edit-todo",
+  "--show-current-patch"
+])
+
+const WORKTREE_GIT_CONFIG_WRITE_OPTIONS = new Set([
+  "--add",
+  "--replace-all",
+  "--unset",
+  "--unset-all",
+  "--rename-section",
+  "--remove-section",
+  "--edit"
+])
+
+const WORKTREE_GIT_CONFIG_READ_OPTIONS = new Set([
+  "--get",
+  "--get-all",
+  "--get-regexp",
+  "--get-urlmatch",
+  "--list",
+  "-l"
+])
+
+/** `git config` writes its default local config into the repository's shared
+ * common directory, even when invoked from a linked worktree. Permit only the
+ * ordinary query forms; all mutations, including `--worktree`, are outside an
+ * isolated agent's transient-branch contract. */
+function isReadOnlyGitConfigInvocation(args: string[]): boolean {
+  if (args.some((arg) => WORKTREE_GIT_CONFIG_WRITE_OPTIONS.has(arg.toLowerCase()))) {
+    return false
+  }
+  const first = args[0]?.toLowerCase()
+  if (first === "get" || first === "list" || first === "get-regexp" || first === "get-urlmatch") {
+    return true
+  }
+  if (first === "set" || first === "add" || first === "unset" || first === "rename-section") {
+    return false
+  }
+  if (args.some((arg) => WORKTREE_GIT_CONFIG_READ_OPTIONS.has(arg.toLowerCase()))) {
+    return true
+  }
+
+  // Legacy `git config <name>` is a read; a second positional value changes
+  // the shared config. Skip the small set of global options that consume a
+  // value before counting positional arguments.
+  const positionals: string[] = []
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
+    if (["--file", "-f", "--blob", "--type", "--default"].includes(arg.toLowerCase())) {
+      index += 1
+      continue
+    }
+    if (arg.startsWith("--file=") || arg.startsWith("--blob=") || arg.startsWith("--type=") || arg.startsWith("--default=")) {
+      continue
+    }
+    if (!arg.startsWith("-")) positionals.push(arg)
+  }
+  return positionals.length <= 1
+}
+
+/** Remote names and URLs live in the shared repository config. Keep list/show
+ * queries usable while rejecting every form that can mutate that shared state. */
+function isReadOnlyGitRemoteInvocation(args: string[]): boolean {
+  let index = 0
+  while (args[index] === "-v" || args[index]?.toLowerCase() === "--verbose") index += 1
+  if (index === args.length) return true
+  const subcommand = args[index].toLowerCase()
+  return subcommand === "get-url" || subcommand === "show"
+}
+
+export function isGitAddCommand(command: string): boolean {
+  const segments = splitShellCommandSegments(command)
+  if (segments.length !== 1) return false
+  const tokens = tokenizeCommand(segments[0])
+  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+  return findGitSubcommand(gitTokens ?? [])?.subcommand === "add"
+}
+
+/** Whether a command contains a real `git add`, including a shell chain. The
+ * isolated-worktree broker accepts only the single-command form above; chained
+ * staging must be rejected rather than falling through to raw execution. */
+export function containsGitAddCommand(command: string): boolean {
+  return commandHasGitSubcommand(command.trim(), new Set(["add"]))
+}
+
+function realpathIfExisting(input: string): string | null {
+  try {
+    return typeof realpathSync.native === "function"
+      ? realpathSync.native(input)
+      : realpathSync(input)
+  } catch {
+    return null
+  }
+}
+
+function normalizeWorktreeBoundaryPath(input: string): string {
+  const canonical = realpathIfExisting(input)
+  const resolved =
+    (canonical ?? path.resolve(input)).replace(/[\\/]+$/, "") ||
+    path.parse(canonical ?? path.resolve(input)).root
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved
+}
+
+function isInsideWorktreeBoundary(candidate: string, root: string): boolean {
+  const normalizedCandidate = normalizeWorktreeBoundaryPath(candidate)
+  const normalizedRoot = normalizeWorktreeBoundaryPath(root)
+  const relative = path.relative(normalizedRoot, normalizedCandidate)
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  )
+}
+
+/** Resolve a `cd` / `git -C` target without collapsing `..` before the
+ * filesystem sees an intervening symlink. The fallback is lexical only for a
+ * non-existent target, which the shell/Git will reject itself. */
+function resolveWorktreeCommandDirectory(cwd: string, target: string): string {
+  const normalizedTarget = normalizeMsysPathForWindows(target)
+  const rawCandidate = path.isAbsolute(normalizedTarget)
+    ? normalizedTarget
+    : `${cwd}${path.sep}${normalizedTarget}`
+  return realpathIfExisting(rawCandidate) ?? path.resolve(cwd, normalizedTarget)
+}
+
+function isWorktreeRedirectingGitConfig(config: string): boolean {
+  const key = config.split("=", 1)[0]?.trim().toLowerCase()
+  return (
+    key === "core.worktree" ||
+    key === "core.bare" ||
+    key === "core.repositoryformatversion" ||
+    key === "extensions.worktreeconfig" ||
+    key === "commondir"
+  )
+}
+
+function worktreeGitEnvironmentViolation(tokens: string[]): string | null {
+  const gitIndex = tokens.findIndex((token) => normalizeExecutable(token) === "git")
+  for (const token of tokens.slice(0, gitIndex)) {
+    if (!isShellEnvAssignment(token)) continue
+    const name = token.slice(0, token.indexOf("=")).toUpperCase()
+    if (isGitRepositoryOverrideEnvironmentVariable(name)) {
+      return `worktree isolation blocks Git environment redirection ${name}`
+    }
+  }
+  return null
+}
+
+/** Shell assignments persist across later segments. Block the explicit forms
+ * that can redirect a subsequent Git invocation without trying to model the
+ * shell's general environment semantics. */
+function worktreeGitEnvironmentMutationViolation(tokens: string[]): string | null {
+  const invocation = getExecutableInvocationTokens(tokens)
+  if (invocation.length === 0) {
+    for (const token of tokens) {
+      if (!isShellEnvAssignment(token)) continue
+      const name = token.slice(0, token.indexOf("="))
+      if (isGitRepositoryOverrideEnvironmentVariable(name)) {
+        return `worktree isolation blocks Git environment redirection ${name.toUpperCase()}`
+      }
+    }
+    return null
+  }
+  if (normalizeExecutable(invocation[0]) !== "export") return null
+  for (const token of invocation.slice(1)) {
+    if (token.startsWith("-")) continue
+    const name = token.split("=", 1)[0]
+    if (name && isGitRepositoryOverrideEnvironmentVariable(name)) {
+      return `worktree isolation blocks Git environment redirection ${name.toUpperCase()}`
+    }
+  }
+  return null
+}
+
+function inspectWorktreeGitInvocation(
+  gitTokens: string[],
+  cwd: string,
+  executionRoots: readonly string[]
+): string | null {
+  let gitCwd = cwd
+  let subcommandIndex = -1
+
+  for (let i = 1; i < gitTokens.length; i++) {
+    const token = gitTokens[i]
+    const lower = token.toLowerCase()
+    if (token === "-C") {
+      const target = gitTokens[++i]
+      if (!target) return "worktree isolation blocks Git -C without a target"
+      gitCwd = resolveWorktreeCommandDirectory(gitCwd, target)
+      if (!executionRoots.some((root) => isInsideWorktreeBoundary(gitCwd, root))) {
+        return "worktree isolation blocks git -C outside the assigned workspace or enabled skill"
+      }
+      continue
+    }
+    if (token.startsWith("-C") && token.length > 2) {
+      gitCwd = resolveWorktreeCommandDirectory(gitCwd, token.slice(2))
+      if (!executionRoots.some((root) => isInsideWorktreeBoundary(gitCwd, root))) {
+        return "worktree isolation blocks git -C outside the assigned workspace or enabled skill"
+      }
+      continue
+    }
+    if (lower === "-c") {
+      const config = gitTokens[++i]
+      if (!config) return "worktree isolation blocks Git -c without a config value"
+      if (isWorktreeRedirectingGitConfig(config)) {
+        return `worktree isolation blocks repository-redirection config ${config}`
+      }
+      continue
+    }
+    if (token.startsWith("-c") && token.length > 2) {
+      const config = token.slice(2)
+      if (isWorktreeRedirectingGitConfig(config)) {
+        return `worktree isolation blocks repository-redirection config ${config}`
+      }
+      continue
+    }
+    if (
+      lower === "--config-env" ||
+      lower === "--git-dir" ||
+      lower === "--work-tree" ||
+      lower === "--namespace"
+    ) {
+      return `worktree isolation blocks Git redirection/config option ${token}`
+    }
+    if (
+      lower.startsWith("--config-env=") ||
+      lower.startsWith("--git-dir=") ||
+      lower.startsWith("--work-tree=") ||
+      lower.startsWith("--namespace=")
+    ) {
+      return `worktree isolation blocks Git redirection/config option ${token}`
+    }
+    if (token === "--" || token.startsWith("-")) continue
+    subcommandIndex = i
+    break
+  }
+
+  if (subcommandIndex < 0) return null
+  const subcommand = gitTokens[subcommandIndex].toLowerCase()
+  const args = gitTokens.slice(subcommandIndex + 1)
+  if (args.some((arg) => arg.toLowerCase() === "--autostash")) {
+    return "worktree isolation blocks --autostash because refs/stash is shared"
+  }
+  if (args.some((arg) => arg.toLowerCase() === "--update-refs")) {
+    return "worktree isolation blocks --update-refs because it can move sibling branches"
+  }
+  if (WORKTREE_ALWAYS_BLOCKED_GIT_COMMANDS.has(subcommand)) {
+    return `worktree isolation blocks Git command that can modify shared metadata: git ${subcommand}`
+  }
+  if (
+    subcommand === "reflog" &&
+    ["expire", "delete"].includes(firstGitPositionalArgument(args) ?? "")
+  ) {
+    return "worktree isolation blocks rewriting shared reflogs"
+  }
+  if (subcommand === "maintenance" && firstGitPositionalArgument(args) === "run") {
+    return "worktree isolation blocks shared repository maintenance"
+  }
+  if (subcommand === "config" && !isReadOnlyGitConfigInvocation(args)) {
+    return "worktree isolation blocks modifying shared Git configuration"
+  }
+  if (subcommand === "remote" && !isReadOnlyGitRemoteInvocation(args)) {
+    return "worktree isolation blocks modifying shared Git remotes"
+  }
+  if (
+    (subcommand === "merge" || subcommand === "rebase") &&
+    !args.some((arg) => WORKTREE_GIT_IN_PROGRESS_RECOVERY_OPTIONS.has(arg.toLowerCase()))
+  ) {
+    return `worktree isolation leaves cross-branch integration to the workflow owner: git ${subcommand}`
+  }
+  if (subcommand === "switch") {
+    return "worktree isolation keeps the checkout on its assigned transient branch"
+  }
+  if (subcommand === "symbolic-ref") {
+    const positional = args.filter((arg) => !arg.startsWith("-"))
+    const hasWriteFlag = args.some((arg) => arg === "-d" || arg === "--delete")
+    const validFlags = args.every(
+      (arg) => !arg.startsWith("-") || ["-q", "--quiet", "--short", "--no-recurse"].includes(arg)
+    )
+    if (hasWriteFlag || !validFlags || positional.length !== 1) {
+      return "worktree isolation blocks modifying symbolic refs"
+    }
+  }
+  if (
+    subcommand === "stash" &&
+    (args.length === 0 || !["list", "show"].includes(args[0].toLowerCase()))
+  ) {
+    return "worktree isolation blocks modifying the shared stash"
+  }
+  if (subcommand === "worktree" && (args.length === 0 || args[0].toLowerCase() !== "list")) {
+    return "worktree isolation blocks creating, moving, or removing Git worktrees"
+  }
+  if (subcommand === "checkout") {
+    const separator = args.indexOf("--")
+    const branchFlags = new Set(["-b", "-B", "--detach", "--orphan", "--track"])
+    const positionals = args.filter((arg) => !arg.startsWith("-"))
+    const unambiguousCurrentTreePath =
+      separator < 0 &&
+      positionals.length === 1 &&
+      (positionals[0] === "." ||
+        positionals[0].startsWith("./") ||
+        positionals[0].startsWith(".\\"))
+    if (
+      (separator < 0 && !unambiguousCurrentTreePath) ||
+      separator === args.length - 1 ||
+      args.slice(0, separator).some((arg) => branchFlags.has(arg))
+    ) {
+      return "worktree isolation blocks switching or creating branches with git checkout"
+    }
+  }
+  if (
+    subcommand === "branch" &&
+    args.some((arg) =>
+      ["-d", "-D", "--delete", "-f", "--force", "-m", "-M", "--move"].includes(arg)
+    )
+  ) {
+    return "worktree isolation blocks deleting, force-moving, or renaming shared branches"
+  }
+  if (
+    subcommand === "tag" &&
+    args.some((arg) => ["-d", "--delete", "-f", "--force"].includes(arg))
+  ) {
+    return "worktree isolation blocks deleting or force-moving shared tags"
+  }
+  return null
+}
+
+/**
+ * Best-effort, platform-independent guard for common worktree mistakes. Like
+ * MiMo Code's isolated-git guard, this is not a shell security boundary: aliases,
+ * wrapper scripts, complex environment mutations and obscure plumbing can evade
+ * string-level inspection. It rejects direct cwd/Git metadata escapes with
+ * actionable diagnostics, while a
+ * configured OS sandbox remains optional defense in depth.
+ */
+export function getWorktreeShellIsolationViolation(
+  command: string,
+  cwd: string,
+  boundary: WorkflowWorktreeIsolationBoundary,
+  additionalExecutionRoots: readonly string[] = []
+): string | null {
+  const executionRoots = [boundary.workspaceRoot, ...additionalExecutionRoots]
+  if (!executionRoots.some((root) => isInsideWorktreeBoundary(cwd, root))) {
+    return "worktree isolation blocks shell execution outside the assigned workspace or enabled skill"
+  }
+  let effectiveCwd = cwd
+  const directoryStack: string[] = []
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = tokenizeCommand(segment)
+    if (!tokens) continue
+    const environmentMutationViolation = worktreeGitEnvironmentMutationViolation(tokens)
+    if (environmentMutationViolation) return environmentMutationViolation
+    const invocation = getExecutableInvocationTokens(tokens)
+    const executable = normalizeExecutable(invocation[0] || "")
+    if (executable === "popd") {
+      if (invocation.length !== 1 || directoryStack.length === 0) {
+        return "worktree isolation blocks an unverifiable popd"
+      }
+      effectiveCwd = directoryStack.pop()!
+      continue
+    }
+    if (executable === "cd" || executable === "pushd") {
+      const target = invocation[1] === "--" ? invocation[2] : invocation[1]
+      if (!target || target === "-") {
+        return "worktree isolation blocks an unverifiable shell directory change"
+      }
+      const nextCwd = resolveWorktreeCommandDirectory(effectiveCwd, target)
+      if (!executionRoots.some((root) => isInsideWorktreeBoundary(nextCwd, root))) {
+        return "worktree isolation blocks cd/pushd outside the assigned workspace or enabled skill"
+      }
+      if (executable === "pushd") directoryStack.push(effectiveCwd)
+      effectiveCwd = nextCwd
+      continue
+    }
+
+    const gitTokens = getGitInvocationTokens(tokens)
+    if (gitTokens) {
+      // getGitInvocationTokens deliberately removes shell/env prefixes to find
+      // the executable, so inspect redirection before that information is lost.
+      const environmentViolation = worktreeGitEnvironmentViolation(tokens)
+      if (environmentViolation) return environmentViolation
+      const gitViolation = inspectWorktreeGitInvocation(
+        gitTokens,
+        effectiveCwd,
+        executionRoots
+      )
+      if (gitViolation) return gitViolation
+    }
+  }
+  return null
+}
+
 export function normalizeCdPrefixedGitCommitCommand(
   command: string,
   cwd: string
@@ -1687,6 +2107,19 @@ function extractGitAddPathspecs(command: string): string[] | null {
     pathspecs.push(token)
   }
   return Array.from(new Set(pathspecs))
+}
+
+/** The broker stages the entire assigned scope. Accept only add forms whose
+ * normal Git meaning is already whole-scope, so a selective `git add file` is
+ * never silently widened. */
+export function isWholeScopeGitAddCommand(command: string): boolean {
+  if (!isGitAddCommand(command)) return false
+  const tokens = tokenizeCommand(command)
+  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+  const subcommand = findGitSubcommand(gitTokens ?? [])
+  if (!gitTokens || !subcommand || subcommand.index !== 1) return false
+  const args = gitTokens.slice(subcommand.index + 1)
+  return args.length === 1 && ["-A", "--all"].includes(args[0])
 }
 
 export function normalizeGitAddPrefixedGitCommitCommand(
@@ -2085,6 +2518,40 @@ export function isAmendOrFixupCommit(
     }
   }
   return false
+}
+
+/** Isolated commits are host-brokered, not raw Git. Only a single explicit
+ * message is faithfully representable; reject history edits, pathspecs and
+ * staging flags instead of silently turning them into a different commit. */
+export function isSimpleIsolatedGitCommitCommand(command: string): boolean {
+  if (isChainedShellCommand(command)) return false
+  const tokens = tokenizeCommand(command)
+  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
+  const subcommand = findGitSubcommand(gitTokens ?? [])
+  if (!gitTokens || !subcommand || subcommand.subcommand !== "commit" || subcommand.index !== 1) {
+    return false
+  }
+  const args = gitTokens.slice(subcommand.index + 1)
+  let messages = 0
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]
+    if (token === "-m" || token === "--message") {
+      if (!args[index + 1]) return false
+      messages += 1
+      index += 1
+      continue
+    }
+    if (token.startsWith("--message=") && token.length > "--message=".length) {
+      messages += 1
+      continue
+    }
+    if (/^-m.+/.test(token)) {
+      messages += 1
+      continue
+    }
+    return false
+  }
+  return messages === 1
 }
 
 export function derivePermanentApprovalPattern(command: string): string | null {

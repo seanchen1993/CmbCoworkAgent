@@ -106,9 +106,11 @@ import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
+import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
+import { ChatMessageCount } from "./ChatMessageCount"
 import {
   getSystemConstraintsLoadCounts,
   hasNoLoadedSystemConstraints,
@@ -162,6 +164,10 @@ import {
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import {
+  CHAT_AUTO_SCROLL_ALWAYS,
+  normalizeChatAutoScrollMessageLimit
+} from "../../../../shared/chat-scroll"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
@@ -1606,6 +1612,8 @@ export function ChatContainer({
   )
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
+  const chatScrollSettings = useAppStore((state) => state.chatScrollSettings)
+  const chatScrollLimitNoticeKeyRef = useRef<string | null>(null)
   const [glowVisible, setGlowVisible] = useState(false)
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
@@ -2748,6 +2756,11 @@ export function ChatContainer({
           suggestedCommitFilePaths?: string[]
           suggestedCommitFileBasePath?: string
           suggestedGitWorktreePath?: string
+          suggestedGitRepositories?: Array<{
+            path: string
+            displayPath: string
+            gitRoot: string
+          }>
           suggestedCommitFileSelectionSource?: "pathspec" | "staged"
         })
       | null
@@ -2963,6 +2976,23 @@ export function ChatContainer({
     return `${displayMessages.length}:${isLoading}:${lastTextLength}`
   }, [displayMessages, isLoading])
 
+  const chatAutoScrollTriggerKey = useMemo(() => {
+    const last = displayMessages[displayMessages.length - 1]
+    const lastTextLength = last ? getMessageText(last.content).length : 0
+    const lastReasoningLength =
+      last && typeof last.reasoning === "string" ? last.reasoning.length : 0
+    const lastToolCallCount = Array.isArray(last?.tool_calls) ? last.tool_calls.length : 0
+    return [
+      displayMessages.length,
+      isLoading ? 1 : 0,
+      last?.id ?? "",
+      lastTextLength,
+      lastReasoningLength,
+      lastToolCallCount,
+      queuedMessages.length
+    ].join(":")
+  }, [displayMessages, isLoading, queuedMessages.length])
+
   const detachedHookLogBuckets = useMemo(() => {
     const userMessageIds = new Set(
       displayMessages.filter((message) => message.role === "user").map((message) => message.id)
@@ -3123,6 +3153,43 @@ export function ChatContainer({
     if (!viewport) return
     viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
   }, [getViewport])
+
+  useEffect(() => {
+    if (historyLoading || pendingApproval || pendingUserInput) return
+
+    const configuredLimit = normalizeChatAutoScrollMessageLimit(
+      chatScrollSettings.autoScrollMessageLimit
+    )
+    if (
+      configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS &&
+      displayMessages.length > configuredLimit
+    ) {
+      const noticeKey = `${threadId}:${configuredLimit}`
+      if (chatScrollLimitNoticeKeyRef.current !== noticeKey) {
+        chatScrollLimitNoticeKeyRef.current = noticeKey
+        toast.warning(
+          `会话消息已超过 ${configuredLimit} 条，已暂停自动置底。可前往“自定义 / 基础功能 / 通用”调整自动置底消息数量。`
+        )
+      }
+      return
+    }
+
+    const viewport = getViewport()
+    if (!viewport) return
+    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+    if (bottomDistance <= 200) {
+      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    }
+  }, [
+    chatAutoScrollTriggerKey,
+    chatScrollSettings.autoScrollMessageLimit,
+    displayMessages.length,
+    getViewport,
+    historyLoading,
+    pendingApproval,
+    pendingUserInput,
+    threadId
+  ])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
@@ -5475,14 +5542,21 @@ export function ChatContainer({
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
         ? undefined
         : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
+    const preserveHarnessView = surface !== "default"
     setForkingMessageId(messageForkTarget.message.id)
     try {
-      await forkThread({
-        sourceThreadId: messageForkTarget.sourceThreadId,
-        checkpointId: messageForkTarget.checkpoint.checkpointId,
-        ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
-        overrides
-      })
+      const forkedThread = await forkThread(
+        {
+          sourceThreadId: messageForkTarget.sourceThreadId,
+          checkpointId: messageForkTarget.checkpoint.checkpointId,
+          ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
+          overrides
+        },
+        preserveHarnessView ? { preserveView: true } : undefined
+      )
+      if (preserveHarnessView) {
+        onHarnessSessionCreated?.(forkedThread.thread_id)
+      }
       toast.success("已从这条消息创建新会话")
       resetMessageForkDialog()
     } catch (error) {
@@ -5499,7 +5573,9 @@ export function ChatContainer({
     forkingMessageId,
     handleSelectForkWorkspace,
     messageForkTarget,
-    resetMessageForkDialog
+    onHarnessSessionCreated,
+    resetMessageForkDialog,
+    surface
   ])
 
   const handleEditGoal = useCallback((): void => {
@@ -6787,6 +6863,7 @@ export function ChatContainer({
                         suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
                         suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
                         suggestedGitWorktreePath={agentCommitApproval?.suggestedGitWorktreePath}
+                        suggestedGitRepositories={agentCommitApproval?.suggestedGitRepositories}
                         suggestedFileSelectionSource={
                           agentCommitApproval?.suggestedCommitFileSelectionSource
                         }
@@ -6798,6 +6875,7 @@ export function ChatContainer({
                   {/*chat container bottom panel */}
                   <div className={"flex items-center justify-between"}>
                     <div className={"flex items-center gap-2"}>
+                      <ChatMessageCount count={displayMessages.length} />
                       {yoloMode && (
                         <button
                           type="button"
@@ -6810,6 +6888,9 @@ export function ChatContainer({
                         </button>
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                      {(agentMode === "normal" || agentMode === "multi") && (
+                        <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
+                      )}
                       <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (

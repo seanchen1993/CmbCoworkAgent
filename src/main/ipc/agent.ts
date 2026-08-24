@@ -11,6 +11,11 @@ import {
   type PhysicalStreamRunSetupGuard
 } from "../agent/physical-stream-run-setup"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+import {
+  resolveThreadOutputStyle,
+  type AgentOutputStyle
+} from "../../shared/agent-output-style"
 import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
 import { getDurableRuntimeTail } from "./thread-runtime-tail"
 import { Command } from "@langchain/langgraph"
@@ -3004,6 +3009,10 @@ function shouldDisableNormalModeSubagents(
   metadata: Record<string, unknown>
 ): boolean {
   return agentMode === "normal" && metadata.subagentsEnabled === false
+}
+
+function getRequestedOutputStyle(metadata: Record<string, unknown>): AgentOutputStyle {
+  return resolveThreadOutputStyle(metadata)
 }
 
 function renderCoordinatorWorkerNotifications(
@@ -7055,7 +7064,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           configurable: { thread_id: threadId },
           signal: abortController.signal,
           streamMode: ["messages", "values"] as ("messages" | "values")[],
-          recursionLimit: 1000
+          recursionLimit: getAgentGraphRecursionLimit()
         }
 
         // ── Failover loop: try models in order, resume from checkpoint on retryable errors ──
@@ -7081,6 +7090,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             soloTaskTraceManager?.setModelId(candidateId)
             agent = await createAgentRuntime({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               modelId: candidateId,
@@ -7926,6 +7936,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           soloTaskTraceManager?.setModelId(nextCandidate)
           agent = await createAgentRuntime({
             threadId,
+            outputStyle: getRequestedOutputStyle(metadata),
             currentRunMessageQueueOwnerToken: runToken,
             workspacePath,
             modelId: nextCandidate,
@@ -8067,6 +8078,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             soloTaskTraceManager?.setModelId(nextCandidate)
             agent = await createAgentRuntime({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               modelId: nextCandidate,
@@ -9660,7 +9672,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           configurable: { thread_id: threadId },
           signal: abortController.signal,
           streamMode: ["messages", "values"] as ("messages" | "values")[],
-          recursionLimit: 1000
+          recursionLimit: getAgentGraphRecursionLimit()
         }
 
         // Resume from checkpoint by streaming with Command containing the decision
@@ -9698,6 +9710,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           try {
             const resumeAgent = await createAgentRuntime({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               modelId: candidateId,
@@ -9946,6 +9959,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const nextCandidate = resumeRemainingCandidates.shift()!
             const nextAgent = await createAgentRuntime({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               modelId: nextCandidate,
@@ -10735,7 +10749,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         configurable: { thread_id: threadId },
         signal: abortController.signal,
         streamMode: ["messages", "values"] as ("messages" | "values")[],
-        recursionLimit: 1000
+        recursionLimit: getAgentGraphRecursionLimit()
       }
 
       if (decision.type === "approve") {
@@ -10759,6 +10773,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           try {
             const intAgent = await createAgentRuntime({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               modelId: candidateId,
@@ -11000,6 +11015,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             const nextCandidate = intRemainingCandidates.shift()!
             const nextAgent = await createAgentRuntime({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               modelId: nextCandidate,

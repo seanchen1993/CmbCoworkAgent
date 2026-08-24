@@ -291,12 +291,14 @@ async function assertWorkspaceSwitchAllowed(
       ? workflowRunManager.findPendingNotification(currentPath, threadId)
       : null
   if (
-    workflowRunManager.isBusyForThread(
+    await workflowRunManager.isWorkspacePinnedForThread(
       threadId,
       typeof currentPath === "string" ? currentPath : undefined
     )
   ) {
-    throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换工作区。")
+    throw new Error(
+      "仍有动态工作流、待汇报结果或尚未处理的 worktree，请先完成 Merge/Discard/Cleanup 后再切换工作区。"
+    )
   }
   if (hasActiveAgentRun(threadId)) {
     throw new Error("当前线程仍有前台请求在执行，请等待该轮完成后再切换工作区。")
@@ -2953,7 +2955,11 @@ function createEmptyGitChangedFilesSummary(
 export async function buildGitPanelMetaState(
   threadId: string,
   context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>,
-  options?: { worktreePath?: string }
+  options?: {
+    worktreePath?: string
+    includeSummary?: boolean
+    includePushability?: boolean
+  }
 ): Promise<GitPanelMetaStatePayload> {
   if (!context.workspacePath) {
     return createEmptyGitPanelMetaState(threadId, { error: "未配置工作区" })
@@ -2965,33 +2971,35 @@ export async function buildGitPanelMetaState(
     })
   }
 
-  const repos = await getContextGitRepositories(context)
-  if (!options?.worktreePath && repos.length > 1) {
-    const summaries: Array<{ hasPendingDiff: boolean; changedFiles: number }> = new Array(
-      repos.length
-    )
-    await runWithConcurrency(
-      repos.map((repo, index) => ({ repo, index })),
-      GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
-      async ({ repo, index }) => {
-        summaries[index] = await getGitPanelSummaryQuick(repo.repoPath).catch(() => ({
-          hasPendingDiff: false,
-          changedFiles: 0
-        }))
+  if (!options?.worktreePath) {
+    const repos = await getContextGitRepositories(context)
+    if (repos.length > 1) {
+      const summaries: Array<{ hasPendingDiff: boolean; changedFiles: number }> = new Array(
+        repos.length
+      )
+      await runWithConcurrency(
+        repos.map((repo, index) => ({ repo, index })),
+        GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
+        async ({ repo, index }) => {
+          summaries[index] = await getGitPanelSummaryQuick(repo.repoPath).catch(() => ({
+            hasPendingDiff: false,
+            changedFiles: 0
+          }))
+        }
+      )
+      const changedFilesTotal = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
+      return {
+        success: true,
+        isWorktree: false,
+        isGitRepo: true,
+        taskId: threadId,
+        changedFilesTotal,
+        hasPendingDiff: changedFilesTotal > 0,
+        hasPushableCommit: false,
+        pendingCommits: [],
+        trackedFiles: getTrackedLlmFiles(context.metadata),
+        worktreeBranch: `${repos.length} 个仓库`
       }
-    )
-    const changedFilesTotal = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
-    return {
-      success: true,
-      isWorktree: false,
-      isGitRepo: true,
-      taskId: threadId,
-      changedFilesTotal,
-      hasPendingDiff: changedFilesTotal > 0,
-      hasPushableCommit: false,
-      pendingCommits: [],
-      trackedFiles: getTrackedLlmFiles(context.metadata),
-      worktreeBranch: `${repos.length} 个仓库`
     }
   }
 
@@ -3006,27 +3014,46 @@ export async function buildGitPanelMetaState(
   const workspacePath = target.worktreePath
   const tracked = getTrackedLlmFiles(context.metadata)
   const cacheKey = getCacheKeyForPath(workspacePath)
-  const summaryPromise = getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
-    getGitPanelSummaryQuick(workspacePath)
-  )
-  const branchPromise = options?.worktreePath
-    ? getCurrentBranchCached(workspacePath, { silent: true })
-    : context.worktreeBranch
-    ? Promise.resolve(context.worktreeBranch)
-    : getCurrentBranchCached(workspacePath, { silent: true })
+  const summaryPromise =
+    options?.includeSummary === false
+      ? Promise.resolve({ hasPendingDiff: false, changedFiles: 0 })
+      : getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
+          getGitPanelSummaryQuick(workspacePath)
+        )
+  const targetMatchesContext =
+    getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
+  const isWorktreePromise = targetMatchesContext
+    ? Promise.resolve(context.isWorktree)
+    : detectIsWorktreePath(workspacePath)
+  const branchPromise =
+    options?.worktreePath || !targetMatchesContext
+      ? getCurrentBranchCached(workspacePath, { silent: true })
+      : context.worktreeBranch
+        ? Promise.resolve(context.worktreeBranch)
+        : getCurrentBranchCached(workspacePath, { silent: true })
 
   const worktreeBranch = await branchPromise
-  const pushabilityPromise = worktreeBranch
-    ? getPushabilitySnapshot(workspacePath, worktreeBranch, context.worktreeBaseCommit, {
-      silent: true
-    })
-    : Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
+  const pushabilityPromise =
+    options?.includePushability === false
+      ? Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
+      : worktreeBranch
+        ? getPushabilitySnapshot(
+            workspacePath,
+            worktreeBranch,
+            targetMatchesContext ? context.worktreeBaseCommit : null,
+            { silent: true }
+          )
+        : Promise.resolve({ hasPushableCommit: false, pendingCommits: [] })
 
-  const [summary, pushability] = await Promise.all([summaryPromise, pushabilityPromise])
+  const [summary, pushability, isWorktree] = await Promise.all([
+    summaryPromise,
+    pushabilityPromise,
+    isWorktreePromise
+  ])
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     changedFilesTotal: summary.changedFiles,
@@ -3095,16 +3122,21 @@ async function buildGitChangedFilesSummary(
     })
   }
   const tracked = getTrackedLlmFiles(context.metadata)
-  const changedFileEntries = await getChangedFileEntriesForGitOps(target.worktreePath, tracked, {
-    silent: true,
-    includeAllWhenNoTracked: true,
-    combineMoves: false
-  })
+  const [changedFileEntries, isWorktree] = await Promise.all([
+    getChangedFileEntriesForGitOps(target.worktreePath, tracked, {
+      silent: true,
+      includeAllWhenNoTracked: true,
+      combineMoves: false
+    }),
+    getCacheKeyForPath(target.worktreePath) === getCacheKeyForPath(context.workspacePath)
+      ? Promise.resolve(context.isWorktree)
+      : detectIsWorktreePath(target.worktreePath)
+  ])
   const files = changedFileEntries.slice(0, GIT_PANEL_MAX_VISIBLE_FILES)
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     files,
@@ -3257,21 +3289,26 @@ export async function buildGitPanelDiffState(
   }
 
   const tracked = getTrackedLlmFiles(context.metadata)
-  const state = await buildGitPanelState(target.worktreePath, tracked, {
-    silent: true,
-    // Git Panel is a workspace review surface. llmModifiedFiles can seed commit
-    // attribution, but it must not hide user-created or manually edited files.
-    includeAllWhenNoTracked: true,
-    includeDiffs: options?.includeDiffs ?? true,
-    includeChangedFiles: options?.includeChangedFiles ?? true,
-    statusUntrackedMode: options?.statusUntrackedMode,
-    visibleFileLimit: options?.visibleFileLimit
-  })
+  const [state, isWorktree] = await Promise.all([
+    buildGitPanelState(target.worktreePath, tracked, {
+      silent: true,
+      // Git Panel is a workspace review surface. llmModifiedFiles can seed commit
+      // attribution, but it must not hide user-created or manually edited files.
+      includeAllWhenNoTracked: true,
+      includeDiffs: options?.includeDiffs ?? true,
+      includeChangedFiles: options?.includeChangedFiles ?? true,
+      statusUntrackedMode: options?.statusUntrackedMode,
+      visibleFileLimit: options?.visibleFileLimit
+    }),
+    getCacheKeyForPath(target.worktreePath) === getCacheKeyForPath(context.workspacePath)
+      ? Promise.resolve(context.isWorktree)
+      : detectIsWorktreePath(target.worktreePath)
+  ])
   const changedFilesTotal = state.changedFilesTotal
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     files: state.files,
@@ -3353,6 +3390,11 @@ export async function buildGitPanelFileDiffState(
     })
   }
 
+  const isWorktree =
+    getCacheKeyForPath(targetWorktreePath) === getCacheKeyForPath(context.workspacePath)
+      ? context.isWorktree
+      : await detectIsWorktreePath(targetWorktreePath)
+
   const diff = await buildGitPanelFileDiff(targetWorktreePath, requestedPath, {
     silent: true
   })
@@ -3360,7 +3402,7 @@ export async function buildGitPanelFileDiffState(
   if (!diff) {
     return {
       success: true,
-      isWorktree: context.isWorktree,
+      isWorktree,
       isGitRepo: true,
       taskId: threadId,
       file: {
@@ -3376,7 +3418,7 @@ export async function buildGitPanelFileDiffState(
 
   return {
     success: true,
-    isWorktree: context.isWorktree,
+    isWorktree,
     isGitRepo: true,
     taskId: threadId,
     file: {
@@ -3828,7 +3870,6 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       if (newPath) {
         const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
         if (!ready) return null
-
         metadata.workspacePath = newPath
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
@@ -4462,18 +4503,31 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "workspace:getGitPanelMeta",
-    async (_event, { threadId, options }: { threadId: string; options?: { worktreePath?: string } }) => {
-    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-    try {
-      context = await resolveThreadWorkspaceContext(threadId)
-      return await buildGitPanelMetaState(threadId, context, options)
-    } catch (e) {
-      return createEmptyGitPanelMetaState(threadId, {
-        isWorktree: Boolean(context?.isWorktree),
-        isGitRepo: Boolean(context?.isGitRepo),
-        error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
-      })
-    }
+    async (
+      _event,
+      {
+        threadId,
+        options
+      }: {
+        threadId: string
+        options?: {
+          worktreePath?: string
+          includeSummary?: boolean
+          includePushability?: boolean
+        }
+      }
+    ) => {
+      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+      try {
+        context = await resolveThreadWorkspaceContext(threadId)
+        return await buildGitPanelMetaState(threadId, context, options)
+      } catch (e) {
+        return createEmptyGitPanelMetaState(threadId, {
+          isWorktree: Boolean(context?.isWorktree),
+          isGitRepo: Boolean(context?.isGitRepo),
+          error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
+        })
+      }
     }
   )
 
@@ -4627,16 +4681,21 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       }
       const workspacePath = target.worktreePath
       const cacheKey = getCacheKeyForPath(workspacePath)
-      const { hasPendingDiff, changedFiles } = await getCachedPromise(
-        summaryCache,
-        cacheKey,
-        GIT_CONTEXT_CACHE_TTL_MS,
-        () => getGitPanelSummaryQuick(workspacePath)
-      )
+      const [{ hasPendingDiff, changedFiles }, isWorktree] = await Promise.all([
+        getCachedPromise(
+          summaryCache,
+          cacheKey,
+          GIT_CONTEXT_CACHE_TTL_MS,
+          () => getGitPanelSummaryQuick(workspacePath)
+        ),
+        getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
+          ? Promise.resolve(context.isWorktree)
+          : detectIsWorktreePath(workspacePath)
+      ])
       logGitStep(threadId, "summary", `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`)
       return {
         success: true,
-        isWorktree: context.isWorktree,
+        isWorktree,
         isGitRepo: true,
         hasPendingDiff,
         changedFiles

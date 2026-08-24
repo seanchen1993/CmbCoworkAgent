@@ -38,6 +38,18 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
+import {
+  configureAgentGraphRecursionLimit,
+  configureWorkflowWorktreeRemoveTimeoutMinutes,
+  configureWorkflowWorktreeTimeoutMinutes,
+  getAgentGraphRecursionLimit,
+  getWorkflowWorktreeRemoveTimeoutMinutes,
+  getWorkflowWorktreeTimeoutMinutes,
+  isAgentGraphRecursionLimit,
+  isWorkflowWorktreeRemoveTimeoutMinutes,
+  isWorkflowWorktreeTimeoutMinutes,
+  type AgentRuntimeSettings
+} from "../shared/agent-runtime-limits"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
@@ -46,6 +58,13 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
+const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
 const EVENT_CATEGORIES = new Set<EventCategory>([
@@ -243,6 +262,7 @@ import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
+import { registerManagedLinkHandlers } from "./ipc/managed-links"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
@@ -283,9 +303,17 @@ import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "
 import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
 import {
+  getChatScrollSettings,
   getOpenworkDir,
+  getStoredAgentGraphRecursionLimit,
+  getStoredWorkflowWorktreeRemoveTimeoutMinutes,
+  getStoredWorkflowWorktreeTimeoutMinutes,
   getWindowCloseBehavior,
   isKeepAwakeEnabled,
+  setChatScrollSettings,
+  setStoredAgentGraphRecursionLimit,
+  setStoredWorkflowWorktreeRemoveTimeoutMinutes,
+  setStoredWorkflowWorktreeTimeoutMinutes,
   setKeepAwakeEnabled,
   setWindowCloseBehavior
 } from "./storage"
@@ -460,6 +488,16 @@ function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBeha
     mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
   }
   return savedBehavior
+}
+
+function saveChatScrollSettings(
+  settings: Parameters<typeof setChatScrollSettings>[0]
+): ReturnType<typeof setChatScrollSettings> {
+  const savedSettings = setChatScrollSettings(settings)
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, savedSettings)
+  }
+  return savedSettings
 }
 
 function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
@@ -719,6 +757,12 @@ if (!gotTheLock) {
   })
 
   app.whenReady().then(async () => {
+    configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
+    configureWorkflowWorktreeTimeoutMinutes(getStoredWorkflowWorktreeTimeoutMinutes())
+    configureWorkflowWorktreeRemoveTimeoutMinutes(
+      getStoredWorkflowWorktreeRemoveTimeoutMinutes()
+    )
+
     // Set app user model id for windows
     if (process.platform === "win32") {
       app.setAppUserModelId("CMBDevClaw")
@@ -852,6 +896,7 @@ if (!gotTheLock) {
     registerAutoCommitHandlers(ipcMain)
     registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
+    registerManagedLinkHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
 
@@ -888,6 +933,115 @@ if (!gotTheLock) {
       }
       return saveWindowCloseBehavior(behavior)
     })
+
+    ipcMain.handle(CHAT_SCROLL_SETTINGS_GET_CHANNEL, (event) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Chat scroll settings are only available to the main window")
+      }
+      return getChatScrollSettings()
+    })
+
+    ipcMain.handle(CHAT_SCROLL_SETTINGS_SET_CHANNEL, (event, settings: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Chat scroll settings are only available to the main window")
+      }
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+        throw new Error("Invalid chat scroll settings")
+      }
+      return saveChatScrollSettings(settings as Parameters<typeof setChatScrollSettings>[0])
+    })
+
+    ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL, (event): AgentRuntimeSettings => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Agent runtime settings are only available to the main window")
+      }
+      return {
+        recursionLimit: getAgentGraphRecursionLimit(),
+        workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+        workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+      }
+    })
+
+    ipcMain.handle(
+      AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isAgentGraphRecursionLimit(value)) {
+          throw new Error("Agent graph recursion limit must be an integer between 25 and 100000")
+        }
+        const persisted = setStoredAgentGraphRecursionLimit(value)
+        return {
+          recursionLimit: configureAgentGraphRecursionLimit(persisted),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+        }
+      }
+    )
+
+    ipcMain.handle(
+      WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isWorkflowWorktreeTimeoutMinutes(value)) {
+          throw new Error("Workflow worktree timeout must be an integer between 1 and 120 minutes")
+        }
+        const persisted = setStoredWorkflowWorktreeTimeoutMinutes(value)
+        return {
+          recursionLimit: getAgentGraphRecursionLimit(),
+          workflowWorktreeTimeoutMinutes: configureWorkflowWorktreeTimeoutMinutes(persisted),
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+        }
+      }
+    )
+
+    ipcMain.handle(
+      WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isWorkflowWorktreeRemoveTimeoutMinutes(value)) {
+          throw new Error(
+            "Workflow worktree removal timeout must be an integer between 1 and 10 minutes"
+          )
+        }
+        const persisted = setStoredWorkflowWorktreeRemoveTimeoutMinutes(value)
+        return {
+          recursionLimit: getAgentGraphRecursionLimit(),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+          workflowWorktreeRemoveTimeoutMinutes:
+            configureWorkflowWorktreeRemoveTimeoutMinutes(persisted)
+        }
+      }
+    )
 
     ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return

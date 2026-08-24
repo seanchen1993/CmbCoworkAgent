@@ -49,6 +49,7 @@ import {
   commitWorkflowThreadDisposal,
   deleteWorkflowRunsForThread,
   isWorkflowThreadMarkedDisposed,
+  countUnresolvedWorkflowWorktrees,
   markWorkflowThreadDisposed,
   rollbackWorkflowThreadDisposal
 } from "../agent/workflow/run-store"
@@ -57,12 +58,18 @@ import {
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
+import { isAgentOutputStyle } from "../../shared/agent-output-style"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
 import {
   deleteProjectThreadDataDirectory,
   getProjectThreadDataDirectory
 } from "../agent/context-history-path"
 import { generateTitle } from "../services/title-generator"
+import {
+  finalizeWorkflowWorktreeRecord,
+  identifyRepository,
+  listWorkflowWorktreeRecordsForPrune
+} from "../services/git-worktree"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { getDefaultModel } from "./models"
@@ -225,20 +232,21 @@ async function assertCanPersistExplicitNormalMode(
   currentMetadata: Record<string, unknown>,
   nextMetadata: Record<string, unknown>
 ): Promise<void> {
-  // Block a workspace switch WHILE staying in workflow mode: run files live under
-  // the OLD workspace's .cmbdevclaw, but hydrate / completion notification / history
-  // all look runs up by the thread's CURRENT workspacePath — switching orphans an
-  // active or pending run. The leave guard below doesn't fire here (the mode is
-  // unchanged), so cover it explicitly with the same active/pending condition. (#2)
+  // Any workspace switch must keep the old workspace pinned while it owns an
+  // active/pending run or an unresolved retained worktree. This also covers a
+  // combined mode+workspace update without blocking a mode-only change.
   if (
-    currentMetadata.agentMode === "workflow" &&
-    nextMetadata.agentMode === "workflow" &&
     typeof currentMetadata.workspacePath === "string" &&
     typeof nextMetadata.workspacePath === "string" &&
     nextMetadata.workspacePath !== currentMetadata.workspacePath &&
-    workflowRunManager.isBusyForThread(threadId, currentMetadata.workspacePath)
+    (await workflowRunManager.isWorkspacePinnedForThread(
+      threadId,
+      currentMetadata.workspacePath
+    ))
   ) {
-    throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换工作目录。")
+    throw new Error(
+      "仍有动态工作流、待汇报结果或尚未处理的 worktree，请先完成 Merge/Discard/Cleanup 后再切换工作目录。"
+    )
   }
   // Leaving workflow mode (to ANY non-workflow mode — normal OR coordinator) must
   // be blocked while a run is active or its result is still pending, or the
@@ -726,6 +734,43 @@ function copyForkGitMetadataIfWorkspaceMatches(input: {
   if (gitContext) targetMetadata.gitContext = gitContext
 }
 
+function copyForkHarnessMetadata(input: {
+  sourceMetadata: Record<string, unknown>
+  targetMetadata: Record<string, unknown>
+}): void {
+  const { sourceMetadata, targetMetadata } = input
+  const harnessFeature = sourceMetadata.harnessFeature
+  const hasHarnessFeature =
+    isPlainRecord(harnessFeature) &&
+    typeof harnessFeature.projectId === "string" &&
+    harnessFeature.projectId.trim().length > 0 &&
+    typeof harnessFeature.slug === "string" &&
+    harnessFeature.slug.trim().length > 0
+
+  if (hasHarnessFeature) {
+    targetMetadata.harnessFeature = { ...harnessFeature }
+  }
+
+  const harnessProjectSession = sourceMetadata.harnessProjectSession
+  const hasHarnessProjectSession =
+    isPlainRecord(harnessProjectSession) &&
+    typeof harnessProjectSession.projectId === "string" &&
+    harnessProjectSession.projectId.trim().length > 0 &&
+    typeof harnessProjectSession.kind === "string" &&
+    harnessProjectSession.kind.trim().length > 0
+
+  if (hasHarnessProjectSession) {
+    targetMetadata.harnessProjectSession = { ...harnessProjectSession }
+  }
+
+  if (
+    (hasHarnessFeature || hasHarnessProjectSession) &&
+    typeof sourceMetadata.disableAgentsPrompt === "boolean"
+  ) {
+    targetMetadata.disableAgentsPrompt = sourceMetadata.disableAgentsPrompt
+  }
+}
+
 function isValidForkWorkspacePath(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0
 }
@@ -902,6 +947,7 @@ function buildForkMetadata(input: {
     workspacePath,
     hasWorkspacePathOverride
   })
+  copyForkHarnessMetadata({ sourceMetadata, targetMetadata: next })
 
   const model = overrides?.model ?? sourceMetadata.model
   if (typeof model === "string" && model.trim()) next.model = model
@@ -916,6 +962,11 @@ function buildForkMetadata(input: {
 
   const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
   if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
+
+  if (isAgentOutputStyle(sourceMetadata.outputStyle)) {
+    next.outputStyle = sourceMetadata.outputStyle
+  }
+  if (sourceMetadata.conciseModeEnabled === true) next.conciseModeEnabled = true
 
   const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
   next.title = nextTitle
@@ -2954,6 +3005,55 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         }
       }
       workspacePath = workspacePath ?? activeWorkspaceFallback
+      let unresolvedManifestWorktree = false
+      if (workspacePath) {
+        const repository = await identifyRepository(workspacePath)
+        if (repository) {
+          const manifestState = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
+          if (!manifestState.reliable) {
+            throw new Error(
+              "检测到损坏的 workflow worktree 记录；为保护可能残留的工作，任务未删除。请修复该工作区的 worktree 记录后重试。"
+            )
+          }
+          for (const record of manifestState.records) {
+            if (record.threadId !== threadId) continue
+            const terminal = record.status === "merged" || record.status === "discarded"
+            const alreadyCleaned = terminal && record.cleanupPending !== true && !existsSync(record.directory)
+            if (!alreadyCleaned) {
+              unresolvedManifestWorktree = true
+              break
+            }
+            // A process can crash after run.json has recorded terminal cleanup
+            // but before its small ownership tombstone is finalized. This is no
+            // longer user work; finish the idempotent CAS-protected finalizer
+            // before allowing the thread (and its recovery entry point) to go.
+            if (!(await finalizeWorkflowWorktreeRecord(record).catch(() => false))) {
+              unresolvedManifestWorktree = true
+              break
+            }
+          }
+        }
+      }
+      const unresolvedWorktreeCount =
+        (workspacePath ? countUnresolvedWorkflowWorktrees(workspacePath, threadId) : 0) +
+        workflowRunManager
+          .listFlushFailedRuns(threadId)
+          .reduce(
+            (count, run) =>
+              count +
+              (run.worktrees ?? []).filter(
+                (record) =>
+                  (record.status !== "merged" && record.status !== "discarded") ||
+                  record.cleanupPending === true ||
+                  existsSync(record.directory)
+              ).length,
+            0
+          )
+      if (unresolvedManifestWorktree || unresolvedWorktreeCount > 0) {
+        throw new Error(
+          "该任务仍有未处理或待清理的 workflow worktree；请先在运行历史中合并、丢弃或按错误提示完成手工清理，再删除任务。"
+        )
+      }
       const hookChannel = `agent:stream:${threadId}`
       await fireSessionEnd(
         threadId,

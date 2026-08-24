@@ -7,6 +7,8 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { ChatScrollSettings } from "../shared/chat-scroll"
+import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 import type {
   Thread,
   Message,
@@ -114,6 +116,10 @@ import type {
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
+import type {
+  WorkflowWorktreeAction,
+  WorkflowWorktreeActionResponse
+} from "../main/ipc/workflow-worktree-payload"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
@@ -174,6 +180,13 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
+const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
@@ -199,6 +212,8 @@ function notifyForAgentStreamEvent(event: unknown, threadId?: string): void {
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") =>
+    ipcRenderer.invoke("managed-links:open", id) as Promise<void>,
   openLoginWindow: () => ipcRenderer.invoke("open-login-window"),
   closeLoginWindow: () => ipcRenderer.invoke("close-login-window"),
   openLoginPage: () => ipcRenderer.invoke("open-login-page"),
@@ -232,6 +247,35 @@ const electronAPI = {
     ipcRenderer.on(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
     return () => ipcRenderer.removeListener(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
   },
+  getChatScrollSettings: (): Promise<ChatScrollSettings> =>
+    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_GET_CHANNEL) as Promise<ChatScrollSettings>,
+  setChatScrollSettings: (settings: Partial<ChatScrollSettings>): Promise<ChatScrollSettings> =>
+    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_SET_CHANNEL, settings) as Promise<ChatScrollSettings>,
+  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => {
+    const handler = (_event: unknown, settings: unknown): void => {
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) return
+      callback(settings as ChatScrollSettings)
+    }
+    ipcRenderer.on(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
+  },
+  getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(AGENT_RUNTIME_SETTINGS_GET_CHANNEL) as Promise<AgentRuntimeSettings>,
+  setAgentRuntimeRecursionLimit: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
+  setWorkflowWorktreeTimeoutMinutes: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
+  setWorkflowWorktreeRemoveTimeoutMinutes: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
       callback(data)
@@ -593,6 +637,19 @@ const api = {
     },
     cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
       return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
+    },
+    worktreeAction: (
+      threadId: string,
+      runId: string,
+      worktreeId: string,
+      action: WorkflowWorktreeAction
+    ): Promise<WorkflowWorktreeActionResponse> => {
+      return ipcRenderer.invoke("workflow:worktree-action", {
+        threadId,
+        runId,
+        worktreeId,
+        action
+      }) as Promise<WorkflowWorktreeActionResponse>
     },
     setAgentStreamInterest: (
       threadId: string,
@@ -1306,7 +1363,11 @@ const api = {
     },
     getGitPanelMeta: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: {
+        worktreePath?: string
+        includeSummary?: boolean
+        includePushability?: boolean
+      }
     ): Promise<{
       success: boolean
       isWorktree: boolean
