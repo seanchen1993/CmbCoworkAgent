@@ -30,7 +30,7 @@ import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./ty
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
 import { normalizeChatScrollSettings, type ChatScrollSettings } from "../shared/chat-scroll"
-import { readdir, rm, mkdir, readFile, writeFile  } from "fs/promises"
+import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
 import {
   isAgentGraphRecursionLimit,
   isWorkflowWorktreeRemoveTimeoutMinutes,
@@ -39,7 +39,6 @@ import {
   normalizeWorkflowWorktreeRemoveTimeoutMinutes,
   normalizeWorkflowWorktreeTimeoutMinutes
 } from "../shared/agent-runtime-limits"
-import { readdir, rm, mkdir } from "fs/promises"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type {

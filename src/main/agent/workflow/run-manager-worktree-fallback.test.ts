@@ -53,16 +53,15 @@ describe("isolated worktree provisioning failure", () => {
   })
 
   test("never starts the subagent in the shared workspace", async () => {
-    const dirtyPath = join(repo, "uncommitted-user-work.txt")
     const escapedMarker = join(repo, "SHARED-WORKSPACE-FALLBACK.txt")
     const script = `export const meta = { name: "no-shared-fallback", description: "d" }
 const result = await agent("create SHARED-WORKSPACE-FALLBACK.txt", { isolation: "worktree" })
 return result === null ? "PROVISIONING_BLOCKED" : "UNEXPECTED_AGENT_RESULT"`
     let runtimeStarts = 0
 
-    // This change is intentionally absent from HEAD. A worktree created from
-    // HEAD would silently omit it, so provisioning must fail closed.
-    writeFileSync(dirtyPath, "user work that is not in HEAD\n")
+    // Detached source checkouts cannot supply the managed source branch. This
+    // provisioning failure must return null, never retry in the shared checkout.
+    git(repo, ["checkout", "--detach"])
 
     const launch = workflowRunManager.launch({
       threadId,
@@ -91,7 +90,7 @@ return result === null ? "PROVISIONING_BLOCKED" : "UNEXPECTED_AGENT_RESULT"`
     const persisted = loadWorkflowRun(repo, threadId, runId)
     expect(persisted?.status).toBe("completed")
     expect(persisted?.result).toBe("PROVISIONING_BLOCKED")
-    expect(persisted?.agents[0]?.error).toContain("clean assigned workspace")
+    expect(persisted?.agents[0]?.error).toContain("attached to a branch")
     expect(runtimeStarts).toBe(0)
     expect(existsSync(escapedMarker)).toBe(false)
     expect(

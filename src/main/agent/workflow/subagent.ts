@@ -396,7 +396,7 @@ async function runOnce(
       ? `${request.roleSystemPrompt}\n\n${baseExtraPrompt}`
       : baseExtraPrompt
     const extraSystemPrompt = request.worktreeIsolation
-      ? `${rolePrompt}\n\nYou are running in an isolated Git worktree at \`${request.worktreeIsolation.workspaceRoot}\` on branch \`${request.worktreeIsolation.branch}\`, separate from the source working directory and other agents. Work normally; the checkout is removed if unchanged or preserved for review if changed. Commit deliverable changes with \`git commit -m "..."\` and do not push the transient branch.`
+      ? `${rolePrompt}\n\nYou are running in an isolated Git worktree at \`${request.worktreeIsolation.workspaceRoot}\` on branch \`${request.worktreeIsolation.branch}\`, separate from the source working directory and other agents. It starts from the frozen committed source HEAD; staged, unstaged, and untracked changes in the source checkout are not present. For this isolated worktree, these native Git instructions override the ordinary task-card commit workflow. Work normally with native Git: use \`git add\` and \`git commit\` to commit exactly the changes you intend to deliver, and leave the worktree clean. Do not switch to or modify another existing branch, and do not merge back into the source branch yourself. Do not push unless the task explicitly requires publishing this transient branch and the user approves it. The checkout is removed if unchanged or preserved for review if changed.`
       : rolePrompt
 
     const { runtime, modelFellBack } = await createRuntimeWithModelFallback(deps, {

@@ -536,7 +536,10 @@ return "done"`
   workflowRunManager.getFlushFailedRun = ((candidateRunId) =>
     candidateRunId === runId
       ? recoveredSnapshot
-      : originalGetFlushFailedRun.call(workflowRunManager, candidateRunId)) as typeof workflowRunManager.getFlushFailedRun
+      : originalGetFlushFailedRun.call(
+          workflowRunManager,
+          candidateRunId
+        )) as typeof workflowRunManager.getFlushFailedRun
   const workflowTool = createWorkflowTool({
     threadId,
     workspacePath: workspace,
@@ -578,8 +581,7 @@ return "done"`
     workflowRunManager.getFlushFailedRun = originalGetFlushFailedRun
   }
   assert(
-    launchedWorktrees?.[0]?.status === "merged" &&
-      launchedWorktrees[0].cleanupPending === false,
+    launchedWorktrees?.[0]?.status === "merged" && launchedWorktrees[0].cleanupPending === false,
     "resume launch must inherit the flush-failed terminal record, never resurrect stale disk state"
   )
 }
@@ -613,7 +615,10 @@ return "done"`
     updatedAt: now,
     endedAt: now
   }
-  assert(await persistRecoveredRun(workspace, threadId, diskRun), "disk resume fixture should persist")
+  assert(
+    await persistRecoveredRun(workspace, threadId, diskRun),
+    "disk resume fixture should persist"
+  )
 
   const snapshot: PersistedWorkflowRun = {
     ...diskRun,
@@ -635,7 +640,10 @@ return "done"`
   workflowRunManager.getFlushFailedRun = ((candidateRunId) =>
     candidateRunId === runId
       ? snapshot
-      : originalGetFlushFailedRun.call(workflowRunManager, candidateRunId)) as typeof workflowRunManager.getFlushFailedRun
+      : originalGetFlushFailedRun.call(
+          workflowRunManager,
+          candidateRunId
+        )) as typeof workflowRunManager.getFlushFailedRun
   const workflowTool = createWorkflowTool({
     threadId,
     workspacePath: workspace,
@@ -2016,7 +2024,10 @@ async function testPersistRecoveredRunUpdatesBackup(workspace: string): Promise<
     startedAt: now,
     updatedAt: now
   }
-  assert(await persistRecoveredRun(workspace, threadId, original), "original recovery state persists")
+  assert(
+    await persistRecoveredRun(workspace, threadId, original),
+    "original recovery state persists"
+  )
   const latest: PersistedWorkflowRun = {
     ...original,
     result: "latest terminal state",
@@ -4688,9 +4699,12 @@ async function testWorktreeSubagentPromptAndBoundaryPropagation(): Promise<void>
       runtimeCalls[0]?.extraSystemPrompt.includes(boundary.branch) &&
       runtimeCalls[0]?.extraSystemPrompt.includes("separate from the source working directory") &&
       runtimeCalls[0]?.extraSystemPrompt.includes("preserved for review if changed") &&
-      runtimeCalls[0]?.extraSystemPrompt.includes('git commit -m "..."') &&
-      runtimeCalls[0]?.extraSystemPrompt.includes("do not push"),
-    "isolated subagent prompt keeps the short CC reminder plus CmbCowork's commit boundary"
+      runtimeCalls[0]?.extraSystemPrompt.includes(
+        "these native Git instructions override the ordinary task-card commit workflow"
+      ) &&
+      runtimeCalls[0]?.extraSystemPrompt.includes("use `git add` and `git commit`") &&
+      runtimeCalls[0]?.extraSystemPrompt.includes("Do not push"),
+    "isolated subagent prompt keeps the short reminder plus native Git boundaries"
   )
   assert(
     !runtimeCalls[1]?.extraSystemPrompt.includes("running in an isolated Git worktree"),

@@ -277,6 +277,29 @@ function tomlBasicString(value: string): string {
     .replace(/\r/g, "\\r")}"`
 }
 
+const WORKTREE_INTERNAL_EXCLUDES_FILE_NAME = ".cmb-internal-excludes"
+const WORKTREE_INTERNAL_EXCLUDES_ENV = "CMB_WORKTREE_GIT_EXCLUDES_FILE"
+
+function gitConfigEnvironmentPreamble(
+  shellBase: string,
+  entries: ReadonlyArray<readonly [string, string]>
+): string {
+  const variables: Array<readonly [string, string]> = [
+    ["GIT_CONFIG_COUNT", String(entries.length)],
+    ...entries.flatMap(([key, value], index) => [
+      [`GIT_CONFIG_KEY_${index}`, key] as const,
+      [`GIT_CONFIG_VALUE_${index}`, value] as const
+    ])
+  ]
+  if (shellBase === "cmd") {
+    return variables.map(([key, value]) => `set "${key}=${cmdSetLiteral(value)}"`).join(" & ")
+  }
+  if (shellBase === "pwsh" || shellBase === "powershell") {
+    return variables.map(([key, value]) => `$env:${key}=${powershellSingleQuote(value)}`).join("; ")
+  }
+  return ""
+}
+
 /**
  * Options for LocalSandbox configuration.
  */
@@ -1322,10 +1345,16 @@ export class LocalSandbox
     //     repo is owned by the host user, which trips git's "dubious ownership" check on every
     //     command. Trusting all paths inside the sandbox shell is safe — Codex's sandbox token
     //     already restricts what the user can read/write at the OS level.
-    const gitSslCmd =
-      'set "GIT_CONFIG_COUNT=2" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl" & set "GIT_CONFIG_KEY_1=safe.directory" & set "GIT_CONFIG_VALUE_1=*"'
-    const gitSslPs =
-      "$env:GIT_CONFIG_COUNT='2'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'; $env:GIT_CONFIG_KEY_1='safe.directory'; $env:GIT_CONFIG_VALUE_1='*'"
+    const gitConfigEntries: Array<readonly [string, string]> = [
+      ["http.sslBackend", "openssl"],
+      ["safe.directory", "*"]
+    ]
+    const worktreeExcludesFile = hostEnv?.[WORKTREE_INTERNAL_EXCLUDES_ENV]
+    if (worktreeExcludesFile) {
+      gitConfigEntries.push(["core.excludesFile", worktreeExcludesFile])
+    }
+    const gitSslCmd = gitConfigEnvironmentPreamble("cmd", gitConfigEntries)
+    const gitSslPs = gitConfigEnvironmentPreamble("powershell", gitConfigEntries)
 
     // The elevated sandbox runs as CodexSandboxOnline whose registry PATH only has System32.
     // codex.exe's CreateProcessAsUser loads that minimal PATH — the main-process PATH (with
@@ -1754,10 +1783,20 @@ export class LocalSandbox
       ? withoutGitRepositoryOverrides(inheritedEnv)
       : inheritedEnv
     if (options.worktreeIsolation) {
-      // Read-only Git inspection must not try to refresh the linked index. All
-      // intentional add/commit mutations are intercepted by the host broker.
+      // Keep read-only Git inspection from refreshing the linked index, while
+      // native add/commit still take the mandatory locks they need. The private
+      // excludes file hides only untracked Cmb runtime support; Git continues to
+      // stage already-tracked `.cmbdevclaw` files normally.
+      const internalExcludesFile = path.join(
+        path.dirname(options.worktreeIsolation.worktreeRoot),
+        WORKTREE_INTERNAL_EXCLUDES_FILE_NAME
+      )
       baseEnv.GIT_OPTIONAL_LOCKS = "0"
       baseEnv.GIT_TERMINAL_PROMPT = "0"
+      baseEnv.GIT_CONFIG_COUNT = "1"
+      baseEnv.GIT_CONFIG_KEY_0 = "core.excludesFile"
+      baseEnv.GIT_CONFIG_VALUE_0 = internalExcludesFile
+      baseEnv[WORKTREE_INTERNAL_EXCLUDES_ENV] = internalExcludesFile
     }
     baseEnv.SESSION_ID = this.runId
     const systemId = options.systemId?.trim()
@@ -5196,7 +5235,10 @@ export class LocalSandbox
       sandboxMode === "none"
         ? await LocalSandbox.resolveShell()
         : (await LocalSandbox.resolveWindowsSandboxShell()).shell
-    const shellBase = path.basename(shell).replace(/\.exe$/i, "").toLowerCase()
+    const shellBase = path
+      .basename(shell)
+      .replace(/\.exe$/i, "")
+      .toLowerCase()
     if (["bash", "sh", "zsh", "fish"].includes(shellBase)) return "posix"
     return ["pwsh", "powershell"].includes(shellBase) ? "powershell" : "cmd"
   }
@@ -6019,6 +6061,7 @@ export class LocalSandbox
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
       enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      nativeGitWorktree: Boolean(this.worktreeIsolation),
       shellSyntax
     })
     if (safety.level === "forbidden") {
@@ -6066,10 +6109,10 @@ export class LocalSandbox
       return result.output || (result.exitCode === 0 ? "操作成功" : "操作失败")
     }
 
-    // Worktree Git mutations are deliberately foreground-only. They are short,
-    // explicit state transitions and already have a guarded foreground broker;
-    // adding a second asynchronous broker would expand the lifecycle surface for
-    // no workflow benefit. Long-running builds/tests remain background-capable.
+    // Worktree Git mutations are deliberately foreground-only. Native Git may
+    // update the linked index/branch immediately before the agent settles; keeping
+    // those transitions attached to the tool call prevents lifecycle inspection
+    // from racing a detached add/commit/push. Long builds/tests remain background-capable.
     if (
       this.worktreeIsolation &&
       (containsGitAddCommand(effectiveCommand) || isGitCommitCommand(effectiveCommand))
@@ -6077,7 +6120,7 @@ export class LocalSandbox
       return "Command forbidden: isolated worktree Git staging and commits must run in the foreground; retry without run_in_background"
     }
     if (this.worktreeIsolation && isGitPushCommand(effectiveCommand)) {
-      return "Command forbidden: direct push from an isolated workflow worktree is blocked"
+      return "Command forbidden: isolated worktree pushes must run in the foreground for explicit approval"
     }
 
     const taskId = randomUUID().slice(0, 8)
@@ -6385,6 +6428,7 @@ export class LocalSandbox
       windowsShell:
         process.platform === "win32" && this.windowsSandbox !== "none" ? "powershell" : "unknown",
       enforceGitWorkflowCommitOnly: this.enforceGitWorkflowCommitOnly,
+      nativeGitWorktree: Boolean(this.worktreeIsolation),
       shellSyntax
     })
     if (safety.level === "forbidden") {
@@ -6615,8 +6659,7 @@ export class LocalSandbox
           isGitPushCommand(command, outsideShellSyntax)
         ) {
           return {
-            output:
-              `Command forbidden after project-hook shell change: ${outsideSafety.reason || "Git submit commands must use the orchestrated workflow"}`,
+            output: `Command forbidden after project-hook shell change: ${outsideSafety.reason || "Git submit commands must use the orchestrated workflow"}`,
             exitCode: 1,
             truncated: false
           }
@@ -6841,6 +6884,23 @@ export class LocalSandbox
       effectiveMode,
       sandboxCacheRoots
     )
+    const runScopedWritableRootKeys = new Set<string>()
+    if (
+      this.worktreeIsolation &&
+      (effectiveMode === "elevated" || effectiveMode === "unelevated")
+    ) {
+      // Linked-worktree Git writes its index/object/ref administration under the
+      // repository commonDir, outside the checkout directory. Native add/commit
+      // therefore need this Git-only root writable; the source working tree itself
+      // is not added and remains outside the OS sandbox's writable roots.
+      const commonDir = path.win32.normalize(this.worktreeIsolation.commonDir)
+      executionPlan.writableRoots.push(commonDir)
+      // Unlike app-owned package caches, a user's shared Git directory must not
+      // retain an Everyone:Modify ACE after this workflow agent exits. Existing
+      // run-level ACL reference counting keeps concurrent agents working and
+      // revokes the grant after the final owner finishes.
+      runScopedWritableRootKeys.add(normalizeDirKey(commonDir))
+    }
     executionPlan.writableRoots = Array.from(
       new Set(executionPlan.writableRoots.map((dir) => path.win32.normalize(dir)))
     )
@@ -6929,11 +6989,23 @@ export class LocalSandbox
     // SEC_E_NO_CREDENTIALS even for public HTTPS repos. OpenSSL does not use the Windows
     // Security API and works correctly under restricted tokens.
     // GIT_CONFIG_COUNT/KEY/VALUE injects git config for this invocation only (git ≥ 2.31).
+    const sandboxGitConfigEntries: Array<readonly [string, string]> = [
+      ["http.sslBackend", "openssl"],
+      ["safe.directory", "*"]
+    ]
+    const worktreeExcludesFile = this.env[WORKTREE_INTERNAL_EXCLUDES_ENV]
+    if (worktreeExcludesFile) {
+      sandboxGitConfigEntries.push(["core.excludesFile", worktreeExcludesFile])
+    }
+    const sandboxGitConfigPreamble = gitConfigEnvironmentPreamble(
+      shellBase,
+      sandboxGitConfigEntries
+    )
     const clearProxyPreamble =
       !isElevatedSandbox && effectiveMode !== "none"
         ? shellBase === "cmd"
-          ? 'set "HTTP_PROXY=" & set "HTTPS_PROXY=" & set "ALL_PROXY=" & set "GIT_HTTP_PROXY=" & set "GIT_HTTPS_PROXY=" & set "GIT_SSH_COMMAND=" & set "GIT_ALLOW_PROTOCOLS=" & set "PIP_NO_INDEX=" & set "NPM_CONFIG_OFFLINE=" & set "CARGO_NET_OFFLINE=" & set "SBX_NONET_ACTIVE=" & set "GIT_CONFIG_COUNT=2" & set "GIT_CONFIG_KEY_0=http.sslBackend" & set "GIT_CONFIG_VALUE_0=openssl" & set "GIT_CONFIG_KEY_1=safe.directory" & set "GIT_CONFIG_VALUE_1=*"'
-          : "$env:HTTP_PROXY=$null; $env:HTTPS_PROXY=$null; $env:ALL_PROXY=$null; $env:GIT_HTTP_PROXY=$null; $env:GIT_HTTPS_PROXY=$null; $env:GIT_SSH_COMMAND=$null; $env:GIT_ALLOW_PROTOCOLS=$null; $env:PIP_NO_INDEX=$null; $env:NPM_CONFIG_OFFLINE=$null; $env:CARGO_NET_OFFLINE=$null; $env:SBX_NONET_ACTIVE=$null; $env:GIT_CONFIG_COUNT='2'; $env:GIT_CONFIG_KEY_0='http.sslBackend'; $env:GIT_CONFIG_VALUE_0='openssl'; $env:GIT_CONFIG_KEY_1='safe.directory'; $env:GIT_CONFIG_VALUE_1='*'"
+          ? `set "HTTP_PROXY=" & set "HTTPS_PROXY=" & set "ALL_PROXY=" & set "GIT_HTTP_PROXY=" & set "GIT_HTTPS_PROXY=" & set "GIT_SSH_COMMAND=" & set "GIT_ALLOW_PROTOCOLS=" & set "PIP_NO_INDEX=" & set "NPM_CONFIG_OFFLINE=" & set "CARGO_NET_OFFLINE=" & set "SBX_NONET_ACTIVE=" & ${sandboxGitConfigPreamble}`
+          : `$env:HTTP_PROXY=$null; $env:HTTPS_PROXY=$null; $env:ALL_PROXY=$null; $env:GIT_HTTP_PROXY=$null; $env:GIT_HTTPS_PROXY=$null; $env:GIT_SSH_COMMAND=$null; $env:GIT_ALLOW_PROTOCOLS=$null; $env:PIP_NO_INDEX=$null; $env:NPM_CONFIG_OFFLINE=$null; $env:CARGO_NET_OFFLINE=$null; $env:SBX_NONET_ACTIVE=$null; ${sandboxGitConfigPreamble}`
         : ""
     // Unelevated sandbox: set shared tool env vars to the persistent writable cache root.
     const unelevatedJvmPreamble =
@@ -7062,11 +7134,13 @@ export class LocalSandbox
         new Set([...sandboxCacheDirs, ...executionPlan.writableRoots])
       )) {
         const cacheKey = normalizeDirKey(cachePath)
-        let permanentAcl = true
-        try {
-          permanentAcl = (await fs.stat(cachePath)).isDirectory()
-        } catch {
-          permanentAcl = true
+        let permanentAcl = !runScopedWritableRootKeys.has(cacheKey)
+        if (permanentAcl) {
+          try {
+            permanentAcl = (await fs.stat(cachePath)).isDirectory()
+          } catch {
+            permanentAcl = true
+          }
         }
         if (!permanentAcl || !LocalSandbox._permanentAclDirs.has(cacheKey)) {
           aclDirs.push(cachePath)

@@ -47,11 +47,6 @@ import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
-import {
-  assertWorkflowWorktreeGitOperationTarget,
-  commitWorkflowWorktree,
-  stageWorkflowWorktree
-} from "../services/git-worktree"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
 import type {
@@ -65,7 +60,10 @@ import {
   calculateSummarizationKeepTokens,
   calculateSummarizationTriggerTokens
 } from "../../shared/model-token-budget"
-import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+import {
+  getAgentGraphRecursionLimit,
+  getWorkflowWorktreeTimeoutMs
+} from "../../shared/agent-runtime-limits"
 import {
   DEFAULT_AGENT_OUTPUT_STYLE,
   resolveAgentOutputStyle,
@@ -3845,10 +3843,7 @@ async function applyWorkerPromptSubmitHooks({
   workspacePath: string
   onHookResult?: HookResultCallback
   metadata?: Record<string, unknown>
-  isolatedHookContext?: Pick<
-    HookContext,
-    "workspaceHookCwd" | "forceSyncWorkspaceHooks"
-  >
+  isolatedHookContext?: Pick<HookContext, "workspaceHookCwd" | "forceSyncWorkspaceHooks">
 }): Promise<string> {
   let effectivePrompt = prompt
   const promptSubmitResult = await runHooksEnriched(
@@ -3923,10 +3918,7 @@ async function runWorkerStopHooksWithRevision({
   sendNotice: (message: string) => void
   sendError: (message: string) => void
   onHookResult?: HookResultCallback
-  isolatedHookContext?: Pick<
-    HookContext,
-    "workspaceHookCwd" | "forceSyncWorkspaceHooks"
-  >
+  isolatedHookContext?: Pick<HookContext, "workspaceHookCwd" | "forceSyncWorkspaceHooks">
 }): Promise<boolean> {
   let revisionCount = 0
   while (!abortSignal.aborted) {
@@ -4589,7 +4581,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentId,
     worktreeIsolation: options.worktreeIsolation,
     virtualMode: false,
-    timeout: 60_000,
+    // Native Git in an isolated worktree runs through the normal shell path.
+    // Reuse the existing worktree operation timeout so large adds, filters and
+    // repository hooks do not regress to the ordinary agent's 60-second limit.
+    timeout: options.worktreeIsolation ? getWorkflowWorktreeTimeoutMs() : 60_000,
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
@@ -4795,29 +4790,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     yoloMode,
     options.autoApproveFileEdits === true,
     !options.worktreeIsolation,
-    options.worktreeIsolation
-      ? async (operation, message, cwd) => {
-          const boundary = options.worktreeIsolation!
-          try {
-            await assertWorkflowWorktreeGitOperationTarget(boundary, cwd)
-            const output =
-              operation === "stage"
-                ? await stageWorkflowWorktree(boundary, options.abortSignal)
-                : await commitWorkflowWorktree(boundary, message ?? "", options.abortSignal)
-            return {
-              output: output || "isolated worktree changes staged",
-              exitCode: 0,
-              truncated: false
-            }
-          } catch (error) {
-            return {
-              output: error instanceof Error ? error.message : String(error),
-              exitCode: 1,
-              truncated: false
-            }
-          }
-        }
-      : undefined,
     workspacePath
   )
   backend.setOrchestrator(orchestrator)

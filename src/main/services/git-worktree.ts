@@ -155,6 +155,39 @@ function gitFailure(result: GitResult, fallback: string): string {
   return result.stderr.trim() || result.stdout.trim() || fallback
 }
 
+async function writeWorkflowWorktreeExcludesFile(
+  repoRoot: string,
+  targetPath: string,
+  signal?: AbortSignal
+): Promise<void> {
+  // core.excludesFile is a single-value setting. Pointing Git straight at
+  // Cmb's private file would replace the user's effective global/repository
+  // excludes and make `git add -A` stage files Git normally ignores. Snapshot
+  // that effective file first, then append only the Cmb-owned support pattern.
+  const configured = await git(
+    repoRoot,
+    ["config", "--path", "--get", "core.excludesFile"],
+    GIT_QUERY_TIMEOUT_MS,
+    signal
+  )
+  let inherited = Buffer.alloc(0)
+  const configuredPath = configured.code === 0 ? configured.stdout.trim() : ""
+  if (configuredPath) {
+    // `git config --path` expands `~`, but intentionally leaves relative values
+    // relative. Git invoked with `-C repoRoot` resolves those from the repository;
+    // Node would otherwise resolve them from Electron's unrelated process cwd.
+    const resolvedPath = path.isAbsolute(configuredPath)
+      ? configuredPath
+      : path.resolve(repoRoot, configuredPath)
+    inherited = await fs.readFile(resolvedPath).catch(() => Buffer.alloc(0))
+  }
+  const separator = inherited.length > 0 && inherited[inherited.length - 1] !== 0x0a ? "\n" : ""
+  await fs.writeFile(
+    targetPath,
+    Buffer.concat([inherited, Buffer.from(`${separator}${WORKTREE_INTERNAL_EXCLUDES}`, "utf8")])
+  )
+}
+
 function isConfirmedMergeTreeConflict(result: GitResult): boolean {
   if (result.infrastructureFailure || result.code !== 1) return false
   return /(?:^|\n)CONFLICT \(/.test(`${result.stdout}\n${result.stderr}`)
@@ -224,7 +257,7 @@ function isGitPathInsideScope(gitPath: string, sourceRelativePath: string): bool
   return !scope || candidate === scope || candidate.startsWith(`${scope}/`)
 }
 
-async function assertDeliverablePathsInScope(
+export async function assertWorkflowWorktreeDeliverablePathsInScope(
   directory: string,
   baseCommit: string,
   headCommit: string,
@@ -240,6 +273,24 @@ async function assertDeliverablePathsInScope(
     signal
   )
   assertGitPathsInScope(changedPaths, sourceRelativePath)
+}
+
+export async function assertWorkflowWorktreeDeliverableDescendsFromBase(
+  directory: string,
+  baseCommit: string,
+  headCommit: string,
+  timeoutMs = GIT_QUERY_TIMEOUT_MS,
+  signal?: AbortSignal
+): Promise<void> {
+  const basedOnSource = await git(
+    directory,
+    ["merge-base", "--is-ancestor", baseCommit, headCommit],
+    timeoutMs,
+    signal
+  )
+  if (basedOnSource.code !== 0) {
+    throw new GitWorktreeError("deliverable history no longer descends from its recorded base")
+  }
 }
 
 function assertGitPathsInScope(changedPaths: string[], sourceRelativePath: string): void {
@@ -273,15 +324,12 @@ async function listChangedGitPaths(
   timeoutMs = GIT_QUERY_TIMEOUT_MS,
   signal?: AbortSignal
 ): Promise<string[]> {
-  const changed = await git(directory, [
-    "diff",
-    "--name-status",
-    "-z",
-    "--find-renames",
-    "--find-copies",
-    baseCommit,
-    headCommit
-  ], timeoutMs, signal)
+  const changed = await git(
+    directory,
+    ["diff", "--name-status", "-z", "--find-renames", "--find-copies", baseCommit, headCommit],
+    timeoutMs,
+    signal
+  )
   if (changed.code !== 0) {
     throw new GitWorktreeError(gitFailure(changed, "failed to inspect changed paths"))
   }
@@ -312,7 +360,12 @@ async function assertNoGitlinkChanges(
   for (const changedPathBatch of gitPathBatches(changedPaths)) {
     const paths = changedPathBatch.map((gitPath) => `:(top,literal)${gitPath}`)
     for (const commit of [baseCommit, headCommit]) {
-      const tree = await git(directory, ["ls-tree", "-z", commit, "--", ...paths], timeoutMs, signal)
+      const tree = await git(
+        directory,
+        ["ls-tree", "-z", commit, "--", ...paths],
+        timeoutMs,
+        signal
+      )
       if (tree.code !== 0) {
         throw new GitWorktreeError(gitFailure(tree, "failed to inspect deliverable file modes"))
       }
@@ -364,15 +417,20 @@ async function assertNoIgnoredSourceCollisions(
   if (integrationPaths.length === 0) return
   const candidates = [...new Set(integrationPaths.flatMap(gitPathAncestors))]
   for (const batch of gitPathBatches(candidates)) {
-    const ignored = await git(directory, [
-      "ls-files",
-      "--others",
-      "--ignored",
-      "--exclude-standard",
-      "-z",
-      "--",
-      ...batch.map((gitPath) => `:(top,literal)${gitPath}`)
-    ], timeoutMs, signal)
+    const ignored = await git(
+      directory,
+      [
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ...batch.map((gitPath) => `:(top,literal)${gitPath}`)
+      ],
+      timeoutMs,
+      signal
+    )
     if (ignored.code !== 0) {
       throw new GitWorktreeError(gitFailure(ignored, "failed to inspect ignored source paths"))
     }
@@ -447,9 +505,7 @@ function repoKeyFor(commonDir: string): string {
 }
 
 function workflowScopePathspec(sourceRelativePath: string): string {
-  return sourceRelativePath
-    ? `:(top,literal)${sourceRelativePath.split(path.sep).join("/")}`
-    : "."
+  return sourceRelativePath ? `:(top,literal)${sourceRelativePath.split(path.sep).join("/")}` : "."
 }
 
 /** Inspect one assigned workspace scope (or the whole checkout when empty), then
@@ -463,25 +519,27 @@ async function inspectWorkspaceStatus(
   signal?: AbortSignal
 ): Promise<GitResult> {
   const scope = workflowScopePathspec(sourceRelativePath)
-  const tracked = await git(directory, [
-    "-c",
-    "core.fsmonitor=false",
-    "status",
-    "--porcelain",
-    "--untracked-files=no",
-    "--",
-    scope
-  ], timeoutMs, signal)
+  const tracked = await git(
+    directory,
+    ["-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=no", "--", scope],
+    timeoutMs,
+    signal
+  )
   if (tracked.code !== 0) return tracked
-  const untracked = await git(directory, [
-    "ls-files",
-    "--others",
-    "--exclude-standard",
-    "-z",
-    "--",
-    scope,
-    ":(top,glob,exclude)**/.cmbdevclaw/**"
-  ], timeoutMs, signal)
+  const untracked = await git(
+    directory,
+    [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
+      "--",
+      scope,
+      ":(top,glob,exclude)**/.cmbdevclaw/**"
+    ],
+    timeoutMs,
+    signal
+  )
   if (untracked.code !== 0) return untracked
   return {
     code: 0,
@@ -494,7 +552,6 @@ async function inspectWorkspaceStatus(
 interface SourceWorkspaceSnapshot {
   baseCommit: string
   sourceBranch?: string
-  dirty: boolean
 }
 
 function parseSourceWorkspaceSnapshot(result: GitResult): SourceWorkspaceSnapshot {
@@ -504,21 +561,30 @@ function parseSourceWorkspaceSnapshot(result: GitResult): SourceWorkspaceSnapsho
     )
   }
   const lines = result.stdout.split(/\r?\n/).filter(Boolean)
-  const oid = lines.find((line) => line.startsWith("# branch.oid "))?.slice(13).trim() ?? ""
-  const branch = lines.find((line) => line.startsWith("# branch.head "))?.slice(14).trim() ?? ""
+  const oid =
+    lines
+      .find((line) => line.startsWith("# branch.oid "))
+      ?.slice(13)
+      .trim() ?? ""
+  const branch =
+    lines
+      .find((line) => line.startsWith("# branch.head "))
+      ?.slice(14)
+      .trim() ?? ""
   if (!/^[0-9a-f]{40,64}$/i.test(oid) || !branch) {
     throw new GitWorktreeError("cannot resolve a stable source HEAD for worktree isolation")
   }
   return {
     baseCommit: oid,
-    sourceBranch: branch === "(detached)" ? undefined : branch,
-    dirty: lines.some((line) => !line.startsWith("# "))
+    sourceBranch: branch === "(detached)" ? undefined : branch
   }
 }
 
 /** Git porcelain v2 reports branch and OID from one status snapshot. Read it
- * again after the separate untracked query so an IDE branch switch/ref advance
- * cannot pair one branch name with another branch's commit. */
+ * twice so an IDE branch switch/ref advance cannot pair one branch name with
+ * another branch's commit. Source checkout changes are deliberately ignored:
+ * the isolated checkout starts from the committed HEAD, matching Git worktree
+ * and Claude Code semantics. */
 async function inspectSourceWorkspaceForProvisioning(
   directory: string,
   sourceRelativePath: string,
@@ -537,34 +603,14 @@ async function inspectSourceWorkspaceForProvisioning(
     scope
   ]
   const before = parseSourceWorkspaceSnapshot(await git(directory, statusArgs, timeoutMs, signal))
-  const untracked = await git(directory, [
-    "ls-files",
-    "--others",
-    "--exclude-standard",
-    "-z",
-    "--",
-    scope,
-    ":(top,glob,exclude)**/.cmbdevclaw/**"
-  ], timeoutMs, signal)
-  if (untracked.code !== 0) {
-    throw new GitWorktreeError(
-      `cannot inspect source workspace before worktree isolation (${gitFailure(untracked, "git ls-files failed")})`
-    )
-  }
   const after = parseSourceWorkspaceSnapshot(await git(directory, statusArgs, timeoutMs, signal))
-  if (
-    before.baseCommit !== after.baseCommit ||
-    before.sourceBranch !== after.sourceBranch
-  ) {
+  if (before.baseCommit !== after.baseCommit || before.sourceBranch !== after.sourceBranch) {
     throw new GitWorktreeError(
       "source HEAD changed while preparing worktree isolation; retry after branch activity stops",
       "source-busy"
     )
   }
-  return {
-    ...after,
-    dirty: before.dirty || after.dirty || Boolean(untracked.stdout)
-  }
+  return after
 }
 
 /** Resolve a path to its real location, tolerating a not-yet-existing target.
@@ -632,22 +678,15 @@ interface RepoIdentity {
  * the actual checkout so isolation pins that checkout's HEAD.
  */
 export async function identifyRepository(directory: string): Promise<RepoIdentity | null> {
-  const commonRaw = await git(directory, [
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-common-dir"
-  ])
-  let commonDir = commonRaw.code === 0 ? commonRaw.stdout.trim() : ""
-  if (!commonDir) {
-    // Older git without --path-format: fall back to the relative form and resolve
-    // it against the directory ourselves.
-    const legacy = await git(directory, ["rev-parse", "--git-common-dir"])
-    if (legacy.code !== 0) return null
-    const value = legacy.stdout.trim()
-    if (!value) return null
-    commonDir = path.resolve(directory, value)
-  }
-  commonDir = path.resolve(commonDir)
+  // Resolve Git's relative output ourselves instead of using
+  // `--path-format=absolute`. Older Git for Windows (including 2.18) echoes that
+  // unknown option to stdout while still exiting successfully, which can turn
+  // `--path-format=absolute\n.git` into a fictitious filesystem path.
+  const commonRaw = await git(directory, ["rev-parse", "--git-common-dir"])
+  if (commonRaw.code !== 0) return null
+  const commonValue = commonRaw.stdout.trim()
+  if (!commonValue) return null
+  const commonDir = path.resolve(directory, commonValue)
   const sourceTop = await git(directory, ["rev-parse", "--show-toplevel"])
   if (sourceTop.code !== 0 || !sourceTop.stdout.trim()) return null
   const sourceRoot = path.resolve(sourceTop.stdout.trim())
@@ -668,11 +707,9 @@ export interface WorkflowWorktreeSource extends RepoIdentity {
   sourceBranch: string
 }
 
-/** Capture the exact source checkout and base once for a ledger/fan-out. Dirty
- * input inside the assigned workspace is rejected: silently dropping those edits
- * makes an isolated agent reason about different code than the user is looking at.
- * Uncommitted sibling-package work is outside this agent's scope and must not make
- * monorepo isolation unusable. */
+/** Capture the exact source checkout and committed base once for a ledger/fan-out.
+ * As with Claude Code and native `git worktree add`, staged, unstaged, and
+ * untracked source-checkout changes are not copied into the isolated checkout. */
 export async function prepareWorkflowWorktreeSource(
   workspacePath: string,
   signal?: AbortSignal
@@ -699,11 +736,6 @@ export async function prepareWorkflowWorktreeSource(
   if (!snapshot.sourceBranch) {
     throw new GitWorktreeError(
       "worktree isolation requires the source checkout to be attached to a branch; check out the intended target branch first"
-    )
-  }
-  if (snapshot.dirty) {
-    throw new GitWorktreeError(
-      "worktree isolation requires a clean assigned workspace; commit, stash, or discard staged/unstaged/untracked changes in that scope first"
     )
   }
   return {
@@ -936,6 +968,16 @@ async function pathExists(target: string): Promise<boolean> {
   }
 }
 
+async function isDefinitelyMissingPath(target: string): Promise<boolean> {
+  try {
+    await fs.access(target)
+    return false
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === "ENOENT" || code === "ENOTDIR"
+  }
+}
+
 const WORKTREE_HOOK_RUNTIME_ENTRIES = new Set([
   "conversation_history",
   "coordinator",
@@ -980,9 +1022,7 @@ async function materializeWorkspaceHookSupport(
     filter: async (candidate) => {
       const resolved = await fs.realpath(candidate)
       if (!isPathInsideOrSame(resolved, canonicalSupport)) {
-        throw new GitWorktreeError(
-          `workspace hook support path escapes .cmbdevclaw: ${candidate}`
-        )
+        throw new GitWorktreeError(`workspace hook support path escapes .cmbdevclaw: ${candidate}`)
       }
       const relative = path.relative(canonicalSupport, resolved)
       const firstSegment = relative.split(path.sep)[0]
@@ -1035,10 +1075,10 @@ export async function createWorkflowWorktree(
 
   return withRepoLock(canonicalKey(repo.commonDir), async () => {
     await fs.mkdir(root, { recursive: true })
-    await fs.writeFile(
+    await writeWorkflowWorktreeExcludesFile(
+      repo.sourceRoot,
       path.join(root, WORKTREE_INTERNAL_EXCLUDES_FILE_NAME),
-      WORKTREE_INTERNAL_EXCLUDES,
-      "utf8"
+      input.signal
     )
 
     const info = await pickAvailableName(repo, source, root, runShort, labelPart)
@@ -1295,31 +1335,6 @@ export async function resolveWorkflowWorktreeIsolationBoundary(
   }
 }
 
-/** Guard the host-side stage/commit broker against silently redirecting a
- * `git commit` issued from a nested repository into the outer workflow branch. */
-export async function assertWorkflowWorktreeGitOperationTarget(
-  boundary: WorkflowWorktreeIsolationBoundary,
-  cwd: string
-): Promise<void> {
-  const operationCwd = await canonicalExistingPath(cwd, "isolated Git operation cwd")
-  if (!isPathInsideOrSame(operationCwd, boundary.workspaceRoot)) {
-    throw new GitWorktreeError("isolated Git operation escaped its assigned workspace")
-  }
-  const top = await git(operationCwd, ["rev-parse", "--show-toplevel"])
-  if (top.code !== 0 || !top.stdout.trim()) {
-    throw new GitWorktreeError("isolated Git operation cwd is not inside its worktree repository")
-  }
-  const operationRoot = await canonicalExistingPath(
-    top.stdout.trim(),
-    "isolated Git repository root"
-  )
-  if (canonicalKey(operationRoot) !== canonicalKey(boundary.worktreeRoot)) {
-    throw new GitWorktreeError(
-      "isolated Git commit from a nested repository is not supported; commit only the assigned workflow worktree"
-    )
-  }
-}
-
 interface RemoveWorkflowWorktreeInput {
   directory: string
   gitRoot: string
@@ -1330,6 +1345,24 @@ interface RemoveWorkflowWorktreeInput {
   expectedBranchHead?: string
   /** Remove without `--force`; used for pristine/post-merge cleanup. */
   preserveChanges?: boolean
+}
+
+async function findUnavailableWorktreeRegistrations(
+  gitRoot: string,
+  targetDirectory: string
+): Promise<string[]> {
+  const listed = await git(gitRoot, ["worktree", "list", "--porcelain"])
+  if (listed.code !== 0) return []
+
+  const targetKey = canonicalKey(targetDirectory)
+  const unavailable: string[] = []
+  for (const entry of parseWorktreeList(listed.stdout)) {
+    if (!entry.path || canonicalKey(entry.path) === targetKey) continue
+    // This is diagnostic only. A permission error or temporarily unavailable
+    // mount must not be presented as a stale registration the user should prune.
+    if (await isDefinitelyMissingPath(entry.path)) unavailable.push(entry.path)
+  }
+  return unavailable
 }
 
 /**
@@ -1413,8 +1446,15 @@ export async function removeWorkflowWorktree(input: RemoveWorkflowWorktreeInput)
   // Git is the only automatic remover. A timeout, lock, submodule, ignored file,
   // junction, or other unexpected state must leave the directory recoverable.
   if (await pathExists(directory)) {
+    const unavailableRegistrations = await findUnavailableWorktreeRegistrations(
+      input.gitRoot,
+      directory
+    )
+    const recoveryHint = unavailableRegistrations.length
+      ? `\nGit also reports unavailable worktree registrations that may block cleanup:\n${unavailableRegistrations.map((entry) => `- ${entry}`).join("\n")}\nInspect them with \`git worktree prune --dry-run --verbose\`. Only after confirming those paths are permanently gone, run \`git worktree prune --verbose\` and retry Cleanup.`
+      : ""
     throw new GitWorktreeError(
-      `git did not remove worktree ${directory}: ${gitFailure(removed, "worktree remains on disk")}`
+      `git did not remove worktree ${directory}: ${gitFailure(removed, "worktree remains on disk")}${recoveryHint}`
     )
   }
   if (removed.code !== 0) {
@@ -1555,7 +1595,9 @@ async function assertManagedWorkflowWorktree(
   const expectedWorkspace = record.sourceRelativePath
     ? path.join(directory, record.sourceRelativePath)
     : directory
-  if (canonicalKey(expectedWorkspace) !== canonicalKey(await canonicalPath(record.workspaceDirectory))) {
+  if (
+    canonicalKey(expectedWorkspace) !== canonicalKey(await canonicalPath(record.workspaceDirectory))
+  ) {
     throw new GitWorktreeError("worktree workspace scope does not match its ownership record")
   }
 
@@ -2063,18 +2105,14 @@ export async function mergeWorkflowWorktree(input: {
             "deliverable HEAD is no longer attached to its recorded branch"
           )
         }
-        const basedOnSource = await git(
+        await assertWorkflowWorktreeDeliverableDescendsFromBase(
           record.directory,
-          ["merge-base", "--is-ancestor", record.baseCommit, inspected.headCommit],
+          record.baseCommit,
+          inspected.headCommit,
           operationTimeoutMs,
           input.signal
         )
-        if (basedOnSource.code !== 0) {
-          throw new GitWorktreeError(
-            "deliverable history no longer descends from its recorded base"
-          )
-        }
-        await assertDeliverablePathsInScope(
+        await assertWorkflowWorktreeDeliverablePathsInScope(
           record.directory,
           record.baseCommit,
           inspected.headCommit,
@@ -2585,114 +2623,6 @@ export async function finalizeWorkflowWorktreeRecord(
       return true
     })
   )
-}
-
-async function stageWorkflowWorktreeUnlocked(
-  boundary: WorkflowWorktreeIsolationBoundary,
-  signal?: AbortSignal
-): Promise<string[]> {
-  await assertWorkflowWorktreeCommitBranch(boundary, signal)
-  const relativeScope = path.relative(boundary.worktreeRoot, boundary.workspaceRoot)
-  if (
-    relativeScope === ".." ||
-    relativeScope.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relativeScope)
-  ) {
-    throw new GitWorktreeError("isolated workspace scope escaped its checkout")
-  }
-  const normalizedScope = relativeScope.replace(/\\/g, "/")
-  const gitScope = relativeScope ? `:(top,literal)${normalizedScope}` : "."
-  const internalScope = relativeScope ? `${normalizedScope}/.cmbdevclaw` : ".cmbdevclaw"
-  const staged = await git(
-    boundary.worktreeRoot,
-    [
-      "-c",
-      "core.fsmonitor=false",
-      "add",
-      "-A",
-      "--",
-      gitScope,
-      `:(top,exclude,literal)${internalScope}`
-    ],
-    getWorkflowWorktreeTimeoutMs(),
-    signal
-  )
-  if (staged.code !== 0) {
-    throw new GitWorktreeError(gitFailure(staged, "failed to stage isolated worktree"))
-  }
-  const stagedPaths = await git(
-    boundary.worktreeRoot,
-    ["diff", "--cached", "--name-only", "-z"],
-    getWorkflowWorktreeTimeoutMs(),
-    signal
-  )
-  if (stagedPaths.code !== 0) {
-    throw new GitWorktreeError(gitFailure(stagedPaths, "failed to validate staged paths"))
-  }
-  const paths = stagedPaths.stdout.split("\0").filter(Boolean)
-  for (const changedPath of paths) {
-    if (!isGitPathInsideScope(changedPath, relativeScope)) {
-      throw new GitWorktreeError(`staged path escaped the assigned workspace: ${changedPath}`)
-    }
-  }
-  return paths
-}
-
-async function assertWorkflowWorktreeCommitBranch(
-  boundary: WorkflowWorktreeIsolationBoundary,
-  signal?: AbortSignal
-): Promise<void> {
-  const branch = await git(
-    boundary.worktreeRoot,
-    ["symbolic-ref", "--quiet", "--short", "HEAD"],
-    GIT_QUERY_TIMEOUT_MS,
-    signal
-  )
-  if (branch.code !== 0 || branch.stdout.trim() !== boundary.branch) {
-    throw new GitWorktreeError("isolated checkout is no longer on its assigned branch")
-  }
-}
-
-export async function stageWorkflowWorktree(
-  boundary: WorkflowWorktreeIsolationBoundary,
-  signal?: AbortSignal
-): Promise<string> {
-  return (await stageWorkflowWorktreeUnlocked(boundary, signal)).join("\n")
-}
-
-export async function commitWorkflowWorktree(
-  boundary: WorkflowWorktreeIsolationBoundary,
-  message: string,
-  signal?: AbortSignal
-): Promise<string> {
-  const commitMessage = message.trim()
-  if (!commitMessage) throw new GitWorktreeError("isolated worktree commit requires a message")
-  if (commitMessage.length > 10_000) throw new GitWorktreeError("commit message is too long")
-  const paths = await stageWorkflowWorktreeUnlocked(boundary, signal)
-  if (paths.length === 0) throw new GitWorktreeError("isolated worktree has no changes to commit")
-  // Staging can take long enough for an IDE or a nested command to detach or
-  // switch HEAD.  Recheck immediately before commit so the broker never
-  // reports a managed-branch commit that actually landed detached.
-  await assertWorkflowWorktreeCommitBranch(boundary, signal)
-  const committed = await git(
-    boundary.worktreeRoot,
-    [
-      "-c",
-      "core.hooksPath=/dev/null",
-      "-c",
-      "commit.gpgsign=false",
-      "commit",
-      "--no-verify",
-      "-m",
-      commitMessage
-    ],
-    getWorkflowWorktreeTimeoutMs(),
-    signal
-  )
-  if (committed.code !== 0) {
-    throw new GitWorktreeError(gitFailure(committed, "isolated worktree commit failed"))
-  }
-  return committed.stdout.trim() || "isolated worktree committed"
 }
 
 interface WorktreeListEntry {

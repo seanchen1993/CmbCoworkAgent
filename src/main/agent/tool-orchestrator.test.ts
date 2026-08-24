@@ -185,17 +185,15 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).not.toHaveBeenCalled()
   })
 
-  it("executes isolated worktree commits in place and blocks pushes", async () => {
+  it("preserves native isolated Git commands and separately approves push", async () => {
     const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
-      output: "committed",
+      output: "native git",
       exitCode: 0,
       truncated: false
     })
-    const requestApproval = vi.fn<RequestApprovalFn>()
-    const isolatedGitMutation = vi.fn().mockResolvedValue({
-      output: "broker committed",
-      exitCode: 0,
-      truncated: false
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "approve",
+      tool_call_id: "isolated-push"
     })
     const orchestrator = new ToolOrchestrator(
       new ApprovalStore(),
@@ -203,35 +201,43 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       requestApproval,
       true,
       false,
-      false,
-      isolatedGitMutation
+      false
     )
 
-    const committed = await orchestrator.execute("git commit -m isolated", process.cwd(), "none")
-    const pushed = await orchestrator.execute("git push origin HEAD", process.cwd(), "none")
+    for (const command of [
+      "git add src/a.ts",
+      'git add src/a.ts && git commit -m "isolated"',
+      "git commit --amend --no-edit",
+      "git commit --fixup HEAD"
+    ]) {
+      const result = await orchestrator.execute(command, process.cwd(), "none")
+      expect(result.exitCode, command).toBe(0)
+      expect(result.output, command).toBe("native git")
+    }
 
-    expect(committed.output).toBe("broker committed")
-    expect(isolatedGitMutation).toHaveBeenCalledWith("commit", "isolated", process.cwd())
-    expect(requestApproval).not.toHaveBeenCalled()
-    expect(pushed.exitCode).toBe(1)
-    expect(pushed.output).toContain("direct push")
-    expect(rawExecute).not.toHaveBeenCalled()
+    const pushed = await orchestrator.execute("git push origin HEAD", process.cwd(), "none")
+    expect(pushed.exitCode).toBe(0)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(rawExecute).toHaveBeenCalledWith("git push origin HEAD", "none", process.cwd())
+
+    const forcePush = await orchestrator.execute(
+      "git push --force origin HEAD",
+      process.cwd(),
+      "none"
+    )
+    expect(forcePush.exitCode).toBe(1)
+    expect(forcePush.output).toContain("force push")
 
     for (const command of [
-      "git commit --amend -m rewritten",
-      "git commit --fixup HEAD -m rewritten",
-      "git commit -m partial -- src/a.ts",
-      "git commit -m chained && git status",
-      "git add src/a.ts",
-      "cd subdir && git add -A",
-      "git -C nested-repo commit -m nested",
-      "git -C nested-repo add -A"
+      "bash -lc 'git push origin HEAD'",
+      "git -c alias.pub='!git push origin HEAD' pub"
     ]) {
-      const rejected = await orchestrator.execute(command, process.cwd(), "none")
-      expect(rejected.exitCode, command).toBe(1)
-      expect(rejected.output, command).toContain("Command forbidden")
+      const indirectPush = await orchestrator.execute(command, process.cwd(), "none")
+      expect(indirectPush.exitCode, command).toBe(1)
+      expect(indirectPush.output, command).toContain("must be issued directly")
+      expect(rawExecute).not.toHaveBeenCalledWith(command, "none", process.cwd())
     }
-    expect(isolatedGitMutation).toHaveBeenCalledTimes(1)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
   })
 
   it("rejects a bare commit instead of restaging unstaged hunks from indexed files", async () => {
@@ -244,7 +250,6 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       false,
       false,
       true,
-      undefined,
       process.cwd()
     )
 
@@ -272,7 +277,6 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       false,
       false,
       true,
-      undefined,
       workspace
     )
 
@@ -312,15 +316,10 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         false,
         false,
         true,
-        undefined,
         workspace
       )
 
-      await orchestrator.execute(
-        'git commit -m "test" -- repo-a/file.txt',
-        workspace,
-        "none"
-      )
+      await orchestrator.execute('git commit -m "test" -- repo-a/file.txt', workspace, "none")
 
       expect(requestApproval).toHaveBeenCalledTimes(1)
       expect(requestApproval.mock.calls[0][0]).toMatchObject({
@@ -356,15 +355,10 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         false,
         false,
         true,
-        undefined,
         workspace
       )
 
-      await orchestrator.execute(
-        'git commit -m "test" -- repo-a/file.txt',
-        workspace,
-        "none"
-      )
+      await orchestrator.execute('git commit -m "test" -- repo-a/file.txt', workspace, "none")
 
       expect(requestApproval).toHaveBeenCalledTimes(1)
       expect(requestApproval.mock.calls[0][0]).toMatchObject({
@@ -396,7 +390,6 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       false,
       false,
       true,
-      undefined,
       workspace
     )
 
@@ -429,7 +422,6 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         false,
         false,
         true,
-        undefined,
         workspace
       )
 

@@ -206,9 +206,10 @@ export interface ParsedWorkflowScript {
   body: string
 }
 
-/** The only isolation mode with an implementation here. `remote` and friends are
- * recognized as "asked for something we don't have" and rejected explicitly, so a
- * script never silently gets LESS isolation than it requested. */
+/** The only isolation mode implemented by this engine. Runtime JavaScript can
+ * still contain legacy/unknown values; those retain the pre-worktree warning +
+ * shared-workspace behavior instead of making this additive feature break an
+ * existing workflow. Typed callers can request only the implemented mode. */
 export type WorkflowAgentIsolation = "worktree"
 
 export type WorkflowWorktreeStatus =

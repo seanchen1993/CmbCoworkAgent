@@ -1172,22 +1172,27 @@ test("elevated sandbox preamble injects git safe.directory and openssl backend",
   )
   const unelevatedClearProxySection = sectionBetween(
     localSandboxSource,
-    "    const clearProxyPreamble =",
+    "    const sandboxGitConfigEntries:",
     "    // Unelevated sandbox: set shared tool env vars"
   )
 
   for (const section of [elevatedPreambleSection, unelevatedClearProxySection]) {
     assert.match(
       section,
-      /GIT_CONFIG_COUNT=2/,
-      "GIT_CONFIG_COUNT must be bumped to 2 so both http.sslBackend and safe.directory survive"
+      /\["http\.sslBackend", "openssl"\][\s\S]*\["safe\.directory", "\*"\]/,
+      "both http.sslBackend and safe.directory must survive the generated Git config preamble"
     )
     assert.match(
       section,
-      /GIT_CONFIG_KEY_1=safe\.directory[\s\S]*GIT_CONFIG_VALUE_1=\*/,
-      "git safe.directory=* must be injected so the sandbox user can operate on the host-owned workspace without 'dubious ownership' errors"
+      /gitConfigEnvironmentPreamble/,
+      "sandbox Git config must use the shared indexed-environment preamble builder"
     )
   }
+  assert.match(
+    localSandboxSource,
+    /\["GIT_CONFIG_COUNT", String\(entries\.length\)\]/,
+    "GIT_CONFIG_COUNT must follow the generated entry count"
+  )
 })
 
 test("sandbox ACL grants only cover writable sandbox roots", () => {
@@ -2451,17 +2456,22 @@ test("isolated worktree provisioning requires the durable run index", () => {
   )
 })
 
-test("isolated commits verify the assigned branch again after staging", () => {
-  const commit = sectionBetween(
+test("isolated commits use native Git without the old staging broker", () => {
+  assert.doesNotMatch(
     gitWorktreeSource,
-    "export async function commitWorkflowWorktree",
-    "interface WorktreeListEntry"
+    /commitWorkflowWorktree|stageWorkflowWorktreeUnlocked/,
+    "isolated add/commit must preserve the agent's actual native Git index and hooks"
   )
-  const stagedAt = commit.indexOf("stageWorkflowWorktreeUnlocked(boundary, signal)")
-  const recheckAt = commit.indexOf("assertWorkflowWorktreeCommitBranch(boundary, signal)")
-  const gitCommitAt = commit.indexOf('"commit"')
-  assert.ok(stagedAt !== -1 && recheckAt > stagedAt && gitCommitAt > recheckAt,
-    "a branch switch during staging must be rejected before git commit runs")
+  assert.match(
+    localSandboxSource,
+    /executionPlan\.writableRoots\.push\(commonDir\)/,
+    "Windows worktree Git must be able to update linked-worktree administration"
+  )
+  assert.match(
+    localSandboxSource,
+    /runScopedWritableRootKeys\.add\(normalizeDirKey\(commonDir\)\)[\s\S]*?let permanentAcl = !runScopedWritableRootKeys\.has\(cacheKey\)/,
+    "a user repository commonDir ACL must remain run-scoped instead of becoming permanent"
+  )
 })
 
 test("retained worktrees pin only their owning workspace until explicitly resolved", () => {

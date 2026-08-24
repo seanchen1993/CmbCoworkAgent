@@ -458,6 +458,10 @@ export function assessCommandSafety(
   options?: {
     windowsShell?: WindowsShellKind
     enforceGitWorkflowCommitOnly?: boolean
+    /** Isolated worktrees use native Git rather than the ordinary task-card
+     * commit router. Keep the general safety policy, but do not reject standard
+     * Git syntax merely because that router cannot reproduce it. */
+    nativeGitWorktree?: boolean
     shellSyntax?: CommandShellSyntax
   }
 ): SafetyAssessment {
@@ -468,6 +472,7 @@ export function assessCommandSafety(
   }
 
   if (
+    !options?.nativeGitWorktree &&
     options?.enforceGitWorkflowCommitOnly &&
     containsDirectGitSubmitCommand(trimmed, shellSyntax)
   ) {
@@ -478,14 +483,14 @@ export function assessCommandSafety(
     }
   }
 
-  if (containsEnvSplitStringOption(trimmed, shellSyntax)) {
+  if (!options?.nativeGitWorktree && containsEnvSplitStringOption(trimmed, shellSyntax)) {
     return {
       level: "forbidden",
       reason: "env split-string execution is not supported because it can hide a git commit"
     }
   }
 
-  if (containsForceGitAddCommand(trimmed, 0, shellSyntax)) {
+  if (!options?.nativeGitWorktree && containsForceGitAddCommand(trimmed, 0, shellSyntax)) {
     return {
       level: "forbidden",
       reason:
@@ -493,7 +498,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (containsDirectGitIndexPlumbing(trimmed, shellSyntax)) {
+  if (!options?.nativeGitWorktree && containsDirectGitIndexPlumbing(trimmed, shellSyntax)) {
     return {
       level: "forbidden",
       reason:
@@ -501,7 +506,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (containsPotentialGitAliasInvocation(trimmed, shellSyntax)) {
+  if (!options?.nativeGitWorktree && containsPotentialGitAliasInvocation(trimmed, shellSyntax)) {
     return {
       level: "forbidden",
       reason:
@@ -509,7 +514,7 @@ export function assessCommandSafety(
     }
   }
 
-  if (containsWrappedGitCommitCommand(trimmed, 0, shellSyntax)) {
+  if (!options?.nativeGitWorktree && containsWrappedGitCommitCommand(trimmed, 0, shellSyntax)) {
     return {
       level: "forbidden",
       reason:
@@ -736,9 +741,7 @@ function splitShellCommandSegments(
       continue
     }
 
-    if (
-      shellEscapeConsumesNext(ch, command[i + 1], quote, shellSyntax)
-    ) {
+    if (shellEscapeConsumesNext(ch, command[i + 1], quote, shellSyntax)) {
       current += ch
       escaped = true
       continue
@@ -781,9 +784,9 @@ function backslashEscapesNextChar(
   if (!next) return false
   if (shellSyntax !== "posix") return false
   if (quote === null) return true
-  if (quote === "\"") {
+  if (quote === '"') {
     return (
-      next === "\"" ||
+      next === '"' ||
       next === "\\" ||
       next === "$" ||
       next === "`" ||
@@ -791,7 +794,7 @@ function backslashEscapesNextChar(
       next === "\n"
     )
   }
-  return next === "'" || next === "\"" || next === "\\" || "$`;&|<>".includes(next)
+  return next === "'" || next === '"' || next === "\\" || "$`;&|<>".includes(next)
 }
 
 function getGitInvocationTokens(tokens: string[]): string[] | null {
@@ -962,9 +965,7 @@ function getWrappedShellScript(tokens: string[]): string | null {
       const option = lower.slice(1)
       if (
         option &&
-        ("command".startsWith(option) ||
-          "commandwithargs".startsWith(option) ||
-          option === "cwa")
+        ("command".startsWith(option) || "commandwithargs".startsWith(option) || option === "cwa")
       ) {
         return invocation.slice(i + 1).join(" ") || null
       }
@@ -1000,10 +1001,7 @@ function getWrappedShellSyntax(tokens: string[]): CommandShellSyntax | null {
   return null
 }
 
-function interpolatingShellText(
-  command: string,
-  shellSyntax: CommandShellSyntax
-): string {
+function interpolatingShellText(command: string, shellSyntax: CommandShellSyntax): string {
   let result = ""
   let quote: "'" | '"' | null = null
   for (let index = 0; index < command.length; index += 1) {
@@ -1024,10 +1022,7 @@ function interpolatingShellText(
     }
     if (quote === '"') {
       if (char === '"') quote = null
-      else if (
-        (char === "(" && command[index - 1] === "$") ||
-        !"(){}*?[".includes(char)
-      ) {
+      else if ((char === "(" && command[index - 1] === "$") || !"(){}*?[".includes(char)) {
         result += char
       } else {
         result += " "
@@ -1048,10 +1043,7 @@ function interpolatingShellText(
   return result
 }
 
-function hasOpaqueGitMutationSyntax(
-  command: string,
-  shellSyntax: CommandShellSyntax
-): boolean {
+function hasOpaqueGitMutationSyntax(command: string, shellSyntax: CommandShellSyntax): boolean {
   const visible = interpolatingShellText(command, shellSyntax)
   if (
     !/\bgit\b|\b(?:commit|add|stage|commit-tree|read-tree|update-index|update-ref|write-tree)\b/i.test(
@@ -1066,15 +1058,10 @@ function hasOpaqueGitMutationSyntax(
   if (shellSyntax === "cmd") {
     return /%[^%]+%|![^!]+!/.test(visible)
   }
-  return /\$\(|\$\{|\$[A-Za-z_@*?#0-9!-]|`|[<>]\(|[(){}*?]|\[/i.test(
-    visible
-  )
+  return /\$\(|\$\{|\$[A-Za-z_@*?#0-9!-]|`|[<>]\(|[(){}*?]|\[/i.test(visible)
 }
 
-function hasOpaqueShellExecution(
-  tokens: string[],
-  shellSyntax: CommandShellSyntax
-): boolean {
+function hasOpaqueShellExecution(tokens: string[], shellSyntax: CommandShellSyntax): boolean {
   const invocation = getExecutableInvocationTokens(tokens)
   const executable = normalizeExecutable(invocation[0] || "")
   if (POWERSHELL_WRAPPERS.has(executable)) {
@@ -1132,9 +1119,9 @@ function hasOpaqueShellExecution(
   if (controlKeywords.has(executable)) return true
   if (
     executable === "fish" &&
-    invocation.slice(1).some((token) =>
-      /^(?:-C|--command(?:=|$)|--init-command(?:=|$))/.test(token)
-    )
+    invocation
+      .slice(1)
+      .some((token) => /^(?:-C|--command(?:=|$)|--init-command(?:=|$))/.test(token))
   ) {
     return true
   }
@@ -1159,15 +1146,10 @@ function hasOpaqueShellExecution(
   }
   if (shellSyntax === "cmd") {
     return (
-      executable === "call" ||
-      executable === "start" ||
-      /%(?:[^%]+)%|![^!]+!/.test(tokens[0] || "")
+      executable === "call" || executable === "start" || /%(?:[^%]+)%|![^!]+!/.test(tokens[0] || "")
     )
   }
-  return (
-    executable === "eval" ||
-    /\$|`|[*?[]|\{[^}]*[,}]/.test(tokens[0] || "")
-  )
+  return executable === "eval" || /\$|`|[*?[]|\{[^}]*[,}]/.test(tokens[0] || "")
 }
 
 const GIT_COMMIT_EXECUTION_WRAPPERS = new Set([
@@ -1347,15 +1329,10 @@ function containsDirectGitIndexPlumbing(
     for (const nestedTokens of getExecutionWrapperSuffixTokens(tokens)) {
       const nestedScript = getWrappedShellScript(nestedTokens)
       const nestedSyntax = getWrappedShellSyntax(nestedTokens) ?? shellSyntax
-      if (
-        nestedScript &&
-        containsDirectGitIndexPlumbing(nestedScript, nestedSyntax, depth + 1)
-      ) {
+      if (nestedScript && containsDirectGitIndexPlumbing(nestedScript, nestedSyntax, depth + 1)) {
         return true
       }
-      if (
-        containsDirectGitIndexPlumbing(nestedTokens.join(" "), nestedSyntax, depth + 1)
-      ) {
+      if (containsDirectGitIndexPlumbing(nestedTokens.join(" "), nestedSyntax, depth + 1)) {
         return true
       }
     }
@@ -1442,9 +1419,7 @@ function containsPotentialGitAliasInvocation(
       ) {
         return true
       }
-      if (
-        containsPotentialGitAliasInvocation(nestedTokens.join(" "), nestedSyntax, depth + 1)
-      ) {
+      if (containsPotentialGitAliasInvocation(nestedTokens.join(" "), nestedSyntax, depth + 1)) {
         return true
       }
     }
@@ -1463,11 +1438,7 @@ function containsPotentialWrapperGitCommit(tokens: string[]): boolean {
   }
   const firstExecutable = normalizeExecutable(tokens[firstExecutableIndex] || "")
   if (!GIT_COMMIT_EXECUTION_WRAPPERS.has(firstExecutable)) return false
-  if (
-    tokens
-      .slice(firstExecutableIndex + 1)
-      .some((token) => /\bgit\s+commit\b/i.test(token))
-  ) {
+  if (tokens.slice(firstExecutableIndex + 1).some((token) => /\bgit\s+commit\b/i.test(token))) {
     return true
   }
 
@@ -1509,11 +1480,12 @@ function containsWrappedGitCommitCommand(
     if (containsPotentialWrapperGitCommit(tokens)) return true
     const script = getWrappedShellScript(tokens)
     const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
-    if (script && (
-      containsPotentialGitAliasInvocation(script, childSyntax) ||
-      commandHasGitSubcommand(script, new Set(["commit"]), childSyntax) ||
-      containsWrappedGitCommitCommand(script, depth + 1, childSyntax)
-    )) {
+    if (
+      script &&
+      (containsPotentialGitAliasInvocation(script, childSyntax) ||
+        commandHasGitSubcommand(script, new Set(["commit"]), childSyntax) ||
+        containsWrappedGitCommitCommand(script, depth + 1, childSyntax))
+    ) {
       return true
     }
     for (const nestedTokens of getExecutionWrapperSuffixTokens(tokens)) {
@@ -1550,6 +1522,91 @@ function commandHasGitSubcommand(
   return false
 }
 
+function inlineGitAliasInvokesPush(gitTokens: string[]): boolean {
+  const subcommand = findGitSubcommand(gitTokens)
+  if (!subcommand) return false
+
+  const aliases = new Map<string, string>()
+  for (let index = 1; index < subcommand.index; index += 1) {
+    const token = gitTokens[index]
+    let config: string | undefined
+    if (token.toLowerCase() === "-c") {
+      config = gitTokens[++index]
+    } else if (token.toLowerCase().startsWith("-c") && token.length > 2) {
+      config = token.slice(2)
+    }
+    if (!config) continue
+    const separator = config.indexOf("=")
+    if (separator <= 0) continue
+    const key = config.slice(0, separator).toLowerCase()
+    if (!key.startsWith("alias.")) continue
+    aliases.set(key.slice("alias.".length), config.slice(separator + 1))
+  }
+
+  let aliasName = subcommand.subcommand
+  for (let depth = 0; depth < 4; depth += 1) {
+    const value = aliases.get(aliasName)
+    if (value === undefined) return false
+    if (value.startsWith("!")) {
+      const script = value.slice(1)
+      return (
+        commandHasGitSubcommand(script, new Set(["push"]), "posix") ||
+        containsIndirectGitPushCommand(script, "posix", depth + 1)
+      )
+    }
+    const expanded = tokenizeCommand(`git ${value}`, "posix")
+    if (!expanded) return false
+    const expandedSubcommand = findGitSubcommand(expanded)
+    if (!expandedSubcommand) return false
+    if (expandedSubcommand.subcommand === "push") return true
+    aliasName = expandedSubcommand.subcommand
+  }
+  return false
+}
+
+function containsIndirectGitPushCommand(
+  command: string,
+  shellSyntax: CommandShellSyntax = hostShellSyntax(),
+  depth = 0
+): boolean {
+  if (depth > 4) return false
+  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
+    const tokens = tokenizeCommand(segment, shellSyntax)
+    if (!tokens) continue
+    for (const gitTokens of collectPotentialGitInvocations(tokens)) {
+      if (inlineGitAliasInvokesPush(gitTokens)) return true
+    }
+
+    const script = getWrappedShellScript(tokens)
+    const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
+    if (
+      script &&
+      (commandHasGitSubcommand(script, new Set(["push"]), childSyntax) ||
+        containsIndirectGitPushCommand(script, childSyntax, depth + 1))
+    ) {
+      return true
+    }
+    for (const nestedTokens of getExecutionWrapperSuffixTokens(tokens)) {
+      const nestedScript = getWrappedShellScript(nestedTokens)
+      const nestedSyntax = getWrappedShellSyntax(nestedTokens) ?? shellSyntax
+      if (commandHasGitSubcommand(nestedTokens.join(" "), new Set(["push"]), nestedSyntax)) {
+        return true
+      }
+      if (
+        nestedScript &&
+        (commandHasGitSubcommand(nestedScript, new Set(["push"]), nestedSyntax) ||
+          containsIndirectGitPushCommand(nestedScript, nestedSyntax, depth + 1))
+      ) {
+        return true
+      }
+      if (containsIndirectGitPushCommand(nestedTokens.join(" "), nestedSyntax, depth + 1)) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
 /** True when the command is (or contains) a real `git commit` invocation. */
 export function isGitCommitCommand(
   command: string,
@@ -1564,6 +1621,18 @@ export function isGitPushCommand(
   shellSyntax: CommandShellSyntax = hostShellSyntax()
 ): boolean {
   return commandHasGitSubcommand(command.trim(), new Set(["push"]), shellSyntax)
+}
+
+/**
+ * True only when a push is visibly hidden behind a shell wrapper or an inline
+ * `git -c alias.*=...` definition. Isolated worktrees reject this narrow case so
+ * the agent can retry a direct push that enters the explicit approval flow.
+ */
+export function containsIndirectGitPush(
+  command: string,
+  shellSyntax: CommandShellSyntax = hostShellSyntax()
+): boolean {
+  return containsIndirectGitPushCommand(command.trim(), shellSyntax)
 }
 
 /** True when the command is (or contains) a real `git merge` invocation. */
@@ -1610,12 +1679,7 @@ function resolveShellCdTarget(currentCwd: string, segment: string): string | nul
 /** Common, direct operations that violate this product's transient-branch
  * contract. This is intentionally an accident guard, not an exhaustive model
  * of every Git plumbing command (matching MiMo Code's worktree guard). */
-const WORKTREE_ALWAYS_BLOCKED_GIT_COMMANDS = new Set([
-  "push",
-  "update-ref",
-  "gc",
-  "pack-refs"
-])
+const WORKTREE_ALWAYS_BLOCKED_GIT_COMMANDS = new Set(["update-ref", "gc", "pack-refs"])
 
 function firstGitPositionalArgument(args: string[]): string | undefined {
   return args.find((arg) => !arg.startsWith("-"))?.toLowerCase()
@@ -1681,7 +1745,12 @@ function isReadOnlyGitConfigInvocation(args: string[]): boolean {
       index += 1
       continue
     }
-    if (arg.startsWith("--file=") || arg.startsWith("--blob=") || arg.startsWith("--type=") || arg.startsWith("--default=")) {
+    if (
+      arg.startsWith("--file=") ||
+      arg.startsWith("--blob=") ||
+      arg.startsWith("--type=") ||
+      arg.startsWith("--default=")
+    ) {
       continue
     }
     if (!arg.startsWith("-")) positionals.push(arg)
@@ -1699,17 +1768,9 @@ function isReadOnlyGitRemoteInvocation(args: string[]): boolean {
   return subcommand === "get-url" || subcommand === "show"
 }
 
-export function isGitAddCommand(command: string): boolean {
-  const segments = splitShellCommandSegments(command)
-  if (segments.length !== 1) return false
-  const tokens = tokenizeCommand(segments[0])
-  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
-  return findGitSubcommand(gitTokens ?? [])?.subcommand === "add"
-}
-
-/** Whether a command contains a real `git add`, including a shell chain. The
- * isolated-worktree broker accepts only the single-command form above; chained
- * staging must be rejected rather than falling through to raw execution. */
+/** Whether a command contains a real `git add`, including a shell chain. Used
+ * to keep native index mutation attached to its foreground tool call so the
+ * worktree lifecycle cannot settle while staging is still running. */
 export function containsGitAddCommand(command: string): boolean {
   return commandHasGitSubcommand(command.trim(), new Set(["add"]))
 }
@@ -1805,7 +1866,9 @@ function worktreeGitEnvironmentMutationViolation(tokens: string[]): string | nul
 function inspectWorktreeGitInvocation(
   gitTokens: string[],
   cwd: string,
-  executionRoots: readonly string[]
+  executionRoots: readonly string[],
+  assignedWorkspaceRoot: string,
+  assignedBranch: string
 ): string | null {
   let gitCwd = cwd
   let subcommandIndex = -1
@@ -1868,6 +1931,12 @@ function inspectWorktreeGitInvocation(
   if (subcommandIndex < 0) return null
   const subcommand = gitTokens[subcommandIndex].toLowerCase()
   const args = gitTokens.slice(subcommandIndex + 1)
+  if (
+    ["add", "commit", "push"].includes(subcommand) &&
+    !isInsideWorktreeBoundary(gitCwd, assignedWorkspaceRoot)
+  ) {
+    return `worktree isolation only allows git ${subcommand} inside the assigned worktree workspace`
+  }
   if (args.some((arg) => arg.toLowerCase() === "--autostash")) {
     return "worktree isolation blocks --autostash because refs/stash is shared"
   }
@@ -1891,6 +1960,56 @@ function inspectWorktreeGitInvocation(
   }
   if (subcommand === "remote" && !isReadOnlyGitRemoteInvocation(args)) {
     return "worktree isolation blocks modifying shared Git remotes"
+  }
+  if (subcommand === "push") {
+    const lowerArgs = args.map((arg) => arg.toLowerCase())
+    if (
+      lowerArgs.some(
+        (arg) =>
+          arg === "-f" ||
+          arg === "--force" ||
+          arg.startsWith("--force=") ||
+          arg.startsWith("--force-with-lease") ||
+          arg.startsWith("--force-if-includes") ||
+          arg === "-d" ||
+          arg === "--delete" ||
+          arg === "--mirror" ||
+          arg === "--all" ||
+          arg === "--tags" ||
+          arg === "--prune" ||
+          arg === "-u" ||
+          arg === "--set-upstream"
+      )
+    ) {
+      return "worktree isolation blocks force/delete/bulk/upstream pushes from a transient branch"
+    }
+
+    // Keep push deliberately explicit. A bare push can follow stale upstream or
+    // push.default configuration into another remote ref. The accepted forms all
+    // name exactly one remote and the assigned transient branch.
+    if (args.some((arg) => arg.startsWith("-"))) {
+      return "worktree isolation requires an explicit plain push of the assigned transient branch"
+    }
+    if (args.length !== 2) {
+      return "worktree isolation requires `git push <remote> HEAD` for the assigned transient branch"
+    }
+    const refspec = args[1]
+    const shortBranch = assignedBranch.replace(/^refs\/heads\//, "")
+    const fullBranch = `refs/heads/${shortBranch}`
+    const allowedRefspecs = new Set([
+      "HEAD",
+      shortBranch,
+      fullBranch,
+      `HEAD:${shortBranch}`,
+      `HEAD:${fullBranch}`,
+      `${shortBranch}:${shortBranch}`,
+      `${shortBranch}:${fullBranch}`,
+      `${fullBranch}:${shortBranch}`,
+      `${fullBranch}:${fullBranch}`
+    ])
+    if (!allowedRefspecs.has(refspec)) {
+      return "worktree isolation only allows pushing the assigned transient branch to the same remote branch"
+    }
   }
   if (
     (subcommand === "merge" || subcommand === "rebase") &&
@@ -1973,6 +2092,9 @@ export function getWorktreeShellIsolationViolation(
   if (!executionRoots.some((root) => isInsideWorktreeBoundary(cwd, root))) {
     return "worktree isolation blocks shell execution outside the assigned workspace or enabled skill"
   }
+  if (containsIndirectGitPush(command)) {
+    return "worktree isolation push must be issued directly as `git push <remote> HEAD` for explicit approval"
+  }
   let effectiveCwd = cwd
   const directoryStack: string[] = []
   for (const segment of splitShellCommandSegments(command)) {
@@ -2012,7 +2134,9 @@ export function getWorktreeShellIsolationViolation(
       const gitViolation = inspectWorktreeGitInvocation(
         gitTokens,
         effectiveCwd,
-        executionRoots
+        executionRoots,
+        boundary.workspaceRoot,
+        boundary.branch
       )
       if (gitViolation) return gitViolation
     }
@@ -2052,9 +2176,7 @@ function hasUnsupportedGitRoutingContext(
   const envIndex = invocationPrefix.findIndex((token) => normalizeExecutable(token) === "env")
   if (
     envIndex >= 0 &&
-    invocationPrefix
-      .slice(envIndex + 1)
-      .some((token) => token.startsWith("-") && token !== "--")
+    invocationPrefix.slice(envIndex + 1).some((token) => token.startsWith("-") && token !== "--")
   ) {
     return true
   }
@@ -2107,19 +2229,6 @@ function extractGitAddPathspecs(command: string): string[] | null {
     pathspecs.push(token)
   }
   return Array.from(new Set(pathspecs))
-}
-
-/** The broker stages the entire assigned scope. Accept only add forms whose
- * normal Git meaning is already whole-scope, so a selective `git add file` is
- * never silently widened. */
-export function isWholeScopeGitAddCommand(command: string): boolean {
-  if (!isGitAddCommand(command)) return false
-  const tokens = tokenizeCommand(command)
-  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
-  const subcommand = findGitSubcommand(gitTokens ?? [])
-  if (!gitTokens || !subcommand || subcommand.index !== 1) return false
-  const args = gitTokens.slice(subcommand.index + 1)
-  return args.length === 1 && ["-A", "--all"].includes(args[0])
 }
 
 export function normalizeGitAddPrefixedGitCommitCommand(
@@ -2520,40 +2629,6 @@ export function isAmendOrFixupCommit(
   return false
 }
 
-/** Isolated commits are host-brokered, not raw Git. Only a single explicit
- * message is faithfully representable; reject history edits, pathspecs and
- * staging flags instead of silently turning them into a different commit. */
-export function isSimpleIsolatedGitCommitCommand(command: string): boolean {
-  if (isChainedShellCommand(command)) return false
-  const tokens = tokenizeCommand(command)
-  const gitTokens = tokens ? getGitInvocationTokens(tokens) : null
-  const subcommand = findGitSubcommand(gitTokens ?? [])
-  if (!gitTokens || !subcommand || subcommand.subcommand !== "commit" || subcommand.index !== 1) {
-    return false
-  }
-  const args = gitTokens.slice(subcommand.index + 1)
-  let messages = 0
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index]
-    if (token === "-m" || token === "--message") {
-      if (!args[index + 1]) return false
-      messages += 1
-      index += 1
-      continue
-    }
-    if (token.startsWith("--message=") && token.length > "--message=".length) {
-      messages += 1
-      continue
-    }
-    if (/^-m.+/.test(token)) {
-      messages += 1
-      continue
-    }
-    return false
-  }
-  return messages === 1
-}
-
 export function derivePermanentApprovalPattern(command: string): string | null {
   const trimmed = command.trim()
   if (!trimmed) return null
@@ -2941,7 +3016,8 @@ function tokenizeCommand(
       tokenStarted = false
       return
     }
-    const token = shellSyntax === "cmd" && tokens.length === 0 ? current.replace(/^@+/, "") : current
+    const token =
+      shellSyntax === "cmd" && tokens.length === 0 ? current.replace(/^@+/, "") : current
     tokens.push(token)
     current = ""
     tokenStarted = false
