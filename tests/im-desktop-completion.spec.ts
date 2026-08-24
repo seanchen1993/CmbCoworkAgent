@@ -89,7 +89,7 @@ async function testStableDesktopDeliveryIsDurableAndIdempotent(): Promise<void> 
     assert.deepEqual(second, first)
     const outbox = context.events.listOutbox()
     assert.equal(outbox.length, 1)
-    assert.equal(outbox[0].content, completion.finalText)
+    assert.equal(outbox[0].content, `【会话：桌面会话】\n${completion.finalText}`)
     assert.equal(outbox[0].eventId, null)
     assert(context.persistence.flushCount > 0, "proactive outbox must cross a strict flush")
   } finally {
@@ -154,7 +154,11 @@ async function testOutboxAndGatewayFailuresNeverEscapeObserver(): Promise<void> 
       conversations: gatewayFailure.conversations,
       access: {
         getThreadGrant: (threadId) => gatewayFailure.grants.getThreadGrant(threadId),
-        validateThreadForCompletionDelivery: () => ({}) as never
+        validateThreadForCompletionDelivery: () =>
+          ({
+            thread: { title: "桌面会话" },
+            workspacePath: "/workspace"
+          }) as never
       },
       events: {
         enqueueProactiveReplies: async () => {

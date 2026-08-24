@@ -185,7 +185,7 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     const request = userInputRequest({ requestId: "request-option" })
     await context.publish(request)
     const text = context.deliveryText(request.requestId)
-    assert(text.includes("【桌面会话】需要你确认"))
+    assert(text.includes("【会话：桌面会话】需要你确认"))
     assert(text.includes("导出格式用哪种？"))
     assert(text.includes("1. CSV (Recommended) — 兼容性最好。"))
     assert(text.includes("/回答 A1B2C3 <编号>"))

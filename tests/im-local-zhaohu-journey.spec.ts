@@ -633,7 +633,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert(
       journey
         .eventReplyText(featureMessage.event.eventId)
-        .startsWith("【支付平台 / 快捷支付 · 远程会话 1】")
+        .startsWith("【会话：支付平台 / 快捷支付 · 远程会话 1】")
     )
 
     const longTask = await journey.send("运行一个长任务")
@@ -648,7 +648,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(longTask.event.eventId, "completed")
     await journey.waitForEventState(queuedInbox.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
-    assert(longReply.includes("【支付平台 / 快捷支付 · 远程会话 1】"))
+    assert(longReply.includes("【会话：支付平台 / 快捷支付 · 远程会话 1】"))
     assert(longReply.includes("切换前任务"))
     assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("切换前任务"))
 

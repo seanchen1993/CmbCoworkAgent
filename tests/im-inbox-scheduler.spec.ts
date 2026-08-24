@@ -169,6 +169,7 @@ async function testScheduledInboxUsesLeaseAndStableProactiveOutbox(): Promise<vo
     assert.equal(executions, 1)
     assert.equal(gateway.replies.length, 1)
     assert.equal(gateway.replies[0].eventId, undefined)
+    assert.equal(gateway.replies[0].message.content, "【远程收件箱】\n记得喝水。")
     assert.equal(context.eventStore.listOutbox("sent").length, 1)
     assert.equal(getLocalThreadRunLease(target.threadId), undefined)
 

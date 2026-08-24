@@ -1,6 +1,7 @@
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventStore } from "./event-store"
 import { imRemoteAccessService, type ImRemoteAccessService } from "./remote-access-service"
+import { imThreadReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 
@@ -93,8 +94,10 @@ export class ImDesktopCompletionObserver {
       return { status: "skipped", reasonCode: "GRANT_ROUTE_STALE" }
     }
 
+    let threadTitle = grant.titleSnapshot
     try {
-      this.dependencies.access.validateThreadForCompletionDelivery(threadId)
+      const validated = this.dependencies.access.validateThreadForCompletionDelivery(threadId)
+      threadTitle = validated.thread.title?.trim() || threadTitle
     } catch {
       return { status: "skipped", reasonCode: "THREAD_STRUCTURE_INVALID" }
     }
@@ -104,7 +107,8 @@ export class ImDesktopCompletionObserver {
       buildImProactiveReplies({
         deliveryId,
         conversationKey: grant.conversationKey,
-        text: finalText
+        text: finalText,
+        prefix: imThreadReplyPrefix(threadTitle)
       })
     )
 

@@ -18,6 +18,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { isBuiltinRobotThreadRemoteAccessEligible } from "@/lib/builtin-robot-remote-access"
+import { sortBuiltinRobotThreadsByRemoteAccess } from "@/lib/builtin-robot-thread-sort"
 import { cn } from "@/lib/utils"
 import type {
   BuiltinRobotConnectionState,
@@ -124,13 +125,17 @@ export function BuiltinRobotPanel(): React.JSX.Element {
     []
   )
 
-  const grantableThreads = useMemo(
-    () =>
-      threads
-        .filter(isBuiltinRobotThreadRemoteAccessEligible)
-        .sort((left, right) => right.updated_at.getTime() - left.updated_at.getTime()),
-    [threads]
-  )
+  const grantableThreads = useMemo(() => {
+    const activeThreadIds = new Set(
+      remoteAccess?.threadGrants
+        .filter((grant) => grant.state === "active")
+        .map((grant) => grant.threadId) ?? []
+    )
+    return sortBuiltinRobotThreadsByRemoteAccess(
+      threads.filter(isBuiltinRobotThreadRemoteAccessEligible),
+      activeThreadIds
+    )
+  }, [remoteAccess?.threadGrants, threads])
 
   const performRemoteAccess = useCallback(
     async (

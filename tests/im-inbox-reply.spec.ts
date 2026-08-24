@@ -8,6 +8,11 @@ import { ImConversationStateStore } from "../src/main/services/im/conversation-s
 import { ImInboxService, IM_MANAGED_INBOX_DIRECTORY } from "../src/main/services/im/inbox-service"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
 import {
+  imFeatureReplyPrefix,
+  imInboxReplyPrefix,
+  imThreadReplyPrefix
+} from "../src/main/services/im/reply-context"
+import {
   IM_REPLY_TRUNCATION_NOTICE,
   buildImEventReplies,
   eventShortCode,
@@ -96,7 +101,12 @@ function testReplySegmentationAndStableEnvelope(): void {
   const prefixed = segmentImReplyText("甲".repeat(7_000), { prefix: "【项目 / 功能】" })
   assert(prefixed.length > 1)
   for (const [index, segment] of prefixed.entries()) {
-    assert(segment.startsWith(`【项目 / 功能】\n[${index + 1}/${prefixed.length}] `))
+    const expectedStart =
+      index === 0
+        ? `【项目 / 功能】\n[1/${prefixed.length}] `
+        : `[${index + 1}/${prefixed.length}] `
+    assert(segment.startsWith(expectedStart))
+    if (index > 0) assert(!segment.includes("【项目 / 功能】"))
     assert(Array.from(segment).length <= 2_800)
   }
 
@@ -116,6 +126,20 @@ function testReplySegmentationAndStableEnvelope(): void {
   assert(first.every((reply) => reply.segment.count === first.length))
   assert.equal(eventShortCode("event-stable-id"), eventShortCode("event-stable-id"))
   assert.match(eventShortCode("event-stable-id"), /^[A-F0-9]{8}$/)
+
+  assert.equal(imInboxReplyPrefix(), "【远程收件箱】")
+  assert.equal(imThreadReplyPrefix("  接口   排障  "), "【会话：接口 排障】")
+  assert.equal(
+    imFeatureReplyPrefix({
+      projectName: "支付平台",
+      projectId: "project-pay",
+      featureTitle: "快捷支付",
+      featureSlug: "quick-pay",
+      threadTitle: "验收会话",
+      switched: true
+    }),
+    "【Feature：支付平台 / 快捷支付｜会话：验收会话】（切换前任务）"
+  )
 }
 
 async function testConcurrentOutboxDrainUsesSingleSender(): Promise<void> {

@@ -285,7 +285,7 @@ async function testSuccessfulRunAndDurableOutbox(): Promise<void> {
     assert.equal(executions, 1)
     assert.equal(context.events.getEvent(queued.eventId)?.state, "completed")
     assert.equal(context.events.listOutbox("sent").length, 1)
-    assert.equal(gateway.replies[0].message.content, "完成回复")
+    assert.equal(gateway.replies[0].message.content, "【远程收件箱】\n完成回复")
     assert.equal(gateway.acknowledgements.at(-1)?.type, "completed")
     assert.equal(getLocalThreadRunLease(target.threadId), undefined)
   } finally {
@@ -359,7 +359,7 @@ async function runForeignOwnerReleaseWakeScenario(
     )
 
     assert.equal(executions, 1)
-    assert.equal(gateway.replies.at(-1)?.message.content, `${owner} released`)
+    assert.equal(gateway.replies.at(-1)?.message.content, `【远程收件箱】\n${owner} released`)
   } finally {
     await queue.stop()
     releaseLocalThreadRunLease(target.threadId, owner, foreignRunId)
@@ -471,7 +471,7 @@ async function testFeatureDesktopWaitPersistsAndRevalidatesBeforeResume(): Promi
       assert.equal(context.events.getEvent(event.eventId)?.state, "waiting_desktop")
       assert.equal(gateway.acknowledgements.at(-1)?.type, "waiting_desktop")
       assert(gateway.replies.at(-1)?.message.content.includes("等待桌面确认"))
-      assert(gateway.replies.at(-1)?.message.content.includes("【统一机器人 / 审批流程】"))
+      assert(gateway.replies.at(-1)?.message.content.includes("【Feature：统一机器人 / 审批流程】"))
       await interactionWaitHooks.onWaitEnd({
         id: "approval-1",
         kind: "approval",

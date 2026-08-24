@@ -19,6 +19,7 @@ import { imConversationStateStore, type ImConversationStateStore } from "./conve
 import { imEventStore, type ImEventStore } from "./event-store"
 import { imRemoteAccessService, type ImRemoteAccessService } from "./remote-access-service"
 import { imRemoteGrantStore, type ImRemoteGrantStore } from "./remote-grant-store"
+import { imFeatureReplyPrefix, imInboxReplyPrefix, imThreadReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 
@@ -29,7 +30,7 @@ interface RemoteUserInputRoute {
   principalId: string
   conversationKey: string
   threadId: string
-  label: string
+  prefix: string
 }
 
 interface RemoteUserInputSession {
@@ -112,7 +113,7 @@ function renderQuestion(session: RemoteUserInputSession): string {
       ? `（${session.questionIndex + 1}/${session.request.questions.length}）`
       : ""
   return [
-    `【${session.route.label}】需要你确认${progress}`,
+    `${session.route.prefix}需要你确认${progress}`,
     `【${question.header}】${question.question}`,
     "",
     ...question.options.map(
@@ -377,7 +378,7 @@ export class ImRemoteUserInputService {
           principalId: threadGrant.principalId,
           conversationKey: threadGrant.conversationKey,
           threadId,
-          label: threadGrant.titleSnapshot
+          prefix: imThreadReplyPrefix(thread.title?.trim() || threadGrant.titleSnapshot)
         }
       }
     }
@@ -405,7 +406,13 @@ export class ImRemoteUserInputService {
           principalId: conversation.principalId,
           conversationKey: conversation.conversationKey,
           threadId,
-          label: `${grant.projectNameSnapshot} / ${grant.featureTitleSnapshot}`
+          prefix: imFeatureReplyPrefix({
+            projectName: grant.projectNameSnapshot,
+            projectId: grant.projectId,
+            featureTitle: grant.featureTitleSnapshot,
+            featureSlug: grant.featureSlug,
+            threadTitle: thread.title
+          })
         }
       }
       if (target.snapshot.kind === "inbox") {
@@ -413,7 +420,7 @@ export class ImRemoteUserInputService {
           principalId: conversation.principalId,
           conversationKey: conversation.conversationKey,
           threadId,
-          label: "收件箱"
+          prefix: imInboxReplyPrefix()
         }
       }
     }

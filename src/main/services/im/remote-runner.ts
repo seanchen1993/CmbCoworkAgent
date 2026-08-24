@@ -51,17 +51,14 @@ import {
   type ImRemoteCapabilityDecision,
   type ImRemoteCapabilityGuard
 } from "./capability-guard"
-import {
-  imConversationStateStore,
-  type ImConversationStateStore,
-  type ImTargetSnapshot
-} from "./conversation-state"
+import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
 import { imEventStore, type ImEventRecord, type ImEventStore } from "./event-store"
 import {
   unavailableImGatewayClient,
   type ImExecutionPermitResult,
   type ImGatewayClientPort
 } from "./gateway-client"
+import { imTargetReplyPrefix } from "./reply-context"
 import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
 import { trackEvent } from "../event-reporter"
@@ -144,15 +141,6 @@ class ImPreparedPromptRejectedError extends Error {
 
 class ImCompletionHookRejectedError extends Error {
   readonly reasonCode = "REMOTE_COMPLETION_HOOK_BLOCKED"
-}
-
-function targetPrefix(target: ImTargetSnapshot | null, switched = false): string | undefined {
-  if (!target || target.kind === "inbox") return undefined
-  const label =
-    target.kind === "thread"
-      ? target.title
-      : `${target.projectName ?? target.projectId} / ${target.featureTitle ?? target.featureSlug}`
-  return `【${label}】${switched ? "（切换前任务）" : ""}`
 }
 
 function acknowledgementForTerminal(event: ImEventRecord): RemoteImAckV1 {
@@ -936,12 +924,14 @@ export class ImRemoteRunner {
 
   private targetPrefixForEvent(event: ImEventRecord): string | undefined {
     const snapshot = event.targetSnapshot
-    if (!snapshot || snapshot.kind === "inbox") return undefined
+    if (!snapshot) return undefined
     try {
       const active = this.dependencies.conversationState.getActiveTarget(event.conversationKey)
-      return targetPrefix(snapshot, Boolean(active && active.targetId !== snapshot.targetId))
+      return imTargetReplyPrefix(snapshot, {
+        switched: Boolean(active && active.targetId !== snapshot.targetId)
+      })
     } catch {
-      return targetPrefix(snapshot)
+      return imTargetReplyPrefix(snapshot)
     }
   }
 }

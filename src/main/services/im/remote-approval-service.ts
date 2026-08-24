@@ -19,6 +19,7 @@ import {
   type ImRemoteApprovalAuditStore
 } from "./remote-approval-audit-store"
 import { imRemoteGrantStore, type ImRemoteGrantStore } from "./remote-grant-store"
+import { imFeatureReplyPrefix, imInboxReplyPrefix, imThreadReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies, IM_REPLY_TRUNCATION_NOTICE } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 
@@ -30,7 +31,7 @@ interface RemoteApprovalRoute {
   conversationKey: string
   threadId: string
   workspacePath: string
-  label: string
+  prefix: string
 }
 
 interface RemoteApprovalCode {
@@ -387,13 +388,13 @@ export class ImRemoteApprovalService {
       : ""
     const text = code
       ? [
-          `【${route.label}】需要批准`,
+          `${route.prefix}需要批准`,
           presentation.detail,
           "",
           decisionCommands,
           "短码 10 分钟内单次有效。"
         ].join("\n")
-      : [`【${route.label}】需要在桌面确认`, presentation.detail].join("\n")
+      : [`${route.prefix}需要在桌面确认`, presentation.detail].join("\n")
     const replies = buildImProactiveReplies({
       deliveryId: `approval-request:${registration.request.id}`,
       conversationKey: route.conversationKey,
@@ -434,7 +435,7 @@ export class ImRemoteApprovalService {
       buildImProactiveReplies({
         deliveryId: `approval-request:${registration.request.id}`,
         conversationKey: route.conversationKey,
-        text: `【${route.label}】需要在桌面确认\n操作 ${operation} 无法在招乎中完整、安全地展示。`
+        text: `${route.prefix}需要在桌面确认\n操作 ${operation} 无法在招乎中完整、安全地展示。`
       })
     )
     this.drainReplies()
@@ -461,7 +462,7 @@ export class ImRemoteApprovalService {
           conversationKey: threadGrant.conversationKey,
           threadId,
           workspacePath,
-          label: threadGrant.titleSnapshot
+          prefix: imThreadReplyPrefix(thread.title?.trim() || threadGrant.titleSnapshot)
         }
       }
     }
@@ -490,7 +491,13 @@ export class ImRemoteApprovalService {
           conversationKey: conversation.conversationKey,
           threadId,
           workspacePath,
-          label: `${grant.projectNameSnapshot} / ${grant.featureTitleSnapshot}`
+          prefix: imFeatureReplyPrefix({
+            projectName: grant.projectNameSnapshot,
+            projectId: grant.projectId,
+            featureTitle: grant.featureTitleSnapshot,
+            featureSlug: grant.featureSlug,
+            threadTitle: thread.title
+          })
         }
       }
       if (target.snapshot.kind === "inbox") {
@@ -499,7 +506,7 @@ export class ImRemoteApprovalService {
           conversationKey: conversation.conversationKey,
           threadId,
           workspacePath,
-          label: "收件箱"
+          prefix: imInboxReplyPrefix()
         }
       }
     }

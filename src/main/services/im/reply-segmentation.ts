@@ -41,7 +41,7 @@ function takeAtBoundary(points: string[], maxCharacters: number): { head: string
 }
 
 function visibleSegmentPrefix(prefix: string, index: number, count: number): string {
-  const targetPrefix = prefix.trim() ? `${prefix.trim()}\n` : ""
+  const targetPrefix = index === 0 && prefix.trim() ? `${prefix.trim()}\n` : ""
   return count > 1 ? `${targetPrefix}[${index + 1}/${count}] ` : targetPrefix
 }
 
@@ -70,7 +70,10 @@ export function segmentImReplyText(text: string, options: SegmentImReplyOptions 
 
   // V1 caps at eight segments, so every [i/n] marker has the same six-character
   // upper bound. Splitting against that bound makes the later count immutable.
-  const markerBudget = lengthOf(visibleSegmentPrefix(prefix, 7, 8))
+  const markerBudget = Math.max(
+    lengthOf(visibleSegmentPrefix(prefix, 0, 8)),
+    lengthOf(visibleSegmentPrefix(prefix, 7, 8))
+  )
   const payloadBudget = maxCharacters - markerBudget
   if (payloadBudget < 1) throw new Error("Reply prefix leaves no room for content")
 

@@ -6,6 +6,7 @@ import { imConversationStateStore, type ImConversationStateStore } from "./conve
 import { imEventStore, type ImEventRecord } from "./event-store"
 import { unavailableImGatewayClient, type ImGatewayClientPort } from "./gateway-client"
 import { createImInboxRemotePolicy, executePreparedRemoteStandardTurn } from "./remote-runner"
+import { imInboxReplyPrefix } from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import { ImReplyClient } from "./reply-client"
 
@@ -192,7 +193,8 @@ export async function executeImInboxScheduledTask(
       buildImProactiveReplies({
         deliveryId,
         conversationKey: delivery.conversationKey,
-        text
+        text,
+        prefix: imInboxReplyPrefix()
       })
     )
     await replyClient.sendPending()

@@ -1,9 +1,43 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
+import { sortBuiltinRobotThreadsByRemoteAccess } from "../src/renderer/src/lib/builtin-robot-thread-sort"
+import type { Thread } from "../src/renderer/src/types"
 
 function source(path: string): string {
   return readFileSync(resolve(process.cwd(), path), "utf8")
+}
+
+function thread(threadId: string, updatedAt: number): Thread {
+  return {
+    thread_id: threadId,
+    created_at: new Date(0),
+    updated_at: new Date(updatedAt),
+    status: "idle"
+  }
+}
+
+function testEnabledDesktopThreadsAreSortedFirst(): void {
+  const threads = [
+    thread("disabled-new", 400),
+    thread("enabled-old", 100),
+    thread("enabled-new", 300),
+    thread("disabled-old", 200)
+  ]
+  const sorted = sortBuiltinRobotThreadsByRemoteAccess(
+    threads,
+    new Set(["enabled-old", "enabled-new"])
+  )
+
+  assert.deepEqual(
+    sorted.map((candidate) => candidate.thread_id),
+    ["enabled-new", "enabled-old", "disabled-new", "disabled-old"]
+  )
+  assert.deepEqual(
+    threads.map((candidate) => candidate.thread_id),
+    ["disabled-new", "enabled-old", "enabled-new", "disabled-old"],
+    "sorting must not mutate the thread list returned by the store"
+  )
 }
 
 function testRemoteInboxIsReadOnlyAtRendererAndMainBoundary(): void {
@@ -104,4 +138,6 @@ testRemoteInboxIsReadOnlyAtRendererAndMainBoundary()
 console.log("PASS testRemoteInboxIsReadOnlyAtRendererAndMainBoundary")
 testRemoteThreadsHaveStableSourceAndModeLabels()
 console.log("PASS testRemoteThreadsHaveStableSourceAndModeLabels")
+testEnabledDesktopThreadsAreSortedFirst()
+console.log("PASS testEnabledDesktopThreadsAreSortedFirst")
 console.log("im-remote-thread-ui.spec.ts passed")
