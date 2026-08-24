@@ -5542,14 +5542,21 @@ export function ChatContainer({
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
         ? undefined
         : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
+    const preserveHarnessView = surface !== "default"
     setForkingMessageId(messageForkTarget.message.id)
     try {
-      await forkThread({
-        sourceThreadId: messageForkTarget.sourceThreadId,
-        checkpointId: messageForkTarget.checkpoint.checkpointId,
-        ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
-        overrides
-      })
+      const forkedThread = await forkThread(
+        {
+          sourceThreadId: messageForkTarget.sourceThreadId,
+          checkpointId: messageForkTarget.checkpoint.checkpointId,
+          ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
+          overrides
+        },
+        preserveHarnessView ? { preserveView: true } : undefined
+      )
+      if (preserveHarnessView) {
+        onHarnessSessionCreated?.(forkedThread.thread_id)
+      }
       toast.success("已从这条消息创建新会话")
       resetMessageForkDialog()
     } catch (error) {
@@ -5566,7 +5573,9 @@ export function ChatContainer({
     forkingMessageId,
     handleSelectForkWorkspace,
     messageForkTarget,
-    resetMessageForkDialog
+    onHarnessSessionCreated,
+    resetMessageForkDialog,
+    surface
   ])
 
   const handleEditGoal = useCallback((): void => {
