@@ -20,10 +20,12 @@ export interface ChatSearchCorpus {
 
 export function findChatSearchMatches(
   documents: readonly ChatSearchDocument[],
-  rawQuery: string
+  rawQuery: string,
+  maxMatches = Number.POSITIVE_INFINITY
 ): ChatSearchMatch[] {
   const query = rawQuery.trim().toLocaleLowerCase()
-  if (!query) return []
+  const boundedMaxMatches = Math.max(0, Math.floor(maxMatches))
+  if (!query || boundedMaxMatches === 0) return []
 
   const matches: ChatSearchMatch[] = []
   for (const document of documents) {
@@ -31,7 +33,7 @@ export function findChatSearchMatches(
     let offset = 0
     let occurrenceIndex = 0
     let matchIndex = text.indexOf(query, offset)
-    while (matchIndex >= 0) {
+    while (matchIndex >= 0 && matches.length < boundedMaxMatches) {
       matches.push({
         messageId: document.messageId,
         occurrenceIndex,
@@ -41,18 +43,23 @@ export function findChatSearchMatches(
       offset = matchIndex + query.length
       matchIndex = text.indexOf(query, offset)
     }
+    if (matches.length >= boundedMaxMatches) break
   }
   return matches
 }
 
 function mergeSortedMatches(
   stable: readonly ChatSearchMatch[],
-  dynamic: readonly ChatSearchMatch[]
+  dynamic: readonly ChatSearchMatch[],
+  maxMatches: number
 ): ChatSearchMatch[] {
   const merged: ChatSearchMatch[] = []
   let stableIndex = 0
   let dynamicIndex = 0
-  while (stableIndex < stable.length || dynamicIndex < dynamic.length) {
+  while (
+    merged.length < maxMatches &&
+    (stableIndex < stable.length || dynamicIndex < dynamic.length)
+  ) {
     const stableMatch = stable[stableIndex]
     const dynamicMatch = dynamic[dynamicIndex]
     if (!dynamicMatch) {
@@ -81,10 +88,13 @@ function mergeSortedMatches(
  * suffix, only that suffix is searched again; the already-indexed history text
  * is not revisited.
  */
-export function createChatSearchMatcher(): (
+export function createChatSearchMatcher(
+  maxMatches = Number.POSITIVE_INFINITY
+): (
   corpus: ChatSearchCorpus,
   query: string
 ) => ChatSearchMatch[] {
+  const boundedMaxMatches = Math.max(0, Math.floor(maxMatches))
   let previousStableDocuments: readonly ChatSearchDocument[] | null = null
   let previousQuery = ""
   let stableMatches: ChatSearchMatch[] = []
@@ -99,7 +109,11 @@ export function createChatSearchMatcher(): (
       corpus.stableDocuments !== previousStableDocuments ||
       normalizedQuery !== previousQuery
     ) {
-      stableMatches = findChatSearchMatches(corpus.stableDocuments, normalizedQuery)
+      stableMatches = findChatSearchMatches(
+        corpus.stableDocuments,
+        normalizedQuery,
+        boundedMaxMatches
+      )
       previousStableDocuments = corpus.stableDocuments
       previousQuery = normalizedQuery
       previousDynamicIdKey = "\u0001"
@@ -114,7 +128,11 @@ export function createChatSearchMatcher(): (
       previousDynamicIdKey = dynamicIdKey
     }
 
-    const dynamicMatches = findChatSearchMatches(corpus.dynamicDocuments, normalizedQuery)
-    return mergeSortedMatches(visibleStableMatches, dynamicMatches)
+    const dynamicMatches = findChatSearchMatches(
+      corpus.dynamicDocuments,
+      normalizedQuery,
+      boundedMaxMatches
+    )
+    return mergeSortedMatches(visibleStableMatches, dynamicMatches, boundedMaxMatches)
   }
 }

@@ -17,6 +17,39 @@ export function isChatMessageIndexVisible(
   return dynamicVisibilityByIndex.get(index) ?? stableVisibleIndexes.has(index)
 }
 
+/**
+ * Merges the durable and live visibility indexes into the row order consumed by
+ * the virtual list. The live map is authoritative for indexes it contains, so
+ * it can hide a durable row while an in-flight replacement is temporarily empty.
+ */
+export function mergeVisibleChatMessageIndexes(
+  orderedStableVisibleIndexes: readonly number[],
+  dynamicVisibilityByIndex: ReadonlyMap<number, boolean>,
+  orderedDynamicVisibleIndexes: readonly number[]
+): number[] {
+  const merged: number[] = []
+  let stablePosition = 0
+  let dynamicPosition = 0
+
+  while (
+    stablePosition < orderedStableVisibleIndexes.length ||
+    dynamicPosition < orderedDynamicVisibleIndexes.length
+  ) {
+    const stableIndex = orderedStableVisibleIndexes[stablePosition]
+    const dynamicIndex = orderedDynamicVisibleIndexes[dynamicPosition]
+    if (dynamicIndex === undefined || (stableIndex !== undefined && stableIndex < dynamicIndex)) {
+      stablePosition += 1
+      if (dynamicVisibilityByIndex.get(stableIndex) !== false) merged.push(stableIndex)
+      continue
+    }
+    if (stableIndex === dynamicIndex) stablePosition += 1
+    dynamicPosition += 1
+    if (dynamicVisibilityByIndex.get(dynamicIndex) === true) merged.push(dynamicIndex)
+  }
+
+  return merged
+}
+
 export function findPreviousVisibleChatMessageIndex(
   beforeIndex: number,
   orderedStableVisibleIndexes: readonly number[],

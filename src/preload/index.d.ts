@@ -48,6 +48,8 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMessageSearchOptions,
+  ThreadMessageSearchPage,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   SubagentTranscriptPage,
@@ -975,6 +977,11 @@ interface CustomAPI {
       threadId: string,
       options?: ThreadMessagesPageOptions
     ) => Promise<ThreadMessagesPage>
+    searchMessages: (
+      threadId: string,
+      query: string,
+      options?: ThreadMessageSearchOptions
+    ) => Promise<ThreadMessageSearchPage>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
     replaceMessageId: (
       threadId: string,

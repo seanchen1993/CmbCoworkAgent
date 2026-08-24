@@ -166,6 +166,7 @@ export interface DynamicLiveVisibilityProjectionInput {
 export interface DynamicLiveVisibilityProjection {
   byIndex: ReadonlyMap<number, boolean>
   orderedVisibleIndexes: readonly number[]
+  version: number
 }
 
 function lowerBound(values: readonly number[], target: number): number {
@@ -191,6 +192,7 @@ export function createDynamicLiveVisibilityProjector(): (
   let previousHasHookLogChip: DynamicLiveVisibilityProjectionInput["hasHookLogChip"] | null = null
   let visibility = new Map<number, boolean>()
   let orderedVisibleIndexes: number[] = []
+  let version = 0
 
   const rebuild = (input: DynamicLiveVisibilityProjectionInput): void => {
     visibility = new Map()
@@ -205,6 +207,7 @@ export function createDynamicLiveVisibilityProjector(): (
       if (visible) orderedVisibleIndexes.push(displayIndex)
     }
     orderedVisibleIndexes.sort((left, right) => left - right)
+    version += 1
   }
 
   return (input) => {
@@ -238,6 +241,7 @@ export function createDynamicLiveVisibilityProjector(): (
         } else if (orderedVisibleIndexes[insertionIndex] === displayIndex) {
           orderedVisibleIndexes.splice(insertionIndex, 1)
         }
+        version += 1
       }
     }
 
@@ -247,6 +251,6 @@ export function createDynamicLiveVisibilityProjector(): (
     previousDisplayStructureVersion = input.displayStructureVersion
     previousDisplayIndexById = input.displayIndexById
     previousHasHookLogChip = input.hasHookLogChip
-    return { byIndex: visibility, orderedVisibleIndexes }
+    return { byIndex: visibility, orderedVisibleIndexes, version }
   }
 }

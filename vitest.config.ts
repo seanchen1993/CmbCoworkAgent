@@ -21,6 +21,13 @@ export default defineConfig({
       "src/renderer/src/components/dashboard/project-mode-export.test.ts",
       "src/renderer/src/components/update/release-notes.test.ts",
       "src/renderer/src/components/trace/TraceConversation.test.ts",
+      "src/renderer/src/components/chat/chat-message-virtual-list-initial-position.test.ts",
+      "src/renderer/src/components/chat/chat-scroll-regressions.test.ts",
+      "src/renderer/src/components/chat/chat-scroll-runtime-harness.test.ts",
+      "src/renderer/src/components/chat/chat-scroll-navigator.test.ts",
+      "src/renderer/src/components/chat/chat-search-overlay.test.ts",
+      "src/renderer/src/lib/chat-scroll-tail-change.test.ts",
+      "src/renderer/src/lib/bounded-chat-search-text.test.ts",
       "src/renderer/src/lib/apple-intelligence-glow.test.ts",
       "tests/close-to-tray.spec.ts"
     ]

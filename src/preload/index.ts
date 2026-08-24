@@ -54,6 +54,8 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMessageSearchOptions,
+  ThreadMessageSearchPage,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   SubagentTranscriptPage,
@@ -802,6 +804,13 @@ const api = {
       options?: ThreadMessagesPageOptions
     ): Promise<ThreadMessagesPage> => {
       return ipcRenderer.invoke("threads:messages-page", { threadId, options })
+    },
+    searchMessages: (
+      threadId: string,
+      query: string,
+      options?: ThreadMessageSearchOptions
+    ): Promise<ThreadMessageSearchPage> => {
+      return ipcRenderer.invoke("threads:search-messages", { threadId, query, options })
     },
     appendMessages: (threadId: string, messages: Message[]): Promise<{ count: number }> => {
       return ipcRenderer.invoke("threads:appendMessages", { threadId, messages })

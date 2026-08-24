@@ -15,7 +15,8 @@ import { createChatMessageProjector } from "../src/renderer/src/lib/chat-message
 import {
   deriveChatMessageWindowRows,
   findNextVisibleChatMessageIndex,
-  findPreviousVisibleChatMessageIndex
+  findPreviousVisibleChatMessageIndex,
+  mergeVisibleChatMessageIndexes
 } from "../src/renderer/src/lib/chat-visible-index"
 import type { Message } from "../src/renderer/src/types"
 
@@ -57,6 +58,12 @@ assert.deepEqual(
     { messageId: "m1", occurrenceIndex: 1 },
     { messageId: "m2", occurrenceIndex: 0 }
   ]
+)
+assert.equal(
+  findChatSearchMatches([{ messageId: "bounded", text: "x".repeat(20_000) }], "x", 1_001)
+    .length,
+  1_001,
+  "renderer search must not allocate one match object per occurrence in a huge message"
 )
 
 const baselineTarget: Message[] = Array.from({ length: 10_000 }, (_, index) => ({
@@ -183,6 +190,19 @@ assert.equal(
     orderedDynamicVisibleIndexes
   ),
   9_900
+)
+
+assert.deepEqual(
+  mergeVisibleChatMessageIndexes(
+    [0, 1, 2, 5],
+    new Map([
+      [1, false],
+      [3, true],
+      [5, true]
+    ]),
+    [3, 5]
+  ),
+  [0, 2, 3, 5]
 )
 
 let stableSearchDocumentReads = 0

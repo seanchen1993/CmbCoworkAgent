@@ -9,6 +9,7 @@ import React, {
 } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
+import type { VirtuosoHandle } from "react-virtuoso"
 import {
   Send,
   Square,
@@ -92,8 +93,6 @@ import {
   messageHasVisibleRow
 } from "@/lib/message-display-visibility"
 import {
-  areMessageRenderFieldsEqual,
-  areMessageToolRenderInputsEqual,
   createIncrementalToolDerivationProjector,
   type IncrementalToolDerivationProjection
 } from "@/lib/message-render-stability"
@@ -120,7 +119,6 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
-  HITLRequest,
   Message,
   SkillMetadata,
   Thread,
@@ -129,10 +127,22 @@ import type {
   ToolCallStatus,
   UserInputResponse
 } from "@/types"
-import { MessageBubble } from "./MessageBubble"
-import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import {
+  CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
+  ChatMessageVirtualList,
+  shouldVirtualizeChatMessageList,
+  type ChatApprovalDecision
+} from "./ChatMessageVirtualList"
+import {
+  ChatScrollNavigator,
+  createChatScrollQuestionRevisionProjector
+} from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
-import { ChatSearchOverlay } from "./ChatSearchOverlay"
+import {
+  ChatSearchOverlay,
+  type DurableChatSearchOptions,
+  type DurableChatSearchPage
+} from "./ChatSearchOverlay"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -165,10 +175,6 @@ import {
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
-import {
-  CHAT_AUTO_SCROLL_ALWAYS,
-  normalizeChatAutoScrollMessageLimit
-} from "../../../../shared/chat-scroll"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
@@ -207,17 +213,7 @@ import {
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
-import { HookLogChip, HookLogModal } from "./HookLogViews"
-import {
-  CHAT_MESSAGE_WINDOW_SHIFT,
-  createPrependAnchoredChatMessageWindow,
-  createTailChatMessageWindow,
-  isTailChatMessageWindow,
-  reconcileChatMessageWindow,
-  revealChatMessageIndex,
-  shiftChatMessageWindow,
-  type ChatMessageWindow
-} from "@/lib/chat-message-window"
+import { HookLogModal } from "./HookLogViews"
 import type { ChatSearchCorpus, ChatSearchDocument } from "@/lib/chat-search-matches"
 import { createChatMessageProjector } from "@/lib/chat-message-projection"
 import {
@@ -225,13 +221,48 @@ import {
   createLiveDisplayMessageProjector
 } from "@/lib/live-display-message-projection"
 import {
-  deriveChatMessageWindowRows,
-  findPreviousVisibleChatMessageIndex,
-  type ChatMessageWindowRenderRow
+  mergeVisibleChatMessageIndexes
 } from "@/lib/chat-visible-index"
+import {
+  chatScrollTailMessageIdentity,
+  classifyChatScrollTailChange,
+  shouldMarkChatTailContentGrowth
+} from "@/lib/chat-scroll-tail-change"
+import { buildBoundedChatSearchText } from "@/lib/bounded-chat-search-text"
+import {
+  createChatScrollState,
+  isChatScrollDetached,
+  mergeChatScrollEffects,
+  shouldFollowChatOutput,
+  transitionChatScroll,
+  type ChatScrollEffect,
+  type ChatScrollEvent,
+  type ChatScrollState,
+  type ChatScrollTransition
+} from "../../../../shared/chat-scroll-controller"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+const CHAT_AT_BOTTOM_THRESHOLD_PX = 32
+const CHAT_SCROLL_UP_DETACH_DELTA_PX = 1
+const CHAT_USER_SCROLL_INTENT_WINDOW_MS = 350
+const CHAT_BOTTOM_SETTLE_MAX_FRAMES = 60
+const CHAT_FOLLOW_SETTLE_MAX_FRAMES = 12
+const CHAT_HISTORY_ANCHOR_MAX_FRAMES = 120
+const CHAT_HISTORY_ANCHOR_STABLE_FRAMES = 12
+const CHAT_LOCAL_SEARCH_HISTORY_LIMIT = 500
+const CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT = 4 * 1024 * 1024
+
+interface PendingDurableHistoryAnchor {
+  threadId: string
+  generation: number
+  messageId: string
+  viewportTop: number
+  previousMessageCount: number
+  previousLoadedMessageCount: number
+  attempt: number
+  stableFrames: number
+}
 
 function interruptionNoticeCopy(event: string, action: string): {
   title: string
@@ -936,16 +967,6 @@ const getMessageText = (content: Message["content"]): string => {
     .join("\n")
 }
 
-function stringifyChatSearchValue(value: unknown): string {
-  if (typeof value === "string") return value
-  if (value == null) return ""
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
 function cleanUserAttachmentMarkupForDisplay(message: Message): Message {
   if (
     message.role !== "user" ||
@@ -1400,357 +1421,6 @@ function ChatErrorCard({
   )
 }
 
-type ChatApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-
-interface ChatToolResultInfo {
-  content: string | unknown
-  is_error?: boolean
-}
-
-type ChatMessageWindowRow = ChatMessageWindowRenderRow<Message>
-
-interface ChatMessageListProps {
-  messages: Message[]
-  windowRows: ChatMessageWindowRow[]
-  messageWindow: ChatMessageWindow
-  onLoadOlder: () => void
-  onLoadNewer: () => void
-  onLoadEarlierHistoryPage: () => void
-  historyHasMore: boolean
-  historyPageLoading: boolean
-  historyRemainingCount: number
-  hookLoggingEnabled: boolean
-  hookLogBucketByTurnId: Map<string, HookLogBucket>
-  detachedHookLogBuckets: HookLogBucket[]
-  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: (messageId: string, role: Message["role"]) => (node: HTMLDivElement | null) => void
-  isLoading: boolean
-  toolResults: Map<string, ChatToolResultInfo>
-  toolCallStates: Map<string, ToolCallState>
-  pendingApprovalToolCallKeys: Set<string>
-  pendingApproval: HITLRequest | null
-  autoApproveGitPush: boolean
-  onApprovalDecision: (decision: ChatApprovalDecision) => void
-  onEditUserMessage: (message: Message) => void
-  onSetGoalFromMessage: (text: string) => void
-  onForkFromMessage: (message: Message) => void
-  forkingMessageId: string | null
-  onOpenHookLogBucket: (turnId: string) => void
-  threadId: string
-  assistantDurationMsById: Map<string, number>
-  userSendTimeLabelById: Map<string, string>
-}
-
-interface ChatMessageRowProps {
-  message: Message
-  previousMessage: Message | null
-  isLastMessage: boolean
-  hasUserAfterHead: boolean
-  showAssistantMeta: boolean
-  hookLogBucket?: HookLogBucket
-  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: ChatMessageListProps["setMessageRef"]
-  isLoading: boolean
-  toolResults: Map<string, ChatToolResultInfo>
-  toolCallStates: Map<string, ToolCallState>
-  pendingApprovalToolCallKeys: Set<string>
-  pendingApproval: HITLRequest | null
-  autoApproveGitPush: boolean
-  onApprovalDecision: ChatMessageListProps["onApprovalDecision"]
-  onEditUserMessage: ChatMessageListProps["onEditUserMessage"]
-  onSetGoalFromMessage: ChatMessageListProps["onSetGoalFromMessage"]
-  onForkFromMessage: ChatMessageListProps["onForkFromMessage"]
-  forkingMessageId: string | null
-  onOpenHookLogBucket: ChatMessageListProps["onOpenHookLogBucket"]
-  threadId: string
-  assistantDurationMs?: number
-  userSendTimeLabel: string | null
-}
-
-function ChatMessageRowImpl({
-  message,
-  previousMessage,
-  isLastMessage,
-  hasUserAfterHead,
-  showAssistantMeta,
-  hookLogBucket,
-  contentMessageRefs,
-  setMessageRef,
-  isLoading,
-  toolResults,
-  toolCallStates,
-  pendingApprovalToolCallKeys,
-  pendingApproval,
-  autoApproveGitPush,
-  onApprovalDecision,
-  onEditUserMessage,
-  onSetGoalFromMessage,
-  onForkFromMessage,
-  forkingMessageId,
-  onOpenHookLogBucket,
-  threadId,
-  assistantDurationMs,
-  userSendTimeLabel
-}: ChatMessageRowProps): React.JSX.Element {
-  const navigatorRef = useMemo(
-    () => setMessageRef(message.id, message.role),
-    [message.id, message.role, setMessageRef]
-  )
-  const contentMessageRefMap = contentMessageRefs.current
-  const combinedRef = useCallback(
-    (node: HTMLDivElement | null): void => {
-      navigatorRef(node)
-      if (node && message.role !== "tool") {
-        contentMessageRefMap.set(message.id, node)
-        return
-      }
-      contentMessageRefMap.delete(message.id)
-    },
-    [contentMessageRefMap, message.id, message.role, navigatorRef]
-  )
-  const handleOpenHookLogBucket = useCallback(() => {
-    if (hookLogBucket) onOpenHookLogBucket(hookLogBucket.turnId)
-  }, [hookLogBucket, onOpenHookLogBucket])
-
-  return (
-    <div
-      ref={combinedRef}
-      data-chat-message-row=""
-      data-chat-message-id={message.id}
-      data-message-role={message.role}
-    >
-      <MessageBubble
-        message={message}
-        previousMessage={previousMessage}
-        isStreaming={isLastMessage && isLoading}
-        showAssistantMeta={showAssistantMeta}
-        toolResults={toolResults}
-        toolCallStates={toolCallStates}
-        pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-        pendingApproval={pendingApproval}
-        autoApproveGitPush={autoApproveGitPush}
-        onApprovalDecision={onApprovalDecision}
-        onEditUserMessage={onEditUserMessage}
-        onSetGoalFromMessage={onSetGoalFromMessage}
-        onForkFromMessage={onForkFromMessage}
-        forkingMessageId={forkingMessageId}
-        threadId={threadId}
-        isLoading={isLoading}
-        hasUserAfterHead={hasUserAfterHead}
-        assistantDurationMs={assistantDurationMs}
-        userSendTimeLabel={userSendTimeLabel}
-      />
-      {hookLogBucket && hookLogBucket.entries.length > 0 && (
-        <div className="mt-1 ml-12">
-          <HookLogChip bucket={hookLogBucket} onClick={handleOpenHookLogBucket} />
-        </div>
-      )}
-    </div>
-  )
-}
-
-function areChatMessageRowPropsEqual(
-  previous: Readonly<ChatMessageRowProps>,
-  next: Readonly<ChatMessageRowProps>
-): boolean {
-  return (
-    areMessageRenderFieldsEqual(previous.message, next.message) &&
-    (previous.previousMessage?.role ?? null) === (next.previousMessage?.role ?? null) &&
-    previous.isLastMessage === next.isLastMessage &&
-    previous.hasUserAfterHead === next.hasUserAfterHead &&
-    previous.showAssistantMeta === next.showAssistantMeta &&
-    previous.hookLogBucket === next.hookLogBucket &&
-    previous.contentMessageRefs === next.contentMessageRefs &&
-    previous.setMessageRef === next.setMessageRef &&
-    previous.isLoading === next.isLoading &&
-    previous.pendingApproval === next.pendingApproval &&
-    previous.autoApproveGitPush === next.autoApproveGitPush &&
-    previous.onApprovalDecision === next.onApprovalDecision &&
-    previous.onEditUserMessage === next.onEditUserMessage &&
-    previous.onSetGoalFromMessage === next.onSetGoalFromMessage &&
-    previous.onForkFromMessage === next.onForkFromMessage &&
-    previous.forkingMessageId === next.forkingMessageId &&
-    previous.onOpenHookLogBucket === next.onOpenHookLogBucket &&
-    previous.threadId === next.threadId &&
-    previous.assistantDurationMs === next.assistantDurationMs &&
-    previous.userSendTimeLabel === next.userSendTimeLabel &&
-    areMessageToolRenderInputsEqual(previous.message, previous, next)
-  )
-}
-
-const ChatMessageRow = React.memo(ChatMessageRowImpl, areChatMessageRowPropsEqual)
-
-const DETACHED_HOOK_LOG_WINDOW_SIZE = 80
-
-const ChatMessageList = React.memo(function ChatMessageList({
-  messages,
-  windowRows,
-  messageWindow,
-  onLoadOlder,
-  onLoadNewer,
-  onLoadEarlierHistoryPage,
-  historyHasMore,
-  historyPageLoading,
-  historyRemainingCount,
-  hookLoggingEnabled,
-  hookLogBucketByTurnId,
-  detachedHookLogBuckets,
-  contentMessageRefs,
-  setMessageRef,
-  isLoading,
-  toolResults,
-  toolCallStates,
-  pendingApprovalToolCallKeys,
-  pendingApproval,
-  autoApproveGitPush,
-  onApprovalDecision,
-  onEditUserMessage,
-  onSetGoalFromMessage,
-  onForkFromMessage,
-  forkingMessageId,
-  onOpenHookLogBucket,
-  threadId,
-  assistantDurationMsById,
-  userSendTimeLabelById
-}: ChatMessageListProps): React.JSX.Element {
-  const [detachedHookLogOffsetFromTail, setDetachedHookLogOffsetFromTail] = useState(0)
-  const detachedHookLogEnd = Math.max(
-    0,
-    detachedHookLogBuckets.length - detachedHookLogOffsetFromTail
-  )
-  const detachedHookLogStart = Math.max(
-    0,
-    detachedHookLogEnd - DETACHED_HOOK_LOG_WINDOW_SIZE
-  )
-  const renderedDetachedHookLogBuckets = detachedHookLogBuckets.slice(
-    detachedHookLogStart,
-    detachedHookLogEnd
-  )
-
-  return (
-    <>
-      {messageWindow.startIndex > 0 && (
-        <button
-          type="button"
-          data-chat-window-boundary="older"
-          onClick={onLoadOlder}
-          className="mx-auto flex rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        >
-          加载更早的 {Math.min(CHAT_MESSAGE_WINDOW_SHIFT, messageWindow.startIndex)} 条消息
-        </button>
-      )}
-      {messageWindow.startIndex === 0 && historyHasMore && (
-        <button
-          type="button"
-          data-chat-history-boundary="older"
-          onClick={onLoadEarlierHistoryPage}
-          disabled={historyPageLoading}
-          className="mx-auto flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-60"
-        >
-          {historyPageLoading && <Loader2 className="size-3 animate-spin" />}
-          {historyPageLoading
-            ? "正在加载更早消息"
-            : `加载更早的 ${Math.max(1, Math.min(500, historyRemainingCount))} 条消息`}
-        </button>
-      )}
-      {windowRows.map((row) => {
-        const { message } = row
-        const hookLogBucketForTurn =
-          hookLoggingEnabled && message.role === "user"
-            ? hookLogBucketByTurnId.get(message.id)
-            : undefined
-
-        return (
-          <ChatMessageRow
-            key={`${message.role}:${message.id}`}
-            message={message}
-            previousMessage={row.previousMessage}
-            isLastMessage={row.isLastMessage}
-            hasUserAfterHead={row.hasUserAfterHead}
-            showAssistantMeta={row.showAssistantMeta}
-            hookLogBucket={hookLogBucketForTurn}
-            contentMessageRefs={contentMessageRefs}
-            setMessageRef={setMessageRef}
-            isLoading={isLoading}
-            toolResults={toolResults}
-            toolCallStates={toolCallStates}
-            pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-            pendingApproval={pendingApproval}
-            autoApproveGitPush={autoApproveGitPush}
-            onApprovalDecision={onApprovalDecision}
-            onEditUserMessage={onEditUserMessage}
-            onSetGoalFromMessage={onSetGoalFromMessage}
-            onForkFromMessage={onForkFromMessage}
-            forkingMessageId={forkingMessageId}
-            onOpenHookLogBucket={onOpenHookLogBucket}
-            threadId={threadId}
-            assistantDurationMs={assistantDurationMsById.get(message.id)}
-            userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-          />
-        )
-      })}
-
-      {messageWindow.endIndex < messages.length && (
-        <button
-          type="button"
-          data-chat-window-boundary="newer"
-          onClick={onLoadNewer}
-          className="mx-auto flex rounded-full border border-border/70 bg-muted/30 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        >
-          加载更新的 {Math.min(CHAT_MESSAGE_WINDOW_SHIFT, messages.length - messageWindow.endIndex)} 条消息
-        </button>
-      )}
-
-      {hookLoggingEnabled &&
-        messageWindow.endIndex >= messages.length &&
-        detachedHookLogBuckets.length > 0 && (
-        <div className="mt-1 space-y-2">
-          <div className="flex flex-wrap justify-start gap-2">
-            {renderedDetachedHookLogBuckets.map((bucket) => (
-              <HookLogChip
-                key={bucket.turnId}
-                bucket={bucket}
-                onClick={() => onOpenHookLogBucket(bucket.turnId)}
-              />
-            ))}
-          </div>
-          <div className="flex justify-center gap-2 text-xs text-muted-foreground">
-            {detachedHookLogStart > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  setDetachedHookLogOffsetFromTail((offset) =>
-                    Math.min(
-                      detachedHookLogBuckets.length,
-                      offset + DETACHED_HOOK_LOG_WINDOW_SIZE
-                    )
-                  )
-                }
-                className="rounded-full border border-border/70 px-2 py-0.5 hover:bg-muted"
-              >
-                更早的 Hook 日志
-              </button>
-            )}
-            {detachedHookLogOffsetFromTail > 0 && (
-              <button
-                type="button"
-                onClick={() =>
-                  setDetachedHookLogOffsetFromTail((offset) =>
-                    Math.max(0, offset - DETACHED_HOOK_LOG_WINDOW_SIZE)
-                  )
-                }
-                className="rounded-full border border-border/70 px-2 py-0.5 hover:bg-muted"
-              >
-                更新的 Hook 日志
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-    </>
-  )
-})
-
 function SystemPromptPreviewButton({
   threadId
 }: {
@@ -1883,7 +1553,39 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null)
+  const chatScrollStateRef = useRef<ChatScrollState | null>(null)
+  if (chatScrollStateRef.current === null) {
+    chatScrollStateRef.current = createChatScrollState(threadId)
+  }
+  const [chatScrollUiState, setChatScrollUiState] = useState(() => ({
+    generation: chatScrollStateRef.current?.generation ?? 0,
+    mode: chatScrollStateRef.current?.mode ?? "initializing",
+    hasUnread: chatScrollStateRef.current?.hasUnread ?? false,
+    unreadCount: chatScrollStateRef.current?.unreadCount ?? 0
+  }))
+  const pendingBottomScrollEffectRef = useRef<ChatScrollEffect | null>(null)
+  const bottomScrollFrameRef = useRef<number | null>(null)
+  const bottomSettleAttemptRef = useRef(0)
+  const bottomSettleEffectKeyRef = useRef("")
+  const lastVisibleMessageIndexRef = useRef(-1)
+  const messageVirtualizationEnabledRef = useRef(false)
+  const lastObservedScrollTopRef = useRef(0)
+  const upwardUserScrollIntentUntilRef = useRef(0)
+  const downwardUserScrollIntentUntilRef = useRef(0)
+  const scrollbarUserIntentActiveRef = useRef(false)
+  const chatContentSnapshotRef = useRef<{
+    threadId: string
+    visibleCount: number
+    lastMessageId: string | null
+    lastMessageIdentity: string | null
+    loadedMessageCount: number
+    contentVersion: number
+    structureVersion: number
+  } | null>(null)
+  const pendingDurableHistoryAnchorRef = useRef<PendingDurableHistoryAnchor | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
   // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
@@ -1919,8 +1621,6 @@ export function ChatContainer({
   )
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
-  const chatScrollSettings = useAppStore((state) => state.chatScrollSettings)
-  const chatScrollLimitNoticeKeyRef = useRef<string | null>(null)
   const [glowVisible, setGlowVisible] = useState(false)
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
@@ -2938,9 +2638,7 @@ export function ChatContainer({
   // workspace:pushWorktree calls before the pending approval is cleared on re-render.
   const gitPushInFlightRef = useRef<Set<string>>(new Set())
   const handleApprovalDecision = useCallback(
-    async (
-      decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-    ): Promise<void> => {
+    async (decision: ChatApprovalDecision): Promise<void> => {
       if (!pendingApproval) return
 
       // Check if this is an orchestrator-sourced approval (has requestId)
@@ -3227,6 +2925,15 @@ export function ChatContainer({
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  const [projectChatScrollQuestionRevision] = useState(
+    createChatScrollQuestionRevisionProjector
+  )
+  const chatScrollQuestionStructureRevision = projectChatScrollQuestionRevision({
+    scopeKey: threadId,
+    messages: displayMessages,
+    structureVersion: displayMessagesStructureVersion,
+    changedMessages: displayMessageProjection.changedMessages
+  })
   const stableMessageIndexProjection = useMemo(
     () => {
       const visibleIndexes: number[] = []
@@ -3262,10 +2969,6 @@ export function ChatContainer({
     ]
   )
   const orderedStableVisibleMessageIndexes = stableMessageIndexProjection.visibleIndexes
-  const stableVisibleMessageIndexes = useMemo(
-    () => new Set(orderedStableVisibleMessageIndexes),
-    [orderedStableVisibleMessageIndexes]
-  )
   const hasHookLogChipForMessage = useCallback(
     (message: Message): boolean =>
       Boolean(
@@ -3295,34 +2998,14 @@ export function ChatContainer({
     liveLastUserMessageIndex ?? -1
   )
 
-  const chatScrollNavigatorMessages = threadDisplayBaseline
+  const chatScrollNavigatorMessages = displayMessages
 
-  // Key that drives in-session search re-matching. Message count and isLoading
-  // stay constant while tokens append to the SAME streaming message, so fold in
-  // the last message's text length — otherwise search misses text that is still
-  // being streamed until the run ends.
+  // Keep closed search off the token hot path. The content projector already exposes a cheap
+  // scalar version, so search can refresh live text without re-joining block-array content here.
   const searchRecomputeKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}:${lastTextLength}`
-  }, [displayMessages, displayMessagesContentVersion, isLoading])
-
-  const chatAutoScrollTriggerKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    const lastReasoningLength =
-      last && typeof last.reasoning === "string" ? last.reasoning.length : 0
-    const lastToolCallCount = Array.isArray(last?.tool_calls) ? last.tool_calls.length : 0
-    return [
-      displayMessages.length,
-      isLoading ? 1 : 0,
-      last?.id ?? "",
-      lastTextLength,
-      lastReasoningLength,
-      lastToolCallCount,
-      queuedMessages.length
-    ].join(":")
-  }, [displayMessages, isLoading, queuedMessages.length])
+    if (!searchOpen) return "closed"
+    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}`
+  }, [displayMessages.length, displayMessagesContentVersion, isLoading, searchOpen])
 
   const detachedHookLogBuckets = useMemo(() => {
     // A content-only assistant token changes liveDisplayMessages, but cannot
@@ -3336,6 +3019,25 @@ export function ChatContainer({
       (bucket) => bucket.entries.length > 0 && !userMessageIds.has(bucket.turnId)
     )
   }, [displayMessages, displayMessagesStructureVersion, hookLogBuckets])
+
+  const visibleMessageIndexes = useMemo(
+    () =>
+      mergeVisibleChatMessageIndexes(
+        orderedStableVisibleMessageIndexes,
+        dynamicVisibilityByIndex,
+        orderedDynamicVisibleMessageIndexes
+      ),
+    [
+      dynamicVisibilityProjection.version,
+      orderedDynamicVisibleMessageIndexes,
+      orderedStableVisibleMessageIndexes
+    ]
+  )
+  const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
+  const lastContentMessageId =
+    lastVisibleMessageIndex === undefined
+      ? null
+      : displayMessages[lastVisibleMessageIndex]?.id ?? null
 
   // Ordinary assistant tokens update only the changed display slot. Keep the
   // tool projection stable and replace a slot only when that changed row is
@@ -3455,20 +3157,20 @@ export function ChatContainer({
       const hasHookLogChip = Boolean(hookLogBucket?.entries.length)
       if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
-      const parts = [getMessageText(message.content), message.reasoning ?? ""]
+      const parts: unknown[] = [message.content, message.reasoning ?? ""]
       for (const [toolCallIndex, toolCall] of (message.tool_calls ?? []).entries()) {
-        parts.push(toolCall.name, stringifyChatSearchValue(toolCall.args))
+        parts.push(toolCall.name, toolCall.args)
         const toolResult = toolResults.get(
           getWorkerToolUiKey(message.id, toolCall.id, toolCallIndex)
         )
-        if (toolResult) parts.push(stringifyChatSearchValue(toolResult.content))
+        if (toolResult) parts.push(toolResult.content)
       }
       if (hookLogBucket?.entries.length) {
-        parts.push(stringifyChatSearchValue(hookLogBucket.entries))
+        parts.push(hookLogBucket.entries)
       }
       return {
         messageId: message.id,
-        text: parts.filter(Boolean).join("\n"),
+        text: buildBoundedChatSearchText(parts),
         sortIndex
       }
     },
@@ -3497,14 +3199,35 @@ export function ChatContainer({
       cached.indexById !== displayMessageProjection.indexById ||
       cached.buildDocument !== buildSearchDocument
     ) {
-      stableDocuments = threadDisplayBaseline
-        .flatMap((message) => {
-          const sortIndex = displayMessageProjection.indexById.get(message.id)
-          if (sortIndex === undefined) return []
-          const document = buildSearchDocument(message, sortIndex)
-          return document ? [document] : []
-        })
-        .sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+      // The durable search API covers the complete persisted transcript. Keep the renderer-side
+      // corpus bounded to the already-visible recent page so opening search after paging through a
+      // very long task cannot synchronously stringify and index the entire hydrated history.
+      const documents: ChatSearchDocument[] = []
+      let textUnits = 0
+      const startIndex = Math.max(0, threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+      for (
+        let messageIndex = threadDisplayBaseline.length - 1;
+        messageIndex >= startIndex;
+        messageIndex -= 1
+      ) {
+        const message = threadDisplayBaseline[messageIndex]
+        const sortIndex = displayMessageProjection.indexById.get(message.id)
+        if (sortIndex === undefined) continue
+        const document = buildSearchDocument(message, sortIndex)
+        if (!document) continue
+        if (
+          documents.length > 0 &&
+          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          break
+        }
+        documents.push(document)
+        textUnits += document.text.length
+        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+      }
+      stableDocuments = documents.sort(
+        (left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0)
+      )
       stableSearchDocumentsRef.current = {
         baseline: threadDisplayBaseline,
         indexById: displayMessageProjection.indexById,
@@ -3514,15 +3237,31 @@ export function ChatContainer({
     }
     let dynamicCache = dynamicSearchDocumentsRef.current
     const rebuildDynamicDocuments = (): typeof dynamicCache => {
-      const documents = liveDisplayMessages
-        .flatMap((liveMessage) => {
-          const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
-          if (sortIndex === undefined) return []
-          const message = displayMessages[sortIndex]
-          const document = message ? buildSearchDocument(message, sortIndex) : null
-          return document ? [document] : []
-        })
-        .sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+      const documents: ChatSearchDocument[] = []
+      let textUnits = 0
+      const startIndex = Math.max(0, liveDisplayMessages.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+      for (
+        let liveIndex = liveDisplayMessages.length - 1;
+        liveIndex >= startIndex;
+        liveIndex -= 1
+      ) {
+        const liveMessage = liveDisplayMessages[liveIndex]
+        const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+        if (sortIndex === undefined) continue
+        const message = displayMessages[sortIndex]
+        const document = message ? buildSearchDocument(message, sortIndex) : null
+        if (!document) continue
+        if (
+          documents.length > 0 &&
+          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          break
+        }
+        documents.push(document)
+        textUnits += document.text.length
+        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+      }
+      documents.sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
       dynamicCache = {
         liveStructureVersion: liveDisplayProjection.structureVersion,
         liveContentVersion: liveDisplayProjection.contentVersion,
@@ -3593,172 +3332,515 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  const [messageWindow, setMessageWindow] = useState<ChatMessageWindow>(() =>
-    createTailChatMessageWindow(0)
-  )
-  const messageWindowThreadIdRef = useRef(threadId)
-  const followMessageWindowTailRef = useRef(true)
-  const pendingWindowAnchorRef = useRef<{ messageId: string; viewportTop: number } | null>(null)
-  const pendingDurableHistoryAnchorRef = useRef<{
-    threadId: string
-    messageId: string
-    viewportTop: number
-    previousMessageCount: number
-  } | null>(null)
-  const displayMessageCountRef = useRef(displayMessages.length)
-  displayMessageCountRef.current = displayMessages.length
-  const displayMessageIndexById = displayMessageProjection.indexById
-  const lastVisibleMessageIndex = findPreviousVisibleChatMessageIndex(
-    displayMessages.length,
-    orderedStableVisibleMessageIndexes,
-    dynamicVisibilityByIndex,
-    orderedDynamicVisibleMessageIndexes
-  )
-  const lastContentMessageId =
-    lastVisibleMessageIndex === null ? null : displayMessages[lastVisibleMessageIndex]?.id ?? null
-  const windowRows = useMemo<ChatMessageWindowRow[]>(
-    () =>
-      deriveChatMessageWindowRows(
-        displayMessages,
-        messageWindow.startIndex,
-        messageWindow.endIndex,
-        orderedStableVisibleMessageIndexes,
-        stableVisibleMessageIndexes,
-        dynamicVisibilityByIndex,
-        lastUserMessageIndex,
-        orderedDynamicVisibleMessageIndexes
-      ),
-    [
-    displayMessages,
-    displayMessagesContentVersion,
-    dynamicVisibilityByIndex,
-    lastUserMessageIndex,
-    messageWindow.endIndex,
-    messageWindow.startIndex,
-    orderedStableVisibleMessageIndexes,
-    orderedDynamicVisibleMessageIndexes,
-    stableVisibleMessageIndexes
-    ]
-  )
-  const renderedMessageIds = useMemo(
-    () => new Set(windowRows.map((row) => row.message.id)),
-    [windowRows]
-  )
-  const renderedRowIds = useMemo(
-    () => windowRows.map((row) => row.message.id),
-    [windowRows]
-  )
-  const messageWindowAtTail = isTailChatMessageWindow(messageWindow, displayMessages.length)
+  useLayoutEffect(() => {
+    setScrollParent(getViewport())
+  }, [getViewport, threadId])
+
+  const applyChatScrollEvent = useCallback((event: ChatScrollEvent): ChatScrollTransition => {
+    const current = chatScrollStateRef.current ?? createChatScrollState(threadId)
+    const transition = transitionChatScroll(current, event)
+    chatScrollStateRef.current = transition.state
+    setChatScrollUiState((previous) => {
+      if (
+        previous.generation === transition.state.generation &&
+        previous.mode === transition.state.mode &&
+        previous.hasUnread === transition.state.hasUnread &&
+        previous.unreadCount === transition.state.unreadCount
+      ) {
+        return previous
+      }
+      return {
+        generation: transition.state.generation,
+        mode: transition.state.mode,
+        hasUnread: transition.state.hasUnread,
+        unreadCount: transition.state.unreadCount
+      }
+    })
+    return transition
+  }, [threadId])
 
   useLayoutEffect(() => {
-    if (messageWindowThreadIdRef.current !== threadId) {
-      messageWindowThreadIdRef.current = threadId
-      followMessageWindowTailRef.current = true
-      pendingWindowAnchorRef.current = null
-      pendingDurableHistoryAnchorRef.current = null
-      setMessageWindow(createTailChatMessageWindow(displayMessages.length))
-      return
+    if (bottomScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(bottomScrollFrameRef.current)
+      bottomScrollFrameRef.current = null
     }
-    const durableAnchor = pendingDurableHistoryAnchorRef.current
-    if (durableAnchor?.threadId === threadId && !historyPageLoading) {
-      pendingDurableHistoryAnchorRef.current = null
-      if (displayMessages.length > durableAnchor.previousMessageCount) {
-        const anchorIndex = displayMessageIndexById.get(durableAnchor.messageId)
-        const nextWindow = createPrependAnchoredChatMessageWindow(
-          anchorIndex ?? displayMessages.length - durableAnchor.previousMessageCount,
-          displayMessages.length
-        )
-        pendingWindowAnchorRef.current = {
-          messageId: durableAnchor.messageId,
-          viewportTop: durableAnchor.viewportTop
+    applyChatScrollEvent({ type: "THREAD_RESET", threadId })
+    pendingBottomScrollEffectRef.current = null
+    bottomSettleAttemptRef.current = 0
+    bottomSettleEffectKeyRef.current = ""
+    lastObservedScrollTopRef.current = 0
+    upwardUserScrollIntentUntilRef.current = 0
+    downwardUserScrollIntentUntilRef.current = 0
+    scrollbarUserIntentActiveRef.current = false
+    chatContentSnapshotRef.current = null
+  }, [applyChatScrollEvent, threadId])
+
+  useEffect(() => {
+    if (scrollParent || !scrollRef.current) return
+    setScrollParent(getViewport())
+  }, [getViewport, scrollParent])
+
+  const visibleMessageIndexById = useMemo(() => {
+    const indexById = new Map<string, number>()
+    visibleMessageIndexes.forEach((messageIndex, visibleIndex) => {
+      const message = displayMessages[messageIndex]
+      if (message) indexById.set(message.id, visibleIndex)
+    })
+    return indexById
+  }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
+  const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
+    visibleMessageIndexes.length
+  )
+  lastVisibleMessageIndexRef.current = visibleMessageIndexes.length - 1
+  messageVirtualizationEnabledRef.current = isMessageVirtualizationEnabled
+  useEffect(() => {
+    pendingDurableHistoryAnchorRef.current = null
+  }, [threadId])
+
+  const scheduleBottomScrollEffect = useCallback(
+    (effect: ChatScrollEffect): void => {
+      pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+        pendingBottomScrollEffectRef.current,
+        effect
+      )
+      if (bottomScrollFrameRef.current !== null) return
+
+      const run = (): void => {
+        bottomScrollFrameRef.current = null
+        const pending = pendingBottomScrollEffectRef.current
+        pendingBottomScrollEffectRef.current = null
+        const state = chatScrollStateRef.current
+        if (!pending || !state || pending.generation !== state.generation) return
+
+        const viewport = getViewport()
+        const lastVisibleIndex = lastVisibleMessageIndexRef.current
+        if (!viewport || lastVisibleIndex < 0) {
+          applyChatScrollEvent({
+            type:
+              pending.reason === "content-appended" || pending.reason === "content-grown"
+                ? "PROGRAMMATIC_SCROLL_END"
+                : "SCROLL_TO_BOTTOM_FAILED",
+            generation: pending.generation
+          })
+          return
         }
-        followMessageWindowTailRef.current = false
-        setMessageWindow(nextWindow)
-        return
+
+        if (messageVirtualizationEnabledRef.current && virtuosoRef.current) {
+          virtuosoRef.current.scrollToIndex({
+            index: lastVisibleIndex,
+            align: "end",
+            behavior: "auto"
+          })
+        }
+        // The Virtuoso footer lives after the last indexed message (queued rows, loading state,
+        // approvals, user-input cards). scrollToIndex mounts/measures the last row; this final
+        // bounded write includes the footer and is skipped when the viewport is already settled.
+        const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        if (Math.abs(viewport.scrollTop - bottom) > 1) {
+          viewport.scrollTo({ top: bottom, behavior: "auto" })
+        }
+
+        const distanceToBottom =
+          viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+          bottomSettleAttemptRef.current = 0
+          applyChatScrollEvent({
+            type: "BOTTOM_CONFIRMED",
+            generation: pending.generation
+          })
+          return
+        }
+
+        const longSettle =
+          pending.reason === "initial-position" ||
+          pending.reason === "return-to-bottom" ||
+          pending.reason === "restore-complete"
+        const settleKey = `${pending.generation}:${pending.reason}`
+        if (bottomSettleEffectKeyRef.current !== settleKey) {
+          bottomSettleEffectKeyRef.current = settleKey
+          bottomSettleAttemptRef.current = 0
+        }
+        const settleLimit = longSettle
+          ? CHAT_BOTTOM_SETTLE_MAX_FRAMES
+          : CHAT_FOLLOW_SETTLE_MAX_FRAMES
+        if (
+          bottomSettleAttemptRef.current < settleLimit
+        ) {
+          bottomSettleAttemptRef.current += 1
+          pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+            pendingBottomScrollEffectRef.current,
+            pending
+          )
+          bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+          return
+        }
+
+        bottomSettleAttemptRef.current = 0
+        bottomSettleEffectKeyRef.current = ""
+        applyChatScrollEvent({
+          type: longSettle ? "SCROLL_TO_BOTTOM_FAILED" : "PROGRAMMATIC_SCROLL_END",
+          generation: pending.generation
+        })
+      }
+
+      bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+    },
+    [applyChatScrollEvent, getViewport]
+  )
+
+  const runChatScrollTransition = useCallback(
+    (transition: ChatScrollTransition): ChatScrollState => {
+      if (transition.state.mode === "restoring" || isChatScrollDetached(transition.state)) {
+        pendingBottomScrollEffectRef.current = null
+        if (bottomScrollFrameRef.current !== null) {
+          window.cancelAnimationFrame(bottomScrollFrameRef.current)
+          bottomScrollFrameRef.current = null
+        }
+      }
+      for (const effect of transition.effects) scheduleBottomScrollEffect(effect)
+      return transition.state
+    },
+    [scheduleBottomScrollEffect]
+  )
+
+  const dispatchChatScrollEvent = useCallback(
+    (event: ChatScrollEvent): ChatScrollState => {
+      let nextState = runChatScrollTransition(applyChatScrollEvent(event))
+      // A real user gesture during page-anchor restoration owns the viewport. Cancel the restore
+      // session immediately so its next animation frame cannot pull the reader back to the old
+      // anchor after wheel/touch/keyboard navigation.
+      if (event.type === "USER_DETACH" && pendingDurableHistoryAnchorRef.current) {
+        pendingDurableHistoryAnchorRef.current = null
+        nextState = runChatScrollTransition(
+          applyChatScrollEvent({ type: "RESTORE_END", generation: nextState.generation })
+        )
+      }
+      return nextState
+    },
+    [applyChatScrollEvent, runChatScrollTransition]
+  )
+
+  const scrollToConversationBottom = useCallback((): void => {
+    dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+  }, [dispatchChatScrollEvent])
+
+  useEffect(() => {
+    return () => {
+      pendingBottomScrollEffectRef.current = null
+      if (bottomScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomScrollFrameRef.current)
+        bottomScrollFrameRef.current = null
       }
     }
-    setMessageWindow((previous) =>
-      reconcileChatMessageWindow(
-        previous,
-        displayMessages.length,
-        followMessageWindowTailRef.current
-      )
-    )
-  }, [displayMessageIndexById, displayMessages.length, historyPageLoading, threadId])
-
-  useLayoutEffect(() => {
-    const pendingAnchor = pendingWindowAnchorRef.current
-    if (!pendingAnchor) return
-    const viewport = getViewport()
-    const target = contentMessageRefs.current.get(pendingAnchor.messageId)
-    if (!viewport || !target) return
-    pendingWindowAnchorRef.current = null
-    const nextViewportTop = target.getBoundingClientRect().top
-    viewport.scrollTop += nextViewportTop - pendingAnchor.viewportTop
-  }, [getViewport, messageWindow])
-
-  const shiftMessageWindow = useCallback(
-    (direction: "older" | "newer"): void => {
-      const viewport = getViewport()
-      const anchorId =
-        direction === "older"
-          ? renderedRowIds[0]
-          : renderedRowIds[renderedRowIds.length - 1]
-      const anchor = anchorId ? contentMessageRefs.current.get(anchorId) : null
-      pendingWindowAnchorRef.current =
-        anchorId && anchor
-          ? { messageId: anchorId, viewportTop: anchor.getBoundingClientRect().top }
-          : null
-      followMessageWindowTailRef.current = false
-      setMessageWindow((previous) => {
-        const next = shiftChatMessageWindow(previous, displayMessages.length, direction)
-        if (
-          next.startIndex === previous.startIndex &&
-          next.endIndex === previous.endIndex
-        ) {
-          pendingWindowAnchorRef.current = null
-          return previous
-        }
-        return next
-      })
-      if (!viewport) pendingWindowAnchorRef.current = null
+  }, [])
+  const searchDurableMessages = useCallback(
+    (
+      query: string,
+      options: DurableChatSearchOptions
+    ): Promise<DurableChatSearchPage> => {
+      return window.api.threads.searchMessages(threadId, query, options)
     },
-    [displayMessages.length, getViewport, renderedRowIds]
+    [threadId]
   )
-  const loadOlderMessages = useCallback(
-    () => shiftMessageWindow("older"),
-    [shiftMessageWindow]
+
+  useEffect(() => {
+    if (!scrollParent) return
+    lastObservedScrollTopRef.current = scrollParent.scrollTop
+
+    const confirmOrDetachFromScroll = (): void => {
+      const previousTop = lastObservedScrollTopRef.current
+      const nextTop = scrollParent.scrollTop
+      const distanceToBottom =
+        scrollParent.scrollHeight - nextTop - scrollParent.clientHeight
+      lastObservedScrollTopRef.current = nextTop
+
+      if (
+        nextTop < previousTop - CHAT_SCROLL_UP_DETACH_DELTA_PX &&
+        performance.now() <= upwardUserScrollIntentUntilRef.current
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+        return
+      }
+      if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+        const state = chatScrollStateRef.current
+        // Explicit wheel/touch/keyboard/scrollbar handlers own detachment. Do not let the scroll
+        // event immediately re-attach a detached reader while the viewport is still moving up
+        // inside the at-bottom threshold. Downward movement to the bottom still re-attaches.
+        if (
+          state &&
+          isChatScrollDetached(state) &&
+          (nextTop <= previousTop + CHAT_SCROLL_UP_DETACH_DELTA_PX ||
+            (performance.now() > downwardUserScrollIntentUntilRef.current &&
+              !scrollbarUserIntentActiveRef.current))
+        ) {
+          return
+        }
+        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+      }
+    }
+    const cancelPendingHistoryAnchorFromUserGesture = (): void => {
+      const anchor = pendingDurableHistoryAnchorRef.current
+      if (!anchor) return
+      dispatchChatScrollEvent({
+        type: "USER_DETACH",
+        source: "user-input",
+        generation: anchor.generation
+      })
+    }
+    const detachFromExplicitWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (event.deltaY > 0) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+    const scrollRoot = scrollRef.current
+    const detachFromScrollbarPointer = (event: PointerEvent): void => {
+      if (
+        event.composedPath().some(
+          (target) =>
+            target instanceof HTMLElement && target.hasAttribute("data-scroll-area-scrollbar")
+        )
+      ) {
+        scrollbarUserIntentActiveRef.current = true
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      }
+    }
+    const clearScrollbarPointerIntent = (): void => {
+      scrollbarUserIntentActiveRef.current = false
+    }
+    let lastTouchY: number | null = null
+    const rememberTouchPosition = (event: TouchEvent): void => {
+      lastTouchY = event.touches[0]?.clientY ?? null
+    }
+    const detachFromTouchScroll = (event: TouchEvent): void => {
+      const nextTouchY = event.touches[0]?.clientY ?? null
+      if (lastTouchY !== null && nextTouchY !== null && nextTouchY > lastTouchY + 1) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (lastTouchY !== null && nextTouchY !== null && nextTouchY < lastTouchY - 1) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+      lastTouchY = nextTouchY
+    }
+    const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
+      if (!chatRootRef.current.contains(document.activeElement) && document.activeElement !== document.body) {
+        return
+      }
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
+      if (
+        event.key === "ArrowUp" ||
+        event.key === "PageUp" ||
+        event.key === "Home" ||
+        (event.key === " " && event.shiftKey)
+      ) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (
+        event.key === "ArrowDown" ||
+        event.key === "PageDown" ||
+        event.key === "End" ||
+        (event.key === " " && !event.shiftKey)
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+
+    scrollParent.addEventListener("scroll", confirmOrDetachFromScroll, { passive: true })
+    scrollParent.addEventListener("wheel", detachFromExplicitWheel, { passive: true })
+    scrollRoot?.addEventListener("pointerdown", detachFromScrollbarPointer, {
+      capture: true,
+      passive: true
+    })
+    scrollParent.addEventListener("touchstart", rememberTouchPosition, { passive: true })
+    scrollParent.addEventListener("touchmove", detachFromTouchScroll, { passive: true })
+    window.addEventListener("keydown", detachFromKeyboardScroll, true)
+    window.addEventListener("pointerup", clearScrollbarPointerIntent, true)
+    window.addEventListener("pointercancel", clearScrollbarPointerIntent, true)
+    window.addEventListener("blur", clearScrollbarPointerIntent)
+    confirmOrDetachFromScroll()
+    return () => {
+      scrollParent.removeEventListener("scroll", confirmOrDetachFromScroll)
+      scrollParent.removeEventListener("wheel", detachFromExplicitWheel)
+      scrollRoot?.removeEventListener("pointerdown", detachFromScrollbarPointer, true)
+      scrollParent.removeEventListener("touchstart", rememberTouchPosition)
+      scrollParent.removeEventListener("touchmove", detachFromTouchScroll)
+      window.removeEventListener("keydown", detachFromKeyboardScroll, true)
+      window.removeEventListener("pointerup", clearScrollbarPointerIntent, true)
+      window.removeEventListener("pointercancel", clearScrollbarPointerIntent, true)
+      window.removeEventListener("blur", clearScrollbarPointerIntent)
+    }
+  }, [dispatchChatScrollEvent, scrollParent])
+
+  const scrollToMessageById = useCallback(
+    (messageId: string): void => {
+      const index = visibleMessageIndexById.get(messageId)
+      if (index === undefined) return
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      const targetElement = contentMessageRefs.current.get(messageId)
+      const viewport = getViewport()
+      if (targetElement && viewport) {
+        const viewportRect = viewport.getBoundingClientRect()
+        const targetRect = targetElement.getBoundingClientRect()
+        viewport.scrollTo({
+          top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - 8),
+          behavior: "smooth"
+        })
+        return
+      }
+      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
+    },
+    [dispatchChatScrollEvent, getViewport, visibleMessageIndexById]
   )
-  const loadNewerMessages = useCallback(
-    () => shiftMessageWindow("newer"),
-    [shiftMessageWindow]
+  const revealMessage = useCallback(
+    (messageId: string): void => {
+      const index = visibleMessageIndexById.get(messageId)
+      if (index === undefined) return
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      const targetElement = contentMessageRefs.current.get(messageId)
+      if (targetElement) return
+      virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+    },
+    [dispatchChatScrollEvent, visibleMessageIndexById]
   )
+  const handleScrollToQuestion = useCallback((): void => {
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+  }, [dispatchChatScrollEvent])
+
+  const handleInitialVirtualItemsRendered = useCallback((): void => {
+    if (historyLoading) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent, historyLoading, visibleMessageIndexes.length])
+
+  const handleContentHeightChanged = useCallback((): void => {
+    const state = chatScrollStateRef.current
+    if (
+      visibleMessageIndexes.length === 0 ||
+      !state ||
+      state.generation !== chatScrollUiState.generation ||
+      !shouldFollowChatOutput(state)
+    ) {
+      return
+    }
+    dispatchChatScrollEvent({
+      type: "CONTENT_GROWN",
+      generation: chatScrollUiState.generation
+    })
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent, visibleMessageIndexes.length])
+
+  const handleVirtualAtBottomStateChange = useCallback((atBottom: boolean): void => {
+    const state = chatScrollStateRef.current
+    // Virtuoso may report `true` when a row collapses or a late measurement shortens content.
+    // That is layout, not proof that a detached reader intentionally returned to the bottom.
+    // Manual downward scrolling is confirmed by the viewport scroll listener; the button changes
+    // mode to following before its programmatic settle, so both intentional paths still work.
+    if (atBottom && state && !isChatScrollDetached(state)) {
+      dispatchChatScrollEvent({
+        type: "BOTTOM_CONFIRMED",
+        generation: chatScrollUiState.generation
+      })
+    }
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent])
+
+  useEffect(() => {
+    if (historyLoading || !scrollParent) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
+  }, [
+    chatScrollUiState.generation,
+    dispatchChatScrollEvent,
+    historyLoading,
+    scrollParent,
+    threadId,
+    visibleMessageIndexes.length
+  ])
+
   const loadEarlierHistoryPage = useCallback(async (): Promise<void> => {
     if (historyPageLoading || !historyHasMore) return
-    const anchorId = renderedRowIds[0]
-    const anchor = anchorId ? contentMessageRefs.current.get(anchorId) : null
-    const request = anchorId && anchor
-      ? {
-          threadId,
-          messageId: anchorId,
-          viewportTop: anchor.getBoundingClientRect().top,
-          previousMessageCount: displayMessages.length
-        }
-      : null
+    const generation = chatScrollStateRef.current?.generation
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input", generation })
+    dispatchChatScrollEvent({ type: "RESTORE_BEGIN", generation })
+    const viewport = getViewport()
+    const viewportTop = viewport?.getBoundingClientRect().top ?? 0
+    let anchor: HTMLElement | null = null
+    let anchorDistance = Number.POSITIVE_INFINITY
+    for (const candidate of viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []) {
+      const distance = Math.abs(candidate.getBoundingClientRect().top - viewportTop)
+      if (distance < anchorDistance) {
+        anchor = candidate
+        anchorDistance = distance
+      }
+    }
+    const anchorId = anchor?.dataset.chatMessageId
+    const request =
+      anchorId && anchor
+        ? {
+            threadId,
+            generation: generation ?? 0,
+            messageId: anchorId,
+            viewportTop: anchor.getBoundingClientRect().top,
+            previousMessageCount: displayMessages.length,
+            previousLoadedMessageCount: historyLoadedMessageCount,
+            attempt: 0,
+            stableFrames: 0
+          }
+        : null
     pendingDurableHistoryAnchorRef.current = request
-    const prependedCount = await loadEarlierMessages()
-    if (
-      prependedCount === 0 &&
-      pendingDurableHistoryAnchorRef.current === request
-    ) {
-      pendingDurableHistoryAnchorRef.current = null
+    try {
+      const prependedCount = await loadEarlierMessages()
+      if (prependedCount === 0 || !request) {
+        if (pendingDurableHistoryAnchorRef.current === request) {
+          pendingDurableHistoryAnchorRef.current = null
+        }
+        dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      }
+    } catch (error) {
+      if (pendingDurableHistoryAnchorRef.current === request) {
+        pendingDurableHistoryAnchorRef.current = null
+      }
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      toast.error(error instanceof Error ? error.message : "加载更早消息失败")
     }
   }, [
+    dispatchChatScrollEvent,
     displayMessages.length,
+    getViewport,
+    historyLoadedMessageCount,
     historyHasMore,
     historyPageLoading,
     loadEarlierMessages,
-    renderedRowIds,
     threadId
   ])
   const historyRemainingCount = Math.max(
@@ -3766,108 +3848,121 @@ export function ChatContainer({
     historyMessageTotal - historyLoadedMessageCount
   )
 
-  const revealMessage = useCallback(
-    (messageId: string): void => {
-      const messageIndex = displayMessageIndexById.get(messageId)
-      if (messageIndex === undefined) return
-      followMessageWindowTailRef.current = messageIndex >= displayMessages.length - 1
-      pendingWindowAnchorRef.current = null
-      setMessageWindow((previous) =>
-        revealChatMessageIndex(previous, messageIndex, displayMessages.length)
-      )
-    },
-    [displayMessageIndexById, displayMessages.length]
-  )
-
-  useEffect(() => {
-    const viewport = getViewport()
-    if (!viewport) return
+  useLayoutEffect(() => {
+    const anchor = pendingDurableHistoryAnchorRef.current
+    if (!anchor || anchor.threadId !== threadId || historyPageLoading) return
+    if (displayMessages.length <= anchor.previousMessageCount) {
+      if (historyLoadedMessageCount <= anchor.previousLoadedMessageCount) return
+      pendingDurableHistoryAnchorRef.current = null
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+      return
+    }
     let frame: number | null = null
-    const measureAndShift = (): void => {
-      frame = null
-      const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      followMessageWindowTailRef.current = messageWindowAtTail && distanceFromBottom < 96
-      if (viewport.scrollTop < 160 && messageWindow.startIndex > 0) {
-        shiftMessageWindow("older")
-      } else if (distanceFromBottom < 160 && messageWindow.endIndex < displayMessages.length) {
-        shiftMessageWindow("newer")
+    const finishRestore = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
+      pendingDurableHistoryAnchorRef.current = null
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+    }
+    const restoreAnchor = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
+      const viewport = getViewport()
+      const target =
+        contentMessageRefs.current.get(anchor.messageId) ??
+        Array.from(
+          viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []
+        ).find((candidate) => candidate.dataset.chatMessageId === anchor.messageId)
+      if (viewport && target) {
+        const delta = target.getBoundingClientRect().top - anchor.viewportTop
+        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        if (anchor.stableFrames >= CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+          finishRestore()
+          return
+        }
+      }
+      const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+      if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
+        virtuosoRef.current?.scrollToIndex({ index: visibleIndex, align: "start", behavior: "auto" })
+      }
+      anchor.attempt += 1
+      if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
+        frame = window.requestAnimationFrame(restoreAnchor)
+      } else {
+        finishRestore()
       }
     }
-    const handleScroll = (): void => {
-      const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-      followMessageWindowTailRef.current = messageWindowAtTail && distanceFromBottom < 96
-      if (frame === null) frame = window.requestAnimationFrame(measureAndShift)
-    }
-    viewport.addEventListener("scroll", handleScroll, { passive: true })
+    frame = window.requestAnimationFrame(restoreAnchor)
     return () => {
-      viewport.removeEventListener("scroll", handleScroll)
       if (frame !== null) window.cancelAnimationFrame(frame)
     }
   }, [
+    dispatchChatScrollEvent,
     displayMessages.length,
     getViewport,
-    messageWindow.endIndex,
-    messageWindow.startIndex,
-    messageWindowAtTail,
-    shiftMessageWindow
+    historyLoadedMessageCount,
+    historyPageLoading,
+    threadId,
+    visibleMessageIndexById
   ])
 
   useEffect(() => {
-    if (!messageWindowAtTail || !followMessageWindowTailRef.current) return
-    const frame = window.requestAnimationFrame(() => {
-      const viewport = getViewport()
-      if (!viewport || !followMessageWindowTailRef.current) return
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    const lastVisibleMessageIndex = visibleMessageIndexes.at(-1)
+    const lastVisibleMessage =
+      lastVisibleMessageIndex === undefined ? undefined : displayMessages[lastVisibleMessageIndex]
+    const nextSnapshot = {
+      threadId,
+      visibleCount: visibleMessageIndexes.length,
+      lastMessageId: lastVisibleMessage?.id ?? null,
+      lastMessageIdentity: chatScrollTailMessageIdentity(lastVisibleMessage),
+      loadedMessageCount: historyLoadedMessageCount,
+      contentVersion: displayMessagesContentVersion,
+      structureVersion: displayMessagesStructureVersion
+    }
+    const previous = chatContentSnapshotRef.current
+    chatContentSnapshotRef.current = nextSnapshot
+    if (historyLoading || !previous || previous.threadId !== threadId) return
+
+    const tailChange = classifyChatScrollTailChange({
+      previous,
+      current: nextSnapshot,
+      displayMessages,
+      visibleMessageIndexes,
+      visibleMessageIndexById
     })
-    return () => window.cancelAnimationFrame(frame)
-  }, [getViewport, messageWindowAtTail, searchRecomputeKey])
 
-  const scrollToConversationBottom = useCallback((): void => {
-    followMessageWindowTailRef.current = true
-    pendingWindowAnchorRef.current = null
-    setMessageWindow(createTailChatMessageWindow(displayMessageCountRef.current))
-    window.requestAnimationFrame(() => {
-      const viewport = getViewport()
-      if (!viewport) return
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-    })
-  }, [getViewport])
-
-  useEffect(() => {
-    if (historyLoading || pendingApproval || pendingUserInput) return
-
-    const configuredLimit = normalizeChatAutoScrollMessageLimit(
-      chatScrollSettings.autoScrollMessageLimit
-    )
-    if (
-      configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS &&
-      displayMessages.length > configuredLimit
-    ) {
-      const noticeKey = `${threadId}:${configuredLimit}`
-      if (chatScrollLimitNoticeKeyRef.current !== noticeKey) {
-        chatScrollLimitNoticeKeyRef.current = noticeKey
-        toast.warning(
-          `会话消息已超过 ${configuredLimit} 条，已暂停自动置底。可前往“自定义 / 基础功能 / 通用”调整自动置底消息数量。`
-        )
-      }
+    if (tailChange.appendedMessageCount > 0) {
+      dispatchChatScrollEvent({
+        type: "CONTENT_APPENDED",
+        unreadMessages: tailChange.unreadMessageCount
+      })
       return
     }
-
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    if (shouldMarkChatTailContentGrowth({
+      change: tailChange,
+      currentTail: lastVisibleMessage,
+      contentVersionChanged: nextSnapshot.contentVersion !== previous.contentVersion,
+      structureVersionChanged: nextSnapshot.structureVersion !== previous.structureVersion,
+      changedTail: displayMessageProjection.changedMessages.some(
+        (message) => message.id === nextSnapshot.lastMessageId
+      )
+    })) {
+      const state = chatScrollStateRef.current
+      if (state && isChatScrollDetached(state)) {
+        dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+      }
     }
   }, [
-    chatAutoScrollTriggerKey,
-    chatScrollSettings.autoScrollMessageLimit,
-    displayMessages.length,
-    getViewport,
+    dispatchChatScrollEvent,
+    displayMessageProjection.changedMessages,
+    displayMessages,
+    displayMessagesContentVersion,
+    displayMessagesStructureVersion,
+    historyLoadedMessageCount,
     historyLoading,
-    pendingApproval,
-    pendingUserInput,
-    threadId
+    threadId,
+    visibleMessageIndexById,
+    visibleMessageIndexes,
+    visibleMessageIndexes.length
   ])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
@@ -3888,20 +3983,31 @@ export function ChatContainer({
   }, [])
 
   useEffect(() => {
-    if (!pendingApproval) return
-    scrollToConversationBottom()
-  }, [pendingApproval, scrollToConversationBottom])
+    const state = chatScrollStateRef.current
+    if (!pendingApproval || !state || !shouldFollowChatOutput(state)) return
+    dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+  }, [dispatchChatScrollEvent, pendingApproval])
 
   useEffect(() => {
-    if (!pendingUserInput || !userInputDialogLayout) return
-    if (!messageWindowAtTail) {
-      scrollToConversationBottom()
+    const state = chatScrollStateRef.current
+    if (!pendingUserInput || !userInputDialogLayout || !state || !shouldFollowChatOutput(state)) {
       return
     }
     const viewport = getViewport()
     if (!viewport) return
+    const generation = state.generation
+    dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_BEGIN", generation })
 
     const frame = requestAnimationFrame(() => {
+      const currentState = chatScrollStateRef.current
+      if (
+        !currentState ||
+        currentState.generation !== generation ||
+        !shouldFollowChatOutput(currentState)
+      ) {
+        dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+        return
+      }
       const targetElement = lastContentMessageId
         ? contentMessageRefs.current.get(lastContentMessageId)
         : null
@@ -3912,31 +4018,26 @@ export function ChatContainer({
         const targetRect = targetElement.getBoundingClientRect()
         const scrollDelta = targetRect.bottom - targetBottom
         if (Math.abs(scrollDelta) > 1) {
-          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+          viewport.scrollBy({ top: scrollDelta, behavior: "auto" })
         }
       } else {
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
       }
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
     })
 
-    return () => cancelAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(frame)
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+    }
   }, [
+    dispatchChatScrollEvent,
     getViewport,
     lastContentMessageId,
-    messageWindowAtTail,
     pendingUserInput,
-    scrollToConversationBottom,
     userInputDialogLayout?.height,
     userInputDialogLayout?.top
   ])
-
-  //  滚动到底部
-  // 1.初始化
-  // 2.切换thread
-  useEffect(() => {
-    scrollToConversationBottom()
-  }, [historyLoading, scrollToConversationBottom, threadId])
-
   // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus()
@@ -6392,6 +6493,92 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const chatMessageListFooter = (
+    <div
+      className="space-y-4 pt-4 pb-4"
+      style={
+        userInputScrollPadding
+          ? { paddingBottom: `${userInputScrollPadding}px` }
+          : undefined
+      }
+    >
+      {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
+      {modelRetry && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+          <div className="min-w-0 flex-1">
+            <span>
+              模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+              {modelRetry.maxRetries}
+              {modelRetry.delayMs > 0 && <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>}
+              …
+            </span>
+          </div>
+        </div>
+      )}
+      {isLoading && (
+        <div className="space-y-3">
+          {contextCompaction?.phase !== "started" && (
+            <div className="flex items-center gap-2 text-sm">
+              <div className="rainbow-spinner" />
+              <span
+                className="thinking-shimmer-text"
+                data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+              >
+                {THINKING_MESSAGES[thinkingMessageIndex]}
+              </span>
+              {streamData.isLoading && (
+                <ProcessingDuration key={threadId} startTime={activeTurnStartTime} text="已处理" />
+              )}
+            </div>
+          )}
+          {todos.length > 0 && <ChatTodos todos={todos} />}
+        </div>
+      )}
+      {workflowRun ? (
+        <WorkflowRunPanel threadId={threadId} run={workflowRun} />
+      ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
+        <WorkflowHistoryButton threadId={threadId} />
+      ) : null}
+      {hookInterruption && !isLoading && (
+        <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-300" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              {interruptionNotice?.title}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+              <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                {hookInterruption.event}
+              </span>
+              <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+            </div>
+            <div className="mt-2 text-sm text-amber-900/90 break-words dark:text-amber-100/90">
+              {hookInterruption.reason}
+            </div>
+            {hookInterruption.systemMessage && (
+              <div className="mt-2 text-xs text-amber-700/80 break-words dark:text-amber-200/80">
+                {hookInterruption.systemMessage}
+              </div>
+            )}
+            <div className="mt-2 text-xs text-muted-foreground">
+              {interruptionNotice?.explanation}
+            </div>
+          </div>
+          <button
+            onClick={clearHookInterruption}
+            className="shrink-0 rounded p-1 transition-colors hover:bg-amber-500/20"
+            aria-label="Dismiss hook notice"
+          >
+            <X className="size-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
+      {threadError && !isLoading && (
+        <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError} />
+      )}
+    </div>
+  )
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -6402,6 +6589,7 @@ export function ChatContainer({
         getViewport={getViewport}
         getSearchCorpus={getSearchCorpus}
         onRevealMessage={revealMessage}
+        searchDurableMessages={searchDurableMessages}
         recomputeKey={searchRecomputeKey}
       />
 
@@ -6528,24 +6716,37 @@ export function ChatContainer({
 
       {skillIntentBanner}
       {nuxDialog}
+      {visibleMessageIndexes.length > CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD && (
+        <TooltipProvider delayDuration={180}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                role="img"
+                aria-label="虚拟列表已启用"
+                className="pointer-events-auto absolute right-4 top-4 z-20 block size-2.5 rounded-full bg-emerald-500 ring-2 ring-background shadow-[0_0_0_1px_rgb(16_185_129/0.3)]"
+              />
+            </TooltipTrigger>
+            <TooltipContent side="left" sideOffset={8}>
+              虚拟列表已启用
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
 
       <ChatScrollNavigator
         messages={chatScrollNavigatorMessages}
-        renderedMessageIds={renderedMessageIds}
+        questionStructureRevision={chatScrollQuestionStructureRevision}
         onRevealMessage={revealMessage}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
+        onScrollToQuestion={handleScrollToQuestion}
+        scrollToMessageById={scrollToMessageById}
       >
-        {({ reserveLeftSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
-                style={
-                  userInputScrollPadding
-                    ? { paddingBottom: `${userInputScrollPadding}px` }
-                    : undefined
-                }
+                className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}
               >
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
@@ -6584,12 +6785,11 @@ export function ChatContainer({
                       onOpenMarketBySkill={handleOpenMarketBySkill}
                     />
                   )}
-                  <ChatMessageList
+                  <ChatMessageVirtualList
                     messages={displayMessages}
-                    windowRows={windowRows}
-                    messageWindow={messageWindow}
-                    onLoadOlder={loadOlderMessages}
-                    onLoadNewer={loadNewerMessages}
+                    visibleMessageIndexes={visibleMessageIndexes}
+                    lastUserMessageIndex={lastUserMessageIndex}
+                    contentVersion={displayMessagesContentVersion}
                     onLoadEarlierHistoryPage={loadEarlierHistoryPage}
                     historyHasMore={historyHasMore}
                     historyPageLoading={historyPageLoading}
@@ -6614,111 +6814,20 @@ export function ChatContainer({
                     threadId={threadId}
                     assistantDurationMsById={assistantDurationMsById}
                     userSendTimeLabelById={userSendTimeLabelById}
+                    customScrollParent={scrollParent}
+                    virtuosoRef={virtuosoRef}
+                    navigatorVirtualRangeRef={virtualRangeRef}
+                    initialTopMostItemIndex={
+                      chatScrollUiState.mode === "initializing" ||
+                      chatScrollUiState.mode === "following"
+                        ? { index: "LAST", align: "end", behavior: "auto" }
+                        : undefined
+                    }
+                    onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
+                    onContentHeightChanged={handleContentHeightChanged}
+                    onAtBottomStateChange={handleVirtualAtBottomStateChange}
+                    footer={chatMessageListFooter}
                   />
-
-                  {contextCompaction && (
-                    <ContextCompactionCard compaction={contextCompaction} />
-                  )}
-
-                  {/*测试git diff功能*/}
-                  {/*<DisplayDiffTest/>*/}
-
-                  {/*
-              Hook log chips now live under each user message above. The modal
-              is mounted once at component scope below so it's not bound to a
-              specific message render. Buckets without a visible user message
-              (session lifecycle, worker auto-turns, older placeholders) render
-              their chips in ChatMessageList.
-            */}
-
-                  {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
-                  {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
-                  {modelRetry && (
-                    <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 dark:border-amber-500/40 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                      <span className="inline-block size-3 mt-0.5 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <span>
-                          模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-                          {modelRetry.maxRetries}
-                          {modelRetry.delayMs > 0 && (
-                            <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
-                          )}
-                          …
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  {/* Streaming indicator and inline TODOs */}
-                  {isLoading && (
-                    <div className="space-y-3">
-                      {contextCompaction?.phase !== "started" && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <div className="rainbow-spinner" />
-                          <span
-                            className="thinking-shimmer-text"
-                            data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                          >
-                            {THINKING_MESSAGES[thinkingMessageIndex]}
-                          </span>
-                          {streamData.isLoading && (
-                            <ProcessingDuration
-                              key={threadId}
-                              startTime={activeTurnStartTime}
-                              text="已处理"
-                            />
-                          )}
-                        </div>
-                      )}
-                      {todos.length > 0 && <ChatTodos todos={todos} />}
-                    </div>
-                  )}
-                  {workflowRun ? (
-                    <WorkflowRunPanel threadId={threadId} run={workflowRun} />
-                  ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
-                    <WorkflowHistoryButton threadId={threadId} />
-                  ) : null}
-                  {hookInterruption && !isLoading && (
-                    <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-                      <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {interruptionNotice?.title}
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
-                          <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
-                            {hookInterruption.event}
-                          </span>
-                          <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
-                        </div>
-                        <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
-                          {hookInterruption.reason}
-                        </div>
-                        {hookInterruption.systemMessage && (
-                          <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
-                            {hookInterruption.systemMessage}
-                          </div>
-                        )}
-                        <div className="text-xs text-muted-foreground mt-2">
-                          {interruptionNotice?.explanation}
-                        </div>
-                      </div>
-                      <button
-                        onClick={clearHookInterruption}
-                        className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
-                        aria-label="Dismiss hook notice"
-                      >
-                        <X className="size-4 text-muted-foreground" />
-                      </button>
-                    </div>
-                  )}
-                  {/* Error state */}
-                  {threadError && !isLoading && (
-                    <ChatErrorCard
-                      error={threadError}
-                      detail={errorDetail}
-                      onDismiss={handleDismissError}
-                    />
-                  )}
                 </div>
               </div>
             </ScrollArea>
@@ -7059,9 +7168,10 @@ export function ChatContainer({
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
-                  getViewport={getViewport}
+                  visible={chatScrollUiState.mode === "detached"}
+                  hasUnread={chatScrollUiState.hasUnread}
+                  unreadCount={chatScrollUiState.unreadCount}
                   onScrollToBottom={scrollToConversationBottom}
-                  resetKey={threadId}
                 />
                 <SlashCommandPopover
                   mode={slash.mode}
