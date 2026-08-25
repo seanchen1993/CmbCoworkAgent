@@ -27,8 +27,13 @@ import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { stripLegacyGoalTransportSummary } from "@/lib/goal-transport-summary"
 import { MessageFeedbackDialog, type DislikeFeedbackPayload } from "./MessageFeedbackDialog"
+import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  parseUserVisibleBuiltinBrowserContent,
+  stripBuiltinBrowserPrompt
+} from "@/features/builtin-browser/chat-integration"
 import {
   isCoordinatorWorkerToolName,
   normalizeCoordinatorWorkerToolArgsForDisplay
@@ -132,16 +137,19 @@ function parseGoalUserControlMessage(text: string): {
 
 function extractMessagePlainText(
   content: Message["content"],
-  options: { stripSkillUse?: boolean } = {}
+  options: { stripSkillUse?: boolean; stripBuiltinBrowser?: boolean } = {}
 ): string {
   const maybeStrip = options.stripSkillUse ? stripSkillUseBlock : (s: string): string => s
-  if (typeof content === "string") return maybeStrip(content)
+  const stripBrowser = options.stripBuiltinBrowser
+    ? stripBuiltinBrowserPrompt
+    : (s: string): string => s
+  if (typeof content === "string") return stripBrowser(maybeStrip(content))
   if (!Array.isArray(content)) return ""
 
   return content
     .map((block) => {
-      if (block.type === "text") return maybeStrip(block.text ?? "")
-      if (typeof block.content === "string") return maybeStrip(block.content)
+      if (block.type === "text") return stripBrowser(maybeStrip(block.text ?? ""))
+      if (typeof block.content === "string") return stripBrowser(maybeStrip(block.content))
       return ""
     })
     .filter(Boolean)
@@ -174,7 +182,10 @@ function stripThinkBlocksForDisplay(text: string): string {
 
 // 获取工具调用的简要描述
 function getToolCallSummary(toolCall: { name: string; args?: Record<string, unknown> }): string {
-  const label = getToolLabel(toolCall.name, { showToolName: false })
+  const label = getToolLabel(toolCall.name, {
+    args: toolCall.args,
+    showToolName: false
+  })
   const args = toolCall.args || {}
 
   // 获取主要参数用于显示
@@ -770,7 +781,10 @@ function MessageBubbleImpl({
 
   // Only strip the skill-use tail from OUR user messages; assistant text that
   // happens to quote the tag (e.g. while discussing the protocol) copies verbatim.
-  const plainTextForCopy = extractMessagePlainText(message.content, { stripSkillUse: isUser })
+  const plainTextForCopy = extractMessagePlainText(message.content, {
+    stripSkillUse: isUser,
+    stripBuiltinBrowser: isUser
+  })
   const goalUserSetMessage = isUser ? parseGoalUserSetMessage(plainTextForCopy) : null
   const goalUserControlMessage = isUser ? parseGoalUserControlMessage(plainTextForCopy) : null
 
@@ -836,11 +850,15 @@ function MessageBubbleImpl({
         // Parse the trailing `<CMBDEVCLAW-SKILL-USE-V1>` block: chip at the top,
         // rest of the message as plain text. Handles skill-only sends (no text)
         // by still rendering the chip with an empty tail.
-        const { visibleText, skillName } = parseUserVisibleSkillContent(displayContent)
+        const skillContent = parseUserVisibleSkillContent(displayContent)
+        const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
-            {skillName && <SkillChip label={skillName} compact className="mr-2" />}
-            {visibleText}
+            {skillContent.skillName && (
+              <SkillChip label={skillContent.skillName} compact className="mr-2" />
+            )}
+            {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
+            {browserContent.visibleText}
           </div>
         )
       }
@@ -855,14 +873,18 @@ function MessageBubbleImpl({
           if (!displayText.trim()) return null
           // Use streaming markdown for assistant text blocks
           if (isUser) {
-            const { visibleText, skillName } = parseUserVisibleSkillContent(displayText)
+            const skillContent = parseUserVisibleSkillContent(displayText)
+            const browserContent = parseUserVisibleBuiltinBrowserContent(skillContent.visibleText)
             return (
               <div
                 key={index}
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
-                {skillName && <SkillChip label={skillName} compact className="mr-2" />}
-                {visibleText}
+                {skillContent.skillName && (
+                  <SkillChip label={skillContent.skillName} compact className="mr-2" />
+                )}
+                {browserContent.browserSelected && <BuiltinBrowserChip compact className="mr-2" />}
+                {browserContent.visibleText}
               </div>
             )
           }
@@ -1138,9 +1160,7 @@ function MessageBubbleImpl({
                 (needsApproval
                   ? "awaiting_approval"
                   : result !== undefined
-                    ? result.is_error
-                      ? "failed"
-                      : "completed"
+                    ? "completed"
                     : isResultlessCompletedToolCall(resolvedToolCall)
                       ? "completed"
                     : isStreaming
@@ -1153,7 +1173,7 @@ function MessageBubbleImpl({
                 : collapsedTools.has(toolId)
               const summary = getToolCallSummary(resolvedToolCall)
               const previewPath = getToolPreviewPath(resolvedToolCall)
-              const isOk = result !== undefined && !result.is_error
+              const isOk = result !== undefined && !result?.is_error
 
               // 如果工具需要审批，使用原来的ToolCallRenderer（批量时隐藏按钮）
               if (needsApproval) {

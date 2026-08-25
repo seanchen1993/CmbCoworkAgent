@@ -75,7 +75,10 @@ describe("agent runtime settings integration", () => {
     expect(worktreeService).not.toContain("180_000")
 
     const scaleSensitiveHelpers = [
-      ["async function assertDeliverablePathsInScope(", "function assertGitPathsInScope("],
+      [
+        "async function assertWorkflowWorktreeDeliverablePathsInScope(",
+        "function assertGitPathsInScope("
+      ],
       ["async function listChangedGitPaths(", "async function assertNoGitlinkChanges("],
       ["async function assertNoGitlinkChanges(", "function gitPathBatches("],
       ["async function assertNoIgnoredSourceCollisions(", "// ── Per-repository serialization"],
@@ -110,19 +113,17 @@ describe("agent runtime settings integration", () => {
     const merge = sourceBetween(
       worktreeService,
       "export async function mergeWorkflowWorktree(",
-      "async function stageWorkflowWorktreeUnlocked("
+      "interface WorktreeListEntry"
     )
     expect(merge).toContain("const operationTimeoutMs = getWorkflowWorktreeTimeoutMs()")
     expect(merge.match(/\boperationTimeoutMs\b/g)?.length ?? 0).toBeGreaterThan(10)
     expect(merge).not.toMatch(/git\(record\.sourceRoot, \["write-tree"\]\)/)
     expect(merge).toContain("operationTimeoutMs,\n          input.signal")
 
-    const staging = sourceBetween(
-      worktreeService,
-      "async function stageWorkflowWorktreeUnlocked(",
-      "export async function commitWorkflowWorktree("
+    const runtime = readRepositoryFile("src/main/agent/runtime.ts")
+    expect(runtime).toContain(
+      "timeout: options.worktreeIsolation ? getWorkflowWorktreeTimeoutMs() : 60_000"
     )
-    expect(staging.match(/getWorkflowWorktreeTimeoutMs\(\)/g)).toHaveLength(2)
   })
 
   it("opens General by default while preserving explicit deep links", () => {

@@ -13,6 +13,7 @@ import {
   Briefcase,
   Eye,
   GitBranch,
+  Globe2,
   GripVertical,
   Loader2,
   PanelLeftClose,
@@ -43,7 +44,8 @@ const DashboardView = lazy(() =>
 )
 import { ResizeHandle } from "@/components/ui/resizable"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
-import { useAppStore } from "@/lib/store"
+import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
+import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
 import { initMMJ, updateMMJUserInfo } from "../js/mmjUtils"
@@ -105,11 +107,15 @@ async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
 const LEFT_MIN = 200
 const LEFT_MAX = 400
 const LEFT_DEFAULT = 280
+const LEFT_RESIZE_HANDLE_WIDTH = 6
 
 const RIGHT_MIN = 250
 const RIGHT_MAX = 1600
 const RIGHT_DEFAULT = 300
-const RIGHT_PREVIEW_EXPAND_VW = 0.4
+const RIGHT_PREVIEW_EXPAND_VW = 0.35
+const BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT = 66.67
+const BROWSER_FULLSCREEN_MIN_PANEL_PERCENT = 20
+const BROWSER_FULLSCREEN_MAX_PANEL_PERCENT = 80
 
 interface WorkerSplitHandleProps {
   onDrag: (totalDelta: number) => void
@@ -177,6 +183,32 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
   )
 }
 
+function AnimatedThreadSidebar({
+  hidden,
+  width,
+  onResize
+}: {
+  hidden: boolean
+  width: number
+  onResize: (totalDelta: number) => void
+}): React.JSX.Element {
+  return (
+    <div
+      data-app-route-control
+      aria-hidden={hidden}
+      className={`flex shrink-0 overflow-hidden transition-[width,opacity] duration-300 ease-out ${
+        hidden ? "pointer-events-none opacity-0" : "opacity-100"
+      }`}
+      style={{ width: hidden ? 0 : width + LEFT_RESIZE_HANDLE_WIDTH }}
+    >
+      <div style={{ width }} className="shrink-0">
+        <ThreadSidebar />
+      </div>
+      <ResizeHandle onDrag={onResize} />
+    </div>
+  )
+}
+
 function App(): React.JSX.Element {
   const {
     currentThreadId,
@@ -192,6 +224,9 @@ function App(): React.JSX.Element {
     rightPanelCollapsed,
     toggleRightPanel,
     rightPanelWorkRequest,
+    rightModule,
+    setRightModule,
+    setBrowserCdpConfig,
     setPendingEvolution,
     workerFocusView,
     subagentFocusView,
@@ -215,6 +250,9 @@ function App(): React.JSX.Element {
       rightPanelCollapsed: state.rightPanelCollapsed,
       toggleRightPanel: state.toggleRightPanel,
       rightPanelWorkRequest: state.rightPanelWorkRequest,
+      rightModule: state.rightModule,
+      setRightModule: state.setRightModule,
+      setBrowserCdpConfig: state.setBrowserCdpConfig,
       setPendingEvolution: state.setPendingEvolution,
       workerFocusView: state.workerFocusView,
       subagentFocusView: state.subagentFocusView,
@@ -245,9 +283,12 @@ function App(): React.JSX.Element {
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
+  const [browserFullscreenRightPercent, setBrowserFullscreenRightPercent] = useState(
+    BROWSER_FULLSCREEN_RIGHT_DEFAULT_PERCENT
+  )
   const [workerSplitLeftPercent, setWorkerSplitLeftPercent] = useState(50)
-  const [rightModule, setRightModule] = useState<"work" | "preview" | "git">("work")
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
+  const [browserFullscreen, setBrowserFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
@@ -327,6 +368,24 @@ function App(): React.JSX.Element {
   const renderedMainView = renderedRoute.mainView
   const renderedThreadId = renderedRoute.threadId
   const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
+  const isRightPanelFullscreen = previewFullscreen || browserFullscreen
+  const showRightResizeHandle = !previewFullscreen
+  const fullscreenMainClassName = browserFullscreen
+    ? "relative flex min-w-0 flex-col overflow-hidden"
+    : "relative flex flex-1 min-w-0 flex-col overflow-hidden"
+  const fullscreenMainStyle = browserFullscreen
+    ? { flex: `${100 - browserFullscreenRightPercent} 1 0%` }
+    : undefined
+  const fullscreenRightPanelClassName = browserFullscreen
+    ? "min-w-0"
+    : isRightPanelFullscreen
+      ? "min-w-0 flex-1"
+      : "shrink-0 pl-0"
+  const fullscreenRightPanelStyle = browserFullscreen
+    ? { flex: `${browserFullscreenRightPercent} 1 0%` }
+    : isRightPanelFullscreen
+      ? undefined
+      : { width: rightWidth }
   const isThreadWorkerFocusActive =
     renderedMainView === "thread" &&
     Boolean(
@@ -488,8 +547,12 @@ function App(): React.JSX.Element {
 
   // Track drag start widths
   const dragStartWidths = useRef<{ left: number; right: number } | null>(null)
+  const rightPanelSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitRef = useRef<HTMLDivElement>(null)
   const workerSplitStartRef = useRef<{ leftPercent: number; width: number } | null>(null)
+  const browserFullscreenSplitStartRef = useRef<{ rightPercent: number; width: number } | null>(
+    null
+  )
   const previewCollapsedWidthRef = useRef<number | null>(null)
 
   // Set platform-specific titlebar insets and track zoom
@@ -550,13 +613,30 @@ function App(): React.JSX.Element {
 
   const handleRightResize = useCallback(
     (totalDelta: number) => {
+      if (browserFullscreen) {
+        if (!browserFullscreenSplitStartRef.current) {
+          browserFullscreenSplitStartRef.current = {
+            rightPercent: browserFullscreenRightPercent,
+            width: rightPanelSplitRef.current?.clientWidth || window.innerWidth
+          }
+        }
+        const { rightPercent, width } = browserFullscreenSplitStartRef.current
+        const nextPercent = rightPercent - (totalDelta / Math.max(1, width)) * 100
+        setBrowserFullscreenRightPercent(
+          Math.min(
+            BROWSER_FULLSCREEN_MAX_PANEL_PERCENT,
+            Math.max(BROWSER_FULLSCREEN_MIN_PANEL_PERCENT, nextPercent)
+          )
+        )
+        return
+      }
       if (!dragStartWidths.current) {
         dragStartWidths.current = { left: leftWidth, right: rightWidth }
       }
       const newWidth = dragStartWidths.current.right - totalDelta
       setRightWidth(Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, newWidth)))
     },
-    [leftWidth, rightWidth]
+    [browserFullscreen, browserFullscreenRightPercent, leftWidth, rightWidth]
   )
 
   const handleWorkerSplitResize = useCallback(
@@ -593,19 +673,28 @@ function App(): React.JSX.Element {
 
   const selectPreviewModule = useCallback(() => {
     setRightModule("preview")
-    handlePreviewExpand()
-  }, [handlePreviewExpand])
+  }, [setRightModule])
 
   const selectWorkModule = useCallback(() => {
     setRightModule("work")
-    handlePreviewCollapse()
-  }, [handlePreviewCollapse])
+  }, [setRightModule])
+
+  const selectBrowserModule = useCallback(() => {
+    setRightModule("browser")
+  }, [setRightModule])
 
   useEffect(() => {
     if (rightPanelWorkRequest?.target !== "systemConstraints") return
     setRightModule("work")
-    handlePreviewCollapse()
-  }, [handlePreviewCollapse, rightPanelWorkRequest])
+  }, [rightPanelWorkRequest, setRightModule])
+
+  useEffect(() => {
+    if (rightModule === "work") {
+      handlePreviewCollapse()
+      return
+    }
+    handlePreviewExpand()
+  }, [handlePreviewCollapse, handlePreviewExpand, rightModule])
 
   const setThreadPendingGitDiff = useCallback((threadId: string, pending: boolean) => {
     setPendingGitDiffByThread((prev) => {
@@ -646,24 +735,50 @@ function App(): React.JSX.Element {
   const showRightPanelModuleControls =
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
 
+  useBrowserViewLifecycle({
+    currentThreadId,
+    harnessSessionThreadId,
+    mainView,
+    rightPanelCollapsed,
+    isAgentFocusActive
+  })
+
   const selectGitModule = useCallback(() => {
     if (activeRightPanelThreadId) {
       setThreadPendingGitDiff(activeRightPanelThreadId, false)
     }
     setRightModule("git")
-    handlePreviewExpand()
-  }, [activeRightPanelThreadId, handlePreviewExpand, setThreadPendingGitDiff])
+  }, [activeRightPanelThreadId, setRightModule, setThreadPendingGitDiff])
 
   const dismissGitChangeNotice = useCallback(() => {
     if (!activeRightPanelThreadId) return
     setThreadPendingGitDiff(activeRightPanelThreadId, false)
   }, [activeRightPanelThreadId, setThreadPendingGitDiff])
 
+  const rightModuleRef = useRef(rightModule)
+  const previousActiveRightPanelThreadIdRef = useRef<string | null>(activeRightPanelThreadId)
+  const previousMainViewRef = useRef(mainView)
+  rightModuleRef.current = rightModule
+
   useEffect(() => {
-    // Keep right panel behavior predictable: when switching thread or entering thread view,
-    // always fall back to workspace mode.
-    setRightModule("work")
-    handlePreviewCollapse()
+    const previousActiveRightPanelThreadId = previousActiveRightPanelThreadIdRef.current
+    const previousMainView = previousMainViewRef.current
+    previousActiveRightPanelThreadIdRef.current = activeRightPanelThreadId
+    previousMainViewRef.current = mainView
+
+    const shouldPreserveCurrentModule =
+      rightModuleRef.current === "browser" &&
+      (mainView === "thread" || mainView === "harness") &&
+      previousMainView === mainView &&
+      Boolean(previousActiveRightPanelThreadId) &&
+      Boolean(activeRightPanelThreadId) &&
+      previousActiveRightPanelThreadId !== activeRightPanelThreadId
+
+    if (!shouldPreserveCurrentModule) {
+      // Keep right panel behavior predictable when entering thread-like views and for
+      // non-browser module switches between threads.
+      setRightModule("work")
+    }
 
     try {
       // 主应用已经处于打开/查看状态，清空宠物完成任务提醒队列。
@@ -672,7 +787,7 @@ function App(): React.JSX.Element {
       console.warn("[App] Failed to clear pet completed tasks:", error)
     }
 
-  }, [activeRightPanelThreadId, mainView, handlePreviewCollapse])
+  }, [activeRightPanelThreadId, mainView, setRightModule])
 
   useEffect(() => {
     if (mainView !== "harness") {
@@ -737,6 +852,7 @@ function App(): React.JSX.Element {
     const handleMouseUp = (): void => {
       dragStartWidths.current = null
       workerSplitStartRef.current = null
+      browserFullscreenSplitStartRef.current = null
     }
     document.addEventListener("mouseup", handleMouseUp)
     return () => document.removeEventListener("mouseup", handleMouseUp)
@@ -746,7 +862,15 @@ function App(): React.JSX.Element {
     async function init(): Promise<void> {
       try {
         await migrateDisabledSkillsFromLocalStorage()
-        await Promise.all([loadThreads(), loadDashboardAllowed()])
+        const [, , loadedBrowserCdpConfig] = await Promise.all([
+          loadThreads(),
+          loadDashboardAllowed(),
+          window.api.browser.getCdpConfig().catch((error: unknown) => {
+            console.error("Failed to load Browser CDP config during initialization:", error)
+            return DEFAULT_BROWSER_CDP_CONFIG
+          })
+        ])
+        setBrowserCdpConfig(loadedBrowserCdpConfig)
         const threads = useAppStore.getState().threads
         if (threads.length === 0) {
           await createThread()
@@ -759,7 +883,7 @@ function App(): React.JSX.Element {
       }
     }
     init()
-  }, [loadThreads, loadDashboardAllowed, loadChatScrollSettings, createThread])
+  }, [loadThreads,setBrowserCdpConfig, loadDashboardAllowed, loadChatScrollSettings, createThread])
 
   useEffect(() => {
     let cancelled = false
@@ -1032,6 +1156,21 @@ function App(): React.JSX.Element {
                 <button
                   type="button"
                   className={`${panelToggleBaseClass} ${
+                    rightModule === "browser"
+                      ? moduleActiveClass
+                      : moduleInactiveClass
+                  }`}
+                  onClick={selectBrowserModule}
+                  title="内置浏览器"
+                  aria-label="内置浏览器"
+                  aria-pressed={rightModule === "browser"}
+                >
+                  <Globe2 size={16} className="shrink-0" strokeWidth={1.8} />
+                  <span>浏览器</span>
+                </button>
+                <button
+                  type="button"
+                  className={`${panelToggleBaseClass} ${
                     rightModule === "work"
                       ? moduleActiveClass
                       : moduleInactiveClass
@@ -1104,19 +1243,17 @@ function App(): React.JSX.Element {
         ) : renderedMainView !== "claudecode" &&
           renderedMainView !== "dashboard" &&
           renderedMainView !== "harness" ? (
-          <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
+          <div
+            ref={rightPanelSplitRef}
+            className="relative flex flex-1 overflow-hidden bg-grid-subtle"
+          >
             {/* Left Sidebar */}
             {!sidebarCollapsed && !isAgentFocusActive && (
-              <>
-                <div
-                  data-app-route-control
-                  style={{ width: leftWidth }}
-                  className="relative z-[60] shrink-0"
-                >
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
+              <AnimatedThreadSidebar
+                hidden={browserFullscreen}
+                width={leftWidth}
+                onResize={handleLeftResize}
+              />
             )}
 
             {renderedMainView === "kanban" ? (
@@ -1164,7 +1301,7 @@ function App(): React.JSX.Element {
                     </section>
                   </main>
                 ) : !previewFullscreen && (
-                  <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
+                  <main className={fullscreenMainClassName} style={fullscreenMainStyle}>
                     {renderedThreadId ? (
                       <TabbedPanel
                         threadId={renderedThreadId}
@@ -1186,18 +1323,20 @@ function App(): React.JSX.Element {
 
             {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
                 {/* Right Panel - floating style */}
                 <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0" : "shrink-0"}
+                  style={fullscreenRightPanelStyle}
+                  className={fullscreenRightPanelClassName}
                 >
                   <RightPanel
                     threadId={renderedThreadId}
                     moduleMode={rightModule}
                     onRequestPreviewMode={selectPreviewModule}
                     onRequestWorkMode={selectWorkModule}
+                    onRequestBrowserMode={selectBrowserModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
+                    onBrowserFullscreenChange={setBrowserFullscreen}
                   />
                 </div>
               </>
@@ -1231,30 +1370,29 @@ function App(): React.JSX.Element {
         {/* Harness Board 面板 */}
         {renderedMainView === "harness" && (
           <div
-            ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
+            ref={isHarnessAgentFocusActive ? workerSplitRef : rightPanelSplitRef}
             className="relative flex flex-1 overflow-hidden bg-grid-subtle"
           >
             {!sidebarCollapsed && !isHarnessAgentFocusActive && (
-              <>
-                <div
-                  data-app-route-control
-                  style={{ width: leftWidth }}
-                  className="relative z-[60] shrink-0"
-                >
-                  <ThreadSidebar />
-                </div>
-                <ResizeHandle onDrag={handleLeftResize} />
-              </>
+              <AnimatedThreadSidebar
+                hidden={browserFullscreen}
+                width={leftWidth}
+                onResize={handleLeftResize}
+              />
             )}
             <main
               key="harness-main"
-              style={isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
+              style={
+                isHarnessAgentFocusActive
+                  ? { width: `${workerSplitLeftPercent}%` }
+                  : fullscreenMainStyle
+              }
               className={
                 previewFullscreen && renderedHarnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
                   ? "hidden"
                   : isHarnessAgentFocusActive
                     ? "relative flex min-w-0 flex-col overflow-hidden"
-                    : "relative flex flex-1 flex-col min-w-0 overflow-hidden"
+                    : fullscreenMainClassName
               }
             >
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
@@ -1283,10 +1421,10 @@ function App(): React.JSX.Element {
             )}
             {renderedHarnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
               <>
-                {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
+                {showRightResizeHandle && <ResizeHandle onDrag={handleRightResize} />}
                 <div
-                  style={previewFullscreen ? undefined : { width: rightWidth }}
-                  className={previewFullscreen ? "flex-1 min-w-0" : "shrink-0"}
+                  style={fullscreenRightPanelStyle}
+                  className={fullscreenRightPanelClassName}
                 >
                   <RightPanel
                     threadId={renderedHarnessSessionThreadId}
@@ -1294,7 +1432,9 @@ function App(): React.JSX.Element {
                     showSystemConstraints={renderedMainView === "harness"}
                     onRequestPreviewMode={selectPreviewModule}
                     onRequestWorkMode={selectWorkModule}
+                    onRequestBrowserMode={selectBrowserModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
+                    onBrowserFullscreenChange={setBrowserFullscreen}
                   />
                 </div>
               </>

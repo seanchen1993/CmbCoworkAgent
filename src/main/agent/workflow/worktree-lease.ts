@@ -1,4 +1,6 @@
 import {
+  assertWorkflowWorktreeDeliverableDescendsFromBase,
+  assertWorkflowWorktreeDeliverablePathsInScope,
   createWorkflowWorktree,
   deleteWorkflowWorktreeRecord,
   inspectWorkflowWorktree,
@@ -9,10 +11,8 @@ import {
   type WorkflowWorktreeInfo,
   type WorkflowWorktreeSource
 } from "../../services/git-worktree"
-import type {
-  WorkflowWorktreeRecord,
-  WorkflowWorktreeStatus
-} from "./types"
+import type { WorkflowWorktreeRecord, WorkflowWorktreeStatus } from "./types"
+import { getWorkflowWorktreeTimeoutMs } from "../../../shared/agent-runtime-limits"
 
 interface OwnedWorktree {
   info: WorkflowWorktreeInfo
@@ -42,10 +42,7 @@ export class WorkflowWorktreeLedger {
    * promise, so a later branch switch cannot split one run across baselines. */
   private source(): Promise<WorkflowWorktreeSource> {
     if (!this.sourcePromise) {
-      const pending = prepareWorkflowWorktreeSource(
-        this.options.workspacePath,
-        this.options.signal
-      )
+      const pending = prepareWorkflowWorktreeSource(this.options.workspacePath, this.options.signal)
       this.sourcePromise = pending
       // A transient dirty/read failure happened before any base was frozen or
       // checkout was created. Let a later isolated call retry after the user
@@ -115,10 +112,7 @@ export class WorkflowWorktreeLedger {
     return info
   }
 
-  async settle(
-    info: WorkflowWorktreeInfo,
-    outcome: { succeeded: boolean }
-  ): Promise<void> {
+  async settle(info: WorkflowWorktreeInfo, outcome: { succeeded: boolean }): Promise<void> {
     const owned = this.pending.get(info.directory)
     if (!owned) return
     this.pending.delete(info.directory)
@@ -147,14 +141,38 @@ export class WorkflowWorktreeLedger {
     // to Merge or Diff, so retain them as recovery state instead of advertising
     // a false ready deliverable.
     const hasReadableHead = Boolean(state.headCommit)
+    let deliveryError: string | undefined
+    if (outcome.succeeded && hasReadableHead && state.headCommit !== info.baseCommit) {
+      try {
+        await assertWorkflowWorktreeDeliverableDescendsFromBase(
+          info.directory,
+          info.baseCommit,
+          state.headCommit,
+          getWorkflowWorktreeTimeoutMs(),
+          this.options.signal
+        )
+        await assertWorkflowWorktreeDeliverablePathsInScope(
+          info.directory,
+          info.baseCommit,
+          state.headCommit,
+          info.sourceRelativePath,
+          getWorkflowWorktreeTimeoutMs(),
+          this.options.signal
+        )
+      } catch (error) {
+        deliveryError = `agent committed a deliverable that cannot be merged automatically: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
     const status: WorkflowWorktreeStatus =
-      outcome.succeeded && hasReadableHead ? "ready" : "recoverable"
+      outcome.succeeded && hasReadableHead && !deliveryError ? "ready" : "recoverable"
     const patch: Partial<WorkflowWorktreeRecord> = {
       headCommit: state.headCommit || undefined,
       dirty: state.dirty,
       ...(outcome.succeeded
         ? hasReadableHead
-          ? {}
+          ? deliveryError
+            ? { error: deliveryError }
+            : {}
           : { error: "agent completed but its worktree is unreadable; retained for recovery" }
         : { error: "agent failed or was cancelled; changes retained for recovery" })
     }

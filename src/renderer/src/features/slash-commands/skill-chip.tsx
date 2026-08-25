@@ -7,9 +7,18 @@ interface Props {
   onRemove?: () => void
   className?: string
   compact?: boolean
+  icon?: React.ReactNode
+  removeLabel?: string
 }
 
-export function SkillChip({ label, onRemove, className, compact }: Props): React.ReactElement {
+export function SkillChip({
+  label,
+  onRemove,
+  className,
+  compact,
+  icon,
+  removeLabel = "移除技能"
+}: Props): React.ReactElement {
   return (
     <span
       className={cn(
@@ -21,14 +30,14 @@ export function SkillChip({ label, onRemove, className, compact }: Props): React
         className
       )}
     >
-      <Package2 className={compact ? "size-3" : "size-3.5"} />
+      {icon ?? <Package2 className={compact ? "size-3" : "size-3.5"} />}
       <span className="max-w-[160px] truncate">{label}</span>
       {onRemove && (
         <button
           type="button"
           onClick={onRemove}
           className="ml-0.5 opacity-60 hover:opacity-100"
-          aria-label="移除技能"
+          aria-label={removeLabel}
         >
           <X className="size-3" />
         </button>

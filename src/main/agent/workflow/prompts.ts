@@ -105,11 +105,11 @@ Concurrency guidance:
 
 ## Isolated agents (opts.isolation: 'worktree')
 
-\`agent(prompt, {isolation: 'worktree'})\` runs that agent in an independent Git working copy on a fresh branch from a frozen, clean source commit. It has extra setup-time and disk cost per agent, so use it ONLY when agents mutate files in parallel and would otherwise conflict; it is unnecessary overhead for read-only work. Agents in one fan-out do not see sibling changes, so complete prerequisites before launching dependent work.
+\`agent(prompt, {isolation: 'worktree'})\` runs that agent in an independent Git working copy on a fresh branch from a frozen source commit. Staged, unstaged, and untracked changes in the source checkout are not copied into it. It has extra setup-time and disk cost per agent, so use it ONLY when agents mutate files in parallel and would otherwise conflict; it is unnecessary overhead for read-only work. Agents in one fan-out do not see sibling changes, so complete prerequisites before launching dependent work.
 
 Isolation never changes the return value: schema calls return their validated object and other calls return final text. A pristine checkout is removed; a changed checkout is retained in Cmb's workflow panel for review and resolution. If a worktree cannot be provisioned safely, the call returns \`null\` and never falls back to the shared workspace.
 
-For a deliverable you intend to Merge in Cmb, tell the isolated agent to commit its changes and leave its worktree clean. Do not ask isolated agents to push. This is repository-edit isolation, not a sandbox for untrusted code or network access.
+For a deliverable you intend to Merge in Cmb, tell the isolated agent to work normally with \`git add\` and \`git commit\`, commit the changes it intends to deliver, and leave its worktree clean. Do not tell it to switch to another existing branch or merge back into the source branch. Do not ask it to push unless the task explicitly requires publishing the transient branch and the user approves that push. This is repository-edit isolation, not a sandbox for untrusted code or network access.
 
 DEFAULT TO pipeline(). Only reach for a barrier (parallel between stages) when you genuinely need ALL prior-stage results together.
 

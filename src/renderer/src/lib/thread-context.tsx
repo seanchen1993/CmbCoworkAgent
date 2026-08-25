@@ -629,6 +629,8 @@ export interface ThreadState {
    * matching how draftInput already behaves.
    */
   draftSkill: SkillMetadata | null
+  /** Whether the built-in browser mode is selected for the next send. */
+  draftBuiltinBrowser: boolean
   scheduledTaskLoading: boolean
   historyLoading: boolean
   historyPageLoading: boolean
@@ -842,6 +844,7 @@ export interface ThreadActions {
   setDraftInput: (input: string) => void
   setHarnessNextActionDialogTips: (tips: string | null) => void
   setDraftSkill: (skill: SkillMetadata | null) => void
+  setDraftBuiltinBrowser: (selected: boolean) => void
 }
 
 // Context value
@@ -895,6 +898,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
     attachmentDisplayPrefix:
       typeof item.attachmentDisplayPrefix === "string" ? item.attachmentDisplayPrefix : undefined,
     skillBlock: typeof item.skillBlock === "string" ? item.skillBlock : undefined,
+    builtinBrowser: item.builtinBrowser === true,
     modelId: typeof item.modelId === "string" ? item.modelId : undefined,
     handoffRequestedAt:
       handoffRequestedAt && !Number.isNaN(handoffRequestedAt.getTime())
@@ -976,6 +980,7 @@ const createDefaultThreadState = (): ThreadState => ({
   draftInput: "",
   harnessNextActionDialogTips: null,
   draftSkill: null,
+  draftBuiltinBrowser: false,
   scheduledTaskLoading: false,
   // An absent ThreadState is observed for one render before initializeThread's
   // passive effect runs. Treat that shell as loading so first-open/dehydrated
@@ -1189,6 +1194,7 @@ function normalizeThreadState(state: ThreadState): ThreadState {
     historyPageCursor: state.historyPageCursor ?? null,
     historyMessageTotal: state.historyMessageTotal ?? state.messages.length,
     historyLoadedMessageCount: state.historyLoadedMessageCount ?? state.messages.length,
+    draftBuiltinBrowser: state.draftBuiltinBrowser ?? false,
     toolCallStates: state.toolCallStates || {},
     contextCompaction: state.contextCompaction ?? null,
     ...buildPendingApprovalState(pendingQueue)
@@ -4801,14 +4807,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               }
             }
             if (currentMessage.role === "tool" && currentMessage.tool_call_id) {
-              nextToolCallStates = upsertToolCallState(
-                nextToolCallStates,
-                currentMessage.tool_call_id,
-                {
-                  name: currentMessage.name,
-                  status: currentMessage.is_error ? "failed" : "completed"
-                }
-              )
+              nextToolCallStates = upsertToolCallState(nextToolCallStates, currentMessage.tool_call_id, {
+                name: currentMessage.name,
+                status: toolResultStatusFromMessage(currentMessage)
+              })
             }
             if (exists) {
               return {
@@ -5144,6 +5146,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         },
         setDraftSkill: (skill: SkillMetadata | null) => {
           updateThreadState(threadId, () => ({ draftSkill: skill }))
+        },
+        setDraftBuiltinBrowser: (selected: boolean) => {
+          updateThreadState(threadId, () => ({ draftBuiltinBrowser: selected }))
         }
       }
 

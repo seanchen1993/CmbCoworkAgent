@@ -15,7 +15,7 @@ import path from "path"
 import { ApprovalStore } from "./approval-store"
 import {
   assessCommandSafety,
-  containsGitAddCommand,
+  containsIndirectGitPush,
   derivePermanentApprovalPattern,
   extractGitCommitPathspecs,
   extractGitCommitMessage,
@@ -23,11 +23,8 @@ import {
   isAmendOrFixupCommit,
   isChainedShellCommand,
   isForcePushCommand,
-  isGitAddCommand,
   isGitCommitCommand,
   isGitPushCommand,
-  isSimpleIsolatedGitCommitCommand,
-  isWholeScopeGitAddCommand,
   resolveGitCommandCwd,
   resolveGitPushCommandCwd,
   type CommandShellSyntax
@@ -54,11 +51,6 @@ export type RawExecuteFn = (
 
 /** Function to request interactive approval from the user (renderer). */
 export type RequestApprovalFn = (req: ApprovalRequest) => Promise<ApprovalDecision>
-export type IsolatedGitMutationFn = (
-  operation: "stage" | "commit",
-  message: string | undefined,
-  cwd: string
-) => Promise<ExecuteResponse>
 
 /**
  * Generic prompt shown when a sandboxed command fails with output that looks like a
@@ -68,8 +60,7 @@ export type IsolatedGitMutationFn = (
 const SANDBOX_BYPASS_PROMPT_REASON =
   "命令在沙箱内执行失败，疑似受沙箱限制。是否允许我在沙箱外重试同一命令？"
 
-const AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE =
-  "Agent 指定的文件均被 Git ignore，未发起提交。"
+const AGENT_COMMIT_NO_ELIGIBLE_FILES_MESSAGE = "Agent 指定的文件均被 Git ignore，未发起提交。"
 
 function normalizeDirBoundaryKey(dir: string): string {
   const resolved = path.resolve(dir)
@@ -256,7 +247,6 @@ export class ToolOrchestrator {
     private autoApproveFileEdits: boolean = false,
     /** Isolated worktree runtimes must never retry a denied command on the host. */
     private sandboxEscapeAllowed: boolean = true,
-    private isolatedGitMutation?: IsolatedGitMutationFn,
     /** Thread workspace boundary; execute() cwd may be a nested shell directory. */
     private workspacePath?: string
   ) {}
@@ -288,6 +278,7 @@ export class ToolOrchestrator {
       const safety = assessCommandSafety(command, cwd, {
         windowsShell:
           process.platform === "win32" && sandboxMode !== "none" ? "powershell" : "unknown",
+        nativeGitWorktree: !this.sandboxEscapeAllowed,
         shellSyntax
       })
       console.log(
@@ -303,59 +294,11 @@ export class ToolOrchestrator {
         }
       }
 
-      // An isolated workflow checkout is intentionally not a child of the thread's
-      // source workspace, so the Git Panel's thread-scoped commit/push IPC cannot
-      // authorize it. Commits go through a guarded host broker that stages only the
-      // assigned scope and advances only its branch. Direct push commands are rejected for
-      // app-owned transient branches; arbitrary project subprocesses and network access
-      // remain outside this worktree-integrity boundary and are explicitly treated as trusted.
-      if (!this.sandboxEscapeAllowed && isGitPushCommand(command, shellSyntax)) {
-        return {
-          output: "Command forbidden: direct push from an isolated workflow worktree is blocked",
-          exitCode: 1,
-          truncated: false
-        }
-      }
-      if (!this.sandboxEscapeAllowed && this.isolatedGitMutation) {
-        if (containsGitAddCommand(command)) {
-          if (!isGitAddCommand(command) || !isWholeScopeGitAddCommand(command)) {
-            return {
-              output:
-                "Command forbidden: isolated staging only supports `git add -A` or `git add --all`; commit automatically stages the assigned scope",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          return this.isolatedGitMutation("stage", undefined, cwd)
-        }
-        if (isGitCommitCommand(command, shellSyntax)) {
-          if (isChainedShellCommand(command, shellSyntax)) {
-            return {
-              output:
-                "Command forbidden: run isolated `git commit -m ...` as a standalone command; the broker stages the assigned scope automatically",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          if (!isSimpleIsolatedGitCommitCommand(command)) {
-            return {
-              output:
-                "Command forbidden: isolated commits support only `git commit -m <message>`; amend/fixup/squash, pathspecs, and staging options are not supported",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          const message = extractGitCommitMessage(command)
-          if (!message?.trim()) {
-            return {
-              output: "Command forbidden: isolated worktree commits require -m/--message",
-              exitCode: 1,
-              truncated: false
-            }
-          }
-          return this.isolatedGitMutation("commit", message, cwd)
-        }
-      }
+      // Isolated workflow agents use native Git in their assigned checkout. Do not
+      // route their add/commit commands through the ordinary task-card flow: Git must
+      // preserve the agent's real index, hooks, signing and command semantics. The
+      // LocalSandbox worktree guard has already rejected cross-worktree/shared-metadata
+      // operations before execution reaches this orchestrator.
 
       // 2.5 git commit → route through the task-card commit dialog instead of a plain
       // approval. The renderer collects the task card + message, performs the commit via
@@ -370,7 +313,7 @@ export class ToolOrchestrator {
           return {
             output:
               "检测到 `git commit` 与其他命令串联执行，任务卡片流程无法安全保留各段命令的路径和短路语义。" +
-              "请直接使用 `git commit -m \"摘要\" -- <明确文件路径>`；如需切换目录，请单独执行 cd 或使用 git -C。",
+              '请直接使用 `git commit -m "摘要" -- <明确文件路径>`；如需切换目录，请单独执行 cd 或使用 git -C。',
             exitCode: 1,
             truncated: false
           }
@@ -391,12 +334,51 @@ export class ToolOrchestrator {
           return {
             output:
               "检测到任务卡片提交流程无法安全复现的 Git 文件范围选项（如 -a、--patch 或 " +
-              "--pathspec-from-file）。请先运行 git status，再使用 `git commit -m \"摘要\" -- <明确文件路径>` 重试。",
+              '--pathspec-from-file）。请先运行 git status，再使用 `git commit -m "摘要" -- <明确文件路径>` 重试。',
             exitCode: 1,
             truncated: false
           }
         }
         return this.requestCardCommit(command, cwd, shellSyntax)
+      }
+
+      // A push from an app-owned transient branch is never silently approved by
+      // YOLO mode. LocalSandbox has already limited the refspec to this worktree's
+      // assigned branch; ask once, then execute the original native Git command so
+      // credentials and remote behavior are not rewritten by the source-workspace
+      // Git Panel flow.
+      if (!this.sandboxEscapeAllowed && containsIndirectGitPush(command, shellSyntax)) {
+        return {
+          output:
+            "Command forbidden: isolated worktree push must be issued directly as `git push <remote> HEAD` for explicit approval",
+          exitCode: 1,
+          truncated: false
+        }
+      }
+      if (!this.sandboxEscapeAllowed && isGitPushCommand(command, shellSyntax)) {
+        if (isForcePushCommand(command, shellSyntax)) {
+          return {
+            output: "Command forbidden: force push from an isolated workflow worktree is blocked",
+            exitCode: 1,
+            truncated: false
+          }
+        }
+        const approval = await this.requestApproval({
+          id: randomUUID(),
+          tool_call: { id: randomUUID(), name: "execute", args: { command } },
+          safety_level: "needs_approval",
+          operation: "execute",
+          command,
+          cwd,
+          reason: "Push the assigned isolated workflow branch to its matching remote branch?",
+          allowed_decisions: ["approve", "reject"],
+          allowed_approval_types: ["approve", "reject"]
+        })
+        const decision = this.mapDecisionToReview(approval.type)
+        if (decision === "denied" || decision === "abort") {
+          return { output: "Command rejected by user.", exitCode: 1, truncated: false }
+        }
+        return this.rawExecute(command, sandboxMode, cwd)
       }
 
       // 2.6 git push → route a plain (non-force) push through workspace:pushWorktree — the
@@ -409,6 +391,7 @@ export class ToolOrchestrator {
       // the current cwd — a `git -C <other>` push to a different repo would otherwise be
       // silently redirected to the thread's worktree.
       if (
+        this.sandboxEscapeAllowed &&
         isGitPushCommand(command, shellSyntax) &&
         !isForcePushCommand(command, shellSyntax) &&
         !isChainedShellCommand(command, shellSyntax)
@@ -423,26 +406,14 @@ export class ToolOrchestrator {
       // commands, but still require explicit approval before escaping the sandbox.
       if (this.yoloMode) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(
-          command,
-          cwd,
-          sandboxMode,
-          result,
-          outsideShellSyntax
-        )
+        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
       }
 
       // 4. Safe commands → execute directly
       if (safety.level === "safe") {
         console.log("[Orchestrator] safe → rawExecute")
         const result = await this.rawExecute(command, sandboxMode, cwd)
-        return this.maybeRetryOutsideSandbox(
-          command,
-          cwd,
-          sandboxMode,
-          result,
-          outsideShellSyntax
-        )
+        return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
       }
 
       // 5. Needs approval → check cache, then ask user
@@ -541,14 +512,12 @@ export class ToolOrchestrator {
         truncated: false
       }
     }
-    const extractedPathspecs = Array.from(
-      new Set(extractGitCommitPathspecs(command, shellSyntax))
-    )
+    const extractedPathspecs = Array.from(new Set(extractGitCommitPathspecs(command, shellSyntax)))
     if (extractedPathspecs.length === 0) {
       return {
         output:
           "任务卡片提交流程必须指定明确文件路径，不能安全复现裸 `git commit` 的暂存区/未暂存片段语义。" +
-          "请先运行 git status，再使用 `git commit -m \"摘要\" -- <明确文件路径>` 重试。",
+          '请先运行 git status，再使用 `git commit -m "摘要" -- <明确文件路径>` 重试。',
         exitCode: 1,
         truncated: false
       }
@@ -750,13 +719,7 @@ export class ToolOrchestrator {
     if (!this.sandboxEscapeAllowed) return result
     // Single Codex-style bypass check — covers piped-spawn EPERM, git .git writes,
     // dubious ownership, ssh auth, generic EACCES/Access-is-denied/拒绝访问, etc.
-    return this.maybeRequestSandboxBypass(
-      command,
-      cwd,
-      sandboxMode,
-      result,
-      outsideShellSyntax
-    )
+    return this.maybeRequestSandboxBypass(command, cwd, sandboxMode, result, outsideShellSyntax)
   }
 
   /**

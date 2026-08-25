@@ -18,7 +18,6 @@ import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { pathToFileURL } from "url"
 import {
-  assertWorkflowWorktreeGitOperationTarget,
   createWorkflowWorktree,
   cleanupWorkflowWorktree,
   diffWorkflowWorktree,
@@ -35,7 +34,10 @@ import {
   resolveWorkflowWorktreeIsolationBoundary,
   type WorkflowWorktreeInfo
 } from "../src/main/services/git-worktree.ts"
-import { withoutGitRepositoryOverrides } from "../src/main/services/git-environment.ts"
+import {
+  isGitRepositoryOverrideEnvironmentVariable,
+  withoutGitRepositoryOverrides
+} from "../src/main/services/git-environment.ts"
 import { WorkflowWorktreeLedger } from "../src/main/agent/workflow/worktree-lease.ts"
 import { runWorkflowEngine } from "../src/main/agent/workflow/engine.ts"
 import { workflowRunManager } from "../src/main/agent/workflow/run-manager.ts"
@@ -192,7 +194,9 @@ async function testDetachedSourceFailsBeforeProvisioning(): Promise<void> {
         appDataRoot
       })
     } catch (error) {
-      rejected = /attached to a branch/i.test(error instanceof Error ? error.message : String(error))
+      rejected = /attached to a branch/i.test(
+        error instanceof Error ? error.message : String(error)
+      )
     }
     assert(rejected, "detached source HEAD must fail before creating an unusable deliverable")
     assert(
@@ -465,55 +469,52 @@ async function testTrackedWorkspaceHookSymlinkStaysPristine(): Promise<void> {
   }
 }
 
-async function testDirtySourceFailsClosed(): Promise<void> {
+async function testDirtySourceUsesCommittedHead(): Promise<void> {
   const repo = makeRepo()
   const appDataRoot = makeAppDataRoot()
-  const expectDirtyFailure = async (label: string): Promise<void> => {
-    let thrown: unknown
-    try {
-      await createWorkflowWorktree({ workspacePath: repo, runId: "wf_dirty", label, appDataRoot })
-    } catch (error) {
-      thrown = error
-    }
-    assert(
-      thrown instanceof Error && thrown.message.includes("clean assigned workspace"),
-      `${label} source changes must fail closed, got ${String(thrown)}`
-    )
-  }
   try {
-    writeFileSync(join(repo, "untracked.txt"), "x\n")
-    await expectDirtyFailure("untracked")
-    rmSync(join(repo, "untracked.txt"))
-
-    writeFileSync(join(repo, "README.md"), "unstaged\n")
-    await expectDirtyFailure("unstaged")
-    git(repo, ["restore", "README.md"])
-
-    writeFileSync(join(repo, "staged.txt"), "x\n")
+    writeFileSync(join(repo, "staged.txt"), "committed staged\n")
     git(repo, ["add", "staged.txt"])
-    await expectDirtyFailure("staged")
-    git(repo, ["reset", "--", "staged.txt"])
-    rmSync(join(repo, "staged.txt"))
+    git(repo, ["commit", "-m", "add dirty-source fixtures"])
 
-    mkdirSync(join(repo, ".cmbdevclaw"), { recursive: true })
-    writeFileSync(join(repo, ".cmbdevclaw", "tracked.txt"), "tracked base\n")
-    git(repo, ["add", "-f", ".cmbdevclaw/tracked.txt"])
-    git(repo, ["commit", "-m", "track reserved-path fixture"])
-    writeFileSync(join(repo, ".cmbdevclaw", "tracked.txt"), "tracked user edit\n")
-    git(repo, ["add", "-f", ".cmbdevclaw/tracked.txt"])
-    await expectDirtyFailure("tracked runtime")
-    git(repo, ["restore", "--staged", "--worktree", ".cmbdevclaw/tracked.txt"])
+    writeFileSync(join(repo, "README.md"), "source unstaged only\n")
+    writeFileSync(join(repo, "staged.txt"), "source staged only\n")
+    git(repo, ["add", "staged.txt"])
+    writeFileSync(join(repo, "untracked.txt"), "source untracked only\n")
+    const sourceStatusBefore = git(repo, ["status", "--short"])
 
-    // The run store is created before the first agent. Its private runtime files
-    // must not make every repository without a matching .gitignore unusable.
-    mkdirSync(join(repo, ".cmbdevclaw", "workflows", "thread"), { recursive: true })
-    writeFileSync(join(repo, ".cmbdevclaw", "workflows", "thread", "run.json"), "{}\n")
     const isolated = await createWorkflowWorktree({
       workspacePath: repo,
-      runId: "wf_internal",
+      runId: "wf_dirty_source",
       appDataRoot
     })
-    assert(existsSync(isolated.directory), "app runtime data should not trip the dirty-source gate")
+    assert(
+      readFileSync(join(isolated.directory, "README.md"), "utf8") === "base\n",
+      "unstaged source changes must not be copied into the isolated checkout"
+    )
+    assert(
+      readFileSync(join(isolated.directory, "staged.txt"), "utf8") === "committed staged\n",
+      "staged source changes must not be copied into the isolated checkout"
+    )
+    assert(
+      !existsSync(join(isolated.directory, "untracked.txt")),
+      "untracked source files must not be copied into the isolated checkout"
+    )
+    assert(
+      git(isolated.directory, ["status", "--porcelain"]) === "",
+      "a dirty source checkout must still produce a pristine committed-HEAD worktree"
+    )
+    assert(
+      git(repo, ["status", "--short"]) === sourceStatusBefore,
+      "provisioning must not alter the source checkout's staged or unstaged state"
+    )
+    await removeWorkflowWorktree({
+      directory: isolated.directory,
+      gitRoot: isolated.gitRoot,
+      branch: isolated.branch,
+      expectedBranchHead: isolated.baseCommit,
+      preserveChanges: true
+    })
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(appDataRoot, { recursive: true, force: true })
@@ -530,22 +531,22 @@ async function testSubdirectoryScopeAndLinkedSourceHead(): Promise<void> {
     git(repo, ["commit", "-m", "add package"])
 
     writeFileSync(join(repo, "packages", "a", "local.ts"), "assigned dirty\n")
-    let scopedDirtyFailure: unknown
-    try {
-      await createWorkflowWorktree({
-        workspacePath: join(repo, "packages", "a"),
-        runId: "wf_scope_dirty",
-        appDataRoot
-      })
-    } catch (error) {
-      scopedDirtyFailure = error
-    }
+    const scopedDirty = await createWorkflowWorktree({
+      workspacePath: join(repo, "packages", "a"),
+      runId: "wf_scope_dirty",
+      appDataRoot
+    })
     assert(
-      scopedDirtyFailure instanceof Error &&
-        scopedDirtyFailure.message.includes("clean assigned workspace"),
-      "dirty work inside the assigned package must block isolation"
+      !existsSync(join(scopedDirty.workspaceDirectory, "local.ts")),
+      "assigned-scope source changes must not be copied into the isolated checkout"
     )
-    rmSync(join(repo, "packages", "a", "local.ts"))
+    await removeWorkflowWorktree({
+      directory: scopedDirty.directory,
+      gitRoot: scopedDirty.gitRoot,
+      branch: scopedDirty.branch,
+      expectedBranchHead: scopedDirty.baseCommit,
+      preserveChanges: true
+    })
 
     mkdirSync(join(repo, "packages", "b"), { recursive: true })
     writeFileSync(join(repo, "packages", "b", "unrelated.ts"), "sibling dirty\n")
@@ -603,37 +604,6 @@ async function testSubdirectoryScopeAndLinkedSourceHead(): Promise<void> {
     assert(
       nested.workspaceDirectory === join(nested.directory, "packages", "a"),
       "linked subdirectory scope must survive nested isolation"
-    )
-  } finally {
-    rmSync(repo, { recursive: true, force: true })
-    rmSync(appDataRoot, { recursive: true, force: true })
-  }
-}
-
-async function testNestedRepositoryCommitTargetFailsClosed(): Promise<void> {
-  const repo = makeRepo()
-  const appDataRoot = makeAppDataRoot()
-  try {
-    const info = await createWorkflowWorktree({
-      workspacePath: repo,
-      runId: "wf_nested_commit",
-      appDataRoot
-    })
-    const boundary = await resolveWorkflowWorktreeIsolationBoundary(info, appDataRoot)
-    await assertWorkflowWorktreeGitOperationTarget(boundary, info.workspaceDirectory)
-
-    const nestedRepo = join(info.workspaceDirectory, "nested-repo")
-    mkdirSync(nestedRepo, { recursive: true })
-    git(nestedRepo, ["init", "--initial-branch=main"])
-    let rejected: unknown
-    try {
-      await assertWorkflowWorktreeGitOperationTarget(boundary, nestedRepo)
-    } catch (error) {
-      rejected = error
-    }
-    assert(
-      rejected instanceof Error && rejected.message.includes("nested repository"),
-      `nested repository commit must fail explicitly, got ${String(rejected)}`
     )
   } finally {
     rmSync(repo, { recursive: true, force: true })
@@ -747,6 +717,65 @@ async function testCreateFromInsideAWorktreeUsesPrimaryRepo(): Promise<void> {
       "identifyRepository should map a worktree to its primary repo"
     )
   } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(appDataRoot, { recursive: true, force: true })
+  }
+}
+
+async function testSymlinkedWorkspaceKeepsOneRepositoryIdentity(): Promise<void> {
+  if (process.platform === "win32") return
+  const repo = makeRepo()
+  const appDataRoot = makeAppDataRoot()
+  const aliasRoot = realpathSync(mkdtempSync(join(tmpdir(), "cmb-wt-alias-")))
+  const workspaceAlias = join(aliasRoot, "repository")
+  try {
+    symlinkSync(repo, workspaceAlias, "dir")
+    const canonicalIdentity = await identifyRepository(repo)
+    const aliasIdentity = await identifyRepository(workspaceAlias)
+    assert(
+      aliasIdentity?.commonDir === canonicalIdentity?.commonDir &&
+        aliasIdentity?.sourceRoot === canonicalIdentity?.sourceRoot &&
+        aliasIdentity?.gitRoot === canonicalIdentity?.gitRoot,
+      "symlink and canonical workspace spellings must identify the same repository"
+    )
+
+    const ledger = new WorkflowWorktreeLedger({
+      workspacePath: workspaceAlias,
+      runId: "wf_symlink_identity",
+      appDataRoot
+    })
+    const info = await ledger.acquire("symlinked-workspace")
+    writeFileSync(join(info.directory, "symlink-delivery.txt"), "delivered\n")
+    git(info.directory, ["add", "symlink-delivery.txt"])
+    git(info.directory, ["commit", "-m", "deliver through symlink workspace"])
+    await ledger.settle(info, { succeeded: true })
+    const ready = (await listWorkflowWorktreeRecords(info.commonDir, appDataRoot)).find(
+      (record) => record.id === info.name
+    )
+    assert(ready?.status === "ready", "symlinked workspace deliverable should become ready")
+
+    const diff = await diffWorkflowWorktree({
+      workspacePath: workspaceAlias,
+      record: ready!,
+      appDataRoot
+    })
+    assert(
+      diff.summary.includes("deliver through symlink workspace"),
+      "Diff should accept the original symlinked workspace spelling"
+    )
+    const merged = await mergeWorkflowWorktree({
+      workspacePath: workspaceAlias,
+      record: diff.record,
+      appDataRoot
+    })
+    assert(merged.record.status === "merged", "Merge should preserve repository identity")
+    assert(
+      readFileSync(join(repo, "symlink-delivery.txt"), "utf8") === "delivered\n",
+      "merged output should land in the canonical source checkout"
+    )
+    assert(!existsSync(info.directory), "successful Merge should clean up the worktree")
+  } finally {
+    rmSync(aliasRoot, { recursive: true, force: true })
     rmSync(repo, { recursive: true, force: true })
     rmSync(appDataRoot, { recursive: true, force: true })
   }
@@ -979,7 +1008,13 @@ async function testSafeRemovalRejectsAnAdvancedBranch(): Promise<void> {
 async function testGitRemovalFailureNeverFallsBackToRecursiveDelete(): Promise<void> {
   const repo = makeRepo()
   const appDataRoot = makeAppDataRoot()
+  const userParent = realpathSync(mkdtempSync(join(tmpdir(), "cmb-unavailable-wt-")))
+  const userWorktree = join(userParent, "external-checkout")
+  const parkedWorktree = join(userParent, "external-checkout-offline")
   try {
+    git(repo, ["worktree", "add", "-b", "user/unavailable", userWorktree, "HEAD"])
+    renameSync(userWorktree, parkedWorktree)
+
     const info = await createWorkflowWorktree({
       workspacePath: repo,
       runId: "wf_locked",
@@ -999,6 +1034,11 @@ async function testGitRemovalFailureNeverFallsBackToRecursiveDelete(): Promise<v
       removalError = error
     }
     assert(removalError instanceof Error, "a Git worktree removal failure must surface")
+    assert(
+      removalError.message.includes(userWorktree) &&
+        removalError.message.includes("git worktree prune --dry-run --verbose"),
+      "cleanup failure should identify unavailable external registrations without pruning them"
+    )
     assert(existsSync(info.directory), "Git failure must retain the worktree directory")
     assert(
       existsSync(join(info.directory, "recover-me.txt")),
@@ -1007,6 +1047,7 @@ async function testGitRemovalFailureNeverFallsBackToRecursiveDelete(): Promise<v
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(appDataRoot, { recursive: true, force: true })
+    rmSync(userParent, { recursive: true, force: true })
   }
 }
 
@@ -1084,6 +1125,36 @@ async function testSuccessfulAgentWithMissingCheckoutIsRecoverable(): Promise<vo
       record?.error?.includes("unreadable"),
       `recovery state should explain the missing checkout, got ${record?.error}`
     )
+  } finally {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(appDataRoot, { recursive: true, force: true })
+  }
+}
+
+async function testRewrittenBaseIsNotAdvertisedAsReady(): Promise<void> {
+  const repo = makeRepo()
+  const appDataRoot = makeAppDataRoot()
+  try {
+    const ledger = new WorkflowWorktreeLedger({
+      workspacePath: repo,
+      runId: "wf_rewritten_base",
+      appDataRoot
+    })
+    const info = await ledger.acquire("rewrite base")
+    writeFileSync(join(info.directory, "amended.txt"), "amended base\n")
+    git(info.directory, ["add", "amended.txt"])
+    git(info.directory, ["commit", "--amend", "--no-edit"])
+
+    await ledger.settle(info, { succeeded: true })
+    const record = (await listWorkflowWorktreeRecords(info.commonDir, appDataRoot)).find(
+      (candidate) => candidate.id === info.name
+    )
+    assert(record?.status === "recoverable", "a rewritten base must not be advertised as ready")
+    assert(
+      record?.error?.includes("no longer descends from its recorded base"),
+      `recovery state should explain the rewritten history, got ${record?.error}`
+    )
+    assert(existsSync(info.directory), "rewritten work must be retained for manual recovery")
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(appDataRoot, { recursive: true, force: true })
@@ -1199,7 +1270,7 @@ async function testLedgerReclaimAwaitsRecoveryBeforeReturning(): Promise<void> {
   }
 }
 
-async function testLedgerRetriesSourcePreparationAfterFailure(): Promise<void> {
+async function testLedgerRetriesSourcePreparationAfterDetachedHead(): Promise<void> {
   const repo = makeRepo()
   const appDataRoot = makeAppDataRoot()
   try {
@@ -1208,8 +1279,7 @@ async function testLedgerRetriesSourcePreparationAfterFailure(): Promise<void> {
       runId: "wf_source_retry",
       appDataRoot
     })
-    const dirtyPath = join(repo, "temporary.txt")
-    writeFileSync(dirtyPath, "not ready\n")
+    git(repo, ["checkout", "--detach"])
     let firstFailure: unknown
     try {
       await ledger.acquire("first")
@@ -1217,11 +1287,11 @@ async function testLedgerRetriesSourcePreparationAfterFailure(): Promise<void> {
       firstFailure = error
     }
     assert(
-      firstFailure instanceof Error && firstFailure.message.includes("clean assigned workspace"),
-      `the first dirty source must fail, got ${String(firstFailure)}`
+      firstFailure instanceof Error && firstFailure.message.includes("attached to a branch"),
+      `the first detached source must fail, got ${String(firstFailure)}`
     )
 
-    rmSync(dirtyPath)
+    git(repo, ["switch", "main"])
     const recovered = await ledger.acquire("retry")
     assert(existsSync(recovered.directory), "a corrected source must be retried in the same run")
     await ledger.settle(recovered, { succeeded: true })
@@ -1849,7 +1919,11 @@ async function testSourceOnlyFilteredSiblingDoesNotBlockScopedMerge(): Promise<v
     writeFileSync(join(repo, "packages", "assigned", "index.ts"), "base\n")
     writeFileSync(join(repo, "outside.txt"), "outside base\n")
     writeFileSync(join(repo, ".gitattributes"), "outside.txt filter=review\n")
-    git(repo, ["config", "filter.review.smudge", `sh -c 'touch ${join(appDataRoot, "filter-ran")}; cat'`])
+    git(repo, [
+      "config",
+      "filter.review.smudge",
+      `sh -c 'touch ${join(appDataRoot, "filter-ran")}; cat'`
+    ])
     git(repo, ["add", ".gitattributes", "outside.txt", "packages/assigned/index.ts"])
     git(repo, ["commit", "-m", "scoped filter fixture"])
 
@@ -1996,7 +2070,12 @@ async function testSingleSidedMergeAttributeDoesNotBlock(): Promise<void> {
 
 async function testIntegrationTransactionOwnershipAndDescendants(): Promise<void> {
   const runCase = async (
-    mode: "manual" | "manual-missing" | "manual-missing-symlink" | "unrelated-descendant" | "reverting-descendant"
+    mode:
+      | "manual"
+      | "manual-missing"
+      | "manual-missing-symlink"
+      | "unrelated-descendant"
+      | "reverting-descendant"
   ) => {
     const repo = makeRepo()
     const appDataDirectory = makeAppDataRoot()
@@ -2170,6 +2249,14 @@ async function testScopedDeliverableCannotMergeOutsideWorkspace(): Promise<void>
     git(info.directory, ["add", "-A"])
     git(info.directory, ["commit", "-m", "out of scope"])
     await ledger.settle(info, { succeeded: true })
+    const retained = (await listWorkflowWorktreeRecords(info.commonDir, appDataRoot)).find(
+      (record) => record.id === info.name
+    )
+    assert(
+      retained?.status === "recoverable" &&
+        retained.error?.includes("outside the assigned workspace"),
+      "an out-of-scope native commit should be retained with an actionable completion error"
+    )
     let rejected: unknown
     try {
       await mergeRecordedWorktree(repo, info, appDataRoot)
@@ -2398,7 +2485,6 @@ async function testDamagedWorktreeDiscardIsRecoverableAndNoFollow(): Promise<voi
       manualCleanup.record.cleanupPending === false,
       "after the user removes an unregistered damaged directory, retry cleanup must safely close its branch state"
     )
-
   } finally {
     rmSync(repo, { recursive: true, force: true })
     rmSync(appDataRoot, { recursive: true, force: true })
@@ -2466,7 +2552,8 @@ async function testDiscardCleanupNeverDeletesLateCommits(): Promise<void> {
 function testWorktreePromptMatchesRuntimeBoundary(): void {
   assert(
     WORKFLOW_TOOL_DESCRIPTION.includes("independent Git working copy") &&
-      WORKFLOW_TOOL_DESCRIPTION.includes("frozen, clean source commit") &&
+      WORKFLOW_TOOL_DESCRIPTION.includes("frozen source commit") &&
+      WORKFLOW_TOOL_DESCRIPTION.includes("are not copied into it") &&
       WORKFLOW_TOOL_DESCRIPTION.includes("transform each (worktree isolation)"),
     "workflow prompt must describe when isolated worktrees are useful"
   )
@@ -2478,8 +2565,8 @@ function testWorktreePromptMatchesRuntimeBoundary(): void {
     "workflow prompt must retain the script-facing isolation contract"
   )
   assert(
-    WORKFLOW_TOOL_DESCRIPTION.includes("tell the isolated agent to commit its changes") &&
-      WORKFLOW_TOOL_DESCRIPTION.includes("Do not ask isolated agents to push"),
+    WORKFLOW_TOOL_DESCRIPTION.includes("work normally with `git add` and `git commit`") &&
+      WORKFLOW_TOOL_DESCRIPTION.includes("Do not ask it to push unless"),
     "the prompt must state Cmb's delivery requirements without exposing integration internals"
   )
 }
@@ -2492,14 +2579,20 @@ function testGitEnvironmentOverridesAreRemoved(): void {
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: "core.worktree",
     GIT_CONFIG_VALUE_0: "/tmp/other",
+    GIT_LFS_SKIP_SMUDGE: "1",
     CMB_SAFE: "yes"
   })
   assert(clean.PATH === "/usr/bin" && clean.CMB_SAFE === "yes", "ordinary env must survive")
   assert(
     !Object.keys(clean).some((name) => name.toUpperCase().startsWith("GIT_CONFIG")) &&
       clean.GIT_DIR === undefined &&
-      clean.git_work_tree === undefined,
+      clean.git_work_tree === undefined &&
+      clean.GIT_LFS_SKIP_SMUDGE === undefined,
     "Git repository/config redirection must not reach lifecycle or isolated shell processes"
+  )
+  assert(
+    !isGitRepositoryOverrideEnvironmentVariable("GIT_LFS_SKIP_SMUDGE"),
+    "LFS checkout control must be cleaned only on inheritance, not forbidden as repository redirection"
   )
 }
 
@@ -2873,10 +2966,7 @@ async function testManifestOnlyWorktreePinsItsWorkspace(): Promise<void> {
     const repositoriesRoot = join(appDataRoot, "worktrees")
     const [repositoryKey] = readdirSync(repositoriesRoot)
     assert(repositoryKey, "fixture must create a repository manifest directory")
-    writeFileSync(
-      join(repositoriesRoot, repositoryKey, ".records", "corrupt.json"),
-      "{not-json"
-    )
+    writeFileSync(join(repositoriesRoot, repositoryKey, ".records", "corrupt.json"), "{not-json")
     assert(
       await workflowRunManager.isWorkspacePinnedForThread(threadId, repo),
       "a valid ownership manifest must pin its workspace even when a sibling manifest is corrupt"
@@ -3011,7 +3101,8 @@ async function testEngineForwardsIsolationWithoutChangingResults(): Promise<void
     )
 
     assert(
-      JSON.stringify(seen) === JSON.stringify([undefined, "worktree", "worktree", "worktree", "worktree"]),
+      JSON.stringify(seen) ===
+        JSON.stringify([undefined, "worktree", "worktree", "worktree", "worktree"]),
       `runner should receive isolation per call, got ${JSON.stringify(seen)}`
     )
 
@@ -3139,7 +3230,10 @@ async function testUnsupportedIsolationKeepsLegacySharedExecution(): Promise<voi
       result === "ok",
       `unsupported legacy isolation should retain shared execution, got ${String(result)}`
     )
-    assert(seen.length === 1 && seen[0] === undefined, "legacy isolation must not enter worktree mode")
+    assert(
+      seen.length === 1 && seen[0] === undefined,
+      "legacy isolation must not enter worktree mode"
+    )
   } finally {
     rmSync(harness.workspace, { recursive: true, force: true })
   }
@@ -3180,12 +3274,12 @@ async function main(): Promise<void> {
   await testSourceSnapshotHonorsWorkflowCancellation()
   await testWorkspaceHookFilesAreMaterializedWithoutDirtyingWorktree()
   await testTrackedWorkspaceHookSymlinkStaysPristine()
-  await testDirtySourceFailsClosed()
+  await testDirtySourceUsesCommittedHead()
   await testSubdirectoryScopeAndLinkedSourceHead()
-  await testNestedRepositoryCommitTargetFailsClosed()
   await testConcurrentCreatesAreSerializedAndUnique()
   await testLongLabelOwnershipRecordsDoNotCollide()
   await testCreateFromInsideAWorktreeUsesPrimaryRepo()
+  await testSymlinkedWorkspaceKeepsOneRepositoryIdentity()
   await testCreateRejectsNonGitDirectory()
   await testPristineDetection()
   await testRemoveIsCompleteAndIdempotent()
@@ -3194,10 +3288,11 @@ async function main(): Promise<void> {
   await testGitRemovalFailureNeverFallsBackToRecursiveDelete()
   await testLedgerKeepsOnlyChangedSuccesses()
   await testSuccessfulAgentWithMissingCheckoutIsRecoverable()
+  await testRewrittenBaseIsNotAdvertisedAsReady()
   await testLedgerReclaimsOutstandingWorktrees()
   await testLedgerCleansUpWorktreeCreatedDuringCancel()
   await testLedgerReclaimAwaitsRecoveryBeforeReturning()
-  await testLedgerRetriesSourcePreparationAfterFailure()
+  await testLedgerRetriesSourcePreparationAfterDetachedHead()
   await testLedgerFreezesFanoutBase()
   await testDiffMergeAndDiscardOperations()
   await testCancellationAfterSourceAdvanceStillFinishesMerge()
@@ -3231,7 +3326,7 @@ async function main(): Promise<void> {
   testWorktreePromptMatchesRuntimeBoundary()
   testGitEnvironmentOverridesAreRemoved()
 
-  console.log("PASS workflow-worktree (60 tests)")
+  console.log("PASS workflow-worktree (62 tests)")
 }
 
 main().catch((error) => {

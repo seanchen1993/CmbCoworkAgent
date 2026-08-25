@@ -418,18 +418,18 @@ export function ToolCallRenderer({
   }
 
   const Icon = TOOL_ICONS[toolCall.name] || Terminal
-  const label = getToolLabel(toolCall.name)
+  const label = getToolLabel(toolCall.name, { args: toolCall.args })
   const isPanelSynced = PANEL_SYNCED_TOOLS.has(toolCall.name)
-  const effectiveStatus: ToolCallStatus =
+  const statusBadge = getStatusBadge(
     status ||
-    (needsApproval
-      ? "awaiting_approval"
-      : result !== undefined
-        ? (isError ? "failed" : "completed")
-        : isStreaming
-          ? "running"
-          : "interrupted")
-  const statusBadge = getStatusBadge(effectiveStatus)
+      (needsApproval
+        ? "awaiting_approval"
+        : result !== undefined
+          ? "completed"
+          : isStreaming
+            ? "running"
+            : "interrupted")
+  )
 
   const handleReject = (e: React.MouseEvent): void => {
     e.stopPropagation()

@@ -34,7 +34,10 @@ describe("right panel render windows", () => {
   })
 
   it("does not refresh collapsed Skills or Plugins sections", () => {
-    const source = readFileSync(new URL("./RightPanel.tsx", import.meta.url), "utf8")
+    const source = readFileSync(new URL("./RightPanel.tsx", import.meta.url), "utf8").replace(
+      /\r\n/g,
+      "\n"
+    )
     expect(source).toContain("if (!skillsOpen) return undefined\n    void loadSkillCatalog()")
     expect(source).toContain("if (!pluginsOpen) return undefined\n    const requestId")
     expect(source).not.toContain("badge={hooks.filter((h) => h.enabled).length}")
