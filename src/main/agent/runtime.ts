@@ -2145,7 +2145,17 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
     markFilesystemWriteToolAsUserInitiated(mw)
-    patchRuntimeReadFileTool({ middleware: mw, filesystemBackend, toolTokenLimitBeforeEvict })
+    patchRuntimeReadFileTool({
+      middleware: mw,
+      filesystemBackend,
+      toolTokenLimitBeforeEvict,
+      ...(soloTaskTraceManager
+        ? {
+            resolveTraceContextForAgent: (agentId: string) =>
+              soloTaskTraceManager.getTraceContextForOwner(agentId)
+          }
+        : {})
+    })
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const grepTool = mw.tools?.find((t: any) => t.name === "grep") as any

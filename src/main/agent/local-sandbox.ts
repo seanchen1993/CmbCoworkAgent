@@ -55,6 +55,7 @@ import {
   type CommandShellSyntax
 } from "./exec-policy"
 import type { WorkflowWorktreeIsolationBoundary } from "./workflow/types"
+import type { TraceContext } from "./trace/types"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import {
   areElevatedRootsPreparedAsync,
@@ -175,6 +176,12 @@ export interface LocalSandboxReadFileOptions {
   // especially for long-line continuation chunks and output-line budget edges.
   // Any lookahead content is trimmed before returning output or running PostToolUse hooks.
   includeLookahead?: boolean
+  /**
+   * Dynamic task-subagent trace ownership for this read. Ordinary task
+   * subagents share their parent's LocalSandbox, so the per-tool context must
+   * override the sandbox's fixed parent trace identity.
+   */
+  traceContext?: TraceContext
 }
 
 interface FormattedReadLineState {
@@ -2575,8 +2582,23 @@ export class LocalSandbox
     return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
   }
 
-  private async recordPluginSystemConstraintRead(resolvedPath: string): Promise<void> {
-    if (!this.pluginRoot || !this.traceId || !this.harnessProjectId || !this.featureId) {
+  private async recordPluginSystemConstraintRead(
+    resolvedPath: string,
+    traceContext?: TraceContext
+  ): Promise<void> {
+    const traceId = traceContext?.traceId?.trim() || this.traceId
+    const rootTraceId = traceContext?.rootTraceId?.trim() || this.rootTraceId
+    const rootThreadId = traceContext?.rootThreadId?.trim() || this.rootThreadId
+    const threadId = traceContext?.threadId?.trim() || this.runId
+    const agentId = traceContext?.subagentRunId?.trim() || this.agentId
+    const harnessProjectId =
+      traceContext?.harnessFeature?.projectId?.trim() || this.harnessProjectId
+    const harnessFeatureSlug = traceContext?.harnessFeature?.slug?.trim() || this.featureId
+    const harnessNodeName = traceContext?.harnessFeature?.nodeName?.trim() || this.harnessNodeName
+    const harnessNodeStatus =
+      traceContext?.harnessFeature?.nodeStatus?.trim() || this.harnessNodeStatus
+
+    if (!this.pluginRoot || !traceId || !harnessProjectId || !harnessFeatureSlug) {
       return
     }
 
@@ -2584,17 +2606,17 @@ export class LocalSandbox
       const constraintFile = await resolvePluginSystemConstraintPath(this.pluginRoot, resolvedPath)
       if (!constraintFile) return
       recordSystemConstraintRead({
-        traceId: this.traceId,
-        rootTraceId: this.rootTraceId,
-        rootThreadId: this.rootThreadId,
-        threadId: this.runId,
-        agentId: this.agentId,
-        harnessProjectId: this.harnessProjectId,
-        harnessFeatureSlug: this.featureId,
+        traceId,
+        rootTraceId,
+        rootThreadId,
+        threadId,
+        agentId,
+        harnessProjectId,
+        harnessFeatureSlug,
         // Match the existing dashboard attribution contract: one stage snapshot
         // per turn/trace, rather than running an adapter inspection on every read.
-        harnessNodeName: this.harnessNodeName,
-        harnessNodeStatus: this.harnessNodeStatus,
+        harnessNodeName,
+        harnessNodeStatus,
         pluginId: this.pluginId,
         pluginName: this.pluginName,
         harnessAdapterName: this.harnessAdapterName,
@@ -4031,7 +4053,7 @@ export class LocalSandbox
         hookVisibleResult
       )
       if (formattedLines.length > 0) {
-        await this.recordPluginSystemConstraintRead(resolvedPath)
+        await this.recordPluginSystemConstraintRead(resolvedPath, options.traceContext)
       }
       return finalResult
     } catch (e: unknown) {

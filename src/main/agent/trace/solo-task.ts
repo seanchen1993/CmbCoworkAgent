@@ -310,6 +310,28 @@ export class SoloTaskTraceManager {
     return Boolean(ownerId && this.observedOwnerIds.has(ownerId))
   }
 
+  /**
+   * Resolve the active child trace for a task-owned tool call. Task subagents
+   * share the parent's filesystem backend, so read_file uses this lookup to
+   * attribute successful constraint reads to the child rather than the parent.
+   */
+  getTraceContextForOwner(ownerId: string | undefined): TraceContext | undefined {
+    const normalizedOwnerId = ownerId?.trim()
+    if (!normalizedOwnerId) return undefined
+    const entry = this.active.get(normalizedOwnerId)
+    if (!entry) return undefined
+    try {
+      const context = entry.tracer.getTraceContext()
+      return {
+        ...context,
+        ...(context.harnessFeature ? { harnessFeature: { ...context.harnessFeature } } : {})
+      }
+    } catch (error) {
+      console.warn("[SoloTask] trace context lookup failed; using parent trace fallback:", error)
+      return undefined
+    }
+  }
+
   finishTask(ownerId: string, outcome: TraceOutcome, resultOrError?: unknown): void {
     try {
       if (this.finishedOwnerIds.has(ownerId)) return
