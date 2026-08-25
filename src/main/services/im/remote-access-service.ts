@@ -100,6 +100,10 @@ function featureGrantPrincipalMatches(principalId: string, grant: ImFeatureGrant
   return grant.principalId === principalId
 }
 
+function currentThreadTitle(thread: ThreadRow, fallback: string): string {
+  return thread.title?.trim() || fallback
+}
+
 const goalStore = new SqlGoalStore()
 
 export class ImRemoteAccessService {
@@ -196,7 +200,7 @@ export class ImRemoteAccessService {
         kind: "thread_grant",
         grantId: grant.grantId,
         grantVersion: grant.grantVersion,
-        label: grant.titleSnapshot,
+        label: currentThreadTitle(thread, grant.titleSnapshot),
         threadId: grant.threadId,
         sessionKind: projectMode ? "project" : "ordinary"
       })
@@ -232,6 +236,7 @@ export class ImRemoteAccessService {
       threadId: grant.threadId
     })
     const validation = this.validateGrantableThread(grant.threadId)
+    const title = currentThreadTitle(validation.thread, grant.titleSnapshot)
     const reusable = this.dependencies.conversations
       .listTargets(input.route.conversationKey)
       .find(
@@ -246,7 +251,7 @@ export class ImRemoteAccessService {
         grantId: grant.grantId,
         grantVersion: grant.grantVersion,
         workspacePath: validation.workspacePath,
-        title: grant.titleSnapshot,
+        title,
         activate: true
       })) as Extract<ImTargetSnapshot, { kind: "thread" }>
     }
@@ -256,7 +261,7 @@ export class ImRemoteAccessService {
       grantId: grant.grantId,
       grantVersion: grant.grantVersion,
       threadId: grant.threadId,
-      title: grant.titleSnapshot,
+      title,
       workspacePath: validation.workspacePath
     }
     await this.dependencies.conversations.registerTarget(input.route.conversationKey, target, {

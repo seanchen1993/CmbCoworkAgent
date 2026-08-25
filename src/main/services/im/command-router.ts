@@ -180,10 +180,10 @@ export class ImCommandRouter {
       "/收件箱 — 切回默认聊天",
       "/当前 — 查看目标、运行和队列状态",
       "/停止 — 只停止当前由 IM 发起的任务",
-      "/重试 <事件短码> — 显式重试结果未知的事件",
       "/批准 <审批短码> — 一次性批准工具调用（需在桌面设置中开启）",
       "/拒绝 <审批短码> — 拒绝工具调用（需在桌面设置中开启）",
-      "/回答 <输入短码> <编号> — 回答 Agent 的补充问题"
+      "/回答 <输入短码> <编号> — 回答 Agent 的补充问题",
+      "/重试 <事件短码> — 显式重试结果未知的事件"
     ].join("\n")
   }
 
@@ -214,7 +214,7 @@ export class ImCommandRouter {
       ...targets.map((target, index) =>
         target.kind === "thread_grant"
           ? `${index + 1}. ${target.label}（${target.sessionKind === "project" ? "项目会话" : "普通会话"}）`
-          : `${index + 1}. ${target.label}（功能，新建会话）`
+          : `${index + 1}. ${target.label}（特性，可创建新会话）`
       ),
       "发送 /绑定 <编号> 切换。"
     ].join("\n")

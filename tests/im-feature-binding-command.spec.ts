@@ -249,7 +249,7 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
     assert(!sessions.includes(context.root))
     assert(!sessions.includes("project-secret-id"))
     assert(!sessions.includes("must-not-leak"))
-    assert(sessions.includes("（功能，新建会话）"))
+    assert(sessions.includes("（特性，可创建新会话）"))
 
     const bound = await router.handle({
       ...commandInput,
@@ -281,8 +281,8 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
       command: parseImCommand("/会话")!
     })
     assert(withFirstSession.includes("（项目会话）"))
-    assert(withFirstSession.includes("（功能，新建会话）"))
-    const createIndex = selectionIndexContaining(withFirstSession, "（功能，新建会话）")
+    assert(withFirstSession.includes("（特性，可创建新会话）"))
+    const createIndex = selectionIndexContaining(withFirstSession, "（特性，可创建新会话）")
 
     const secondBound = await router.handle({
       ...commandInput,
@@ -319,7 +319,7 @@ async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<v
       ...commandInput,
       command: parseImCommand("/会话")!
     })
-    assert(!afterCreateDisabled.includes("（功能，新建会话）"))
+    assert(!afterCreateDisabled.includes("（特性，可创建新会话）"))
     assert.equal(afterCreateDisabled.match(/（项目会话）/gu)?.length, 2)
 
     const switched = await router.handle({
@@ -537,15 +537,18 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     }
     context.makeThread("desktop-thread", originalMetadata)
     await context.access.enableThread({ route, threadId: "desktop-thread" })
+    context.updateLocalThread("desktop-thread", { title: "支付排障会话（已更新）" })
 
     const sessions = await router.handle({ ...route, command: parseImCommand("/会话")! })
-    assert(sessions.includes("支付排障会话"))
+    assert(sessions.includes("支付排障会话（已更新）"))
+    assert(!sessions.includes("1. 支付排障会话（普通会话）"))
     const bound = await router.handle({ ...route, command: parseImCommand("/绑定 1")! })
-    assert(bound.includes("支付排障会话"))
+    assert(bound.includes("支付排障会话（已更新）"))
     const target = context.conversations.getActiveTarget(route.conversationKey)
     assert.equal(target?.kind, "thread")
     assert.equal(target?.threadId, "desktop-thread")
     if (target?.kind !== "thread") throw new Error("thread target expected")
+    assert.equal(target.title, "支付排障会话（已更新）")
     assert.deepEqual(
       JSON.parse(context.threads.get("desktop-thread")!.metadata!),
       originalMetadata,
