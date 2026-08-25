@@ -30,6 +30,7 @@ export interface SafetyAssessment {
 export type CommandConcurrencyClassification = "parallel_safe" | "exclusive"
 
 const APPROVAL_PREFIX_RULE_PREFIX = "prefix:"
+const WORKTREE_NESTED_REPOSITORY_READ_ONLY = "nested repositories are read-only"
 
 const SAFE_EXECUTABLES = new Set([
   "base64",
@@ -1522,7 +1523,10 @@ function commandHasGitSubcommand(
   return false
 }
 
-function inlineGitAliasInvokesPush(gitTokens: string[]): boolean {
+function inlineGitAliasInvokesPush(
+  gitTokens: string[],
+  memo: Map<string, boolean>
+): boolean {
   const subcommand = findGitSubcommand(gitTokens)
   if (!subcommand) return false
 
@@ -1551,7 +1555,7 @@ function inlineGitAliasInvokesPush(gitTokens: string[]): boolean {
       const script = value.slice(1)
       return (
         commandHasGitSubcommand(script, new Set(["push"]), "posix") ||
-        containsIndirectGitPushCommand(script, "posix", depth + 1)
+        containsIndirectGitPushCommand(script, "posix", depth + 1, memo)
       )
     }
     const expanded = tokenizeCommand(`git ${value}`, "posix")
@@ -1567,14 +1571,44 @@ function inlineGitAliasInvokesPush(gitTokens: string[]): boolean {
 function containsIndirectGitPushCommand(
   command: string,
   shellSyntax: CommandShellSyntax = hostShellSyntax(),
-  depth = 0
+  depth = 0,
+  memo = new Map<string, boolean>(),
+  scanState: { unverifiable: boolean } = { unverifiable: false }
 ): boolean {
-  if (depth > 4) return false
+  // Once the visible wrapper nesting exceeds the bounded parser, the command
+  // can no longer be verified. Keep that distinct from actually finding a
+  // hidden push so callers can fail closed without misclassifying the command.
+  if (depth > 4) {
+    scanState.unverifiable = true
+    return false
+  }
+  const memoKey = `${shellSyntax}\0${depth}\0${command}`
+  if (memo.has(memoKey)) return memo.get(memoKey) === true
+  // Mark the state before descending so malformed/self-referential wrapper
+  // spellings cannot cycle. The value is replaced if a push is found.
+  memo.set(memoKey, false)
   for (const segment of splitShellCommandSegments(command, shellSyntax)) {
     const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
+    let firstExecutableIndex = 0
+    while (
+      firstExecutableIndex < tokens.length &&
+      isShellEnvAssignment(tokens[firstExecutableIndex])
+    ) {
+      firstExecutableIndex += 1
+    }
+    const firstExecutable = normalizeExecutable(tokens[firstExecutableIndex] || "")
+    const directGit = firstExecutable === "git"
     for (const gitTokens of collectPotentialGitInvocations(tokens)) {
-      if (inlineGitAliasInvokesPush(gitTokens)) return true
+      const subcommand = findGitSubcommand(gitTokens)
+      if (!directGit && subcommand?.subcommand === "push") {
+        memo.set(memoKey, true)
+        return true
+      }
+      if (inlineGitAliasInvokesPush(gitTokens, memo)) {
+        memo.set(memoKey, true)
+        return true
+      }
     }
 
     const script = getWrappedShellScript(tokens)
@@ -1582,29 +1616,78 @@ function containsIndirectGitPushCommand(
     if (
       script &&
       (commandHasGitSubcommand(script, new Set(["push"]), childSyntax) ||
-        containsIndirectGitPushCommand(script, childSyntax, depth + 1))
+        containsIndirectGitPushCommand(script, childSyntax, depth + 1, memo, scanState))
     ) {
+      memo.set(memoKey, true)
       return true
     }
-    for (const nestedTokens of getExecutionWrapperSuffixTokens(tokens)) {
+
+    // Wrapper suffix enumeration grows rapidly for inputs such as
+    // `env env ...`. Git invocations above are already found in one pass; only
+    // explicit nested shell executors still need their script parsed.
+    if (!GIT_COMMIT_EXECUTION_WRAPPERS.has(firstExecutable)) continue
+    const hasEnvSplitString = tokens.some((token) => {
+      const lower = token.toLowerCase()
+      return (
+        token === "-S" ||
+        lower === "--split-string" ||
+        (token.startsWith("-S") && token.length > 2) ||
+        lower.startsWith("--split-string=")
+      )
+    })
+    const nestedWrapperIndexes: number[] = []
+    for (let index = firstExecutableIndex + 1; index < tokens.length; index += 1) {
+      const executable = normalizeExecutable(tokens[index])
+      if (
+        POSIX_SHELL_WRAPPERS.has(executable) ||
+        POWERSHELL_WRAPPERS.has(executable) ||
+        CMD_WRAPPERS.has(executable) ||
+        executable === "busybox" ||
+        (hasEnvSplitString && executable === "env")
+      ) {
+        nestedWrapperIndexes.push(index)
+        if (nestedWrapperIndexes.length > 16) {
+          scanState.unverifiable = true
+          continue
+        }
+      }
+    }
+    for (const index of nestedWrapperIndexes) {
+      const nestedTokens = tokens.slice(index)
       const nestedScript = getWrappedShellScript(nestedTokens)
       const nestedSyntax = getWrappedShellSyntax(nestedTokens) ?? shellSyntax
-      if (commandHasGitSubcommand(nestedTokens.join(" "), new Set(["push"]), nestedSyntax)) {
-        return true
-      }
       if (
         nestedScript &&
         (commandHasGitSubcommand(nestedScript, new Set(["push"]), nestedSyntax) ||
-          containsIndirectGitPushCommand(nestedScript, nestedSyntax, depth + 1))
+          containsIndirectGitPushCommand(
+            nestedScript,
+            nestedSyntax,
+            depth + 1,
+            memo,
+            scanState
+          ))
       ) {
-        return true
-      }
-      if (containsIndirectGitPushCommand(nestedTokens.join(" "), nestedSyntax, depth + 1)) {
+        memo.set(memoKey, true)
         return true
       }
     }
   }
   return false
+}
+
+function inspectIndirectGitPush(
+  command: string,
+  shellSyntax: CommandShellSyntax = hostShellSyntax()
+): { containsPush: boolean; unverifiable: boolean } {
+  const scanState = { unverifiable: false }
+  const containsPush = containsIndirectGitPushCommand(
+    command.trim(),
+    shellSyntax,
+    0,
+    new Map<string, boolean>(),
+    scanState
+  )
+  return { containsPush, unverifiable: scanState.unverifiable }
 }
 
 /** True when the command is (or contains) a real `git commit` invocation. */
@@ -1632,7 +1715,7 @@ export function containsIndirectGitPush(
   command: string,
   shellSyntax: CommandShellSyntax = hostShellSyntax()
 ): boolean {
-  return containsIndirectGitPushCommand(command.trim(), shellSyntax)
+  return inspectIndirectGitPush(command, shellSyntax).containsPush
 }
 
 /** True when the command is (or contains) a real `git merge` invocation. */
@@ -1803,6 +1886,20 @@ function isInsideWorktreeBoundary(candidate: string, root: string): boolean {
   )
 }
 
+/** Resolve the closest repository that Git would select from an existing cwd.
+ * Linked worktrees expose `.git` as a file while ordinary/nested repositories
+ * expose it as a directory, so existence is the only distinction needed here.
+ * Returning null leaves malformed/non-repository cwd handling to Git itself. */
+function findContainingGitRepositoryRoot(directory: string): string | null {
+  let current = realpathIfExisting(directory) ?? path.resolve(directory)
+  while (true) {
+    if (realpathIfExisting(path.join(current, ".git"))) return current
+    const parent = path.dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
 /** Resolve a `cd` / `git -C` target without collapsing `..` before the
  * filesystem sees an intervening symlink. The fallback is lexical only for a
  * non-existent target, which the shell/Git will reject itself. */
@@ -1840,7 +1937,21 @@ function worktreeGitEnvironmentViolation(tokens: string[]): string | null {
 /** Shell assignments persist across later segments. Block the explicit forms
  * that can redirect a subsequent Git invocation without trying to model the
  * shell's general environment semantics. */
-function worktreeGitEnvironmentMutationViolation(tokens: string[]): string | null {
+function worktreeGitEnvironmentMutationViolation(
+  tokens: string[],
+  shellSyntax: CommandShellSyntax
+): string | null {
+  if (shellSyntax === "powershell") {
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index]
+      const match = token.match(/^\$(?:env:([^=\s]+)|\{env:([^}]+)\})(?:=|$)/i)
+      const name = match?.[1] ?? match?.[2]
+      const assignsValue = token.includes("=") || tokens[index + 1] === "="
+      if (name && assignsValue && isGitRepositoryOverrideEnvironmentVariable(name)) {
+        return `worktree isolation blocks Git environment redirection ${name.toUpperCase()}`
+      }
+    }
+  }
   const invocation = getExecutableInvocationTokens(tokens)
   if (invocation.length === 0) {
     for (const token of tokens) {
@@ -1868,6 +1979,7 @@ function inspectWorktreeGitInvocation(
   cwd: string,
   executionRoots: readonly string[],
   assignedWorkspaceRoot: string,
+  assignedWorktreeRoot: string,
   assignedBranch: string
 ): string | null {
   let gitCwd = cwd
@@ -1936,6 +2048,16 @@ function inspectWorktreeGitInvocation(
     !isInsideWorktreeBoundary(gitCwd, assignedWorkspaceRoot)
   ) {
     return `worktree isolation only allows git ${subcommand} inside the assigned worktree workspace`
+  }
+  if (["add", "commit", "push"].includes(subcommand)) {
+    const operationRoot = findContainingGitRepositoryRoot(gitCwd)
+    if (
+      operationRoot &&
+      normalizeWorktreeBoundaryPath(operationRoot) !==
+        normalizeWorktreeBoundaryPath(assignedWorktreeRoot)
+    ) {
+      return `worktree isolation only allows git ${subcommand} in the assigned workflow worktree repository; ${WORKTREE_NESTED_REPOSITORY_READ_ONLY}`
+    }
   }
   if (args.some((arg) => arg.toLowerCase() === "--autostash")) {
     return "worktree isolation blocks --autostash because refs/stash is shared"
@@ -2086,22 +2208,44 @@ export function getWorktreeShellIsolationViolation(
   command: string,
   cwd: string,
   boundary: WorkflowWorktreeIsolationBoundary,
-  additionalExecutionRoots: readonly string[] = []
+  additionalExecutionRoots: readonly string[] = [],
+  shellSyntax: CommandShellSyntax = hostShellSyntax()
 ): string | null {
   const executionRoots = [boundary.workspaceRoot, ...additionalExecutionRoots]
   if (!executionRoots.some((root) => isInsideWorktreeBoundary(cwd, root))) {
     return "worktree isolation blocks shell execution outside the assigned workspace or enabled skill"
   }
-  if (containsIndirectGitPush(command)) {
+  const indirectPushInspection = inspectIndirectGitPush(command, shellSyntax)
+  if (indirectPushInspection.containsPush) {
     return "worktree isolation push must be issued directly as `git push <remote> HEAD` for explicit approval"
+  }
+  if (indirectPushInspection.unverifiable) {
+    return "worktree isolation blocks shell wrapper nesting that is too deep to verify"
   }
   let effectiveCwd = cwd
   const directoryStack: string[] = []
-  for (const segment of splitShellCommandSegments(command)) {
-    const tokens = tokenizeCommand(segment)
+  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
+    const tokens = tokenizeCommand(segment, shellSyntax)
     if (!tokens) continue
-    const environmentMutationViolation = worktreeGitEnvironmentMutationViolation(tokens)
+    const environmentMutationViolation = worktreeGitEnvironmentMutationViolation(
+      tokens,
+      shellSyntax
+    )
     if (environmentMutationViolation) return environmentMutationViolation
+    const wrappedScript = getWrappedShellScript(tokens)
+    if (wrappedScript !== null) {
+      // Native add/commit wrappers remain supported, but wrapping must not hide
+      // an operation that the same script would be forbidden from running
+      // directly (cwd escape, shared Git mutation, nested-repo write, etc.).
+      const wrappedViolation = getWorktreeShellIsolationViolation(
+        wrappedScript,
+        effectiveCwd,
+        boundary,
+        additionalExecutionRoots,
+        getWrappedShellSyntax(tokens) ?? shellSyntax
+      )
+      if (wrappedViolation) return wrappedViolation
+    }
     const invocation = getExecutableInvocationTokens(tokens)
     const executable = normalizeExecutable(invocation[0] || "")
     if (executable === "popd") {
@@ -2136,6 +2280,7 @@ export function getWorktreeShellIsolationViolation(
         effectiveCwd,
         executionRoots,
         boundary.workspaceRoot,
+        boundary.worktreeRoot,
         boundary.branch
       )
       if (gitViolation) return gitViolation

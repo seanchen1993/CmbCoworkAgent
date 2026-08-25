@@ -172,14 +172,26 @@ async function writeWorkflowWorktreeExcludesFile(
   )
   let inherited = Buffer.alloc(0)
   const configuredPath = configured.code === 0 ? configured.stdout.trim() : ""
+  let inheritedPath = ""
   if (configuredPath) {
     // `git config --path` expands `~`, but intentionally leaves relative values
     // relative. Git invoked with `-C repoRoot` resolves those from the repository;
     // Node would otherwise resolve them from Electron's unrelated process cwd.
-    const resolvedPath = path.isAbsolute(configuredPath)
+    inheritedPath = path.isAbsolute(configuredPath)
       ? configuredPath
       : path.resolve(repoRoot, configuredPath)
-    inherited = await fs.readFile(resolvedPath).catch(() => Buffer.alloc(0))
+  } else {
+    // When core.excludesFile is unset, Git still reads its documented default:
+    // $XDG_CONFIG_HOME/git/ignore, or ~/.config/git/ignore when XDG is absent.
+    // Injecting Cmb's private file would otherwise silently replace that rule set.
+    const xdgConfigHome = GIT_BASE_ENV.XDG_CONFIG_HOME?.trim() ?? ""
+    inheritedPath =
+      xdgConfigHome && path.isAbsolute(xdgConfigHome)
+        ? path.join(xdgConfigHome, "git", "ignore")
+        : path.join(homedir(), ".config", "git", "ignore")
+  }
+  if (inheritedPath) {
+    inherited = await fs.readFile(inheritedPath).catch(() => Buffer.alloc(0))
   }
   const separator = inherited.length > 0 && inherited[inherited.length - 1] !== 0x0a ? "\n" : ""
   await fs.writeFile(
@@ -686,17 +698,22 @@ export async function identifyRepository(directory: string): Promise<RepoIdentit
   if (commonRaw.code !== 0) return null
   const commonValue = commonRaw.stdout.trim()
   if (!commonValue) return null
-  const commonDir = path.resolve(directory, commonValue)
+  const commonDir = await canonicalExistingPath(
+    path.resolve(directory, commonValue),
+    "git common directory"
+  )
   const sourceTop = await git(directory, ["rev-parse", "--show-toplevel"])
   if (sourceTop.code !== 0 || !sourceTop.stdout.trim()) return null
-  const sourceRoot = path.resolve(sourceTop.stdout.trim())
+  const sourceRoot = await canonicalExistingPath(sourceTop.stdout.trim(), "source checkout")
 
   // Do not derive the primary checkout from `dirname(commonDir)`: that is wrong
   // for submodules and --separate-git-dir repositories. Git's own worktree list is
   // authoritative; the first non-bare entry is the primary checkout.
   const listed = await git(sourceRoot, ["worktree", "list", "--porcelain"])
   const primary = listed.code === 0 ? parseWorktreeList(listed.stdout)[0]?.path : undefined
-  const gitRoot = primary ? path.resolve(primary) : sourceRoot
+  const gitRoot = primary
+    ? await canonicalExistingPath(primary, "primary checkout")
+    : sourceRoot
   return { gitRoot, sourceRoot, commonDir }
 }
 

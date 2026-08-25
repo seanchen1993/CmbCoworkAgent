@@ -722,6 +722,65 @@ async function testCreateFromInsideAWorktreeUsesPrimaryRepo(): Promise<void> {
   }
 }
 
+async function testSymlinkedWorkspaceKeepsOneRepositoryIdentity(): Promise<void> {
+  if (process.platform === "win32") return
+  const repo = makeRepo()
+  const appDataRoot = makeAppDataRoot()
+  const aliasRoot = realpathSync(mkdtempSync(join(tmpdir(), "cmb-wt-alias-")))
+  const workspaceAlias = join(aliasRoot, "repository")
+  try {
+    symlinkSync(repo, workspaceAlias, "dir")
+    const canonicalIdentity = await identifyRepository(repo)
+    const aliasIdentity = await identifyRepository(workspaceAlias)
+    assert(
+      aliasIdentity?.commonDir === canonicalIdentity?.commonDir &&
+        aliasIdentity?.sourceRoot === canonicalIdentity?.sourceRoot &&
+        aliasIdentity?.gitRoot === canonicalIdentity?.gitRoot,
+      "symlink and canonical workspace spellings must identify the same repository"
+    )
+
+    const ledger = new WorkflowWorktreeLedger({
+      workspacePath: workspaceAlias,
+      runId: "wf_symlink_identity",
+      appDataRoot
+    })
+    const info = await ledger.acquire("symlinked-workspace")
+    writeFileSync(join(info.directory, "symlink-delivery.txt"), "delivered\n")
+    git(info.directory, ["add", "symlink-delivery.txt"])
+    git(info.directory, ["commit", "-m", "deliver through symlink workspace"])
+    await ledger.settle(info, { succeeded: true })
+    const ready = (await listWorkflowWorktreeRecords(info.commonDir, appDataRoot)).find(
+      (record) => record.id === info.name
+    )
+    assert(ready?.status === "ready", "symlinked workspace deliverable should become ready")
+
+    const diff = await diffWorkflowWorktree({
+      workspacePath: workspaceAlias,
+      record: ready!,
+      appDataRoot
+    })
+    assert(
+      diff.summary.includes("deliver through symlink workspace"),
+      "Diff should accept the original symlinked workspace spelling"
+    )
+    const merged = await mergeWorkflowWorktree({
+      workspacePath: workspaceAlias,
+      record: diff.record,
+      appDataRoot
+    })
+    assert(merged.record.status === "merged", "Merge should preserve repository identity")
+    assert(
+      readFileSync(join(repo, "symlink-delivery.txt"), "utf8") === "delivered\n",
+      "merged output should land in the canonical source checkout"
+    )
+    assert(!existsSync(info.directory), "successful Merge should clean up the worktree")
+  } finally {
+    rmSync(aliasRoot, { recursive: true, force: true })
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(appDataRoot, { recursive: true, force: true })
+  }
+}
+
 async function testCreateRejectsNonGitDirectory(): Promise<void> {
   const plain = mkdtempSync(join(tmpdir(), "cmb-wt-plain-"))
   const appDataRoot = makeAppDataRoot()
@@ -3220,6 +3279,7 @@ async function main(): Promise<void> {
   await testConcurrentCreatesAreSerializedAndUnique()
   await testLongLabelOwnershipRecordsDoNotCollide()
   await testCreateFromInsideAWorktreeUsesPrimaryRepo()
+  await testSymlinkedWorkspaceKeepsOneRepositoryIdentity()
   await testCreateRejectsNonGitDirectory()
   await testPristineDetection()
   await testRemoveIsCompleteAndIdempotent()
@@ -3266,7 +3326,7 @@ async function main(): Promise<void> {
   testWorktreePromptMatchesRuntimeBoundary()
   testGitEnvironmentOverridesAreRemoved()
 
-  console.log("PASS workflow-worktree (61 tests)")
+  console.log("PASS workflow-worktree (62 tests)")
 }
 
 main().catch((error) => {

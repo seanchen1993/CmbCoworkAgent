@@ -5343,7 +5343,8 @@ export class LocalSandbox
 
   /** Directories that currently have the Everyone ACE granted, with reference count.
    *  Key = normalized dir path, value = number of active runs using that grant.
-   *  ACL is only revoked when the count drops to 0. */
+   *  When the count drops to 0, normal cleanup makes a best-effort revoke attempt
+   *  and logs any timeout or failure. */
   private static readonly _grantedAclRefCount = new Map<string, number>()
   /** Per-run tracking: which dirs each runId has granted (for correct decrement on cleanup). */
   private static readonly _runAclDirs = new Map<string, Set<string>>()
@@ -5418,8 +5419,9 @@ export class LocalSandbox
     })
   }
 
-  /** Remove the Everyone ACE added by grantSandboxWriteAcl. Only actually calls
-   *  icacls when the ref count drops to 0 (no other runs using this dir). */
+  /** Best-effort removal of the Everyone ACE added by grantSandboxWriteAcl.
+   *  Only calls icacls when the ref count drops to 0 (no other runs use this
+   *  directory); timeout or failure is logged without blocking run cleanup. */
   private static revokeSandboxWriteAcl(dir: string): Promise<void> {
     const key = normalizeDirKey(dir)
     const count = LocalSandbox._grantedAclRefCount.get(key) ?? 0
@@ -5433,7 +5435,7 @@ export class LocalSandbox
       LocalSandbox._grantedAclRefCount.set(key, count - 1)
       return Promise.resolve()
     }
-    // count === 1 → last user, actually revoke
+    // count === 1 → last user, attempt the best-effort revoke
     LocalSandbox._grantedAclRefCount.delete(key)
     return new Promise<void>((resolve) => {
       const proc = spawn("icacls", [dir, "/remove:g", LocalSandbox.EVERYONE_SID], {
@@ -5465,8 +5467,8 @@ export class LocalSandbox
   }
 
   /**
-   * Release ACL grants for a specific run. Decrements ref counts and only
-   * actually revokes the ACL when no other runs are using the directory.
+   * Release ACL ownership for a specific run. Decrements ref counts and makes
+   * a best-effort revoke attempt when no other runs are using the directory.
    * @param runId — the agent run that is ending.
    */
   static async revokeGrantedAclsForRun(runId: string): Promise<void> {
@@ -6053,7 +6055,8 @@ export class LocalSandbox
           effectiveCommand,
           effectiveCwd,
           this.worktreeIsolation,
-          this.worktreeAdditionalExecutionRoots(effectiveCwd)
+          this.worktreeAdditionalExecutionRoots(effectiveCwd),
+          shellSyntax
         )
       : null
     if (worktreeViolation) return `Command forbidden: ${worktreeViolation}`
@@ -6405,12 +6408,14 @@ export class LocalSandbox
         truncated: false
       }
     }
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
     const worktreeViolation = this.worktreeIsolation
       ? getWorktreeShellIsolationViolation(
           effectiveCommand,
           effectiveCwd,
           this.worktreeIsolation,
-          this.worktreeAdditionalExecutionRoots(effectiveCwd)
+          this.worktreeAdditionalExecutionRoots(effectiveCwd),
+          shellSyntax
         )
       : null
     if (worktreeViolation) {
@@ -6422,7 +6427,6 @@ export class LocalSandbox
     }
 
     // Always check forbidden commands, even without orchestrator (YOLO mode safety net)
-    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
     const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
     const safety = assessCommandSafety(effectiveCommand, effectiveCwd, {
       windowsShell:
@@ -6758,12 +6762,14 @@ export class LocalSandbox
       }
     }
 
+    const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(effectiveSandboxMode)
     const worktreeViolation = this.worktreeIsolation
       ? getWorktreeShellIsolationViolation(
           command,
           effectiveCwd,
           this.worktreeIsolation,
-          this.worktreeAdditionalExecutionRoots(effectiveCwd)
+          this.worktreeAdditionalExecutionRoots(effectiveCwd),
+          shellSyntax
         )
       : null
     if (worktreeViolation) {
@@ -6889,16 +6895,18 @@ export class LocalSandbox
       this.worktreeIsolation &&
       (effectiveMode === "elevated" || effectiveMode === "unelevated")
     ) {
-      // Linked-worktree Git writes its index/object/ref administration under the
+      // Linked-worktree Git writes index/object/ref administration under the
       // repository commonDir, outside the checkout directory. Native add/commit
-      // therefore need this Git-only root writable; the source working tree itself
-      // is not added and remains outside the OS sandbox's writable roots.
+      // therefore require that shared Git metadata directory to be writable by
+      // the trusted agent process. This is not a Git-only OS permission or a hard
+      // security boundary; the source working tree itself is still not added to
+      // the OS sandbox's writable roots.
       const commonDir = path.win32.normalize(this.worktreeIsolation.commonDir)
       executionPlan.writableRoots.push(commonDir)
-      // Unlike app-owned package caches, a user's shared Git directory must not
-      // retain an Everyone:Modify ACE after this workflow agent exits. Existing
-      // run-level ACL reference counting keeps concurrent agents working and
-      // revokes the grant after the final owner finishes.
+      // Unlike app-owned package caches, a user's shared Git directory should not
+      // retain an Everyone:Modify ACE after this workflow agent exits. Run-level
+      // reference counting keeps concurrent agents working; the final owner
+      // normally triggers a best-effort revoke, with failures logged.
       runScopedWritableRootKeys.add(normalizeDirKey(commonDir))
     }
     executionPlan.writableRoots = Array.from(

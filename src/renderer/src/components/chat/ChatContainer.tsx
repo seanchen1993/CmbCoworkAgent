@@ -6124,7 +6124,7 @@ export function ChatContainer({
                 (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
-                <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-20")}>
+                <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                   {(() => {
                     const approval = pendingApproval as unknown as Record<string, unknown>
                     const operation = approval.operation

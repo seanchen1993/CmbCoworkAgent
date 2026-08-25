@@ -38,6 +38,7 @@ describe("dynamic-workflow worktree shell isolation", () => {
       "git status --short",
       "git add src/app.ts",
       'git commit -m "work"',
+      `bash -lc 'git add src/app.ts && git commit -m "work"'`,
       "git -C src status",
       "git -c core.fsmonitor=false status",
       "git config --get user.name",
@@ -172,6 +173,31 @@ describe("dynamic-workflow worktree shell isolation", () => {
     }
   })
 
+  it("applies the same worktree violations inside visible shell wrappers", () => {
+    for (const command of [
+      `bash -lc 'git -C ${SOURCE_ROOT} reset --hard'`,
+      `bash -lc 'cd ${SOURCE_ROOT} && touch escaped.txt'`,
+      `bash -lc 'git worktree remove --force /other/worktree'`
+    ]) {
+      expect(
+        getWorktreeShellIsolationViolation(command, WORKTREE_ROOT, WORKTREE_BOUNDARY),
+        command
+      ).not.toBeNull()
+    }
+  })
+
+  it("blocks PowerShell Git repository redirection inside a visible wrapper", () => {
+    const command =
+      `powershell -Command "` +
+      `$env:GIT_DIR=${SOURCE_ROOT}/.git; ` +
+      `$env:GIT_WORK_TREE=${SOURCE_ROOT}; ` +
+      `git commit --allow-empty -m escaped"`
+
+    expect(
+      getWorktreeShellIsolationViolation(command, WORKTREE_ROOT, WORKTREE_BOUNDARY)
+    ).toContain("GIT_DIR")
+  })
+
   it("distinguishes direct push approval from visible wrapper and inline-alias bypasses", () => {
     expect(containsIndirectGitPush("git push origin HEAD")).toBe(false)
     expect(containsIndirectGitPush("bash -lc 'git add -A && git commit -m x'")).toBe(false)
@@ -183,6 +209,32 @@ describe("dynamic-workflow worktree shell isolation", () => {
     expect(containsIndirectGitPush('cmd /c "git push origin HEAD"', "cmd")).toBe(true)
     expect(containsIndirectGitPush("git -c alias.pub='push origin HEAD' pub")).toBe(true)
     expect(containsIndirectGitPush("git -c alias.pub='!git push origin HEAD' pub")).toBe(true)
+  })
+
+  it("bounds repeated execution-wrapper push inspection", () => {
+    const wrappers = Array.from({ length: 200 }, () => "env").join(" ")
+    const startedAt = Date.now()
+    expect(containsIndirectGitPush(`${wrappers} printf ok`)).toBe(false)
+    expect(containsIndirectGitPush(`${wrappers} git push origin HEAD`)).toBe(true)
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
+  })
+
+  it("reports unverifiable shell nesting without misclassifying it as an indirect push", () => {
+    let nestedRead = "printf ok"
+    let nestedPush = "git push origin HEAD"
+    for (let depth = 0; depth < 6; depth += 1) {
+      nestedRead = `sh -c ${JSON.stringify(nestedRead)}`
+      nestedPush = `sh -c ${JSON.stringify(nestedPush)}`
+    }
+
+    expect(containsIndirectGitPush(nestedRead)).toBe(false)
+    expect(containsIndirectGitPush(nestedPush)).toBe(false)
+    expect(
+      getWorktreeShellIsolationViolation(nestedRead, WORKTREE_ROOT, WORKTREE_BOUNDARY)
+    ).toContain("too deep to verify")
+    expect(
+      getWorktreeShellIsolationViolation(nestedPush, WORKTREE_ROOT, WORKTREE_BOUNDARY)
+    ).toContain("too deep to verify")
   })
 
   it("allows ordinary absolute-path reads because worktree mode is not a security sandbox", () => {

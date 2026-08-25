@@ -44,9 +44,16 @@ async function run(): Promise<void> {
     writeFileSync(userExcludesFile, "*.userignored\n")
     git(repo, ["config", "core.excludesFile", "user-global-excludes"])
     writeFileSync(join(repo, "README.md"), "base\n")
+    writeFileSync(join(repo, ".gitignore"), "nested-repo/\n")
     mkdirSync(join(repo, ".cmbdevclaw"), { recursive: true })
     writeFileSync(join(repo, ".cmbdevclaw", "tracked.txt"), "tracked baseline\n")
-    git(repo, ["add", "README.md", ".cmbdevclaw/tracked.txt", "user-global-excludes"])
+    git(repo, [
+      "add",
+      "README.md",
+      ".gitignore",
+      ".cmbdevclaw/tracked.txt",
+      "user-global-excludes"
+    ])
     git(repo, ["commit", "-m", "base"])
     const nativeHookMarker = join(appDataRoot, "native-pre-commit-ran.txt")
     const preCommitHook = join(repo, ".git", "hooks", "pre-commit")
@@ -224,17 +231,59 @@ async function run(): Promise<void> {
     writeFileSync(join(nestedRepo, "nested.txt"), "nested\n")
     git(nestedRepo, ["add", "nested.txt"])
     git(nestedRepo, ["commit", "-m", "nested base"])
+    assert.equal(
+      git(info.directory, ["check-ignore", "nested-repo/nested.txt"]),
+      "nested-repo/nested.txt",
+      "the regression fixture must be invisible to the outer repository's normal status"
+    )
     const outerHeadBeforeNestedCommit = git(info.directory, ["rev-parse", "HEAD"])
+    const nestedHeadBeforeBlockedCommit = git(nestedRepo, ["rev-parse", "HEAD"])
     writeFileSync(join(nestedRepo, "nested.txt"), "nested updated\n")
+    const nestedStatus = await sandbox.execute("git status --short", nestedRepo)
+    assert.equal(
+      nestedStatus.exitCode,
+      0,
+      `nested repository read-only Git should remain available: ${nestedStatus.output}`
+    )
     const nestedCommit = await sandbox.execute(
       "git add nested.txt && git commit -m nested",
       nestedRepo
     )
-    assert.equal(
+    assert.notEqual(
       nestedCommit.exitCode,
       0,
-      `nested repository native Git should work: ${nestedCommit.output}`
+      "a nested repository cannot become an independent workflow deliverable"
     )
+    assert.match(
+      nestedCommit.output,
+      /assigned workflow worktree repository; nested repositories are read-only/i
+    )
+    assert.equal(
+      git(nestedRepo, ["rev-parse", "HEAD"]),
+      nestedHeadBeforeBlockedCommit,
+      "a blocked nested commit must not advance the nested repository"
+    )
+    const gitCNestedCommit = await sandbox.execute(
+      `git -C ${JSON.stringify(nestedRepo)} add nested.txt && git -C ${JSON.stringify(nestedRepo)} commit -m nested-via-c`
+    )
+    assert.notEqual(gitCNestedCommit.exitCode, 0)
+    assert.match(
+      gitCNestedCommit.output,
+      /assigned workflow worktree repository; nested repositories are read-only/i
+    )
+    assert.equal(git(nestedRepo, ["rev-parse", "HEAD"]), nestedHeadBeforeBlockedCommit)
+    if (process.platform !== "win32") {
+      const wrappedNestedCommit = await sandbox.execute(
+        `bash -lc ${JSON.stringify('git add nested.txt && git commit -m "wrapped nested"')}`,
+        nestedRepo
+      )
+      assert.notEqual(wrappedNestedCommit.exitCode, 0)
+      assert.match(
+        wrappedNestedCommit.output,
+        /assigned workflow worktree repository; nested repositories are read-only/i
+      )
+      assert.equal(git(nestedRepo, ["rev-parse", "HEAD"]), nestedHeadBeforeBlockedCommit)
+    }
     assert.equal(
       git(info.directory, ["rev-parse", "HEAD"]),
       outerHeadBeforeNestedCommit,
