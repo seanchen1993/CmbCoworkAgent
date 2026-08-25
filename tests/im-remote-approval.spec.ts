@@ -98,7 +98,7 @@ async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) 
   }
   const broker = new ApprovalDecisionBroker()
   const generatedCodes = ["A1B2C3", "D4E5F6", "012ABC", "789DEF", "AAA111"]
-  const persistedDesktopNotices: string[] = []
+  const desktopAuditNotices: string[] = []
   const warnings: unknown[] = []
   let sendPendingCount = 0
   const service = new ImRemoteApprovalService({
@@ -118,10 +118,10 @@ async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) 
     }),
     now: () => clock.now,
     createCode: () => generatedCodes.shift() ?? "ABC123",
-    persistDesktopNotice: async (record) => {
-      persistedDesktopNotices.push(`${record.decision}:${record.summary}`)
-    },
     warn: (_message, error) => warnings.push(error)
+  })
+  service.subscribeAudit((record) => {
+    desktopAuditNotices.push(`${record.decision}:${record.summary}`)
   })
   service.registerReplyDrainer({
     sendPending: async () => {
@@ -163,7 +163,7 @@ async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) 
     service,
     register,
     deliveryText,
-    persistedDesktopNotices,
+    desktopAuditNotices,
     warnings,
     sendPendingCount: () => sendPendingCount
   }
@@ -233,7 +233,7 @@ async function testWorkspaceApprovalIsSingleUseAndAudited(): Promise<void> {
     assert(result.includes("一次性批准"))
     assert.deepEqual(decisions, [{ type: "approve", tool_call_id: request.tool_call.id }])
     assert.equal(context.audits.getByRequestId(request.id)?.decision, "approve")
-    assert.deepEqual(context.persistedDesktopNotices, ["approve:写入文件 src/billing.ts"])
+    assert.deepEqual(context.desktopAuditNotices, ["approve:写入文件 src/billing.ts"])
     assert.equal(
       await context.service.resolveCode({ code: "A1B2C3", decision: "approve", ...ROUTE }),
       "审批短码不存在、已过期或已使用。"
@@ -317,7 +317,7 @@ async function testAuditFlushFailureNeverResumesRuntime(): Promise<void> {
     })
     assert(failed.includes("本次决定未执行"))
     assert.equal(decisions.length, 0)
-    assert.equal(context.persistedDesktopNotices.length, 0)
+    assert.equal(context.desktopAuditNotices.length, 0)
 
     context.flushControl.fail = false
     const retried = await context.service.resolveCode({
@@ -361,7 +361,7 @@ async function testDesktopDecisionWinsAuditFlushRace(): Promise<void> {
     assert(result.includes("已失效或发生变化"))
     assert.deepEqual(decisions, [{ type: "reject", tool_call_id: request.tool_call.id }])
     assert.equal(context.audits.getByRequestId(request.id), null)
-    assert.equal(context.persistedDesktopNotices.length, 0)
+    assert.equal(context.desktopAuditNotices.length, 0)
   } finally {
     context.service.dispose()
     context.database.close()

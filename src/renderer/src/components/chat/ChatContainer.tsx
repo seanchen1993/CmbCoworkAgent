@@ -950,10 +950,8 @@ interface MessageForkDialogTarget {
 
 interface RemoteThreadDisplayInfo {
   kind: "inbox" | "feature"
-  conversationKey: string
   historical: boolean
-  projectId?: string
-  featureSlug?: string
+  featureLabel?: string
 }
 
 function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayInfo | null {
@@ -970,7 +968,6 @@ function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayI
   if (metadata.targetKind === "inbox") {
     return {
       kind: "inbox",
-      conversationKey: context.conversationKey,
       historical: metadata.remoteState === "historical"
     }
   }
@@ -982,16 +979,9 @@ function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayI
   if (typeof feature.projectId !== "string" || typeof feature.slug !== "string") return null
   return {
     kind: "feature",
-    conversationKey: context.conversationKey,
     historical: metadata.remoteState === "historical",
-    projectId: feature.projectId,
-    featureSlug: feature.slug
+    featureLabel: feature.slug
   }
-}
-
-function compactConversationKey(value: string): string {
-  if (value.length <= 18) return value
-  return `${value.slice(0, 8)}…${value.slice(-6)}`
 }
 
 function getForkWorkspacePath(thread: Thread | null): string | null {
@@ -5881,17 +5871,12 @@ export function ChatContainer({
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="rounded bg-blue-500/15 px-1.5 py-0.5 font-medium text-blue-700 dark:text-blue-300">
-                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程 Feature"}
+                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"}
               </span>
-              {remoteThreadInfo.kind === "feature" ? (
-                <span className="font-medium">
-                  {remoteThreadInfo.projectId} / {remoteThreadInfo.featureSlug}
-                </span>
+              {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
+                <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
               ) : null}
-              <span className="text-muted-foreground">
-                招乎会话 {compactConversationKey(remoteThreadInfo.conversationKey)}
-                {` · ${remoteThreadStatus}`}
-              </span>
+              <span className="text-muted-foreground">{remoteThreadStatus}</span>
             </div>
             <p className="text-muted-foreground">
               {remoteThreadInfo.kind === "inbox"
@@ -5899,10 +5884,10 @@ export function ChatContainer({
                   ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
                   : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
                 : remoteThreadInfo.historical
-                  ? "此 Feature Thread 已停用，仅保留历史；请重新绑定。"
+                  ? "此远程会话已停用，仅保留历史；请重新绑定。"
                   : isLoading
                     ? "当前任务占用远程运行租约，结束后可在桌面继续。"
-                    : "可在桌面继续处理；桌面发出的本轮结果只保留在本机，不会自动发送到招乎。"}
+                    : "可在桌面继续处理。"}
             </p>
           </div>
         </div>

@@ -5494,6 +5494,16 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           useAppStore.getState().selectThread(threadId)
         }
       })
+      const cleanupResolved = window.api.sandbox.onApprovalResolved(threadId, (data) => {
+        console.log(
+          `[ThreadProvider] Approval resolved outside desktop for thread ${threadId}: requestId=${data.requestId}, decision=${data.decision}`
+        )
+        if (!initializedThreadsRef.current.has(threadId)) return
+        cancelledApprovalRequestIds.add(data.requestId)
+        updateThreadState(threadId, (state) => ({
+          ...removePendingApprovalByRequestId(state, data.requestId)
+        }))
+      })
       const cleanupTimeout = window.api.sandbox.onApprovalTimeout(threadId, (data) => {
         console.warn(
           `[ThreadProvider] Approval timed out for thread ${threadId}: requestId=${data.requestId}`
@@ -5544,7 +5554,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
         })
       })
-      approvalListenerCleanups.current[threadId] = [cleanupApproval, cleanupTimeout, cleanupCancel]
+      approvalListenerCleanups.current[threadId] = [
+        cleanupApproval,
+        cleanupResolved,
+        cleanupTimeout,
+        cleanupCancel
+      ]
 
       // When the main process injects steered messages into the running turn,
       // drop them from the draft queue and surface them as committed user turns

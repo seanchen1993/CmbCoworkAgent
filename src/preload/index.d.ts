@@ -2004,6 +2004,10 @@ interface CustomAPI {
       pushResult?: { success: boolean; error?: string }
     }) => void
     onApprovalRequest: (threadId: string, callback: (request: unknown) => void) => () => void
+    onApprovalResolved: (
+      threadId: string,
+      callback: (data: { requestId: string; decision: "approve" | "reject" }) => void
+    ) => () => void
     onApprovalTimeout: (
       threadId: string,
       callback: (data: { requestId: string }) => void

@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { sortBuiltinRobotThreadsByRemoteAccess } from "../src/renderer/src/lib/builtin-robot-thread-sort"
+import { isImRemoteApprovalTranscriptMessageId } from "../src/shared/im-remote-approval-transcript"
 import type { Thread } from "../src/renderer/src/types"
 
 function source(path: string): string {
@@ -73,14 +74,18 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   )
   const remoteAccessEligibility = source("src/renderer/src/lib/builtin-robot-remote-access.ts")
   const harnessBoard = source("src/renderer/src/components/harness-board/HarnessBoardView.tsx")
-  assert(chat.includes('remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程 Feature"'))
-  assert(chat.includes("桌面发出的本轮结果只保留在本机，不会自动发送到招乎"))
+  assert(chat.includes('remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"'))
+  assert(!chat.includes("远程 Feature"))
+  assert(!chat.includes("桌面发出的本轮结果只保留在本机，不会自动发送到招乎"))
+  assert(!chat.includes("compactConversationKey"))
+  assert(!chat.includes("remoteThreadInfo.projectId"))
   assert(chat.includes("等待桌面审批"))
   assert(chat.includes("执行结果未知"))
   assert(sidebar.includes("getRemoteThreadKind"))
   assert(sidebar.includes("remoteThreadHistorical"))
   assert(sidebar.includes('"远程收件箱"'))
-  assert(sidebar.includes('"远程 Feature"'))
+  assert(sidebar.includes('"远程会话"'))
+  assert(!sidebar.includes('"远程 Feature"'))
   assert(sidebar.includes('"远程历史"'))
   assert(remoteDisplay.includes('REMOTE_INBOX_WORKSPACE_NAME = "远程收件箱"'))
   assert(sidebar.includes("isManagedInbox"))
@@ -173,6 +178,42 @@ function testRemoteTurnMirrorsCompleteRendererLifecycle(): void {
   assert(streamConverter.includes("export type SchedulerLifecycleEvent"))
 }
 
+function testRemoteApprovalResolutionClosesDesktopCard(): void {
+  const robotIpc = source("src/main/ipc/builtin-robot.ts")
+  const preload = source("src/preload/index.ts")
+  const preloadTypes = source("src/preload/index.d.ts")
+  const threadContext = source("src/renderer/src/lib/thread-context.tsx")
+
+  assert(robotIpc.includes("`approval:resolved:${record.threadId}`"))
+  assert(robotIpc.includes("requestId: record.requestId"))
+  assert(robotIpc.includes("decision: record.decision"))
+  assert(preload.includes("onApprovalResolved:"))
+  assert(preload.includes("`approval:resolved:${threadId}`"))
+  assert(preloadTypes.includes("onApprovalResolved:"))
+  assert(threadContext.includes("window.api.sandbox.onApprovalResolved(threadId"))
+  assert(
+    /onApprovalResolved\(threadId[\s\S]*removePendingApprovalByRequestId\(state, data\.requestId\)/u.test(
+      threadContext
+    ),
+    "a remote decision must remove exactly its matching desktop approval card"
+  )
+}
+
+function testRemoteApprovalAuditDoesNotEnterConversationTranscript(): void {
+  const approvalService = source("src/main/services/im/remote-approval-service.ts")
+  const runtimeTail = source("src/main/ipc/thread-runtime-tail.ts")
+  const threadsIpc = source("src/main/ipc/threads.ts")
+  const messageBubble = source("src/renderer/src/components/chat/MessageBubble.tsx")
+
+  assert(isImRemoteApprovalTranscriptMessageId("im-remote-approval:audit-1"))
+  assert(!isImRemoteApprovalTranscriptMessageId("im-remote-user-input:request-1"))
+  assert(!approvalService.includes("persistRemoteApprovalDesktopNotice"))
+  assert(!approvalService.includes("upsertThreadMessages"))
+  assert(runtimeTail.includes("!isImRemoteApprovalTranscriptMessageId(message.id)"))
+  assert(threadsIpc.includes("!isImRemoteApprovalTranscriptMessageId(message.id)"))
+  assert(messageBubble.includes("isImRemoteApprovalTranscriptMessageId(message.id)"))
+}
+
 testRemoteInboxIsReadOnlyAtRendererAndMainBoundary()
 console.log("PASS testRemoteInboxIsReadOnlyAtRendererAndMainBoundary")
 testRemoteThreadsHaveStableSourceAndModeLabels()
@@ -181,4 +222,8 @@ testEnabledDesktopThreadsAreSortedFirst()
 console.log("PASS testEnabledDesktopThreadsAreSortedFirst")
 testRemoteTurnMirrorsCompleteRendererLifecycle()
 console.log("PASS testRemoteTurnMirrorsCompleteRendererLifecycle")
+testRemoteApprovalResolutionClosesDesktopCard()
+console.log("PASS testRemoteApprovalResolutionClosesDesktopCard")
+testRemoteApprovalAuditDoesNotEnterConversationTranscript()
+console.log("PASS testRemoteApprovalAuditDoesNotEnterConversationTranscript")
 console.log("im-remote-thread-ui.spec.ts passed")

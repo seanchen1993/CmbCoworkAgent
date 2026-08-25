@@ -64,7 +64,7 @@ import {
   deleteProjectThreadDataDirectory,
   getProjectThreadDataDirectory
 } from "../agent/context-history-path"
-import { generateTitle } from "../services/title-generator"
+import { defaultThreadTitle, generateTitle } from "../services/title-generator"
 import { imRemoteAccessService } from "../services/im/remote-access-service"
 import {
   finalizeWorkflowWorktreeRecord,
@@ -97,6 +97,7 @@ import {
   mergeCheckpointAuthorityTranscriptMessages,
   truncateCheckpointMessagesAfter
 } from "../../shared/checkpoint-transcript"
+import { isImRemoteApprovalTranscriptMessageId } from "../../shared/im-remote-approval-transcript"
 import {
   getMessageProviderOccurrenceIdentity,
   getMessageProviderTupleFromMetadata
@@ -505,7 +506,10 @@ function stringifyThreadMessageContent(content: Message["content"]): string {
 }
 
 function isForkVisiblePersistedMessage(message: Message): boolean {
-  return !isWorkflowPlumbingTranscriptContent(stringifyThreadMessageContent(message.content))
+  return (
+    !isImRemoteApprovalTranscriptMessageId(message.id) &&
+    !isWorkflowPlumbingTranscriptContent(stringifyThreadMessageContent(message.content))
+  )
 }
 
 function findDurableForkTailMessages(
@@ -2527,7 +2531,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
 
     // title 仍保持原有规则：优先使用调用方传入，否则使用日期默认值。
-    const title = (nextMetadata.title as string) || `Thread ${new Date().toLocaleDateString()}`
+    const title = (nextMetadata.title as string) || defaultThreadTitle()
     nextMetadata.title = title
 
     const thread = dbCreateThread(threadId, nextMetadata)

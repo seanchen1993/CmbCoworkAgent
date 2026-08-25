@@ -49,7 +49,9 @@ export function imTargetReplyPrefix(
 ): string {
   const switched = options.switched === true
   if (target.kind === "inbox") return imInboxReplyPrefix(switched)
-  if (target.kind === "thread") return imThreadReplyPrefix(target.title, switched)
+  if (target.kind === "thread") {
+    return imThreadReplyPrefix(options.threadTitle ?? target.title, switched)
+  }
   return imFeatureReplyPrefix({
     projectName: target.projectName,
     projectId: target.projectId,

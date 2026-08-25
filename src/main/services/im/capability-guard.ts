@@ -88,6 +88,8 @@ function existingDirectory(path: string): boolean {
 }
 
 function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean {
+  // A Thread title is mutable presentation data. Renaming it must not invalidate
+  // an event that was already queued under the same grant and workspace.
   return (
     left.kind === right.kind &&
     left.targetId === right.targetId &&
@@ -96,8 +98,7 @@ function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean 
     (left.kind === "inbox" ||
       (left.kind === "thread" && right.kind === "thread"
         ? left.grantId === right.grantId &&
-          left.grantVersion === right.grantVersion &&
-          left.title === right.title
+          left.grantVersion === right.grantVersion
         : left.kind === "feature" &&
           right.kind === "feature" &&
           left.bindingId === right.bindingId &&

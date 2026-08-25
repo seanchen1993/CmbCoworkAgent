@@ -597,6 +597,21 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     const allowed = await guard.evaluate(event)
     assert.equal(allowed.allowed, true, JSON.stringify(allowed))
 
+    context.updateLocalThread("desktop-thread", { title: "支付排障会话（再次更新）" })
+    await context.conversations.refreshGrantTarget({
+      targetId: target.targetId,
+      grantId: target.grantId,
+      grantVersion: target.grantVersion,
+      workspacePath: target.workspacePath,
+      title: "支付排障会话（再次更新）"
+    })
+    const allowedAfterQueuedTitleChange = await guard.evaluate(event)
+    assert.equal(
+      allowedAfterQueuedTitleChange.allowed,
+      true,
+      "a mutable title change must not invalidate an already queued event"
+    )
+
     const projectModeMetadata = {
       title: "快捷支付 Project Mode 会话",
       workspacePath: context.root,

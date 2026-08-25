@@ -335,7 +335,7 @@ function ThreadListItemImpl({
                         ? "远程历史"
                         : remoteThreadKind === "inbox"
                           ? "远程收件箱"
-                          : "远程 Feature"}
+                          : "远程会话"}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
                     {pendingUserInputBadge}

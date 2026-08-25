@@ -7,7 +7,7 @@ import {
   type ApprovalDecisionBroker
 } from "../../agent/approval-decision-broker"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
-import { flushStrict, getThread, upsertThreadMessages } from "../../db"
+import { getThread } from "../../db"
 import { getBuiltinRobotSettings } from "../../storage"
 import type { ApprovalRequest } from "../../types"
 import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
@@ -67,32 +67,12 @@ interface RemoteApprovalDependencies {
   getSettings: typeof getBuiltinRobotSettings
   now: () => number
   createCode: () => string
-  persistDesktopNotice: (record: ImRemoteApprovalAuditRecord) => Promise<void>
   warn: (message: string, error?: unknown) => void
 }
 
 export function remoteApprovalDesktopNotice(record: ImRemoteApprovalAuditRecord): string {
   const action = record.decision === "approve" ? "一次性批准" : "拒绝"
   return `已从招乎远程${action}工具调用：${record.summary}`
-}
-
-async function persistRemoteApprovalDesktopNotice(
-  record: ImRemoteApprovalAuditRecord
-): Promise<void> {
-  const count = upsertThreadMessages(
-    record.threadId,
-    [
-      {
-        id: `im-remote-approval:${record.auditId}`,
-        role: "system",
-        content: remoteApprovalDesktopNotice(record),
-        created_at: new Date(record.createdAt)
-      }
-    ],
-    { touchThreadUpdatedAt: false }
-  )
-  if (count !== 1) throw new Error("remote approval desktop notice was not persisted")
-  await flushStrict()
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -226,7 +206,6 @@ export class ImRemoteApprovalService {
       getSettings: dependencies.getSettings ?? getBuiltinRobotSettings,
       now: dependencies.now ?? Date.now,
       createCode: dependencies.createCode ?? (() => randomBytes(3).toString("hex").toUpperCase()),
-      persistDesktopNotice: dependencies.persistDesktopNotice ?? persistRemoteApprovalDesktopNotice,
       warn: dependencies.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
     this.unsubscribePending = this.dependencies.broker.subscribePending((registration) => {
@@ -340,14 +319,6 @@ export class ImRemoteApprovalService {
         : "该审批已失效或发生变化，请回到桌面确认。"
     }
 
-    try {
-      await this.dependencies.persistDesktopNotice(audit)
-    } catch (error) {
-      this.dependencies.warn(
-        "Remote approval audit could not be shown in the desktop thread.",
-        error
-      )
-    }
     for (const listener of this.auditListeners) {
       try {
         listener(audit)

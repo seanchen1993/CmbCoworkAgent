@@ -37,9 +37,10 @@ import { runCompletionHooksWithRevision } from "../../agent/skill-lifecycle/comp
 import { createSkillUseTracker } from "../../agent/skill-lifecycle/tracker"
 import { createPersistentThreadHookScope } from "../../hooks/thread-scope-persistence"
 import { makeBroadcastHookResultCallback } from "../../hooks/result-callback"
-import { flushStrict, getThread, updateThread } from "../../db"
+import { flushStrict, getThread, getThreadMessages, updateThread } from "../../db"
 import type { ScheduledTaskImDeliveryContext } from "../../types"
 import { rememberRoutingDecision } from "../../routing"
+import { generateTitle } from "../title-generator"
 import {
   discardAgentAutoCommitTracking,
   maybeAutoCommitAfterAgentRun,
@@ -123,6 +124,11 @@ export interface ImRemoteRunnerDependencies {
   capabilityGuard: ImRemoteCapabilityGuard
   replyClient: ImReplyClient
   executeTurn: (input: ImRemoteTurnExecutionInput) => Promise<string>
+  getThread: typeof getThread
+  getThreadMessages: typeof getThreadMessages
+  updateThread: typeof updateThread
+  generateThreadTitle: typeof generateTitle
+  notifyThreadChanged: () => void
   createRunId: () => string
   permitRenewIntervalMs: number
   waitingDesktopTtlMs: number
@@ -534,6 +540,11 @@ export class ImRemoteRunner {
       capabilityGuard: dependencies.capabilityGuard ?? imRemoteCapabilityGuard,
       replyClient: dependencies.replyClient ?? new ImReplyClient(gateway, eventStore),
       executeTurn: dependencies.executeTurn ?? executePreparedImStandardTurn,
+      getThread: dependencies.getThread ?? getThread,
+      getThreadMessages: dependencies.getThreadMessages ?? getThreadMessages,
+      updateThread: dependencies.updateThread ?? updateThread,
+      generateThreadTitle: dependencies.generateThreadTitle ?? generateTitle,
+      notifyThreadChanged: dependencies.notifyThreadChanged ?? notifyRemoteThreadChanged,
       createRunId: dependencies.createRunId ?? randomUUID,
       permitRenewIntervalMs: dependencies.permitRenewIntervalMs ?? 30_000,
       waitingDesktopTtlMs: dependencies.waitingDesktopTtlMs ?? DEFAULT_WAITING_DESKTOP_TTL_MS,
@@ -743,6 +754,7 @@ export class ImRemoteRunner {
       if (!decision.allowed) {
         return await this.finalizeRejected(latest, decision.reasonCode, decision.message)
       }
+      await this.generateFirstMessageTitle(latest, decision)
       const begun = await this.dependencies.eventStore.beginExecution(latest.eventId, runId)
       await this.dependencies.setThreadLifecycle(begun, "active")
       const result = await this.dependencies.executeTurn({
@@ -934,16 +946,68 @@ export class ImRemoteRunner {
     await this.dependencies.gateway.sendAcknowledgement(acknowledgementForTerminal(event))
   }
 
+  private async generateFirstMessageTitle(
+    event: ImEventRecord,
+    decision: Extract<ImRemoteCapabilityDecision, { allowed: true }>
+  ): Promise<void> {
+    if (
+      decision.target.kind !== "thread" ||
+      decision.metadata.remoteThread !== true ||
+      decision.metadata.targetKind !== "feature" ||
+      !this.isGeneratedRemoteThreadTitle(decision.thread.title)
+    ) {
+      return
+    }
+    const firstPersistedUserMessage = this.dependencies
+      .getThreadMessages(decision.thread.thread_id)
+      .find(
+        (message) =>
+          message.role === "user" &&
+          typeof message.content === "string" &&
+          message.content.trim().length > 0
+      )
+    const titleSource =
+      firstPersistedUserMessage && typeof firstPersistedUserMessage.content === "string"
+        ? firstPersistedUserMessage.content
+        : event.messageText
+    const title = this.dependencies.generateThreadTitle(titleSource).trim()
+    if (!title) return
+    const updated = this.dependencies.updateThread(decision.thread.thread_id, { title })
+    if (!updated) return
+
+    try {
+      await this.dependencies.conversationState.refreshGrantTarget({
+        targetId: decision.target.targetId,
+        grantId: decision.target.grantId,
+        grantVersion: decision.target.grantVersion,
+        workspacePath: decision.workspacePath,
+        title
+      })
+    } catch (error) {
+      console.warn("[IM] Failed to synchronize generated remote thread title:", error)
+    }
+    this.dependencies.notifyThreadChanged()
+  }
+
+  private isGeneratedRemoteThreadTitle(title: string | null): boolean {
+    return Boolean(title?.startsWith("Thread ") || / · 远程会话 \d+$/u.test(title ?? ""))
+  }
+
   private targetPrefixForEvent(event: ImEventRecord): string | undefined {
     const snapshot = event.targetSnapshot
     if (!snapshot) return undefined
+    const threadTitle =
+      snapshot.kind === "thread"
+        ? this.dependencies.getThread(snapshot.threadId)?.title?.trim() || snapshot.title
+        : undefined
     try {
       const active = this.dependencies.conversationState.getActiveTarget(event.conversationKey)
       return imTargetReplyPrefix(snapshot, {
-        switched: Boolean(active && active.targetId !== snapshot.targetId)
+        switched: Boolean(active && active.targetId !== snapshot.targetId),
+        threadTitle
       })
     } catch {
-      return imTargetReplyPrefix(snapshot)
+      return imTargetReplyPrefix(snapshot, { threadTitle })
     }
   }
 }

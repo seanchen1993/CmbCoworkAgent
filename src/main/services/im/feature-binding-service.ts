@@ -6,6 +6,7 @@ import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { getThread, createThread } from "../../db"
 import { isFeatureGateEnabled } from "../../feature-gates"
+import { defaultThreadTitle } from "../title-generator"
 import {
   buildHarnessFeatureAgentContext,
   getHarnessProjectDetail,
@@ -305,25 +306,8 @@ export class ImFeatureBindingService {
     const validation = await this.validateFeature(input.projectId, input.featureSlug)
     if (!validation.valid) throw new ImFeatureBindingError(validation.message)
 
-    const remoteSessionCount = this.dependencies.conversationState
-      .listTargets(input.conversationKey)
-      .filter(({ snapshot }) => {
-        if (snapshot.kind !== "thread") return false
-        const metadata = parseStandardThreadMetadata(
-          this.dependencies.getThread(snapshot.threadId)?.metadata
-        ).metadata
-        const harness = metadata.harnessFeature
-        if (!harness || typeof harness !== "object" || Array.isArray(harness)) return false
-        const feature = harness as Record<string, unknown>
-        return (
-          metadata.remoteThread === true &&
-          metadata.targetKind === "feature" &&
-          feature.projectId === input.projectId &&
-          feature.slug === input.featureSlug
-        )
-      }).length
     const threadId = this.dependencies.createId()
-    const title = `${validation.project.name} / ${validation.feature.title} · 远程会话 ${remoteSessionCount + 1}`
+    const title = defaultThreadTitle()
     this.dependencies.createThread(threadId, {
       title,
       workspacePath: validation.workspacePath,

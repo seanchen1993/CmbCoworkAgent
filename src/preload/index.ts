@@ -2764,6 +2764,23 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     },
+    // Listen for approval decisions completed outside the desktop renderer (for example via IM).
+    onApprovalResolved: (
+      threadId: string,
+      callback: (data: { requestId: string; decision: "approve" | "reject" }) => void
+    ): (() => void) => {
+      const channel = `approval:resolved:${threadId}`
+      const handler = (
+        _: unknown,
+        data: { requestId: string; decision: "approve" | "reject" }
+      ): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
     // Listen for approval timeout notifications from main → renderer
     onApprovalTimeout: (
       threadId: string,

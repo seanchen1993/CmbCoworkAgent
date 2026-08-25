@@ -33,6 +33,10 @@ function broadcastRemoteApprovalAudit(
       : `${fullMessage.slice(0, 500)}…（完整记录已写入对应会话）`
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.send(`approval:resolved:${record.threadId}`, {
+        requestId: record.requestId,
+        decision: record.decision
+      })
       window.webContents.send(`agent:stream:${record.threadId}`, {
         type: "custom",
         data: { type: "hook_notice", message }

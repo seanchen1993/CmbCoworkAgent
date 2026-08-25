@@ -263,7 +263,6 @@ async function createJourney() {
       }) as never,
     now: () => clock.now,
     createCode: () => "A1B2C3",
-    persistDesktopNotice: async () => undefined,
     warn: (message, error) => {
       throw new Error(`${message}: ${String(error ?? "")}`)
     }
@@ -370,6 +369,10 @@ async function createJourney() {
     conversationState: conversations,
     capabilityGuard: guard,
     replyClient,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    getThreadMessages: () => [],
+    updateThread: updateLocalThread,
+    notifyThreadChanged: () => undefined,
     createRunId: () => createId("run"),
     permitRenewIntervalMs: 60_000,
     waitingDesktopTtlMs: 5_000,
@@ -615,7 +618,7 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     const featureTarget = journey.conversations.getActiveTarget(CONVERSATION_KEY)
     assert.equal(featureTarget?.kind, "thread")
     if (featureTarget?.kind !== "thread") throw new Error("Feature Thread target expected")
-    assert.equal(featureTarget.title, "支付平台 / 快捷支付 · 远程会话 1")
+    assert(featureTarget.title.startsWith("Thread "))
     const featureMetadata = JSON.parse(
       journey.threads.get(featureTarget.threadId)!.metadata!
     ) as Record<string, unknown>
@@ -628,12 +631,23 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     })
     assert.equal(journey.grants.getThreadGrant(featureTarget.threadId)?.state, "active")
 
+    const legacyThread = journey.threads.get(featureTarget.threadId)
+    if (!legacyThread) throw new Error("remote Feature Thread expected")
+    legacyThread.title = "支付平台 / 快捷支付 · 远程会话 1"
+    await journey.conversations.refreshGrantTarget({
+      targetId: featureTarget.targetId,
+      grantId: featureTarget.grantId,
+      grantVersion: featureTarget.grantVersion,
+      workspacePath: featureTarget.workspacePath,
+      title: legacyThread.title
+    })
+
     const featureMessage = await journey.send("检查 Feature 当前状态")
     await journey.waitForEventState(featureMessage.event.eventId, "completed")
     assert(
       journey
         .eventReplyText(featureMessage.event.eventId)
-        .startsWith("【会话：支付平台 / 快捷支付 · 远程会话 1】")
+        .startsWith("【会话：检查 Feature 当前状态】")
     )
 
     const longTask = await journey.send("运行一个长任务")
@@ -648,13 +662,13 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     await journey.waitForEventState(longTask.event.eventId, "completed")
     await journey.waitForEventState(queuedInbox.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
-    assert(longReply.includes("【会话：支付平台 / 快捷支付 · 远程会话 1】"))
+    assert(longReply.includes("【会话：检查 Feature 当前状态】"))
     assert(longReply.includes("切换前任务"))
     assert(!journey.eventReplyText(queuedInbox.event.eventId).includes("切换前任务"))
 
     const sessions = await journey.send("/会话")
     const sessionsText = journey.eventReplyText(sessions.event.eventId)
-    assert(sessionsText.includes("支付平台 / 快捷支付 · 远程会话 1（项目会话）"))
+    assert(sessionsText.includes("检查 Feature 当前状态（项目会话）"))
     const ordinaryIndex = selectionIndexContaining(sessionsText, "桌面排障会话（普通会话）")
     const ordinaryBind = await journey.send(`/绑定 ${ordinaryIndex}`)
     assert(journey.eventReplyText(ordinaryBind.event.eventId).includes("桌面排障会话"))
