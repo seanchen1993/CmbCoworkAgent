@@ -1437,7 +1437,18 @@ function recordHookResult(
         blocked: isBlockingResult(result),
         exitCode: result.exitCode,
         durationMs: result.durationMs,
-        source: hook.hookSourceType ?? "global"
+        source: hook.hookSourceType ?? "global",
+        threadId: context.sessionId,
+        turnId: context.turnId,
+        agentId: context.agentId,
+        pluginId: context.pluginId,
+        pluginName: context.pluginName,
+        harnessProjectId: context.harnessProjectId,
+        harnessFeatureSlug: context.featureId,
+        harnessAdapterName: context.harnessAdapterName,
+        harnessAdapterVersion: context.harnessAdapterVersion,
+        harnessNodeName: context.harnessNodeName,
+        harnessNodeStatus: context.harnessNodeStatus
       })
     } catch (e) {
       console.warn("[event] failed to emit hook.executed:", e)

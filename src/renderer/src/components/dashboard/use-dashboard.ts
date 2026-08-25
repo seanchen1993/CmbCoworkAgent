@@ -353,10 +353,10 @@ export interface DashboardUserListItem {
   count: number
   lastActiveAt?: string
   avgDurationMs: number
-  totalToolCalls: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  codeStats: DashboardCodeStats | null
 }
 
 export interface DashboardUserListData {
@@ -379,6 +379,8 @@ export interface DashboardUserDetail {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 当前时间范围内该用户的代码生成、Commit 采纳与 Push 入库统计。 */
+  codeStats: DashboardCodeStats | null
   bySkill: Array<{ skill: string; count: number }>
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
@@ -454,6 +456,10 @@ export interface DashboardProjectModeFeature {
   summary?: string
   /** This-range code adoption sliced to this feature; absent/null if no code data. */
   codeStats?: DashboardCodeStats | null
+  /** Successful plugin system-constraint reads aggregated across this feature's stages. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions aggregated across this feature's stages. */
+  hookExecutions?: DashboardProjectModeHookStats | null
 }
 
 /** Sub-row of a stage: conversations + code adoption for one node status (进行中/已完成/...). */
@@ -463,12 +469,45 @@ export interface DashboardProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
+export interface DashboardProjectModeConstraintReadStats {
+  traceCount: number
+  successfulReadCount: number
+  distinctFileCount: number
+  filesTruncated: boolean
+  files: Array<{ path: string; traceCount: number }>
+}
+
+export interface DashboardProjectModeHookStats {
+  executionCount: number
+  blockedCount: number
+  byEvent: Array<{ event: string; count: number }>
+}
+
+export interface DashboardProjectModeOperationalDetails {
+  constraintFiles: Array<{ path: string; traceCount: number }>
+  hookEvents: Array<{ event: string; count: number }>
+}
+
+export interface DashboardProjectModeOperationalDetailScope {
+  projectId: string
+  featureSlug?: string
+  nodeName?: string
+}
+
+export type DashboardProjectModeOperationalDetailsLoader = (
+  scope: DashboardProjectModeOperationalDetailScope
+) => Promise<DashboardProjectModeOperationalDetails>
+
 /** Per-stage (workflow node) breakdown of a feature: conversations + code adoption. */
 export interface DashboardProjectModeFeatureNode {
   /** Human-readable stage name (group-label, e.g. "Dev-代码实现"); no raw node id. */
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  /** Successful model-facing reads of plugin-maintained `<plugin>/sys/**` files. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions attributed to this workflow stage. */
+  hookExecutions?: DashboardProjectModeHookStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: DashboardProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
@@ -576,6 +615,10 @@ export interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  /** Successful plugin system-constraint reads aggregated across all project features/stages. */
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  /** Runtime hook executions aggregated across all project features/stages. */
+  hookExecutions?: DashboardProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 

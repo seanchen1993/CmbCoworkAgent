@@ -3,6 +3,7 @@ import { nowIsoLocal } from "../util/local-time"
 import { AsyncKeyedLock } from "./async-keyed-lock"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
 import {
+  classifyPhysicalStreamRunFailure,
   createPhysicalStreamRunSetupGuard,
   failPhysicalStreamRunBeforeSetupPublication,
   physicalStreamRunHasSuccessor,
@@ -8374,7 +8375,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           } else {
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
-            tracer.finish("cancelled").catch(() => {})
+            await tracer.finish("cancelled").catch(() => {})
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -8396,7 +8397,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         } catch (error) {
           await settleDrainedCoordinatorNotifications("restore")
-          if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) {
+          const failureDisposition = classifyPhysicalStreamRunFailure({
+            ownsLease: ownsPhysicalStreamRunLease(threadId, runToken, abortController),
+            signalAborted: abortController.signal.aborted,
+            error
+          })
+          if (failureDisposition === "stale") {
             turnStateShouldDispose = true
             return
           }
@@ -8406,7 +8412,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             pauseActiveGoalForRuntimeStop(error.reason)
             sendHookHalt(window, channel, error)
             syncUsedSkillsContext()
-            tracer.finish("cancelled", error.reason).catch(() => {})
+            await tracer.finish("cancelled", error.reason).catch(() => {})
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -8430,7 +8436,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             pauseActiveGoalForRuntimeStop(actionStationarityHalt.decision.reason)
             sendActionStationarityHalt(window, channel, actionStationarityHalt)
             syncUsedSkillsContext()
-            tracer.finish("cancelled", actionStationarityHalt.decision.reason).catch(() => {})
+            await tracer.finish("cancelled", actionStationarityHalt.decision.reason).catch(() => {})
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -8451,7 +8457,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             pauseActiveGoalForRuntimeStop(failureFuseHalt.decision.reason)
             sendFailureFuseHalt(window, channel, failureFuseHalt)
             syncUsedSkillsContext()
-            tracer.finish("cancelled", failureFuseHalt.decision.reason).catch(() => {})
+            await tracer.finish("cancelled", failureFuseHalt.decision.reason).catch(() => {})
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -8466,11 +8472,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             return
           }
           // Ignore abort-related errors (expected when stream is cancelled)
-          const isAbortError =
-            error instanceof Error &&
-            (error.name === "AbortError" ||
-              error.message.includes("aborted") ||
-              error.message.includes("Controller is already closed"))
+          const isAbortError = failureDisposition === "cancelled"
 
           // A workflow notification turn that ends here (success is settled on the
           // ack path) MUST release its in-flight mark — INCLUDING on abort — or the
@@ -8538,7 +8540,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               resetSkillEvolutionSession(threadId)
             }
             syncUsedSkillsContext()
-            tracer.finish("error", errMsg).catch(() => {})
+            await tracer.finish("error", errMsg).catch(() => {})
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -8553,7 +8555,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           } else {
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
-            tracer.finish("cancelled").catch(() => {})
+            await tracer.finish("cancelled").catch(() => {})
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -9604,7 +9606,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
           }
         } catch (error) {
-          if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) {
+          const failureDisposition = classifyPhysicalStreamRunFailure({
+            ownsLease: ownsPhysicalStreamRunLease(threadId, runToken, abortController),
+            signalAborted: abortController.signal.aborted,
+            error
+          })
+          if (failureDisposition === "stale") {
             turnStateShouldDispose = true
             return
           }
@@ -9661,11 +9668,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
-          const isAbortError =
-            error instanceof Error &&
-            (error.name === "AbortError" ||
-              error.message.includes("aborted") ||
-              error.message.includes("Controller is already closed"))
+          const isAbortError = failureDisposition === "cancelled"
 
           if (!isAbortError) {
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
@@ -10645,7 +10648,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         // edit case handled similarly to approve with modified args
       } catch (error) {
-        if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) {
+        const failureDisposition = classifyPhysicalStreamRunFailure({
+          ownsLease: ownsPhysicalStreamRunLease(threadId, runToken, abortController),
+          signalAborted: abortController.signal.aborted,
+          error
+        })
+        if (failureDisposition === "stale") {
           turnStateShouldDispose = true
           return
         }
@@ -10700,11 +10708,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           turnStateShouldDispose = true
           return
         }
-        const isAbortError =
-          error instanceof Error &&
-          (error.name === "AbortError" ||
-            error.message.includes("aborted") ||
-            error.message.includes("Controller is already closed"))
+        const isAbortError = failureDisposition === "cancelled"
 
         if (!isAbortError) {
           clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true

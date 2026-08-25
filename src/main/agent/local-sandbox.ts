@@ -102,6 +102,8 @@ import {
   markHarnessStageAttributionDirty,
   type HarnessStageAttribution
 } from "../services/harness-stage-attribution"
+import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
+import { resolvePluginSystemConstraintPath } from "./plugin-system-constraint"
 import {
   READ_FILE_DEFAULT_LIMIT,
   READ_FILE_MAX_LIMIT,
@@ -383,6 +385,10 @@ export interface LocalSandboxOptions {
   harnessNodeName?: string
   /** Optional current harness workflow node/stage status exposed as HARNESS_NODE_STATUS. */
   harnessNodeStatus?: string
+  /** Trace identity used to aggregate project-mode system-constraint reads. */
+  traceId?: string
+  rootTraceId?: string
+  rootThreadId?: string
   /** Optional harness project code exposed to child processes as PROJECT_CODE. */
   projectCode?: string
   /** Optional harness project directory exposed to child processes as PROJECT_DIR. */
@@ -495,6 +501,8 @@ export class LocalSandbox
   private readonly windowsSandbox: WindowsSandboxMode
   private readonly pluginOutputDir?: string
   private readonly pluginRoot?: string
+  private readonly pluginId?: string
+  private readonly pluginName?: string
   private readonly systemId?: string
   private readonly agentId?: string
   private readonly pluginWorkspace?: string
@@ -504,6 +512,9 @@ export class LocalSandbox
   private readonly harnessAdapterVersion?: string
   private readonly harnessNodeName?: string
   private readonly harnessNodeStatus?: string
+  private readonly traceId?: string
+  private readonly rootTraceId?: string
+  private readonly rootThreadId?: string
   private readonly projectCode?: string
   private readonly projectDir?: string
   private readonly codexExePath: string
@@ -1850,6 +1861,8 @@ export class LocalSandbox
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.pluginOutputDir = options.pluginOutputDir
     this.pluginRoot = pluginRoot || undefined
+    this.pluginId = pluginId || undefined
+    this.pluginName = pluginName || undefined
     this.systemId = systemId || undefined
     this.agentId = agentId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
@@ -1859,6 +1872,9 @@ export class LocalSandbox
     this.harnessAdapterVersion = harnessAdapterVersion || undefined
     this.harnessNodeName = harnessNodeName || undefined
     this.harnessNodeStatus = harnessNodeStatus || undefined
+    this.traceId = options.traceId?.trim() || undefined
+    this.rootTraceId = options.rootTraceId?.trim() || undefined
+    this.rootThreadId = options.rootThreadId?.trim() || undefined
     this.projectCode = projectCode || undefined
     this.projectDir = projectDir || undefined
     this.codexExePath = options.codexExePath ?? "codex"
@@ -2596,6 +2612,37 @@ export class LocalSandbox
   ): Promise<HarnessStageAttribution | undefined> {
     if (!this.harnessProjectId || !this.featureId || !isCodeFile(filePath)) return undefined
     return getHarnessStageAttributionForCodeGeneration(this.harnessProjectId, this.featureId)
+  }
+
+  private async recordPluginSystemConstraintRead(resolvedPath: string): Promise<void> {
+    if (!this.pluginRoot || !this.traceId || !this.harnessProjectId || !this.featureId) {
+      return
+    }
+
+    try {
+      const constraintFile = await resolvePluginSystemConstraintPath(this.pluginRoot, resolvedPath)
+      if (!constraintFile) return
+      recordSystemConstraintRead({
+        traceId: this.traceId,
+        rootTraceId: this.rootTraceId,
+        rootThreadId: this.rootThreadId,
+        threadId: this.runId,
+        agentId: this.agentId,
+        harnessProjectId: this.harnessProjectId,
+        harnessFeatureSlug: this.featureId,
+        // Match the existing dashboard attribution contract: one stage snapshot
+        // per turn/trace, rather than running an adapter inspection on every read.
+        harnessNodeName: this.harnessNodeName,
+        harnessNodeStatus: this.harnessNodeStatus,
+        pluginId: this.pluginId,
+        pluginName: this.pluginName,
+        harnessAdapterName: this.harnessAdapterName,
+        harnessAdapterVersion: this.harnessAdapterVersion,
+        constraintFile
+      })
+    } catch (error) {
+      console.warn("[SystemConstraintRead] Failed to record read telemetry:", error)
+    }
   }
 
   private commandMayMutateHarnessState(command: string, cwd: string): boolean {
@@ -4017,11 +4064,15 @@ export class LocalSandbox
 
       const hookVisibleResult =
         options.includeLookahead === true ? trimReadFileOutputLines(result, effectiveLimit) : result
-      return await this.applyPostToolUseHookToText(
+      const finalResult = await this.applyPostToolUseHookToText(
         "read_file",
         LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
         hookVisibleResult
       )
+      if (formattedLines.length > 0) {
+        await this.recordPluginSystemConstraintRead(resolvedPath)
+      }
+      return finalResult
     } catch (e: unknown) {
       if (isHookHaltError(e) || isFailureFuseHaltError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)

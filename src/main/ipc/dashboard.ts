@@ -41,6 +41,16 @@ import {
 } from "./dashboard-code-stats"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
+  buildProjectModeOperationalAggs,
+  parseProjectModeOperationalStats,
+  type ProjectModeConstraintFileStat,
+  type ProjectModeConstraintReadStats,
+  type ProjectModeHookEventStat,
+  type ProjectModeHookStats,
+  type ProjectModeOperationalDetails,
+  type ProjectModeOperationalStats
+} from "./project-mode-operational-metrics"
+import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
   type DashboardEsQueryInput
@@ -55,6 +65,7 @@ import {
   STAGE_IN_PROGRESS_LABEL,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
+import { SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } from "../services/system-constraint-read-reporter"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -527,10 +538,10 @@ interface DashboardUserListItem {
   count: number
   lastActiveAt?: string
   avgDurationMs: number
-  totalToolCalls: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  codeStats: DashboardCodeStats | null
 }
 
 interface DashboardUserListData {
@@ -628,6 +639,8 @@ interface DashboardUserDetail {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 当前时间范围内该用户的代码生成、Commit 采纳与 Push 入库统计。 */
+  codeStats: DashboardCodeStats | null
   bySkill: Array<{ skill: string; count: number }>
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
@@ -1168,9 +1181,11 @@ function escapeWildcard(value: string): string {
 }
 
 function safeExportFileName(value: string): string {
-  const cleaned = value
-    .trim()
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+  const withoutControlCharacters = Array.from(value.trim(), (character) =>
+    character.charCodeAt(0) <= 0x1f ? "-" : character
+  ).join("")
+  const cleaned = withoutControlCharacters
+    .replace(/[<>:"/\\|?*]/g, "-")
     .replace(/\s+/g, " ")
     .replace(/-+/g, "-")
     .slice(0, 80)
@@ -3168,11 +3183,62 @@ function normalizeUserListBucket(bucket: Record<string, unknown>): DashboardUser
     count: asNumber(bucket.doc_count),
     lastActiveAt: asOptionalString(source.startedAt),
     avgDurationMs: asNumber(asRecord(bucket.avg_duration).value),
-    totalToolCalls: asNumber(asRecord(bucket.total_tool_calls).value),
     totalInputTokens,
     totalOutputTokens,
-    totalTokens
+    totalTokens,
+    codeStats: null
   }
+}
+
+async function fetchUserListCodeStats(
+  sapIds: string[],
+  range: TimeRange,
+  upperOrgLv1: string | null,
+  options?: { projectMode?: boolean }
+): Promise<Map<string, DashboardCodeStats>> {
+  const normalizedSapIds = Array.from(new Set(sapIds.map((sapId) => sapId.trim()).filter(Boolean)))
+  if (normalizedSapIds.length === 0) return new Map()
+
+  // Keep the per-user code metrics on the same time and department scope as the
+  // platform overview. Restricting the event query to the visible page avoids a
+  // large all-user aggregation on every list request.
+  const orgFilter = upperOrgLv1 ? buildOrgLevelMatchFilter(upperOrgLv1) : null
+  const scopeFilters: Record<string, unknown>[] = [
+    ...(orgFilter ? [orgFilter] : []),
+    ...(options?.projectMode ? [{ exists: { field: "properties.harnessProjectId" } }] : [])
+  ]
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    scopeFilters
+  )
+  const raw = asRecord(
+    await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: {
+        bool: {
+          filter: [{ terms: { sapId: normalizedSapIds } }],
+          should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+          minimum_should_match: 1
+        }
+      },
+      aggs: {
+        users: {
+          terms: { field: "sapId", size: normalizedSapIds.length },
+          aggs: perBucketAggs
+        }
+      }
+    })
+  )
+
+  const result = new Map<string, DashboardCodeStats>()
+  const buckets = asRecord(asRecord(raw.aggregations).users).buckets
+  for (const rawBucket of Array.isArray(buckets) ? buckets : []) {
+    const bucket = asRecord(rawBucket)
+    const sapId = asString(bucket.key)
+    if (sapId) result.set(sapId, normalizeCodeStatsFromContainer(bucket))
+  }
+  return result
 }
 
 async function fetchUserList(
@@ -3229,7 +3295,6 @@ async function fetchUserList(
             }
           },
           avg_duration: { avg: { field: "durationMs" } },
-          total_tool_calls: { sum: { field: "totalToolCalls" } },
           total_input_tokens: { sum: { field: "totalInputTokens" } },
           total_output_tokens: { sum: { field: "totalOutputTokens" } },
           total_tokens: { sum: { field: "totalTokens" } }
@@ -3243,13 +3308,22 @@ async function fetchUserList(
   const usersAgg = asRecord(aggs.users)
   const allBuckets = Array.isArray(usersAgg.buckets) ? usersAgg.buckets : []
   const buckets = allBuckets.slice(offset, offset + pageSize)
+  const items = buckets
+    .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
+    .filter((item) => item.sapId)
+  const codeStatsBySapId = await fetchUserListCodeStats(
+    items.map((item) => item.sapId),
+    range,
+    upperOrgLv1
+  )
   const totalActiveUsers = asNumber(asRecord(aggs.total_active_users).value)
   const nextOffset = offset + pageSize
   const hasMoreBuckets = asNumber(usersAgg.sum_other_doc_count) > 0
   return {
-    items: buckets
-      .map((bucket) => normalizeUserListBucket(asRecord(bucket)))
-      .filter((item) => item.sapId),
+    items: items.map((item) => ({
+      ...item,
+      codeStats: codeStatsBySapId.get(item.sapId) ?? null
+    })),
     pageSize,
     ...(hasMoreBuckets && nextOffset < 10_000 ? { nextAfterKey: { offset: nextOffset } } : {}),
     totalActiveUsers
@@ -3802,7 +3876,12 @@ async function fetchUserDetail(
           _source: { includes: dashboardTraceSourceIncludes() }
         }
 
-  const raw = (await esQuery(getEsIndex("trace"), body)) as EsSearchResponse
+  const [raw, codeStatsBySapId] = await Promise.all([
+    esQuery(getEsIndex("trace"), body) as Promise<EsSearchResponse>,
+    fetchUserListCodeStats([normalizedSapId], range, null, {
+      projectMode: options?.projectMode
+    })
+  ])
   const rawRecord = asRecord(raw)
   const aggs = asRecord(rawRecord.aggregations)
   const userInfo = getLatestHitSource(aggs, "latest_user_info")
@@ -3842,6 +3921,7 @@ async function fetchUserDetail(
     totalInputTokens,
     totalOutputTokens,
     totalTokens,
+    codeStats: codeStatsBySapId.get(normalizedSapId) ?? null,
     bySkill: normalizeTermsBucketList(
       asRecord(aggs.by_skill).buckets,
       "skill"
@@ -8119,6 +8199,15 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
   const count = Math.max(3, 150 - index * 3)
   const totalInputTokens = count * (820 + (index % 7) * 120)
   const totalOutputTokens = count * (240 + (index % 5) * 80)
+  const generatedLines = count * (5 + (index % 4))
+  const measuredGeneratedLines = Math.round(generatedLines * (0.68 + (index % 3) * 0.06))
+  const effectiveGeneratedLines = Math.round(measuredGeneratedLines * 0.92)
+  const adoptedLines = Math.round(effectiveGeneratedLines * (0.64 + (index % 4) * 0.07))
+  const pushedEffectiveGeneratedLines = Math.round(effectiveGeneratedLines * 0.78)
+  const pushedAdoptedLines = Math.min(
+    pushedEffectiveGeneratedLines,
+    Math.round(adoptedLines * 0.72)
+  )
   return {
     sapId: `10010${String(index + 1).padStart(3, "0")}`,
     ystId: `2743${String(index + 1).padStart(3, "0")}`,
@@ -8127,10 +8216,23 @@ function makeMockDashboardUser(index: number): DashboardUserListItem {
     count,
     lastActiveAt: new Date(Date.now() - index * 42 * 60 * 1000).toISOString(),
     avgDurationMs: 4200 + (index % 9) * 650,
-    totalToolCalls: count * (2 + (index % 4)),
     totalInputTokens,
     totalOutputTokens,
-    totalTokens: totalInputTokens + totalOutputTokens
+    totalTokens: totalInputTokens + totalOutputTokens,
+    codeStats:
+      index % 11 === 10
+        ? null
+        : makeDashboardCodeStats({
+            generatedLines,
+            deletedLines: Math.round(generatedLines * 0.08),
+            measuredGeneratedLines,
+            effectiveGeneratedLines,
+            adoptedLines,
+            pushedMeasuredGeneratedLines: Math.round(measuredGeneratedLines * 0.8),
+            pushedEffectiveGeneratedLines,
+            pushedAdoptedLines,
+            pushedCommitCount: Math.max(1, Math.round(count / 12))
+          })
   }
 }
 
@@ -8339,10 +8441,11 @@ function makeMockUserDetail(
     upperOrgLv1: user.upperOrgLv1,
     totalCalls: user.count,
     avgDurationMs: user.avgDurationMs,
-    totalToolCalls: user.totalToolCalls,
+    totalToolCalls: user.count * (2 + (index % 4)),
     totalInputTokens: user.totalInputTokens,
     totalOutputTokens: user.totalOutputTokens,
     totalTokens: user.totalTokens,
+    codeStats: user.codeStats,
     bySkill: [
       { skill: "代码审查", count: Math.floor(user.count * 0.34) },
       { skill: "单元测试", count: Math.floor(user.count * 0.22) },
@@ -8407,6 +8510,119 @@ function makeMockStageBuckets(
     pluginConstrained: { conversationCount: conv[0] ?? 0, codeStats: code0 ?? null },
     vibecoding: { conversationCount: conv[1] ?? 0, codeStats: code1 ?? null },
     unattributed: { conversationCount: conv[2] ?? 0, codeStats: code2 ?? null }
+  }
+}
+
+/** DEV mock helper: deterministic feature telemetry, then merge it to project scope. */
+function makeMockFeatureOperationalStats(
+  projectId: string,
+  featureSlug: string
+): ProjectModeOperationalStats {
+  const seed = `${projectId}/${featureSlug}`
+  let hash = 0
+  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0
+  const traceCount = 2 + (hash % 7)
+  const successfulReadCount = traceCount * 2 + (hash % 5)
+  const preToolUseCount = 3 + (hash % 11)
+  const postToolUseCount = 2 + (hash % 7)
+  return {
+    systemConstraintReads: {
+      traceCount,
+      successfulReadCount,
+      distinctFileCount: 2,
+      filesTruncated: false,
+      files: [
+        { path: "sys/project.md", traceCount },
+        { path: `sys/features/${featureSlug}.md`, traceCount: Math.max(1, traceCount - 1) }
+      ]
+    },
+    hookExecutions: {
+      executionCount: preToolUseCount + postToolUseCount,
+      blockedCount: hash % 3,
+      byEvent: [
+        { event: "PreToolUse", count: preToolUseCount },
+        { event: "PostToolUse", count: postToolUseCount }
+      ]
+    }
+  }
+}
+
+/** DEV mock for the lazy detail endpoint; deliberately long enough to exercise both scroll areas. */
+function makeMockProjectModeOperationalDetails(
+  scope: ProjectModeOperationalDetailScope
+): ProjectModeOperationalDetails {
+  const scopeSeed = [scope.projectId, scope.featureSlug, scope.nodeName].filter(Boolean).join("/")
+  const constraintFiles: ProjectModeConstraintFileStat[] = [
+    { path: "sys/project.md", traceCount: 13 },
+    ...Array.from({ length: 17 }, (_, index) => ({
+      path: `sys/rules/${String(index + 1).padStart(2, "0")}-${scopeSeed || "project"}.md`,
+      traceCount: Math.max(1, 12 - (index % 12))
+    }))
+  ]
+  const hookEvents = [
+    "PreToolUse",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "SessionStart",
+    "SessionEnd",
+    "Stop",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "Notification"
+  ].map((event, index) => ({ event, count: Math.max(1, 21 - index * 2) }))
+  return { constraintFiles, hookEvents }
+}
+
+function mergeMockOperationalStats(
+  items: Array<Pick<ProjectModeFeatureView, "systemConstraintReads" | "hookExecutions">>
+): ProjectModeOperationalStats {
+  const constraints = items
+    .map((item) => item.systemConstraintReads)
+    .filter((item): item is ProjectModeConstraintReadStats => Boolean(item))
+  const hooks = items
+    .map((item) => item.hookExecutions)
+    .filter((item): item is ProjectModeHookStats => Boolean(item))
+
+  const files = new Map<string, number>()
+  for (const constraint of constraints) {
+    for (const file of constraint.files) {
+      files.set(file.path, (files.get(file.path) ?? 0) + file.traceCount)
+    }
+  }
+  const hookEvents = new Map<string, number>()
+  for (const hook of hooks) {
+    for (const event of hook.byEvent) {
+      hookEvents.set(event.event, (hookEvents.get(event.event) ?? 0) + event.count)
+    }
+  }
+
+  return {
+    systemConstraintReads:
+      constraints.length > 0
+        ? {
+            traceCount: constraints.reduce((sum, item) => sum + item.traceCount, 0),
+            successfulReadCount: constraints.reduce(
+              (sum, item) => sum + item.successfulReadCount,
+              0
+            ),
+            distinctFileCount: files.size,
+            filesTruncated: constraints.some((item) => item.filesTruncated),
+            files: [...files.entries()]
+              .map(([path, traceCount]) => ({ path, traceCount }))
+              .sort((a, b) => b.traceCount - a.traceCount || a.path.localeCompare(b.path))
+          }
+        : null,
+    hookExecutions:
+      hooks.length > 0
+        ? {
+            executionCount: hooks.reduce((sum, item) => sum + item.executionCount, 0),
+            blockedCount: hooks.reduce((sum, item) => sum + item.blockedCount, 0),
+            byEvent: [...hookEvents.entries()]
+              .map(([event, count]) => ({ event, count }))
+              .sort((a, b) => b.count - a.count || a.event.localeCompare(b.event))
+          }
+        : null
   }
 }
 
@@ -8628,7 +8844,13 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     )
     project.features.forEach((feature, idx) => {
       feature.codeStats = featureStats[idx]
+      const operational = makeMockFeatureOperationalStats(project.projectId, feature.slug)
+      feature.systemConstraintReads = operational.systemConstraintReads
+      feature.hookExecutions = operational.hookExecutions
     })
+    const projectOperational = mergeMockOperationalStats(project.features)
+    project.systemConstraintReads = projectOperational.systemConstraintReads
+    project.hookExecutions = projectOperational.hookExecutions
   }
   const mockCreators: Array<
     Pick<
@@ -10604,6 +10826,10 @@ interface ProjectModeFeatureView {
   summary?: string
   /** This-range code adoption for the feature (sliced by harnessFeatureSlug); absent if no code data. */
   codeStats?: DashboardCodeStats | null
+  /** This-range successful system-constraint reads, deduplicated across workflow stages. */
+  systemConstraintReads?: ProjectModeConstraintReadStats | null
+  /** This-range runtime hook executions attributed to the feature. */
+  hookExecutions?: ProjectModeHookStats | null
 }
 
 interface ProjectModeSkillCount {
@@ -10688,6 +10914,10 @@ interface ProjectModeProjectView {
   features: ProjectModeFeatureView[]
   topSkills: ProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  /** This-range successful system-constraint reads, deduplicated across features/stages. */
+  systemConstraintReads?: ProjectModeConstraintReadStats | null
+  /** This-range runtime hook executions attributed to the project. */
+  hookExecutions?: ProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 
@@ -11309,7 +11539,9 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
       statusLabel: asOptionalString(f.overallStatusLabel),
       currentNodeStatusLabel: asOptionalString(f.currentNodeStatusLabel),
       summary: asOptionalString(f.summary),
-      codeStats: null
+      codeStats: null,
+      systemConstraintReads: null,
+      hookExecutions: null
     }
   })
   return {
@@ -11345,6 +11577,8 @@ function parseProjectModeSnapshotHit(hit: unknown): ProjectModeProjectView | nul
     features,
     topSkills: [],
     codeStats: null,
+    systemConstraintReads: null,
+    hookExecutions: null,
     // Filled with real per-range buckets when the page enriches usage/code; the
     // snapshot hit alone carries no per-turn attribution.
     stageBuckets: emptyStageBuckets()
@@ -12794,7 +13028,7 @@ async function fetchProjectModeAggregateCodeStats(
   }
 }
 
-async function fetchProjectModeProjectCodeStats(
+async function fetchProjectModeProjectMetrics(
   projectIds: string[],
   range: TimeRange,
   opts: OrgFilterOptions | undefined,
@@ -12803,62 +13037,128 @@ async function fetchProjectModeProjectCodeStats(
   byProject: Map<string, DashboardCodeStats>
   byFeature: Map<string, DashboardCodeStats>
   byProjectStage: Map<string, Record<StageBucket, DashboardCodeStats>>
+  operationalByProject: Map<string, ProjectModeOperationalStats>
+  operationalByFeature: Map<string, ProjectModeOperationalStats>
 }> {
   if (projectIds.length === 0) {
     return {
       byProject: new Map<string, DashboardCodeStats>(),
       byFeature: new Map(),
-      byProjectStage: new Map()
+      byProjectStage: new Map(),
+      operationalByProject: new Map(),
+      operationalByFeature: new Map()
     }
   }
 
-  // 同一个 perBucketAggs 既统计项目整体，又作为 by_feature 桶的子聚合按特性 slug 切片，
-  // 一次请求即可拿到项目 + 特性两个粒度的采纳明细（与 by_adapter→by_version 复用同理）。
+  // One event request carries code-adoption plus operational telemetry at both
+  // project and feature scope. Constraint summary documents are emitted once
+  // per Trace x stage, so the rollups cardinality-dedupe traceId instead of
+  // adding stage doc_counts (which would double-count a Trace spanning stages).
+  const scopedProjectIds = projectIds.slice(0, PROJECT_MODE_PROJECT_ID_LIMIT)
   const orgFilterClause = buildProjectModeOrgFilter(opts, access)
-  const raw = await fetchProjectModeCodeAggs(
-    projectIds,
+  const extraFilters = orgFilterClause ? [orgFilterClause] : []
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    scopedProjectIds,
     range,
-    (perBucketAggs, scopedProjectIds) => ({
+    extraFilters
+  )
+  const constraintFilters: Record<string, unknown>[] = [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    { terms: { "properties.harnessProjectId": scopedProjectIds } },
+    ...extraFilters
+  ]
+  const hookFilters: Record<string, unknown>[] = [
+    { term: { eventName: "hook.executed" } },
+    timeRangeFilter("eventTime", range),
+    { terms: { "properties.harnessProjectId": scopedProjectIds } },
+    ...extraFilters
+  ]
+  const projectOperationalAggs = buildProjectModeOperationalAggs(constraintFilters, hookFilters, {
+    dedupeConstraintTraces: true,
+    constraintFileLimit: 20,
+    hookEventLimit: 32
+  })
+  const featureOperationalAggs = buildProjectModeOperationalAggs(constraintFilters, hookFilters, {
+    dedupeConstraintTraces: true,
+    constraintFileLimit: 10,
+    hookEventLimit: 16
+  })
+  const raw = (await esQuery(getEsIndex("event"), {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } },
+          { bool: { filter: constraintFilters } },
+          { bool: { filter: hookFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: {
       by_project: {
         terms: { field: "properties.harnessProjectId", size: Math.max(1, scopedProjectIds.length) },
         aggs: {
           ...perBucketAggs,
+          ...projectOperationalAggs,
           by_feature: {
             terms: {
               field: "properties.harnessFeatureSlug",
               size: PROJECT_MODE_FEATURE_SLUG_LIMIT
             },
-            aggs: perBucketAggs
+            aggs: { ...perBucketAggs, ...featureOperationalAggs }
           },
           ...stageBucketCodeAggs(perBucketAggs)
         }
       }
-    }),
-    orgFilterClause ? [orgFilterClause] : []
-  )
+    }
+  })) as EsSearchResponse
   const projectAggs = asRecord(asRecord(raw).aggregations)
   const projectBuckets = asRecord(projectAggs.by_project).buckets
   const byProject = new Map<string, DashboardCodeStats>()
   const byFeature = new Map<string, DashboardCodeStats>()
   const byProjectStage = new Map<string, Record<StageBucket, DashboardCodeStats>>()
+  const operationalByProject = new Map<string, ProjectModeOperationalStats>()
+  const operationalByFeature = new Map<string, ProjectModeOperationalStats>()
   if (Array.isArray(projectBuckets)) {
     for (const bucket of projectBuckets) {
       const b = asRecord(bucket)
       const projectId = asString(b.key)
       if (!projectId) continue
-      byProject.set(projectId, normalizeCodeStatsFromContainer(b))
-      byProjectStage.set(projectId, parseStageBucketCodeStats(b))
+      const hasProjectCodeEvents =
+        asNumber(asRecord(b.code_gen).doc_count) > 0 ||
+        asNumber(asRecord(b.code_adopt_measured).doc_count) > 0
+      if (hasProjectCodeEvents) {
+        byProject.set(projectId, normalizeCodeStatsFromContainer(b))
+        byProjectStage.set(projectId, parseStageBucketCodeStats(b))
+      }
+      operationalByProject.set(projectId, parseProjectModeOperationalStats(b))
       const featureBuckets = asRecord(b.by_feature).buckets
       if (!Array.isArray(featureBuckets)) continue
       for (const featureBucket of featureBuckets) {
         const fb = asRecord(featureBucket)
         const slug = asString(fb.key)
         if (!slug) continue
-        byFeature.set(projectFeatureKey(projectId, slug), normalizeCodeStatsFromContainer(fb))
+        const key = projectFeatureKey(projectId, slug)
+        const hasFeatureCodeEvents =
+          asNumber(asRecord(fb.code_gen).doc_count) > 0 ||
+          asNumber(asRecord(fb.code_adopt_measured).doc_count) > 0
+        if (hasFeatureCodeEvents) {
+          byFeature.set(key, normalizeCodeStatsFromContainer(fb))
+        }
+        operationalByFeature.set(key, parseProjectModeOperationalStats(fb))
       }
     }
   }
-  return { byProject, byFeature, byProjectStage }
+  return {
+    byProject,
+    byFeature,
+    byProjectStage,
+    operationalByProject,
+    operationalByFeature
+  }
 }
 
 /** Add this-range trace/code metrics to current project snapshots. */
@@ -12873,7 +13173,7 @@ async function enrichProjectModeProjectViews(
   // so a project ranked high by 原始生成行数 still shows its adoption columns.
   const [usage, code] = await Promise.all([
     fetchProjectModePageUsage(projectIds, range, opts, access),
-    fetchProjectModeProjectCodeStats(projectIds, range, opts, access)
+    fetchProjectModeProjectMetrics(projectIds, range, opts, access)
   ])
   return projects.map((project) => ({
     ...project,
@@ -12882,14 +13182,23 @@ async function enrichProjectModeProjectViews(
     devAssociatedFeatureCount: usage.perProjectDevAssociatedFeatures.get(project.projectId) ?? 0,
     topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
     codeStats: code.byProject.get(project.projectId) ?? null,
+    systemConstraintReads:
+      code.operationalByProject.get(project.projectId)?.systemConstraintReads ?? null,
+    hookExecutions: code.operationalByProject.get(project.projectId)?.hookExecutions ?? null,
     stageBuckets: buildStageBuckets(
       usage.perProjectStageConversations.get(project.projectId),
       code.byProjectStage.get(project.projectId)
     ),
-    features: project.features.map((feature) => ({
-      ...feature,
-      codeStats: code.byFeature.get(projectFeatureKey(project.projectId, feature.slug)) ?? null
-    }))
+    features: project.features.map((feature) => {
+      const key = projectFeatureKey(project.projectId, feature.slug)
+      const operational = code.operationalByFeature.get(key)
+      return {
+        ...feature,
+        codeStats: code.byFeature.get(key) ?? null,
+        systemConstraintReads: operational?.systemConstraintReads ?? null,
+        hookExecutions: operational?.hookExecutions ?? null
+      }
+    })
   }))
 }
 
@@ -13380,11 +13689,13 @@ interface ProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
-/** One workflow node (stage) breakdown row for a feature: conversations + code adoption. */
+/** One workflow node (stage) breakdown row for a feature. */
 interface ProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: ProjectModeConstraintReadStats | null
+  hookExecutions?: ProjectModeHookStats | null
   /** Status-at-turn-time sub-breakdown within this stage (进行中/已完成/...). */
   byStatus: ProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因），口径同列表行。 */
@@ -13419,6 +13730,156 @@ const NODE_STATUS_TERMS_SIZE = 16
  * bucket (reusing the shared stage×skill 未归因 label for口径一致性).
  */
 const UNATTRIBUTED_NODE_NAME = STAGE_BUCKET_LABELS.unattributed
+
+interface ProjectModeOperationalDetailScope {
+  projectId: string
+  featureSlug?: string
+  nodeName?: string
+}
+
+const PROJECT_MODE_OPERATIONAL_DETAIL_PAGE_SIZE = 500
+
+function harnessNodeNameEventFilterClause(nodeName: string): Record<string, unknown> {
+  if (nodeName === UNATTRIBUTED_NODE_NAME) {
+    return {
+      bool: { must_not: { exists: { field: "properties.harnessNodeName" } } }
+    }
+  }
+  return { term: { "properties.harnessNodeName": nodeName } }
+}
+
+async function fetchAllProjectModeConstraintFiles(
+  filters: Record<string, unknown>[]
+): Promise<ProjectModeConstraintFileStat[]> {
+  const files: ProjectModeConstraintFileStat[] = []
+  const seenAfterKeys = new Set<string>()
+  let after: Record<string, unknown> | undefined
+
+  for (;;) {
+    const raw = (await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: { bool: { filter: filters } },
+      aggs: {
+        items: {
+          composite: {
+            size: PROJECT_MODE_OPERATIONAL_DETAIL_PAGE_SIZE,
+            sources: [
+              {
+                path: { terms: { field: "properties.constraintFiles" } }
+              }
+            ],
+            ...(after ? { after } : {})
+          },
+          aggs: {
+            trace_count: { cardinality: { field: "properties.traceId" } }
+          }
+        }
+      }
+    })) as EsSearchResponse
+    const items = asRecord(asRecord(raw.aggregations).items)
+    const buckets = items.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const path = asString(asRecord(b.key).path)
+      if (!path) continue
+      const traceCount = asNumber(asRecord(b.trace_count).value)
+      files.push({ path, traceCount: traceCount > 0 ? traceCount : asNumber(b.doc_count) })
+    }
+
+    const nextAfter = asRecord(items.after_key)
+    if (Object.keys(nextAfter).length === 0) break
+    const signature = JSON.stringify(nextAfter)
+    if (seenAfterKeys.has(signature)) break
+    seenAfterKeys.add(signature)
+    after = nextAfter
+  }
+
+  return files.sort((a, b) => b.traceCount - a.traceCount || a.path.localeCompare(b.path))
+}
+
+async function fetchAllProjectModeHookEvents(
+  filters: Record<string, unknown>[]
+): Promise<ProjectModeHookEventStat[]> {
+  const events: ProjectModeHookEventStat[] = []
+  const seenAfterKeys = new Set<string>()
+  let after: Record<string, unknown> | undefined
+
+  for (;;) {
+    const raw = (await esQuery(getEsIndex("event"), {
+      size: 0,
+      query: { bool: { filter: filters } },
+      aggs: {
+        items: {
+          composite: {
+            size: PROJECT_MODE_OPERATIONAL_DETAIL_PAGE_SIZE,
+            sources: [
+              {
+                event: { terms: { field: "properties.event" } }
+              }
+            ],
+            ...(after ? { after } : {})
+          }
+        }
+      }
+    })) as EsSearchResponse
+    const items = asRecord(asRecord(raw.aggregations).items)
+    const buckets = items.buckets
+    if (!Array.isArray(buckets) || buckets.length === 0) break
+
+    for (const bucket of buckets) {
+      const b = asRecord(bucket)
+      const event = asString(asRecord(b.key).event)
+      if (event) events.push({ event, count: asNumber(b.doc_count) })
+    }
+
+    const nextAfter = asRecord(items.after_key)
+    if (Object.keys(nextAfter).length === 0) break
+    const signature = JSON.stringify(nextAfter)
+    if (seenAfterKeys.has(signature)) break
+    seenAfterKeys.add(signature)
+    after = nextAfter
+  }
+
+  return events.sort((a, b) => b.count - a.count || a.event.localeCompare(b.event))
+}
+
+/** Complete operational lists are fetched lazily so the project list query stays compact. */
+async function fetchProjectModeOperationalDetails(
+  scope: ProjectModeOperationalDetailScope,
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<ProjectModeOperationalDetails> {
+  const access = requireDashboardProjectModeAccess()
+  const projectId = typeof scope?.projectId === "string" ? scope.projectId.trim() : ""
+  const featureSlug = typeof scope?.featureSlug === "string" ? scope.featureSlug.trim() : ""
+  const nodeName = typeof scope?.nodeName === "string" ? scope.nodeName.trim() : ""
+  if (!projectId) return { constraintFiles: [], hookEvents: [] }
+
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+  const contextFilters: Record<string, unknown>[] = [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { term: { "properties.harnessProjectId": projectId } },
+    ...(featureSlug ? [{ term: { "properties.harnessFeatureSlug": featureSlug } }] : []),
+    ...(nodeName ? [harnessNodeNameEventFilterClause(nodeName)] : [])
+  ]
+  const constraintFilters: Record<string, unknown>[] = [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    ...contextFilters
+  ]
+  const hookFilters: Record<string, unknown>[] = [
+    { term: { eventName: "hook.executed" } },
+    timeRangeFilter("eventTime", range),
+    ...contextFilters
+  ]
+  const [constraintFiles, hookEvents] = await Promise.all([
+    fetchAllProjectModeConstraintFiles(constraintFilters),
+    fetchAllProjectModeHookEvents(hookFilters)
+  ])
+  return { constraintFiles, hookEvents }
+}
 
 /**
  * Trace filter clause scoping to one stage by name. The 未归因 stage is the
@@ -13465,6 +13926,52 @@ function codeNodeStatusAgg(perBucketAggs: Record<string, unknown>): Record<strin
           aggs: perBucketAggs
         },
         ...stageBucketCodeAggs(perBucketAggs)
+      }
+    }
+  }
+}
+
+/**
+ * Feature-stage event aggregation shared by code-adoption, successful system-
+ * constraint reads and hook executions. Keeping all event-side metrics under
+ * one `by_node` tree avoids an extra ES request (or a per-read event scan) when
+ * the user expands a feature's stage breakdown.
+ */
+function featureNodeEventAgg(
+  perBucketAggs: Record<string, unknown>,
+  codeGenFilters: Record<string, unknown>[],
+  codeAdoptFilters: Record<string, unknown>[],
+  constraintFilters: Record<string, unknown>[],
+  hookFilters: Record<string, unknown>[]
+): Record<string, unknown> {
+  const codeEventFilter = {
+    bool: {
+      should: [{ bool: { filter: codeGenFilters } }, { bool: { filter: codeAdoptFilters } }],
+      minimum_should_match: 1
+    }
+  }
+  return {
+    by_node: {
+      terms: {
+        field: "properties.harnessNodeName",
+        size: PROJECT_MODE_FEATURE_SLUG_LIMIT,
+        missing: UNATTRIBUTED_NODE_NAME
+      },
+      aggs: {
+        ...perBucketAggs,
+        // Scope status rows to code events. Otherwise hook/constraint documents
+        // would create misleading zero-code status rows in the existing UI.
+        code_status_scope: {
+          filter: codeEventFilter,
+          aggs: {
+            by_status: {
+              terms: { field: "properties.harnessNodeStatus", size: NODE_STATUS_TERMS_SIZE },
+              aggs: perBucketAggs
+            }
+          }
+        },
+        ...stageBucketCodeAggs(perBucketAggs),
+        ...buildProjectModeOperationalAggs(constraintFilters, hookFilters)
       }
     }
   }
@@ -13517,10 +14024,19 @@ function parseCodeNodeBuckets(aggregations: unknown): {
       const b = asRecord(bucket)
       const nodeName = asString(b.key)
       if (!nodeName) continue
-      codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
-      codeStageByNode.set(nodeName, parseStageBucketCodeStats(b))
+      const scopedCodeEvents = asRecord(b.code_status_scope)
+      // The combined feature query also contains constraint/hook-only buckets.
+      // Do not turn those into misleading all-zero code stats. Legacy callers
+      // have no code_status_scope and retain their original parsing behavior.
+      if (!("code_status_scope" in b) || asNumber(scopedCodeEvents.doc_count) > 0) {
+        codeByNode.set(nodeName, normalizeCodeStatsFromContainer(b))
+        codeStageByNode.set(nodeName, parseStageBucketCodeStats(b))
+      }
       const statusMap = new Map<string, DashboardCodeStats>()
-      const statusBuckets = asRecord(b.by_status).buckets
+      const scopedStatusBuckets = asRecord(scopedCodeEvents.by_status).buckets
+      const statusBuckets = Array.isArray(scopedStatusBuckets)
+        ? scopedStatusBuckets
+        : asRecord(b.by_status).buckets
       if (Array.isArray(statusBuckets)) {
         for (const sb of statusBuckets) {
           const s = asRecord(sb)
@@ -13534,18 +14050,52 @@ function parseCodeNodeBuckets(aggregations: unknown): {
   return { codeByNode, codeStatusByNode, codeStageByNode }
 }
 
+/** Parse the non-code metrics carried by the combined feature-stage event agg. */
+function parseFeatureOperationalNodeBuckets(aggregations: unknown): {
+  constraintReadsByNode: Map<string, ProjectModeConstraintReadStats>
+  hookExecutionsByNode: Map<string, ProjectModeHookStats>
+} {
+  const constraintReadsByNode = new Map<string, ProjectModeConstraintReadStats>()
+  const hookExecutionsByNode = new Map<string, ProjectModeHookStats>()
+  const buckets = asRecord(asRecord(aggregations).by_node).buckets
+  if (!Array.isArray(buckets)) return { constraintReadsByNode, hookExecutionsByNode }
+
+  for (const bucket of buckets) {
+    const b = asRecord(bucket)
+    const nodeName = asString(b.key)
+    if (!nodeName) continue
+    const operational = parseProjectModeOperationalStats(b)
+    if (operational.systemConstraintReads) {
+      constraintReadsByNode.set(nodeName, operational.systemConstraintReads)
+    }
+    if (operational.hookExecutions) {
+      hookExecutionsByNode.set(nodeName, operational.hookExecutions)
+    }
+  }
+
+  return { constraintReadsByNode, hookExecutionsByNode }
+}
+
 /** Merge parsed trace + event node maps into the sorted stage breakdown (with status sub-rows). */
 function buildFeatureNodeBreakdown(
   trace: ReturnType<typeof parseTraceNodeBuckets>,
-  code: ReturnType<typeof parseCodeNodeBuckets>
+  code: ReturnType<typeof parseCodeNodeBuckets>,
+  operational?: ReturnType<typeof parseFeatureOperationalNodeBuckets>
 ): ProjectModeFeatureNode[] {
-  const nodeNames = new Set<string>([...trace.conversationByNode.keys(), ...code.codeByNode.keys()])
+  const nodeNames = new Set<string>([
+    ...trace.conversationByNode.keys(),
+    ...code.codeByNode.keys(),
+    ...(operational?.constraintReadsByNode.keys() ?? []),
+    ...(operational?.hookExecutionsByNode.keys() ?? [])
+  ])
   return (
     [...nodeNames]
       .map((nodeName) => ({
         nodeName,
         conversationCount: trace.conversationByNode.get(nodeName) ?? 0,
         codeStats: code.codeByNode.get(nodeName) ?? null,
+        systemConstraintReads: operational?.constraintReadsByNode.get(nodeName) ?? null,
+        hookExecutions: operational?.hookExecutionsByNode.get(nodeName) ?? null,
         byStatus: buildNodeStatusBreakdown(
           trace.convStatusByNode.get(nodeName),
           code.codeStatusByNode.get(nodeName)
@@ -13598,23 +14148,65 @@ async function fetchProjectModeFeatureNodes(
     },
     aggs: traceNodeStatusAgg()
   }
-  const traceRaw = (await esQuery(getEsIndex("trace"), traceBody)) as EsSearchResponse
-  const traceParsed = parseTraceNodeBuckets(
-    (traceRaw as unknown as Record<string, unknown>).aggregations
-  )
-
-  // 2) code adoption per stage (+ status sub-breakdown) — event index, scoped to feature.
-  // Mirror fetchProjectModeProjectCodeStats: carry the same org/access filter so
-  // a non-admin never sees other orgs' code events for this project+feature.
+  // 2) Code adoption + operational telemetry share one event-side by-stage
+  // aggregation. Mirror fetchProjectModeProjectMetrics' org/access filter so
+  // a non-admin never sees another org's events for this project+feature.
   const orgFilterClause = buildProjectModeOrgFilter(undefined, access)
-  const codeRaw = await fetchProjectModeCodeAggs([normalizedProjectId], range, codeNodeStatusAgg, [
+  const eventContextFilters: Record<string, unknown>[] = [
     ...(orgFilterClause ? [orgFilterClause] : []),
+    { term: { "properties.harnessProjectId": normalizedProjectId } },
     { term: { "properties.harnessFeatureSlug": normalizedFeatureSlug } }
+  ]
+  const { codeGenFilters, codeAdoptFilters, perBucketAggs } = buildProjectModeCodeAggs(
+    null,
+    range,
+    eventContextFilters
+  )
+  const constraintFilters: Record<string, unknown>[] = [
+    { term: { eventName: SYSTEM_CONSTRAINT_READ_SUMMARY_EVENT } },
+    timeRangeFilter("eventTime", range),
+    ...eventContextFilters
+  ]
+  const hookFilters: Record<string, unknown>[] = [
+    { term: { eventName: "hook.executed" } },
+    timeRangeFilter("eventTime", range),
+    ...eventContextFilters
+  ]
+  const eventBody = {
+    size: 0,
+    query: {
+      bool: {
+        should: [
+          { bool: { filter: codeGenFilters } },
+          { bool: { filter: codeAdoptFilters } },
+          { bool: { filter: constraintFilters } },
+          { bool: { filter: hookFilters } }
+        ],
+        minimum_should_match: 1
+      }
+    },
+    aggs: featureNodeEventAgg(
+      perBucketAggs,
+      codeGenFilters,
+      codeAdoptFilters,
+      constraintFilters,
+      hookFilters
+    )
+  }
+
+  // Trace and event indices are independent; query them concurrently so adding
+  // operational metrics does not add another serial round trip to stage expand.
+  const [traceRaw, eventRaw] = await Promise.all([
+    esQuery(getEsIndex("trace"), traceBody) as Promise<EsSearchResponse>,
+    esQuery(getEsIndex("event"), eventBody) as Promise<EsSearchResponse>
   ])
-  const codeParsed = parseCodeNodeBuckets(asRecord(codeRaw).aggregations)
+  const traceParsed = parseTraceNodeBuckets(traceRaw.aggregations)
+  const eventAggregations = eventRaw.aggregations
+  const codeParsed = parseCodeNodeBuckets(eventAggregations)
+  const operationalParsed = parseFeatureOperationalNodeBuckets(eventAggregations)
 
   // 3) union of stages seen in either index; keep conversation-busiest first.
-  return buildFeatureNodeBreakdown(traceParsed, codeParsed)
+  return buildFeatureNodeBreakdown(traceParsed, codeParsed, operationalParsed)
 }
 
 /** DEV mock: a deterministic per-node breakdown derived from project/feature seed. */
@@ -13639,7 +14231,7 @@ function makeMockProjectModeFeatureNodes(
     pushedCommitCount: 3
   })
   const split = splitMockCodeStatsAcrossFeatures(base, nodeNames.length)
-  const nodes = nodeNames.map((nodeName, i) => {
+  const nodes: ProjectModeFeatureNode[] = nodeNames.map((nodeName, i) => {
     // Unsigned shift (>>>) so a high-bit seed never yields a negative count; +1 so
     // every mock stage shows a non-empty status sub-breakdown.
     const conversationCount = 1 + ((h >>> (i * 4)) % 8)
@@ -13648,10 +14240,29 @@ function makeMockProjectModeFeatureNodes(
     // Split the stage's code stats across its two statuses so the mock shows the
     // full four-rate breakdown (with numerator/denominator) under each status.
     const statusSplit = codeStats ? splitMockCodeStatsAcrossFeatures(codeStats, 2) : []
+    const successfulReadCount = conversationCount * 2 + i
     return {
       nodeName,
       conversationCount,
       codeStats,
+      systemConstraintReads: {
+        traceCount: conversationCount,
+        successfulReadCount,
+        distinctFileCount: 2,
+        filesTruncated: false,
+        files: [
+          { path: "sys/project.md", traceCount: conversationCount },
+          { path: `sys/stages/${i + 1}.md`, traceCount: Math.max(1, conversationCount - 1) }
+        ]
+      },
+      hookExecutions: {
+        executionCount: conversationCount * 3,
+        blockedCount: i === 2 ? 1 : 0,
+        byEvent: [
+          { event: "PreToolUse", count: conversationCount * 2 },
+          { event: "PostToolUse", count: conversationCount }
+        ]
+      },
       byStatus: [
         { status: "进行中", conversationCount: inProgress, codeStats: statusSplit[0] ?? null },
         {
@@ -13672,6 +14283,8 @@ function makeMockProjectModeFeatureNodes(
     nodeName: UNATTRIBUTED_NODE_NAME,
     conversationCount: unattributedConversations,
     codeStats: unattributedCode,
+    systemConstraintReads: null,
+    hookExecutions: null,
     byStatus: [],
     stageBuckets: {
       pluginConstrained: { conversationCount: 0, codeStats: null },
@@ -13942,6 +14555,33 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         }
       } catch (e) {
         console.error("[Dashboard] projectModeFeatureNodes error:", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  _ipcMain.handle(
+    "dashboard:projectModeOperationalDetails",
+    async (
+      _,
+      scope: ProjectModeOperationalDetailScope,
+      range: TimeRange,
+      opts?: OrgFilterOptions
+    ) => {
+      if (import.meta.env.DEV) {
+        return {
+          success: true,
+          data: makeMockProjectModeOperationalDetails(scope ?? { projectId: "" })
+        }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectModeOperationalDetails(scope, range, opts)
+        }
+      } catch (e) {
+        console.error("[Dashboard] projectModeOperationalDetails error:", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }

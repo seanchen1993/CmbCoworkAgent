@@ -64,6 +64,7 @@ import {
   type PluginSkillSourceRef
 } from "../../utils/skill-source"
 import { setAdoptionContext, clearAdoptionContext } from "../../services/adoption-tracker"
+import { flushSystemConstraintReadSummaries } from "../../services/system-constraint-read-reporter"
 import { sanitizeTraceForCloudUpload } from "./sanitizer"
 import { buildSkillEvalTraceExtension } from "../skill-eval/documents"
 import {
@@ -82,6 +83,7 @@ import {
 // ─────────────────────────────────────────────────────────
 
 let _reporter: ITraceReporter = new NoopTraceReporter()
+const pendingTraceReports = new Set<Promise<void>>()
 
 /** Replace the global reporter (call at app startup for remote upload). */
 export function setTraceReporter(reporter: ITraceReporter): void {
@@ -90,6 +92,55 @@ export function setTraceReporter(reporter: ITraceReporter): void {
 
 export function getTraceReporter(): ITraceReporter {
   return _reporter
+}
+
+function reportTraceInBackground(trace: AgentTrace): void {
+  const reporter = _reporter
+  const reportTask = Promise.resolve()
+    .then(() => reporter.report(sanitizeTraceForCloudUpload(trace)))
+    .catch((error) => {
+      console.warn("[Tracer] Reporter.report() threw:", error)
+    })
+  pendingTraceReports.add(reportTask)
+  void reportTask.finally(() => {
+    pendingTraceReports.delete(reportTask)
+  })
+}
+
+export function hasPendingTraceReports(): boolean {
+  return pendingTraceReports.size > 0
+}
+
+/** Wait for reports already scheduled by completed traces, bounded for app shutdown. */
+export async function flushPendingTraceReports(timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs)
+
+  while (pendingTraceReports.size > 0) {
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) {
+      console.warn(
+        `[Tracer] Timed out waiting for ${pendingTraceReports.size} pending trace report(s)`
+      )
+      return false
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const completed = await Promise.race([
+      Promise.allSettled(Array.from(pendingTraceReports)).then(() => true as const),
+      new Promise<false>((resolve) => {
+        timeoutId = setTimeout(() => resolve(false), remainingMs)
+      })
+    ])
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+    if (!completed) {
+      console.warn(
+        `[Tracer] Timed out waiting for ${pendingTraceReports.size} pending trace report(s)`
+      )
+      return false
+    }
+  }
+
+  return true
 }
 
 // ─────────────────────────────────────────────────────────
@@ -325,6 +376,7 @@ export class TraceCollector {
   private toolNodeByCallId = new Map<string, string>()
   private readonly rootNodeId: string
   private terminalNodeAdded = false
+  private finishPromise: Promise<AgentTrace> | undefined
 
   /** The step currently being built (between beginStep / endStep). */
   private currentStepIndex = 0
@@ -735,7 +787,14 @@ export class TraceCollector {
    * Finalize the trace, write to disk, and (optionally) report remotely.
    * Safe to call multiple times — only the first call takes effect.
    */
-  async finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+  finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
+    if (!this.finishPromise) {
+      this.finishPromise = this.finishOnce(outcome, errorMessage)
+    }
+    return this.finishPromise
+  }
+
+  private async finishOnce(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
     const endedAt = nowIsoLocal()
     const durationMs = Date.now() - new Date(this.startedAt).getTime()
     const totalToolCalls = this.getTotalToolCalls()
@@ -911,15 +970,16 @@ export class TraceCollector {
     const traceWithEval: AgentTrace = skillEval ? { ...trace, skillEval } : trace
 
     try {
+      try {
+        flushSystemConstraintReadSummaries(this.traceId, outcome)
+      } catch (error) {
+        console.warn("[Tracer] Failed to flush system-constraint read telemetry:", error)
+      }
       writeTraceFile(traceWithEval)
 
-      // Fire-and-forget: trace upload is a side-channel operation and must
-      // never block the main agent flow. Errors are logged and swallowed.
-      void Promise.resolve()
-        .then(() => _reporter.report(sanitizeTraceForCloudUpload(traceWithEval)))
-        .catch((e) => {
-          console.warn("[Tracer] Reporter.report() threw:", e)
-        })
+      // Keep reporting off the main run path, but track it so graceful app
+      // shutdown can wait for already-scheduled uploads within a hard bound.
+      reportTraceInBackground(traceWithEval)
     } finally {
       // A child trace may finish in the background after a continuation has
       // installed a newer context on the same worker thread. Only clear the

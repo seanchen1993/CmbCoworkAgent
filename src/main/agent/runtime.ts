@@ -4692,6 +4692,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessAdapterVersion,
     harnessNodeName,
     harnessNodeStatus,
+    traceId: traceContext?.traceId,
+    rootTraceId: traceContext?.rootTraceId,
+    rootThreadId: traceContext?.rootThreadId,
     projectCode,
     projectDir,
     onFileMutation,
@@ -5367,6 +5370,7 @@ The workspace root is: ${fileRoot}`
               disableMemoryInjection: restrictedRole,
               memoryEnabled: memoryEnabledForThread,
               agentMode: "normal",
+              traceContext: subagentOptions.traceContext,
               disableSubagents: true,
               // agentType-resolved tool policy. Cuts the disallowed tools and
               // enforces the shell policy via the same filesystemAccess path
@@ -5394,6 +5398,20 @@ The workspace root is: ${fileRoot}`
               onHookResult,
               onFailureFuseNotice,
               hookTurnId,
+              pluginRoot,
+              pluginId,
+              pluginName,
+              pluginWorkspace,
+              featureId,
+              isHarnessProjectSession,
+              harnessProjectId,
+              harnessAdapterName,
+              harnessAdapterVersion,
+              harnessNodeName,
+              harnessNodeStatus,
+              projectCode,
+              projectDir,
+              pluginOutputDir,
               additionalTools: subagentOptions.additionalTools,
               // Subagents SHARING the workspace share the parent thread's tool-
               // concurrency queue so their file writes serialize across the run (no
@@ -5785,6 +5803,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         workerRoutingResult?.resolvedTier ?? "premium",
         workerRoutingResult?.layer !== "pinned"
       )
+      let workerRuntimeTraceContext = traceContext
       if (traceContext) {
         workerTracer = createTraceCollectorSafely(
           workerInput.workerThreadId,
@@ -5814,6 +5833,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           },
           "CoordinatorWorker"
         )
+        workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
@@ -5945,6 +5965,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
@@ -6018,6 +6039,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
@@ -6072,6 +6094,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice

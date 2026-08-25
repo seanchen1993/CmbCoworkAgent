@@ -468,10 +468,10 @@ interface DashboardUserListItem {
   count: number
   lastActiveAt?: string
   avgDurationMs: number
-  totalToolCalls: number
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  codeStats: DashboardCodeStats | null
 }
 
 interface DashboardUserListData {
@@ -548,6 +548,8 @@ interface DashboardUserDetail {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
+  /** 当前时间范围内该用户的代码生成、Commit 采纳与 Push 入库统计。 */
+  codeStats: DashboardCodeStats | null
   bySkill: Array<{ skill: string; count: number }>
   byModel: Array<{ model: string; count: number }>
   byOutcome: Array<{ outcome: string; count: number }>
@@ -592,6 +594,9 @@ interface DashboardProjectModeFeature {
   statusLabel?: string
   currentNodeStatusLabel?: string
   summary?: string
+  codeStats?: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
 }
 
 interface DashboardProjectModeSkillCount {
@@ -670,6 +675,8 @@ interface DashboardProjectModeProject {
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
   stageBuckets: DashboardStageBuckets
 }
 
@@ -822,10 +829,31 @@ interface DashboardProjectModeNodeStatus {
   codeStats: DashboardCodeStats | null
 }
 
+interface DashboardProjectModeConstraintReadStats {
+  traceCount: number
+  successfulReadCount: number
+  distinctFileCount: number
+  filesTruncated: boolean
+  files: Array<{ path: string; traceCount: number }>
+}
+
+interface DashboardProjectModeHookStats {
+  executionCount: number
+  blockedCount: number
+  byEvent: Array<{ event: string; count: number }>
+}
+
+interface DashboardProjectModeOperationalDetails {
+  constraintFiles: Array<{ path: string; traceCount: number }>
+  hookEvents: Array<{ event: string; count: number }>
+}
+
 interface DashboardProjectModeFeatureNode {
   nodeName: string
   conversationCount: number
   codeStats: DashboardCodeStats | null
+  systemConstraintReads?: DashboardProjectModeConstraintReadStats | null
+  hookExecutions?: DashboardProjectModeHookStats | null
   byStatus: DashboardProjectModeNodeStatus[]
   /** Stage×skill 三桶拆分（插件约束（Harness）/ VibeCoding / 未归因）。 */
   stageBuckets: DashboardStageBuckets
@@ -2377,6 +2405,15 @@ interface CustomAPI {
       featureSlug: string,
       range: { from: string; to: string }
     ) => Promise<{ success: boolean; data?: DashboardProjectModeFeatureNode[]; error?: string }>
+    projectModeOperationalDetails: (
+      scope: { projectId: string; featureSlug?: string; nodeName?: string },
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ) => Promise<{
+      success: boolean
+      data?: DashboardProjectModeOperationalDetails
+      error?: string
+    }>
     pluginAggregate: (
       adapterName: string,
       range: { from: string; to: string }
