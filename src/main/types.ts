@@ -651,6 +651,8 @@ export interface HookCatalogPageInput {
   /** Latest-wins namespace scoped by the main process to the calling renderer. */
   requestScope: string
   workspacePath?: string
+  /** Optional caller revision used to reuse a worker snapshot across summary and detail reads. */
+  revision?: string
   /** Opaque continuation returned by the previous page. */
   cursor?: string
   /** Requested rows. Clamped to the catalog's hard page limit. */
@@ -675,6 +677,8 @@ export interface HookCatalogPage {
   nextCursor?: string
   /** Total projected entries retained in this bounded snapshot. */
   totalEntries: number
+  /** Enabled entries in the whole snapshot, independent of the current page. */
+  enabledEntries: number
   /** True only when source data was omitted by a hard safety cap. */
   truncated: boolean
   truncatedReasons: string[]
@@ -1060,6 +1064,8 @@ export interface SkillPluginCatalogPage {
   disabledSkillIds: string[]
   cursor: string | null
   total: number
+  /** Enabled skills in the whole skills snapshot; zero for plugin-only projections. */
+  enabledSkillCount: number
   truncated: boolean
   truncatedReasons: string[]
   stats: SkillPluginCatalogPageStats

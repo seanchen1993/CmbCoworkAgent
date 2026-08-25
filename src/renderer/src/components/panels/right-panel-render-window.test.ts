@@ -33,13 +33,36 @@ describe("right panel render windows", () => {
     )
   })
 
-  it("does not refresh collapsed Skills or Plugins sections", () => {
+  it("loads bounded header summaries without hydrating collapsed detail sections", () => {
     const source = readFileSync(new URL("./RightPanel.tsx", import.meta.url), "utf8").replace(
       /\r\n/g,
       "\n"
     )
-    expect(source).toContain("if (!skillsOpen) return undefined\n    void loadSkillCatalog()")
-    expect(source).toContain("if (!pluginsOpen) return undefined\n    const requestId")
+    expect(source).toContain("if (!skillsOpen) return undefined")
+    expect(source).toContain("if (!pluginsOpen) return undefined")
+    expect(source).toContain("refreshSkillSummary")
+    expect(source).toContain("refreshPluginSummary")
+    expect(source).toContain("refreshHookSummary")
+    expect(source).toContain("await refreshPluginSummary()")
+    expect(source).toContain("await refreshSkillSummary()")
+    expect(source).toContain("catalogSummaryWarmupRef.current.then")
+    expect(source).toContain("limit: 1")
+    expect(source).toContain("badge !== undefined && badge !== null")
+    expect(source).toContain("getSkillCatalogRevision(pluginVersion)")
+    expect(source).toContain("getGlobalHookCatalogRevision()")
+    expect(source).toContain("getWorkspaceHookCatalogRevision(workspacePath)")
+    expect(source).toContain(
+      "normalizeWorkspaceFileKey(data.workspacePath) === workspaceKey"
+    )
+    expect(source).toContain("RIGHT_PANEL_HOOK_REFRESH_DEBOUNCE_MS")
+    expect(source).not.toContain("window.api.lsp.getStatus(")
+    expect(source).not.toContain(
+      "workspaceFileSummaryReady || workspaceFiles.length > 0"
+    )
+    expect(source).not.toContain("window.api.skills.list()")
+    expect(source).not.toContain("window.api.skills.listPlugins()")
+    expect(source).not.toContain("window.api.plugins.list()")
     expect(source).not.toContain("badge={hooks.filter((h) => h.enabled).length}")
+    expect(source).not.toContain("<HooksContent onChange=")
   })
 })

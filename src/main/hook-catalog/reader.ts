@@ -12,7 +12,7 @@ import type { HookConfig, HookInjectUserContext, HookOnBlockConfig } from "../ho
 import { isSupportedHookEvent } from "../hooks/types"
 import { parseSkillFrontmatter, parseSkillNameFromFrontmatterYaml } from "../skills/frontmatter"
 import {
-  isDiscoveredSkillDisabled,
+  getDiscoveredSkillId,
   resolveDisabledSkillIds
 } from "../skills/ids"
 import type { DiscoveredSkill } from "../skills/discovery"
@@ -73,7 +73,9 @@ interface BuildContext {
 
 interface CatalogSnapshot {
   id: string
+  key?: string
   entries: Entry[]
+  enabledEntries: number
   truncated: boolean
   truncatedReasons: string[]
   stats: HookCatalogPageStats
@@ -90,6 +92,7 @@ interface SkillSource {
 }
 
 const snapshots = new Map<string, CatalogSnapshot>()
+const snapshotIdByKey = new Map<string, string>()
 let nextSnapshotId = 1
 
 export class HookCatalogCancelledError extends Error {
@@ -120,15 +123,31 @@ function markTruncated(context: BuildContext, reason: string): void {
   context.truncatedReasons.add(reason)
 }
 
+function deleteSnapshot(id: string): void {
+  const snapshot = snapshots.get(id)
+  if (snapshot?.key && snapshotIdByKey.get(snapshot.key) === id) {
+    snapshotIdByKey.delete(snapshot.key)
+  }
+  snapshots.delete(id)
+}
+
 function trimExpiredSnapshots(): void {
   const now = Date.now()
   for (const [id, snapshot] of snapshots) {
-    if (snapshot.expiresAt <= now) snapshots.delete(id)
+    if (snapshot.expiresAt <= now) deleteSnapshot(id)
   }
+  while (snapshots.size > MAX_SNAPSHOTS) {
+    const oldest = snapshots.keys().next().value as string | undefined
+    if (!oldest) break
+    deleteSnapshot(oldest)
+  }
+}
+
+function reserveSnapshotSlot(): void {
   while (snapshots.size >= MAX_SNAPSHOTS) {
     const oldest = snapshots.keys().next().value as string | undefined
     if (!oldest) break
-    snapshots.delete(oldest)
+    deleteSnapshot(oldest)
   }
 }
 
@@ -831,6 +850,20 @@ function disabledSkillIds(
   return new Set(resolveDisabledSkillIds(entries, globalSkills))
 }
 
+function isDiscoveredSkillIdDisabled(
+  skill: DiscoveredSkill,
+  disabledIds: ReadonlySet<string>
+): boolean {
+  const id = getDiscoveredSkillId(skill)
+  if (!id) return false
+  let separator = id.indexOf("/")
+  while (separator >= 0) {
+    if (disabledIds.has(id.slice(0, separator))) return true
+    separator = id.indexOf("/", separator + 1)
+  }
+  return disabledIds.has(id)
+}
+
 function skillFrontmatterHooks(
   skill: DiscoveredSkill,
   content: string,
@@ -927,7 +960,7 @@ function parseAllSkillHooks(
   for (const { source: skillSource, skills } of globalDiscovered) {
     for (const skill of skills) {
       checkCancelled(context)
-      if (isDiscoveredSkillDisabled(skill, disabled)) continue
+      if (isDiscoveredSkillIdDisabled(skill, disabled)) continue
       const key = process.platform === "win32" ? skill.rootDir.toLowerCase() : skill.rootDir
       if (seen.has(key)) continue
       seen.add(key)
@@ -1004,7 +1037,30 @@ function parseWorkspaceHooks(source: HookCatalogSourceConfig, context: BuildCont
   }
 }
 
-function buildSnapshot(source: HookCatalogSourceConfig, cancelFlag?: Int32Array): CatalogSnapshot {
+function snapshotKey(source: HookCatalogSourceConfig, revision: string): string {
+  return JSON.stringify([
+    source.openworkDir,
+    source.globalHooksPath,
+    source.pluginsStorePath,
+    source.disabledSkillsPath,
+    source.skillSourceDirs,
+    source.workspacePath ?? "",
+    revision
+  ])
+}
+
+function buildSnapshot(
+  source: HookCatalogSourceConfig,
+  input: HookCatalogPageInput,
+  cancelFlag?: Int32Array
+): CatalogSnapshot {
+  trimExpiredSnapshots()
+  const key = input.revision ? snapshotKey(source, input.revision) : undefined
+  const cachedId = key ? snapshotIdByKey.get(key) : undefined
+  const cached = cachedId ? snapshots.get(cachedId) : undefined
+  if (cached && cached.expiresAt > Date.now()) return cached
+  reserveSnapshotSlot()
+
   const startedAt = performance.now()
   const context: BuildContext = {
     cancelFlag,
@@ -1018,11 +1074,15 @@ function buildSnapshot(source: HookCatalogSourceConfig, cancelFlag?: Int32Array)
   parsePluginHooks(plugins, context)
   parseAllSkillHooks(source, plugins, context)
   checkCancelled(context)
-  trimExpiredSnapshots()
   const id = `${Date.now().toString(36)}-${nextSnapshotId++}`
   const snapshot: CatalogSnapshot = {
     id,
+    key,
     entries: context.entries,
+    enabledEntries: context.entries.reduce(
+      (count, entry) => count + Number(entry.hook.enabled),
+      0
+    ),
     truncated: context.truncatedReasons.size > 0,
     truncatedReasons: [...context.truncatedReasons],
     stats: {
@@ -1033,6 +1093,7 @@ function buildSnapshot(source: HookCatalogSourceConfig, cancelFlag?: Int32Array)
     expiresAt: Date.now() + SNAPSHOT_TTL_MS
   }
   snapshots.set(id, snapshot)
+  if (key) snapshotIdByKey.set(key, id)
   return snapshot
 }
 
@@ -1064,7 +1125,7 @@ export function readHookCatalogPage(
 ): HookCatalogPage {
   const cursor = parseCursor(input.cursor)
   trimExpiredSnapshots()
-  const snapshot = cursor ? snapshots.get(cursor.snapshotId) : buildSnapshot(source, cancelFlag)
+  const snapshot = cursor ? snapshots.get(cursor.snapshotId) : buildSnapshot(source, input, cancelFlag)
   if (!snapshot) throw new HookCatalogCursorExpiredError()
   const offset = cursor?.offset ?? 0
   if (offset > snapshot.entries.length) throw new HookCatalogCursorExpiredError()
@@ -1077,6 +1138,7 @@ export function readHookCatalogPage(
     pluginHooks: [],
     skillHooks: [],
     totalEntries: snapshot.entries.length,
+    enabledEntries: snapshot.enabledEntries,
     truncated: snapshot.truncated,
     truncatedReasons: [...snapshot.truncatedReasons],
     stats: { ...snapshot.stats, responseBytes: 0 }
@@ -1111,4 +1173,5 @@ export function readHookCatalogPage(
 
 export function clearHookCatalogSnapshotsForTests(): void {
   snapshots.clear()
+  snapshotIdByKey.clear()
 }

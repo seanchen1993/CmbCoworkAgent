@@ -81,6 +81,7 @@ interface CatalogSnapshot {
   skills: SkillMetadata[]
   plugins: PluginMetadata[]
   disabledSkillIds: string[]
+  enabledSkillCount: number
   truncated: boolean
   truncatedReasons: string[]
   stats: SkillPluginCatalogPageStats
@@ -549,12 +550,37 @@ function trimSnapshots(): void {
   for (const snapshot of snapshotsById.values()) {
     if (snapshot.expiresAt <= now) deleteSnapshot(snapshot)
   }
+  while (snapshotsById.size > MAX_SNAPSHOTS) {
+    const oldestId = snapshotsById.keys().next().value as string | undefined
+    if (!oldestId) break
+    const oldest = snapshotsById.get(oldestId)
+    if (oldest) deleteSnapshot(oldest)
+  }
+}
+
+function reserveSnapshotSlot(): void {
   while (snapshotsById.size >= MAX_SNAPSHOTS) {
     const oldestId = snapshotsById.keys().next().value as string | undefined
     if (!oldestId) break
     const oldest = snapshotsById.get(oldestId)
     if (oldest) deleteSnapshot(oldest)
   }
+}
+
+function isSkillMetadataDisabled(
+  skill: SkillMetadata,
+  disabledSkillIds: ReadonlySet<string>
+): boolean {
+  const name = normalizeSkillId(skill.name)
+  if (name && disabledSkillIds.has(name)) return true
+  const id = normalizeSkillId(skill.id || skill.relativePath || skill.name)
+  if (!id) return false
+  let separator = id.indexOf("/")
+  while (separator >= 0) {
+    if (disabledSkillIds.has(id.slice(0, separator))) return true
+    separator = id.indexOf("/", separator + 1)
+  }
+  return disabledSkillIds.has(id)
 }
 
 function buildSnapshot(
@@ -568,6 +594,7 @@ function buildSnapshot(
   const cachedId = snapshotIdByKey.get(key)
   const cached = cachedId ? snapshotsById.get(cachedId) : undefined
   if (cached && cached.expiresAt > Date.now()) return cached
+  reserveSnapshotSlot()
 
   const context: BuildContext = {
     cancelFlag,
@@ -583,6 +610,7 @@ function buildSnapshot(
       skills: [],
       plugins,
       disabledSkillIds: [],
+      enabledSkillCount: 0,
       truncated: context.truncatedReasons.size > 0,
       truncatedReasons: [...context.truncatedReasons],
       stats: { ...context.stats },
@@ -629,6 +657,11 @@ function buildSnapshot(
     globalDiscovered.map(({ skill }) => skill),
     context
   )
+  const disabled = new Set(disabledSkillIds.map(normalizeSkillId))
+  const enabledSkillCount = skills.reduce(
+    (count, skill) => count + Number(!isSkillMetadataDisabled(skill, disabled)),
+    0
+  )
   checkCancelled(context)
   const snapshot: CatalogSnapshot = {
     id: `spc-${nextSnapshotId++}`,
@@ -636,6 +669,7 @@ function buildSnapshot(
     skills,
     plugins,
     disabledSkillIds,
+    enabledSkillCount,
     truncated: context.truncatedReasons.size > 0,
     truncatedReasons: [...context.truncatedReasons],
     stats: { ...context.stats },
@@ -710,6 +744,7 @@ export function readSkillPluginCatalogPage(
     disabledSkillIds: input.kind === "disabled" ? (selected as string[]) : [],
     cursor: cursor < items.length ? `${snapshot.id}:${input.kind}:${cursor}` : null,
     total: items.length,
+    enabledSkillCount: snapshot.enabledSkillCount,
     truncated: snapshot.truncated,
     truncatedReasons: [...snapshot.truncatedReasons],
     stats: { ...snapshot.stats }

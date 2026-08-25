@@ -5,6 +5,10 @@ import {
   configureAppCatalogLoaders,
   ensureDisabledSkillsChangedInvalidationSource,
   ensureSkillsChangedInvalidationSource,
+  ensureWorkspaceHooksChangedInvalidationSource,
+  getGlobalHookCatalogRevision,
+  getSkillCatalogRevision,
+  getWorkspaceHookCatalogRevision,
   invalidateSkillCatalog,
   projectChatSkillCatalog,
   readPluginCatalogCache,
@@ -15,7 +19,8 @@ import {
   revalidatePluginCatalog,
   revalidateSkillCatalog,
   subscribeGlobalHookCatalogInvalidation,
-  subscribeSkillCatalogInvalidation
+  subscribeSkillCatalogInvalidation,
+  subscribeWorkspaceHookCatalogInvalidation
 } from "./app-catalog-cache"
 
 function skill(
@@ -144,6 +149,8 @@ describe("application catalog cache", () => {
     }))
     const hooksInitial = await revalidateGlobalHookCatalog(1, hookLoader)
     expect(await revalidateGlobalHookCatalog(1, hookLoader)).toBe(hooksInitial)
+    expect(getSkillCatalogRevision(1)).toBe("1:0")
+    expect(getGlobalHookCatalogRevision()).toBe(0)
     emitChanged()
     const [left, right] = await Promise.all([
       revalidateSkillCatalog(1, loader),
@@ -156,10 +163,12 @@ describe("application catalog cache", () => {
     expect(loader).toHaveBeenCalledTimes(2)
     expect(left).toBe(right)
     expect(left).not.toBe(initial)
+    expect(getSkillCatalogRevision(1)).toBe("1:1")
 
     emitHooksChanged({ reason: "ordinary-hook-edit" })
     expect(observed).toHaveBeenCalledTimes(1)
     expect(hooksObserved).toHaveBeenCalledTimes(1)
+    expect(getGlobalHookCatalogRevision()).toBe(1)
     await Promise.all([
       revalidateGlobalHookCatalog(1, hookLoader),
       revalidateGlobalHookCatalog(1, hookLoader)
@@ -168,8 +177,38 @@ describe("application catalog cache", () => {
     emitHooksChanged({ reason: "skills-disabled-changed" })
     expect(observed).toHaveBeenCalledTimes(2)
     expect(hooksObserved).toHaveBeenCalledTimes(2)
+    expect(getGlobalHookCatalogRevision()).toBe(2)
     unsubscribe()
     unsubscribeHooks()
+  })
+
+  it("keeps one workspace-hook source and revisions equivalent workspace paths", () => {
+    let emitChanged = (payload: { threadId: string; workspacePath: string }): void => {
+      throw new Error(`workspace hooks source was not installed: ${payload.threadId}`)
+    }
+    const sourceCleanup = vi.fn()
+    const sourceSubscribe = vi.fn(
+      (listener: (payload: { threadId: string; workspacePath: string }) => void) => {
+        emitChanged = listener
+        return sourceCleanup
+      }
+    )
+    const observed = vi.fn()
+    const unsubscribe = subscribeWorkspaceHookCatalogInvalidation(observed)
+
+    ensureWorkspaceHooksChangedInvalidationSource(sourceSubscribe)
+    ensureWorkspaceHooksChangedInvalidationSource(sourceSubscribe)
+    expect(getWorkspaceHookCatalogRevision("C:/repo")).toBe(0)
+
+    const payload = { threadId: "thread-b", workspacePath: "C:\\repo\\" }
+    emitChanged(payload)
+
+    expect(sourceSubscribe).toHaveBeenCalledTimes(1)
+    expect(getWorkspaceHookCatalogRevision("C:/repo")).toBe(1)
+    expect(getWorkspaceHookCatalogRevision("C:/other")).toBe(0)
+    expect(observed).toHaveBeenCalledOnce()
+    expect(observed).toHaveBeenCalledWith(payload)
+    unsubscribe()
   })
 
   it("keeps stale data visible while a new plugin version revalidates once", async () => {

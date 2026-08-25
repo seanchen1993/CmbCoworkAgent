@@ -57,6 +57,12 @@ async function main(): Promise<void> {
       "utf8"
     )
   ).replace(/\r\n/g, "\n")
+  const lspPanelSource = (
+    await readFile(
+      resolve(__dirname, "../src/renderer/src/components/customize/LspPanel.tsx"),
+      "utf8"
+    )
+  ).replace(/\r\n/g, "\n")
 
   for (const [name, consumerSource] of [
     ["model switcher", modelSwitcherSource],
@@ -94,24 +100,46 @@ async function main(): Promise<void> {
     "the project-mode page must retain a small fixed mount budget"
   )
 
-  const lspLoadEffect = rightPanelSource.slice(
-    rightPanelSource.indexOf("const loadLspSummary") - 100,
-    rightPanelSource.indexOf("const loadLspSummary") + 1_000
+  assert.match(
+    rightPanelSource,
+    /const refreshLspConfig = useCallback/,
+    "the collapsed LSP header may only load its lightweight config summary"
+  )
+  assert.doesNotMatch(
+    rightPanelSource,
+    /window\.api\.lsp\.getStatus\(/,
+    "the right-panel header must reuse expanded LSP data instead of duplicating runtime probes"
   )
   assert.match(
-    lspLoadEffect,
-    /if \(!lspOpen\) return undefined/,
-    "a closed LSP section must not issue workspace hydration IPC while switching tasks"
+    rightPanelSource,
+    /\{lspOpen && \([\s\S]{0,500}<LspPanel/,
+    "the runtime-probing LSP panel must remain unmounted while its section is closed"
+  )
+  assert.match(lspPanelSource, /window\.api\.lsp\.getStatus\(/)
+  assert.match(
+    lspPanelSource,
+    /requestId === loadRequestIdRef\.current/,
+    "late LSP responses from a previous task must not replace the current status"
   )
   const hooksEffectsStart = rightPanelSource.indexOf("if (!hooksOpen) return undefined")
   assert.ok(hooksEffectsStart >= 0, "the Hooks section must have a closed-state hydration gate")
   assert.ok(
-    rightPanelSource.match(/if \(!hooksOpen\) return undefined/g)?.length === 2,
-    "both initial Hooks hydration and workspace invalidation listeners must stay dormant while closed"
+    rightPanelSource.match(/if \(!hooksOpen\) return undefined/g)?.length === 1,
+    "full Hooks hydration must stay dormant while closed"
+  )
+  assert.match(
+    rightPanelSource,
+    /requestScope: RIGHT_PANEL_HOOK_SUMMARY_SCOPE[\s\S]{0,250}limit: 1/,
+    "collapsed Hooks may only request one bounded Worker summary page"
+  )
+  assert.match(
+    rightPanelSource,
+    /window\.setTimeout\([\s\S]{0,120}RIGHT_PANEL_HOOK_REFRESH_DEBOUNCE_MS/,
+    "full Hook hydration must coalesce adjacent skill and hook invalidations"
   )
   assert.match(
     rightPanelSource.slice(
-      rightPanelSource.indexOf("const loadMarketSkills") - 100,
+      rightPanelSource.indexOf("const loadMarketSkills") - 180,
       rightPanelSource.indexOf("const loadMarketSkills") + 800
     ),
     /if \(!skillsOpen\) return undefined/,

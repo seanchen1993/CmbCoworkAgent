@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { SkillMetadata, SkillPluginCatalogPage } from "../../../main/types"
 import {
+  loadPluginCatalogSummary,
   loadSkillCatalogPages,
+  loadSkillCatalogSummary,
   SKILL_PLUGIN_CATALOG_RENDER_BATCH
 } from "./skill-plugin-catalog"
 
@@ -11,6 +13,55 @@ afterEach(() => {
 })
 
 describe("renderer skill/plugin catalog pagination", () => {
+  it("reads only one Worker row for collapsed header summaries", async () => {
+    const read = vi.fn(
+      async (
+        input: {
+          kind: "skills" | "plugins" | "disabled"
+          limit?: number
+          revision?: string
+        },
+        requestScope: string
+      ): Promise<SkillPluginCatalogPage> => {
+        void requestScope
+        return {
+          kind: input.kind,
+          skills: [],
+          plugins: [],
+          disabledSkillIds: [],
+          cursor: "snapshot:1",
+          total: input.kind === "skills" ? 7 : 3,
+          enabledSkillCount: input.kind === "skills" ? 5 : 0,
+          truncated: false,
+          truncatedReasons: [],
+          stats: {
+            scannedDirectories: 0,
+            scannedFiles: 0,
+            discoveredSkills: 0,
+            readBytes: 0
+          }
+        }
+      }
+    )
+    vi.stubGlobal("window", {
+      api: { skills: { catalog: { read, cancel: vi.fn(async () => undefined) } } }
+    })
+
+    await expect(loadSkillCatalogSummary("revision", "summary")).resolves.toEqual({
+      total: 7,
+      enabled: 5,
+      truncated: false
+    })
+    await expect(loadPluginCatalogSummary("revision", "summary")).resolves.toEqual({
+      total: 3,
+      truncated: false
+    })
+    expect(read.mock.calls.map(([input, scope]) => [input.kind, input.limit, scope])).toEqual([
+      ["skills", 1, "summary:skills"],
+      ["plugins", 1, "summary:plugins"]
+    ])
+  })
+
   it("accumulates 20k entries through bounded context-bridge pages", async () => {
     const catalog = Array.from({ length: 20_000 }, (_, index): SkillMetadata => ({
       id: `skill-${index}`,
@@ -36,6 +87,7 @@ describe("renderer skill/plugin catalog pagination", () => {
           disabledSkillIds: [],
           cursor: nextOffset < items.length ? `page:${nextOffset}` : null,
           total: items.length,
+          enabledSkillCount: items.length,
           truncated: false,
           truncatedReasons: [],
           stats: {

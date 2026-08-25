@@ -15,6 +15,7 @@ function page(overrides: Partial<HookCatalogPage> = {}): HookCatalogPage {
     pluginHooks: [],
     skillHooks: [],
     totalEntries: 0,
+    enabledEntries: 0,
     truncated: false,
     truncatedReasons: [],
     stats: {

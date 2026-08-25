@@ -221,6 +221,9 @@ export function registerHooksHandlers(ipcMain: IpcMain): void {
         ...(typeof rawInput?.workspacePath === "string" && rawInput.workspacePath
           ? { workspacePath: rawInput.workspacePath.slice(0, 32_768) }
           : {}),
+        ...(typeof rawInput?.revision === "string" && rawInput.revision
+          ? { revision: rawInput.revision.slice(0, 256) }
+          : {}),
         ...(typeof rawInput?.cursor === "string" && rawInput.cursor
           ? { cursor: rawInput.cursor.slice(0, 256) }
           : {}),

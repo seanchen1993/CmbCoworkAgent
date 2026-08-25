@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -39,7 +39,7 @@ afterAll(async () => {
   await Promise.all(clients.map((client) => client.close()))
   for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true })
   rmSync(workerBuildDirectory, { recursive: true, force: true })
-})
+}, 30_000)
 
 function makeSource(root: string, skillsDir = join(root, "skills")): HookCatalogSourceConfig {
   return {
@@ -180,6 +180,18 @@ async function readAll(
 }
 
 describe("HookCatalogClient", () => {
+  it("releases an old snapshot before a cache-miss scan allocates the replacement", () => {
+    const source = readFileSync(new URL("./reader.ts", import.meta.url), "utf8")
+    const build = source.slice(
+      source.indexOf("function buildSnapshot("),
+      source.indexOf("function parseCursor(")
+    )
+
+    expect(build.indexOf("reserveSnapshotSlot()"))
+      .toBeLessThan(build.indexOf("const startedAt"))
+    expect(build.match(/reserveSnapshotSlot\(\)/g)).toHaveLength(1)
+  })
+
   it("keeps display parsing semantically aligned across all four hook sources", async () => {
     const fixture = makeFixture()
     const client = makeClient(fixture.source)
@@ -197,6 +209,7 @@ describe("HookCatalogClient", () => {
       "skill:review/hooks/hooks.json:file",
       "skill:plugin-skill/owned"
     ])
+    expect(pages[0]).toMatchObject({ totalEntries: 6, enabledEntries: 6 })
     const hooks = pages.flatMap((page) => [
       ...page.globalHooks,
       ...page.workspaceHooks,
@@ -221,13 +234,59 @@ describe("HookCatalogClient", () => {
     }
   }, 30_000)
 
-  it("scans 10k skills and an oversized SKILL.md off-main with bounded pages", async () => {
+  it("reuses a revision-keyed snapshot for header summary and detail reads", async () => {
+    const fixture = makeFixture()
+    const client = makeClient(fixture.source)
+    const summary = await client.readPage(
+      {
+        requestScope: "summary",
+        workspacePath: fixture.workspace,
+        revision: "revision-1",
+        limit: 1
+      },
+      "renderer:summary"
+    )
+    expect(summary).toMatchObject({ totalEntries: 6, enabledEntries: 6 })
+
+    writeFileSync(fixture.source.globalHooksPath, "[]")
+    const cachedDetail = await client.readPage(
+      {
+        requestScope: "detail",
+        workspacePath: fixture.workspace,
+        revision: "revision-1",
+        limit: 1
+      },
+      "renderer:detail"
+    )
+    expect(cachedDetail.totalEntries).toBe(6)
+
+    const refreshed = await client.readPage(
+      {
+        requestScope: "summary",
+        workspacePath: fixture.workspace,
+        revision: "revision-2",
+        limit: 1
+      },
+      "renderer:summary"
+    )
+    expect(refreshed).toMatchObject({ totalEntries: 5, enabledEntries: 5 })
+  }, 30_000)
+
+  it("scans 10k disabled skills and an oversized SKILL.md off-main with bounded pages", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmb-hook-catalog-large-"))
     temporaryDirectories.push(root)
     const skillsDir = join(root, "skills")
     mkdirSync(skillsDir)
     writeFileSync(join(root, "plugins.json"), "[]")
-    writeFileSync(join(root, "disabled-skills.json"), "[]")
+    writeFileSync(
+      join(root, "disabled-skills.json"),
+      JSON.stringify(
+        Array.from(
+          { length: 10_000 },
+          (_, index) => `skill-${String(index).padStart(5, "0")}`
+        )
+      )
+    )
     writeFileSync(join(root, "hooks.json"), "[]")
     writeFileSync(
       join(skillsDir, "SKILL.md"),
@@ -303,6 +362,7 @@ function emptyPage(): Record<string, unknown> {
     pluginHooks: [],
     skillHooks: [],
     totalEntries: 0,
+    enabledEntries: 0,
     truncated: false,
     truncatedReasons: [],
     stats: {

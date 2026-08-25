@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -23,6 +23,18 @@ afterEach(() => {
 })
 
 describe("skill/plugin catalog reader", () => {
+  it("releases an old snapshot before a cache-miss scan allocates the replacement", () => {
+    const source = readFileSync(new URL("./reader.ts", import.meta.url), "utf8")
+    const build = source.slice(
+      source.indexOf("function buildSnapshot("),
+      source.indexOf("function parseCursor(")
+    )
+
+    expect(build.indexOf("reserveSnapshotSlot()"))
+      .toBeLessThan(build.indexOf("const context"))
+    expect(build.match(/reserveSnapshotSlot\(\)/g)).toHaveLength(1)
+  })
+
   it("preserves custom precedence, plugin enablement and disabled ids", () => {
     const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-reader-"))
     temporaryDirectories.push(root)
@@ -100,6 +112,8 @@ describe("skill/plugin catalog reader", () => {
       pluginName: "enabled"
     })
     expect(skills.skills.some((skill) => skill.pluginId === "disabled")).toBe(false)
+    expect(skills.total).toBe(2)
+    expect(skills.enabledSkillCount).toBe(1)
     expect(plugins.plugins).toHaveLength(2)
     expect(plugins.stats.discoveredSkills).toBe(0)
     expect(plugins.stats.scannedDirectories).toBe(0)

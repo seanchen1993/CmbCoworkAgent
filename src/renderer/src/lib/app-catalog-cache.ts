@@ -2,6 +2,7 @@ import type { MarketItem } from "@/api/market"
 import { mergeChatSkills, type PreferredPlugin } from "@/features/slash-commands/skill-merge"
 import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import type { PluginMetadata, SkillMetadata } from "@/types"
+import { normalizeWorkspacePathKey } from "../../../shared/workspace-path"
 
 export interface SkillCatalogLoadResult {
   localSkills: SkillMetadata[]
@@ -83,6 +84,12 @@ let globalHookRequest: CatalogRequest<GlobalHookCatalogSnapshot> | null = null
 let globalHookGeneration = 0
 let globalHookInvalidationRevision = 0
 const globalHookInvalidationListeners = new Set<() => void>()
+let workspaceHooksChangedSourceInstalled = false
+let workspaceHooksChangedSourceCleanup: (() => void) | null = null
+const workspaceHookInvalidationRevisionByPath = new Map<string, number>()
+const workspaceHookInvalidationListeners = new Set<
+  (payload: { threadId: string; workspacePath: string }) => void
+>()
 
 let configuredSkillLoader: ((key: string) => Promise<SkillCatalogLoadResult>) | null = null
 let configuredPluginLoader: ((key: string) => Promise<PluginMetadata[]>) | null = null
@@ -97,6 +104,10 @@ export function configureAppCatalogLoaders(loaders: {
 
 function skillCatalogKey(pluginVersion: string | number): string {
   return `${String(pluginVersion)}:${skillInvalidationRevision}`
+}
+
+export function getSkillCatalogRevision(pluginVersion: string | number): string {
+  return skillCatalogKey(pluginVersion)
 }
 
 function createSkillCatalogSnapshot(
@@ -260,6 +271,51 @@ export function subscribeGlobalHookCatalogInvalidation(listener: () => void): ()
   return () => globalHookInvalidationListeners.delete(listener)
 }
 
+export function getGlobalHookCatalogRevision(): number {
+  return globalHookInvalidationRevision
+}
+
+function workspaceHookCatalogKey(workspacePath: string | null | undefined): string {
+  return workspacePath ? (normalizeWorkspacePathKey(workspacePath) || "/") : ""
+}
+
+export function getWorkspaceHookCatalogRevision(
+  workspacePath: string | null | undefined
+): number {
+  return workspaceHookInvalidationRevisionByPath.get(
+    workspaceHookCatalogKey(workspacePath)
+  ) ?? 0
+}
+
+export function ensureWorkspaceHooksChangedInvalidationSource(
+  subscribe: (
+    listener: (payload: { threadId: string; workspacePath: string }) => void
+  ) => () => void
+): void {
+  if (workspaceHooksChangedSourceInstalled) return
+  workspaceHooksChangedSourceInstalled = true
+  try {
+    workspaceHooksChangedSourceCleanup = subscribe((payload) => {
+      const key = workspaceHookCatalogKey(payload.workspacePath)
+      workspaceHookInvalidationRevisionByPath.set(
+        key,
+        (workspaceHookInvalidationRevisionByPath.get(key) ?? 0) + 1
+      )
+      for (const listener of workspaceHookInvalidationListeners) listener(payload)
+    })
+  } catch (error) {
+    workspaceHooksChangedSourceInstalled = false
+    throw error
+  }
+}
+
+export function subscribeWorkspaceHookCatalogInvalidation(
+  listener: (payload: { threadId: string; workspacePath: string }) => void
+): () => void {
+  workspaceHookInvalidationListeners.add(listener)
+  return () => workspaceHookInvalidationListeners.delete(listener)
+}
+
 function preferredPluginProjectionKey(preferredPlugin?: PreferredPlugin | null): string {
   if (!preferredPlugin) return ""
   if (typeof preferredPlugin === "string") return `name:${normalizeSkillId(preferredPlugin)}`
@@ -385,6 +441,7 @@ export function invalidateMarketSkillCatalog(): void {
 export function resetAppCatalogCacheForTests(): void {
   skillsChangedSourceCleanup?.()
   disabledSkillsChangedSourceCleanup?.()
+  workspaceHooksChangedSourceCleanup?.()
   skillSnapshot = null
   skillRequest = null
   skillGeneration = 0
@@ -405,6 +462,10 @@ export function resetAppCatalogCacheForTests(): void {
   globalHookGeneration = 0
   globalHookInvalidationRevision = 0
   globalHookInvalidationListeners.clear()
+  workspaceHooksChangedSourceInstalled = false
+  workspaceHooksChangedSourceCleanup = null
+  workspaceHookInvalidationRevisionByPath.clear()
+  workspaceHookInvalidationListeners.clear()
   configuredSkillLoader = null
   configuredPluginLoader = null
 }

@@ -84,6 +84,10 @@ import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import {
   ensureDisabledSkillsChangedInvalidationSource,
   ensureSkillsChangedInvalidationSource,
+  ensureWorkspaceHooksChangedInvalidationSource,
+  getGlobalHookCatalogRevision,
+  getSkillCatalogRevision,
+  getWorkspaceHookCatalogRevision,
   readMarketSkillCatalogCache,
   readPluginCatalogCache,
   readSkillCatalogCache,
@@ -91,8 +95,14 @@ import {
   revalidatePluginCatalog,
   revalidateSkillCatalog,
   subscribeGlobalHookCatalogInvalidation,
-  subscribeSkillCatalogInvalidation
+  subscribeSkillCatalogInvalidation,
+  subscribeWorkspaceHookCatalogInvalidation
 } from "@/lib/app-catalog-cache"
+import {
+  cancelSkillPluginCatalog,
+  loadPluginCatalogSummary,
+  loadSkillCatalogSummary
+} from "@/lib/skill-plugin-catalog"
 import {
   getRightPanelSkillProjection,
   getRightPanelSkillProjectionAsync,
@@ -146,6 +156,28 @@ const MIN_CONTENT_HEIGHT = 60 // px
 const COLLAPSE_THRESHOLD = 55 // px - auto-collapse when below this
 const PREVIEW_MAX_HEIGHT = "100vh"
 const RIGHT_PANEL_SYNC_SKILL_PROJECTION_LIMIT = 256
+const RIGHT_PANEL_SUMMARY_SCOPE = "right-panel-summary"
+const RIGHT_PANEL_HOOK_SCOPE = "right-panel"
+const RIGHT_PANEL_HOOK_SUMMARY_SCOPE = "right-panel-hook-summary"
+const RIGHT_PANEL_HOOK_REFRESH_DEBOUNCE_MS = 50
+
+interface CatalogHeaderValue {
+  total: number
+  enabled?: number
+  truncated: boolean
+}
+
+interface HeaderSummaryState {
+  value: CatalogHeaderValue | null
+  loading: boolean
+  error: boolean
+}
+
+interface HookDetailState {
+  key: string
+  hooks: DisplayHook[]
+  truncated: boolean
+}
 
 type PanelHeights = {
   tasks: number
@@ -161,8 +193,12 @@ type PanelHeights = {
 interface SectionHeaderProps {
   title: string
   icon: React.ElementType
-  badge?: number
+  badge?: number | null
+  badgeTitle?: string
+  badgeTruncated?: boolean
   detail?: React.ReactNode
+  loading?: boolean
+  error?: boolean
   isOpen: boolean
   onToggle: () => void
 }
@@ -171,7 +207,11 @@ function SectionHeader({
   title,
   icon: Icon,
   badge,
+  badgeTitle,
+  badgeTruncated = false,
   detail,
+  loading = false,
+  error = false,
   isOpen,
   onToggle
 }: SectionHeaderProps): React.JSX.Element {
@@ -189,9 +229,27 @@ function SectionHeader({
       />
       <Icon className="size-4.5 text-foreground/70" />
       <span className="flex-1 text-left text-[16px] font-semibold leading-none">{title}</span>
-      {detail && <div className="shrink-0">{detail}</div>}
-      {badge !== undefined && badge > 0 && (
-        <span className="text-xs text-muted-foreground tabular-nums">{badge}</span>
+      {detail != null && <div className="shrink-0">{detail}</div>}
+      {badge !== undefined && badge !== null && (
+        <span
+          className="text-xs text-muted-foreground tabular-nums"
+          title={badgeTitle}
+        >
+          {badge}
+          {badgeTruncated ? "+" : ""}
+        </span>
+      )}
+      {loading && (
+        <Loader2
+          className="size-3.5 shrink-0 animate-spin text-muted-foreground"
+          aria-label={`${title}摘要加载中`}
+        />
+      )}
+      {!loading && error && (
+        <AlertCircle
+          className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+          aria-label={`${title}摘要加载失败`}
+        />
       )}
     </button>
   )
@@ -419,69 +477,212 @@ export function RightPanel({
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(
     () => readSkillCatalogCache()?.disabledSkillIds ?? new Set()
   )
-  const [enabledSkillCount, setEnabledSkillCount] = useState(
-    () => readSkillCatalogCache()?.rightPanelEnabledSkillCount ?? 0
-  )
+  const [skillSummary, setSkillSummary] = useState<HeaderSummaryState>(() => {
+    const snapshot = readSkillCatalogCache()
+    return {
+      value: snapshot
+        ? {
+            total: snapshot.rightPanelSkills.length,
+            enabled: snapshot.rightPanelEnabledSkillCount,
+            truncated: false
+          }
+        : null,
+      loading: false,
+      error: false
+    }
+  })
   const [plugins, setPlugins] = useState<PluginMetadata[]>(
     () => readPluginCatalogCache()?.plugins ?? []
   )
-  const [hooks, setHooks] = useState<DisplayHook[]>([])
-  const [enabledHookCount, setEnabledHookCount] = useState(0)
-  const [hookCatalogTruncated, setHookCatalogTruncated] = useState(false)
+  const [pluginSummary, setPluginSummary] = useState<HeaderSummaryState>(() => {
+    const snapshot = readPluginCatalogCache()
+    return {
+      value: snapshot
+        ? { total: snapshot.plugins.length, truncated: false }
+        : null,
+      loading: false,
+      error: false
+    }
+  })
+  const [, setHookCatalogRevision] = useState(0)
+  const currentHookWorkerRevision =
+    `${getSkillCatalogRevision(pluginVersion)}:${getGlobalHookCatalogRevision()}:` +
+    `${getWorkspaceHookCatalogRevision(workspacePath)}`
+  const currentHookCatalogKey = useMemo(
+    () =>
+      JSON.stringify([
+        currentHookWorkerRevision,
+        workspacePath ? normalizeWorkspaceFileKey(workspacePath) : ""
+      ]),
+    [currentHookWorkerRevision, workspacePath]
+  )
+  const [hookSummary, setHookSummary] = useState<HeaderSummaryState & { key: string }>({
+    key: "",
+    value: null,
+    loading: false,
+    error: false
+  })
+  const [hookDetail, setHookDetail] = useState<HookDetailState>({
+    key: "",
+    hooks: [],
+    truncated: false
+  })
+  const [lspConfigLoading, setLspConfigLoading] = useState(false)
+  const [lspConfigError, setLspConfigError] = useState(false)
   const skillsCatalogRequestIdRef = useRef(0)
   const pluginCatalogRequestIdRef = useRef(0)
   const hooksCatalogRequestIdRef = useRef(0)
+  const skillSummaryRequestIdRef = useRef(0)
+  const pluginSummaryRequestIdRef = useRef(0)
+  const hookSummaryRequestIdRef = useRef(0)
+  const lspConfigRequestIdRef = useRef(0)
+  const catalogSummaryWarmupRef = useRef<Promise<void>>(Promise.resolve())
+
+  useEffect(() => {
+    setHookDetail({ key: currentHookCatalogKey, hooks: [], truncated: false })
+  }, [currentHookCatalogKey])
+
+  useEffect(() => {
+    setLspStatus(null)
+  }, [lspOpen, workspacePath])
 
   const loadSkillCatalog = useCallback(async (): Promise<void> => {
     const requestId = ++skillsCatalogRequestIdRef.current
     try {
-      const snapshot = await revalidateSkillCatalog(pluginVersion, async () => {
-        const pluginSkillsPromise = window.api.skills.listPlugins().catch((error) => {
-          console.warn("[RightPanel] Failed to load plugin skills:", error)
-          return []
-        })
-        const [localSkills, pluginSkills, disabledSkillIds] = await Promise.all([
-          window.api.skills.list(),
-          pluginSkillsPromise,
-          window.api.skills.getDisabled()
-        ])
-        return { localSkills, pluginSkills, disabledSkillIds }
-      })
+      const snapshot = await revalidateSkillCatalog(pluginVersion)
       if (requestId !== skillsCatalogRequestIdRef.current) return
       setSkills(snapshot.rightPanelSkills)
       setDisabledSkills(snapshot.disabledSkillIds)
-      setEnabledSkillCount(snapshot.rightPanelEnabledSkillCount)
+      setSkillSummary({
+        value: {
+          total: snapshot.rightPanelSkills.length,
+          enabled: snapshot.rightPanelEnabledSkillCount,
+          truncated: false
+        },
+        loading: false,
+        error: false
+      })
     } catch (error) {
       console.error("[RightPanel] Failed to load skills:", error)
     }
   }, [pluginVersion])
 
+  const refreshSkillSummary = useCallback(async (): Promise<void> => {
+    const requestId = ++skillSummaryRequestIdRef.current
+    setSkillSummary((previous) => ({ ...previous, loading: true, error: false }))
+    try {
+      const summary = await loadSkillCatalogSummary(
+        getSkillCatalogRevision(pluginVersion),
+        RIGHT_PANEL_SUMMARY_SCOPE,
+        () => requestId === skillSummaryRequestIdRef.current
+      )
+      if (requestId !== skillSummaryRequestIdRef.current) return
+      setSkillSummary({
+        value: {
+          total: summary.total,
+          enabled: summary.enabled,
+          truncated: summary.truncated
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      if (requestId !== skillSummaryRequestIdRef.current) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|supersed|SKILL_PLUGIN_CATALOG_CANCELLED/i.test(message)) return
+      console.error("[RightPanel] Failed to load skill summary:", error)
+      setSkillSummary((previous) => ({ ...previous, loading: false, error: true }))
+    }
+  }, [pluginVersion])
+
+  const refreshPluginSummary = useCallback(async (): Promise<void> => {
+    const requestId = ++pluginSummaryRequestIdRef.current
+    setPluginSummary((previous) => ({ ...previous, loading: true, error: false }))
+    try {
+      const summary = await loadPluginCatalogSummary(
+        String(pluginVersion),
+        RIGHT_PANEL_SUMMARY_SCOPE,
+        () => requestId === pluginSummaryRequestIdRef.current
+      )
+      if (requestId !== pluginSummaryRequestIdRef.current) return
+      setPluginSummary({
+        value: { total: summary.total, truncated: summary.truncated },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      if (requestId !== pluginSummaryRequestIdRef.current) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|supersed|SKILL_PLUGIN_CATALOG_CANCELLED/i.test(message)) return
+      console.error("[RightPanel] Failed to load plugin summary:", error)
+      setPluginSummary((previous) => ({ ...previous, loading: false, error: true }))
+    }
+  }, [pluginVersion])
+
+  useEffect(() => {
+    if (moduleMode !== "work") return undefined
+    let cancelled = false
+    catalogSummaryWarmupRef.current = (async () => {
+      await refreshPluginSummary()
+      if (cancelled) return
+      await refreshSkillSummary()
+    })()
+    return () => {
+      cancelled = true
+      skillSummaryRequestIdRef.current += 1
+      pluginSummaryRequestIdRef.current += 1
+      cancelSkillPluginCatalog(RIGHT_PANEL_SUMMARY_SCOPE)
+    }
+  }, [moduleMode, refreshPluginSummary, refreshSkillSummary])
+
   useEffect(() => {
     if (!skillsOpen) return undefined
+    if (moduleMode !== "work") return undefined
     void loadSkillCatalog()
     return () => {
       skillsCatalogRequestIdRef.current += 1
     }
-  }, [loadSkillCatalog, skillsOpen])
+  }, [loadSkillCatalog, moduleMode, skillsOpen])
 
   useEffect(() => {
     ensureSkillsChangedInvalidationSource((listener) => window.api.skills.onChanged(listener))
     ensureDisabledSkillsChangedInvalidationSource((listener) =>
       window.api.hooks.onChanged(listener)
     )
+    ensureWorkspaceHooksChangedInvalidationSource((listener) =>
+      window.api.hooks.workspace.onChanged(listener)
+    )
+  }, [])
+
+  useEffect(() => {
+    if (moduleMode !== "work") return undefined
+    return subscribeSkillCatalogInvalidation(() => {
+      catalogSummaryWarmupRef.current = refreshSkillSummary()
+    })
+  }, [moduleMode, refreshSkillSummary])
+
+  useEffect(() => {
     if (!skillsOpen) return undefined
+    if (moduleMode !== "work") return undefined
     const unsubscribe = subscribeSkillCatalogInvalidation(() => {
       void loadSkillCatalog()
     })
     return unsubscribe
-  }, [loadSkillCatalog, skillsOpen])
+  }, [loadSkillCatalog, moduleMode, skillsOpen])
 
   useEffect(() => {
     if (!pluginsOpen) return undefined
+    if (moduleMode !== "work") return undefined
     const requestId = ++pluginCatalogRequestIdRef.current
-    void revalidatePluginCatalog(pluginVersion, () => window.api.plugins.list())
+    void revalidatePluginCatalog(pluginVersion)
       .then((snapshot) => {
-        if (requestId === pluginCatalogRequestIdRef.current) setPlugins(snapshot.plugins)
+        if (requestId !== pluginCatalogRequestIdRef.current) return
+        setPlugins(snapshot.plugins)
+        setPluginSummary({
+          value: { total: snapshot.plugins.length, truncated: false },
+          loading: false,
+          error: false
+        })
       })
       .catch((error) => {
         console.error("[RightPanel] Failed to load plugins:", error)
@@ -489,10 +690,11 @@ export function RightPanel({
     return () => {
       pluginCatalogRequestIdRef.current += 1
     }
-  }, [pluginVersion, pluginsOpen])
+  }, [moduleMode, pluginVersion, pluginsOpen])
 
   useEffect(() => {
     if (!skillsOpen) return undefined
+    if (moduleMode !== "work") return undefined
     let cancelled = false
 
     const loadMarketSkills = async (): Promise<void> => {
@@ -515,38 +717,53 @@ export function RightPanel({
     return () => {
       cancelled = true
     }
-  }, [skillsOpen])
+  }, [moduleMode, skillsOpen])
+
+  const refreshLspConfig = useCallback(async (): Promise<void> => {
+    const requestId = ++lspConfigRequestIdRef.current
+    setLspConfigLoading(true)
+    setLspConfigError(false)
+    try {
+      const config = await window.api.lsp.getConfig()
+      if (requestId !== lspConfigRequestIdRef.current) return
+      setLspConfig(config)
+      setLspConfigLoading(false)
+    } catch (error) {
+      if (requestId !== lspConfigRequestIdRef.current) return
+      console.error("[RightPanel] Failed to load LSP config summary:", error)
+      setLspConfigLoading(false)
+      setLspConfigError(true)
+    }
+  }, [])
 
   useEffect(() => {
-    if (!lspOpen) return undefined
-    let cancelled = false
-
-    const loadLspSummary = async (): Promise<void> => {
-      try {
-        const cfg = await window.api.lsp.getConfig()
-        if (cancelled) return
-        setLspConfig(cfg)
-
-        const currentWorkspacePath = cfg.enabled ? (workspacePath ?? null) : null
-        const currentStatus = await window.api.lsp.getStatus(currentWorkspacePath)
-        if (!cancelled) {
-          setLspStatus(currentStatus)
-        }
-      } catch (error) {
-        console.error("[RightPanel] Failed to load LSP summary:", error)
-      }
-    }
-
-    void loadLspSummary()
-    const unsubscribe = window.api.lsp.onChanged(() => {
-      void loadLspSummary()
-    })
-
+    if (moduleMode !== "work") return undefined
+    const timer = window.setTimeout(() => void refreshLspConfig(), 0)
+    const unsubscribe = window.api.lsp.onChanged(() => void refreshLspConfig())
     return () => {
-      cancelled = true
+      window.clearTimeout(timer)
+      lspConfigRequestIdRef.current += 1
       unsubscribe()
     }
-  }, [lspOpen, workspacePath])
+  }, [moduleMode, refreshLspConfig])
+
+  const handleLspSummaryChange = useCallback(
+    ({ config, status }: { config: LspConfig; status: LspStatus | null }): void => {
+      setLspConfig(config)
+      setLspConfigLoading(false)
+      setLspConfigError(false)
+      const expectedProjectRoot = config.enabled ? (workspacePath ?? null) : null
+      const matchesWorkspace =
+        status !== null &&
+        ((status.projectRoot === null && expectedProjectRoot === null) ||
+          (status.projectRoot !== null &&
+            expectedProjectRoot !== null &&
+            normalizeWorkspaceFileKey(status.projectRoot) ===
+              normalizeWorkspaceFileKey(expectedProjectRoot)))
+      setLspStatus(matchesWorkspace ? status : null)
+    },
+    [workspacePath]
+  )
 
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
@@ -608,21 +825,31 @@ export function RightPanel({
   const lspHeaderStatus = useMemo(() => {
     if (!lspConfig) return null
 
+    const expectedProjectRoot = lspConfig.enabled ? (workspacePath ?? null) : null
+    const statusMatchesWorkspace =
+      lspStatus !== null &&
+      ((lspStatus.projectRoot === null && expectedProjectRoot === null) ||
+        (lspStatus.projectRoot !== null &&
+          expectedProjectRoot !== null &&
+          normalizeWorkspaceFileKey(lspStatus.projectRoot) ===
+            normalizeWorkspaceFileKey(expectedProjectRoot)))
+    const currentStatus = statusMatchesWorkspace ? lspStatus : null
+
     const statusText = !lspConfig.enabled
       ? "已禁用"
       : currentThreadId && !workspacePath
         ? "未关联工作目录"
-        : (lspStatus?.statusText ?? "已停止")
+        : (currentStatus?.statusText ?? "已启用")
 
     const statusClass = cn(
       "text-xs font-medium tabular-nums",
-      lspStatus?.lifecycle === "ready"
+      currentStatus?.lifecycle === "ready"
         ? "text-green-500"
-        : lspStatus?.lifecycle === "degraded"
+        : currentStatus?.lifecycle === "degraded"
           ? "text-amber-600 dark:text-amber-400"
-          : lspStatus?.lifecycle === "starting" || lspStatus?.lifecycle === "importing"
+          : currentStatus?.lifecycle === "starting" || currentStatus?.lifecycle === "importing"
             ? "text-sky-600 dark:text-sky-400"
-            : lspStatus?.lifecycle === "error"
+            : currentStatus?.lifecycle === "error"
               ? "text-destructive"
               : "text-muted-foreground"
     )
@@ -648,8 +875,65 @@ export function RightPanel({
     }
   }, [skillGenerationAgent.phase, skillGenerationAgent.errorText])
 
+  const refreshHookSummary = useCallback(async (): Promise<void> => {
+    const requestId = ++hookSummaryRequestIdRef.current
+    const key = currentHookCatalogKey
+    setHookSummary((previous) => ({
+      key,
+      value: previous.key === key ? previous.value : null,
+      loading: true,
+      error: false
+    }))
+    try {
+      const page = await window.api.hooks.catalog.read({
+        requestScope: RIGHT_PANEL_HOOK_SUMMARY_SCOPE,
+        ...(workspacePath ? { workspacePath } : {}),
+        revision: currentHookWorkerRevision,
+        limit: 1
+      })
+      if (requestId !== hookSummaryRequestIdRef.current) return
+      setHookSummary({
+        key,
+        value: {
+          total: page.totalEntries,
+          enabled: page.enabledEntries,
+          truncated: page.truncated
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      if (requestId !== hookSummaryRequestIdRef.current) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
+      console.error("[RightPanel] Failed to load hook summary:", error)
+      setHookSummary((previous) =>
+        previous.key === key
+          ? { ...previous, loading: false, error: true }
+          : previous
+      )
+    }
+  }, [currentHookCatalogKey, currentHookWorkerRevision, workspacePath])
+
+  useEffect(() => {
+    if (moduleMode !== "work") return undefined
+    let cancelled = false
+    void catalogSummaryWarmupRef.current.then(() => {
+      if (!cancelled) void refreshHookSummary()
+    })
+    return () => {
+      cancelled = true
+      hookSummaryRequestIdRef.current += 1
+      void window.api.hooks.catalog.cancel(RIGHT_PANEL_HOOK_SUMMARY_SCOPE).catch(() => undefined)
+    }
+  }, [moduleMode, refreshHookSummary])
+
   const loadHooks = useCallback(async (): Promise<void> => {
     const requestId = ++hooksCatalogRequestIdRef.current
+    const key = currentHookCatalogKey
+    setHookDetail((previous) =>
+      previous.key === key ? previous : { key, hooks: [], truncated: false }
+    )
     try {
       const globalHooks: HookConfig[] = []
       const workspaceHooks: HookConfig[] = []
@@ -657,11 +941,14 @@ export function RightPanel({
       const skillHooks: SkillHookMetadata[] = []
       let cursor: string | undefined
       let truncated = false
+      let totalEntries = 0
+      let enabledEntries = 0
       do {
         const previousCursor = cursor
         const page = await window.api.hooks.catalog.read({
-          requestScope: "right-panel",
+          requestScope: RIGHT_PANEL_HOOK_SCOPE,
           ...(workspacePath ? { workspacePath } : {}),
+          revision: currentHookWorkerRevision,
           ...(cursor ? { cursor } : {}),
           limit: RIGHT_PANEL_INITIAL_RENDER_ITEMS
         })
@@ -671,6 +958,8 @@ export function RightPanel({
         pluginHooks.push(...page.pluginHooks)
         skillHooks.push(...page.skillHooks)
         truncated ||= page.truncated
+        totalEntries = page.totalEntries
+        enabledEntries = page.enabledEntries
         cursor = page.nextCursor
         if (cursor && cursor === previousCursor) {
           truncated = true
@@ -701,41 +990,49 @@ export function RightPanel({
           })
         )
       ]
-      setHooks(nextHooks)
-      setEnabledHookCount(nextHooks.reduce((count, hook) => count + Number(hook.enabled), 0))
-      setHookCatalogTruncated(truncated)
+      setHookDetail({ key, hooks: nextHooks, truncated })
+      setHookSummary({
+        key,
+        value: { total: totalEntries, enabled: enabledEntries, truncated },
+        loading: false,
+        error: false
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
       console.error("[RightPanel] Failed to load hooks:", error)
     }
-  }, [pluginVersion, workspacePath])
+  }, [currentHookCatalogKey, currentHookWorkerRevision, workspacePath])
 
   useEffect(() => {
     if (!hooksOpen) return undefined
-    void loadHooks()
+    if (moduleMode !== "work") return undefined
+    const timer = window.setTimeout(
+      () => void loadHooks(),
+      RIGHT_PANEL_HOOK_REFRESH_DEBOUNCE_MS
+    )
     return () => {
+      window.clearTimeout(timer)
       hooksCatalogRequestIdRef.current += 1
-      void window.api.hooks.catalog.cancel("right-panel").catch(() => undefined)
+      void window.api.hooks.catalog.cancel(RIGHT_PANEL_HOOK_SCOPE).catch(() => undefined)
     }
-  }, [hooksOpen, loadHooks])
+  }, [hooksOpen, loadHooks, moduleMode])
 
   useEffect(() => {
-    if (!hooksOpen) return undefined
     return subscribeGlobalHookCatalogInvalidation(() => {
-      void loadHooks()
+      setHookCatalogRevision((revision) => revision + 1)
     })
-  }, [hooksOpen, loadHooks])
+  }, [])
 
   useEffect(() => {
-    if (!currentThreadId || !hooksOpen) return
-    const cleanup = window.api.hooks.workspace.onChanged((data) => {
-      if (data.threadId === currentThreadId) {
-        void loadHooks()
+    if (!workspacePath) return undefined
+    const workspaceKey = normalizeWorkspaceFileKey(workspacePath)
+    return subscribeWorkspaceHookCatalogInvalidation((data) => {
+      if (normalizeWorkspaceFileKey(data.workspacePath) === workspaceKey) {
+        setHookCatalogRevision((revision) => revision + 1)
       }
     })
-    return cleanup
-  }, [currentThreadId, hooksOpen, loadHooks])
+  }, [workspacePath])
 
   const applyStreamPreview = useCallback(
     (path: string, switchToPreview: boolean): void => {
@@ -1316,6 +1613,29 @@ export function RightPanel({
     [workspacePath]
   )
 
+  const hookSummaryValue =
+    hookSummary.key === currentHookCatalogKey ? hookSummary.value : null
+  const hookSummaryLoading =
+    hookSummary.key !== currentHookCatalogKey || hookSummary.loading
+  const hookSummaryError =
+    hookSummary.key === currentHookCatalogKey && hookSummary.error
+  const currentHookDetail =
+    hookDetail.key === currentHookCatalogKey
+      ? hookDetail
+      : { key: currentHookCatalogKey, hooks: [], truncated: false }
+  const workspaceFileSummaryReady = Boolean(
+    currentThreadId &&
+      workspacePath &&
+      hasLoadedWorkspaceFiles(currentThreadId, workspacePath)
+  )
+  const workspaceFileBadge =
+    workspacePath && workspaceFileSummaryReady ? workspaceFiles.length : null
+  const workspaceFileDetail = !workspacePath
+    ? "未关联"
+    : workspaceFileBadge === null
+      ? "待加载"
+      : null
+
   return (
     <aside
       ref={containerRef}
@@ -1475,7 +1795,15 @@ export function RightPanel({
             <SectionHeader
               title="文件"
               icon={FolderTree}
-              badge={workspaceFiles.length}
+              badge={workspaceFileBadge}
+              badgeTitle={
+                workspaceFileBadge === null ? undefined : `已加载 ${workspaceFileBadge} 项`
+              }
+              detail={
+                workspaceFileDetail ? (
+                  <span className="text-xs text-muted-foreground">{workspaceFileDetail}</span>
+                ) : undefined
+              }
               isOpen={filesOpen}
               onToggle={() => setFilesOpen((prev) => !prev)}
             />
@@ -1543,7 +1871,15 @@ export function RightPanel({
             <SectionHeader
               title="技能"
               icon={Sparkles}
-              badge={enabledSkillCount}
+              badge={skillSummary.value?.enabled ?? null}
+              badgeTitle={
+                skillSummary.value
+                  ? `已启用 ${skillSummary.value.enabled ?? 0}，共 ${skillSummary.value.total}`
+                  : undefined
+              }
+              badgeTruncated={skillSummary.value?.truncated}
+              loading={skillSummary.loading || (!skillSummary.value && !skillSummary.error)}
+              error={skillSummary.error}
               isOpen={skillsOpen}
               onToggle={() => setSkillsOpen((prev) => !prev)}
             />
@@ -1567,7 +1903,15 @@ export function RightPanel({
             <SectionHeader
               title="插件"
               icon={Puzzle}
-              badge={plugins.length}
+              badge={pluginSummary.value?.total ?? null}
+              badgeTitle={
+                pluginSummary.value ? `已安装 ${pluginSummary.value.total} 个插件` : undefined
+              }
+              badgeTruncated={pluginSummary.value?.truncated}
+              loading={
+                pluginSummary.loading || (!pluginSummary.value && !pluginSummary.error)
+              }
+              error={pluginSummary.error}
               isOpen={pluginsOpen}
               onToggle={() => setPluginsOpen((prev) => !prev)}
             />
@@ -1586,18 +1930,23 @@ export function RightPanel({
             <SectionHeader
               title="钩子"
               icon={Webhook}
-              badge={enabledHookCount}
+              badge={hookSummaryValue?.enabled ?? null}
+              badgeTitle={
+                hookSummaryValue
+                  ? `已启用 ${hookSummaryValue.enabled ?? 0}，共 ${hookSummaryValue.total}`
+                  : undefined
+              }
+              badgeTruncated={hookSummaryValue?.truncated}
+              loading={hookSummaryLoading}
+              error={hookSummaryError}
               isOpen={hooksOpen}
               onToggle={() => setHooksOpen((prev) => !prev)}
             />
             {hooksOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
                 <HooksContent
-                  hooks={hooks}
-                  truncated={hookCatalogTruncated}
-                  onChange={() => {
-                    void loadHooks()
-                  }}
+                  hooks={currentHookDetail.hooks}
+                  truncated={currentHookDetail.truncated}
                 />
               </div>
             )}
@@ -1612,12 +1961,19 @@ export function RightPanel({
               title="LSP"
               icon={Code2}
               detail={lspHeaderStatus}
+              loading={lspConfigLoading || (!lspConfig && !lspConfigError)}
+              error={lspConfigError}
               isOpen={lspOpen}
               onToggle={() => setLspOpen((prev) => !prev)}
             />
             {lspOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.lsp }}>
-                <LspPanel threadId={currentThreadId} embedded statusOnly />
+                <LspPanel
+                  threadId={currentThreadId}
+                  embedded
+                  statusOnly
+                  onSummaryChange={handleLspSummaryChange}
+                />
               </div>
             )}
           </div>
@@ -3804,12 +4160,10 @@ function buildHookSourceGroups(hooks: DisplayHook[]): HookSourceGroup[] {
 
 function HooksContent({
   hooks,
-  truncated,
-  onChange
+  truncated
 }: {
   hooks: DisplayHook[]
   truncated: boolean
-  onChange: () => void
 }): React.JSX.Element {
   const [visibleHookCount, setVisibleHookCount] = useState(RIGHT_PANEL_INITIAL_RENDER_ITEMS)
   const hookWindow = useMemo(
@@ -3833,7 +4187,6 @@ function HooksContent({
     try {
       if (hook.source !== "global") return
       await window.api.hooks.setEnabled(hook.id, !hook.enabled)
-      onChange()
     } catch (e) {
       console.error("[HooksContent] Failed to toggle hook:", e)
     }

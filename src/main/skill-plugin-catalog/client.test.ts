@@ -280,6 +280,7 @@ function emptyPage(kind: SkillPluginCatalogPage["kind"]): SkillPluginCatalogPage
     disabledSkillIds: [],
     cursor: null,
     total: 0,
+    enabledSkillCount: 0,
     truncated: false,
     truncatedReasons: [],
     stats: { scannedDirectories: 0, scannedFiles: 0, discoveredSkills: 0, readBytes: 0 }

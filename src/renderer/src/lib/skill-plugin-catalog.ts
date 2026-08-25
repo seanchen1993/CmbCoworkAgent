@@ -13,6 +13,49 @@ interface LoadOptions {
   isCurrent?: () => boolean
 }
 
+export interface SkillCatalogSummary {
+  total: number
+  enabled: number
+  truncated: boolean
+}
+
+export interface PluginCatalogSummary {
+  total: number
+  truncated: boolean
+}
+
+export async function loadSkillCatalogSummary(
+  revision: string,
+  scope = "right-panel-summary",
+  isCurrent?: () => boolean
+): Promise<SkillCatalogSummary> {
+  if (isCurrent && !isCurrent()) throw new Error("Catalog request superseded")
+  const page = await window.api.skills.catalog.read(
+    { kind: "skills", limit: 1, revision },
+    `${scope}:skills`
+  )
+  if (isCurrent && !isCurrent()) throw new Error("Catalog request superseded")
+  return {
+    total: page.total,
+    enabled: page.enabledSkillCount,
+    truncated: page.truncated
+  }
+}
+
+export async function loadPluginCatalogSummary(
+  revision: string,
+  scope = "right-panel-summary",
+  isCurrent?: () => boolean
+): Promise<PluginCatalogSummary> {
+  if (isCurrent && !isCurrent()) throw new Error("Catalog request superseded")
+  const page = await window.api.skills.catalog.read(
+    { kind: "plugins", limit: 1, revision },
+    `${scope}:plugins`
+  )
+  if (isCurrent && !isCurrent()) throw new Error("Catalog request superseded")
+  return { total: page.total, truncated: page.truncated }
+}
+
 async function drainCatalogKind(
   kind: "skills" | "plugins" | "disabled",
   options: LoadOptions
