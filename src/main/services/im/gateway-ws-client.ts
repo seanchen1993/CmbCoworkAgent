@@ -20,7 +20,6 @@ const CONNECT_TIMEOUT_MS = 10_000
 const COMMAND_TIMEOUT_MS = 15_000
 const RECONNECT_MAX_MS = 60_000
 const MAX_FRAME_BYTES = 64 * 1024
-const AUTHENTICATION_REFRESH_SKEW_MS = 5 * 60_000
 const MAX_TIMER_DELAY_MS = 2_147_000_000
 const DEFAULT_ROUTE_SYNC_EXTENSION = "sync-default-route-v1"
 const PERMANENT_REPLY_REASON_CODES = new Set([
@@ -366,13 +365,10 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       routes: []
     })
     const tokenExpiresAt = jwtExpiresAtMs(token)
-    if (
-      tokenExpiresAt !== null &&
-      tokenExpiresAt <= this.now() + AUTHENTICATION_REFRESH_SKEW_MS
-    ) {
+    if (tokenExpiresAt !== null && tokenExpiresAt <= this.now()) {
       console.info("[IM Gateway] token-refresh:preflight", {
         expiresAt: new Date(tokenExpiresAt).toISOString(),
-        expired: tokenExpiresAt <= this.now()
+        expired: true
       })
       this.beginAuthenticationRefresh(token, generation, null, "preflight")
       return
@@ -1020,12 +1016,12 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     if (!token) return
     const expiresAt = jwtExpiresAtMs(token)
     if (expiresAt === null) return
-    const remaining = expiresAt - this.now() - AUTHENTICATION_REFRESH_SKEW_MS
+    const remaining = expiresAt - this.now()
     const delay = Math.max(0, Math.min(remaining, MAX_TIMER_DELAY_MS))
     this.authenticationRefreshTimer = setTimeout(() => {
       this.authenticationRefreshTimer = undefined
       if (this.stopped || this.connectionToken !== token) return
-      if (expiresAt > this.now() + AUTHENTICATION_REFRESH_SKEW_MS) {
+      if (expiresAt > this.now()) {
         this.scheduleAuthenticationRefresh()
         return
       }

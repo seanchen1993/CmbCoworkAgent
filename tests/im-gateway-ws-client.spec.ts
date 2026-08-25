@@ -378,6 +378,24 @@ async function main(): Promise<void> {
   )
   legacyAmbiguousClient.stop()
 
+  const nearExpiryToken = unsignedJwt(Date.now() + 90_000)
+  let nearExpiryRefreshCount = 0
+  const nearExpiryClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => nearExpiryToken,
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      nearExpiryRefreshCount += 1
+      return false
+    },
+    onRemoteEvent: () => undefined
+  })
+  nearExpiryClient.start()
+  await waitFor(() => nearExpiryClient.isAuthenticated(), "valid near-expiry JWT handshake")
+  assert.equal(nearExpiryRefreshCount, 0)
+  assert.equal(authorization, `Bearer ${nearExpiryToken}`)
+  nearExpiryClient.stop()
+
   let preflightToken = unsignedJwt(Date.now() - 60_000)
   let preflightRefreshCount = 0
   const preflightRefreshingClient = new ImGatewayWsClient({
