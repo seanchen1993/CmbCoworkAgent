@@ -3,6 +3,11 @@ import {
   openNativeSqliteDatabase
 } from "../db/native-sqlite-adapter"
 import { sqliteFileSize } from "../utils/sqlite-durable-file"
+import { ensureCheckpointRuntimeProjectionInWorker } from "./runtime-projection-client"
+import {
+  buildCheckpointRuntimeProjection,
+  CHECKPOINT_RUNTIME_PROJECTION_VERSION
+} from "./runtime-projection"
 
 const DEFAULT_MAX_DB_SIZE_BYTES = 100 * 1024 * 1024
 const DEFAULT_MAX_ROOT_FORK_BOUNDARY_CHECKPOINTS = 0
@@ -254,10 +259,26 @@ export interface SqlJsSaverOptions {
   maxRootForkBoundaryBytes?: number
   /** Non-root namespaces are LangGraph internals/tool subgraphs and can grow very large. */
   maxNonRootCheckpoints?: number
-  /** Soft size guard for opening a database without emergency pruning. */
+  /** Size threshold used by explicit/background runMaintenance() calls. */
   maxDatabaseBytes?: number
   /** @deprecated Native SQLite no longer loads the whole file into memory. */
   maxOversizedRecoveryBytes?: number
+}
+
+interface CheckpointRuntimeProjectionRow {
+  thread_id: string
+  checkpoint_ns: string
+  checkpoint_id: string
+  parent_checkpoint_id: string | null
+  type: string | null
+  runtime_checkpoint: string | Uint8Array
+}
+
+export interface SqlJsSaverMaintenanceResult {
+  attempted: boolean
+  compacted: boolean
+  beforeBytes: number | null
+  afterBytes: number | null
 }
 
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
@@ -366,10 +387,6 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         await this.setup()
         if (this.retired) {
           throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
-        }
-        const liveSize = sqliteFileSize(this.dbPath)
-        if (liveSize && liveSize > this.maxDatabaseBytes) {
-          this.compactOversizedLiveDatabase(database, liveSize)
         }
       } catch (error) {
         if (this.db === database) {
@@ -492,7 +509,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private compactOversizedLiveDatabase(
     database: NativeSqliteAdapter,
     liveSize: number
-  ): void {
+  ): boolean {
     try {
       this.pruneAllCheckpointNamespaces(database)
       this.pruneAllUnreachableMessageSnapshots(database)
@@ -506,8 +523,38 @@ export class SqlJsSaver extends BaseCheckpointSaver {
           `${Math.round(liveSize / 1024 / 1024)}MB to ` +
           `${nextSize ? Math.round(nextSize / 1024 / 1024) : "unknown"}MB.`
       )
+      return true
     } catch (error) {
       console.warn("[SqlJsSaver] Failed to compact oversized database:", error)
+      return false
+    }
+  }
+
+  /**
+   * Explicit cold-path maintenance. Callers must schedule this outside thread
+   * hydration and active graph runs (for example in a maintenance worker): the
+   * namespace scan and VACUUM are intentionally synchronous within this method.
+   */
+  async runMaintenance(): Promise<SqlJsSaverMaintenanceResult> {
+    await this.initialize()
+    if (!this.db) throw new Error("Database not initialized")
+
+    const beforeBytes = sqliteFileSize(this.dbPath)
+    if (beforeBytes === null || beforeBytes <= this.maxDatabaseBytes) {
+      return {
+        attempted: false,
+        compacted: false,
+        beforeBytes,
+        afterBytes: beforeBytes
+      }
+    }
+
+    const compacted = this.compactOversizedLiveDatabase(this.db, beforeBytes)
+    return {
+      attempted: true,
+      compacted,
+      beforeBytes,
+      afterBytes: sqliteFileSize(this.dbPath)
     }
   }
 
@@ -564,6 +611,33 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       CREATE INDEX IF NOT EXISTS idx_checkpoint_message_snapshot_parent
       ON checkpoint_message_snapshots (thread_id, checkpoint_ns, parent_checkpoint_id)
     `)
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS checkpoint_runtime_projections (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        checkpoint_ts TEXT NOT NULL,
+        projection_version INTEGER NOT NULL DEFAULT 1,
+        type TEXT NOT NULL,
+        runtime_checkpoint BLOB NOT NULL,
+        PRIMARY KEY (thread_id, checkpoint_ns)
+      )
+    `)
+    const runtimeProjectionColumns = this.db.exec(
+      "PRAGMA table_info(checkpoint_runtime_projections)"
+    )
+    const hasRuntimeProjectionVersion = (runtimeProjectionColumns[0]?.values ?? []).some(
+      (column) => column[1] === "projection_version"
+    )
+    if (!hasRuntimeProjectionVersion) {
+      // Rows written by the pre-projection-version implementation are not
+      // trusted as bounded; the worker rebuilds them from the authoritative
+      // checkpoint before Electron main reads the payload.
+      this.db.run(
+        "ALTER TABLE checkpoint_runtime_projections ADD COLUMN projection_version INTEGER NOT NULL DEFAULT 0"
+      )
+    }
     this.isSetup = true
   }
 
@@ -726,83 +800,6 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       messages
     }
     return checkpoint
-  }
-
-  /**
-   * Upgrade a pre-snapshot checkpoint after its one unavoidable compatibility
-   * read. Keeping the snapshot insert and compact checkpoint rewrite in one
-   * transaction means a crash can expose either the complete legacy row or the
-   * complete external reference, never a reference without its message base.
-   */
-  private async migrateLegacyInlineCheckpointMessages(
-    row: CheckpointRow,
-    checkpoint: Checkpoint,
-    messages: unknown[]
-  ): Promise<boolean> {
-    if (!this.db) throw new Error("Database not initialized")
-    const database = this.db
-    const compactCheckpoint: Checkpoint = {
-      ...checkpoint,
-      channel_values: {
-        ...checkpoint.channel_values,
-        messages: buildExternalMessagesReference(messages.length)
-      }
-    }
-    const [[snapshotType, serializedMessages], [checkpointType, serializedCheckpoint]] =
-      await Promise.all([
-        this.serde.dumpsTyped(messages),
-        this.serde.dumpsTyped(compactCheckpoint)
-      ])
-
-    database.run("BEGIN")
-    try {
-      database.run(
-        `INSERT OR REPLACE INTO checkpoint_message_snapshots
-         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, prefix_length,
-          message_count, type, suffix)
-         VALUES (?, ?, ?, NULL, 0, ?, ?, ?)`,
-        [
-          row.thread_id,
-          row.checkpoint_ns,
-          row.checkpoint_id,
-          messages.length,
-          snapshotType,
-          serializedMessages
-        ]
-      )
-      // A concurrent put may have replaced this exact checkpoint id while the
-      // async serializer yielded. Compare-and-swap the payload so migration can
-      // never overwrite a newer authoritative checkpoint.
-      database.run(
-        `UPDATE checkpoints
-         SET type = ?, checkpoint = ?
-         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
-           AND type IS ? AND checkpoint = ?`,
-        [
-          checkpointType,
-          serializedCheckpoint,
-          row.thread_id,
-          row.checkpoint_ns,
-          row.checkpoint_id,
-          row.type,
-          row.checkpoint
-        ]
-      )
-      const changed = Number(database.exec("SELECT changes() AS changed")[0]?.values[0]?.[0] ?? 0)
-      if (changed !== 1) {
-        database.run("ROLLBACK")
-        return false
-      }
-      database.run("COMMIT")
-      return true
-    } catch (error) {
-      try {
-        database.run("ROLLBACK")
-      } catch {
-        // Preserve the migration error.
-      }
-      throw error
-    }
   }
 
   private pruneUnreachableMessageSnapshots(
@@ -1074,6 +1071,47 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     if (failure) throw failure
   }
 
+  private readLatestRuntimeProjection(
+    threadId: string,
+    checkpointNs: string
+  ): CheckpointRuntimeProjectionRow | undefined {
+    if (!this.db) return undefined
+    const stmt = this.db.prepare(`
+      SELECT projection.thread_id, projection.checkpoint_ns, projection.checkpoint_id,
+             projection.parent_checkpoint_id, projection.type, projection.runtime_checkpoint
+      FROM checkpoint_runtime_projections AS projection
+      JOIN checkpoints AS checkpoint
+        ON checkpoint.thread_id = projection.thread_id
+       AND checkpoint.checkpoint_ns = projection.checkpoint_ns
+       AND checkpoint.checkpoint_id = projection.checkpoint_id
+      WHERE projection.thread_id = ? AND projection.checkpoint_ns = ?
+        AND projection.projection_version = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM checkpoints AS newer
+          WHERE newer.thread_id = checkpoint.thread_id
+            AND newer.checkpoint_ns = checkpoint.checkpoint_ns
+            AND (
+              COALESCE(newer.checkpoint_ts, newer.checkpoint_id) >
+                COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id)
+              OR (
+                COALESCE(newer.checkpoint_ts, newer.checkpoint_id) =
+                  COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id)
+                AND newer.checkpoint_id > checkpoint.checkpoint_id
+              )
+            )
+        )
+      LIMIT 1
+    `)
+    stmt.bind([threadId, checkpointNs, CHECKPOINT_RUNTIME_PROJECTION_VERSION])
+    if (!stmt.step()) {
+      stmt.free()
+      return undefined
+    }
+    const row = stmt.getAsObject() as unknown as CheckpointRuntimeProjectionRow
+    stmt.free()
+    return row
+  }
+
   /**
    * Read only the latest checkpoint state needed to restore renderer/runtime
    * affordances such as todos and interrupts. Unlike getTuple()/list(), this
@@ -1091,40 +1129,24 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const checkpointNs = config.configurable?.checkpoint_ns ?? ""
     if (typeof threadId !== "string" || !threadId) return undefined
 
-    const stmt = this.db.prepare(`
-      SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint
-      FROM checkpoints
-      WHERE thread_id = ? AND checkpoint_ns = ?
-      ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
-      LIMIT 1
-    `)
-    stmt.bind([threadId, checkpointNs])
-    if (!stmt.step()) {
-      stmt.free()
-      return undefined
-    }
-
-    const row = stmt.getAsObject() as unknown as CheckpointRow
-    stmt.free()
-    const serializedCheckpoint = (await this.serde.loadsTyped(
-      row.type ?? "json",
-      row.checkpoint
-    )) as Checkpoint
-    const storedMessages = (serializedCheckpoint.channel_values as Record<string, unknown>)
-      .messages
-    if (Array.isArray(storedMessages)) {
+    let row = this.readLatestRuntimeProjection(threadId, checkpointNs)
+    if (!row) {
       try {
-        await this.migrateLegacyInlineCheckpointMessages(row, serializedCheckpoint, storedMessages)
+        await ensureCheckpointRuntimeProjectionInWorker(this.dbPath, threadId, checkpointNs)
       } catch (error) {
-        // Runtime hydration still succeeds from the already-decoded legacy row.
-        // A later access can retry the crash-safe migration.
-        console.warn("[SqlJsSaver] Failed to migrate legacy inline checkpoint messages:", error)
+        // Never fall back to parsing the full checkpoint on Electron main. A
+        // missing legacy runtime affordance is recoverable; freezing the whole
+        // application on a multi-megabyte compatibility row is not.
+        console.warn("[SqlJsSaver] Failed to build checkpoint runtime projection:", error)
       }
+      row = this.readLatestRuntimeProjection(threadId, checkpointNs)
     }
-    const runtimeChannelValues = {
-      ...(serializedCheckpoint.channel_values as Record<string, unknown>)
-    }
-    delete runtimeChannelValues.messages
+    if (!row) return undefined
+
+    const runtimeCheckpoint = (await this.serde.loadsTyped(
+      row.type ?? "json",
+      row.runtime_checkpoint
+    )) as Checkpoint
 
     return {
       config: {
@@ -1134,10 +1156,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
           checkpoint_id: row.checkpoint_id
         }
       },
-      checkpoint: {
-        ...serializedCheckpoint,
-        channel_values: runtimeChannelValues
-      },
+      checkpoint: runtimeCheckpoint,
       parentConfig: row.parent_checkpoint_id
         ? {
             configurable: {
@@ -1455,9 +1474,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         Boolean(persistedSnapshot[0]?.values.length)
     }
 
-    const [[type1, serializedCheckpoint], [type2, serializedMetadata]] = await Promise.all([
+    const runtimeCheckpoint = buildCheckpointRuntimeProjection(preparedCheckpoint)
+    const [
+      [type1, serializedCheckpoint],
+      [type2, serializedMetadata],
+      [runtimeType, serializedRuntimeCheckpoint]
+    ] = await Promise.all([
       this.serde.dumpsTyped(preparedCheckpoint),
-      this.serde.dumpsTyped(metadata)
+      this.serde.dumpsTyped(metadata),
+      this.serde.dumpsTyped(runtimeCheckpoint)
     ])
 
     if (type1 !== type2) {
@@ -1510,6 +1535,34 @@ export class SqlJsSaver extends BaseCheckpointSaver {
           serializedMetadata,
           checkpointTs,
           forkBoundaryMarker
+        ]
+      )
+      database.run(
+        `INSERT INTO checkpoint_runtime_projections
+         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+          checkpoint_ts, projection_version, type, runtime_checkpoint)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(thread_id, checkpoint_ns) DO UPDATE SET
+           checkpoint_id = excluded.checkpoint_id,
+           parent_checkpoint_id = excluded.parent_checkpoint_id,
+           checkpoint_ts = excluded.checkpoint_ts,
+           projection_version = excluded.projection_version,
+           type = excluded.type,
+           runtime_checkpoint = excluded.runtime_checkpoint
+         WHERE excluded.checkpoint_ts > checkpoint_runtime_projections.checkpoint_ts
+            OR (
+              excluded.checkpoint_ts = checkpoint_runtime_projections.checkpoint_ts
+              AND excluded.checkpoint_id >= checkpoint_runtime_projections.checkpoint_id
+            )`,
+        [
+          thread_id,
+          checkpoint_ns,
+          checkpoint.id,
+          parent_checkpoint_id ?? null,
+          checkpointTs,
+          CHECKPOINT_RUNTIME_PROJECTION_VERSION,
+          runtimeType,
+          serializedRuntimeCheckpoint
         ]
       )
       database.run("COMMIT")
@@ -1682,6 +1735,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     this.db.run(`DELETE FROM checkpoints WHERE thread_id = ?`, [threadId])
     this.db.run(`DELETE FROM writes WHERE thread_id = ?`, [threadId])
     this.db.run(`DELETE FROM checkpoint_message_snapshots WHERE thread_id = ?`, [threadId])
+    this.db.run(`DELETE FROM checkpoint_runtime_projections WHERE thread_id = ?`, [threadId])
 
     const cachePrefix = `${threadId}\u0000`
     for (const key of this.checkpointMessageWriteStates.keys()) {

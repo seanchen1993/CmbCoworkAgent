@@ -98,7 +98,12 @@ export function TabbedPanel({
                 </div>
               }
             >
-              <FileViewer key={activeFile.path} filePath={activeFile.path} threadId={threadId} />
+              <FileViewer
+                key={activeFile.path}
+                filePath={activeFile.path}
+                threadId={threadId}
+                requestLane="active-file-tab"
+              />
             </Suspense>
           </div>
         ) : (

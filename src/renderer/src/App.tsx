@@ -1,4 +1,14 @@
-import { useEffect, useState, useCallback, useRef, useLayoutEffect, lazy, Suspense } from "react"
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  lazy,
+  Suspense
+} from "react"
 import {
   Briefcase,
   Eye,
@@ -36,7 +46,7 @@ import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
-import { initMMJ } from "../js/mmjUtils"
+import { initMMJ, updateMMJUserInfo } from "../js/mmjUtils"
 import { toast, Toaster } from "sonner"
 import { useShallow } from "zustand/react/shallow"
 import { evolutionApi } from "@/api/evolution"
@@ -52,6 +62,19 @@ import {
   unnotifiedReviewCandidates
 } from "@/lib/evolution-notices"
 import { useMyUploadedSkills } from "@/lib/use-my-uploaded-skills"
+import {
+  configureAppCatalogLoaders,
+  ensureDisabledSkillsChangedInvalidationSource,
+  ensureSkillsChangedInvalidationSource,
+  revalidateSkillCatalog
+} from "@/lib/app-catalog-cache"
+import { loadPluginCatalogPages, loadSkillCatalogPages } from "@/lib/skill-plugin-catalog"
+import { invalidateModelCatalogCache } from "@/lib/model-catalog-cache"
+
+configureAppCatalogLoaders({
+  skills: (key) => loadSkillCatalogPages(key, "app-skill-catalog"),
+  plugins: (key) => loadPluginCatalogPages(key, "app-plugin-catalog")
+})
 interface UserInfoConfig {
   sapId: string
   ystId: string
@@ -160,6 +183,7 @@ function App(): React.JSX.Element {
     loadThreads,
     loadDashboardAllowed,
     loadChatScrollSettings,
+    loadModels,
     dashboardAllowed,
     createThread,
     mainView,
@@ -174,13 +198,15 @@ function App(): React.JSX.Element {
     workflowAgentFocusView,
     setShowCustomizeView,
     setEvolutionTab,
-    setCloudEvolutionUpdates
+    setCloudEvolutionUpdates,
+    pluginVersion
   } = useAppStore(
     useShallow((state) => ({
       currentThreadId: state.currentThreadId,
       loadThreads: state.loadThreads,
       loadDashboardAllowed: state.loadDashboardAllowed,
       loadChatScrollSettings: state.loadChatScrollSettings,
+      loadModels: state.loadModels,
       dashboardAllowed: state.dashboardAllowed,
       createThread: state.createThread,
       mainView: state.mainView,
@@ -195,10 +221,27 @@ function App(): React.JSX.Element {
       workflowAgentFocusView: state.workflowAgentFocusView,
       setShowCustomizeView: state.setShowCustomizeView,
       setEvolutionTab: state.setEvolutionTab,
-      setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
+      setCloudEvolutionUpdates: state.setCloudEvolutionUpdates,
+      pluginVersion: state.pluginVersion
     }))
   )
   const { ownedSkillKeys } = useMyUploadedSkills()
+
+  useEffect(() => {
+    ensureSkillsChangedInvalidationSource((listener) => window.api.skills.onChanged(listener))
+    ensureDisabledSkillsChangedInvalidationSource((listener) =>
+      window.api.hooks.onChanged(listener)
+    )
+  }, [])
+
+  useEffect(() => {
+    void loadModels()
+    return window.api.models.onChanged(() => {
+      invalidateModelCatalogCache()
+      void loadModels(true)
+    })
+  }, [loadModels])
+
   const [isLoading, setIsLoading] = useState(true)
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT)
@@ -208,6 +251,40 @@ function App(): React.JSX.Element {
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
+
+  // Version and local-IP metadata belong to the application lifetime, not to a
+  // ChatContainer. Keeping these listeners here avoids repeating IPC requests
+  // and user-info refreshes every time a thread surface remounts.
+  useEffect(() => {
+    const { ipcRenderer } = window.electron
+    const removeVersionListener = ipcRenderer.on("version", (version: unknown) => {
+      if (typeof version !== "string" || !version) return
+      localStorage.setItem("version", version)
+      updateMMJUserInfo()
+    })
+    const removeIpListener = ipcRenderer.on("ip", (ip: unknown) => {
+      if (typeof ip !== "string" || !ip) return
+      localStorage.setItem("localIp", ip)
+    })
+
+    void Promise.allSettled([
+      ipcRenderer.invoke("get-version").then((version: unknown) => {
+        if (typeof version !== "string" || !version) return
+        localStorage.setItem("version", version)
+        updateMMJUserInfo()
+      }),
+      ipcRenderer.invoke("get-local-ip").then((ip: unknown) => {
+        if (typeof ip !== "string" || !ip) return
+        localStorage.setItem("localIp", ip)
+        updateMMJUserInfo()
+      })
+    ])
+
+    return () => {
+      if (typeof removeVersionListener === "function") removeVersionListener()
+      if (typeof removeIpListener === "function") removeIpListener()
+    }
+  }, [])
 
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
@@ -221,26 +298,71 @@ function App(): React.JSX.Element {
   const moduleInactiveClass = "text-foreground hover:bg-muted/45"
   const sidebarToggleText = sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏"
   const rightPanelToggleText = rightPanelCollapsed ? "显示右侧面板" : "隐藏右侧面板"
+
+  // Keep the route consumed by the expensive center/right surfaces atomic. A
+  // task click updates the lightweight sidebar immediately, while React may
+  // finish the old surface and yield before committing the new task/mode as a
+  // single unit. In particular, the center must never render task B while the
+  // right panel still reads task A from the global store.
+  const selectedRenderRoute = useMemo(
+    () => ({
+      mainView,
+      threadId: currentThreadId,
+      harnessSessionThreadId,
+      workerFocusView,
+      subagentFocusView,
+      workflowAgentFocusView
+    }),
+    [
+      currentThreadId,
+      harnessSessionThreadId,
+      mainView,
+      subagentFocusView,
+      workerFocusView,
+      workflowAgentFocusView
+    ]
+  )
+  const renderedRoute = useDeferredValue(selectedRenderRoute)
+  const renderRoutePending = renderedRoute !== selectedRenderRoute
+  const renderedMainView = renderedRoute.mainView
+  const renderedThreadId = renderedRoute.threadId
+  const renderedHarnessSessionThreadId = renderedRoute.harnessSessionThreadId
   const isThreadWorkerFocusActive =
-    mainView === "thread" &&
-    Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
+    renderedMainView === "thread" &&
+    Boolean(
+      renderedThreadId && renderedRoute.workerFocusView?.threadId === renderedThreadId
+    )
   const isHarnessWorkerFocusActive =
-    mainView === "harness" &&
-    Boolean(harnessSessionThreadId && workerFocusView?.threadId === harnessSessionThreadId)
+    renderedMainView === "harness" &&
+    Boolean(
+      renderedHarnessSessionThreadId &&
+        renderedRoute.workerFocusView?.threadId === renderedHarnessSessionThreadId
+    )
   const isWorkerFocusActive = isThreadWorkerFocusActive || isHarnessWorkerFocusActive
   const isThreadSubagentFocusActive =
-    mainView === "thread" &&
-    Boolean(currentThreadId && subagentFocusView?.threadId === currentThreadId)
+    renderedMainView === "thread" &&
+    Boolean(
+      renderedThreadId && renderedRoute.subagentFocusView?.threadId === renderedThreadId
+    )
   const isHarnessSubagentFocusActive =
-    mainView === "harness" &&
-    Boolean(harnessSessionThreadId && subagentFocusView?.threadId === harnessSessionThreadId)
+    renderedMainView === "harness" &&
+    Boolean(
+      renderedHarnessSessionThreadId &&
+        renderedRoute.subagentFocusView?.threadId === renderedHarnessSessionThreadId
+    )
   const isSubagentFocusActive = isThreadSubagentFocusActive || isHarnessSubagentFocusActive
   const isThreadWorkflowAgentFocusActive =
-    mainView === "thread" &&
-    Boolean(currentThreadId && workflowAgentFocusView?.threadId === currentThreadId)
+    renderedMainView === "thread" &&
+    Boolean(
+      renderedThreadId &&
+        renderedRoute.workflowAgentFocusView?.threadId === renderedThreadId
+    )
   const isHarnessWorkflowAgentFocusActive =
-    mainView === "harness" &&
-    Boolean(harnessSessionThreadId && workflowAgentFocusView?.threadId === harnessSessionThreadId)
+    renderedMainView === "harness" &&
+    Boolean(
+      renderedHarnessSessionThreadId &&
+        renderedRoute.workflowAgentFocusView?.threadId === renderedHarnessSessionThreadId
+    )
   const isWorkflowAgentFocusActive =
     isThreadWorkflowAgentFocusActive || isHarnessWorkflowAgentFocusActive
   const isAgentFocusActive =
@@ -505,11 +627,21 @@ function App(): React.JSX.Element {
 
   const activeRightPanelThreadId =
     mainView === "harness" ? harnessSessionThreadId : currentThreadId
+  const renderedRightPanelThreadId =
+    renderedMainView === "harness"
+      ? renderedHarnessSessionThreadId
+      : renderedThreadId
   const isActiveRightPanelThreadGit = activeRightPanelThreadId
     ? Boolean(isGitWorkspaceByThread[activeRightPanelThreadId])
     : false
   const hasPendingGitDiff = activeRightPanelThreadId
     ? Boolean(pendingGitDiffByThread[activeRightPanelThreadId] && isActiveRightPanelThreadGit)
+    : false
+  const renderedHasPendingGitDiff = renderedRightPanelThreadId
+    ? Boolean(
+        pendingGitDiffByThread[renderedRightPanelThreadId] &&
+          isGitWorkspaceByThread[renderedRightPanelThreadId]
+      )
     : false
   const showRightPanelModuleControls =
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
@@ -634,7 +766,7 @@ function App(): React.JSX.Element {
 
     const checkOptimizedSkillUpdates = async (): Promise<void> => {
       try {
-        const installedSkills = await window.api.skills.list()
+        const installedSkills = (await revalidateSkillCatalog(pluginVersion)).localSkills
         const updates = await evolutionApi.listAvailableUpdates(installedSkills)
         if (cancelled) return
 
@@ -676,7 +808,13 @@ function App(): React.JSX.Element {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
+  }, [
+    pluginVersion,
+    setCloudEvolutionUpdates,
+    setEvolutionTab,
+    setPendingEvolution,
+    setShowCustomizeView
+  ])
 
   // 「待审批发布」提醒：本分支把进化审批权限放开给个人后，技能创建者需要被
   // 提醒自己上传的技能跑出了优化候选、正等待其审批发布。仅面向个人，管理员不在此提醒范围内。
@@ -739,8 +877,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     return window.api.threads.onThreadsChanged(async () => {
       try {
-        const threads = await window.api.threads.list()
-        useAppStore.setState({ threads })
+        await useAppStore.getState().loadThreads()
       } catch (err) {
         console.error("[App] Failed to reload threads:", err)
       }
@@ -752,8 +889,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     const onFocus = async (): Promise<void> => {
       try {
-        const threads = await window.api.threads.list()
-        useAppStore.setState({ threads })
+        await useAppStore.getState().loadThreads()
         window.api.pet.clearCompletedTasks()
       } catch {
         // ignore
@@ -941,8 +1077,23 @@ function App(): React.JSX.Element {
           </div>
         </div>
 
-        {/* Main content below titlebar */}
-        {mainView === "customize" ? (
+        {/*
+          Main content below titlebar. The lightweight sidebar remains above the
+          transition shield so rapid A -> B -> C navigation can supersede stale
+          hydration; stale center/right controls cannot mutate the previous task.
+        */}
+        <div
+          className="relative flex min-h-0 flex-1 overflow-hidden"
+          aria-busy={renderRoutePending}
+          onKeyDownCapture={(event) => {
+            if (!renderRoutePending) return
+            const target = event.target
+            if (target instanceof Element && target.closest("[data-app-route-control]")) return
+            event.preventDefault()
+            event.stopPropagation()
+          }}
+        >
+        {renderedMainView === "customize" ? (
           <div className="flex flex-1 overflow-hidden bg-grid-subtle">
             <main className="flex flex-1 flex-col min-w-0 overflow-hidden">
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
@@ -950,19 +1101,25 @@ function App(): React.JSX.Element {
               </Suspense>
             </main>
           </div>
-        ) : mainView !== "claudecode" && mainView !== "dashboard" && mainView !== "harness" ? (
+        ) : renderedMainView !== "claudecode" &&
+          renderedMainView !== "dashboard" &&
+          renderedMainView !== "harness" ? (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {/* Left Sidebar */}
             {!sidebarCollapsed && !isAgentFocusActive && (
               <>
-                <div style={{ width: leftWidth }} className="shrink-0">
+                <div
+                  data-app-route-control
+                  style={{ width: leftWidth }}
+                  className="relative z-[60] shrink-0"
+                >
                   <ThreadSidebar />
                 </div>
                 <ResizeHandle onDrag={handleLeftResize} />
               </>
             )}
 
-            {mainView === "kanban" ? (
+            {renderedMainView === "kanban" ? (
               <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
                 <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
                   <KanbanView />
@@ -980,11 +1137,11 @@ function App(): React.JSX.Element {
                       className="flex min-w-0 flex-col overflow-hidden"
                       style={{ width: `${workerSplitLeftPercent}%` }}
                     >
-                      {currentThreadId ? (
+                      {renderedThreadId ? (
                         <TabbedPanel
-                          threadId={currentThreadId}
+                          threadId={renderedThreadId}
                           showTabBar={false}
-                          hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                          hasPendingGitDiffNotice={renderedHasPendingGitDiff && rightModule !== "git"}
                           onRequestOpenGitPanel={selectGitModule}
                           onDismissGitChangeNotice={dismissGitChangeNotice}
                           onThreadGitStatusChange={handleThreadGitStatusChange}
@@ -1008,11 +1165,11 @@ function App(): React.JSX.Element {
                   </main>
                 ) : !previewFullscreen && (
                   <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
-                    {currentThreadId ? (
+                    {renderedThreadId ? (
                       <TabbedPanel
-                        threadId={currentThreadId}
+                        threadId={renderedThreadId}
                         showTabBar={false}
-                        hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                        hasPendingGitDiffNotice={renderedHasPendingGitDiff && rightModule !== "git"}
                         onRequestOpenGitPanel={selectGitModule}
                         onDismissGitChangeNotice={dismissGitChangeNotice}
                         onThreadGitStatusChange={handleThreadGitStatusChange}
@@ -1027,7 +1184,7 @@ function App(): React.JSX.Element {
               </>
             )}
 
-            {mainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
+            {renderedMainView === "thread" && !rightPanelCollapsed && !isAgentFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 {/* Right Panel - floating style */}
@@ -1036,6 +1193,7 @@ function App(): React.JSX.Element {
                   className={previewFullscreen ? "flex-1 min-w-0" : "shrink-0"}
                 >
                   <RightPanel
+                    threadId={renderedThreadId}
                     moduleMode={rightModule}
                     onRequestPreviewMode={selectPreviewModule}
                     onRequestWorkMode={selectWorkModule}
@@ -1048,11 +1206,15 @@ function App(): React.JSX.Element {
         ) : null}
 
         {/* Dashboard 面板 */}
-        {mainView === "dashboard" && dashboardAllowed === true && (
+        {renderedMainView === "dashboard" && dashboardAllowed === true && (
           <div className="relative flex flex-1 overflow-hidden bg-grid-subtle">
             {!sidebarCollapsed && (
               <>
-                <div style={{ width: leftWidth }} className="shrink-0">
+                <div
+                  data-app-route-control
+                  style={{ width: leftWidth }}
+                  className="relative z-[60] shrink-0"
+                >
                   <ThreadSidebar />
                 </div>
                 <ResizeHandle onDrag={handleLeftResize} />
@@ -1067,14 +1229,18 @@ function App(): React.JSX.Element {
         )}
 
         {/* Harness Board 面板 */}
-        {mainView === "harness" && (
+        {renderedMainView === "harness" && (
           <div
             ref={isHarnessAgentFocusActive ? workerSplitRef : undefined}
             className="relative flex flex-1 overflow-hidden bg-grid-subtle"
           >
             {!sidebarCollapsed && !isHarnessAgentFocusActive && (
               <>
-                <div style={{ width: leftWidth }} className="shrink-0">
+                <div
+                  data-app-route-control
+                  style={{ width: leftWidth }}
+                  className="relative z-[60] shrink-0"
+                >
                   <ThreadSidebar />
                 </div>
                 <ResizeHandle onDrag={handleLeftResize} />
@@ -1084,7 +1250,7 @@ function App(): React.JSX.Element {
               key="harness-main"
               style={isHarnessAgentFocusActive ? { width: `${workerSplitLeftPercent}%` } : undefined}
               className={
-                previewFullscreen && harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
+                previewFullscreen && renderedHarnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive
                   ? "hidden"
                   : isHarnessAgentFocusActive
                     ? "relative flex min-w-0 flex-col overflow-hidden"
@@ -1093,7 +1259,7 @@ function App(): React.JSX.Element {
             >
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
                 <HarnessBoardView
-                  hasPendingGitDiffNotice={hasPendingGitDiff && rightModule !== "git"}
+                  hasPendingGitDiffNotice={renderedHasPendingGitDiff && rightModule !== "git"}
                   onRequestOpenGitPanel={selectGitModule}
                   onDismissGitChangeNotice={dismissGitChangeNotice}
                   onThreadGitStatusChange={handleThreadGitStatusChange}
@@ -1115,7 +1281,7 @@ function App(): React.JSX.Element {
                 </section>
               </>
             )}
-            {harnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
+            {renderedHarnessSessionThreadId && !rightPanelCollapsed && !isHarnessAgentFocusActive && (
               <>
                 {!previewFullscreen && <ResizeHandle onDrag={handleRightResize} />}
                 <div
@@ -1123,9 +1289,9 @@ function App(): React.JSX.Element {
                   className={previewFullscreen ? "flex-1 min-w-0" : "shrink-0"}
                 >
                   <RightPanel
-                    threadId={harnessSessionThreadId}
+                    threadId={renderedHarnessSessionThreadId}
                     moduleMode={rightModule}
-                    showSystemConstraints={mainView === "harness"}
+                    showSystemConstraints={renderedMainView === "harness"}
                     onRequestPreviewMode={selectPreviewModule}
                     onRequestWorkMode={selectWorkModule}
                     onPreviewFullscreenChange={setPreviewFullscreen}
@@ -1137,12 +1303,16 @@ function App(): React.JSX.Element {
         )}
 
         {/* Claude Code 面板：首次进入时再加载代码；之后保持挂载，切换视图时仅隐藏。 */}
-        {(claudeCodeMounted || mainView === "claudecode") && (
-          <div className={mainView === "claudecode" ? "relative flex flex-1 overflow-hidden bg-grid-subtle" : "hidden"}>
+        {(claudeCodeMounted || renderedMainView === "claudecode") && (
+          <div className={renderedMainView === "claudecode" ? "relative flex flex-1 overflow-hidden bg-grid-subtle" : "hidden"}>
             {/* claudecode 模式下也显示侧边栏 */}
-            {mainView === "claudecode" && !sidebarCollapsed && (
+            {renderedMainView === "claudecode" && !sidebarCollapsed && (
               <>
-                <div style={{ width: leftWidth }} className="shrink-0">
+                <div
+                  data-app-route-control
+                  style={{ width: leftWidth }}
+                  className="relative z-[60] shrink-0"
+                >
                   <ThreadSidebar />
                 </div>
                 <ResizeHandle onDrag={handleLeftResize} />
@@ -1150,11 +1320,24 @@ function App(): React.JSX.Element {
             )}
             <main className="relative flex flex-1 flex-col min-w-0 overflow-hidden">
               <Suspense fallback={<div className="flex flex-1 items-center justify-center"><Loader2 className="size-6 animate-spin text-muted-foreground" /></div>}>
-                <ClaudeCodePanel visible={mainView === "claudecode"} />
+                <ClaudeCodePanel visible={renderedMainView === "claudecode"} />
               </Suspense>
             </main>
           </div>
         )}
+        {renderRoutePending && (
+          <div
+            className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-background/20 backdrop-blur-[1px]"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="flex items-center gap-2 rounded-md border border-border/70 bg-background/90 px-3 py-2 text-xs text-muted-foreground shadow-sm">
+              <Loader2 className="size-3.5 animate-spin" />
+              正在切换任务…
+            </div>
+          </div>
+        )}
+        </div>
       </div>
       <PetStateBridge />
       <Toaster position="top-center" richColors duration={2200} />

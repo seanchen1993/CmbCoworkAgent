@@ -10,7 +10,8 @@ import {
   writeFileSync,
   unlinkSync,
   renameSync,
-  readdirSync
+  readdirSync,
+  statSync
 } from "fs"
 import {
   deleteSqliteDurableFileSync,
@@ -250,9 +251,15 @@ export function getEnvFilePath(): string {
 }
 
 // Read .env file and parse into object
+let parsedEnvFileCache: Record<string, string> | null = null
+
 function parseEnvFile(): Record<string, string> {
+  if (parsedEnvFileCache) return parsedEnvFileCache
   const envPath = getEnvFilePath()
-  if (!existsSync(envPath)) return {}
+  if (!existsSync(envPath)) {
+    parsedEnvFileCache = {}
+    return parsedEnvFileCache
+  }
 
   const content = readFileSync(envPath, "utf-8")
   const result: Record<string, string> = {}
@@ -267,7 +274,8 @@ function parseEnvFile(): Record<string, string> {
       result[key] = value
     }
   }
-  return result
+  parsedEnvFileCache = result
+  return parsedEnvFileCache
 }
 
 // Write object back to .env file
@@ -277,6 +285,7 @@ function writeEnvFile(env: Record<string, string>): void {
     .filter((entry) => entry[1])
     .map(([k, v]) => `${k}=${v}`)
   writeFileSync(getEnvFilePath(), lines.join("\n") + "\n")
+  parsedEnvFileCache = { ...env }
 }
 
 /** Resolve the managed-model credential, keeping runtime values overridable. */
@@ -464,6 +473,7 @@ export function setSkillEvolutionTurnThreshold(value: number): void {
 // ── Memory settings ──
 
 const MEMORY_SETTINGS_FILE = join(OPENWORK_DIR, "memory-settings.json")
+const CHAT_MOUNT_SETTINGS_MAX_BYTES = 64 * 1024
 
 interface MemorySettings {
   enabled?: boolean
@@ -471,21 +481,34 @@ interface MemorySettings {
   sessionOptInMigrated?: boolean
 }
 
+let memorySettingsCache: MemorySettings | null = null
+
 function readMemorySettings(): MemorySettings {
-  if (!existsSync(MEMORY_SETTINGS_FILE)) return {}
+  if (memorySettingsCache) return memorySettingsCache
+  if (!existsSync(MEMORY_SETTINGS_FILE)) {
+    memorySettingsCache = {}
+    return memorySettingsCache
+  }
   try {
+    if (statSync(MEMORY_SETTINGS_FILE).size > CHAT_MOUNT_SETTINGS_MAX_BYTES) {
+      memorySettingsCache = {}
+      return memorySettingsCache
+    }
     const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    memorySettingsCache = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as MemorySettings)
       : {}
+    return memorySettingsCache
   } catch {
-    return {}
+    memorySettingsCache = {}
+    return memorySettingsCache
   }
 }
 
 function writeMemorySettings(settings: MemorySettings): void {
   getOpenworkDir()
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify(settings, null, 2))
+  memorySettingsCache = settings
 }
 
 function hasLegacyMemoryFiles(): boolean {
@@ -1602,14 +1625,27 @@ export function getDefaultModelConfig(): CustomModelConfig | null {
   return configs[0] ?? null
 }
 
+let customModelsRawCache: StoredCustomModelRecord[] | null = null
+
+function cloneStoredCustomModels(items: StoredCustomModelRecord[]): StoredCustomModelRecord[] {
+  return items.map((item) => ({ ...item }))
+}
+
 function readCustomModelsRaw(): StoredCustomModelRecord[] {
+  if (customModelsRawCache) return cloneStoredCustomModels(customModelsRawCache)
   getOpenworkDir()
-  if (!existsSync(CUSTOM_MODELS_FILE)) return []
+  if (!existsSync(CUSTOM_MODELS_FILE)) {
+    customModelsRawCache = []
+    return []
+  }
   try {
     const content = readFileSync(CUSTOM_MODELS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
+    if (!Array.isArray(parsed)) {
+      customModelsRawCache = []
+      return []
+    }
+    customModelsRawCache = parsed.filter(
       (item): item is StoredCustomModelRecord =>
         !!item &&
         typeof item === "object" &&
@@ -1618,13 +1654,16 @@ function readCustomModelsRaw(): StoredCustomModelRecord[] {
         typeof (item as { baseUrl?: unknown }).baseUrl === "string" &&
         typeof (item as { model?: unknown }).model === "string"
     )
+    return cloneStoredCustomModels(customModelsRawCache)
   } catch {
+    customModelsRawCache = []
     return []
   }
 }
 
 function writeCustomModelsRaw(items: StoredCustomModelRecord[]): void {
   writeFileSync(CUSTOM_MODELS_FILE, JSON.stringify(items, null, 2))
+  customModelsRawCache = cloneStoredCustomModels(items)
 }
 
 function writeUserInfoModelsRaw(items: UserInfoConfig): void {
@@ -1906,6 +1945,7 @@ export function deleteAllCustomModelConfigs(): void {
   if (existsSync(CUSTOM_MODEL_FILE)) {
     unlinkSync(CUSTOM_MODEL_FILE)
   }
+  customModelsRawCache = []
   deleteAllCustomModelApiKeys()
 }
 
@@ -2826,6 +2866,10 @@ export function getHookLoggingConfig(): import("./types").HookLoggingConfig {
     return _hookLoggingCache
   }
   try {
+    if (statSync(HOOK_LOGGING_CONFIG_FILE).size > CHAT_MOUNT_SETTINGS_MAX_BYTES) {
+      _hookLoggingCache = defaultHookLoggingConfig()
+      return _hookLoggingCache
+    }
     const parsed = JSON.parse(readFileSync(HOOK_LOGGING_CONFIG_FILE, "utf-8")) as Record<
       string,
       unknown
@@ -2900,19 +2944,36 @@ const SANDBOX_MODES = new Set<"none" | "unelevated" | "readonly" | "elevated">([
   "elevated"
 ])
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
+type SandboxSettings = { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean }
 
-function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean } {
-  if (!existsSync(SANDBOX_SETTINGS_FILE)) return { mode: "none", yolo: false, nuxCompleted: true }
+let sandboxSettingsCache: SandboxSettings | null = null
+
+function defaultSandboxSettings(): SandboxSettings {
+  return { mode: "none", yolo: false, nuxCompleted: true }
+}
+
+function readSandboxSettings(): SandboxSettings {
+  if (sandboxSettingsCache) return sandboxSettingsCache
+  if (!existsSync(SANDBOX_SETTINGS_FILE)) {
+    sandboxSettingsCache = defaultSandboxSettings()
+    return sandboxSettingsCache
+  }
   try {
+    if (statSync(SANDBOX_SETTINGS_FILE).size > CHAT_MOUNT_SETTINGS_MAX_BYTES) {
+      sandboxSettingsCache = defaultSandboxSettings()
+      return sandboxSettingsCache
+    }
     const parsed = JSON.parse(readFileSync(SANDBOX_SETTINGS_FILE, "utf-8"))
-    return {
+    sandboxSettingsCache = {
       mode: SANDBOX_MODES.has(parsed.mode) ? parsed.mode : "none",
       yolo: parsed.yolo === true,
       nuxCompleted: parsed.nuxCompleted !== false
     }
+    return sandboxSettingsCache
   } catch (err) {
     console.warn("[Storage] Failed to load sandbox settings:", err)
-    return { mode: "none", yolo: false, nuxCompleted: true }
+    sandboxSettingsCache = defaultSandboxSettings()
+    return sandboxSettingsCache
   }
 }
 
@@ -2921,7 +2982,9 @@ function updateSandboxSettings(
 ): void {
   getOpenworkDir()
   const current = readSandboxSettings()
-  writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify({ ...current, ...patch }, null, 2))
+  const next = { ...current, ...patch }
+  writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify(next, null, 2))
+  sandboxSettingsCache = next
 }
 
 export function getWindowsSandboxMode(): SandboxMode {
@@ -4175,19 +4238,29 @@ interface RoutingSettings {
   mode: "auto" | "pinned"
 }
 
+let routingSettingsCache: RoutingSettings | null = null
+
 function readRoutingSettings(): RoutingSettings {
-  if (!existsSync(ROUTING_SETTINGS_FILE)) return { mode: "pinned" }
+  if (routingSettingsCache) return routingSettingsCache
+  if (!existsSync(ROUTING_SETTINGS_FILE)) {
+    routingSettingsCache = { mode: "pinned" }
+    return routingSettingsCache
+  }
   try {
     const content = readFileSync(ROUTING_SETTINGS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
     if (parsed && typeof parsed === "object" && "mode" in parsed) {
       const m = (parsed as Record<string, unknown>).mode
-      if (m === "auto" || m === "pinned") return { mode: m }
+      if (m === "auto" || m === "pinned") {
+        routingSettingsCache = { mode: m }
+        return routingSettingsCache
+      }
     }
   } catch {
     // ignore parse errors, fall back to default
   }
-  return { mode: "pinned" }
+  routingSettingsCache = { mode: "pinned" }
+  return routingSettingsCache
 }
 
 export function getGlobalRoutingMode(): "auto" | "pinned" {
@@ -4197,6 +4270,7 @@ export function getGlobalRoutingMode(): "auto" | "pinned" {
 export function setGlobalRoutingMode(mode: "auto" | "pinned"): void {
   getOpenworkDir()
   writeFileSync(ROUTING_SETTINGS_FILE, JSON.stringify({ mode }, null, 2), "utf-8")
+  routingSettingsCache = { mode }
 }
 
 // ─── Preferred IDE ──────────────────────────────────────────────────────────

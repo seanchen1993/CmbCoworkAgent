@@ -3,6 +3,7 @@
  * 同时收口这类文件专用的去重、扩展名过滤、数量/字符上限控制和路径转换。
  */
 import type { FileAttachment, FileInfo } from "@/types"
+import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
 import {
   isSupportedWorkspaceMentionFilePath,
   extractAtFileMentions,
@@ -14,9 +15,11 @@ interface WorkspaceReadFileResult {
   success: boolean
   content?: string
   size?: number
+  truncated?: boolean
 }
 
 const MENTION_READ_TIMEOUT_MS = 3000
+const MENTION_MAX_PREVIEW_PAGES = 64
 
 // 输入框里已经选中的 @文件项。相比 suggestion，多带一个绝对路径，
 // 方便在“显式添加的 @文件”和“用户直接输入的 @路径”之间统一去重。
@@ -33,7 +36,11 @@ interface ResolveAtFileAttachmentsParams {
   workspaceFiles: readonly FileInfo[]
   maxAttachments: number
   maxTotalChars: number
-  readWorkspaceFile: (filePath: string) => Promise<WorkspaceReadFileResult>
+  readWorkspaceFile: (
+    filePath: string,
+    maxChars: number
+  ) => Promise<WorkspaceReadFileResult>
+  cancelWorkspaceFileReads?: () => void
 }
 
 interface ResolveAtFileAttachmentsResult {
@@ -106,18 +113,72 @@ export function resolveAtFileSelection(params: {
 }
 
 function readWorkspaceFileWithTimeout(
-  readWorkspaceFile: (filePath: string) => Promise<WorkspaceReadFileResult>,
-  filePath: string
+  readWorkspaceFile: (
+    filePath: string,
+    maxChars: number
+  ) => Promise<WorkspaceReadFileResult>,
+  filePath: string,
+  maxChars: number,
+  cancelWorkspaceFileReads?: () => void
 ): Promise<WorkspaceReadFileResult> {
-  // 这里故意给读文件加硬超时：@文件是“增强能力”，不能因为某个文件 IO 卡住而拖死整次发送。
-  return Promise.race([
-    readWorkspaceFile(filePath),
-    new Promise<WorkspaceReadFileResult>((resolve) => {
-      setTimeout(() => {
-        resolve({ success: false })
-      }, MENTION_READ_TIMEOUT_MS)
-    })
-  ])
+  // 超时时显式取消底层 worker 请求，不能只丢弃 renderer Promise。
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      cancelWorkspaceFileReads?.()
+      resolve({ success: false })
+    }, MENTION_READ_TIMEOUT_MS)
+    void readWorkspaceFile(filePath, maxChars).then(
+      (result) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(result)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
+}
+
+export async function readBoundedWorkspaceMentionFile(params: {
+  maxChars: number
+  readPage: (offset: number) => Promise<WorkspaceFilePreviewReadResult>
+}): Promise<WorkspaceReadFileResult> {
+  const maxChars = Math.max(0, Math.floor(params.maxChars))
+  if (maxChars === 0) return { success: false }
+  let offset = 0
+  let content = ""
+  let size = 0
+  let truncated = false
+  let finished = false
+
+  for (let page = 0; page < MENTION_MAX_PREVIEW_PAGES; page += 1) {
+    const result = await params.readPage(offset)
+    if (!result.success) return { success: false }
+    size = result.size
+    const remaining = maxChars - content.length
+    content += result.content.slice(0, remaining)
+    if (result.content.length > remaining || content.length >= maxChars) {
+      truncated = result.hasMore || result.content.length > remaining
+      finished = true
+      break
+    }
+    if (!result.hasMore || result.nextOffset === null) {
+      finished = true
+      break
+    }
+    if (result.nextOffset <= offset) return { success: false }
+    offset = result.nextOffset
+  }
+
+  return { success: true, content, size, truncated: truncated || !finished }
 }
 
 // 发送前把 @文件语法替换回普通路径文本：
@@ -153,7 +214,8 @@ export async function resolveAtFileAttachments(
     workspaceFiles,
     maxAttachments,
     maxTotalChars,
-    readWorkspaceFile
+    readWorkspaceFile,
+    cancelWorkspaceFileReads
   } = params
   const fallbackAttachments = attachments.length > 0 ? [...attachments] : []
 
@@ -258,7 +320,9 @@ export async function resolveAtFileAttachments(
         try {
           readResult = await readWorkspaceFileWithTimeout(
             readWorkspaceFile,
-            mentionFile.workspaceFilePath
+            mentionFile.workspaceFilePath,
+            remaining,
+            cancelWorkspaceFileReads
           )
         } catch {
           // 任何异常都只降级成提示，不让 @文件 阻塞正常发送。
@@ -273,7 +337,7 @@ export async function resolveAtFileAttachments(
         if (!readResult.content.trim()) continue
 
         // 超过剩余额度时只截断内容，不丢掉这个附件，尽量保留用户意图。
-        const truncated = readResult.content.length > remaining
+        const truncated = Boolean(readResult.truncated) || readResult.content.length > remaining
         const content = truncated
           ? `${readResult.content.slice(0, remaining)}\n\n... [内容已截取：显示前 ${remaining.toLocaleString()} 个字符]`
           : readResult.content

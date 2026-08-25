@@ -159,7 +159,7 @@ async function main(): Promise<void> {
     const runtimeValues = runtimeTuple?.checkpoint.channel_values as Record<string, unknown>
     assert.equal(runtimeTuple?.checkpoint.id, "cp-2")
     assert.equal("messages" in runtimeValues, false)
-    assert.equal(runtimeValues.unrelated, "small")
+    assert.equal("unrelated" in runtimeValues, false)
     assert.deepEqual(runtimeValues.todos, [
       { id: "todo-1", content: "keep runtime state", status: "pending" }
     ])
@@ -303,26 +303,29 @@ async function main(): Promise<void> {
     await legacyMigrator.close()
 
     const compactRaw = new DatabaseSync(databasePath, { readOnly: true })
-    const compactLegacyRow = compactRaw
+    const legacyCheckpointRow = compactRaw
       .prepare(
         `SELECT LENGTH(checkpoint) AS checkpoint_bytes
          FROM checkpoints
          WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`
       )
       .get(legacyThreadId, legacyCheckpoint.id) as { checkpoint_bytes: number }
-    const legacySnapshotRow = compactRaw
+    const runtimeProjectionRow = compactRaw
       .prepare(
-        `SELECT message_count
-         FROM checkpoint_message_snapshots
-         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`
+        `SELECT LENGTH(runtime_checkpoint) AS projection_bytes
+         FROM checkpoint_runtime_projections
+         WHERE thread_id = ? AND checkpoint_ns = ''`
       )
-      .get(legacyThreadId, legacyCheckpoint.id) as { message_count: number }
+      .get(legacyThreadId) as { projection_bytes: number }
     compactRaw.close()
     assert(
-      Number(compactLegacyRow.checkpoint_bytes) < 64 * 1024,
-      `legacy checkpoint remained ${compactLegacyRow.checkpoint_bytes} bytes after migration`
+      Number(legacyCheckpointRow.checkpoint_bytes) > 64 * 1024,
+      "fixture must retain a large independent checkpoint payload"
     )
-    assert.equal(Number(legacySnapshotRow.message_count), legacyMessages.length)
+    assert(
+      Number(runtimeProjectionRow.projection_bytes) < 64 * 1024,
+      `runtime projection grew to ${runtimeProjectionRow.projection_bytes} bytes`
+    )
 
     const reopenedLegacy = new SqlJsSaver(databasePath)
     const reopenedObservedBytes: number[] = []

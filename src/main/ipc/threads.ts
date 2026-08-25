@@ -6,11 +6,9 @@ import Store from "electron-store"
 import AdmZip from "adm-zip"
 import { v4 as uuid } from "uuid"
 import {
-  getAllThreadSummaries,
   copyThreadSubagentManifestRowsPage,
   getThreadCore,
-  getThreadHydrationValuesJson,
-  getLegacyThreadSubagentMigrationPayload,
+  getThreadHydrationCore,
   getThreadValuesJson,
   getThreadValuesJsonPage,
   getThreadMessages,
@@ -26,14 +24,12 @@ import {
   getThreadSubagentManifestPage,
   getThreadSubagentManifestBlobReferenceHashes,
   getThreadSubagentTextJournalChunkPage,
-  getThreadSubagentStartupManifests,
   appendThreadSubagentManifestTextDeltas,
   patchThreadSubagentManifestPreservingTextJournal,
   threadSubagentManifestHasTextJournal,
-  migrateLegacyThreadSubagentManifestBuckets,
   upsertThreadSubagentManifestMessages,
   getThreadGoalEvents,
-  getThreadGoalEventsForRestore,
+  getThreadGoalEventsHydrationFallback,
   addThreadGoalEvent,
   flushStrict as flushDbStrict,
   createThread as dbCreateThread,
@@ -64,6 +60,7 @@ import {
   deleteThreadWorkerCheckpoints,
   deleteThreadWorkflowCheckpoints,
   getThreadCheckpointPath,
+  getDbPath,
   getOpenworkDir,
   purgeThreadCheckpointArtifacts
 } from "../storage"
@@ -107,6 +104,8 @@ import type {
   ThreadForkResponse,
   SubagentTranscriptBlobField,
   ThreadMessageSearchOptions,
+  ThreadHydrationOptions,
+  ThreadSummaryPageOptions,
   ThreadMessagesPageOptions,
   ThreadUpdateParams,
   ThreadValuesMergeParams
@@ -140,6 +139,7 @@ import {
 } from "../../shared/checkpoint-forkability"
 import type { LegacyForkFallbackMode } from "../../shared/checkpoint-forkability"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
+import { resolveRecentWorkspacePath } from "./recent-workspace"
 import {
   copyCheckpoint,
   type Checkpoint,
@@ -148,17 +148,44 @@ import {
 } from "@langchain/langgraph-checkpoint"
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
 import {
+  isThreadMessageHydrationWorkerUnavailable,
+  readThreadMessagesPageInWorker
+} from "../thread-message-hydration/client"
+import {
+  isThreadMetadataHydrationWorkerUnavailable,
+  readThreadGoalEventsInWorker,
+  readThreadHydrationInWorker,
+  readThreadSummaryPageInWorker
+} from "../thread-metadata-hydration/client"
+import type { ThreadGoalHydrationEvent } from "../thread-metadata-hydration/protocol"
+import {
+  bootstrapLegacyCheckpointTranscriptInWorker,
+  cancelLegacyCheckpointTranscriptBootstrap,
+  isCheckpointRuntimeProjectionCancelled,
+  readLatestCheckpointTupleInWorker
+} from "../checkpointer/runtime-projection-client"
+import {
+  cancelLegacySubagentTranscriptMigration,
+  ensureLegacySubagentTranscriptRows as ensureSubagentTranscriptRows,
+  forgetLegacySubagentTranscriptMigration
+} from "../legacy-subagent-migration/coordinator"
+import {
+  cancelSubagentTranscriptStartupRead,
+  isSubagentTranscriptStartupCancelled,
+  readSubagentTranscriptStartupInWorker
+} from "../subagent-transcript-startup/client"
+import {
   buildHarnessFeatureAgentContext,
   DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
 import {
   acquireSubagentTranscriptBlobReadPin,
   advanceSubagentTranscriptReferenceEpoch,
-  buildSubagentTranscriptStartupManifests,
   compactSubagentTranscriptManifests,
   exportSubagentTranscriptBlobValue,
   exportSubagentTranscriptTextWithJournal,
   getSubagentTranscriptReferenceEpoch,
+  hasActiveSubagentTranscriptExternalMutation,
   hydrateSubagentTranscriptManifestPage,
   quarantineSubagentTranscriptBlobGcCandidates,
   removeQuarantinedSubagentTranscriptBlobs,
@@ -398,12 +425,29 @@ function parseThreadValues(raw: string | null | undefined): Record<string, unkno
   return parseJsonObject(raw) ?? {}
 }
 
+const foregroundLegacySubagentMigrationByWebContents = new Map<number, string>()
+
+const MAIN_ONLY_THREAD_METADATA_KEYS = [
+  "llmFileHistory",
+  "llmModifiedFiles",
+  "llmRecentlyRevertedFiles"
+] as const
+
+function threadMetadataWithoutMainOnlyHistory(
+  raw: string | null | undefined
+): Record<string, unknown> | undefined {
+  const metadata = parseJsonObject(raw)
+  if (!metadata) return undefined
+  for (const key of MAIN_ONLY_THREAD_METADATA_KEYS) delete metadata[key]
+  return metadata
+}
+
 function serializeThreadRow(row: ThreadRow): Thread {
   return {
     thread_id: row.thread_id,
     created_at: new Date(row.created_at),
     updated_at: new Date(row.updated_at),
-    metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    metadata: threadMetadataWithoutMainOnlyHistory(row.metadata),
     status: row.status as Thread["status"],
     // Subagent transcripts can contain thousands of manifest entries. They
     // travel only through the dedicated transcript IPC; returning them from
@@ -428,29 +472,6 @@ function threadValuesWithoutSubagentTranscripts(
   delete values.internalGoalMessageTimes
   delete values.internalGoalMessageTimeOrder
   return values
-}
-
-const checkedLegacySubagentTranscriptThreads = new Set<string>()
-
-/** One-time compatibility migration; all subsequent reads/writes are row-level. */
-function ensureSubagentTranscriptRows(threadId: string): void {
-  if (checkedLegacySubagentTranscriptThreads.has(threadId)) return
-  const migrationPayload = getLegacyThreadSubagentMigrationPayload(threadId)
-  if (!migrationPayload) return
-  if (!migrationPayload.hasLegacyValue) {
-    getThreadHydrationValuesJson(threadId)
-    checkedLegacySubagentTranscriptThreads.add(threadId)
-    return
-  }
-  const legacy = parseJsonObject(migrationPayload.legacyTranscriptsJson) ?? {}
-  const migrated = migrateLegacyThreadSubagentManifestBuckets(
-    threadId,
-    legacy,
-    migrationPayload.nextThreadValuesJson
-  )
-  if (!migrated) throw new Error("Thread not found")
-  checkedLegacySubagentTranscriptThreads.add(threadId)
-  advanceSubagentTranscriptReferenceEpoch()
 }
 
 function rowBackedSubagentTranscriptPage(
@@ -1068,10 +1089,28 @@ function isValidForkWorkspacePath(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0
 }
 
-function assertValidForkOverrides(
+async function forkWorkspaceExists(workspacePath: string): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      lstat(path.resolve(workspacePath)).then(
+        () => true,
+        () => false
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 750)
+        timer.unref?.()
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+async function assertValidForkOverrides(
   sourceMetadata: Record<string, unknown>,
   overrides: ThreadForkParams["overrides"]
-): void {
+): Promise<void> {
   if (overrides === undefined) return
   if (!isPlainRecord(overrides)) throw new Error("Fork overrides 格式无效。")
 
@@ -1098,7 +1137,7 @@ function assertValidForkOverrides(
     if (!isValidForkWorkspacePath(workspacePath)) {
       throw new Error("Fork 到 workflow/coordinator 模式必须提供有效工作区。")
     }
-    if (!existsSync(path.resolve(workspacePath))) {
+    if (!(await forkWorkspaceExists(workspacePath))) {
       throw new Error("Fork 目标工作区不存在，无法进入 workflow/coordinator 模式。")
     }
   }
@@ -1597,7 +1636,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
     if (await isThreadForkBusy({ threadId: sourceThreadId, workspacePath, agentMode })) {
       throw new Error("当前会话仍在运行，请停止或等待完成后再 fork。")
     }
-    ensureSubagentTranscriptRows(sourceThreadId)
+    await ensureSubagentTranscriptRows(sourceThreadId)
 
     const forkSource = await withCheckpointer(sourceThreadId, async (sourceSaver) => {
       const sourceTuple = await sourceSaver.getTuple({
@@ -1684,7 +1723,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
     const sourceTitle =
       sourceRow.title || (typeof sourceMetadata.title === "string" ? sourceMetadata.title : "")
     const targetThreadId = uuid()
-    assertValidForkOverrides(sourceMetadata, params.overrides)
+    await assertValidForkOverrides(sourceMetadata, params.overrides)
     const targetMetadata = buildForkMetadata({
       sourceThreadId,
       sourceTitle,
@@ -2672,39 +2711,50 @@ function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
 }
 
 export function registerThreadHandlers(ipcMain: IpcMain): void {
-  // List all threads
-  ipcMain.handle("threads:list", async () => {
-    const threads = getAllThreadSummaries()
-    return threads.map((row) => ({
-      thread_id: row.thread_id,
-      created_at: new Date(row.created_at),
-      updated_at: new Date(row.updated_at),
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-      status: row.status as Thread["status"],
-      title: row.title
-    }))
+  // Read a bounded page of task summaries. The renderer incrementally builds the
+  // directory so Electron never structured-clones an unbounded task table.
+  ipcMain.handle("threads:list-page", async (event, options?: ThreadSummaryPageOptions) => {
+    try {
+      return await readThreadSummaryPageInWorker(options, event.sender.id)
+    } catch (error) {
+      if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+      console.warn(
+        "[ThreadMetadataHydrationWorker] unavailable; retrying bounded task directory page",
+        error
+      )
+      return readThreadSummaryPageInWorker(options, event.sender.id)
+    }
   })
 
   // Get a single thread
-  ipcMain.handle("threads:get", async (_event, threadId: string) => {
-    return withThreadRunMutationLock(threadId, async () => {
-      const row = getThreadCore(threadId)
-      if (!row) return null
-      // This projection atomically migrates the legacy subagent sidecar and
-      // strips lifetime timing maps before the compact value crosses IPC.
-      ensureSubagentTranscriptRows(threadId)
-      const hydrationValues = getThreadHydrationValuesJson(threadId)
-      return {
-        thread_id: row.thread_id,
-        created_at: new Date(row.created_at),
-        updated_at: new Date(row.updated_at),
-        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-        status: row.status as Thread["status"],
-        thread_values: threadValuesWithoutSubagentTranscripts(hydrationValues),
-        title: row.title
+  ipcMain.handle(
+    "threads:get",
+    async (event, threadId: string, options?: ThreadHydrationOptions) => {
+      try {
+        return await readThreadHydrationInWorker(
+          threadId,
+          options?.requestScope === "foreground-hydration" ? event.sender.id : undefined
+        )
+      } catch (error) {
+        if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+        console.warn(
+          "[ThreadMetadataHydrationWorker] unavailable; using main-process thread fallback",
+          error
+        )
+        const row = getThreadHydrationCore(threadId)
+        if (!row) return null
+        return {
+          thread_id: row.thread_id,
+          created_at: new Date(row.created_at),
+          updated_at: new Date(row.updated_at),
+          metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+          status: row.status as Thread["status"],
+          thread_values: {},
+          title: row.title
+        }
       }
-    })
-  })
+    }
+  )
 
   ipcMain.handle("threads:messages", async (_event, threadId: string) => {
     return getThreadMessages(threadId)
@@ -2713,13 +2763,27 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "threads:messages-page",
     async (
-      _event,
+      event,
       {
         threadId,
         options
       }: { threadId: string; options?: ThreadMessagesPageOptions }
     ) => {
-      return getThreadMessagesPage(threadId, options)
+      try {
+        return await readThreadMessagesPageInWorker(threadId, options, event.sender.id)
+      } catch (error) {
+        if (!isThreadMessageHydrationWorkerUnavailable(error)) throw error
+        console.warn(
+          "[ThreadHydrationWorker] unavailable; restarting the isolated reader",
+          error
+        )
+        // Never deserialize a transcript row on Electron main as a fallback:
+        // the first durable row may legitimately exceed the page budget. The
+        // client drops a failed worker, so one retry starts a fresh isolated
+        // reader; a second failure is surfaced for the renderer to retry.
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        return readThreadMessagesPageInWorker(threadId, options, event.sender.id)
+      }
     }
   )
 
@@ -2799,13 +2863,13 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     // 2) 业务方显式指定 workspacePath -> 保持调用方优先。
     const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
     if (!hasWorkspacePath) {
-      const lastWorkspacePath = settingsStore.get("workspacePath", null)
-      // 仅在路径存在时回填，避免写入无效目录导致后续报错。
-      if (
-        typeof lastWorkspacePath === "string" &&
-        lastWorkspacePath &&
-        existsSync(lastWorkspacePath)
-      ) {
+      // UNC/network paths can make existsSync block Electron main for seconds.
+      // Probe asynchronously with a short bound, then verify the setting did not
+      // change while I/O was in flight before inheriting it.
+      const lastWorkspacePath = await resolveRecentWorkspacePath(() =>
+        settingsStore.get("workspacePath", null)
+      )
+      if (lastWorkspacePath) {
         nextMetadata.workspacePath = lastWorkspacePath
       }
     }
@@ -2906,14 +2970,22 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           currentMetadata,
           updates.metadata as Record<string, unknown>
         )
+        const requestedMetadata = updates.metadata as Record<string, unknown>
+        for (const key of MAIN_ONLY_THREAD_METADATA_KEYS) {
+          if (
+            !Object.prototype.hasOwnProperty.call(requestedMetadata, key) &&
+            Object.prototype.hasOwnProperty.call(currentMetadata, key)
+          ) {
+            requestedMetadata[key] = currentMetadata[key]
+          }
+        }
       }
 
       if (updates.title !== undefined) updateData.title = updates.title
       if (updates.status !== undefined) updateData.status = updates.status
       if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
       if (updates.thread_values !== undefined) {
-        ensureSubagentTranscriptRows(threadId)
-        getThreadHydrationValuesJson(threadId)
+        await ensureSubagentTranscriptRows(threadId)
         const safeValues = { ...updates.thread_values }
         delete safeValues[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
         delete safeValues.messageTimes
@@ -2934,8 +3006,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     "threads:mergeThreadValues",
     async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
       return withThreadRunMutationLock(threadId, async () => {
-        ensureSubagentTranscriptRows(threadId)
-        getThreadHydrationValuesJson(threadId)
+        await ensureSubagentTranscriptRows(threadId)
         const safePatch = { ...patch }
         delete safePatch[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
         delete safePatch.messageTimes
@@ -2950,14 +3021,41 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle("threads:getSubagentTranscripts", async (_event, threadId: string) => {
-    return withThreadRunMutationLock(threadId, async () => {
-      if (!getThreadCore(threadId)) return {}
-      ensureSubagentTranscriptRows(threadId)
-      return buildSubagentTranscriptStartupManifests(
-        getThreadSubagentStartupManifests(threadId)
-      )
-    })
+  ipcMain.handle("threads:getSubagentTranscripts", async (
+    event,
+    threadId: string,
+    options?: { requestScope?: "foreground-hydration" }
+  ) => {
+    const webContentsId = event.sender.id
+    const isForeground = options?.requestScope === "foreground-hydration"
+    if (isForeground) {
+      const previousThreadId = foregroundLegacySubagentMigrationByWebContents.get(webContentsId)
+      if (previousThreadId && previousThreadId !== threadId) {
+        cancelLegacySubagentTranscriptMigration(previousThreadId)
+      }
+      foregroundLegacySubagentMigrationByWebContents.set(webContentsId, threadId)
+    }
+    try {
+      return await withThreadRunMutationLock(threadId, async () => {
+        if (!getThreadCore(threadId)) return {}
+        await ensureSubagentTranscriptRows(threadId)
+        return readSubagentTranscriptStartupInWorker(threadId, {
+          scope: isForeground
+            ? `webContents:${webContentsId}:foreground`
+            : `webContents:${webContentsId}:background:${threadId}`
+        })
+      })
+    } catch (error) {
+      if (isSubagentTranscriptStartupCancelled(error)) return {}
+      throw error
+    } finally {
+      if (
+        isForeground &&
+        foregroundLegacySubagentMigrationByWebContents.get(webContentsId) === threadId
+      ) {
+        foregroundLegacySubagentMigrationByWebContents.delete(webContentsId)
+      }
+    }
   })
 
   ipcMain.handle(
@@ -2974,7 +3072,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         if (!getThreadCore(threadId) || !subagentId) {
           return sliceSubagentTranscriptManifestPage([], before)
         }
-        ensureSubagentTranscriptRows(threadId)
+        await ensureSubagentTranscriptRows(threadId)
         let selectedPage = rowBackedSubagentTranscriptPage(threadId, subagentId, before)
         if (
           !selectedPage.deferredHydration ||
@@ -3080,7 +3178,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           ) {
             return undefined
           }
-          ensureSubagentTranscriptRows(threadId)
+          await ensureSubagentTranscriptRows(threadId)
           const message = getThreadSubagentManifestAt(threadId, subagentId, messageIndex)
           if (!message || typeof message !== "object" || Array.isArray(message)) return undefined
           if ((message as Record<string, unknown>).id !== expectedMessageId) return undefined
@@ -3148,9 +3246,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       { threadId, transcripts }: { threadId: string; transcripts: Record<string, unknown> }
     ) => {
       return withThreadRunMutationLock(threadId, async () => {
+        if (!getThreadCore(threadId)) throw new Error("Thread not found")
+        await ensureSubagentTranscriptRows(threadId)
         return withSubagentTranscriptContentMutationLock(async () => {
-          if (!getThreadCore(threadId)) throw new Error("Thread not found")
-          ensureSubagentTranscriptRows(threadId)
           const persistedRows: Record<string, unknown[]> = {}
           let referenceMutationCommitted = false
           try {
@@ -3252,15 +3350,21 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   let transcriptBlobGcRetryTimer: NodeJS.Timeout | undefined
   const runTranscriptBlobGcSweep = async (): Promise<boolean> => {
     const epoch = await withSubagentTranscriptContentMutationLock(async () =>
-      getSubagentTranscriptReferenceEpoch()
+      hasActiveSubagentTranscriptExternalMutation()
+        ? null
+        : getSubagentTranscriptReferenceEpoch()
     )
+    if (epoch === null) return false
     const referencedHashes = await collectReferencedTranscriptHashesBounded()
     const candidates = await scanSubagentTranscriptBlobGcCandidates(referencedHashes, 0)
     const batchSize = 8
     for (let offset = 0; offset < candidates.length; offset += batchSize) {
       let stale = false
       const quarantined = await withSubagentTranscriptContentMutationLock(async () => {
-        if (getSubagentTranscriptReferenceEpoch() !== epoch) {
+        if (
+          hasActiveSubagentTranscriptExternalMutation() ||
+          getSubagentTranscriptReferenceEpoch() !== epoch
+        ) {
           stale = true
           return []
         }
@@ -3450,7 +3554,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)
-      checkedLegacySubagentTranscriptThreads.delete(threadId)
+      forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
       // subscriber lists and per-change IPC fan-out cannot grow forever.
       stopWatching(threadId)
@@ -3561,6 +3665,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   }
 
   ipcMain.handle("threads:delete", async (event, threadId: string) => {
+    // Abort a parser before waiting for the same-thread mutation lock. Every
+    // completed batch is independently committed and therefore safe to leave
+    // behind until deletion or a later idempotent retry.
+    cancelLegacySubagentTranscriptMigration(threadId)
+    cancelSubagentTranscriptStartupRead(threadId)
+    cancelLegacyCheckpointTranscriptBootstrap(threadId)
     return withThreadRunMutationLock(threadId, async () => {
       while (deletingThreads.has(threadId)) {
         await deletingThreads.get(threadId)?.catch(() => undefined)
@@ -3592,19 +3702,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  // Get the latest checkpoint only. Worker tool-flow restore uses this to avoid
-  // materializing a long checkpoint history in the renderer process.
-  ipcMain.handle("threads:latest-checkpoint", async (_event, threadId: string) => {
+  // Get only a bounded tail of the latest worker checkpoint. The full snapshot
+  // is reconstructed inside the worker, but at most 500 / 1 MiB crosses into
+  // Electron main and the renderer worker panel.
+  ipcMain.handle("threads:latest-checkpoint", async (event, threadId: string) => {
     try {
       const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-      return await withCheckpointer(normalizedThreadId, async (checkpointer) => {
-        const config = { configurable: { thread_id: normalizedThreadId } }
-        for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
-          return checkpoint
+      return await readLatestCheckpointTupleInWorker(
+        getThreadCheckpointPath(normalizedThreadId),
+        normalizedThreadId,
+        "",
+        {
+          messageLimit: 500,
+          messageByteBudget: 1024 * 1024,
+          foregroundKey: `worker-panel:${event.sender.id}`
         }
-        return null
-      })
+      )
     } catch (e) {
+      if (isCheckpointRuntimeProjectionCancelled(e)) return null
       console.warn("Failed to get latest thread checkpoint:", e)
       return null
     }
@@ -3613,21 +3728,70 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Renderer hydration needs only small runtime channels (todos, interrupts,
   // etc.). Keep the full latest-checkpoint API above for worker/fork callers
   // that intentionally need channel_values.messages.
-  ipcMain.handle("threads:latest-checkpoint-runtime-state", async (_event, threadId: string) => {
+  ipcMain.handle("threads:latest-checkpoint-runtime-state", async (event, threadId: string) => {
     try {
       const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-      return await withCheckpointer(normalizedThreadId, async (checkpointer) => {
-        return (
-          (await checkpointer.getLatestRuntimeTuple({
-            configurable: { thread_id: normalizedThreadId }
-          })) ?? null
-        )
-      })
+      return await readLatestCheckpointTupleInWorker(
+        getThreadCheckpointPath(normalizedThreadId),
+        normalizedThreadId,
+        "",
+        {
+          messageLimit: 0,
+          messageByteBudget: 0,
+          foregroundKey: `thread-hydration:${event.sender.id}`
+        }
+      )
     } catch (e) {
+      if (isCheckpointRuntimeProjectionCancelled(e)) return null
       console.warn("Failed to get latest thread checkpoint runtime state:", e)
       return null
     }
   })
+
+  // One-time bridge for old tasks whose transcript still lives only inside a
+  // checkpoint. The worker imports that transcript into durable rows in
+  // bounded transactions. Only the small runtime tuple and a bounded first
+  // page cross worker -> main -> renderer; the full checkpoint array never
+  // enters Electron main or the renderer hydration path.
+  ipcMain.handle(
+    "threads:bootstrap-legacy-checkpoint-transcript",
+    async (event, threadId: string) => {
+      try {
+        const normalizedThreadId = assertValidCheckpointThreadId(threadId)
+        const bootstrap = await bootstrapLegacyCheckpointTranscriptInWorker(
+          getThreadCheckpointPath(normalizedThreadId),
+          getDbPath(),
+          normalizedThreadId,
+          "",
+          `thread-hydration:${event.sender.id}`
+        )
+        const pageOptions = { limit: 128, byteBudget: 1024 * 1024 }
+        let page
+        try {
+          // Do not mark this as foreground/latest-wins. A stale bootstrap must
+          // never cancel a newer task's latency-critical initial page.
+          page = await readThreadMessagesPageInWorker(normalizedThreadId, pageOptions)
+        } catch (error) {
+          if (!isThreadMessageHydrationWorkerUnavailable(error)) throw error
+          console.warn(
+            "[ThreadHydrationWorker] unavailable after legacy bootstrap; restarting reader",
+            error
+          )
+          await new Promise<void>((resolve) => setImmediate(resolve))
+          page = await readThreadMessagesPageInWorker(normalizedThreadId, pageOptions)
+        }
+        return {
+          checkpoint: bootstrap.runtimeTuple,
+          page,
+          migration: bootstrap.stats
+        }
+      } catch (error) {
+        if (isCheckpointRuntimeProjectionCancelled(error)) return null
+        console.warn("Failed to bootstrap legacy checkpoint transcript:", error)
+        return null
+      }
+    }
+  )
 
   ipcMain.handle("threads:exportSession", async (event, threadId: string) => {
     try {
@@ -3693,10 +3857,33 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "threads:goalEvents",
-    async (_event, threadId: string, options?: { restore?: boolean; limit?: number }) => {
-      const events = options?.restore
-        ? getThreadGoalEventsForRestore(threadId, { recentLimit: GOAL_UI_EVENT_LIMIT })
-        : getThreadGoalEvents(threadId, { limit: options?.limit ?? GOAL_UI_EVENT_LIMIT })
+    async (event, threadId: string, options?: { restore?: boolean; limit?: number }) => {
+      const recentLimit = Math.min(
+        GOAL_UI_EVENT_LIMIT,
+        Math.max(1, Math.floor(options?.limit ?? GOAL_UI_EVENT_LIMIT))
+      )
+      let events: ThreadGoalHydrationEvent[]
+      try {
+        const result = await readThreadGoalEventsInWorker(threadId, {
+          restore: options?.restore === true,
+          recentLimit,
+          scanLimit: options?.restore ? 500 : recentLimit,
+          byteBudget: 1024 * 1024,
+          ...(options?.restore === true ? { webContentsId: event.sender.id } : {})
+        })
+        events = result.events
+      } catch (error) {
+        if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+        console.warn(
+          "[ThreadMetadataHydrationWorker] unavailable; using bounded goal-event fallback",
+          error
+        )
+        events = getThreadGoalEventsHydrationFallback(threadId, {
+          limit: recentLimit,
+          restore: options?.restore === true,
+          scanLimit: options?.restore ? 500 : recentLimit
+        })
+      }
       return events.map((event) => ({
         ...event,
         created_at: new Date(event.created_at)
@@ -3709,10 +3896,31 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     async (_event, threadId: string, options?: { includeEvents?: boolean }) => {
       const goalStore = new SqlGoalStore()
       const includeEvents = options?.includeEvents !== false
+      let events: ThreadGoalHydrationEvent[] = []
+      if (includeEvents) {
+        try {
+          events = (
+            await readThreadGoalEventsInWorker(threadId, {
+              recentLimit: GOAL_UI_EVENT_LIMIT,
+              scanLimit: GOAL_UI_EVENT_LIMIT,
+              byteBudget: 1024 * 1024
+            })
+          ).events
+        } catch (error) {
+          if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+          console.warn(
+            "[ThreadMetadataHydrationWorker] unavailable; using bounded goal-state fallback",
+            error
+          )
+          events = getThreadGoalEventsHydrationFallback(threadId, {
+            limit: GOAL_UI_EVENT_LIMIT
+          })
+        }
+      }
       return {
         goal: serializeGoal(goalStore.get(threadId)),
         events: includeEvents
-          ? getThreadGoalEvents(threadId, { limit: GOAL_UI_EVENT_LIMIT }).map((event) => ({
+          ? events.map((event) => ({
               ...event,
               created_at: new Date(event.created_at)
             }))

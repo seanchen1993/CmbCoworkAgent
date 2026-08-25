@@ -26,8 +26,12 @@ export function hasBlockingSpecialThreadActivity(activity: SpecialThreadActivity
 }
 
 /** Heavy, durable-or-reconstructable state released by the idle holder LRU. */
-export function createDehydratedThreadStatePatch() {
+export function createDehydratedThreadStatePatch(retainedUi?: {
+  openFiles: Array<{ path: string; name: string }>
+  activeTab: "agent" | string
+}) {
   return {
+    dehydrated: true,
     messages: [] as never[],
     messagesContentVersion: 0,
     goalUi: { goal: null, events: [] as never[], lastUpdated: null },
@@ -43,14 +47,20 @@ export function createDehydratedThreadStatePatch() {
     subagentInternalLogs: [] as never[],
     toolCallStates: {} as Record<string, never>,
     approvalQueue: [] as never[],
-    openFiles: [] as never[],
-    activeTab: "agent" as const,
+    // Tabs are lightweight navigation state. Their contents are released below
+    // and lazily re-read when revisited, but dropping the paths would make an
+    // idle-LRU eviction visibly reset the user's workspace.
+    openFiles: retainedUi ? [...retainedUi.openFiles] : [],
+    activeTab: retainedUi?.activeTab ?? ("agent" as const),
     fileContents: {} as Record<string, string>,
     tokenUsage: null,
     harnessAgentmdLoadStatus: null,
     contextCompaction: null,
     workflowRun: null,
-    historyLoading: false,
+    // A dehydrated task has no main transcript in memory. Keep the loading
+    // shell truthful until the bounded durable page (or legacy checkpoint
+    // fallback) has been published on reopen.
+    historyLoading: true,
     historyPageLoading: false,
     historyHasMore: false,
     historyPageCursor: null,

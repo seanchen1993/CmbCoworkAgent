@@ -9,6 +9,15 @@ import type {
   WorkspaceFilesChangedPayload,
   WorkspaceFilesUpdate
 } from "../../shared/workspace-files-changed"
+import {
+  WORKSPACE_GITIGNORE_MAX_BYTES,
+  WORKSPACE_GITIGNORE_MAX_RULES
+} from "../../shared/workspace-file-scan"
+import {
+  isWorkspaceWatcherCancelled,
+  WorkspaceWatcherWorkerClient,
+  type WorkspaceWatcherWorkerEvent
+} from "../workspace-watcher-worker/client"
 
 /**
  * Files directly under .git/ that signal meta-relevant changes:
@@ -20,7 +29,7 @@ function isGitMetaPath(relativePath: string): boolean {
 }
 
 interface ActiveWorkspaceWatcher {
-  watcher: fs.FSWatcher
+  watcher: WorkspaceWatcherWorkerClient
   workspacePath: string
   // Keep the path spelling used by each thread. The physical watcher is shared
   // by normalized path, while renderer guards still compare the event path
@@ -32,17 +41,30 @@ interface ActiveWorkspaceWatcher {
   knownDirectories: Set<string>
 }
 
+interface PendingWorkspaceWatcherStart {
+  generation: number
+  watcher: WorkspaceWatcherWorkerClient
+}
+
 // A workspace is a physical resource, not a thread resource. Multiple tasks
 // commonly point at the same checkout, so keep one recursive watcher per
 // normalized path and attach thread subscribers to it.
 const activeWatchersByPath = new Map<string, ActiveWorkspaceWatcher>()
 const watcherPathByThread = new Map<string, string>()
+const watchStartGenerationsByThread = new Map<string, number>()
+const pendingWatcherStartsByThread = new Map<string, PendingWorkspaceWatcherStart>()
 
 // Cap concurrent recursive watchers. Each fs.watch(recursive) over a workspace
 // keeps an OS-level watch alive and fires the JS callback for every file change
 // in the tree (builds, npm install, git ops), so evict the least-recently-used
 // physical workspace once the cap is exceeded.
 const MAX_ACTIVE_WATCHERS = 6
+const MAX_PENDING_WATCHER_STARTS = 6
+// A physical workspace can be shared by many tasks, but historical foreground
+// visits must not become permanent event subscribers. Keep the foreground task
+// plus a small LRU of recent/background consumers so one file event has a hard
+// upper bound in both the main process and renderer.
+const MAX_THREAD_SUBSCRIBERS_PER_WORKSPACE = 16
 
 // Debounce timers to prevent rapid-fire updates
 const debounceTimers = new Map<string, NodeJS.Timeout>()
@@ -60,13 +82,25 @@ interface GitignoreRule {
   anchored: boolean
   // pattern 内是否包含路径分隔符
   hasSlash: boolean
+  matchPattern: (input: string) => boolean
+  matchAnywhere?: (input: string) => boolean
+  matchDescendants?: (input: string) => boolean
 }
 
-const gitignoreRulesByWorkspace = new Map<string, GitignoreRule[]>()
+const gitignoreRulesByWorkspace = new Map<
+  string,
+  { generation: number; rules: GitignoreRule[] }
+>()
+const gitignoreRuleLoadsByWorkspace = new Map<
+  string,
+  { generation: number; promise: Promise<GitignoreRule[] | null> }
+>()
+const gitignoreGenerationsByWorkspace = new Map<string, number>()
 
 const DEBOUNCE_DELAY = 500 // ms
 const MAX_INCREMENTAL_PATHS = 128
 const FILE_STAT_CONCURRENCY = 24
+const MAX_GITIGNORE_RULE_CHARACTERS = 8 * 1024
 const MICROMATCH_OPTIONS = {
   dot: true,
   nocase: process.platform === "win32"
@@ -108,46 +142,76 @@ function isWorkspaceHookPath(relativePath: string): boolean {
 }
 
 // 解析 .gitignore 文本，转换为可直接匹配的规则结构
-function parseGitignoreRules(content: string): GitignoreRule[] {
+async function yieldWatcherTask(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve))
+}
+
+function parseGitignoreRule(rawLine: string): GitignoreRule | null {
+  const trimmed = rawLine.trim()
+  if (!trimmed || trimmed.startsWith("#")) return null
+
+  let line = trimmed
+  let negated = false
+  if (line.startsWith("\\#") || line.startsWith("\\!")) {
+    line = line.slice(1)
+  } else if (line.startsWith("!")) {
+    negated = true
+    line = line.slice(1).trim()
+  }
+  if (!line) return null
+
+  const anchored = line.startsWith("/")
+  if (anchored) line = line.slice(1)
+  const directoryOnly = line.endsWith("/")
+  if (directoryOnly) line = line.slice(0, -1)
+  const pattern = normalizeRelativePath(line)
+  if (!pattern) return null
+  return {
+    pattern,
+    negated,
+    directoryOnly,
+    anchored,
+    hasSlash: pattern.includes("/"),
+    matchPattern: micromatch.matcher(pattern, MICROMATCH_OPTIONS),
+    ...(!anchored && pattern.includes("/")
+      ? { matchAnywhere: micromatch.matcher(`**/${pattern}`, MICROMATCH_OPTIONS) }
+      : {}),
+    ...(directoryOnly && !anchored && pattern.includes("/")
+      ? {
+          matchDescendants: micromatch.matcher(`**/${pattern}/**`, MICROMATCH_OPTIONS)
+        }
+      : {})
+  }
+}
+
+async function parseGitignoreRules(
+  content: string,
+  isCurrent: () => boolean
+): Promise<GitignoreRule[] | null> {
   const rules: GitignoreRule[] = []
-  const lines = content.split(/\r?\n/)
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trim()
-    if (!trimmed || trimmed.startsWith("#")) continue
-
-    let line = trimmed
-    let negated = false
-
-    if (line.startsWith("\\#") || line.startsWith("\\!")) {
-      line = line.slice(1)
-    } else if (line.startsWith("!")) {
-      negated = true
-      line = line.slice(1).trim()
+  let lineStart = 0
+  let processedLines = 0
+  let processedCharacters = 0
+  for (let cursor = 0; cursor <= content.length; cursor += 1) {
+    const atLineEnd = cursor === content.length || content.charCodeAt(cursor) === 0x0a
+    if (atLineEnd) {
+      const lineLength = cursor - lineStart
+      const rule =
+        lineLength <= MAX_GITIGNORE_RULE_CHARACTERS
+          ? parseGitignoreRule(content.slice(lineStart, cursor).replace(/\r$/, ""))
+          : null
+      if (rule) rules.push(rule)
+      if (rules.length >= WORKSPACE_GITIGNORE_MAX_RULES) break
+      lineStart = cursor + 1
+      processedLines += 1
     }
-
-    if (!line) continue
-
-    const anchored = line.startsWith("/")
-    if (anchored) {
-      line = line.slice(1)
+    processedCharacters += 1
+    if (processedLines >= 128 || processedCharacters >= 16 * 1024) {
+      await yieldWatcherTask()
+      if (!isCurrent()) return null
+      processedLines = 0
+      processedCharacters = 0
     }
-
-    const directoryOnly = line.endsWith("/")
-    if (directoryOnly) {
-      line = line.slice(0, -1)
-    }
-
-    const pattern = normalizeRelativePath(line)
-    if (!pattern) continue
-
-    rules.push({
-      pattern,
-      negated,
-      directoryOnly,
-      anchored,
-      hasSlash: pattern.includes("/")
-    })
   }
 
   return rules
@@ -155,27 +219,88 @@ function parseGitignoreRules(content: string): GitignoreRule[] {
 
 // Cache once per physical workspace so threads sharing a checkout do not read
 // and parse the same .gitignore independently on every watcher event.
-function loadGitignoreRules(workspacePath: string): GitignoreRule[] {
+async function loadGitignoreRules(
+  workspacePath: string,
+  isConsumerCurrent: () => boolean
+): Promise<GitignoreRule[] | null> {
+  if (!isConsumerCurrent()) return null
   const workspaceKey = normalizeWorkspacePath(workspacePath)
+  const generation = gitignoreGenerationsByWorkspace.get(workspaceKey) ?? 0
   const cached = gitignoreRulesByWorkspace.get(workspaceKey)
-  if (cached) return cached
+  if (cached?.generation === generation) return cached.rules
+  const loading = gitignoreRuleLoadsByWorkspace.get(workspaceKey)
+  if (loading?.generation === generation) return loading.promise
 
-  let rules: GitignoreRule[] = []
-  try {
-    const gitignorePath = path.join(workspacePath, ".gitignore")
-    const content = fs.readFileSync(gitignorePath, "utf-8")
-    rules = parseGitignoreRules(content)
-  } catch {
-    rules = []
-  }
-
-  gitignoreRulesByWorkspace.set(workspaceKey, rules)
-  return rules
+  const promise = (async (): Promise<GitignoreRule[] | null> => {
+    let handle: fs.promises.FileHandle | null = null
+    let rules: GitignoreRule[] = []
+    try {
+      handle = await fs.promises.open(path.join(workspacePath, ".gitignore"), "r")
+      const buffer = Buffer.allocUnsafe(WORKSPACE_GITIGNORE_MAX_BYTES)
+      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0)
+      if (!isConsumerCurrent()) return null
+      if ((gitignoreGenerationsByWorkspace.get(workspaceKey) ?? 0) !== generation) {
+        return loadGitignoreRules(workspacePath, isConsumerCurrent)
+      }
+      let contentEnd = bytesRead
+      // A file that fills the byte budget may have been cut in the middle of a
+      // pattern. Ignore that incomplete final line instead of applying a rule
+      // the user never wrote.
+      if (bytesRead === buffer.byteLength) {
+        const lastLf = buffer.lastIndexOf(0x0a, bytesRead - 1)
+        contentEnd = lastLf >= 0 ? lastLf + 1 : 0
+      }
+      const parsed = await parseGitignoreRules(
+        buffer.subarray(0, contentEnd).toString("utf8"),
+        () =>
+          isConsumerCurrent() &&
+          (gitignoreGenerationsByWorkspace.get(workspaceKey) ?? 0) === generation
+      )
+      if (!parsed) {
+        if (!isConsumerCurrent()) return null
+        return loadGitignoreRules(workspacePath, isConsumerCurrent)
+      }
+      rules = parsed
+    } catch {
+      rules = []
+    } finally {
+      await handle?.close().catch(() => undefined)
+    }
+    if (!isConsumerCurrent()) return null
+    if ((gitignoreGenerationsByWorkspace.get(workspaceKey) ?? 0) !== generation) {
+      return loadGitignoreRules(workspacePath, isConsumerCurrent)
+    }
+    gitignoreRulesByWorkspace.set(workspaceKey, { generation, rules })
+    return rules
+  })().finally(() => {
+    if (gitignoreRuleLoadsByWorkspace.get(workspaceKey)?.generation === generation) {
+      gitignoreRuleLoadsByWorkspace.delete(workspaceKey)
+      if (
+        !activeWatchersByPath.has(workspaceKey) &&
+        !gitignoreRulesByWorkspace.has(workspaceKey)
+      ) {
+        gitignoreGenerationsByWorkspace.delete(workspaceKey)
+      }
+    }
+  })
+  gitignoreRuleLoadsByWorkspace.set(workspaceKey, { generation, promise })
+  return promise
 }
 
 // 当 .gitignore 发生变化或 watcher 结束时，清理缓存
 function invalidateGitignoreRules(workspacePath: string): void {
-  gitignoreRulesByWorkspace.delete(normalizeWorkspacePath(workspacePath))
+  const workspaceKey = normalizeWorkspacePath(workspacePath)
+  gitignoreGenerationsByWorkspace.set(
+    workspaceKey,
+    (gitignoreGenerationsByWorkspace.get(workspaceKey) ?? 0) + 1
+  )
+  gitignoreRulesByWorkspace.delete(workspaceKey)
+  if (
+    !activeWatchersByPath.has(workspaceKey) &&
+    !gitignoreRuleLoadsByWorkspace.has(workspaceKey)
+  ) {
+    gitignoreGenerationsByWorkspace.delete(workspaceKey)
+  }
 }
 
 // 判断单条规则是否命中当前相对路径
@@ -191,66 +316,26 @@ function matchesGitignoreRule(relativePath: string, rule: GitignoreRule): boolea
       return (
         normalizedPath === rule.pattern ||
         normalizedPath.startsWith(`${rule.pattern}/`) ||
-        micromatch.isMatch(normalizedPath, `**/${rule.pattern}`, MICROMATCH_OPTIONS) ||
-        micromatch.isMatch(normalizedPath, `**/${rule.pattern}/**`, MICROMATCH_OPTIONS)
+        rule.matchAnywhere?.(normalizedPath) === true ||
+        rule.matchDescendants?.(normalizedPath) === true
       )
     }
 
     const segments = normalizedPath.split("/")
-    return segments.some((segment) => micromatch.isMatch(segment, rule.pattern, MICROMATCH_OPTIONS))
+    return segments.some((segment) => rule.matchPattern(segment))
   }
 
   if (rule.hasSlash) {
     if (rule.anchored) {
-      return micromatch.isMatch(normalizedPath, rule.pattern, MICROMATCH_OPTIONS)
+      return rule.matchPattern(normalizedPath)
     }
     return (
-      micromatch.isMatch(normalizedPath, rule.pattern, MICROMATCH_OPTIONS) ||
-      micromatch.isMatch(normalizedPath, `**/${rule.pattern}`, MICROMATCH_OPTIONS)
+      rule.matchPattern(normalizedPath) || rule.matchAnywhere?.(normalizedPath) === true
     )
   }
 
   const segments = normalizedPath.split("/")
-  return segments.some((segment) => micromatch.isMatch(segment, rule.pattern, MICROMATCH_OPTIONS))
-}
-
-// 按 Git 规则顺序求值：后匹配覆盖前匹配，支持 ! 反选
-function isIgnoredByGitignore(workspacePath: string, relativePath: string): boolean {
-  const rules = loadGitignoreRules(workspacePath)
-  if (rules.length === 0) return false
-
-  let ignored = false
-  for (const rule of rules) {
-    if (!matchesGitignoreRule(relativePath, rule)) continue
-    ignored = !rule.negated
-  }
-  return ignored
-}
-
-/**
- * Build a standalone .gitignore matcher for a workspace (reads the root
- * .gitignore once). Reuses the same rule engine as the watcher so the initial
- * file-tree scan and live watching agree on what is ignored. Returns a
- * predicate; if there is no .gitignore it always returns false.
- */
-export function buildGitignoreMatcher(workspacePath: string): (relativePath: string) => boolean {
-  let rules: GitignoreRule[] = []
-  try {
-    const content = fs.readFileSync(path.join(workspacePath, ".gitignore"), "utf-8")
-    rules = parseGitignoreRules(content)
-  } catch {
-    rules = []
-  }
-  if (rules.length === 0) return () => false
-
-  return (relativePath: string): boolean => {
-    let ignored = false
-    for (const rule of rules) {
-      if (!matchesGitignoreRule(relativePath, rule)) continue
-      ignored = !rule.negated
-    }
-    return ignored
-  }
+  return segments.some((segment) => rule.matchPattern(segment))
 }
 
 /**
@@ -272,6 +357,33 @@ function touchWatcher(workspaceKey: string): void {
   }
 }
 
+function attachThreadToWorkspaceWatcher(
+  workspaceKey: string,
+  entry: ActiveWorkspaceWatcher,
+  threadId: string,
+  workspacePath: string
+): void {
+  // Refresh the subscriber's recency without changing the physical watcher
+  // recency (touchWatcher handles that separately).
+  entry.threadPaths.delete(threadId)
+  entry.threadPaths.set(threadId, workspacePath)
+  watcherPathByThread.set(threadId, workspaceKey)
+
+  while (entry.threadPaths.size > MAX_THREAD_SUBSCRIBERS_PER_WORKSPACE) {
+    let removed = false
+    for (const candidateThreadId of entry.threadPaths.keys()) {
+      if (candidateThreadId === threadId || candidateThreadId === activeThreadId) continue
+      entry.threadPaths.delete(candidateThreadId)
+      if (watcherPathByThread.get(candidateThreadId) === workspaceKey) {
+        watcherPathByThread.delete(candidateThreadId)
+      }
+      removed = true
+      break
+    }
+    if (!removed) break
+  }
+}
+
 /**
  * Mark the foreground thread so the LRU cap never evicts it, and refresh its
  * position. Background `loadFromDisk` calls for other threads can otherwise
@@ -281,7 +393,13 @@ export function setActiveWatchedThread(threadId: string | null): void {
   activeThreadId = threadId
   if (!threadId) return
   const workspaceKey = watcherPathByThread.get(threadId)
-  if (workspaceKey) touchWatcher(workspaceKey)
+  if (!workspaceKey) return
+  const entry = activeWatchersByPath.get(workspaceKey)
+  const workspacePath = entry?.threadPaths.get(threadId)
+  if (entry && workspacePath) {
+    attachThreadToWorkspaceWatcher(workspaceKey, entry, threadId, workspacePath)
+  }
+  touchWatcher(workspaceKey)
 }
 
 function clearWorkspaceTimer(timers: Map<string, NodeJS.Timeout>, workspaceKey: string): void {
@@ -326,17 +444,38 @@ function queueChangedPath(entry: ActiveWorkspaceWatcher, relativePath: string): 
 
 async function resolveFileUpdate(
   entry: ActiveWorkspaceWatcher,
+  workspaceKey: string,
   relativePaths: readonly string[],
   forceFullRescan: boolean
-): Promise<WorkspaceFilesUpdate> {
+): Promise<WorkspaceFilesUpdate | null> {
   if (forceFullRescan || relativePaths.length === 0) return { kind: "rescan" }
+
+  const isCurrent = (): boolean => activeWatchersByPath.get(workspaceKey) === entry
+  const gitignoreRules = await loadGitignoreRules(entry.workspacePath, isCurrent)
+  if (!gitignoreRules || !isCurrent()) return null
+  const visibleRelativePaths: string[] = []
+  let matchOperations = 0
+  for (const relativePath of relativePaths) {
+    let ignored = false
+    for (const rule of gitignoreRules) {
+      if (matchesGitignoreRule(relativePath, rule)) ignored = !rule.negated
+      matchOperations += 1
+      if (matchOperations >= 64) {
+        matchOperations = 0
+        await yieldWatcherTask()
+        if (!isCurrent()) return null
+      }
+    }
+    if (!ignored) visibleRelativePaths.push(relativePath)
+  }
+  if (visibleRelativePaths.length === 0) return { kind: "patch", upserts: [], deletes: [] }
 
   const upserts: Extract<WorkspaceFilesUpdate, { kind: "patch" }>["upserts"] = []
   const deletes: string[] = []
   let requiresFullScan = false
 
-  for (let offset = 0; offset < relativePaths.length; offset += FILE_STAT_CONCURRENCY) {
-    const batch = relativePaths.slice(offset, offset + FILE_STAT_CONCURRENCY)
+  for (let offset = 0; offset < visibleRelativePaths.length; offset += FILE_STAT_CONCURRENCY) {
+    const batch = visibleRelativePaths.slice(offset, offset + FILE_STAT_CONCURRENCY)
     await Promise.all(
       batch.map(async (relativePath) => {
         if (requiresFullScan) return
@@ -393,8 +532,13 @@ function scheduleFileUpdate(entry: ActiveWorkspaceWatcher, workspaceKey: string)
       entry.flushChain = entry.flushChain
         .catch(() => undefined)
         .then(async () => {
-          const update = await resolveFileUpdate(entry, relativePaths, forceFullRescan)
-          if (activeWatchersByPath.get(workspaceKey) !== entry) return
+          const update = await resolveFileUpdate(
+            entry,
+            workspaceKey,
+            relativePaths,
+            forceFullRescan
+          )
+          if (!update || activeWatchersByPath.get(workspaceKey) !== entry) return
           notifyRenderer(entry.threadPaths, workspaceKey, "file", update)
         })
         .catch((error) => {
@@ -405,6 +549,76 @@ function scheduleFileUpdate(entry: ActiveWorkspaceWatcher, workspaceKey: string)
         })
     }, DEBOUNCE_DELAY)
   )
+}
+
+function handleWorkspaceWatcherEvent(
+  entry: ActiveWorkspaceWatcher,
+  workspaceKey: string,
+  event: WorkspaceWatcherWorkerEvent
+): void {
+  if (activeWatchersByPath.get(workspaceKey) !== entry) return
+  const { eventType, filename } = event
+  const relativePath = filename ? normalizeRelativePath(filename) : ""
+
+  if (relativePath && isWorkspaceHookPath(relativePath)) {
+    console.log(
+      `[WorkspaceWatcher] workspace hook ${eventType}: ${filename} in ${entry.workspacePath}`
+    )
+
+    clearWorkspaceTimer(hookDebounceTimers, workspaceKey)
+    hookDebounceTimers.set(
+      workspaceKey,
+      setTimeout(() => {
+        hookDebounceTimers.delete(workspaceKey)
+        notifyWorkspaceHooksChanged(entry.threadPaths)
+      }, DEBOUNCE_DELAY)
+    )
+    return
+  }
+
+  // Keep ignoring hidden paths, except .gitignore which should refresh Git Panel in real time.
+  if (relativePath) {
+    const parts = relativePath.split("/").filter(Boolean)
+    const leaf = parts[parts.length - 1] || ""
+    const hasHiddenPart = parts.some((part) => part.startsWith("."))
+    const isGitInternalPath = parts[0] === ".git"
+    if (isGitInternalPath) {
+      if (isGitCommitSignalPath(relativePath)) {
+        scheduleGitHookEventSync(entry.workspacePath)
+      }
+      if (isGitMetaPath(relativePath)) {
+        clearWorkspaceTimer(metaDebounceTimers, workspaceKey)
+        metaDebounceTimers.set(
+          workspaceKey,
+          setTimeout(() => {
+            metaDebounceTimers.delete(workspaceKey)
+            notifyRenderer(entry.threadPaths, workspaceKey, "meta")
+          }, DEBOUNCE_DELAY)
+        )
+      }
+      return
+    }
+    const isGitIgnore = leaf === ".gitignore"
+    if (isGitIgnore) {
+      invalidateGitignoreRules(entry.workspacePath)
+      requestFullRescan(entry)
+    }
+    if ((hasHiddenPart && !isGitIgnore) || parts.some((part) => part === "node_modules")) {
+      return
+    }
+  }
+
+  console.debug(
+    `[WorkspaceWatcher] ${eventType}: ${filename} in ${entry.workspacePath}`
+  )
+  if (!relativePath) {
+    requestFullRescan(entry)
+  } else if (relativePath.split("/").some((part) => part === "." || part === "..")) {
+    requestFullRescan(entry)
+  } else if (relativePath !== ".gitignore") {
+    queueChangedPath(entry, relativePath)
+  }
+  scheduleFileUpdate(entry, workspaceKey)
 }
 
 /**
@@ -425,40 +639,62 @@ function evictStaleWatchers(keepWorkspaceKey: string): void {
   }
 }
 
-export function startWatching(
+function registerPendingWatcherStart(
+  threadId: string,
+  pending: PendingWorkspaceWatcherStart
+): void {
+  while (pendingWatcherStartsByThread.size >= MAX_PENDING_WATCHER_STARTS) {
+    const oldestThreadId = pendingWatcherStartsByThread.keys().next().value
+    if (typeof oldestThreadId !== "string") break
+    const oldest = pendingWatcherStartsByThread.get(oldestThreadId)
+    pendingWatcherStartsByThread.delete(oldestThreadId)
+    oldest?.watcher.close()
+  }
+  pendingWatcherStartsByThread.set(threadId, pending)
+}
+
+export async function startWatching(
   threadId: string,
   workspacePath: string
-): "existing" | "started" | "failed" {
+): Promise<"existing" | "started" | "failed" | "superseded"> {
   const workspaceKey = normalizeWorkspacePath(workspacePath)
+  const previousPending = pendingWatcherStartsByThread.get(threadId)
+  if (previousPending) {
+    pendingWatcherStartsByThread.delete(threadId)
+    previousPending.watcher.close()
+  }
   const previousWorkspaceKey = watcherPathByThread.get(threadId)
   if (previousWorkspaceKey && previousWorkspaceKey !== workspaceKey) {
     stopWatching(threadId)
   }
+  const startGeneration = (watchStartGenerationsByThread.get(threadId) ?? 0) + 1
+  watchStartGenerationsByThread.set(threadId, startGeneration)
 
   const shared = activeWatchersByPath.get(workspaceKey)
   if (shared) {
-    shared.threadPaths.set(threadId, workspacePath)
-    watcherPathByThread.set(threadId, workspaceKey)
+    attachThreadToWorkspaceWatcher(workspaceKey, shared, threadId, workspacePath)
     touchWatcher(workspaceKey)
     return "existing"
   }
 
-  // Verify the path exists and is a directory
-  try {
-    const stat = fs.statSync(workspacePath)
-    if (!stat.isDirectory()) {
-      console.warn(`[WorkspaceWatcher] Path is not a directory: ${workspacePath}`)
-      return "failed"
-    }
-  } catch (e) {
-    console.warn(`[WorkspaceWatcher] Cannot access path: ${workspacePath}`, e)
-    return "failed"
+  // Directory validation and the native watch install both happen inside the
+  // dedicated worker. Probing a disconnected UNC path in Electron main would
+  // otherwise occupy the global libuv filesystem pool before this request is
+  // covered by the bounded pending-worker registry below.
+  await Promise.resolve()
+  if (watchStartGenerationsByThread.get(threadId) !== startGeneration) return "superseded"
+
+  const sharedAfterProbe = activeWatchersByPath.get(workspaceKey)
+  if (sharedAfterProbe) {
+    attachThreadToWorkspaceWatcher(workspaceKey, sharedAfterProbe, threadId, workspacePath)
+    touchWatcher(workspaceKey)
+    return "existing"
   }
 
   try {
     const threadPaths = new Map([[threadId, workspacePath]])
     const entry: ActiveWorkspaceWatcher = {
-      watcher: undefined as unknown as fs.FSWatcher,
+      watcher: undefined as unknown as WorkspaceWatcherWorkerClient,
       workspacePath,
       threadPaths,
       pendingRelativePaths: new Set(),
@@ -466,89 +702,46 @@ export function startWatching(
       flushChain: Promise.resolve(),
       knownDirectories: new Set()
     }
-    // Use recursive watching (supported on macOS and Windows)
-    const watcher = fs.watch(workspacePath, { recursive: true }, (eventType, filename) => {
-      const relativePath = filename ? normalizeRelativePath(String(filename)) : ""
-
-      if (relativePath && isWorkspaceHookPath(relativePath)) {
-        console.log(
-          `[WorkspaceWatcher] workspace hook ${eventType}: ${filename} in ${workspacePath}`
-        )
-
-        const existingTimer = hookDebounceTimers.get(workspaceKey)
-        if (existingTimer) {
-          clearTimeout(existingTimer)
-        }
-
-        const timer = setTimeout(() => {
-          hookDebounceTimers.delete(workspaceKey)
-          notifyWorkspaceHooksChanged(threadPaths)
-        }, DEBOUNCE_DELAY)
-
-        hookDebounceTimers.set(workspaceKey, timer)
-        return
-      }
-
-      // Keep ignoring hidden paths, except .gitignore which should refresh Git Panel in real time.
-      if (relativePath) {
-        const parts = relativePath.split("/").filter(Boolean)
-        const leaf = parts[parts.length - 1] || ""
-        const hasHiddenPart = parts.some((p) => p.startsWith("."))
-        const isGitInternalPath = parts[0] === ".git"
-        if (isGitInternalPath) {
-          if (isGitCommitSignalPath(relativePath)) {
-            scheduleGitHookEventSync(workspacePath)
-          }
-          // Git metadata changes (.git/index, .git/HEAD) should trigger a full
-          // refresh including branch/commit/pushability meta in the Git panel.
-          if (isGitMetaPath(relativePath)) {
-            clearWorkspaceTimer(metaDebounceTimers, workspaceKey)
-            metaDebounceTimers.set(
-              workspaceKey,
-              setTimeout(() => {
-                metaDebounceTimers.delete(workspaceKey)
-                notifyRenderer(threadPaths, workspaceKey, "meta")
-              }, DEBOUNCE_DELAY)
-            )
-          }
-          return
-        }
-        const isGitIgnore = leaf === ".gitignore"
-        if (isGitIgnore) {
-          // .gitignore 改动后，下一次匹配会自动重载规则
-          invalidateGitignoreRules(workspacePath)
-          requestFullRescan(entry)
-        }
-        if ((hasHiddenPart && !isGitIgnore) || parts.some((p) => p === "node_modules")) {
-          return
-        }
-        // 命中 .gitignore 的变更不对外派发，避免误触发“有变更”提示
-        if (!isGitIgnore && isIgnoredByGitignore(workspacePath, relativePath)) {
-          return
+    const watcher = new WorkspaceWatcherWorkerClient(
+      workspacePath,
+      (event) => handleWorkspaceWatcherEvent(entry, workspaceKey, event),
+      (error) => {
+        console.error(`[WorkspaceWatcher] Error watching ${workspacePath}:`, error)
+        if (activeWatchersByPath.get(workspaceKey)?.watcher === watcher) {
+          closeWorkspaceWatcher(workspaceKey)
         }
       }
-
-      // High-frequency per-file event: keep it at debug so packaged builds drop it
-      // (level gating in logging.ts) and only dev sees the full stream.
-      console.debug(`[WorkspaceWatcher] ${eventType}: ${filename} in ${workspacePath}`)
-
-      if (!relativePath) {
-        requestFullRescan(entry)
-      } else if (relativePath.split("/").some((part) => part === "." || part === "..")) {
-        requestFullRescan(entry)
-      } else if (relativePath !== ".gitignore") {
-        queueChangedPath(entry, relativePath)
-      }
-      scheduleFileUpdate(entry, workspaceKey)
-    })
+    )
     entry.watcher = watcher
-
-    watcher.on("error", (error) => {
-      console.error(`[WorkspaceWatcher] Error watching ${workspacePath}:`, error)
-      if (activeWatchersByPath.get(workspaceKey)?.watcher === watcher) {
-        closeWorkspaceWatcher(workspaceKey)
-      }
+    registerPendingWatcherStart(threadId, {
+      generation: startGeneration,
+      watcher
     })
+    try {
+      await watcher.start()
+    } finally {
+      const pending = pendingWatcherStartsByThread.get(threadId)
+      if (pending?.generation === startGeneration && pending.watcher === watcher) {
+        pendingWatcherStartsByThread.delete(threadId)
+      }
+    }
+
+    if (watchStartGenerationsByThread.get(threadId) !== startGeneration) {
+      watcher.close()
+      return "superseded"
+    }
+    const sharedAfterInstall = activeWatchersByPath.get(workspaceKey)
+    if (sharedAfterInstall) {
+      watcher.close()
+      attachThreadToWorkspaceWatcher(
+        workspaceKey,
+        sharedAfterInstall,
+        threadId,
+        workspacePath
+      )
+      touchWatcher(workspaceKey)
+      return "existing"
+    }
 
     activeWatchersByPath.set(workspaceKey, entry)
     watcherPathByThread.set(threadId, workspaceKey)
@@ -557,25 +750,27 @@ export function startWatching(
     scheduleGitHookEventSync(workspacePath, 100)
     return "started"
   } catch (e) {
+    if (
+      watchStartGenerationsByThread.get(threadId) !== startGeneration ||
+      isWorkspaceWatcherCancelled(e)
+    ) {
+      return "superseded"
+    }
     console.error(`[WorkspaceWatcher] Failed to start watching ${workspacePath}:`, e)
     return "failed"
   }
 }
 
-/** Remember directory paths from the last full scan so deleted directories
- * take the conservative rescan path instead of looking like file deletes. */
-export function recordWorkspaceDirectorySnapshot(
+/** Install a directory snapshot that was accumulated page-by-page by the
+ * workspace scan coordinator. Ownership is transferred to the watcher, so the
+ * main thread never has to walk or clone the complete directory list at scan
+ * completion. */
+export function recordWorkspaceDirectorySnapshotSet(
   workspacePath: string,
-  files: readonly { path: string; is_dir?: boolean }[]
+  directories: Set<string>
 ): void {
   const entry = activeWatchersByPath.get(normalizeWorkspacePath(workspacePath))
   if (!entry) return
-  const directories = new Set<string>()
-  for (const file of files) {
-    if (!file.is_dir) continue
-    const relativePath = normalizeRelativePath(file.path)
-    if (relativePath) directories.add(relativePath)
-  }
   entry.knownDirectories = directories
 }
 
@@ -583,6 +778,12 @@ export function recordWorkspaceDirectorySnapshot(
  * Stop watching the workspace for a specific thread.
  */
 export function stopWatching(threadId: string): void {
+  watchStartGenerationsByThread.set(threadId, (watchStartGenerationsByThread.get(threadId) ?? 0) + 1)
+  const pending = pendingWatcherStartsByThread.get(threadId)
+  if (pending) {
+    pendingWatcherStartsByThread.delete(threadId)
+    pending.watcher.close()
+  }
   const workspaceKey = watcherPathByThread.get(threadId)
   if (!workspaceKey) return
 
@@ -597,10 +798,15 @@ export function stopWatching(threadId: string): void {
  * Stop all active watchers.
  */
 export function stopAllWatching(): void {
+  for (const pending of pendingWatcherStartsByThread.values()) {
+    pending.watcher.close()
+  }
+  pendingWatcherStartsByThread.clear()
   for (const workspaceKey of [...activeWatchersByPath.keys()]) {
     closeWorkspaceWatcher(workspaceKey)
   }
   activeThreadId = null
+  watchStartGenerationsByThread.clear()
 }
 
 /**

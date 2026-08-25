@@ -50,6 +50,14 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
   assert(beforeIndex < afterIndex, `${label}: expected "${before}" before "${after}"`)
 }
 
+function sliceBetween(value: string, start: string, end: string): string {
+  const startIndex = value.indexOf(start)
+  const endIndex = value.indexOf(end, startIndex + start.length)
+  assert(startIndex >= 0, `missing slice start: ${start}`)
+  assert(endIndex > startIndex, `missing slice end: ${end}`)
+  return value.slice(startIndex, endIndex)
+}
+
 async function readProjectFile(path: string): Promise<string> {
   return (await readFile(join(PROJECT_ROOT, path), "utf8")).replace(/\r\n/g, "\n")
 }
@@ -720,10 +728,10 @@ async function testRendererSendsAgentMode(): Promise<void> {
     'case "coordinator_notification_deferred"',
     "thread context reschedules internal notification turns explicitly deferred by the main process"
   )
-  assertIncludes(
+  assertMatches(
     threadContext,
-    "hasPending) scheduleCoordinatorNotificationTurn(threadId)",
-    "thread context schedules pending notifications after loading a thread"
+    /if \(!hasPending \|\| !isCurrentLoad\(\)\) return\s+scheduleCoordinatorNotificationTurn\(threadId\)/,
+    "thread context schedules pending notifications only after the cancellable worker restore"
   )
   assertIncludes(
     threadContext,
@@ -828,6 +836,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
 async function testMainResolvesAndPersistsMode(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
   const streamSerialization = await readProjectFile("src/main/ipc/stream-data-serialization.ts")
+  const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   assertIncludes(
     agentIpc,
     'return agentMode === "normal" && metadata.subagentsEnabled === false',
@@ -933,6 +942,16 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
+    "cancelCoordinatorWorkerRestore(window.id, threadId)",
+    "leaving a task or project view must cancel its obsolete coordinator history scan"
+  )
+  assertIncludes(
+    agentIpc,
+    "signal: restoreController?.signal",
+    "foreground coordinator history reads must receive the latest-wins abort signal"
+  )
+  assertIncludes(
+    agentIpc,
     "sendCoordinatorWorkerEventToChannels(",
     "agent IPC reuses a shared coordinator worker update sender when polling refreshes rebind onUpdate"
   )
@@ -971,25 +990,45 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)",
     "agent IPC checks only coordinator notifications that should still auto-resume"
   )
-  assertIncludes(
+  const pendingNotificationHandler = sliceBetween(
     agentIpc,
-    "restoreWorkersForThread({\n              parentThreadId: threadId",
-    "agent IPC restores workers before checking persisted pending notifications"
+    '"agent:coordinator-worker-notifications-pending"',
+    '"agent:coordinator-worker-stream-focus"'
+  )
+  assertNotIncludes(
+    pendingNotificationHandler,
+    "restoreWorkersForThread(",
+    "notification probes must not start an uncancellable duplicate history scan"
+  )
+  assertIncludes(
+    threadContext,
+    "requestCoordinatorWorkers(threadId, subscribeCoordinatorUpdates)",
+    "thread hydration restores workers before checking the memory-only notification queue"
   )
   assertIncludes(
     agentIpc,
     'mode: "recent"',
     "agent IPC uses a bounded recent restore when explicitly refreshing the coordinator worker list"
   )
-  assertIncludes(
+  const coordinatorWorkersHandler = sliceBetween(
     agentIpc,
-    'mode: "active"',
-    "agent IPC lightweight worker refresh skips acknowledged terminal history during polling"
+    '"agent:coordinator-workers"',
+    '"agent:coordinator-workers-unsubscribe"'
+  )
+  assertNotIncludes(
+    coordinatorWorkersHandler,
+    "existingWorkers.length > 0",
+    "an in-memory worker must not be treated as proof that restore hydration completed"
+  )
+  assertIncludes(
+    coordinatorWorkersHandler,
+    "await coordinatorWorkerManager.restoreWorkersForThread({",
+    "worker refreshes always enter the manager restore fastpath when a workspace exists"
   )
   assertIncludes(
     agentIpc,
     "coordinatorWorkerManager.bindWorkerUpdates(threadId, onUpdate, updateKey)",
-    "agent IPC rebinds in-memory worker updates without polling historical worker files"
+    "agent IPC still rebinds in-memory worker updates when no workspace can be restored"
   )
   assertIncludes(
     agentIpc,
@@ -3020,8 +3059,18 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   )
   assertIncludes(
     workerManager,
-    'options.mode === "active" &&\n      this.activeRestoreHydratedWorkspaceByParent.get(parentThreadId) === workspacePath',
-    "worker manager skips repeated active restore disk scans after the same thread/workspace has been hydrated"
+    "recentRestoreHydratedWorkspaceByParent",
+    "worker manager tracks bounded recent hydration separately from unresolved-only hydration"
+  )
+  assertIncludes(
+    workerManager,
+    "if (hydratedWorkspace === workspacePath)",
+    "worker manager uses explicit hydration state for repeated active and recent restore fastpaths"
+  )
+  assertIncludes(
+    workerManager,
+    "restoreQueueByParent",
+    "worker manager serializes concurrent restore modes per thread"
   )
 }
 

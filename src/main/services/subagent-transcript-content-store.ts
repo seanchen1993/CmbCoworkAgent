@@ -34,6 +34,7 @@ export const SUBAGENT_TRANSCRIPT_PAGE_HYDRATION_BYTES = 32 * 1024 * 1024
 
 let contentMutationTail: Promise<void> = Promise.resolve()
 let transcriptReferenceEpoch = 0
+let activeExternalContentMutations = 0
 const verifiedStreamingBlobs = new Map<string, { mtimeMs: number; size: number }>()
 const activeBlobReadPins = new Map<string, number>()
 
@@ -73,6 +74,32 @@ export function getSubagentTranscriptReferenceEpoch(): number {
 export function advanceSubagentTranscriptReferenceEpoch(): number {
   transcriptReferenceEpoch += 1
   return transcriptReferenceEpoch
+}
+
+export function hasActiveSubagentTranscriptExternalMutation(): boolean {
+  return activeExternalContentMutations > 0
+}
+
+/**
+ * Keep GC from quarantining sidecars while a worker is creating them, without
+ * holding the global content lock across worker parsing or disk I/O.
+ */
+export async function beginSubagentTranscriptExternalMutation(): Promise<
+  () => Promise<void>
+> {
+  await withSubagentTranscriptContentMutationLock(async () => {
+    activeExternalContentMutations += 1
+    advanceSubagentTranscriptReferenceEpoch()
+  })
+  let released = false
+  return async () => {
+    if (released) return
+    released = true
+    await withSubagentTranscriptContentMutationLock(async () => {
+      activeExternalContentMutations = Math.max(0, activeExternalContentMutations - 1)
+      advanceSubagentTranscriptReferenceEpoch()
+    })
+  }
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -911,6 +938,7 @@ export function buildSubagentTranscriptStartupManifests(
         "utf8"
       )
     }
+    if (usedBytes + entryBytes > Math.max(2, byteLimit)) continue
     // Card/index metadata is irreducible for this bounded startup page. Older
     // buckets remain reachable through the focused transcript page API.
     accepted.set(candidate.subagentId, messages)

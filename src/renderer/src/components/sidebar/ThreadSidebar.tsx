@@ -60,6 +60,7 @@ import {
 } from "@/components/ui/context-menu"
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
 import type { Thread } from "@/types"
+import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
@@ -68,6 +69,8 @@ const PROJECT_NAME_OVERRIDES_STORAGE_KEY = "threads:projectNameOverrides"
 /** 工作区展开时默认可见的 thread 条数;点"展开显示"每次追加的条数。 */
 const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
+const DEFAULT_VISIBLE_PROJECTS = 60
+const VISIBLE_PROJECTS_STEP = 60
 type SidebarTab = "chat" | "project"
 
 interface ThreadProject {
@@ -451,6 +454,10 @@ export function ThreadSidebar(): React.JSX.Element {
     selectThread,
     deleteThread,
     updateThread,
+    threadDirectoryHasMore,
+    threadDirectoryLoadingMore,
+    loadMoreThreads,
+    touchThreadSummaries,
     mainView,
     previousThreadId,
     pendingEvolution,
@@ -473,6 +480,10 @@ export function ThreadSidebar(): React.JSX.Element {
       selectThread: state.selectThread,
       deleteThread: state.deleteThread,
       updateThread: state.updateThread,
+      threadDirectoryHasMore: state.threadDirectoryHasMore,
+      threadDirectoryLoadingMore: state.threadDirectoryLoadingMore,
+      loadMoreThreads: state.loadMoreThreads,
+      touchThreadSummaries: state.touchThreadSummaries,
       mainView: state.mainView,
       previousThreadId: state.previousThreadId,
       pendingEvolution: state.pendingEvolution,
@@ -498,39 +509,24 @@ export function ThreadSidebar(): React.JSX.Element {
   useEffect(() => {
     const prev = streamChangeRef.current
     const now = new Date()
-    let changed = false
+    const affectedIds = new Set<string>()
     // 检查当前所有线程的加载状态变化
     for (const threadId of Object.keys(allStreamLoadingStates)) {
       const wasLoading = prev[threadId] === true
       const isLoading = allStreamLoadingStates[threadId] === true
       if (isLoading !== wasLoading) {
-        changed = true
-        break
+        affectedIds.add(threadId)
       }
     }
     // 检查是否有线程从加载状态中移除（流式结束）
-    if (!changed) {
-      for (const threadId of Object.keys(prev)) {
-        if (!(threadId in allStreamLoadingStates)) {
-          changed = true
-          break
-        }
+    for (const threadId of Object.keys(prev)) {
+      if (!(threadId in allStreamLoadingStates)) {
+        affectedIds.add(threadId)
       }
     }
-    if (changed) {
-      // 收集所有受影响的 thread ID（当前 + 之前但已移除的）
-      const affectedIds = new Set([
-        ...Object.keys(allStreamLoadingStates),
-        ...Object.keys(prev)
-      ])
-      useAppStore.setState((state) => ({
-        threads: state.threads.map((t) =>
-          affectedIds.has(t.thread_id) ? { ...t, updated_at: now } : t
-        )
-      }))
-    }
+    touchThreadSummaries(affectedIds, now)
     streamChangeRef.current = { ...allStreamLoadingStates }
-  }, [allStreamLoadingStates])
+  }, [allStreamLoadingStates, touchThreadSummaries])
 
   const [robots, setRobots] = useState<ChatXRobotConfig[]>([])
   const [showRobotPicker, setShowRobotPicker] = useState(false)
@@ -557,6 +553,7 @@ export function ThreadSidebar(): React.JSX.Element {
   // 每个工作区当前可见的 thread 条数(无记录 = 默认 5)。会话级状态:
   // 折叠工作区时清除,重新展开回到默认 5 条;不落盘。
   const [visibleThreadCounts, setVisibleThreadCounts] = useState<Record<string, number>>({})
+  const [visibleProjectCount, setVisibleProjectCount] = useState(DEFAULT_VISIBLE_PROJECTS)
   const [pinnedProjectKeys, setPinnedProjectKeys] = useState<Set<string>>(() =>
     readStoredStringSet(PINNED_PROJECTS_STORAGE_KEY)
   )
@@ -678,7 +675,8 @@ export function ThreadSidebar(): React.JSX.Element {
     const projectMap = new Map<string, ThreadProject>()
     let sortIndex = 0
 
-    for (const thread of threads.filter((item) => !isHarnessProjectModeThread(item))) {
+    for (const thread of threads) {
+      if (isHarnessProjectModeThread(thread)) continue
       const path = getThreadWorkspacePath(
         thread,
         threadStateSummaries[thread.thread_id]?.workspacePath
@@ -706,23 +704,74 @@ export function ThreadSidebar(): React.JSX.Element {
       }
     }
 
-    return Array.from(projectMap.values()).sort((a, b) => {
-      if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-      return a.sortIndex - b.sortIndex
-    })
+    const pinned: ThreadProject[] = []
+    const regular: ThreadProject[] = []
+    for (const project of projectMap.values()) {
+      if (project.isPinned) pinned.push(project)
+      else regular.push(project)
+    }
+    return [...pinned, ...regular]
   }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads])
 
-  const currentThreadWorkspacePath = useMemo(() => {
+  const currentThread = useMemo(() => {
     if (!currentThreadId) return null
+    return threads.find((thread) => thread.thread_id === currentThreadId) ?? null
+  }, [currentThreadId, threads])
 
-    const currentThread = threads.find((thread) => thread.thread_id === currentThreadId)
+  const currentThreadWorkspacePath = useMemo(() => {
     if (!currentThread || isHarnessFeatureThread(currentThread)) return null
 
     return getThreadWorkspacePath(
       currentThread,
-      threadStateSummaries[currentThreadId]?.workspacePath
+      threadStateSummaries[currentThread.thread_id]?.workspacePath
     )
-  }, [currentThreadId, threadStateSummaries, threads])
+  }, [currentThread, threadStateSummaries])
+
+  const currentProjectKey = currentThread
+    ? currentThreadWorkspacePath || NO_WORKSPACE_PROJECT_KEY
+    : null
+  const selectedProjectIndex = useMemo(
+    () =>
+      currentProjectKey
+        ? threadProjects.findIndex((project) => project.key === currentProjectKey)
+        : -1,
+    [currentProjectKey, threadProjects]
+  )
+  const visibleProjectWindow = useMemo(
+    () => selectBoundedSidebarWindow(threadProjects, visibleProjectCount, selectedProjectIndex),
+    [selectedProjectIndex, threadProjects, visibleProjectCount]
+  )
+
+  const projectStatusByKey = useMemo(() => {
+    const status = new Map<
+      string,
+      { unreadCount: number; hasContextReminderThread: boolean; hasRunningThread: boolean }
+    >()
+    for (const project of threadProjects) {
+      let unreadCount = 0
+      let hasContextReminderThread = false
+      let hasRunningThread = false
+      for (const thread of project.threads) {
+        const summary = threadStateSummaries[thread.thread_id]
+        if (unreadIds.has(thread.thread_id)) unreadCount += 1
+        if (summary?.hasContextReminder) hasContextReminderThread = true
+        if (
+          (allStreamLoadingStates[thread.thread_id] ?? false) ||
+          summary?.hasRunningCoordinatorWorker ||
+          summary?.scheduledTaskLoading ||
+          summary?.workflowRunning
+        ) {
+          hasRunningThread = true
+        }
+      }
+      status.set(project.key, {
+        unreadCount,
+        hasContextReminderThread,
+        hasRunningThread
+      })
+    }
+    return status
+  }, [allStreamLoadingStates, threadProjects, threadStateSummaries, unreadIds])
 
   const toggleProject = useCallback(
     (projectKey: string) => {
@@ -760,9 +809,12 @@ export function ThreadSidebar(): React.JSX.Element {
     [persistCollapsedProjects]
   )
 
-  const allProjectsCollapsed =
-    threadProjects.length > 0 &&
-    threadProjects.every((project) => collapsedProjectKeys.has(project.key))
+  const allProjectsCollapsed = useMemo(
+    () =>
+      threadProjects.length > 0 &&
+      threadProjects.every((project) => collapsedProjectKeys.has(project.key)),
+    [collapsedProjectKeys, threadProjects]
+  )
 
   const toggleAllProjects = useCallback(() => {
     setCollapsedProjectKeys((prev) => {
@@ -1247,39 +1299,25 @@ export function ThreadSidebar(): React.JSX.Element {
           {/* Thread List */}
           <ScrollArea className="flex-1 min-h-0">
             <div className="px-2 pb-2 space-y-1 overflow-hidden">
-              {threadProjects.map((project) => {
+              {visibleProjectWindow.items.map((project) => {
                 const isCollapsed = collapsedProjectKeys.has(project.key)
                 const canCustomizeProject = Boolean(project.path)
-                const hasSelectedThread = project.threads.some(
-                  (thread) => thread.thread_id === currentThreadId
-                )
-                // 折叠切片的有效条数:默认 5 / 用户点"展开显示"追加。但当前选中的
-                // thread 必须始终可见——若它排在可见范围之外(如重启恢复上次会话时
-                // 排到第 6+ 位),把切片扩展到刚好包含它,避免选中项被截断藏掉。
+                const hasSelectedThread = project.key === currentProjectKey
                 const requestedVisibleThreads =
                   visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
-                const selectedThreadIndex = currentThreadId
-                  ? project.threads.findIndex((thread) => thread.thread_id === currentThreadId)
-                  : -1
-                const visibleThreadCount =
-                  selectedThreadIndex >= 0
-                    ? Math.max(requestedVisibleThreads, selectedThreadIndex + 1)
-                    : requestedVisibleThreads
-                const unreadCount = project.threads.filter((thread) =>
-                  unreadIds.has(thread.thread_id)
-                ).length
-                const hasContextReminderThread = project.threads.some((thread) =>
-                  Boolean(threadStateSummaries[thread.thread_id]?.hasContextReminder)
+                const selectedThreadIndex =
+                  hasSelectedThread && currentThreadId
+                    ? project.threads.findIndex((thread) => thread.thread_id === currentThreadId)
+                    : -1
+                const visibleThreads = selectBoundedSidebarWindow(
+                  project.threads,
+                  requestedVisibleThreads,
+                  hasSelectedThread ? selectedThreadIndex : -1
                 )
-                const hasRunningThread = project.threads.some((thread) => {
-                  const threadSummary = threadStateSummaries[thread.thread_id]
-                  return (
-                    (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                    Boolean(threadSummary?.hasRunningCoordinatorWorker) ||
-                    Boolean(threadSummary?.scheduledTaskLoading) ||
-                    Boolean(threadSummary?.workflowRunning)
-                  )
-                })
+                const projectStatus = projectStatusByKey.get(project.key)
+                const unreadCount = projectStatus?.unreadCount ?? 0
+                const hasContextReminderThread = projectStatus?.hasContextReminderThread ?? false
+                const hasRunningThread = projectStatus?.hasRunningThread ?? false
 
                 return (
                   <div key={project.key} className="space-y-1">
@@ -1450,9 +1488,7 @@ export function ThreadSidebar(): React.JSX.Element {
 
                     {!isCollapsed && (
                       <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                        {project.threads
-                          .slice(0, visibleThreadCount)
-                          .map((thread) => {
+                        {visibleThreads.items.map((thread) => {
                           const threadSummary = threadStateSummaries[thread.thread_id]
                           const hasRunningCoordinatorWorker = Boolean(
                             threadSummary?.hasRunningCoordinatorWorker
@@ -1461,9 +1497,7 @@ export function ThreadSidebar(): React.JSX.Element {
                             (allStreamLoadingStates[thread.thread_id] ?? false) ||
                             hasRunningCoordinatorWorker ||
                             Boolean(threadSummary?.workflowRunning)
-                          const scheduledTaskLoading = Boolean(
-                            threadSummary?.scheduledTaskLoading
-                          )
+                          const scheduledTaskLoading = Boolean(threadSummary?.scheduledTaskLoading)
                           const hasPendingApproval = Boolean(threadSummary?.hasPendingApproval)
                           const hasPendingUserInput = Boolean(threadSummary?.hasPendingUserInput)
                           const hasContextReminder = Boolean(threadSummary?.hasContextReminder)
@@ -1501,22 +1535,21 @@ export function ThreadSidebar(): React.JSX.Element {
                             />
                           )
                         })}
-                        {project.threads.length > visibleThreadCount && (
+                        {visibleThreads.hiddenCount > 0 && (
                           <button
                             type="button"
                             className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
                             onClick={() =>
                               setVisibleThreadCounts((counts) => ({
                                 ...counts,
-                                // 基于当前实际可见条数追加,确保"选中项撑开切片"时点击仍能继续展开。
-                                [project.key]: visibleThreadCount + VISIBLE_THREADS_STEP
+                                [project.key]: requestedVisibleThreads + VISIBLE_THREADS_STEP
                               }))
                             }
                           >
                             <ChevronDown className="size-3 shrink-0" />
                             展开显示
                             <span className="text-[10px] text-muted-foreground/60">
-                              还有 {project.threads.length - visibleThreadCount} 条
+                              还有 {visibleThreads.hiddenCount} 条
                             </span>
                           </button>
                         )}
@@ -1525,6 +1558,36 @@ export function ThreadSidebar(): React.JSX.Element {
                   </div>
                 )
               })}
+
+              {visibleProjectWindow.hiddenCount > 0 && (
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-sm px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
+                  onClick={() => setVisibleProjectCount((count) => count + VISIBLE_PROJECTS_STEP)}
+                >
+                  <ChevronDown className="size-3 shrink-0" />
+                  展开更多工作区
+                  <span className="text-[10px] text-muted-foreground/60">
+                    还有 {visibleProjectWindow.hiddenCount} 个
+                  </span>
+                </button>
+              )}
+
+              {threadDirectoryHasMore && (
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-sm px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+                  disabled={threadDirectoryLoadingMore}
+                  onClick={() => void loadMoreThreads()}
+                >
+                  {threadDirectoryLoadingMore ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <ChevronDown className="size-3" />
+                  )}
+                  {threadDirectoryLoadingMore ? "正在加载更早任务" : "加载更早任务"}
+                </button>
+              )}
 
               {threadProjects.length === 0 && (
                 <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>

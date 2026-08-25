@@ -237,11 +237,21 @@ import {
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
+import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
+import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
+import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
+import {
+  closeWorkspaceFilePreviewProtocol,
+  registerWorkspaceFilePreviewProtocol,
+  registerWorkspaceFilePreviewScheme
+} from "./workspace-file-preview/media-protocol"
 import { registerSkillsHandlers } from "./ipc/skills"
+import { closeSkillPluginCatalogWorker } from "./skill-plugin-catalog/client"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
+import { closeMemoryCatalogWorker } from "./memory-catalog/client"
 import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
@@ -250,11 +260,13 @@ import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
+import { closeHookCatalogWorker } from "./hook-catalog/client"
 import { flushHookLogs, pruneOldHookLogs } from "./hooks/persistence"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { closeDashboardEsWorker } from "./services/dashboard-es-client"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
@@ -263,7 +275,14 @@ import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { registerManagedLinkHandlers } from "./ipc/managed-links"
-import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
+import {
+  closeHarnessWatchRefWorker,
+  stopAllHarnessWatchRefs
+} from "./harness-board/watch-ref-watcher"
+import { closeHarnessAdapterDetailWorker } from "./harness-board/adapter-detail-client"
+import { closeHarnessCatalogWorker } from "./harness-board/catalog-client"
+import { closeHarnessKnowledgePreviewWorker } from "./harness-board/knowledge-preview-client"
+import { closeHarnessEnterpriseProjectionWorker } from "./harness-board/enterprise-projection-client"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { stopAllLsp } from "./lsp"
 import { initializeTraceStorageSecurity, setTraceReporter } from "./agent/trace/collector"
@@ -276,6 +295,13 @@ import {
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
 import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
+import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
+import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
+import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
+import { closeAllWorkspaceFileScans } from "./workspace-file-scan/manager"
+import { stopAllWatching } from "./services/workspace-watcher"
+import { closeLegacySubagentTranscriptMigrations } from "./legacy-subagent-migration/coordinator"
+import { closeSubagentTranscriptStartupWorker } from "./subagent-transcript-startup/client"
 import {
   hasActiveScheduledTaskRuns,
   startScheduler,
@@ -322,6 +348,10 @@ import {
   markPetStartupReady,
   registerPetHandlers
 } from "./pet"
+
+// Custom schemes must be declared before app readiness. The handler itself is
+// installed after readiness, together with the IPC endpoints below.
+registerWorkspaceFilePreviewScheme()
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
@@ -862,6 +892,8 @@ if (!gotTheLock) {
     registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
+    registerWorkspaceFilePreviewHandlers(ipcMain)
+    registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
     registerScheduledTaskHandlers(ipcMain)
@@ -1339,6 +1371,7 @@ if (!gotTheLock) {
     stopChatX()
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
+    stopAllWatching()
     stopRegisteredGitHookEventSync()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
@@ -1351,6 +1384,58 @@ if (!gotTheLock) {
     const cleanup = Promise.all([
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      closeThreadMessageHydrationWorker().catch((err) =>
+        console.warn("[Main] closeThreadMessageHydrationWorker error:", err)
+      ),
+      closeCheckpointRuntimeProjectionWorker().catch((err) =>
+        console.warn("[Main] closeCheckpointRuntimeProjectionWorker error:", err)
+      ),
+      closeThreadMetadataHydrationWorker().catch((err) =>
+        console.warn("[Main] closeThreadMetadataHydrationWorker error:", err)
+      ),
+      closeAllWorkspaceFileScans().catch((err) =>
+        console.warn("[Main] closeAllWorkspaceFileScans error:", err)
+      ),
+      closeWorkspaceFilePreviewWorker().catch((err) =>
+        console.warn("[Main] closeWorkspaceFilePreviewWorker error:", err)
+      ),
+      closeFileAttachmentParserWorker().catch((err) =>
+        console.warn("[Main] closeFileAttachmentParserWorker error:", err)
+      ),
+      closeLegacySubagentTranscriptMigrations().catch((err) =>
+        console.warn("[Main] closeLegacySubagentTranscriptMigrations error:", err)
+      ),
+      closeSubagentTranscriptStartupWorker().catch((err) =>
+        console.warn("[Main] closeSubagentTranscriptStartupWorker error:", err)
+      ),
+      closeHarnessAdapterDetailWorker().catch((err) =>
+        console.warn("[Main] closeHarnessAdapterDetailWorker error:", err)
+      ),
+      closeHarnessCatalogWorker().catch((err) =>
+        console.warn("[Main] closeHarnessCatalogWorker error:", err)
+      ),
+      closeHarnessKnowledgePreviewWorker().catch((err) =>
+        console.warn("[Main] closeHarnessKnowledgePreviewWorker error:", err)
+      ),
+      closeHarnessEnterpriseProjectionWorker().catch((err) =>
+        console.warn("[Main] closeHarnessEnterpriseProjectionWorker error:", err)
+      ),
+      closeHarnessWatchRefWorker().catch((err) =>
+        console.warn("[Main] closeHarnessWatchRefWorker error:", err)
+      ),
+      closeDashboardEsWorker().catch((err) =>
+        console.warn("[Main] closeDashboardEsWorker error:", err)
+      ),
+      closeSkillPluginCatalogWorker().catch((err) =>
+        console.warn("[Main] closeSkillPluginCatalogWorker error:", err)
+      ),
+      closeHookCatalogWorker().catch((err) =>
+        console.warn("[Main] closeHookCatalogWorker error:", err)
+      ),
+      closeMemoryCatalogWorker().catch((err) =>
+        console.warn("[Main] closeMemoryCatalogWorker error:", err)
+      ),
+      Promise.resolve().then(() => closeWorkspaceFilePreviewProtocol()),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ])
 

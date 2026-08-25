@@ -85,7 +85,10 @@ function assertBoundedSetupStatement(sql: string): void {
     "UPDATE CHECKPOINTS SET CHECKPOINT_TS",
     "UPDATE CHECKPOINTS SET FORK_BOUNDARY_MARKER",
     "WHERE FORK_BOUNDARY_MARKER = 0",
-    "FROM CHECKPOINT_MESSAGE_SNAPSHOTS GROUP BY THREAD_ID, CHECKPOINT_NS"
+    "FROM CHECKPOINT_MESSAGE_SNAPSHOTS GROUP BY THREAD_ID, CHECKPOINT_NS",
+    "FROM CHECKPOINTS GROUP BY THREAD_ID, CHECKPOINT_NS",
+    "PRAGMA FREELIST_COUNT",
+    "VACUUM"
   ]
   const violation = forbidden.find((pattern) => normalized.includes(pattern))
   if (violation) throw new Error(`ordinary reopen executed cold maintenance: ${normalized}`)
@@ -206,7 +209,7 @@ async function main(): Promise<void> {
       for (let reopen = 0; reopen < 2; reopen += 1) {
         statements = []
         const observedLoads = { count: 0 }
-        const saver = new SqlJsSaver(databasePath)
+        const saver = new SqlJsSaver(databasePath, undefined, { maxDatabaseBytes: 1 })
         saver.serde = rejectAnyDeserialization(saver.serde, observedLoads)
         await saver.initialize()
         await saver.close()

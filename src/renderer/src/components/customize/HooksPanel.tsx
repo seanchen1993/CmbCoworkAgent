@@ -27,13 +27,16 @@ import {
   getCommandHookToolInputDocs,
   getCommandHookToolInputSummary
 } from "./AddHookDialog"
+import {
+  CUSTOMIZE_HOOK_CATALOG_SCOPE,
+  readCustomizeHookCatalog,
+  type CustomizeDisplayHook
+} from "@/lib/customize-hook-catalog"
 
-type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
-type SkillHookMetadata = Awaited<ReturnType<typeof window.api.hooks.skills.list>>[number]
-type GlobalDisplayHook = HookConfig & { source: "global" }
-type PluginDisplayHook = PluginHookMetadata & { source: "plugin" }
-type SkillDisplayHook = SkillHookMetadata & { source: "skill" }
-type DisplayHook = GlobalDisplayHook | PluginDisplayHook | SkillDisplayHook
+type DisplayHook = CustomizeDisplayHook
+
+const CUSTOMIZE_HOOK_INITIAL_RENDER_ITEMS = 128
+const CUSTOMIZE_HOOK_RENDER_BATCH = 128
 
 const EVENT_BADGE: Record<
   HookEvent,
@@ -583,7 +586,10 @@ export function HooksPanel(): React.JSX.Element {
   const [debouncedQuery, setDebouncedQuery] = useState("")
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editHook, setEditHook] = useState<HookConfig | null>(null)
+  const [catalogTruncated, setCatalogTruncated] = useState(false)
+  const [visibleHookCount, setVisibleHookCount] = useState(CUSTOMIZE_HOOK_INITIAL_RENDER_ITEMS)
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const catalogRequestIdRef = useRef(0)
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
@@ -592,51 +598,23 @@ export function HooksPanel(): React.JSX.Element {
   }, [])
 
   const loadHooks = useCallback(async () => {
+    const requestId = ++catalogRequestIdRef.current
     try {
-      const [globalHooks, skillHooks, plugins] = await Promise.all([
-        window.api.hooks.list(),
-        window.api.hooks.skills.list(),
-        window.api.plugins.list()
-      ])
-      const pluginHookGroups = await Promise.all(
-        plugins
-          .filter((plugin) => (plugin.hookCount ?? 0) > 0)
-          .map(async (plugin) => {
-            try {
-              const detail = await window.api.plugins.getDetail(plugin.id)
-              return detail.hooks.map(
-                (hook): PluginDisplayHook => ({
-                  ...hook,
-                  source: "plugin"
-                })
-              )
-            } catch (error) {
-              console.error(`[HooksPanel] Failed to load hooks for plugin ${plugin.name}:`, error)
-              return []
-            }
-          })
+      const projection = await readCustomizeHookCatalog(
+        window.api.hooks.catalog.read,
+        () => requestId === catalogRequestIdRef.current
       )
-      const list: DisplayHook[] = [
-        ...globalHooks.map(
-          (hook): GlobalDisplayHook => ({
-            ...hook,
-            source: "global"
-          })
-        ),
-        ...skillHooks.map(
-          (hook): SkillDisplayHook => ({
-            ...hook,
-            source: "skill"
-          })
-        ),
-        ...pluginHookGroups.flat()
-      ]
+      if (!projection || requestId !== catalogRequestIdRef.current) return
+      const list = projection.hooks
       setHooks(list)
+      setCatalogTruncated(projection.truncated)
       setSelectedHook((prev) => {
         if (!prev) return null
         return list.find((h) => h.id === prev.id && h.source === prev.source) ?? null
       })
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
       console.error(e)
     }
   }, [])
@@ -650,6 +628,14 @@ export function HooksPanel(): React.JSX.Element {
       void loadHooks()
     })
   }, [loadHooks])
+
+  useEffect(() => {
+    return () => {
+      catalogRequestIdRef.current += 1
+      clearTimeout(debounceTimer.current)
+      void window.api.hooks.catalog.cancel(CUSTOMIZE_HOOK_CATALOG_SCOPE).catch(() => undefined)
+    }
+  }, [])
 
   const filteredHooks = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
@@ -674,6 +660,15 @@ export function HooksPanel(): React.JSX.Element {
     // out of loadHooks) is preserved for hooks of the same enabled state.
     return [...matched].sort((a, b) => Number(b.enabled) - Number(a.enabled))
   }, [hooks, debouncedQuery])
+
+  useEffect(() => {
+    setVisibleHookCount(CUSTOMIZE_HOOK_INITIAL_RENDER_ITEMS)
+  }, [debouncedQuery, hooks])
+
+  const visibleHooks = useMemo(
+    () => filteredHooks.slice(0, visibleHookCount),
+    [filteredHooks, visibleHookCount]
+  )
 
   const handleToggleEnabled = useCallback(
     async (hook: DisplayHook, enabled: boolean) => {
@@ -711,8 +706,22 @@ export function HooksPanel(): React.JSX.Element {
   )
 
   const handleAddSuccess = useCallback(() => {
-    loadHooks()
+    void loadHooks()
   }, [loadHooks])
+
+  const handleEdit = useCallback(async (hook: HookConfig) => {
+    try {
+      // Catalog rows are display projections and may truncate very large fields.
+      // Fetch the authoritative global row only when the user explicitly edits it.
+      const latest = await window.api.hooks.list()
+      const fullHook = latest.find((candidate) => candidate.id === hook.id)
+      if (!fullHook) throw new Error("Hook 已不存在")
+      setEditHook(fullHook)
+      setDialogOpen(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取 Hook 详情失败")
+    }
+  }, [])
 
   return (
     <>
@@ -760,6 +769,14 @@ export function HooksPanel(): React.JSX.Element {
             </div>
           </div>
         </div>
+        {catalogTruncated && (
+          <div
+            role="status"
+            className="border-b border-amber-300/40 bg-amber-50/80 px-3 py-2 text-[11px] text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300"
+          >
+            Hook 目录达到安全上限，当前仅展示已安全加载的 {hooks.length} 条。
+          </div>
+        )}
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-2">
             {filteredHooks.length === 0 ? (
@@ -767,7 +784,7 @@ export function HooksPanel(): React.JSX.Element {
                 {hooks.length === 0 ? "暂无钩子，点击 + 添加全局 Hook" : "没有匹配的钩子"}
               </p>
             ) : (
-              filteredHooks.map((hook) => {
+              visibleHooks.map((hook) => {
                 const badge = EVENT_BADGE[hook.event]
                 const isPrompt = hook.type === "prompt"
                 const isHttp = hook.type === "http"
@@ -778,10 +795,12 @@ export function HooksPanel(): React.JSX.Element {
                 const forcedLabel = getForcedOutcomeLabel(hook)
                 return (
                   <button
-                    key={hook.id}
+                    key={`${hook.source}:${hook.id}`}
                     className={cn(
                       "w-full rounded-md border border-border/70 px-2.5 py-2 text-left transition-colors",
-                      selectedHook?.id === hook.id ? "bg-muted/70" : "hover:bg-muted/50"
+                      selectedHook?.id === hook.id && selectedHook.source === hook.source
+                        ? "bg-muted/70"
+                        : "hover:bg-muted/50"
                     )}
                     onClick={() => setSelectedHook(hook)}
                   >
@@ -871,6 +890,19 @@ export function HooksPanel(): React.JSX.Element {
                 )
               })
             )}
+            {visibleHooks.length < filteredHooks.length && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs"
+                onClick={() =>
+                  setVisibleHookCount((count) => count + CUSTOMIZE_HOOK_RENDER_BATCH)
+                }
+              >
+                加载更多（剩余 {filteredHooks.length - visibleHooks.length}）
+              </Button>
+            )}
           </div>
         </ScrollArea>
         <HookLoggingControls />
@@ -884,10 +916,7 @@ export function HooksPanel(): React.JSX.Element {
             onToggleEnabled={handleToggleEnabled}
             onDelete={handleDelete}
             onShowGuide={() => setSelectedHook(null)}
-            onEdit={(h) => {
-              setEditHook(h)
-              setDialogOpen(true)
-            }}
+            onEdit={(h) => void handleEdit(h)}
           />
         ) : (
           <HooksGuide />

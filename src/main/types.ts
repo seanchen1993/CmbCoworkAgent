@@ -231,6 +231,36 @@ export interface ThreadMessagesPageOptions {
   beforeOrdinal?: number
   beforeMessageId?: string
   limit?: number
+  /**
+   * Optional response budget. Values above the process-wide 4 MiB ceiling are
+   * clamped. An individually oversized message is returned as an explicit
+   * bounded preview so the cursor advances without breaking the IPC budget.
+   */
+  byteBudget?: number
+  /**
+   * Foreground hydration is latest-wins per renderer. Starting a newer request
+   * cancels the previous foreground page without affecting history pagination.
+   */
+  requestScope?: "foreground-hydration"
+}
+
+export interface ThreadHydrationOptions {
+  /** Cancel an older selected-task metadata read from the same renderer. */
+  requestScope?: "foreground-hydration"
+}
+
+export interface ThreadSummaryPageOptions {
+  beforeUpdatedAt?: number
+  beforeThreadId?: string
+  limit?: number
+  byteBudget?: number
+}
+
+export interface ThreadSummaryPage {
+  threads: Thread[]
+  beforeUpdatedAt: number | null
+  beforeThreadId: string | null
+  hasMore: boolean
 }
 
 export interface ThreadMessagesPage {
@@ -242,6 +272,22 @@ export interface ThreadMessagesPage {
   hasMore: boolean
   /** Total durable messages for the thread, independent of the cursor. */
   total: number
+  /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
+  truncatedMessageIds?: string[]
+}
+
+export interface ThreadLegacyCheckpointMigrationStats {
+  checkpointId: string | null
+  totalMessages: number
+  migratedMessages: number
+  batches: number
+  payloadBytes: number
+}
+
+export interface ThreadLegacyCheckpointBootstrapResult {
+  checkpoint: unknown | null
+  page: ThreadMessagesPage
+  migration: ThreadLegacyCheckpointMigrationStats
 }
 
 export interface ThreadMessageSearchOptions {
@@ -595,6 +641,46 @@ export interface SkillHookMetadata extends HookConfig {
   pluginRoot?: string
 }
 
+/**
+ * Bounded, display-only hook catalog used by the right panel. Runtime hook
+ * resolution deliberately does not consume this projection: large values and
+ * catalogs may be truncated here to keep renderer IPC and Electron's main
+ * thread responsive without changing hook execution semantics.
+ */
+export interface HookCatalogPageInput {
+  /** Latest-wins namespace scoped by the main process to the calling renderer. */
+  requestScope: string
+  workspacePath?: string
+  /** Opaque continuation returned by the previous page. */
+  cursor?: string
+  /** Requested rows. Clamped to the catalog's hard page limit. */
+  limit?: number
+}
+
+export interface HookCatalogPageStats {
+  durationMs: number
+  responseBytes: number
+  scannedDirectories: number
+  scannedFiles: number
+  discoveredSkills: number
+  readBytes: number
+}
+
+export interface HookCatalogPage {
+  globalHooks: HookConfig[]
+  workspaceHooks: HookConfig[]
+  pluginHooks: PluginHookMetadata[]
+  skillHooks: SkillHookMetadata[]
+  /** Opaque continuation for the same worker snapshot. */
+  nextCursor?: string
+  /** Total projected entries retained in this bounded snapshot. */
+  totalEntries: number
+  /** True only when source data was omitted by a hard safety cap. */
+  truncated: boolean
+  truncatedReasons: string[]
+  stats: HookCatalogPageStats
+}
+
 export interface PluginMcpServerConfig {
   command?: string
   args?: string[]
@@ -944,4 +1030,37 @@ export interface SkillMetadata {
   compatibility?: string | null
   metadata?: Record<string, string>
   allowedTools?: string[]
+}
+
+export type SkillPluginCatalogKind = "skills" | "plugins" | "disabled"
+
+export interface SkillPluginCatalogPageInput {
+  kind: SkillPluginCatalogKind
+  cursor?: string | null
+  limit?: number
+  /**
+   * Application cache revision. Filesystem mutations bump this value so a
+   * worker snapshot can be reused across Chat/App/Customize without serving a
+   * stale catalog after an explicit invalidation.
+   */
+  revision?: string
+}
+
+export interface SkillPluginCatalogPageStats {
+  scannedDirectories: number
+  scannedFiles: number
+  discoveredSkills: number
+  readBytes: number
+}
+
+export interface SkillPluginCatalogPage {
+  kind: SkillPluginCatalogKind
+  skills: SkillMetadata[]
+  plugins: PluginMetadata[]
+  disabledSkillIds: string[]
+  cursor: string | null
+  total: number
+  truncated: boolean
+  truncatedReasons: string[]
+  stats: SkillPluginCatalogPageStats
 }

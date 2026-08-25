@@ -9,6 +9,11 @@ import type {
   ThreadForkParams
 } from "@/types"
 import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
+import {
+  appendThreadDirectoryPages,
+  indexThreadDirectory,
+  mergeThreadDirectoryFirstPage
+} from "./thread-directory-pagination"
 import { queueStorageKey } from "./queued-message-content"
 import {
   buildAvailableProviderOccurrenceId,
@@ -19,13 +24,43 @@ import {
   normalizeCompleteMessageIds,
   normalizeMessageRoleCollisionIds
 } from "../../../shared/message-role-collision"
-import {
-  normalizeChatScrollSettings,
-  type ChatScrollSettings
-} from "../../../shared/chat-scroll"
+import { normalizeChatScrollSettings, type ChatScrollSettings } from "../../../shared/chat-scroll"
+import { revalidateModelCatalog } from "./model-catalog-cache"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
+const THREAD_DIRECTORY_PAGE_LIMIT = 128
+const THREAD_DIRECTORY_PAGE_BYTE_BUDGET = 512 * 1024
+const THREAD_DIRECTORY_LOAD_MORE_PAGE_BATCH = 4
+let threadDirectoryLoadGeneration = 0
+let threadDirectoryCursor: { beforeUpdatedAt: number; beforeThreadId: string } | null = null
+let threadDirectoryLoadMorePromise: Promise<void> | null = null
+let threadDirectoryMutationEpoch = 0
+const threadDirectoryMutationEpochById = new Map<string, number>()
+let indexedThreadDirectorySnapshot: readonly Thread[] | null = null
+let threadDirectoryIndexById = new Map<string, number>()
+
+function adoptThreadDirectorySnapshot(threads: readonly Thread[]): Thread[] {
+  indexedThreadDirectorySnapshot = threads
+  threadDirectoryIndexById = indexThreadDirectory(threads)
+  return threads as Thread[]
+}
+
+function getThreadDirectoryIndex(threads: readonly Thread[]): ReadonlyMap<string, number> {
+  if (indexedThreadDirectorySnapshot !== threads) adoptThreadDirectorySnapshot(threads)
+  return threadDirectoryIndexById
+}
+
+function markThreadDirectoryMutation(threadId: string): void {
+  threadDirectoryMutationEpoch += 1
+  threadDirectoryMutationEpochById.set(threadId, threadDirectoryMutationEpoch)
+}
+
+function forgetAcknowledgedThreadDirectoryMutations(requestEpoch: number): void {
+  for (const [threadId, epoch] of threadDirectoryMutationEpochById) {
+    if (epoch <= requestEpoch) threadDirectoryMutationEpochById.delete(threadId)
+  }
+}
 
 function contentTextLength(content: Message["content"] | undefined): number {
   if (typeof content === "string") return content.length
@@ -237,12 +272,7 @@ function ensureUniqueWorkerMessageId(messages: readonly Message[], message: Mess
   const occurrence = getMessageProviderOccurrence(message) ?? 1
   return {
     ...message,
-    id: buildAvailableProviderOccurrenceId(
-      sourceId,
-      message.role,
-      occurrence,
-      occupiedIds
-    ),
+    id: buildAvailableProviderOccurrenceId(sourceId, message.role, occurrence, occupiedIds),
     provider_source_id: sourceId,
     provider_occurrence: occurrence
   }
@@ -354,8 +384,7 @@ function findWorkerToolCallMatch(
 ): { call: WorkerToolCall; index: number } | undefined {
   if (target.id) {
     const index = toolCalls.findIndex(
-      (toolCall, candidateIndex) =>
-        !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
+      (toolCall, candidateIndex) => !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
     )
     return index >= 0 ? { call: toolCalls[index], index } : undefined
   }
@@ -371,9 +400,7 @@ function findWorkerToolCallMatch(
 
   const index = toolCalls.findIndex(
     (toolCall, candidateIndex) =>
-      !usedIndexes?.has(candidateIndex) &&
-      !toolCall.id &&
-      toolCall.name === target.name
+      !usedIndexes?.has(candidateIndex) && !toolCall.id && toolCall.name === target.name
   )
   return index >= 0 ? { call: toolCalls[index], index } : undefined
 }
@@ -505,13 +532,14 @@ function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number
   let currentTurn = turnOffset
   return messages.map((message) => {
     if (message.role === "user") currentTurn += 1
-    return currentTurn > 0
-      ? `__cmb-worker-turn-${currentTurn}__`
-      : WORKER_PRE_USER_TURN_KEY
+    return currentTurn > 0 ? `__cmb-worker-turn-${currentTurn}__` : WORKER_PRE_USER_TURN_KEY
   })
 }
 
-function workerTurnSignatureKey(turnKey: string, signature: string | undefined): string | undefined {
+function workerTurnSignatureKey(
+  turnKey: string,
+  signature: string | undefined
+): string | undefined {
   return signature ? `${turnKey}\u0000${signature}` : undefined
 }
 
@@ -617,8 +645,7 @@ function mergeWorkerToolCalls(
   if (!incoming?.length) return existing
   if (!existing?.length) return incoming
   const incomingIsSparseSubset =
-    existing.length > incoming.length &&
-    areIncomingWorkerToolCallsSubset(existing, incoming)
+    existing.length > incoming.length && areIncomingWorkerToolCallsSubset(existing, incoming)
   if (!areWorkerToolCallsCompatible(existing, incoming) && !incomingIsSparseSubset) {
     return incoming
   }
@@ -852,6 +879,8 @@ interface AppState {
   // Threads
   threads: Thread[]
   currentThreadId: string | null
+  threadDirectoryHasMore: boolean
+  threadDirectoryLoadingMore: boolean
 
   // Models and Providers (global, not per-thread)
   models: ModelConfig[]
@@ -930,6 +959,8 @@ interface AppState {
 
   // Thread actions
   loadThreads: () => Promise<void>
+  loadMoreThreads: () => Promise<void>
+  touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
   createThread: (
     metadata?: Record<string, unknown>,
     options?: ThreadNavigationOptions
@@ -942,8 +973,8 @@ interface AppState {
   generateTitleForFirstMessage: (threadId: string, content: string) => Promise<void>
 
   // Model actions
-  loadModels: () => Promise<void>
-  loadProviders: () => Promise<void>
+  loadModels: (force?: boolean) => Promise<void>
+  loadProviders: (force?: boolean) => Promise<void>
 
   // Panel actions
   setRightPanelTab: (tab: "todos" | "files" | "subagents") => void
@@ -1045,6 +1076,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   threads: [],
   currentThreadId: null,
+  threadDirectoryHasMore: false,
+  threadDirectoryLoadingMore: false,
   models: [],
   providers: [],
   rightPanelTab: "todos",
@@ -1088,23 +1121,129 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Thread actions
   loadThreads: async () => {
-    const threads = await window.api.threads.list()
-    set({ threads })
+    const generation = ++threadDirectoryLoadGeneration
+    threadDirectoryLoadMorePromise = null
+    const requestMutationEpoch = threadDirectoryMutationEpoch
+    const page = await window.api.threads.listPage({
+      limit: THREAD_DIRECTORY_PAGE_LIMIT,
+      byteBudget: THREAD_DIRECTORY_PAGE_BYTE_BUDGET
+    })
+    if (generation !== threadDirectoryLoadGeneration) return
 
-    // Select the first chat thread if none selected. Project-mode threads are
-    // rendered inside the harness board and should not become the default chat.
-    if (!get().currentThreadId) {
-      const firstChatThread = findFirstChatThread(threads)
-      if (firstChatThread) {
-        await get().selectThread(firstChatThread.thread_id)
+    threadDirectoryCursor =
+      page.hasMore && page.beforeUpdatedAt !== null && page.beforeThreadId !== null
+        ? { beforeUpdatedAt: page.beforeUpdatedAt, beforeThreadId: page.beforeThreadId }
+        : null
+    set((state) => {
+      const threads = mergeThreadDirectoryFirstPage(state.threads, page.threads, {
+        requestMutationEpoch,
+        mutationEpochById: threadDirectoryMutationEpochById,
+        knownIndexById: getThreadDirectoryIndex(state.threads),
+        completeSnapshot: !page.hasMore,
+        authoritativePageBoundary: page.hasMore ? page.threads.at(-1) : undefined
+      })
+      return {
+        threads: threads === state.threads ? state.threads : adoptThreadDirectorySnapshot(threads),
+        threadDirectoryHasMore: threadDirectoryCursor !== null,
+        threadDirectoryLoadingMore: false
       }
+    })
+    forgetAcknowledgedThreadDirectoryMutations(requestMutationEpoch)
+
+    // Only the newest bounded page gates app startup. Older directory pages are
+    // explicit/idle work and must never delay the first usable chat surface.
+    if (!get().currentThreadId) {
+      const firstChatThread = findFirstChatThread(get().threads)
+      if (firstChatThread) await get().selectThread(firstChatThread.thread_id)
     }
+  },
+
+  loadMoreThreads: async () => {
+    if (threadDirectoryLoadMorePromise) return threadDirectoryLoadMorePromise
+    const initialCursor = threadDirectoryCursor
+    if (!initialCursor || !get().threadDirectoryHasMore) return
+
+    const generation = threadDirectoryLoadGeneration
+    const requestMutationEpoch = threadDirectoryMutationEpoch
+    const loadPromise = (async () => {
+      set({ threadDirectoryLoadingMore: true })
+      try {
+        let cursor = initialCursor
+        let hasMore = true
+        const incoming: Thread[] = []
+        for (let pageIndex = 0; pageIndex < THREAD_DIRECTORY_LOAD_MORE_PAGE_BATCH; pageIndex += 1) {
+          const page = await window.api.threads.listPage({
+            beforeUpdatedAt: cursor.beforeUpdatedAt,
+            beforeThreadId: cursor.beforeThreadId,
+            limit: THREAD_DIRECTORY_PAGE_LIMIT,
+            byteBudget: THREAD_DIRECTORY_PAGE_BYTE_BUDGET
+          })
+          if (generation !== threadDirectoryLoadGeneration) return
+          incoming.push(...page.threads)
+          hasMore = page.hasMore && page.beforeUpdatedAt !== null && page.beforeThreadId !== null
+          if (!hasMore) break
+          cursor = {
+            beforeUpdatedAt: page.beforeUpdatedAt as number,
+            beforeThreadId: page.beforeThreadId as string
+          }
+        }
+        if (generation !== threadDirectoryLoadGeneration) return
+
+        threadDirectoryCursor = hasMore ? cursor : null
+        set((state) => {
+          const threads = appendThreadDirectoryPages(state.threads, incoming, {
+            requestMutationEpoch,
+            mutationEpochById: threadDirectoryMutationEpochById,
+            knownIndexById: getThreadDirectoryIndex(state.threads)
+          })
+          return {
+            threads:
+              threads === state.threads ? state.threads : adoptThreadDirectorySnapshot(threads),
+            threadDirectoryHasMore: threadDirectoryCursor !== null,
+            threadDirectoryLoadingMore: false
+          }
+        })
+        forgetAcknowledgedThreadDirectoryMutations(requestMutationEpoch)
+      } catch (error) {
+        if (generation === threadDirectoryLoadGeneration) {
+          console.error("[Store] Failed to load older tasks:", error)
+        }
+      } finally {
+        if (generation === threadDirectoryLoadGeneration) {
+          threadDirectoryLoadMorePromise = null
+          set({ threadDirectoryLoadingMore: false })
+        }
+      }
+    })()
+    threadDirectoryLoadMorePromise = loadPromise
+    return loadPromise
+  },
+
+  touchThreadSummaries: (threadIds, updatedAt) => {
+    const uniqueIds = new Set(threadIds)
+    if (uniqueIds.size === 0) return
+    for (const threadId of uniqueIds) markThreadDirectoryMutation(threadId)
+    set((state) => {
+      const indexById = getThreadDirectoryIndex(state.threads)
+      let threads: Thread[] | null = null
+      for (const threadId of uniqueIds) {
+        const index = indexById.get(threadId)
+        if (index === undefined) continue
+        threads ??= [...state.threads]
+        threads[index] = { ...threads[index], updated_at: updatedAt }
+      }
+      return threads ? { threads: adoptThreadDirectorySnapshot(threads) } : state
+    })
   },
 
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
     const thread = await window.api.threads.create(metadata)
+    markThreadDirectoryMutation(thread.thread_id)
     set((state) => ({
-      threads: [thread, ...state.threads],
+      threads: adoptThreadDirectorySnapshot([
+        thread,
+        ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
+      ]),
       currentThreadId: thread.thread_id,
       ...(options?.preserveView
         ? {}
@@ -1131,8 +1270,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   forkThread: async (params: ThreadForkParams, options?: ThreadNavigationOptions) => {
     const response = await window.api.threads.fork(params)
     const thread = response.thread
+    markThreadDirectoryMutation(thread.thread_id)
     set((state) => ({
-      threads: [thread, ...state.threads.filter((item) => item.thread_id !== thread.thread_id)],
+      threads: adoptThreadDirectorySnapshot([
+        thread,
+        ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
+      ]),
       currentThreadId: thread.thread_id,
       ...(options?.preserveView
         ? {}
@@ -1184,6 +1327,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   deleteThread: async (threadId: string) => {
     console.log("[Store] Deleting thread:", threadId)
+    markThreadDirectoryMutation(threadId)
     try {
       await window.api.threads.delete(threadId)
       console.log("[Store] Thread deleted from backend")
@@ -1203,7 +1347,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           : state.currentThreadId
 
         return {
-          threads,
+          threads: adoptThreadDirectorySnapshot(threads),
           currentThreadId: newCurrentId,
           // 如果被删除的线程是之前保存的，清掉避免恢复到无效 id
           previousThreadId: state.previousThreadId === threadId ? null : state.previousThreadId,
@@ -1233,10 +1377,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   updateThread: async (threadId: string, updates: Partial<Thread>) => {
+    markThreadDirectoryMutation(threadId)
     const updated = await window.api.threads.update(threadId, updates)
-    set((state) => ({
-      threads: state.threads.map((t) => (t.thread_id === threadId ? updated : t))
-    }))
+    set((state) => {
+      const index = getThreadDirectoryIndex(state.threads).get(threadId)
+      if (index === undefined) return state
+      const threads = [...state.threads]
+      threads[index] = updated
+      return { threads: adoptThreadDirectorySnapshot(threads) }
+    })
   },
 
   generateTitleForFirstMessage: async (threadId: string, content: string) => {
@@ -1249,14 +1398,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   // Model actions
-  loadModels: async () => {
-    const models = await window.api.models.list()
-    set({ models })
+  loadModels: async (force = false) => {
+    const snapshot = await revalidateModelCatalog(force)
+    set({ models: snapshot.models, providers: snapshot.providers })
   },
 
-  loadProviders: async () => {
-    const providers = await window.api.models.listProviders()
-    set({ providers })
+  loadProviders: async (force = false) => {
+    const snapshot = await revalidateModelCatalog(force)
+    set({ models: snapshot.models, providers: snapshot.providers })
   },
 
   // Panel actions
@@ -1454,9 +1603,9 @@ export const useAppStore = create<AppState>((set, get) => ({
               ? `__cmb-worker-turn-${scopedTurn}__`
               : explicitOccurrenceExistingUserIndex !== undefined
                 ? existingAlignedTurnKeys[explicitOccurrenceExistingUserIndex]
-              : exactExistingUserIndex >= 0
-                ? existingAlignedTurnKeys[exactExistingUserIndex]
-                : undefined
+                : exactExistingUserIndex >= 0
+                  ? existingAlignedTurnKeys[exactExistingUserIndex]
+                  : undefined
         }
         return alignedExistingUserTurnKey ?? turnKey
       })
@@ -1577,9 +1726,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         const explicitOccurrenceReservationOwner =
           rawExplicitOccurrenceExistingIndex === undefined
             ? undefined
-            : reservedIncomingIndexByExistingIndex.get(
-                rawExplicitOccurrenceExistingIndex
-              )
+            : reservedIncomingIndexByExistingIndex.get(rawExplicitOccurrenceExistingIndex)
         const explicitOccurrenceExistingIndex =
           explicitOccurrenceReservationOwner === undefined ||
           explicitOccurrenceReservationOwner === messageIndex
@@ -1594,14 +1741,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           !exactIndexIsReservedForAnotherIncoming &&
           next[exactExistingIndex].role === message.role &&
           (getMessageProviderOccurrence(next[exactExistingIndex]) === undefined ||
-            getMessageProviderOccurrence(next[exactExistingIndex]) ===
-              incomingProviderOccurrence)
+            getMessageProviderOccurrence(next[exactExistingIndex]) === incomingProviderOccurrence)
             ? exactExistingIndex
             : undefined
-        const signature = workerTurnSignatureKey(
-          turnKey,
-          workerFocusMessageSignature(message)
-        )
+        const signature = workerTurnSignatureKey(turnKey, workerFocusMessageSignature(message))
         const existingIndex =
           incomingProviderOccurrence !== undefined
             ? (explicitOccurrenceExistingIndex ??
@@ -1653,13 +1796,10 @@ export const useAppStore = create<AppState>((set, get) => ({
             candidateIndex !== existingIndex && candidate.id === message.id
         )
         const id =
-          useRepeatedOccurrenceReservation && !incomingIdIsOccupied
-            ? message.id
-            : existing.id
+          useRepeatedOccurrenceReservation && !incomingIdIsOccupied ? message.id : existing.id
         const incomingDefinesRepeatedOccurrence =
-          repeatedIncomingTransportIdentities.has(
-            workerTransportIdentityKey(message, turnKey)
-          ) && !useRepeatedOccurrenceReservation
+          repeatedIncomingTransportIdentities.has(workerTransportIdentityKey(message, turnKey)) &&
+          !useRepeatedOccurrenceReservation
         next[existingIndex] = {
           ...existing,
           ...message,
@@ -1681,9 +1821,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           tool_call_id: incomingDefinesRepeatedOccurrence
             ? message.tool_call_id
             : (message.tool_call_id ?? existing.tool_call_id),
-          name: incomingDefinesRepeatedOccurrence
-            ? message.name
-            : (message.name ?? existing.name),
+          name: incomingDefinesRepeatedOccurrence ? message.name : (message.name ?? existing.name),
           status: incomingDefinesRepeatedOccurrence
             ? message.status
             : (message.status ?? existing.status),
@@ -1696,11 +1834,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         incomingResolvedIndexes.push(existingIndex)
       })
       const orderedMessages = options?.orderedSnapshot
-        ? reorderWorkerFocusMessagesByIncomingOrder(
-            next,
-            incomingResolvedIndexes,
-            nextTurnKeys
-          )
+        ? reorderWorkerFocusMessagesByIncomingOrder(next, incomingResolvedIndexes, nextTurnKeys)
         : next
       const prunedMessages = pruneWorkerFocusMessages(
         orderWorkerFocusMessagesByScopedTurn(orderedMessages)

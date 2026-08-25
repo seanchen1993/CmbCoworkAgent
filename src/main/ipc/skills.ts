@@ -1,5 +1,6 @@
 import AdmZip from "adm-zip"
 import { BrowserWindow, IpcMain, shell } from "electron"
+import { randomUUID } from "node:crypto"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { existsSync, mkdirSync, rmSync } from "fs"
@@ -16,7 +17,7 @@ import {
   prepareDisabledSkillsCleanupForSkillDir,
   setDisabledSkills
 } from "../storage"
-import type { SkillMetadata } from "../types"
+import type { SkillMetadata, SkillPluginCatalogPageInput } from "../types"
 import { notifyHooksChanged } from "../hooks/notifications"
 import {
   discoverSkills,
@@ -31,6 +32,16 @@ import {
   selectRootSkillMarkdownEntry
 } from "../skills/archive"
 import { DEFAULT_SKILL_VERSION, normalizeSkillVersion, parseYamlFrontmatter } from "../utils/skill-identifiers"
+import {
+  cancelSkillPluginCatalogScope,
+  readSkillPluginCatalogPageInWorker,
+  resolveSkillPreviewInWorker
+} from "../skill-plugin-catalog/client"
+import { issueExternalFileReadGrant } from "../services/external-file-read-tokens"
+import type {
+  SkillPreviewGrantRequest,
+  SkillPreviewGrantResult
+} from "../../shared/skill-preview"
 
 interface ZipEntryLike {
   entryName: string
@@ -715,6 +726,28 @@ export async function listPluginSkills(): Promise<SkillMetadata[]> {
 export function registerSkillsHandlers(ipcMain: IpcMain): void {
   console.log("[Skills] Registering skills handlers...")
 
+  ipcMain.handle(
+    "skills:catalog:read",
+    async (
+      event,
+      { input, scope }: { input: SkillPluginCatalogPageInput; scope: string }
+    ) => {
+      const requestScope = `wc:${event.sender.id}:${String(scope || "skills")}`
+      return readSkillPluginCatalogPageInWorker(input, requestScope)
+    }
+  )
+
+  ipcMain.handle("skills:catalog:cancel", (event, scope: string): void => {
+    cancelSkillPluginCatalogScope(`wc:${event.sender.id}:${String(scope || "skills")}`)
+  })
+
+  const previewScope = (senderId: number): string => `skill-preview:wc:${senderId}`
+  const trackedPreviewSenders = new Set<number>()
+
+  ipcMain.handle("skills:cancelPreviewGrant", (event): void => {
+    cancelSkillPluginCatalogScope(previewScope(event.sender.id))
+  })
+
   ipcMain.handle("skills:list", async (): Promise<SkillMetadata[]> => {
     return listAllSkills()
   })
@@ -722,6 +755,50 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("skills:listPlugins", async (): Promise<SkillMetadata[]> => {
     return listPluginSkills()
   })
+
+  ipcMain.handle(
+    "skills:requestPreviewGrant",
+    async (event, request: SkillPreviewGrantRequest): Promise<SkillPreviewGrantResult> => {
+      if (
+        !request ||
+        typeof request.id !== "string" ||
+        !request.id ||
+        request.id.length > 1_024 ||
+        typeof request.name !== "string" ||
+        !request.name ||
+        request.name.length > 512 ||
+        !["user", "project"].includes(request.source) ||
+        (request.pluginId !== undefined &&
+          (typeof request.pluginId !== "string" ||
+            !request.pluginId ||
+            request.pluginId.length > 1_024))
+      ) {
+        return { success: false, error: "无效的技能预览请求" }
+      }
+
+      const senderId = event.sender.id
+      if (!trackedPreviewSenders.has(senderId)) {
+        trackedPreviewSenders.add(senderId)
+        event.sender.once("destroyed", () => {
+          trackedPreviewSenders.delete(senderId)
+          cancelSkillPluginCatalogScope(previewScope(senderId))
+        })
+      }
+      const matched = await resolveSkillPreviewInWorker(request, previewScope(senderId))
+      if (!matched) return { success: false, error: "未找到可信技能文件" }
+
+      const filePath = path.resolve(matched.filePath)
+      const issued = issueExternalFileReadGrant(
+        path.dirname(filePath),
+        event.sender.id,
+        [path.basename(filePath)],
+        `skill-preview:${randomUUID()}`
+      )
+      return "error" in issued
+        ? { success: false, error: issued.error }
+        : { success: true, grant: issued.grant, filePath }
+    }
+  )
 
   ipcMain.handle("skills:getDisabled", async (): Promise<string[]> => {
     return getDisabledSkills()

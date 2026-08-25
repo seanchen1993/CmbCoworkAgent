@@ -35,6 +35,8 @@ import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import { invalidateSkillCatalog, revalidateSkillCatalog } from "@/lib/app-catalog-cache"
+import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import { marketApi, type MarketItem } from "../../api/market"
 import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
@@ -1246,9 +1248,9 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
                   取值：
-                  <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+                  <code className="mx-1 font-mono text-foreground/85">&quot;always-revise&quot;</code>
                   （强制走修订）/
-                  <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                  <code className="mx-1 font-mono text-foreground/85">&quot;always-halt&quot;</code>
                   （强制终止本轮）；不写则跟随 hook stdout 输出。可选
                   <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
                   作为静态原因。
@@ -1369,7 +1371,10 @@ function SkillsGuide(): React.JSX.Element {
                 </p>
                 <p>
                   常用返回包括
-                  <code className="mx-1 font-mono text-foreground/85">decision="block"</code>、
+                  <code className="mx-1 font-mono text-foreground/85">
+                    decision=&quot;block&quot;
+                  </code>
+                  、
                   <code className="mx-1 font-mono text-foreground/85">reason</code>、
                   <code className="mx-1 font-mono text-foreground/85">systemMessage</code>、
                   <code className="mx-1 font-mono text-foreground/85">additionalContext</code>和
@@ -1413,8 +1418,13 @@ function SkillsGuide(): React.JSX.Element {
 }
 
 export function SkillsPanel(): React.JSX.Element {
-  const { setShowCustomizeView, setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery } =
-    useAppStore()
+  const setShowCustomizeView = useAppStore((state) => state.setShowCustomizeView)
+  const setMarketInitialSkillCategory = useAppStore(
+    (state) => state.setMarketInitialSkillCategory
+  )
+  const setMarketInitialSkillSearchQuery = useAppStore(
+    (state) => state.setMarketInitialSkillSearchQuery
+  )
   const recordSkillUrl = import.meta.env.VITE_JUMP_RECORD_SKILL_URL?.trim() || ""
   const [skills, setSkills] = useState<SkillMetadata[]>([])
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
@@ -1446,21 +1456,44 @@ export function SkillsPanel(): React.JSX.Element {
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
+  const [visibleSkillLimit, setVisibleSkillLimit] = useState(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
     clearTimeout(debounceTimer.current)
-    debounceTimer.current = setTimeout(() => setDebouncedQuery(value), 200)
+    debounceTimer.current = setTimeout(() => {
+      setDebouncedQuery(value)
+      setVisibleSkillLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+    }, 200)
   }, [])
 
   useEffect(() => {
     return () => clearTimeout(debounceTimer.current)
   }, [])
 
-  useEffect(() => {
-    window.api.skills.list().then(setSkills).catch(console.error)
+  const refreshSkills = useCallback(async (invalidate = false): Promise<SkillMetadata[]> => {
+    if (invalidate) invalidateSkillCatalog()
+    const snapshot = await revalidateSkillCatalog(useAppStore.getState().pluginVersion)
+    setSkills(snapshot.localSkills)
+    setDisabledSkills(snapshot.disabledSkillIds)
+    return snapshot.localSkills
   }, [])
+
+  useEffect(() => {
+    let active = true
+    const timer = setTimeout(() => {
+      void refreshSkills()
+        .then(() => {
+          if (active) setVisibleSkillLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+        })
+        .catch(console.error)
+    }, 0)
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [refreshSkills])
 
   const reloadUploadedSkillNames = useCallback(() => {
     setUploadedSkillNames(readUploadedSkillNamesFromStorage())
@@ -1506,13 +1539,6 @@ export function SkillsPanel(): React.JSX.Element {
     }, 0)
     return () => clearTimeout(timer)
   }, [loadMarketSkills])
-
-  useEffect(() => {
-    window.api.skills
-      .getDisabled()
-      .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
-      .catch(console.error)
-  }, [])
 
   const skillFilesMapRef = useRef(skillFilesMap)
   useEffect(() => {
@@ -1686,16 +1712,17 @@ export function SkillsPanel(): React.JSX.Element {
           delete next[getSkillMetadataId(skill)]
           return next
         })
-        window.api.skills.list().then(setSkills).catch(console.error)
-        window.api.skills
-          .getDisabled()
-          .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
-          .catch(console.error)
+        void refreshSkills(true).catch(console.error)
       } else {
         alert(res.error || "删除失败")
       }
     },
-    [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths, reloadOrgInstalledSkillNames]
+    [
+      refreshSkills,
+      reloadEditedSkillPaths,
+      reloadLocalUploadedSkillPaths,
+      reloadOrgInstalledSkillNames
+    ]
   )
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
@@ -1800,10 +1827,8 @@ export function SkillsPanel(): React.JSX.Element {
          * 保存后主动刷新技能列表，保证左侧列表与右侧详情展示的元信息立即一致。
          */
         setSkillFilesMap({})
-        window.api.skills
-          .list()
+        void refreshSkills(true)
           .then((nextSkills) => {
-            setSkills(nextSkills)
             const nextSelected = nextSkills.find((item) => item.path === filePath) || null
             setSelectedSkill(nextSelected)
             if (nextSelected) {
@@ -1815,7 +1840,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       return { success: true }
     },
-    [isSkillUploadedInPanel, selectedFilePath, selectedSkill]
+    [isSkillUploadedInPanel, refreshSkills, selectedFilePath, selectedSkill]
   )
 
   const filterSkillsBySearch = useCallback(
@@ -1889,6 +1914,39 @@ export function SkillsPanel(): React.JSX.Element {
     () => filterSkillsBySearch(orgInstalledCustomSkills),
     [filterSkillsBySearch, orgInstalledCustomSkills]
   )
+
+  const visibleSkillGroups = useMemo(() => {
+    const builtin = filteredBuiltin.slice(0, visibleSkillLimit)
+    const uploaded = filteredUploadedCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length)
+    )
+    const market = filteredMarketInstalledCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length - uploaded.length)
+    )
+    const org = filteredOrgInstalledCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length - uploaded.length - market.length)
+    )
+    return {
+      builtin,
+      uploaded,
+      market,
+      org
+    }
+  }, [
+    filteredBuiltin,
+    filteredMarketInstalledCustom,
+    filteredOrgInstalledCustom,
+    filteredUploadedCustom,
+    visibleSkillLimit
+  ])
+  const totalFilteredSkills =
+    filteredBuiltin.length +
+    filteredUploadedCustom.length +
+    filteredMarketInstalledCustom.length +
+    filteredOrgInstalledCustom.length
 
   const openMarketWithSkillSearch = useCallback(
     (skillName: string) => {
@@ -2010,7 +2068,7 @@ export function SkillsPanel(): React.JSX.Element {
           <div className="p-2 space-y-3">
             <SkillSection
               title="内置技能"
-              skills={filteredBuiltin}
+              skills={visibleSkillGroups.builtin}
               marketSkillMap={marketSkillMap}
               uploadedSkillNames={uploadedSkillNames}
               editedSkillPaths={editedSkillPaths}
@@ -2026,7 +2084,7 @@ export function SkillsPanel(): React.JSX.Element {
             {uploadedCustomSkills.length > 0 && (
               <SkillSection
                 title="我上传的技能"
-                skills={filteredUploadedCustom}
+                skills={visibleSkillGroups.uploaded}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2043,7 +2101,7 @@ export function SkillsPanel(): React.JSX.Element {
             {marketInstalledCustomSkills.length > 0 && (
               <SkillSection
                 title="我从应用市场安装的技能"
-                skills={filteredMarketInstalledCustom}
+                skills={visibleSkillGroups.market}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2062,7 +2120,7 @@ export function SkillsPanel(): React.JSX.Element {
             {orgInstalledCustomSkills.length > 0 && (
               <SkillSection
                 title="我安装的组织级技能"
-                skills={filteredOrgInstalledCustom}
+                skills={visibleSkillGroups.org}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2076,6 +2134,18 @@ export function SkillsPanel(): React.JSX.Element {
                 onSelectFile={onSelectFile}
                 hideMarketTag
               />
+            )}
+            {visibleSkillLimit < totalFilteredSkills && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs"
+                onClick={() =>
+                  setVisibleSkillLimit((value) => value + SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+                }
+              >
+                加载更多（剩余 {totalFilteredSkills - visibleSkillLimit}）
+              </Button>
             )}
           </div>
         </ScrollArea>
@@ -2122,10 +2192,8 @@ export function SkillsPanel(): React.JSX.Element {
         onOpenChange={setUploadDialogOpen}
         onSuccess={(uploadedSkillDirName) => {
           setSkillFilesMap({})
-          window.api.skills
-            .list()
+          void refreshSkills(true)
             .then((nextSkills) => {
-              setSkills(nextSkills)
               if (!uploadedSkillDirName) return
               /**
                * 上传成功后把“目录名（upload 返回）”映射回技能 path，并写入“本面板上传”的来源标记。
@@ -2157,7 +2225,7 @@ export function SkillsPanel(): React.JSX.Element {
         onSuccess={({ skillName, mode }) => {
           reloadUploadedSkillNames()
           void loadMarketSkills()
-          window.api.skills.list().then(setSkills).catch(console.error)
+          void refreshSkills(true).catch(console.error)
 
           toast.success(
             mode === "update"

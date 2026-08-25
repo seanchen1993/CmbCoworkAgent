@@ -11,6 +11,7 @@ import { tmpdir } from "os"
 import { join } from "path"
 import assert from "assert"
 import initSqlJs from "sql.js"
+import { DatabaseSync } from "node:sqlite"
 import { SqlJsSaver } from "../src/main/checkpointer/sqljs-saver"
 import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import type { RunnableConfig } from "@langchain/core/runnables"
@@ -382,9 +383,12 @@ async function testOversizedLiveStillRecoversNewerTempSnapshot(dir: string): Pro
     maxDatabaseBytes: 1,
     maxRootCheckpoints: 1
   })
+  const maintenance = await recovered.runMaintenance()
   const tuple = await recovered.getTuple(config("t-oversized-temp"))
   await recovered.close()
 
+  assert.equal(maintenance.attempted, true, "explicit maintenance should detect the tiny threshold")
+  assert.equal(maintenance.compacted, true, "explicit maintenance should compact the recovered DB")
   assert.equal(
     tuple?.checkpoint.id,
     "cp-new",
@@ -393,7 +397,7 @@ async function testOversizedLiveStillRecoversNewerTempSnapshot(dir: string): Pro
   console.log("PASS oversized live database still recovers newer temp snapshot first")
 }
 
-async function testOversizedDatabaseCompactsInsteadOfStartingFresh(dir: string): Promise<void> {
+async function testOversizedDatabaseCompactsOnlyDuringMaintenance(dir: string): Promise<void> {
   const dbPath = join(dir, "oversized-compact.sqlite")
   const original = new SqlJsSaver(dbPath, undefined, { maxCheckpointsPerNamespace: 3 })
   await putCheckpoint(original, "t-oversized", "root-1")
@@ -410,6 +414,33 @@ async function testOversizedDatabaseCompactsInsteadOfStartingFresh(dir: string):
     maxNonRootCheckpoints: 1,
     maxDatabaseBytes: 1
   })
+  await compacted.initialize()
+  const beforeMaintenance = new DatabaseSync(dbPath, { readOnly: true })
+  const rootCountBefore = beforeMaintenance
+    .prepare(
+      "SELECT COUNT(*) AS count FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ''"
+    )
+    .get("t-oversized") as { count: number }
+  const toolCountBefore = beforeMaintenance
+    .prepare(
+      "SELECT COUNT(*) AS count FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?"
+    )
+    .get("t-oversized", "tools:fanout") as { count: number }
+  beforeMaintenance.close()
+  assert.equal(
+    Number(rootCountBefore.count),
+    3,
+    "initialize must not prune oversized root checkpoints on the hydration path"
+  )
+  assert.equal(
+    Number(toolCountBefore.count),
+    3,
+    "initialize must not prune oversized non-root checkpoints on the hydration path"
+  )
+
+  const maintenance = await compacted.runMaintenance()
+  assert.equal(maintenance.attempted, true)
+  assert.equal(maintenance.compacted, true)
   const rootIds: string[] = []
   for await (const tuple of compacted.list(config("t-oversized"))) {
     rootIds.push(tuple.checkpoint.id)
@@ -427,7 +458,7 @@ async function testOversizedDatabaseCompactsInsteadOfStartingFresh(dir: string):
     !files.some((file) => file.startsWith("oversized-compact.sqlite.bak.")),
     "oversized but healthy database should be compacted, not quarantined into a timestamped backup"
   )
-  console.log("PASS oversized healthy database compacts instead of starting fresh")
+  console.log("PASS oversized healthy database compacts only during explicit maintenance")
 }
 
 async function testListEarlyBreakLeavesSaverReusable(dir: string): Promise<void> {
@@ -538,7 +569,7 @@ async function main(): Promise<void> {
     await testRecoverFromBackupWhenLiveFileIsCorrupt(dir)
     await testRecoverFromNewerTempSnapshot(dir)
     await testOversizedLiveStillRecoversNewerTempSnapshot(dir)
-    await testOversizedDatabaseCompactsInsteadOfStartingFresh(dir)
+    await testOversizedDatabaseCompactsOnlyDuringMaintenance(dir)
     await testListEarlyBreakLeavesSaverReusable(dir)
     await testForkBoundaryMarkerColumnBackfillsSerializedMetadata(dir)
     await testRetirePoisonsLateWriters(dir)

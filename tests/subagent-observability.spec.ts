@@ -241,7 +241,7 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration)",
+    "scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration, foregroundToken)",
     "thread context retries failed transcript hydration instead of treating it as empty"
   )
   assertIncludes(
@@ -312,8 +312,8 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     compactTranscriptHandler,
-    "getThreadSubagentStartupManifests(threadId)",
-    "history startup returns the bounded row-backed transcript index"
+    "readSubagentTranscriptStartupInWorker(threadId",
+    "history startup projects the bounded row-backed transcript index off the main thread"
   )
   assertIncludes(
     compactTranscriptHandler,
@@ -324,6 +324,11 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     compactTranscriptHandler,
     "hydrateSubagentTranscriptManifests",
     "history startup must not hydrate every large transcript blob"
+  )
+  assertNotIncludes(
+    compactTranscriptHandler,
+    "getThreadSubagentStartupManifests(threadId)",
+    "history startup must not project the complete transcript index on the main thread"
   )
   assertIncludes(
     threadIpc.slice(focusedTranscriptHandlerStart),
@@ -412,8 +417,13 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "getCoordinatorWorkers(threadId, { subscribeUpdates: false })",
+    "requestCoordinatorWorkers(threadId, false)",
     "thread context refreshes coordinator workers outside the active stream without registering stale update callbacks"
+  )
+  assertIncludes(
+    threadContext,
+    "window.api.agent.getCoordinatorWorkers(threadId, { subscribeUpdates: subscribe })",
+    "the shared worker request cache must preserve snapshot versus subscription semantics"
   )
   assertIncludes(
     threadContext,
@@ -422,12 +432,12 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "getCoordinatorWorkers(currentThreadId, { subscribeUpdates: true })",
+    "requestCoordinatorWorkers(currentThreadId, true)",
     "thread context subscribes worker updates only for the active thread"
   )
   assertIncludes(
     threadContext,
-    "Failed to load coordinator workers",
+    "Failed to restore coordinator workers:",
     "thread context restores coordinator workers when loading a thread"
   )
   assertIncludes(

@@ -1,6 +1,7 @@
-import type { IpcMain } from "electron"
+import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron"
 import {
   archiveHarnessProject,
+  cancelHarnessDetailRequestScope,
   createHarnessFeature,
   createHarnessProject,
   buildHarnessFeatureDialogTips,
@@ -8,12 +9,9 @@ import {
   deleteHarnessProject,
   getHarnessProjectDetail,
   getHarnessProjectDetails,
-  getHarnessKnowledgePreview,
   getHarnessLocalAgentmdDeployUnitMappings,
   getHarnessProjectPublicAgentmdDeployUnits,
   getHarnessRunDetail,
-  listHarnessAdapters,
-  listHarnessProjects,
   listHarnessDeployUnitMappings,
   getHarnessLeanTokenConfig,
   saveHarnessDeployUnitMappings,
@@ -25,6 +23,15 @@ import {
   resolveHarnessRunDetailCurrentStage
 } from "../harness-board/service"
 import {
+  cancelHarnessCatalogScope,
+  readHarnessCatalogPageInWorker
+} from "../harness-board/catalog-client"
+import {
+  cancelHarnessKnowledgePreviewOwner,
+  readHarnessKnowledgePreviewInWorker
+} from "../harness-board/knowledge-preview-client"
+import {
+  cancelHarnessEnterpriseRequestScope,
   getEnterpriseProjectDetails,
   getProjectReviews,
   queryPipelineLabels,
@@ -32,9 +39,17 @@ import {
   searchDeployUnits,
   searchEnterpriseProjects
 } from "../harness-board/enterprise-projects"
-import { startHarnessWatchRefs } from "../harness-board/watch-ref-watcher"
+import {
+  startHarnessWatchRefs,
+  stopHarnessWatchRefs,
+  stopAllHarnessWatchRefs
+} from "../harness-board/watch-ref-watcher"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
+import {
+  HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES,
+  HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH
+} from "../harness-board/adapter-detail-protocol"
 import {
   markHarnessStageAttributionDirty,
   primeHarnessStageAttribution
@@ -69,6 +84,14 @@ import type {
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
+import {
+  issueExternalFileReadGrant,
+  revokeExternalFileReadGrantsForOwner
+} from "../services/external-file-read-tokens"
+import type {
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult
+} from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult
@@ -77,20 +100,124 @@ import type {
 export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   console.log("[HarnessBoard] Registering harness board handlers...")
 
-  ipcMain.handle("harnessBoard:registry", async (): Promise<HarnessAdapterRegistryItem[]> => {
-    return listHarnessAdapters()
+  const enterpriseCleanupSenders = new WeakSet<WebContents>()
+  const desiredWatchScopesBySender = new Map<number, Set<string>>()
+  const activeSingleProjectScopeBySender = new Map<number, string>()
+  const activeRunScopeBySender = new Map<number, string>()
+  const enterpriseScope = (senderId: number, lane: string): string =>
+    `harness-enterprise:${senderId}:${lane}`
+  const cancelEnterpriseSenderScopes = (senderId: number): void => {
+    for (const lane of ["board-batch", "selected-project", "reviews"]) {
+      cancelHarnessEnterpriseRequestScope(enterpriseScope(senderId, lane))
+    }
+  }
+  const stopDesiredWatchScope = (senderId: number, scopeKey: string): void => {
+    desiredWatchScopesBySender.get(senderId)?.delete(scopeKey)
+    stopHarnessWatchRefs(scopeKey)
+  }
+  const desireWatchScope = (senderId: number, scopeKey: string): void => {
+    const desired = desiredWatchScopesBySender.get(senderId) ?? new Set<string>()
+    if (!desiredWatchScopesBySender.has(senderId)) {
+      desiredWatchScopesBySender.set(senderId, desired)
+    }
+    desired.delete(scopeKey)
+    while (desired.size >= 4) {
+      const oldestScope = desired.values().next().value as string | undefined
+      if (!oldestScope) break
+      desired.delete(oldestScope)
+      stopHarnessWatchRefs(oldestScope)
+    }
+    desired.add(scopeKey)
+  }
+  const stopDesiredWatchScopesForSender = (senderId: number): void => {
+    const desired = desiredWatchScopesBySender.get(senderId)
+    desiredWatchScopesBySender.delete(senderId)
+    for (const scopeKey of desired ?? []) stopHarnessWatchRefs(scopeKey)
+    activeSingleProjectScopeBySender.delete(senderId)
+    activeRunScopeBySender.delete(senderId)
+  }
+  const ensureEnterpriseSenderCleanup = (event: IpcMainInvokeEvent): void => {
+    if (enterpriseCleanupSenders.has(event.sender)) return
+    enterpriseCleanupSenders.add(event.sender)
+    const senderId = event.sender.id
+    event.sender.once("destroyed", () => {
+      cancelEnterpriseSenderScopes(senderId)
+      cancelHarnessCatalogScope(`harness-dialog-tips:${senderId}`)
+      cancelHarnessKnowledgePreviewOwner(senderId)
+      stopDesiredWatchScopesForSender(senderId)
+      revokeExternalFileReadGrantsForOwner(senderId)
+    })
+  }
+
+  ipcMain.handle("harnessBoard:registry", async (event): Promise<HarnessAdapterRegistryItem[]> => {
+    const result = await readHarnessCatalogPageInWorker(
+      { includeProjects: false, registryLimit: 64 },
+      `${event.sender.id}:registry`
+    )
+    return result.registry
   })
 
-  ipcMain.handle("harnessBoard:listProjects", async (): Promise<HarnessProjectListItem[]> => {
-    return listHarnessProjects()
+  ipcMain.handle(
+    "harnessBoard:catalog",
+    async (event): Promise<{
+      projects: HarnessProjectListItem[]
+      registry: HarnessAdapterRegistryItem[]
+    }> => {
+      const result = await readHarnessCatalogPageInWorker(
+        { projectLimit: 24, registryLimit: 24 },
+        `${event.sender.id}:catalog`
+      )
+      return { projects: result.projects, registry: result.registry }
+    }
+  )
+
+  ipcMain.handle("harnessBoard:listProjects", async (event): Promise<HarnessProjectListItem[]> => {
+    const result = await readHarnessCatalogPageInWorker(
+      { includeRegistry: false, projectLimit: 64 },
+      `${event.sender.id}:projects`
+    )
+    return result.projects
   })
+
+  ipcMain.handle(
+    "harnessBoard:catalogPage",
+    async (event, input: HarnessBoardCatalogPageInput): Promise<HarnessBoardCatalogPageResult> =>
+      readHarnessCatalogPageInWorker(
+        input,
+        `${event.sender.id}:${input.requestScope ?? "catalog-page"}`
+      )
+  )
+
+  ipcMain.handle(
+    "harnessBoard:cancelCatalogRequests",
+    (
+      event,
+      requestedScope?: "board" | "board-registry" | "board-settings" | "chat-binding"
+    ): void => {
+    const prefix = `${event.sender.id}:`
+    const suffixes = requestedScope ? [requestedScope] : [
+      "catalog",
+      "registry",
+      "projects",
+      "catalog-page",
+      "board",
+      "board-registry",
+      "board-sidebar",
+      "board-settings",
+      "chat-binding"
+    ]
+    for (const suffix of suffixes) {
+      cancelHarnessCatalogScope(`${prefix}${suffix}`)
+    }
+    }
+  )
 
   ipcMain.handle("harnessBoard:getDeployUnitMappings", async (): Promise<HarnessDeployUnitMapping[]> => {
     return listHarnessDeployUnitMappings()
   })
 
-  ipcMain.handle("harnessBoard:getLeanTokenConfig", async (): Promise<HarnessLeanTokenConfig> => {
-    return getHarnessLeanTokenConfig()
+  ipcMain.handle("harnessBoard:getLeanTokenConfig", async (event): Promise<HarnessLeanTokenConfig> => {
+    return getHarnessLeanTokenConfig({ scope: `${event.sender.id}:board-settings` })
   })
 
   ipcMain.handle(
@@ -116,10 +243,40 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:getKnowledgePreview",
-    async (_event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
-      return getHarnessKnowledgePreview(adapterId)
+    async (event, adapterId: string): Promise<HarnessKnowledgePreviewResult> => {
+      ensureEnterpriseSenderCleanup(event)
+      const normalizedAdapterId = typeof adapterId === "string" ? adapterId.trim().slice(0, 512) : ""
+      if (!normalizedAdapterId) throw new Error("Harness adapter id is required")
+      const scope = `harness-knowledge:${event.sender.id}:${normalizedAdapterId}`
+      const preview = await readHarnessKnowledgePreviewInWorker(normalizedAdapterId, scope)
+      if (!preview.exists || !preview.path) return preview
+      const previewablePaths = preview.files
+        .filter((file) => !file.is_dir)
+        .map((file) => file.path)
+      if (previewablePaths.length === 0) return preview
+
+      // The knowledge root comes from the main-process Harness adapter config.
+      // The renderer receives only a sender-bound capability, never a path-to-
+      // capability minting primitive.
+      const issued = issueExternalFileReadGrant(
+        preview.path,
+        event.sender.id,
+        previewablePaths,
+        `harness-knowledge:${adapterId}`
+      )
+      if ("error" in issued) {
+        return {
+          ...preview,
+          error: preview.error ? `${preview.error}；${issued.error}` : issued.error
+        }
+      }
+      return { ...preview, previewGrant: issued.grant }
     }
   )
+
+  ipcMain.handle("harnessBoard:cancelKnowledgePreviewRequests", (event): void => {
+    cancelHarnessKnowledgePreviewOwner(event.sender.id)
+  })
 
   ipcMain.handle(
     "harnessBoard:createProject",
@@ -172,17 +329,32 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:getEnterpriseProjectDetails",
     async (
-      _event,
+      event,
       input: HarnessEnterpriseProjectDetailInput
     ): Promise<HarnessEnterpriseProjectDetailResult> => {
-      return getEnterpriseProjectDetails(input)
+      ensureEnterpriseSenderCleanup(event)
+      const lane = input.requestScope === "board-batch" ? "board-batch" : "selected-project"
+      return getEnterpriseProjectDetails(input, {
+        scope: enterpriseScope(event.sender.id, lane)
+      })
     }
   )
 
   ipcMain.handle(
     "harnessBoard:getProjectReviews",
-    async (_event, input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> => {
-      return getProjectReviews(input)
+    async (event, input: HarnessProjectReviewInput): Promise<HarnessProjectReviewResult> => {
+      ensureEnterpriseSenderCleanup(event)
+      return getProjectReviews(input, {
+        scope: enterpriseScope(event.sender.id, "reviews")
+      })
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:cancelEnterpriseRequests",
+    (event, requestedLane: "board-batch" | "selected-project" | "reviews"): void => {
+      if (!["board-batch", "selected-project", "reviews"].includes(requestedLane)) return
+      cancelHarnessEnterpriseRequestScope(enterpriseScope(event.sender.id, requestedLane))
     }
   )
 
@@ -273,13 +445,18 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:getProjectDetail",
-    async (_event, projectId: string): Promise<HarnessProjectDetailViewModel> => {
-      const detail = await getHarnessProjectDetail(projectId)
-      startHarnessWatchRefs(
-        `project:${projectId}`,
-        detail.project.projectRootPath,
-        detail.watchRefs
-      )
+    async (event, projectId: string): Promise<HarnessProjectDetailViewModel> => {
+      ensureEnterpriseSenderCleanup(event)
+      const watchScopeKey = `project:${projectId}`
+      desireWatchScope(event.sender.id, watchScopeKey)
+      activeSingleProjectScopeBySender.set(event.sender.id, watchScopeKey)
+      const detail = await getHarnessProjectDetail(projectId, {
+        scope: `harness-project-detail:${event.sender.id}:single`,
+        maxResponseBytes: HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES
+      })
+      if (desiredWatchScopesBySender.get(event.sender.id)?.has(watchScopeKey)) {
+        startHarnessWatchRefs(watchScopeKey, detail.project.projectRootPath, detail.watchRefs)
+      }
       return detail
     }
   )
@@ -287,32 +464,78 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:getProjectDetails",
     async (
-      _event,
+      event,
       payload: string[] | { projectIds: string[]; watchRefs?: boolean }
     ): Promise<Record<string, HarnessProjectDetailViewModel>> => {
       const projectIds = Array.isArray(payload) ? payload : payload.projectIds
+      if (projectIds.length > HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH) {
+        throw new Error(
+          `Harness project detail request exceeds ${HARNESS_ADAPTER_DETAIL_MAX_PROJECTS_PER_BATCH} projects`
+        )
+      }
       const shouldWatchRefs = Array.isArray(payload) ? true : payload.watchRefs !== false
-      const details = await getHarnessProjectDetails(projectIds)
+      if (shouldWatchRefs) {
+        ensureEnterpriseSenderCleanup(event)
+        for (const projectId of projectIds) {
+          desireWatchScope(event.sender.id, `project:${projectId}`)
+        }
+      }
+      const details = await getHarnessProjectDetails(projectIds, {
+        scope: `harness-project-detail:${event.sender.id}:batch`,
+        maxResponseBytes: HARNESS_ADAPTER_DETAIL_MAX_IPC_BYTES
+      })
       if (shouldWatchRefs) {
         for (const [projectId, detail] of Object.entries(details)) {
-          startHarnessWatchRefs(
-            `project:${projectId}`,
-            detail.project.projectRootPath,
-            detail.watchRefs
-          )
+          const watchScopeKey = `project:${projectId}`
+          if (desiredWatchScopesBySender.get(event.sender.id)?.has(watchScopeKey)) {
+            startHarnessWatchRefs(watchScopeKey, detail.project.projectRootPath, detail.watchRefs)
+          }
         }
       }
       return details
     }
   )
 
+  ipcMain.handle("harnessBoard:stopWatchRefs", (event, scopeKey?: string): void => {
+    if (
+      typeof scopeKey === "string" &&
+      scopeKey.length <= 4_096 &&
+      /^(project:[^:]+|run:[^:]+:.+)$/.test(scopeKey)
+    ) {
+      stopDesiredWatchScope(event.sender.id, scopeKey)
+      if (scopeKey.startsWith("project:")) {
+        if (activeSingleProjectScopeBySender.get(event.sender.id) === scopeKey) {
+          activeSingleProjectScopeBySender.delete(event.sender.id)
+          cancelHarnessDetailRequestScope(`harness-project-detail:${event.sender.id}:single`)
+        }
+      } else if (activeRunScopeBySender.get(event.sender.id) === scopeKey) {
+        activeRunScopeBySender.delete(event.sender.id)
+        cancelHarnessDetailRequestScope(`harness-run-detail:${event.sender.id}`)
+      }
+      return
+    }
+    stopDesiredWatchScopesForSender(event.sender.id)
+    stopAllHarnessWatchRefs()
+    cancelHarnessDetailRequestScope(`harness-project-detail:${event.sender.id}:single`)
+    cancelHarnessDetailRequestScope(`harness-project-detail:${event.sender.id}:batch`)
+    cancelHarnessDetailRequestScope(`harness-run-detail:${event.sender.id}`)
+    cancelHarnessCatalogScope(`harness-dialog-tips:${event.sender.id}`)
+    cancelEnterpriseSenderScopes(event.sender.id)
+  })
+
   ipcMain.handle(
     "harnessBoard:getRunDetail",
     async (
-      _event,
+      event,
       payload: { projectId: string; slug: string }
     ): Promise<HarnessRunDetailViewModel> => {
-      const detail = await getHarnessRunDetail(payload.projectId, payload.slug)
+      ensureEnterpriseSenderCleanup(event)
+      const watchScopeKey = `run:${payload.projectId}:${payload.slug}`
+      desireWatchScope(event.sender.id, watchScopeKey)
+      activeRunScopeBySender.set(event.sender.id, watchScopeKey)
+      const detail = await getHarnessRunDetail(payload.projectId, payload.slug, {
+        scope: `harness-run-detail:${event.sender.id}`
+      })
       // Feature-page refreshes already paid for an authoritative feature_status
       // query, so reuse that result instead of spawning another adapter lookup
       // before the next code generation.
@@ -321,12 +544,14 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
         payload.slug,
         resolveHarnessRunDetailCurrentStage(detail)
       )
-      startHarnessWatchRefs(
-        `run:${payload.projectId}:${payload.slug}`,
-        detail.project.projectRootPath,
-        detail.run.watchRefs,
-        { projectId: payload.projectId, featureSlug: payload.slug }
-      )
+      if (desiredWatchScopesBySender.get(event.sender.id)?.has(watchScopeKey)) {
+        startHarnessWatchRefs(
+          watchScopeKey,
+          detail.project.projectRootPath,
+          detail.run.watchRefs,
+          { projectId: payload.projectId, featureSlug: payload.slug }
+        )
+      }
       return detail
     }
   )
@@ -342,8 +567,15 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "harnessBoard:getDialogTips",
-    async (_event, payload: { projectId: string; slug: string }): Promise<string | null> => {
-      return buildHarnessFeatureDialogTips(payload.projectId, payload.slug)
+    async (event, payload: { projectId: string; slug: string }): Promise<string | null> => {
+      ensureEnterpriseSenderCleanup(event)
+      return buildHarnessFeatureDialogTips(payload.projectId, payload.slug, {
+        scope: `harness-dialog-tips:${event.sender.id}`
+      })
     }
   )
+
+  ipcMain.handle("harnessBoard:cancelDialogTips", (event): void => {
+    cancelHarnessCatalogScope(`harness-dialog-tips:${event.sender.id}`)
+  })
 }

@@ -1,8 +1,14 @@
-import { IpcMain, dialog, app, BrowserWindow, type MessageBoxOptions } from "electron"
+import {
+  IpcMain,
+  dialog,
+  app,
+  BrowserWindow,
+  type MessageBoxOptions,
+  type IpcMainInvokeEvent
+} from "electron"
 import Store from "electron-store"
 import { randomUUID } from "crypto"
 import * as fs from "fs/promises"
-import { existsSync, realpathSync } from "fs"
 import * as path from "path"
 import { execFile, spawn } from "child_process"
 import { promisify } from "util"
@@ -12,13 +18,11 @@ import type {
   ModelConfig,
   Provider,
   WorkspaceSetParams,
-  WorkspaceLoadParams,
-  WorkspaceFileParams
+  WorkspaceLoadParams
 } from "../types"
 import { LocalSandbox } from "../agent/local-sandbox"
 import {
-  buildGitignoreMatcher,
-  recordWorkspaceDirectorySnapshot,
+  recordWorkspaceDirectorySnapshotSet,
   setActiveWatchedThread,
   startWatching,
   stopWatching
@@ -42,10 +46,61 @@ import {
   resolveGitOperationPath
 } from "../services/git-repository-discovery"
 import { normalizeWorkspacePathKey } from "../../shared/workspace-path"
+import {
+  isThreadMetadataHydrationWorkerUnavailable,
+  readThreadGitContextInWorker,
+  readThreadWorkspacePathInWorker
+} from "../thread-metadata-hydration/client"
+import {
+  cancelWorkspaceFileScan,
+  cancelWorkspaceFileScansForOwner,
+  openWorkspaceFileScan,
+  readWorkspaceFileScanPage
+} from "../workspace-file-scan/manager"
+import {
+  currentGitReadSignal,
+  throwIfGitReadCancelled
+} from "../services/git-read-context"
+import {
+  gitReadRequestCoordinator,
+  type GitReadFamily
+} from "./git-read-request-coordinator"
+import {
+  MAX_ATTACHMENT_FILE_BYTES,
+  MAX_ATTACHMENT_FILE_NAME_LENGTH,
+  MAX_ATTACHMENT_PICKER_FILES,
+  type AttachmentBytesParseRequest,
+  type AttachmentFileSelectionResult,
+  type AttachmentGrantParseRequest
+} from "../../shared/file-attachment"
+import type { ParsedAttachment } from "../file-parser"
+import { getFileAttachmentParserClient } from "../file-attachment-parser/client"
+import {
+  issueExternalFileReadGrant,
+  resolveExternalFileReadGrant,
+  revokeExternalFileReadGrantsForOwner
+} from "../services/external-file-read-tokens"
+import { openStableFileHandle } from "../services/stable-file-handle"
 
 const execFileAsync = promisify(execFile)
 
 const MAX_WORKTREES = 10
+
+async function readThreadWorkspacePath(threadId: string): Promise<string | null> {
+  try {
+    return await readThreadWorkspacePathInWorker(threadId)
+  } catch (error) {
+    if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+    console.warn(
+      "[ThreadMetadataHydrationWorker] unavailable; using workspace-path fallback",
+      error
+    )
+    const { getThreadCore } = await import("../db")
+    const thread = getThreadCore(threadId)
+    const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+    return typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
+  }
+}
 
 export interface WorktreeInfo {
   path: string
@@ -66,7 +121,7 @@ interface GitPanelFileDiff {
 
 type GitPanelFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked"
 
-interface GitPanelChangedFile {
+export interface GitPanelChangedFile {
   path: string
   previousPath?: string
   status: GitPanelFileStatus
@@ -381,23 +436,7 @@ function toPosixRelative(input: string): string {
 }
 
 function isAbsoluteLikePath(input: string): boolean {
-  return path.isAbsolute(input) ||
-    (process.platform === "win32" && /^[a-zA-Z]:[\\/]/.test(input))
-}
-
-function findGitRootByFs(startPath: string): string | null {
-  let current: string
-  try {
-    current = realpathSync(startPath)
-  } catch {
-    current = path.resolve(startPath)
-  }
-  while (true) {
-    if (existsSync(path.join(current, ".git"))) return current
-    const parent = path.dirname(current)
-    if (parent === current) return null
-    current = parent
-  }
+  return path.isAbsolute(input) || (process.platform === "win32" && /^[a-zA-Z]:[\\/]/.test(input))
 }
 
 function resolveWorktreeRelativeCandidate(worktreePath: string, rawPath: string): string | null {
@@ -467,7 +506,56 @@ function toWorktreeRelativePath(worktreePath: string, rawPath: string): string[]
  * in a subdirectory worktree, `sub/x` can legitimately name a different file from
  * the repository-root path `sub/x`.
  */
-function gitOutputPathToWorktreeRelativePath(worktreePath: string, rawPath: string): string[] {
+interface GitStatusPathContext {
+  worktreePath: string
+  gitRoot: string | null
+  physicalWorktree: string | null
+}
+
+function gitStatusProjectionAbortError(signal = currentGitReadSignal()): Error {
+  if (signal?.reason instanceof Error) return signal.reason
+  return new DOMException("Git status path projection was cancelled", "AbortError")
+}
+
+function throwIfGitStatusProjectionAborted(signal = currentGitReadSignal()): void {
+  if (signal?.aborted) throw gitStatusProjectionAbortError(signal)
+}
+
+function raceGitStatusProjectionWithAbort<T>(
+  promise: Promise<T>,
+  signal = currentGitReadSignal()
+): Promise<T> {
+  if (!signal) return promise
+  throwIfGitStatusProjectionAborted(signal)
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const onAbort = (): void => rejectPromise(gitStatusProjectionAbortError(signal))
+    signal.addEventListener("abort", onAbort, { once: true })
+    promise.then(resolvePromise, rejectPromise).finally(() => {
+      signal.removeEventListener("abort", onAbort)
+    })
+  })
+}
+
+async function createGitStatusPathContext(
+  worktreePath: string,
+  signal?: AbortSignal
+): Promise<GitStatusPathContext> {
+  throwIfGitStatusProjectionAborted(signal)
+  const resolvedWorktree = path.resolve(worktreePath)
+  const contextPromise = Promise.all([
+    getGitRoot(resolvedWorktree),
+    fs.realpath(resolvedWorktree).catch(() => null)
+  ])
+  const [gitRoot, physicalWorktree] = await raceGitStatusProjectionWithAbort(contextPromise, signal)
+  throwIfGitStatusProjectionAborted(signal)
+  return { worktreePath: resolvedWorktree, gitRoot, physicalWorktree }
+}
+
+function gitOutputPathToWorktreeRelativePath(
+  context: GitStatusPathContext,
+  rawPath: string
+): string[] {
+  const worktreePath = context.worktreePath
   const normalized = normalizeLiteralTrackedPath(rawPath)
   if (!normalized) return []
   if (isAbsoluteLikePath(normalized)) {
@@ -475,7 +563,7 @@ function gitOutputPathToWorktreeRelativePath(worktreePath: string, rawPath: stri
     return direct ? [direct] : []
   }
 
-  const gitRoot = findGitRootByFs(worktreePath)
+  const gitRoot = context.gitRoot
   if (!gitRoot) {
     const direct = resolveWorktreeRelativeCandidate(worktreePath, normalized)
     return direct ? [direct] : []
@@ -487,8 +575,8 @@ function gitOutputPathToWorktreeRelativePath(worktreePath: string, rawPath: stri
   // Git resolves a symlink/junction cwd to the physical repository and emits
   // repository-root-relative paths. Project that physical path back into the
   // logical workspace so a symlinked workspace keeps the same file identity.
-  try {
-    const physicalWorktree = realpathSync(worktreePath)
+  if (context.physicalWorktree) {
+    const physicalWorktree = context.physicalWorktree
     const physicalRelative = path.relative(physicalWorktree, absoluteCandidate)
     if (
       physicalRelative &&
@@ -499,8 +587,6 @@ function gitOutputPathToWorktreeRelativePath(worktreePath: string, rawPath: stri
       const normalizedRelative = normalizeGitRelativePath(physicalRelative)
       return normalizedRelative ? [normalizedRelative] : []
     }
-  } catch {
-    // The lexical containment result above remains authoritative when realpath fails.
   }
   return []
 }
@@ -593,43 +679,69 @@ function decodeGitQuotedPath(rawPath: string): string {
   return Buffer.from(bytes).toString("utf8")
 }
 
-function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
+const GIT_STATUS_PROJECTION_YIELD_INTERVAL = 256
+
+function yieldGitStatusProjection(): Promise<void> {
+  return new Promise((resolvePromise) => setImmediate(resolvePromise))
+}
+
+async function parsePorcelainPathEntries(
+  output: string,
+  signal?: AbortSignal
+): Promise<GitPanelChangedFile[]> {
   // Prefer NUL-delimited porcelain (`git status --porcelain -z`) to avoid
   // C-style quoted paths (e.g. "\\345\\220...") being misparsed as "345/220/...".
   if (output.includes("\0")) {
-    const entries = output.split("\0").filter(Boolean)
     const files: GitPanelChangedFile[] = []
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i]
+    let cursor = 0
+    let parsedEntries = 0
+    while (cursor < output.length) {
+      throwIfGitStatusProjectionAborted(signal)
+      const delimiter = output.indexOf("\0", cursor)
+      const end = delimiter < 0 ? output.length : delimiter
+      const entry = output.slice(cursor, end)
+      cursor = end + 1
+      if (!entry) continue
       if (entry.length < 4) continue
       const status = entry.slice(0, 2)
       const rawPath = entry.slice(3)
       if (!rawPath) continue
       const fileStatus = getGitPanelFileStatus(status)
-      if (isRenameOrCopyStatus(status) && i + 1 < entries.length) {
+      if (isRenameOrCopyStatus(status) && cursor < output.length) {
         // In `status -z`, rename/copy records use:
         //   "R  <new-path>\0<old-path>\0"
         // Keep the current path for git add/commit and skip the historical source path.
+        const previousDelimiter = output.indexOf("\0", cursor)
+        const previousEnd = previousDelimiter < 0 ? output.length : previousDelimiter
+        const previousPath = output.slice(cursor, previousEnd)
+        cursor = previousEnd + 1
         files.push({
           path: normalizeGitRelativePath(rawPath),
-          previousPath: normalizeGitRelativePath(entries[i + 1] || ""),
+          previousPath: normalizeGitRelativePath(previousPath),
           status: fileStatus
         })
-        i += 1
       } else {
         files.push({ path: normalizeGitRelativePath(rawPath), status: fileStatus })
+      }
+      parsedEntries += 1
+      if (parsedEntries % GIT_STATUS_PROJECTION_YIELD_INTERVAL === 0) {
+        await yieldGitStatusProjection()
       }
     }
     return files
   }
 
   // Fallback for newline-delimited porcelain output.
-  const lines = output
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
   const files: GitPanelChangedFile[] = []
-  for (const line of lines) {
+  let cursor = 0
+  let parsedEntries = 0
+  while (cursor < output.length) {
+    throwIfGitStatusProjectionAborted(signal)
+    const delimiter = output.indexOf("\n", cursor)
+    const end = delimiter < 0 ? output.length : delimiter
+    const line = output.slice(cursor, end).trimEnd()
+    cursor = end + 1
+    if (!line) continue
     if (line.length < 4) continue
     const status = line.slice(0, 2)
     let rawPath = line.slice(3).replace(/\r$/, "")
@@ -646,6 +758,10 @@ function parsePorcelainPathEntries(output: string): GitPanelChangedFile[] {
       previousPath: previousPath ? normalizeGitRelativePath(previousPath) : undefined,
       status: getGitPanelFileStatus(status)
     })
+    parsedEntries += 1
+    if (parsedEntries % GIT_STATUS_PROJECTION_YIELD_INTERVAL === 0) {
+      await yieldGitStatusProjection()
+    }
   }
   return files
 }
@@ -693,7 +809,9 @@ async function runStatusPorcelain(
       ],
       { silent, timeoutMs: 15_000, maxBufferBytes: options?.maxBufferBytes }
     )
-  } catch {
+  } catch (error) {
+    throwIfGitReadCancelled()
+    if (isExecMaxBufferError(error)) throw error
     // 旧版 Git 可能不支持当前 porcelain 命令组合里的 -z。
     // 回退到非 NUL 分隔输出以保持兼容，路径反引号/转义由 parsePorcelainPathEntries 统一处理。
     return runGit(
@@ -772,7 +890,9 @@ async function runStatusPorcelainExcludingNoiseDirs(
       run(trackedArgs(true)),
       run(untrackedArgs(true))
     ])
-  } catch {
+  } catch (error) {
+    throwIfGitReadCancelled()
+    if (isExecMaxBufferError(error)) throw error
     // 旧版 Git 不支持某些 -z 组合时回退到换行分隔。
     useZ = false
     ;[trackedOut, untrackedOut] = await Promise.all([
@@ -816,9 +936,15 @@ function getCachedPromise<T>(
   const now = Date.now()
   const cached = cache.get(cacheKey)
   if (cached) {
-    if (cached.settledAt === null || now - cached.settledAt < ttlMs) {
+    if (
+      (cached.settledAt !== null && now - cached.settledAt < ttlMs) ||
+      (cached.settledAt === null && !currentGitReadSignal())
+    ) {
       return cached.promise
     }
+    // A cancellable request must not inherit another request's in-flight
+    // AbortSignal. Replace the cache slot with an independently owned Promise;
+    // the old entry's identity guard below prevents it from deleting the new one.
     cache.delete(cacheKey)
   }
 
@@ -856,6 +982,7 @@ const GIT_EXEC_MAX_BUFFER_BYTES = 20 * 1024 * 1024
 const GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES = 768 * 1024
 const GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES = 2 * 1024 * 1024
 const GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES = 2 * 1024 * 1024
+const GIT_PANEL_MAX_REPOSITORIES = 64
 // 合成新文件 diff 时的内存保护阈值，避免一次性读取超大文件导致主进程内存抖动。
 const MAX_SYNTHETIC_DIFF_BYTES = 256 * 1024
 const LLM_FILE_HISTORY_MAX_SNAPSHOT_BYTES = 256 * 1024
@@ -1072,12 +1199,14 @@ function pickBestWorktreeRelativePath(worktreePath: string, candidates: string[]
   return null
 }
 
-function collectChangedFileEntriesFromStatus(
+export async function collectChangedFileEntriesFromStatus(
   worktreePath: string,
   statusOutput: string,
   trackedFiles: string[],
-  options?: { filterByTracked?: boolean }
-): GitPanelChangedFile[] {
+  options?: { filterByTracked?: boolean; signal?: AbortSignal }
+): Promise<GitPanelChangedFile[]> {
+  const signal = options?.signal
+  const pathContext = await createGitStatusPathContext(worktreePath, signal)
   const trackedSet = new Set<string>()
   for (const tracked of trackedFiles) {
     for (const rel of toWorktreeRelativePath(worktreePath, tracked)) {
@@ -1087,13 +1216,20 @@ function collectChangedFileEntriesFromStatus(
 
   const filterByTracked = Boolean(options?.filterByTracked) && trackedSet.size > 0
   const changedMap = new Map<string, GitPanelChangedFile>()
+  const parsedEntries = await parsePorcelainPathEntries(statusOutput, signal)
 
-  for (const entry of parsePorcelainPathEntries(statusOutput)) {
-    const pathCandidates = gitOutputPathToWorktreeRelativePath(worktreePath, entry.path)
+  for (let index = 0; index < parsedEntries.length; index += 1) {
+    throwIfGitStatusProjectionAborted(signal)
+    if (index > 0 && index % GIT_STATUS_PROJECTION_YIELD_INTERVAL === 0) {
+      await yieldGitStatusProjection()
+      throwIfGitStatusProjectionAborted(signal)
+    }
+    const entry = parsedEntries[index]
+    const pathCandidates = gitOutputPathToWorktreeRelativePath(pathContext, entry.path)
     if (pathCandidates.length === 0) continue
 
     const previousPathCandidates = entry.previousPath
-      ? gitOutputPathToWorktreeRelativePath(worktreePath, entry.previousPath)
+      ? gitOutputPathToWorktreeRelativePath(pathContext, entry.previousPath)
       : []
     const mappedPreviousPath =
       pickBestWorktreeRelativePath(worktreePath, previousPathCandidates) ?? undefined
@@ -1273,17 +1409,29 @@ function parseNumstatByPath(output: string): Map<string, { additions: number; de
 function getExecErrorText(error: unknown): string {
   if (!(error instanceof Error)) return String(error || "")
   const execError = error as ExecFileError
-  const stderr = typeof execError.stderr === "string"
-    ? execError.stderr
-    : execError.stderr
-      ? execError.stderr.toString("utf-8")
-      : ""
-  const stdout = typeof execError.stdout === "string"
-    ? execError.stdout
-    : execError.stdout
-      ? execError.stdout.toString("utf-8")
-      : ""
+  const stderr =
+    typeof execError.stderr === "string"
+      ? execError.stderr
+      : execError.stderr
+        ? execError.stderr.toString("utf-8")
+        : ""
+  const stdout =
+    typeof execError.stdout === "string"
+      ? execError.stdout
+      : execError.stdout
+        ? execError.stdout.toString("utf-8")
+        : ""
   return [stderr, stdout, execError.message].filter(Boolean).join("\n").trim()
+}
+
+function isExecMaxBufferError(error: unknown): boolean {
+  return (
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") ||
+    getExecErrorText(error).toLowerCase().includes("maxbuffer")
+  )
 }
 
 function isMaxBufferExceededError(error: unknown): boolean {
@@ -1326,10 +1474,15 @@ function isGitLfsVersionHookError(error: unknown): boolean {
 }
 
 async function addSafeDirectory(worktreePath: string): Promise<void> {
+  const signal = currentGitReadSignal()
+  throwIfGitReadCancelled(signal)
   console.log(`[GitPanel][exec] git config --global --add safe.directory ${quoteArg(worktreePath)}`)
   await execFileAsync("git", ["config", "--global", "--add", "safe.directory", worktreePath], {
+    signal,
+    timeout: signal ? 20_000 : undefined,
     ...GIT_SPAWN_OPTIONS
   })
+  throwIfGitReadCancelled(signal)
 }
 
 async function runGit(
@@ -1340,8 +1493,11 @@ async function runGit(
     timeoutMs?: number
     maxBufferBytes?: number
     env?: NodeJS.ProcessEnv
+    signal?: AbortSignal
   }
 ): Promise<string> {
+  const signal = options?.signal ?? currentGitReadSignal()
+  throwIfGitReadCancelled(signal)
   const silent = Boolean(options?.silent)
   const maxBufferBytes = options?.maxBufferBytes ?? GIT_EXEC_MAX_BUFFER_BYTES
   const baseArgs = ["-C", worktreePath, ...args]
@@ -1350,13 +1506,16 @@ async function runGit(
   try {
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: { ...GIT_BASE_ENV, ...options?.env },
-      timeout: options?.timeoutMs,
+      timeout: options?.timeoutMs ?? (signal ? 20_000 : undefined),
       maxBuffer: maxBufferBytes,
+      signal,
       ...GIT_SPAWN_OPTIONS
     })
+    throwIfGitReadCancelled(signal)
     if (!silent) console.log(`[GitPanel][exec][ok] ${command}`)
     return stdout
   } catch (error) {
+    throwIfGitReadCancelled(signal)
     if (!isDubiousOwnershipError(error)) {
       if (!silent) console.error(`[GitPanel][exec][fail] ${command}\n${getExecErrorText(error)}`)
       throw error
@@ -1367,10 +1526,12 @@ async function runGit(
     await addSafeDirectory(worktreePath)
     const { stdout } = await execFileAsync("git", baseArgs, {
       env: { ...GIT_BASE_ENV, ...options?.env },
-      timeout: options?.timeoutMs,
+      timeout: options?.timeoutMs ?? (signal ? 20_000 : undefined),
       maxBuffer: maxBufferBytes,
+      signal,
       ...GIT_SPAWN_OPTIONS
     })
+    throwIfGitReadCancelled(signal)
     if (!silent) console.log(`[GitPanel][exec][ok-after-retry] ${command}`)
     return stdout
   }
@@ -1409,17 +1570,19 @@ async function runGitWithLiteralPathspecs(
   worktreePath: string,
   args: string[],
   pathspecs: string[],
-  options?: { silent?: boolean; timeoutMs?: number; maxBufferBytes?: number }
+  options?: {
+    silent?: boolean
+    timeoutMs?: number
+    maxBufferBytes?: number
+    signal?: AbortSignal
+  }
 ): Promise<string> {
   // 提交面板里的文件列表来自 git status / diff 结果，语义上是“文件名”而不是“匹配模式”。
   // 使用 --literal-pathspecs 可以避免带方括号、星号或问号的真实文件名触发 pathspec 匹配失败。
   return runGit(worktreePath, ["--literal-pathspecs", ...args, "--", ...pathspecs], options)
 }
 
-export async function pathExistsForGitAdd(
-  worktreePath: string,
-  relPath: string
-): Promise<boolean> {
+export async function pathExistsForGitAdd(worktreePath: string, relPath: string): Promise<boolean> {
   try {
     // Git tracks the symlink directory entry itself. stat() follows the target and
     // therefore misclassifies a dangling symlink as a deletion; lstat() preserves
@@ -1529,10 +1692,12 @@ async function getCurrentBranchCached(
   // 1s 短缓存覆盖 UI 高频读取分支名场景（打开面板、提交后刷新、推送流程中多处读取）。
   return getCachedPromise(branchCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
-      const branch = (await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"], {
-        silent: Boolean(options?.silent),
-        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-      })).trim()
+      const branch = (
+        await runGit(worktreePath, ["rev-parse", "--abbrev-ref", "HEAD"], {
+          silent: Boolean(options?.silent),
+          timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+        })
+      ).trim()
       return branch && branch !== "HEAD" ? branch : null
     } catch {
       return null
@@ -1551,10 +1716,12 @@ async function getHeadCommitCached(
   // 与分支缓存配套：提交/回滚后可 forceRefresh，其他路径默认复用短缓存减少 rev-parse 频次。
   return getCachedPromise(headCommitCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, async () => {
     try {
-      const head = (await runGit(worktreePath, ["rev-parse", "HEAD"], {
-        silent: Boolean(options?.silent),
-        timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
-      })).trim()
+      const head = (
+        await runGit(worktreePath, ["rev-parse", "HEAD"], {
+          silent: Boolean(options?.silent),
+          timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS
+        })
+      ).trim()
       return head || null
     } catch {
       return null
@@ -1583,13 +1750,18 @@ async function resolvePushBaseRef(
   return null
 }
 
-async function getConfiguredUpstreamRef(worktreePath: string, options?: { silent?: boolean }): Promise<string | null> {
+async function getConfiguredUpstreamRef(
+  worktreePath: string,
+  options?: { silent?: boolean }
+): Promise<string | null> {
   try {
-    const upstream = (await runGit(
-      worktreePath,
-      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-      { silent: Boolean(options?.silent), timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS }
-    )).trim()
+    const upstream = (
+      await runGit(
+        worktreePath,
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        { silent: Boolean(options?.silent), timeoutMs: GIT_CONTEXT_QUERY_TIMEOUT_MS }
+      )
+    ).trim()
     return upstream || null
   } catch {
     return null
@@ -1820,7 +1992,10 @@ function isGitPushRejectedNeedsPullError(error: unknown): boolean {
   )
 }
 
-async function resolveThreadWorkspaceContext(threadId: string): Promise<{
+async function resolveThreadWorkspaceContext(
+  threadId: string,
+  hydration?: { webContentsId?: number; requestScope?: string }
+): Promise<{
   metadata: Record<string, unknown>
   workspacePath: string | null
   isWorktree: boolean
@@ -1829,13 +2004,24 @@ async function resolveThreadWorkspaceContext(threadId: string): Promise<{
   worktreeBranch: string | null
   repositories: DiscoveredGitRepository[]
 }> {
-  const { getThreadCore } = await import("../db")
-  const thread = getThreadCore(threadId)
   let metadata: Record<string, unknown> = {}
   try {
-    metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-  } catch {
-    metadata = {}
+    const projection = await readThreadGitContextInWorker(
+      threadId,
+      hydration?.webContentsId,
+      hydration?.requestScope
+    )
+    metadata = projection.metadata
+  } catch (error) {
+    if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+    console.warn("[ThreadMetadataHydrationWorker] unavailable; using Git context fallback", error)
+    const { getThreadCore } = await import("../db")
+    const thread = getThreadCore(threadId)
+    try {
+      metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
+    } catch {
+      metadata = {}
+    }
   }
   const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
   const metadataMarkedWorktree = Boolean(metadata.isWorktree)
@@ -1899,8 +2085,16 @@ async function getContextGitRepositories(
   context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>>
 ): Promise<DiscoveredGitRepository[]> {
   if (!context.workspacePath) return []
-  if (context.repositories?.length > 0) return context.repositories
-  return discoverWorkspaceGitRepositories(context.workspacePath)
+  const repositories =
+    context.repositories?.length > 0
+      ? context.repositories
+      : await discoverWorkspaceGitRepositories(context.workspacePath)
+  if (repositories.length > GIT_PANEL_MAX_REPOSITORIES) {
+    throw new Error(
+      `工作区包含超过 ${GIT_PANEL_MAX_REPOSITORIES} 个 Git 仓库，请缩小工作区范围后重试`
+    )
+  }
+  return repositories
 }
 
 function prefixRepositoryPath(repo: DiscoveredGitRepository, filePath: string): string {
@@ -2183,16 +2377,26 @@ export async function buildGitPanelFileDiff(
     // diff 本身设置更小的 maxBuffer：超过预算时保留 numstat，并让 UI 显示“无可展示 diff”，
     // 避免先把巨型 patch 塞进主进程再事后截断。
     const [diffHead, numstatHead] = await Promise.allSettled([
-      runGitWithLiteralPathspecs(worktreePath, ["diff", "--no-ext-diff", "--no-textconv", "HEAD"], [targetPath], {
-        silent,
-        timeoutMs: 20_000,
-        maxBufferBytes: GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES
-      }),
-      runGitWithLiteralPathspecs(worktreePath, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "HEAD"], [targetPath], {
-        silent,
-        timeoutMs: 20_000,
-        maxBufferBytes: GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES
-      })
+      runGitWithLiteralPathspecs(
+        worktreePath,
+        ["diff", "--no-ext-diff", "--no-textconv", "HEAD"],
+        [targetPath],
+        {
+          silent,
+          timeoutMs: 20_000,
+          maxBufferBytes: GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES
+        }
+      ),
+      runGitWithLiteralPathspecs(
+        worktreePath,
+        ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "HEAD"],
+        [targetPath],
+        {
+          silent,
+          timeoutMs: 20_000,
+          maxBufferBytes: GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES
+        }
+      )
     ])
     if (numstatHead.status !== "fulfilled") {
       throw numstatHead.reason
@@ -2213,43 +2417,71 @@ export async function buildGitPanelFileDiff(
     // Fallback for repos where HEAD is not available (e.g. unborn branch).
     // 降级分支仍保持并发，避免回退路径性能过差。
     const [cachedDiff, worktreeDiff, cachedNumstat, worktreeNumstat] = await Promise.allSettled([
-      runGitWithLiteralPathspecs(worktreePath, ["diff", "--no-ext-diff", "--no-textconv", "--cached"], [targetPath], {
-        silent,
-        timeoutMs: 20_000,
-        maxBufferBytes: GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES
-      }),
-      runGitWithLiteralPathspecs(worktreePath, ["diff", "--no-ext-diff", "--no-textconv"], [targetPath], {
-        silent,
-        timeoutMs: 20_000,
-        maxBufferBytes: GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES
-      }),
-      runGitWithLiteralPathspecs(worktreePath, ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--cached"], [targetPath], {
-        silent,
-        timeoutMs: 20_000,
-        maxBufferBytes: GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES
-      }),
-      runGitWithLiteralPathspecs(worktreePath, ["diff", "--numstat", "--no-ext-diff", "--no-textconv"], [targetPath], {
-        silent,
-        timeoutMs: 20_000,
-        maxBufferBytes: GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES
-      })
+      runGitWithLiteralPathspecs(
+        worktreePath,
+        ["diff", "--no-ext-diff", "--no-textconv", "--cached"],
+        [targetPath],
+        {
+          silent,
+          timeoutMs: 20_000,
+          maxBufferBytes: GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES
+        }
+      ),
+      runGitWithLiteralPathspecs(
+        worktreePath,
+        ["diff", "--no-ext-diff", "--no-textconv"],
+        [targetPath],
+        {
+          silent,
+          timeoutMs: 20_000,
+          maxBufferBytes: GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES
+        }
+      ),
+      runGitWithLiteralPathspecs(
+        worktreePath,
+        ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--cached"],
+        [targetPath],
+        {
+          silent,
+          timeoutMs: 20_000,
+          maxBufferBytes: GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES
+        }
+      ),
+      runGitWithLiteralPathspecs(
+        worktreePath,
+        ["diff", "--numstat", "--no-ext-diff", "--no-textconv"],
+        [targetPath],
+        {
+          silent,
+          timeoutMs: 20_000,
+          maxBufferBytes: GIT_PANEL_NUMSTAT_MAX_BUFFER_BYTES
+        }
+      )
     ])
 
     diffText = [
       cachedDiff.status === "fulfilled" ? cachedDiff.value : "",
       worktreeDiff.status === "fulfilled" ? worktreeDiff.value : ""
-    ].filter(Boolean).join("\n")
+    ]
+      .filter(Boolean)
+      .join("\n")
     if (
       !diffText.trim() &&
-      [cachedDiff, worktreeDiff].some((result) => result.status === "rejected" && isMaxBufferExceededError(result.reason))
+      [cachedDiff, worktreeDiff].some(
+        (result) => result.status === "rejected" && isMaxBufferExceededError(result.reason)
+      )
     ) {
       diffText = buildSyntheticNoticeDiff(
         targetPath,
         `[diff omitted: output exceeded ${Math.ceil(GIT_PANEL_DIFF_EXEC_MAX_BUFFER_BYTES / 1024)}KB safety limit]`
       )
     }
-    const cachedTotals = parseNumstatTotals(cachedNumstat.status === "fulfilled" ? cachedNumstat.value : "")
-    const worktreeTotals = parseNumstatTotals(worktreeNumstat.status === "fulfilled" ? worktreeNumstat.value : "")
+    const cachedTotals = parseNumstatTotals(
+      cachedNumstat.status === "fulfilled" ? cachedNumstat.value : ""
+    )
+    const worktreeTotals = parseNumstatTotals(
+      worktreeNumstat.status === "fulfilled" ? worktreeNumstat.value : ""
+    )
     additions = cachedTotals.additions + worktreeTotals.additions
     deletions = cachedTotals.deletions + worktreeTotals.deletions
     hasDiffStats = additions > 0 || deletions > 0
@@ -2355,6 +2587,7 @@ export async function buildGitPanelState(
     visibleFileLimit?: number
     statusUntrackedMode?: GitStatusUntrackedMode
     statusMaxBufferBytes?: number
+    signal?: AbortSignal
   }
 ): Promise<{
   files: GitPanelFileDiff[]
@@ -2398,16 +2631,21 @@ export async function buildGitPanelState(
   // 把其它未跟踪目录展开到文件级，避免面板里出现 `node_modules` 这种光秃秃的文件夹条目。
   // 按真实文件名过滤时保持原有口径（excludeDirs 与 magic pathspec 互斥）。
   const excludeUntrackedDirs = filterByTracked ? undefined : GIT_PANEL_EXCLUDED_UNTRACKED_DIRS
-  const effectiveUntrackedMode: GitStatusUntrackedMode = filterByTracked ? statusUntrackedMode : "all"
+  const effectiveUntrackedMode: GitStatusUntrackedMode = filterByTracked
+    ? statusUntrackedMode
+    : "all"
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, {
     silent,
     untrackedMode: effectiveUntrackedMode,
     maxBufferBytes: statusMaxBufferBytes,
     excludeDirs: excludeUntrackedDirs
   })
-  const rawChangedFileEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
-    filterByTracked
-  })
+  const rawChangedFileEntries = await collectChangedFileEntriesFromStatus(
+    worktreePath,
+    statusOut,
+    normalizedTrackedFiles,
+    { filterByTracked, signal: options?.signal }
+  )
   const changedFileEntries = await combineFilesystemMovesForDisplay(
     worktreePath,
     rawChangedFileEntries,
@@ -2549,11 +2787,14 @@ export async function buildGitPanelState(
     })
   }
 
-  const totals = fileDiffs.reduce((acc, file) => {
-    acc.additions += file.additions
-    acc.deletions += file.deletions
-    return acc
-  }, { additions: 0, deletions: 0 })
+  const totals = fileDiffs.reduce(
+    (acc, file) => {
+      acc.additions += file.additions
+      acc.deletions += file.deletions
+      return acc
+    },
+    { additions: 0, deletions: 0 }
+  )
 
   return {
     files: fileDiffs,
@@ -2577,7 +2818,13 @@ export async function buildGitPanelState(
 async function getChangedFileEntriesForGitOps(
   worktreePath: string,
   trackedFiles: string[],
-  options?: { silent?: boolean; includeAllWhenNoTracked?: boolean; combineMoves?: boolean }
+  options?: {
+    silent?: boolean
+    includeAllWhenNoTracked?: boolean
+    combineMoves?: boolean
+    signal?: AbortSignal
+    statusMaxBufferBytes?: number
+  }
 ): Promise<GitPanelChangedFile[]> {
   // commit/push 场景只需要“文件列表”即可，不做重型 diff 计算。
   // 该函数是 Git 提交流程的轻量快速路径。
@@ -2599,11 +2846,15 @@ async function getChangedFileEntriesForGitOps(
   // 列目录场景排除 node_modules 等噪音目录，避免“提交全部”把依赖/构建产物一并暂存。
   const statusOut = await runStatusPorcelain(worktreePath, statusPathspecs, {
     silent,
-    excludeDirs: filterByTracked ? undefined : GIT_PANEL_EXCLUDED_UNTRACKED_DIRS
+    excludeDirs: filterByTracked ? undefined : GIT_PANEL_EXCLUDED_UNTRACKED_DIRS,
+    maxBufferBytes: options?.statusMaxBufferBytes
   })
-  const rawEntries = collectChangedFileEntriesFromStatus(worktreePath, statusOut, normalizedTrackedFiles, {
-    filterByTracked
-  })
+  const rawEntries = await collectChangedFileEntriesFromStatus(
+    worktreePath,
+    statusOut,
+    normalizedTrackedFiles,
+    { filterByTracked, signal: options?.signal }
+  )
   if (options?.combineMoves === false) {
     return rawEntries
   }
@@ -2667,6 +2918,7 @@ async function getHeadTrackedPaths(
 ): Promise<Set<string>> {
   if (candidates.length === 0) return new Set()
   const tracked = new Set<string>()
+  const pathContext = await createGitStatusPathContext(worktreePath)
   const batchSize = 32
   for (let index = 0; index < candidates.length; index += batchSize) {
     const batch = candidates.slice(index, index + batchSize)
@@ -2692,7 +2944,7 @@ async function getHeadTrackedPaths(
     }
 
     for (const rawPath of output.split("\0").filter(Boolean)) {
-      for (const relativePath of gitOutputPathToWorktreeRelativePath(worktreePath, rawPath)) {
+      for (const relativePath of gitOutputPathToWorktreeRelativePath(pathContext, rawPath)) {
         tracked.add(normalizeGitRelativePath(relativePath))
       }
     }
@@ -2700,10 +2952,7 @@ async function getHeadTrackedPaths(
   return tracked
 }
 
-async function runGitCheckIgnoreStdin(
-  worktreePath: string,
-  candidates: string[]
-): Promise<string> {
+async function runGitCheckIgnoreStdin(worktreePath: string, candidates: string[]): Promise<string> {
   const execute = (): Promise<string> =>
     new Promise((resolve, reject) => {
       let settled = false
@@ -2884,7 +3133,8 @@ async function getGitPanelSummaryQuick(worktreePath: string): Promise<{
   // 重命名；若 header 仍按 2 条计数，就会出现“数量对不上”。直接复用同一套实体收集逻辑。
   const entries = await getChangedFileEntriesForGitOps(worktreePath, [], {
     silent: true,
-    includeAllWhenNoTracked: true
+    includeAllWhenNoTracked: true,
+    statusMaxBufferBytes: GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES
   })
   return {
     hasPendingDiff: entries.length > 0,
@@ -3091,15 +3341,24 @@ async function buildGitChangedFilesSummary(
 
   const repos = await getContextGitRepositories(context)
   if (repos.length > 1) {
-    const repoEntries = await Promise.all(
-      repos.map(async (repo) => ({
-        repo,
-        entries: await getChangedFileEntriesForGitOps(repo.repoPath, [], {
-          silent: true,
-          includeAllWhenNoTracked: true,
-          combineMoves: false
-        })
-      }))
+    const repoEntries: Array<{
+      repo: DiscoveredGitRepository
+      entries: GitPanelChangedFile[]
+    }> = new Array(repos.length)
+    await runWithConcurrency(
+      repos.map((repo, index) => ({ repo, index })),
+      GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
+      async ({ repo, index }) => {
+        repoEntries[index] = {
+          repo,
+          entries: await getChangedFileEntriesForGitOps(repo.repoPath, [], {
+            silent: true,
+            includeAllWhenNoTracked: true,
+            combineMoves: false,
+            statusMaxBufferBytes: GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES
+          })
+        }
+      }
     )
     const changedFileEntries = repoEntries.flatMap(({ repo, entries }) =>
       entries.map((entry) => ({
@@ -3136,7 +3395,8 @@ async function buildGitChangedFilesSummary(
     getChangedFileEntriesForGitOps(target.worktreePath, tracked, {
       silent: true,
       includeAllWhenNoTracked: true,
-      combineMoves: false
+      combineMoves: false,
+      statusMaxBufferBytes: GIT_PANEL_STATUS_SUMMARY_MAX_BUFFER_BYTES
     }),
     getCacheKeyForPath(target.worktreePath) === getCacheKeyForPath(context.workspacePath)
       ? Promise.resolve(context.isWorktree)
@@ -3505,6 +3765,7 @@ import {
   upsertUserInfoConfig,
   getUserInfo,
   getStoredDefaultModelId,
+  getGlobalRoutingMode,
   DEFAULT_MAX_TOKENS,
   MIN_MAX_TOKENS,
   MAX_MAX_TOKENS,
@@ -3559,25 +3820,51 @@ function getResolvedStoredDefaultModelId(): string {
   return normalizeConfiguredModelId(stored) || resolveDefaultModelId()
 }
 
+function toRendererModelConfig(config: ReturnType<typeof getModelConfigs>[number]): ModelConfig {
+  return {
+    id: toModelRef(config),
+    name: config.name,
+    provider: config.source,
+    source: config.source,
+    model: config.model,
+    description: config.baseUrl,
+    available: Boolean(config.apiKey),
+    maxTokens: config.maxTokens,
+    ...(config.origin !== undefined && { origin: config.origin }),
+    ...(config.tier !== undefined && { tier: config.tier })
+  }
+}
+
+function modelProvidersFromConfigs(
+  configs: ReturnType<typeof getModelConfigs>
+): Provider[] {
+  return PROVIDERS.map((provider) => ({
+    ...provider,
+    hasAnyModelApiKey: configs.some(
+      (config) => config.source === provider.id && Boolean(config.apiKey)
+    )
+  }))
+}
+
 export function registerModelHandlers(ipcMain: IpcMain): void {
+  const workspaceScanCleanupOwners = new Set<number>()
   // List all effective models. The first call waits for the remote manifest so
   // the renderer does not briefly show fallback entries and then replace them.
   ipcMain.handle("models:list", async () => {
     await refreshBuiltinModelCatalog()
-    const models: ModelConfig[] = getModelConfigs().map((config) => ({
-      id: toModelRef(config),
-      name: config.name,
-      provider: config.source,
-      source: config.source,
-      model: config.model,
-      description: config.baseUrl,
-      available: Boolean(config.apiKey),
-      maxTokens: config.maxTokens,
-      ...(config.origin !== undefined && { origin: config.origin }),
-      ...(config.tier !== undefined && { tier: config.tier })
-    }))
+    return getModelConfigs().map(toRendererModelConfig)
+  })
 
-    return models
+  ipcMain.handle("models:getCatalog", async () => {
+    await refreshBuiltinModelCatalog()
+    const configs = getModelConfigs()
+    const models = configs.map(toRendererModelConfig)
+    return {
+      models,
+      providers: modelProvidersFromConfigs(configs),
+      defaultModelId: models[0]?.id ?? "",
+      routingMode: getGlobalRoutingMode()
+    }
   })
 
   ipcMain.handle("models:getCustomConfigs", async () => {
@@ -3628,13 +3915,10 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle(
-    "models:getUserInfo",
-    async () => {
-      const userInfo = getUserInfo()
-      return userInfo
-    }
-  )
+  ipcMain.handle("models:getUserInfo", async () => {
+    const userInfo = getUserInfo()
+    return userInfo
+  })
 
   ipcMain.handle("models:deleteCustomConfig", async (_event, id: string) => {
     if (!id) throw new Error("Model id is required for deletion")
@@ -3655,22 +3939,19 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // List providers with whether any model has a key configured.
   ipcMain.handle("models:listProviders", async () => {
     await refreshBuiltinModelCatalog()
-    return PROVIDERS.map((provider) => ({
-      ...provider,
-      hasAnyModelApiKey:
-        provider.id === "builtin"
-          ? getBuiltinModelPublicConfigs().some((config) => config.hasApiKey)
-          : getCustomModelPublicConfigs().some((config) => config.hasApiKey)
-    }))
+    return modelProvidersFromConfigs(getModelConfigs())
   })
 
   ipcMain.handle("models:getGoalSettings", async () => {
     return getGoalSettings()
   })
 
-  ipcMain.handle("models:setGoalSettings", async (_event, settings: { evaluatorModelId?: string }) => {
-    setGoalSettings(settings)
-  })
+  ipcMain.handle(
+    "models:setGoalSettings",
+    async (_event, settings: { evaluatorModelId?: string }) => {
+      setGoalSettings(settings)
+    }
+  )
 
   ipcMain.handle("models:getTokenLimits", async () => {
     return {
@@ -3845,13 +4126,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       return store.get("workspacePath", null) as string | null
     }
 
-    // Get from thread metadata via threads:get
-    const { getThreadCore } = await import("../db")
-    const thread = getThreadCore(threadId)
-    if (!thread?.metadata) return null
-
-    const metadata = JSON.parse(thread.metadata)
-    return metadata.workspacePath || null
+    return readThreadWorkspacePath(threadId)
   })
 
   // Set workspace path for a thread (stores in thread metadata)
@@ -3884,7 +4159,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         clearThreadGitContextCache(metadata)
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
 
-        startWatching(threadId, newPath)
+        await startWatching(threadId, newPath)
         // 同步刷新“最近工作区”，供新建线程默认复用。
         store.set("workspacePath", newPath)
       } else {
@@ -3925,8 +4200,16 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       preferredPath = typeof storedPath === "string" ? storedPath : null
     }
 
-    // 仅当目录真实存在时才作为 defaultPath，避免对话框落到不存在路径。
-    const defaultPath = preferredPath && existsSync(preferredPath) ? preferredPath : undefined
+    // UNC probes can be slow; never block Electron main with existsSync here.
+    let defaultPath: string | undefined
+    if (preferredPath) {
+      try {
+        await fs.access(preferredPath)
+        defaultPath = preferredPath
+      } catch {
+        defaultPath = undefined
+      }
+    }
 
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory", "createDirectory"],
@@ -3954,7 +4237,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         updateThread(threadId, { metadata: JSON.stringify(metadata) })
 
         // Start watching the new workspace
-        startWatching(threadId, selectedPath)
+        await startWatching(threadId, selectedPath)
       }
     } else {
       const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
@@ -3968,30 +4251,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     return selectedPath
   })
 
-  // Load files from disk into the workspace view
-  ipcMain.handle("workspace:loadFromDisk", async (_event, params: WorkspaceLoadParams) => {
+  // File scans use a pull-based worker protocol. Every IPC response is capped
+  // to 128 entries / 96 KiB; incremental opendir traversal and stat projection
+  // stay off Electron's main event loop.
+  ipcMain.handle("workspace:fileScanOpen", async (event, params: WorkspaceLoadParams) => {
     const { threadId, workspacePath: requestedWorkspacePath } = params
-    const { getThreadCore } = await import("../db")
-    // Always skip node_modules, the dominant machine-generated directory.
-    // `dist`/`out`/`build` are intentionally NOT hardcoded here: in many
-    // projects they hold artifacts the user may want to browse. Instead we
-    // defer to the workspace's own .gitignore (below) to skip large generated
-    // dirs per the user's intent. The same applies to directories named
-    // coverage/tmp/temp, which can contain legitimate project fixtures.
-    const ignoredWorkspaceDirs = new Set(["node_modules"])
-
-    // Get workspace path from thread metadata
-    const thread = getThreadCore(threadId)
-    const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-    const persistedWorkspacePath = metadata.workspacePath as string | null
-
+    const persistedWorkspacePath = await readThreadWorkspacePath(threadId)
     if (!persistedWorkspacePath) {
-      return { success: false, error: "No workspace folder linked", files: [] }
+      return { success: false, error: "No workspace folder linked" }
     }
-
-    // Reject an IPC request whose originating thread switched paths before
-    // dispatch. Otherwise the renderer could cache the new tree under the old
-    // shared workspace key.
     if (
       requestedWorkspacePath &&
       normalizeWorkspacePathKey(path.resolve(requestedWorkspacePath)) !==
@@ -4000,119 +4268,76 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
       return {
         success: false,
         error: "Workspace changed before file scan started",
-        files: [],
         workspacePath: persistedWorkspacePath
       }
     }
-
     const workspacePath = requestedWorkspacePath || persistedWorkspacePath
-
-    // Respect the workspace's own .gitignore — but for directories only, so
-    // individual gitignored files (e.g. logs, .env) stay visible in the tree
-    // while large gitignored dirs (dist/out/build/.next/target/…) are skipped.
-    const isGitIgnoredDir = buildGitignoreMatcher(workspacePath)
-
-    function shouldSkipWorkspaceDir(name: string, relPath: string): boolean {
-      if (name.startsWith(".") || ignoredWorkspaceDirs.has(name)) return true
-      if (relPath.replace(/\\/g, "/") === "resources/bin") return true
-      return isGitIgnoredDir(relPath)
-    }
-
     try {
-      const files: Array<{
-        path: string
-        is_dir: boolean
-        size?: number
-        modified_at?: string
-      }> = []
-
-      // Cap concurrent fs.stat calls so a directory with very many files can't
-      // exhaust the file-descriptor table (EMFILE). Subdirectory recursion is
-      // sequential, so total in-flight stats stay around this bound.
-      const FILE_STAT_CONCURRENCY = 48
-
-      // Recursively read directory. Files within a directory are stat'd in
-      // bounded-parallel batches (the previous sequential `await fs.stat` per
-      // file was the main cost on large repos / network drives).
-      async function readDir(dirPath: string, relativePath: string = ""): Promise<void> {
-        const entries = await fs.readdir(dirPath, { withFileTypes: true })
-
-        const subDirs: Array<{ fullPath: string; relPath: string }> = []
-        const fileEntries: Array<{ fullPath: string; relPath: string }> = []
-
-        for (const entry of entries) {
-          const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name
-
-          // Skip hidden files and heavy generated directories.
-          if (
-            entry.name.startsWith(".") ||
-            (entry.isDirectory() && shouldSkipWorkspaceDir(entry.name, relPath))
-          ) {
-            continue
-          }
-
-          const fullPath = path.join(dirPath, entry.name)
-
-          if (entry.isDirectory()) {
-            files.push({
-              path: "/" + relPath,
-              is_dir: true
-            })
-            subDirs.push({ fullPath, relPath })
-          } else {
-            fileEntries.push({ fullPath, relPath })
-          }
-        }
-
-        for (let i = 0; i < fileEntries.length; i += FILE_STAT_CONCURRENCY) {
-          const batch = fileEntries.slice(i, i + FILE_STAT_CONCURRENCY)
-          await Promise.all(
-            batch.map(async ({ fullPath, relPath }) => {
-              const stat = await fs.stat(fullPath)
-              files.push({
-                path: "/" + relPath,
-                is_dir: false,
-                size: stat.size,
-                modified_at: stat.mtime.toISOString()
-              })
-            })
-          )
-        }
-
-        for (const dir of subDirs) {
-          await readDir(dir.fullPath, dir.relPath)
-        }
+      const ownerId = event.sender.id
+      const opened = await openWorkspaceFileScan(ownerId, workspacePath)
+      if (!event.sender.isDestroyed() && !workspaceScanCleanupOwners.has(ownerId)) {
+        workspaceScanCleanupOwners.add(ownerId)
+        event.sender.once("destroyed", () => {
+          workspaceScanCleanupOwners.delete(ownerId)
+          void cancelWorkspaceFileScansForOwner(ownerId)
+        })
       }
-
-      await readDir(workspacePath)
-
-      // The scan can take a while; if the thread's workspace switched in the
-      // meantime, don't point the watcher back at the now-stale path. The
-      // renderer also discards stale results via result.workspacePath.
-      const latestThread = getThreadCore(threadId)
-      const latestMetadata = latestThread?.metadata ? JSON.parse(latestThread.metadata) : {}
-      const latestWorkspacePath = latestMetadata.workspacePath as string | null
-      if (
-        latestWorkspacePath &&
-        normalizeWorkspacePathKey(path.resolve(latestWorkspacePath)) ===
-          normalizeWorkspacePathKey(path.resolve(workspacePath))
-      ) {
-        startWatching(threadId, workspacePath)
-        recordWorkspaceDirectorySnapshot(workspacePath, files)
-      }
-
-      return {
-        success: true,
-        files,
-        workspacePath
-      }
-    } catch (e) {
+      return { success: true, ...opened, ordered: false }
+    } catch (error) {
       return {
         success: false,
-        error: e instanceof Error ? e.message : "Unknown error",
-        files: []
+        error: error instanceof Error ? error.message : "Unable to start workspace file scan"
       }
     }
+  })
+
+  ipcMain.handle(
+    "workspace:fileScanNext",
+    async (
+      event,
+      {
+        scanId,
+        threadId,
+        continuation
+      }: { scanId: string; threadId: string; continuation?: string }
+    ) => {
+      try {
+        const page = await readWorkspaceFileScanPage(event.sender.id, scanId, continuation)
+        if (page.done || page.truncated) {
+          const latestWorkspacePath = await readThreadWorkspacePath(threadId)
+          if (
+            latestWorkspacePath &&
+            normalizeWorkspacePathKey(path.resolve(latestWorkspacePath)) ===
+              normalizeWorkspacePathKey(path.resolve(page.workspacePath))
+          ) {
+            await startWatching(threadId, page.workspacePath)
+            if (page.directories) {
+              recordWorkspaceDirectorySnapshotSet(page.workspacePath, page.directories)
+            }
+          }
+        }
+        return {
+          success: true,
+          files: page.files,
+          done: page.done,
+          truncated: page.truncated,
+          continuation: page.continuation,
+          workspacePath: page.workspacePath
+        }
+      } catch (error) {
+        return {
+          success: false,
+          files: [],
+          done: true,
+          error: error instanceof Error ? error.message : "Workspace file scan failed"
+        }
+      }
+    }
+  )
+
+  ipcMain.handle("workspace:fileScanCancel", async (event, { scanId }: { scanId: string }) => {
+    await cancelWorkspaceFileScan(event.sender.id, scanId)
+    return { success: true }
   })
 
   // Ensure the workspace watcher is active for a thread without re-scanning the
@@ -4121,14 +4346,11 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   // call this on thread activation to re-arm it. startWatching is idempotent
   // (same-path calls are a no-op).
   ipcMain.handle("workspace:ensureWatching", async (_event, { threadId }: WorkspaceLoadParams) => {
-    const { getThreadCore } = await import("../db")
-    const thread = getThreadCore(threadId)
-    const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-    const workspacePath = metadata.workspacePath as string | null
+    const workspacePath = await readThreadWorkspacePath(threadId)
     if (!workspacePath) return { success: false }
-    const watcherState = startWatching(threadId, workspacePath)
+    const watcherState = await startWatching(threadId, workspacePath)
     return {
-      success: watcherState !== "failed",
+      success: watcherState !== "failed" && watcherState !== "superseded",
       restarted: watcherState === "started"
     }
   })
@@ -4142,70 +4364,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "workspace:setActiveThread",
     async (_event, { threadId }: { threadId: string | null }) => {
       setActiveWatchedThread(threadId)
-      if (!threadId) return { success: true, restarted: false }
-      const { getThreadCore } = await import("../db")
-      const thread = getThreadCore(threadId)
-      const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-      const workspacePath = metadata.workspacePath as string | null
-      if (!workspacePath) return { success: true, restarted: false }
-      const watcherState = startWatching(threadId, workspacePath)
+      if (!threadId) return { success: true, restarted: false, workspacePath: null }
+      const workspacePath = await readThreadWorkspacePath(threadId)
+      if (!workspacePath) return { success: true, restarted: false, workspacePath: null }
+      const watcherState = await startWatching(threadId, workspacePath)
       return {
-        success: watcherState !== "failed",
-        restarted: watcherState === "started"
-      }
-    }
-  )
-
-  // Read a single file's contents from disk
-  ipcMain.handle(
-    "workspace:readFile",
-    async (_event, { threadId, filePath }: WorkspaceFileParams) => {
-      const { getThreadCore } = await import("../db")
-
-      // Get workspace path from thread metadata
-      const thread = getThreadCore(threadId)
-      const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-      const workspacePath = metadata.workspacePath as string | null
-
-      if (!workspacePath) {
-        return {
-          success: false,
-          error: "No workspace folder linked"
-        }
-      }
-
-      try {
-        // Convert virtual path to full disk path
-        const relativePath = filePath.startsWith("/") ? filePath.slice(1) : filePath
-        const fullPath = path.join(workspacePath, relativePath)
-
-        // Security check: ensure the resolved path is within the workspace
-        const resolvedPath = path.resolve(fullPath)
-        const resolvedWorkspace = path.resolve(workspacePath)
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
-          return { success: false, error: "Access denied: path outside workspace" }
-        }
-
-        // Check if file exists
-        const stat = await fs.stat(fullPath)
-        if (stat.isDirectory()) {
-          return { success: false, error: "Cannot read directory as file" }
-        }
-
-        // Read file contents
-        const content = await fs.readFile(fullPath, "utf-8")
-
-        return {
-          success: true,
-          content,
-          size: stat.size,
-          modified_at: stat.mtime.toISOString()
-        }
-      } catch (e) {
-        return {
-          success: false,
-          error: e instanceof Error ? e.message : "Unknown error"
-        }
+        success: watcherState !== "failed" && watcherState !== "superseded",
+        restarted: watcherState === "started",
+        workspacePath
       }
     }
   )
@@ -4214,7 +4380,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:isGit",
     async (
-      _event,
+      event,
       payload: string | { folderPath: string; includeWorktrees?: boolean; threadId?: string }
     ) => {
       const folderPath = typeof payload === "string" ? payload : payload.folderPath
@@ -4222,56 +4388,35 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         typeof payload === "string" ? true : Boolean(payload.includeWorktrees)
       const threadId = typeof payload === "string" ? null : payload.threadId || null
 
-      const gitRoot = await getGitRoot(folderPath)
-      const repositories = gitRoot ? [] : await discoverWorkspaceGitRepositories(folderPath)
-      const isGit = Boolean(gitRoot || repositories.length > 0)
-      const isWorktreePath = isGit ? await detectIsWorktreePath(folderPath) : false
-      const worktrees = isGit && includeWorktrees && gitRoot ? await listWorktrees(gitRoot) : []
-      const result = {
-        isGit,
-        gitRoot: gitRoot || null,
-        worktrees,
-        isWorktreePath,
-        repositories: repositories.map((repo) => ({
-          path: repo.repoPath,
-          displayPath: repo.displayPath,
-          gitRoot: repo.gitRoot
-        }))
-      }
+      return gitReadRequestCoordinator.run(
+        event.sender,
+        "workspace-probe",
+        "probe",
+        threadId ?? folderPath,
+        async () => {
+          const gitRoot = await getGitRoot(folderPath)
+          const repositories = gitRoot ? [] : await discoverWorkspaceGitRepositories(folderPath)
+          const isGit = Boolean(gitRoot || repositories.length > 0)
+          const isWorktreePath = isGit ? await detectIsWorktreePath(folderPath) : false
+          const worktrees =
+            isGit && includeWorktrees && gitRoot ? await listWorktrees(gitRoot) : []
 
-      if (threadId) {
-        try {
-          const { getThreadCore, updateThread } = await import("../db")
-          const thread = getThreadCore(threadId)
-          if (thread) {
-            let metadata: Record<string, unknown> = {}
-            try {
-              metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-            } catch {
-              metadata = {}
-            }
-
-            const threadWorkspacePath =
-              typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
-            if (
-              threadWorkspacePath &&
-              path.resolve(threadWorkspacePath) === path.resolve(folderPath)
-            ) {
-              writeThreadGitContextCache(metadata, {
-                workspacePath: threadWorkspacePath,
-                isGitRepo: result.isGit,
-                isWorktreePath: result.isWorktreePath,
-                gitRoot: result.gitRoot
-              })
-              updateThread(threadId, { metadata: JSON.stringify(metadata) })
-            }
+          // This mount-time probe intentionally has no persistence side effect. Persisting the
+          // result used to parse and rewrite the complete task metadata blob on Electron's main
+          // thread. Explicit Git panel operations maintain the durable Git context when needed.
+          return {
+            isGit,
+            gitRoot: gitRoot || null,
+            worktrees,
+            isWorktreePath,
+            repositories: repositories.map((repo) => ({
+              path: repo.repoPath,
+              displayPath: repo.displayPath,
+              gitRoot: repo.gitRoot
+            }))
           }
-        } catch {
-          // Cache write is best-effort and should not break git detection response.
         }
-      }
-
-      return result
+      )
     }
   )
 
@@ -4318,7 +4463,9 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         const worktrees = await listWorktrees(gitRoot)
         const resolvedPath = path.resolve(worktreePath)
         const target = worktrees.find(
-          (w) => path.resolve(w.path) === resolvedPath || path.normalize(w.path) === path.normalize(worktreePath)
+          (w) =>
+            path.resolve(w.path) === resolvedPath ||
+            path.normalize(w.path) === path.normalize(worktreePath)
         )
         if (!target) {
           return { success: false, error: "指定的 Worktree 不属于当前仓库" }
@@ -4538,7 +4685,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:getGitPanelMeta",
     async (
-      _event,
+      event,
       {
         threadId,
         options
@@ -4550,10 +4697,14 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           includePushability?: boolean
         }
       }
-    ) => {
+    ) =>
+      gitReadRequestCoordinator.run(event.sender, "panel", "meta", threadId, async () => {
       let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
       try {
-        context = await resolveThreadWorkspaceContext(threadId)
+        context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          requestScope: "git-panel-meta"
+        })
         return await buildGitPanelMetaState(threadId, context, options)
       } catch (e) {
         return createEmptyGitPanelMetaState(threadId, {
@@ -4562,13 +4713,13 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           error: e instanceof Error ? e.message : "加载 Git 仓库信息失败"
         })
       }
-    }
+    })
   )
 
   ipcMain.handle(
     "workspace:getGitPanelDiffs",
     async (
-      _event,
+      event,
       {
         threadId,
         options
@@ -4582,34 +4733,42 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           worktreePath?: string
         }
       }
-    ) => {
-    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-    try {
-      context = await resolveThreadWorkspaceContext(threadId)
-      return await buildGitPanelDiffState(threadId, context, options)
-    } catch (e) {
-      return createEmptyGitPanelDiffState(threadId, {
-        isWorktree: Boolean(context?.isWorktree),
-        isGitRepo: Boolean(context?.isGitRepo),
-        error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
-      })
-    }
-    }
+    ) =>
+      gitReadRequestCoordinator.run(event.sender, "panel", "diffs", threadId, async () => {
+      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+      try {
+        context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          requestScope: "git-panel-diffs"
+        })
+        return await buildGitPanelDiffState(threadId, context, options)
+      } catch (e) {
+        return createEmptyGitPanelDiffState(threadId, {
+          isWorktree: Boolean(context?.isWorktree),
+          isGitRepo: Boolean(context?.isGitRepo),
+          error: e instanceof Error ? e.message : "加载 Git 文件变更失败"
+        })
+      }
+    })
   )
 
   ipcMain.handle(
     "workspace:getGitPanelFileDiff",
     async (
-      _event,
+      event,
       {
         threadId,
         filePath,
         options
       }: { threadId: string; filePath: string; options?: { worktreePath?: string } }
-    ) => {
+    ) =>
+      gitReadRequestCoordinator.run(event.sender, "panel", "file-diff", threadId, async () => {
       let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
       try {
-        context = await resolveThreadWorkspaceContext(threadId)
+        context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          requestScope: "git-panel-file-diff"
+        })
         return await buildGitPanelFileDiffState(threadId, context, filePath, options)
       } catch (e) {
         return createEmptyGitPanelFileDiffState(threadId, {
@@ -4618,131 +4777,200 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           error: e instanceof Error ? e.message : "加载文件 diff 失败"
         })
       }
-    }
+    })
   )
 
-  ipcMain.handle("workspace:getGitChangedFilesSummary", async (_event, { threadId }: { threadId: string }) => {
-    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-    try {
-      context = await resolveThreadWorkspaceContext(threadId)
-      return await buildGitChangedFilesSummary(threadId, context)
-    } catch (e) {
-      return createEmptyGitChangedFilesSummary(threadId, {
-        isWorktree: Boolean(context?.isWorktree),
-        isGitRepo: Boolean(context?.isGitRepo),
-        error: e instanceof Error ? e.message : "加载 Git 文件列表失败"
-      })
-    }
-  })
-
-  ipcMain.handle("workspace:getGitPanelState", async (_event, { threadId }: { threadId: string }) => {
-    let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
-    try {
-      context = await resolveThreadWorkspaceContext(threadId)
-      const [meta, diff] = await Promise.all([
-        buildGitPanelMetaState(threadId, context),
-        buildGitPanelDiffState(threadId, context)
-      ])
-      return {
-        success: meta.success && diff.success,
-        isWorktree: meta.isWorktree || diff.isWorktree,
-        isGitRepo: meta.isGitRepo ?? diff.isGitRepo,
-        taskId: threadId,
-        repositories: diff.repositories,
-        files: diff.files,
-        changedFiles: diff.changedFiles,
-        changedFilesTotal: diff.changedFilesTotal ?? meta.changedFilesTotal,
-        omittedFileCount: diff.omittedFileCount,
-        totals: diff.totals,
-        hasPendingDiff: diff.hasPendingDiff,
-        hasPushableCommit: meta.hasPushableCommit,
-        pendingCommits: meta.pendingCommits,
-        trackedFiles: meta.trackedFiles,
-        worktreeBranch: meta.worktreeBranch,
-        suggestedCommitMessage: diff.suggestedCommitMessage,
-        error: meta.error || diff.error
-      }
-    } catch (e) {
-      return {
-        ...createEmptyGitPanelDiffState(threadId, {
+  ipcMain.handle(
+    "workspace:getGitChangedFilesSummary",
+    async (event, { threadId }: { threadId: string }) =>
+      gitReadRequestCoordinator.run(
+        event.sender,
+        "changed-summary",
+        threadId,
+        threadId,
+        async () => {
+      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+      try {
+        context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          // A workspace event can request summaries for several tasks at once.
+          // Keep those metadata reads independent; a shared latest-wins scope
+          // would make task B cancel task A before either Git projection starts.
+          requestScope: `git-changed-summary:${threadId}`
+        })
+        return await buildGitChangedFilesSummary(threadId, context)
+      } catch (e) {
+        return createEmptyGitChangedFilesSummary(threadId, {
           isWorktree: Boolean(context?.isWorktree),
-          isGitRepo: Boolean(context?.isGitRepo)
-        }),
-        hasPushableCommit: false,
-        pendingCommits: [],
-        trackedFiles: [],
-        worktreeBranch: context?.worktreeBranch ?? null,
-        error: e instanceof Error ? e.message : "加载 Git Panel 失败"
+          isGitRepo: Boolean(context?.isGitRepo),
+          error: e instanceof Error ? e.message : "加载 Git 文件列表失败"
+        })
       }
-    }
-  })
+    })
+  )
 
-  ipcMain.handle("workspace:getGitPanelSummary", async (_event, { threadId }: { threadId: string }) => {
-    try {
-      logGitStep(threadId, "summary", "请求 getGitPanelSummary")
-      const context = await resolveThreadWorkspaceContext(threadId)
-      if (!context.workspacePath || !context.isGitRepo) {
-        logGitStep(threadId, "summary", "非 Git 工作区，返回空摘要")
-        return { success: true, isWorktree: false, isGitRepo: false, hasPendingDiff: false, changedFiles: 0 }
+  ipcMain.handle(
+    "workspace:getGitPanelState",
+    async (event, { threadId }: { threadId: string }) =>
+      gitReadRequestCoordinator.run(event.sender, "panel", "state", threadId, async () => {
+      let context: Awaited<ReturnType<typeof resolveThreadWorkspaceContext>> | null = null
+      try {
+        context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          requestScope: "git-panel-state"
+        })
+        const [meta, diff] = await Promise.all([
+          buildGitPanelMetaState(threadId, context),
+          buildGitPanelDiffState(threadId, context)
+        ])
+        return {
+          success: meta.success && diff.success,
+          isWorktree: meta.isWorktree || diff.isWorktree,
+          isGitRepo: meta.isGitRepo ?? diff.isGitRepo,
+          taskId: threadId,
+          repositories: diff.repositories,
+          files: diff.files,
+          changedFiles: diff.changedFiles,
+          changedFilesTotal: diff.changedFilesTotal ?? meta.changedFilesTotal,
+          omittedFileCount: diff.omittedFileCount,
+          totals: diff.totals,
+          hasPendingDiff: diff.hasPendingDiff,
+          hasPushableCommit: meta.hasPushableCommit,
+          pendingCommits: meta.pendingCommits,
+          trackedFiles: meta.trackedFiles,
+          worktreeBranch: meta.worktreeBranch,
+          suggestedCommitMessage: diff.suggestedCommitMessage,
+          error: meta.error || diff.error
+        }
+      } catch (e) {
+        return {
+          ...createEmptyGitPanelDiffState(threadId, {
+            isWorktree: Boolean(context?.isWorktree),
+            isGitRepo: Boolean(context?.isGitRepo)
+          }),
+          hasPushableCommit: false,
+          pendingCommits: [],
+          trackedFiles: [],
+          worktreeBranch: context?.worktreeBranch ?? null,
+          error: e instanceof Error ? e.message : "加载 Git Panel 失败"
+        }
       }
-      const repos = await getContextGitRepositories(context)
-      if (repos.length > 1) {
-        const summaries = await Promise.all(
-          repos.map((repo) =>
-            getCachedPromise(
-              summaryCache,
-              getCacheKeyForPath(repo.repoPath),
-              GIT_CONTEXT_CACHE_TTL_MS,
-              () => getGitPanelSummaryQuick(repo.repoPath)
-            ).catch(() => ({ hasPendingDiff: false, changedFiles: 0 }))
+    })
+  )
+
+  ipcMain.handle(
+    "workspace:getGitPanelSummary",
+    async (event, { threadId }: { threadId: string }) =>
+      gitReadRequestCoordinator.run(event.sender, "summary", "summary", threadId, async () => {
+      try {
+        logGitStep(threadId, "summary", "请求 getGitPanelSummary")
+        const context = await resolveThreadWorkspaceContext(threadId, {
+          webContentsId: event.sender.id,
+          requestScope: "git-summary"
+        })
+        if (!context.workspacePath || !context.isGitRepo) {
+          logGitStep(threadId, "summary", "非 Git 工作区，返回空摘要")
+          return {
+            success: true,
+            isWorktree: false,
+            isGitRepo: false,
+            hasPendingDiff: false,
+            changedFiles: 0
+          }
+        }
+        const repos = await getContextGitRepositories(context)
+        if (repos.length > 1) {
+          const summaries: GitPanelSummaryStats[] = new Array(repos.length)
+          await runWithConcurrency(
+            repos.map((repo, index) => ({ repo, index })),
+            GIT_PANEL_MULTI_REPO_SCAN_CONCURRENCY,
+            async ({ repo, index }) => {
+              summaries[index] = await getCachedPromise(
+                summaryCache,
+                getCacheKeyForPath(repo.repoPath),
+                GIT_CONTEXT_CACHE_TTL_MS,
+                () => getGitPanelSummaryQuick(repo.repoPath)
+              ).catch(() => ({ hasPendingDiff: false, changedFiles: 0 }))
+            }
           )
+          const changedFiles = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
+          const hasPendingDiff = changedFiles > 0
+          logGitStep(
+            threadId,
+            "summary",
+            `完成 multiRepo=${repos.length} hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`
+          )
+          return {
+            success: true,
+            isWorktree: false,
+            isGitRepo: true,
+            hasPendingDiff,
+            changedFiles
+          }
+        }
+        const target = await resolveGitOperationTarget(context)
+        if ("error" in target) {
+          logGitStep(threadId, "summary", `失败：${target.error}`)
+          return {
+            success: true,
+            isWorktree: false,
+            isGitRepo: false,
+            hasPendingDiff: false,
+            changedFiles: 0
+          }
+        }
+        const workspacePath = target.worktreePath
+        const cacheKey = getCacheKeyForPath(workspacePath)
+        const [{ hasPendingDiff, changedFiles }, isWorktree] = await Promise.all([
+          getCachedPromise(summaryCache, cacheKey, GIT_CONTEXT_CACHE_TTL_MS, () =>
+            getGitPanelSummaryQuick(workspacePath)
+          ),
+          getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
+            ? Promise.resolve(context.isWorktree)
+            : detectIsWorktreePath(workspacePath)
+        ])
+        logGitStep(
+          threadId,
+          "summary",
+          `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`
         )
-        const changedFiles = summaries.reduce((sum, summary) => sum + summary.changedFiles, 0)
-        const hasPendingDiff = changedFiles > 0
-        logGitStep(threadId, "summary", `完成 multiRepo=${repos.length} hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`)
         return {
           success: true,
-          isWorktree: false,
+          isWorktree,
           isGitRepo: true,
           hasPendingDiff,
           changedFiles
         }
+      } catch (error) {
+        logGitStep(
+          threadId,
+          "summary",
+          `异常：${error instanceof Error ? error.message : String(error)}`
+        )
+        return {
+          success: true,
+          isWorktree: false,
+          isGitRepo: false,
+          hasPendingDiff: false,
+          changedFiles: 0
+        }
       }
-      const target = await resolveGitOperationTarget(context)
-      if ("error" in target) {
-        logGitStep(threadId, "summary", `失败：${target.error}`)
-        return { success: true, isWorktree: false, isGitRepo: false, hasPendingDiff: false, changedFiles: 0 }
-      }
-      const workspacePath = target.worktreePath
-      const cacheKey = getCacheKeyForPath(workspacePath)
-      const [{ hasPendingDiff, changedFiles }, isWorktree] = await Promise.all([
-        getCachedPromise(
-          summaryCache,
-          cacheKey,
-          GIT_CONTEXT_CACHE_TTL_MS,
-          () => getGitPanelSummaryQuick(workspacePath)
-        ),
-        getCacheKeyForPath(workspacePath) === getCacheKeyForPath(context.workspacePath)
-          ? Promise.resolve(context.isWorktree)
-          : detectIsWorktreePath(workspacePath)
-      ])
-      logGitStep(threadId, "summary", `完成 hasPendingDiff=${hasPendingDiff} changedFiles=${changedFiles}`)
-      return {
-        success: true,
-        isWorktree,
-        isGitRepo: true,
-        hasPendingDiff,
-        changedFiles
-      }
-    } catch (error) {
-      logGitStep(
-        threadId,
-        "summary",
-        `异常：${error instanceof Error ? error.message : String(error)}`
-      )
-      return { success: true, isWorktree: false, isGitRepo: false, hasPendingDiff: false, changedFiles: 0 }
+    })
+  )
+
+  ipcMain.handle(
+    "workspace:cancelGitPanelReads",
+    (event, family?: GitReadFamily): void => {
+      const selectedFamily: GitReadFamily | undefined =
+        family === "panel" ||
+        family === "changed-summary" ||
+        family === "summary" ||
+        family === "workspace-probe"
+          ? family
+          : undefined
+      gitReadRequestCoordinator.cancel(event.sender.id, selectedFamily)
     }
-  })
+  )
 
   // Commit workspace changes in Git repo with a user-provided message.
   ipcMain.handle(
@@ -5087,382 +5315,223 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "workspace:pullWorktree",
-    async (_event, { threadId, options }: { threadId: string; options?: { worktreePath?: string } }) => {
-    try {
-      logGitStep(threadId, "pull", "开始拉取远端代码")
-      const context = await resolveThreadWorkspaceContext(threadId)
-      if (!context.workspacePath || !context.isGitRepo) {
-        logGitStep(threadId, "pull", "失败：当前任务不在 Git 仓库中")
-        return { success: false, error: "当前任务不在 Git 仓库中" }
-      }
-
-      const pullOne = async (worktreePath: string, label: string): Promise<{ success: boolean; detail: string }> => {
-        const branch =
-          path.resolve(worktreePath) === path.resolve(context.workspacePath || "")
-            ? context.worktreeBranch || (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
-            : (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
-        logGitStep(threadId, "pull", `[${label}] 执行 pull --rebase origin ${branch}`)
-        try {
-          await runGit(worktreePath, ["pull", "--rebase", "origin", branch])
-          return { success: true, detail: `${label}: 拉取成功` }
-        } catch (pullError) {
-          if (isMissingRemoteBranchError(pullError)) {
-            logGitStep(threadId, "pull", `[${label}] 远端不存在分支 ${branch}，跳过`)
-            return { success: true, detail: `${label}: 远端不存在分支 ${branch}，无需拉取` }
-          }
-          try {
-            await runGit(worktreePath, ["rebase", "--abort"])
-          } catch {
-            // ignore
-          }
-          if (isGitRebaseConflictError(pullError)) {
-            logGitStep(threadId, "pull", `[${label}] 检测到代码冲突，已执行 rebase --abort`)
-            return { success: false, detail: `${label}: ${GIT_REBASE_CONFLICT_MESSAGE}` }
-          }
-          const detail = getExecErrorText(pullError) || "拉取失败"
-          logGitStep(threadId, "pull", `[${label}] 失败：${detail}`)
-          return { success: false, detail: `${label}: ${detail}` }
-        }
-      }
-
-      if (!options?.worktreePath) {
-        const repos = await getContextGitRepositories(context)
-        if (repos.length > 1) {
-          const results: Array<{ success: boolean; detail: string }> = []
-          for (const repo of repos) {
-            results.push(await pullOne(repo.repoPath, repo.displayPath))
-          }
-          // One pull action may touch many nested repositories. Publish one
-          // conservative workspace rescan after the whole batch, not one per
-          // repository plus an aggregate duplicate.
-          notifyWorkspaceFilesChanged(threadId, context.workspacePath)
-          const failed = results.filter((result) => !result.success)
-          const detail = results.map((result) => result.detail).join("\n")
-          if (failed.length > 0) {
-            return { success: false, error: `部分仓库拉取失败：\n${failed.map((item) => item.detail).join("\n")}`, detail }
-          }
-          logGitStep(threadId, "pull", `多仓库拉取完成：${repos.length} 个仓库`)
-          return { success: true, detail }
-        }
-      }
-
-      const target = await resolveGitOperationTarget(context, options?.worktreePath)
-      if ("error" in target) {
-        logGitStep(threadId, "pull", `失败：${target.error}`)
-        return { success: false, error: target.error }
-      }
-      const result = await pullOne(target.worktreePath, path.basename(target.worktreePath))
-      if (!result.success) return { success: false, error: result.detail }
-      notifyWorkspaceFilesChanged(threadId, target.worktreePath)
-      if (context.workspacePath && path.resolve(context.workspacePath) !== path.resolve(target.worktreePath)) {
-        notifyWorkspaceFilesChanged(threadId, context.workspacePath)
-      }
-      logGitStep(threadId, "pull", "拉取成功")
-      return { success: true, detail: result.detail }
-    } catch (e) {
-      const detail = getExecErrorText(e)
-      logGitStep(threadId, "pull", `异常：${detail || (e instanceof Error ? e.message : "拉取失败")}`)
-      return { success: false, error: detail || (e instanceof Error ? e.message : "拉取失败") }
-    }
-    }
-  )
-
-  // Read a binary file (images, PDFs, etc.) and return as base64
-  ipcMain.handle(
-    "workspace:readBinaryFile",
-    async (_event, { threadId, filePath }: WorkspaceFileParams) => {
-      const { getThreadCore } = await import("../db")
-
-      // Get workspace path from thread metadata
-      const thread = getThreadCore(threadId)
-      const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
-      const workspacePath = metadata.workspacePath as string | null
-
-      if (!workspacePath) {
-        return {
-          success: false,
-          error: "No workspace folder linked"
-        }
-      }
-
-      try {
-        // Convert virtual path to full disk path
-        const relativePath = filePath.startsWith("/") ? filePath.slice(1) : filePath
-        const fullPath = path.join(workspacePath, relativePath)
-
-        // Security check: ensure the resolved path is within the workspace
-        const resolvedPath = path.resolve(fullPath)
-        const resolvedWorkspace = path.resolve(workspacePath)
-        if (!resolvedPath.startsWith(resolvedWorkspace)) {
-          return { success: false, error: "Access denied: path outside workspace" }
-        }
-
-        // Check if file exists
-        const stat = await fs.stat(fullPath)
-        if (stat.isDirectory()) {
-          return { success: false, error: "Cannot read directory as file" }
-        }
-
-        // Read file as binary and convert to base64
-        const buffer = await fs.readFile(fullPath)
-        const base64 = buffer.toString("base64")
-
-        return {
-          success: true,
-          content: base64,
-          size: stat.size,
-          modified_at: stat.mtime.toISOString()
-        }
-      } catch (e) {
-        return {
-          success: false,
-          error: e instanceof Error ? e.message : "Unknown error"
-        }
-      }
-    }
-  )
-
-  // ---------------------------------------------------------------------------
-  // External file read – token-based with sender validation & denylist
-  // ---------------------------------------------------------------------------
-
-  // One-time tokens: token → { filePath, senderId, createdAt }
-  const externalFileTokens = new Map<
-    string,
-    { filePath: string; senderId: number; createdAt: number }
-  >()
-  const TOKEN_TTL_MS = 5 * 60 * 1000
-  const MAX_TOKENS = 500
-
-  // Periodic cleanup of expired tokens (every 2 minutes)
-  const tokenCleanupTimer = setInterval(() => {
-    const now = Date.now()
-    for (const [token, entry] of externalFileTokens) {
-      if (now - entry.createdAt > TOKEN_TTL_MS) {
-        externalFileTokens.delete(token)
-      }
-    }
-  }, 2 * 60 * 1000)
-  tokenCleanupTimer.unref()
-
-  /** Validate and consume a one-time token. Returns the stored filePath or an error. */
-  function consumeExternalFileToken(
-    token: unknown,
-    senderId: number
-  ): { filePath: string } | { error: string } {
-    if (!token || typeof token !== "string") {
-      return { error: "Missing or invalid token" }
-    }
-    const entry = externalFileTokens.get(token)
-    if (!entry) {
-      return { error: "Invalid or expired token" }
-    }
-    if (entry.senderId !== senderId) {
-      externalFileTokens.delete(token)
-      return { error: "Sender mismatch" }
-    }
-    if (Date.now() - entry.createdAt > TOKEN_TTL_MS) {
-      externalFileTokens.delete(token)
-      return { error: "Token expired" }
-    }
-    // Consume token (one-time use)
-    externalFileTokens.delete(token)
-    return { filePath: entry.filePath }
-  }
-
-  /** Issue a token for a validated file path. Returns error if at capacity. */
-  function issueExternalFileToken(
-    filePath: string,
-    senderId: number
-  ): { token: string } | { error: string } {
-    if (externalFileTokens.size >= MAX_TOKENS) {
-      return { error: "Too many pending file read requests, please try again later" }
-    }
-    const token = randomUUID()
-    externalFileTokens.set(token, { filePath, senderId, createdAt: Date.now() })
-    return { token }
-  }
-
-  // Sensitive-path denylist – patterns that must never be readable
-  const SENSITIVE_DENY_PATTERNS = [
-    // SSH / GPG / credentials
-    /[/\\]\.ssh[/\\]/i,
-    /[/\\]\.ssh$/i,
-    /[/\\]\.aws[/\\]/i,
-    /[/\\]\.aws$/i,
-    /[/\\]\.config[/\\]/i,
-    /[/\\]\.gnupg[/\\]/i,
-    /[/\\]\.gnupg$/i,
-    /[/\\]\.docker[/\\]config\.json$/i,
-    /[/\\]\.npmrc$/i,
-    /[/\\]\.env(\..+)?$/i,
-    /[/\\]\.git-credentials$/i,
-    /[/\\]\.netrc$/i,
-    /[/\\]\.pgpass$/i,
-    /[/\\]\.pypirc$/i,
-    /[/\\]\.gitconfig$/i,
-    // Private keys
-    /[/\\]id_rsa$/i,
-    /[/\\]id_ed25519$/i,
-    /[/\\]id_ecdsa$/i,
-    /[/\\]known_hosts$/i,
-    /[/\\]authorized_keys$/i,
-    // Kubernetes / Vault
-    /[/\\]\.kube[/\\]config$/i,
-    /[/\\]\.vault-token$/i,
-    // Shell history
-    /[/\\]\.bash_history$/i,
-    /[/\\]\.zsh_history$/i,
-    /[/\\]\.zhistory$/i,
-    /[/\\]\.mysql_history$/i,
-    /[/\\]\.psql_history$/i,
-    // System config files
-    /^[/\\]etc[/\\]passwd$/i,
-    /^[/\\]etc[/\\]shadow$/i,
-    /^[/\\]etc[/\\]hosts$/i,
-    /^[/\\]etc[/\\]sudoers/i,
-    /^[/\\]etc[/\\]crontab/i,
-    // macOS keychain / browser profiles
-    /[/\\]Library[/\\]Keychains[/\\]/i,
-    /[/\\]Library[/\\]Preferences[/\\]/i,
-    /[/\\]Library[/\\]Application Support[/\\]Google[/\\]Chrome[/\\]/i,
-    /[/\\]Library[/\\]Application Support[/\\]Firefox[/\\]Profiles[/\\]/i,
-    /[/\\]Library[/\\]Application Support[/\\]Code[/\\]/i
-  ]
-
-  function isSensitivePath(absolutePath: string): boolean {
-    return SENSITIVE_DENY_PATTERNS.some((pattern) => pattern.test(absolutePath))
-  }
-
-  function resolveAndValidateExternalPath(
-    filePath: string
-  ): { fullPath: string } | { error: string } {
-    try {
-      const fullPath = path.resolve(filePath)
-      if (isSensitivePath(fullPath)) {
-        return { error: "Access denied: path is in a protected directory" }
-      }
-      return { fullPath }
-    } catch {
-      return { error: "Invalid file path" }
-    }
-  }
-
-  // Request a one-time read token for an external file path.
-  // The path is validated against the denylist before a token is issued.
-  ipcMain.handle(
-    "workspace:requestExternalFileRead",
-    (event, filePath: string): { success: boolean; token?: string; fileName?: string; error?: string } => {
-      const resolved = resolveAndValidateExternalPath(filePath)
-      if ("error" in resolved) {
-        return { success: false, error: resolved.error }
-      }
-      const issued = issueExternalFileToken(resolved.fullPath, event.sender.id)
-      if ("error" in issued) {
-        return { success: false, error: issued.error }
-      }
-      return {
-        success: true,
-        token: issued.token,
-        fileName: path.basename(resolved.fullPath)
-      }
-    }
-  )
-
-  // Read a text file using a one-time token (outside workspace allowed)
-  ipcMain.handle(
-    "workspace:readExternalFile",
-    async (event, request: { token: string }): Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }> => {
-      try {
-        const consumed = consumeExternalFileToken(request?.token, event.sender.id)
-        if ("error" in consumed) {
-          return { success: false, error: consumed.error }
-        }
-        const fullPath = consumed.filePath
-        const stat = await fs.stat(fullPath)
-        if (stat.isDirectory()) {
-          return { success: false, error: "Cannot read directory as file" }
-        }
-        const content = await fs.readFile(fullPath, "utf-8")
-        return {
-          success: true,
-          content,
-          size: stat.size,
-          modified_at: stat.mtime.toISOString()
-        }
-      } catch (e) {
-        return {
-          success: false,
-          error: e instanceof Error ? e.message : "Unknown error"
-        }
-      }
-    }
-  )
-
-  // Read a binary file using a one-time token (outside workspace allowed)
-  ipcMain.handle(
-    "workspace:readExternalBinaryFile",
-    async (event, request: { token: string }): Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }> => {
-      try {
-        const consumed = consumeExternalFileToken(request?.token, event.sender.id)
-        if ("error" in consumed) {
-          return { success: false, error: consumed.error }
-        }
-        const fullPath = consumed.filePath
-        const stat = await fs.stat(fullPath)
-        if (stat.isDirectory()) {
-          return { success: false, error: "Cannot read directory as file" }
-        }
-        const buffer = await fs.readFile(fullPath)
-        const base64 = buffer.toString("base64")
-        return {
-          success: true,
-          content: base64,
-          size: stat.size,
-          modified_at: stat.mtime.toISOString()
-        }
-      } catch (e) {
-        return {
-          success: false,
-          error: e instanceof Error ? e.message : "Unknown error"
-        }
-      }
-    }
-  )
-
-  // Parse a file and extract text content for chat attachments
-  ipcMain.handle(
-    "file:parse",
     async (
       _event,
-      filePath: string,
-      maxLength?: number
+      { threadId, options }: { threadId: string; options?: { worktreePath?: string } }
+    ) => {
+      try {
+        logGitStep(threadId, "pull", "开始拉取远端代码")
+        const context = await resolveThreadWorkspaceContext(threadId)
+        if (!context.workspacePath || !context.isGitRepo) {
+          logGitStep(threadId, "pull", "失败：当前任务不在 Git 仓库中")
+          return { success: false, error: "当前任务不在 Git 仓库中" }
+        }
+
+        const pullOne = async (
+          worktreePath: string,
+          label: string
+        ): Promise<{ success: boolean; detail: string }> => {
+          const branch =
+            path.resolve(worktreePath) === path.resolve(context.workspacePath || "")
+              ? context.worktreeBranch ||
+                (await getCurrentBranchCached(worktreePath, { silent: true })) ||
+                "HEAD"
+              : (await getCurrentBranchCached(worktreePath, { silent: true })) || "HEAD"
+          logGitStep(threadId, "pull", `[${label}] 执行 pull --rebase origin ${branch}`)
+          try {
+            await runGit(worktreePath, ["pull", "--rebase", "origin", branch])
+            return { success: true, detail: `${label}: 拉取成功` }
+          } catch (pullError) {
+            if (isMissingRemoteBranchError(pullError)) {
+              logGitStep(threadId, "pull", `[${label}] 远端不存在分支 ${branch}，跳过`)
+              return { success: true, detail: `${label}: 远端不存在分支 ${branch}，无需拉取` }
+            }
+            try {
+              await runGit(worktreePath, ["rebase", "--abort"])
+            } catch {
+              // ignore
+            }
+            if (isGitRebaseConflictError(pullError)) {
+              logGitStep(threadId, "pull", `[${label}] 检测到代码冲突，已执行 rebase --abort`)
+              return { success: false, detail: `${label}: ${GIT_REBASE_CONFLICT_MESSAGE}` }
+            }
+            const detail = getExecErrorText(pullError) || "拉取失败"
+            logGitStep(threadId, "pull", `[${label}] 失败：${detail}`)
+            return { success: false, detail: `${label}: ${detail}` }
+          }
+        }
+
+        if (!options?.worktreePath) {
+          const repos = await getContextGitRepositories(context)
+          if (repos.length > 1) {
+            const results: Array<{ success: boolean; detail: string }> = []
+            for (const repo of repos) {
+              results.push(await pullOne(repo.repoPath, repo.displayPath))
+            }
+            // One pull action may touch many nested repositories. Publish one
+            // conservative workspace rescan after the whole batch, not one per
+            // repository plus an aggregate duplicate.
+            notifyWorkspaceFilesChanged(threadId, context.workspacePath)
+            const failed = results.filter((result) => !result.success)
+            const detail = results.map((result) => result.detail).join("\n")
+            if (failed.length > 0) {
+              return {
+                success: false,
+                error: `部分仓库拉取失败：\n${failed.map((item) => item.detail).join("\n")}`,
+                detail
+              }
+            }
+            logGitStep(threadId, "pull", `多仓库拉取完成：${repos.length} 个仓库`)
+            return { success: true, detail }
+          }
+        }
+
+        const target = await resolveGitOperationTarget(context, options?.worktreePath)
+        if ("error" in target) {
+          logGitStep(threadId, "pull", `失败：${target.error}`)
+          return { success: false, error: target.error }
+        }
+        const result = await pullOne(target.worktreePath, path.basename(target.worktreePath))
+        if (!result.success) return { success: false, error: result.detail }
+        notifyWorkspaceFilesChanged(threadId, target.worktreePath)
+        if (
+          context.workspacePath &&
+          path.resolve(context.workspacePath) !== path.resolve(target.worktreePath)
+        ) {
+          notifyWorkspaceFilesChanged(threadId, context.workspacePath)
+        }
+        logGitStep(threadId, "pull", "拉取成功")
+        return { success: true, detail: result.detail }
+      } catch (e) {
+        const detail = getExecErrorText(e)
+        logGitStep(
+          threadId,
+          "pull",
+          `异常：${detail || (e instanceof Error ? e.message : "拉取失败")}`
+        )
+        return { success: false, error: detail || (e instanceof Error ? e.message : "拉取失败") }
+      }
+    }
+  )
+
+  const attachmentParserCleanupOwners = new Set<number>()
+  const attachmentParseLatestKey = (senderId: number): string => `attachment:${senderId}`
+  const attachAttachmentParserCleanup = (event: IpcMainInvokeEvent): void => {
+    if (attachmentParserCleanupOwners.has(event.sender.id) || event.sender.isDestroyed()) return
+    const senderId = event.sender.id
+    attachmentParserCleanupOwners.add(senderId)
+    event.sender.once("destroyed", () => {
+      attachmentParserCleanupOwners.delete(senderId)
+      revokeExternalFileReadGrantsForOwner(senderId)
+      getFileAttachmentParserClient().cancelLatest(attachmentParseLatestKey(senderId))
+    })
+  }
+  const supportedAttachmentExtension = (fileName: string): boolean =>
+    [".txt", ".md", ".csv", ".docx", ".xlsx", ".xls"].includes(
+      path.extname(fileName).toLowerCase()
+    )
+  const validAttachmentMaxLength = (maxLength: unknown): maxLength is number | undefined =>
+    maxLength === undefined ||
+    (Number.isSafeInteger(maxLength) && (maxLength as number) > 0 && (maxLength as number) <= 24_000)
+
+  // Parse only a file capability returned by the main-process native picker.
+  ipcMain.handle(
+    "file:parseSelected",
+    async (
+      event,
+      request: AttachmentGrantParseRequest
     ): Promise<{
       success: boolean
-      attachment?: import("../file-parser").ParsedAttachment
+      attachment?: ParsedAttachment
       error?: string
     }> => {
       try {
-        const { parseFile, isSupportedFile } = await import("../file-parser")
-        if (!isSupportedFile(filePath)) {
+        if (
+          !request ||
+          typeof request.grant !== "string" ||
+          request.grant.length > 256 ||
+          typeof request.filePath !== "string" ||
+          request.filePath.length > 32_768 ||
+          !validAttachmentMaxLength(request.maxLength)
+        ) {
+          return { success: false, error: "无效的附件解析请求" }
+        }
+        const resolved = await resolveExternalFileReadGrant(
+          request.grant,
+          event.sender.id,
+          request.filePath
+        )
+        if ("error" in resolved) return { success: false, error: resolved.error }
+        if (!supportedAttachmentExtension(resolved.filePath)) {
           return { success: false, error: "不支持的文件类型，仅支持 txt、md、csv、docx、xlsx、xls" }
         }
-        if (typeof maxLength === "number" && maxLength <= 0) {
-          return { success: false, error: "附件字符预算已用尽" }
+        const opened = await openStableFileHandle(resolved.rootPath, resolved.filePath)
+        try {
+          if (opened.size > MAX_ATTACHMENT_FILE_BYTES) {
+            return { success: false, error: "文件过大，单文件不超过 5MB" }
+          }
+          const buffer = Buffer.allocUnsafe(MAX_ATTACHMENT_FILE_BYTES + 1)
+          const { bytesRead } = await opened.handle.read(
+            buffer,
+            0,
+            buffer.byteLength,
+            0
+          )
+          if (bytesRead > MAX_ATTACHMENT_FILE_BYTES) {
+            return { success: false, error: "文件过大，单文件不超过 5MB" }
+          }
+          const payload = Uint8Array.from(buffer.subarray(0, bytesRead)).buffer
+          attachAttachmentParserCleanup(event)
+          const attachment = await getFileAttachmentParserClient().parse(
+            {
+              kind: "bytes",
+              fileName: path.basename(opened.filePath),
+              bytes: payload
+            },
+            request.maxLength,
+            attachmentParseLatestKey(event.sender.id)
+          )
+          attachment.filePath = opened.filePath
+          return { success: true, attachment }
+        } finally {
+          await opened.handle.close().catch(() => undefined)
         }
-        const attachment = await parseFile(filePath, maxLength)
+      } catch (e) {
+        return {
+          success: false,
+          error: e instanceof Error ? e.message : "文件解析失败"
+        }
+      }
+    }
+  )
+
+  // Dropped files arrive as bounded browser File bytes; no disk path is trusted.
+  ipcMain.handle(
+    "file:parseBytes",
+    async (
+      event,
+      request: AttachmentBytesParseRequest
+    ): Promise<{ success: boolean; attachment?: ParsedAttachment; error?: string }> => {
+      try {
+        if (
+          !request ||
+          typeof request.fileName !== "string" ||
+          !request.fileName ||
+          request.fileName.length > MAX_ATTACHMENT_FILE_NAME_LENGTH ||
+          request.fileName.includes("\0") ||
+          !(request.bytes instanceof ArrayBuffer) ||
+          request.bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES ||
+          !supportedAttachmentExtension(request.fileName) ||
+          !validAttachmentMaxLength(request.maxLength)
+        ) {
+          return { success: false, error: "无效或过大的拖拽附件" }
+        }
+        attachAttachmentParserCleanup(event)
+        const attachment = await getFileAttachmentParserClient().parse(
+          { kind: "bytes", fileName: path.basename(request.fileName), bytes: request.bytes },
+          request.maxLength,
+          attachmentParseLatestKey(event.sender.id)
+        )
         return { success: true, attachment }
       } catch (e) {
         return {
@@ -5474,18 +5543,36 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   )
 
   // Open native file picker for chat attachments
-  ipcMain.handle("file:select", async (event) => {
+  ipcMain.handle("file:select", async (event): Promise<AttachmentFileSelectionResult> => {
     const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win) return { canceled: true, filePaths: [] }
+    if (!win) return { canceled: true, files: [] }
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile", "multiSelections"],
       title: "选择附件",
       filters: [{ name: "支持的文件", extensions: ["txt", "md", "csv", "docx", "xlsx", "xls"] }]
     })
     if (result.canceled || result.filePaths.length === 0) {
-      return { canceled: true, filePaths: [] }
+      return { canceled: true, files: [] }
     }
-    return { canceled: false, filePaths: result.filePaths }
+    attachAttachmentParserCleanup(event)
+    const files: AttachmentFileSelectionResult["files"] = []
+    for (const filePath of result.filePaths.slice(0, MAX_ATTACHMENT_PICKER_FILES)) {
+      const issued = issueExternalFileReadGrant(
+        path.dirname(filePath),
+        event.sender.id,
+        [path.basename(filePath)],
+        `attachment-picker:${randomUUID()}`
+      )
+      if ("error" in issued) continue
+      files.push({ filePath, grant: issued.grant })
+    }
+    return {
+      canceled: false,
+      files,
+      ...(result.filePaths.length > MAX_ATTACHMENT_PICKER_FILES
+        ? { error: `单次最多选择 ${MAX_ATTACHMENT_PICKER_FILES} 个附件` }
+        : {})
+    }
   })
 
   // Get supported file extensions

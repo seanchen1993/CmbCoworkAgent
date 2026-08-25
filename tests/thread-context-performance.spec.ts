@@ -39,6 +39,84 @@ async function main(): Promise<void> {
       "utf8"
     )
   ).replace(/\r\n/g, "\n")
+  const modelSwitcherSource = (
+    await readFile(
+      resolve(__dirname, "../src/renderer/src/components/chat/ModelSwitcher.tsx"),
+      "utf8"
+    )
+  ).replace(/\r\n/g, "\n")
+  const workspacePickerSource = (
+    await readFile(
+      resolve(__dirname, "../src/renderer/src/components/chat/WorkspacePicker.tsx"),
+      "utf8"
+    )
+  ).replace(/\r\n/g, "\n")
+  const rightPanelSource = (
+    await readFile(
+      resolve(__dirname, "../src/renderer/src/components/panels/RightPanel.tsx"),
+      "utf8"
+    )
+  ).replace(/\r\n/g, "\n")
+
+  for (const [name, consumerSource] of [
+    ["model switcher", modelSwitcherSource],
+    ["workspace picker", workspacePickerSource]
+  ] as const) {
+    assert.doesNotMatch(
+      consumerSource,
+      /useCurrentThread\(/,
+      `${name} must not re-render for every unrelated content token`
+    )
+    assert.match(
+      consumerSource,
+      /useThreadStateSelector\(/,
+      `${name} must subscribe only to the fields it renders`
+    )
+    assert.match(
+      consumerSource,
+      /useThreadActions\(/,
+      `${name} must read stable actions without subscribing to the whole ThreadState`
+    )
+  }
+  assert.match(
+    harnessSource,
+    /windowHarnessProjectGroups\(activeSystemGroups, PROJECT_CATALOG_PAGE_SIZE\)/,
+    "project-mode first paint must keep one global hard budget for mounted project cards"
+  )
+  assert.match(
+    harnessSource,
+    /projectLimit: PROJECT_CATALOG_PAGE_SIZE/,
+    "the catalog IPC page must bound active and archived project rows before rendering"
+  )
+  assert.match(
+    harnessSource,
+    /const PROJECT_CATALOG_PAGE_SIZE = 24/,
+    "the project-mode page must retain a small fixed mount budget"
+  )
+
+  const lspLoadEffect = rightPanelSource.slice(
+    rightPanelSource.indexOf("const loadLspSummary") - 100,
+    rightPanelSource.indexOf("const loadLspSummary") + 1_000
+  )
+  assert.match(
+    lspLoadEffect,
+    /if \(!lspOpen\) return undefined/,
+    "a closed LSP section must not issue workspace hydration IPC while switching tasks"
+  )
+  const hooksEffectsStart = rightPanelSource.indexOf("if (!hooksOpen) return undefined")
+  assert.ok(hooksEffectsStart >= 0, "the Hooks section must have a closed-state hydration gate")
+  assert.ok(
+    rightPanelSource.match(/if \(!hooksOpen\) return undefined/g)?.length === 2,
+    "both initial Hooks hydration and workspace invalidation listeners must stay dormant while closed"
+  )
+  assert.match(
+    rightPanelSource.slice(
+      rightPanelSource.indexOf("const loadMarketSkills") - 100,
+      rightPanelSource.indexOf("const loadMarketSkills") + 800
+    ),
+    /if \(!skillsOpen\) return undefined/,
+    "market skill hydration must follow the Skills section rather than the unrelated LSP section"
+  )
 
   assert.match(
     sidebarSource,
@@ -116,6 +194,16 @@ async function main(): Promise<void> {
     0,
     "ThreadState writes must not clone a React record snapshot"
   )
+  assert.doesNotMatch(
+    source,
+    /setThreadRegistryRevision/,
+    "ordinary token updates must not re-render the provider and enumerate every active holder"
+  )
+  assert.match(
+    source,
+    /messageStructureChanged[\s\S]*setHolderRegistryRevision/,
+    "holder reconciliation must wake only for structural baseline changes"
+  )
   const stateNotificationStart = source.indexOf("const commitThreadStateChanges = useCallback")
   const stateNotificationEnd = source.indexOf("const updateThreadState = useCallback", stateNotificationStart)
   const stateNotificationSource = source.slice(stateNotificationStart, stateNotificationEnd)
@@ -135,7 +223,7 @@ async function main(): Promise<void> {
     "coordinator notification tracking must be incremental on worker-array identity changes"
   )
   assert.doesNotMatch(
-    source.slice(stateNotificationEnd, source.indexOf("const loadWorkspaceFilesInBackground")),
+    source.slice(stateNotificationEnd, source.indexOf("const refreshGoalUi", stateNotificationEnd)),
     /Object\.entries\(threadStatesRef\.current\)/,
     "ordinary ThreadState updates must not rebuild the unresolved coordinator set"
   )
@@ -362,8 +450,57 @@ async function main(): Promise<void> {
   const loadHistorySource = source.slice(loadHistoryStart, loadHistoryEnd)
   assert.match(
     loadHistorySource,
-    /getMessagesPage\(threadId, \{ limit: 500 \}\)/,
-    "opening a 10k-message task must request only the latest 500 durable rows"
+    /const initialPageOptions = \{[\s\S]*?limit: INITIAL_THREAD_MESSAGES_PAGE_LIMIT,[\s\S]*?byteBudget: INITIAL_THREAD_MESSAGES_PAGE_BYTE_BUDGET,[\s\S]*?foregroundToken \? \{ requestScope: "foreground-hydration" as const \} : \{\}[\s\S]*?getMessagesPage\(threadId, initialPageOptions\)/,
+    "opening a 10k-message task must request only the bounded cold-start page"
+  )
+  assert.match(
+    source,
+    /const INITIAL_THREAD_MESSAGES_PAGE_LIMIT = 128/,
+    "cold task switching must keep the first structured-clone payload near one MiB"
+  )
+  assert.match(
+    source,
+    /const INITIAL_THREAD_MESSAGES_PAGE_BYTE_BUDGET = 1024 \* 1024/,
+    "cold task switching must cap the first worker payload at one MiB"
+  )
+  const firstPageAwait = loadHistorySource.indexOf(
+    "const messagePageResult = await durableMessagePageLoad"
+  )
+  const metadataAwait = loadHistorySource.indexOf(
+    "const threadDetailsResult = await threadDetailsLoad"
+  )
+  const goalAwait = loadHistorySource.indexOf("const goalEventsResult = await goalEventsLoad")
+  const subagentAwait = loadHistorySource.indexOf(
+    "const subagentTranscriptResult = await subagentTranscriptLoad"
+  )
+  assert.ok(
+    firstPageAwait >= 0 &&
+      metadataAwait > firstPageAwait &&
+      goalAwait > firstPageAwait &&
+      subagentAwait > firstPageAwait,
+    "the bounded main page must be consumed before metadata, goals and subagent hydration"
+  )
+  const firstPagePublishSource = loadHistorySource.slice(firstPageAwait, metadataAwait)
+  assert.match(
+    firstPagePublishSource,
+    /actions\.setMessages\(visiblePersistedThreadMessages\)/,
+    "a non-empty durable page must be published on its first continuation"
+  )
+  assert.match(
+    firstPagePublishSource,
+    /historyLoading: keepMainTranscriptLoading/,
+    "only main transcript publication may release first-screen history loading"
+  )
+  assert.match(
+    loadHistorySource,
+    /foregroundHydrationGeneration\.capture\(threadId\)[\s\S]*foregroundHydrationGeneration\.isCurrent\(foregroundToken\)/,
+    "A -> B -> C foreground navigation must fence stale renderer hydration generations"
+  )
+  const subagentHydrationSource = loadHistorySource.slice(subagentAwait)
+  assert.doesNotMatch(
+    subagentHydrationSource,
+    /historyLoading: false/,
+    "subagent and goal readiness must not hold or release main transcript readiness"
   )
   assert.doesNotMatch(
     loadHistorySource,
@@ -372,8 +509,13 @@ async function main(): Promise<void> {
   )
   assert.match(
     loadHistorySource,
-    /result\.succeeded && result\.page\.total === 0[\s\S]*getLatestCheckpoint\(threadId\)[\s\S]*getLatestCheckpointRuntimeState\(threadId\)/,
-    "full checkpoint hydration is allowed only for a confirmed empty legacy DB transcript"
+    /messagePageResult\.succeeded &&\s*messagePageResult\.page\.total === 0[\s\S]*bootstrapLegacyCheckpointTranscript\(threadId\)[\s\S]*getLatestCheckpointRuntimeState\(threadId\)/,
+    "an empty legacy transcript must be imported through the bounded worker bridge"
+  )
+  assert.doesNotMatch(
+    loadHistorySource,
+    /getLatestCheckpoint\(threadId\)/,
+    "cold task switching must never clone a complete checkpoint into the renderer"
   )
   assert.match(
     source,
@@ -483,6 +625,11 @@ async function main(): Promise<void> {
     "terminal special-task metadata, drafts and error UI must not prevent safe dehydration"
   )
   assert.match(
+    safeDehydrateSource,
+    /isThreadHistoryHydrationAttemptActive\([\s\S]*hydrationAttemptIsActive &&[\s\S]*state\.historyLoading/,
+    "a cancelled foreground hydration shell must not remain permanently outside the idle LRU"
+  )
+  assert.match(
     dehydrateSource,
     /initializedThreadsRef\.current\.delete\(threadId\)/,
     "a dehydrated thread must reopen through initialization"
@@ -499,7 +646,7 @@ async function main(): Promise<void> {
   )
   assert.match(
     dehydrateSource,
-    /createDehydratedThreadStatePatch\(\)/,
+    /createDehydratedThreadStatePatch\(\{[\s\S]*openFiles: state\.openFiles,[\s\S]*activeTab: state\.activeTab/,
     "the holder eviction must apply the shared heavy-state release patch"
   )
   for (const releasedField of [
@@ -512,7 +659,6 @@ async function main(): Promise<void> {
     "subagents: []",
     "coordinatorWorkers: []",
     "subagentInternalLogs: []",
-    "openFiles: []",
     "fileContents: {}",
     "workflowRun: null"
   ]) {
@@ -521,6 +667,16 @@ async function main(): Promise<void> {
       `dehydration must release the heavy ${releasedField} field`
     )
   }
+  assert.match(
+    dehydrationHelperSource,
+    /openFiles: retainedUi \? \[\.\.\.retainedUi\.openFiles\] : \[\]/,
+    "dehydration must retain only lightweight file-tab paths while releasing file contents"
+  )
+  assert.match(
+    source,
+    /state\.dehydrated && previousSummary[\s\S]*previousSummary\.kanbanSubagents/,
+    "idle eviction must not erase terminal subagent cards from the lightweight Kanban summary"
+  )
   assert.doesNotMatch(
     dehydrateSource,
     /\n\s{12}(?:draftInput|draftSkill|error)\s*:/,
@@ -542,8 +698,23 @@ async function main(): Promise<void> {
   )
   assert.match(
     initializeSource,
+    /attemptMatchesForeground[\s\S]*!attemptIsCurrent[\s\S]*loadThreadHistory\(threadId\)/,
+    "revisiting A after its old foreground generation was cancelled must start a fresh load"
+  )
+  assert.match(
+    initializeSource,
     /threadListenerEpochRef\.current\[threadId\] === listenerEpoch/,
     "queued callbacks from an old listener generation must not mutate a reopened thread"
+  )
+  assert.match(
+    source,
+    /new CoordinatorWorkerRequestCache<CoordinatorWorkerView\[\]>\(\)/,
+    "history restore and foreground binding must share coordinator worker requests"
+  )
+  assert.equal(
+    dehydrationHelperSource.match(/historyLoading: true/g)?.length ?? 0,
+    1,
+    "a dehydrated task must not expose a false empty transcript before rehydration"
   )
 
   console.log("thread context performance contracts passed")

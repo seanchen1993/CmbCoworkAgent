@@ -33,7 +33,7 @@ import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises
 import { existsSync, mkdirSync, statSync } from "fs"
 import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
 import { createHash, randomUUID } from "crypto"
-import { execFile, execFileSync } from "child_process"
+import { execFile } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
 import * as iconv from "iconv-lite"
@@ -501,34 +501,39 @@ export function isCodeFile(filePath: string): boolean {
 
 const GIT_WORKTREE_CACHE_MAX = 256
 const gitWorkTreeCache = new Map<string, boolean>()
+const gitWorkTreeRequests = new Map<string, Promise<boolean>>()
 
-function isInsideGitWorkTree(absPath: string): boolean {
-  const dir = dirname(absPath)
-  const cached = gitWorkTreeCache.get(dir)
-  if (cached !== undefined) return cached
-
-  let inside = false
-  try {
-    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd: dir,
-      encoding: "utf-8",
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"]
-    })
-    inside = out.trim() === "true"
-  } catch {
-    // Not a repo / git error / git missing — treat as outside a work tree.
-    inside = false
-  }
-
-  // Bounded cache (Map preserves insertion order → evict oldest first).
+function rememberGitWorkTreeResult(dir: string, inside: boolean): boolean {
+  // Bounded cache (Map preserves insertion order -> evict oldest first).
   if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
     const oldest = gitWorkTreeCache.keys().next().value
     if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
   }
   gitWorkTreeCache.set(dir, inside)
   return inside
+}
+
+async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
+  const dir = dirname(absPath)
+  const cached = gitWorkTreeCache.get(dir)
+  if (cached !== undefined) return cached
+  const inFlight = gitWorkTreeRequests.get(dir)
+  if (inFlight) return inFlight
+
+  const request = execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+    cwd: dir,
+    encoding: "utf-8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+    windowsHide: true
+  })
+    .then(({ stdout }) => rememberGitWorkTreeResult(dir, stdout.trim() === "true"))
+    .catch(() => rememberGitWorkTreeResult(dir, false))
+    .finally(() => {
+      if (gitWorkTreeRequests.get(dir) === request) gitWorkTreeRequests.delete(dir)
+    })
+  gitWorkTreeRequests.set(dir, request)
+  return request
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1270,7 +1275,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // isInsideGitWorkTree). Non-git files never reach a commit and are where
     // external platforms own reporting via their own hook — skipping them here
     // avoids double-counting and removes events that could never close the loop.
-    if (!isInsideGitWorkTree(absPath)) {
+    if (!(await isInsideGitWorkTree(absPath))) {
       console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
       return
     }

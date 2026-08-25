@@ -81,21 +81,15 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
-  type HookLogBucket,
   type ApiErrorDetailState
 } from "@/lib/thread-context"
 import { filterCoordinatorNoiseMessages } from "@/lib/message-display-helpers"
 import {
-  buildToolResultAssociations,
   getWorkerToolUiKey
 } from "@/lib/worker-tool-result-key"
 import {
   messageHasVisibleRow
 } from "@/lib/message-display-visibility"
-import {
-  createIncrementalToolDerivationProjector,
-  type IncrementalToolDerivationProjection
-} from "@/lib/message-render-stability"
 import {
   isCoordinatorModeMetadata,
   isMultiModeMetadata,
@@ -133,8 +127,7 @@ import {
   type ChatApprovalDecision
 } from "./ChatMessageVirtualList"
 import {
-  ChatScrollNavigator,
-  createChatScrollQuestionRevisionProjector
+  ChatScrollNavigator
 } from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import {
@@ -148,7 +141,7 @@ import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./Use
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
 import { uploadChatData } from "@/api"
-import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
+import { insertLog } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
 import {
@@ -168,15 +161,33 @@ import {
 } from "@/features/mentions/useAtFileMentions"
 import { AtFileMentionPopover } from "@/features/mentions/AtFileMentionPopover"
 import {
+  readBoundedWorkspaceMentionFile,
   resolveAtFileAttachments,
   resolveAtFileSelection,
   type MentionedWorkspaceFile
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import {
+  MAX_ATTACHMENT_FILE_BYTES,
+  type SelectedAttachmentFileGrant
+} from "../../../../shared/file-attachment"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
-import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
+import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  ensureDisabledSkillsChangedInvalidationSource,
+  ensureSkillsChangedInvalidationSource,
+  isSkillCatalogFresh,
+  projectChatSkillCatalog,
+  readSkillCatalogCache,
+  revalidateSkillCatalog,
+  subscribeSkillCatalogInvalidation,
+  type ChatSkillCatalogProjection
+} from "@/lib/app-catalog-cache"
+import {
+  readHarnessBoardCatalogCache
+} from "@/components/harness-board/harness-board-cache"
 import {
   getQueuedModelContent,
   getQueuedDisplayContent,
@@ -185,10 +196,9 @@ import {
   canClaimQueuedMessage,
   classifyGuidedMessage
 } from "@/lib/queued-message-content"
-import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import { getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
-import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import {
   buildLatestChatReportBatch,
   type ChatReportBatch
@@ -215,13 +225,7 @@ import { ContextCompactionCard } from "./ContextCompactionCard"
 import { HookLogModal } from "./HookLogViews"
 import type { ChatSearchCorpus, ChatSearchDocument } from "@/lib/chat-search-matches"
 import { createChatMessageProjector } from "@/lib/chat-message-projection"
-import {
-  createDynamicLiveVisibilityProjector,
-  createLiveDisplayMessageProjector
-} from "@/lib/live-display-message-projection"
-import {
-  mergeVisibleChatMessageIndexes
-} from "@/lib/chat-visible-index"
+import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
 import {
   chatScrollTailMessageIdentity,
   classifyChatScrollTailChange,
@@ -826,15 +830,6 @@ function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
   )
 }
 
-function useStableToolDerivationMessages(
-  messages: readonly Message[],
-  changedMessages: readonly Message[],
-  structureVersion: number
-): IncrementalToolDerivationProjection {
-  const [projectMessages] = useState(createIncrementalToolDerivationProjector)
-  return projectMessages(messages, changedMessages, structureVersion)
-}
-
 const THINKING_MESSAGES = [
   "我先想想...",
   "让我捋一捋...",
@@ -878,9 +873,14 @@ const ATTACH_FILE_POPOVER_CONTENT = (
 const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
+const AT_FILE_PREVIEW_LANE = "chat-at-file-submit"
 /** 输入框正文硬上限(字符数)。超过则拒绝发送并提示,防止病态超长输入。
  * 取值与附件总字符上限(MAX_TOTAL_CHARS)一致,均为 24000。 */
 const MAX_INPUT_CHARS = 24_000
+
+type PendingAttachmentInput =
+  | ({ kind: "selected" } & SelectedAttachmentFileGrant)
+  | { kind: "bytes"; fileName: string; bytes: ArrayBuffer }
 
 // Module-level (not a component-local useRef): TabbedPanel unmounts ChatContainer
 // entirely when switching to a file tab (`isAgentTab ? <ChatContainer> : <FileViewer>`)
@@ -1158,6 +1158,54 @@ function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFea
   const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
   const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
   return projectId && slug ? { projectId, slug } : null
+}
+
+type HarnessPreferredPlugin = { id?: string; name?: string } | null
+
+function getCachedHarnessPreferredPlugin(projectId: string): HarnessPreferredPlugin {
+  const project = readHarnessBoardCatalogCache()?.projects.find(
+    (candidate) => candidate.projectId === projectId
+  )
+  return project
+    ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name }
+    : null
+}
+
+interface InitialChatSkillCatalogState {
+  projection: ChatSkillCatalogProjection | null
+  loading: boolean
+  targetProjectId: string | null
+  resolvedProjectId: string | null
+  preferredPlugin: HarnessPreferredPlugin
+}
+
+function createInitialChatSkillCatalogState(
+  threadId: string,
+  surface: ChatSurface
+): InitialChatSkillCatalogState {
+  const store = useAppStore.getState()
+  const binding = getHarnessFeatureBinding(
+    store.threads.find((thread) => thread.thread_id === threadId)
+  )
+  const targetProjectId = binding?.projectId ?? null
+  const harnessScoped = surface !== "default" || Boolean(binding)
+  const preferredPlugin = binding ? getCachedHarnessPreferredPlugin(binding.projectId) : null
+  const harnessCatalogReady = !binding || preferredPlugin !== null
+  const snapshot = readSkillCatalogCache()
+  const projection = snapshot
+    ? projectChatSkillCatalog(snapshot, {
+        harnessScoped,
+        preferredPlugin
+      })
+    : null
+
+  return {
+    projection,
+    loading: !isSkillCatalogFresh(snapshot, store.pluginVersion) || !harnessCatalogReady,
+    targetProjectId,
+    resolvedProjectId: harnessCatalogReady ? targetProjectId : null,
+    preferredPlugin
+  }
 }
 
 function getSafeHttpUrl(href: unknown): string | null {
@@ -1544,6 +1592,7 @@ export function ChatContainer({
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
   const readOnly = Boolean(readOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
@@ -1590,15 +1639,27 @@ export function ChatContainer({
   // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
   // declaration above for why this must survive ChatContainer remounts.
   const submitInFlightRef = submitInFlightLockStore
-  const [skills, setSkills] = useState<SkillMetadata[]>([])
-  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
-  const [skillsLoading, setSkillsLoading] = useState(true)
-  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(null)
-  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(null)
+  const [initialSkillCatalogState] = useState(() =>
+    createInitialChatSkillCatalogState(threadId, surface)
+  )
+  const [skills, setSkills] = useState<SkillMetadata[]>(
+    () => initialSkillCatalogState.projection?.skills ?? []
+  )
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(
+    () => initialSkillCatalogState.projection?.disabledSkillIds ?? new Set()
+  )
+  const [skillsLoading, setSkillsLoading] = useState(initialSkillCatalogState.loading)
+  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(
+    initialSkillCatalogState.resolvedProjectId
+  )
+  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(
+    initialSkillCatalogState.targetProjectId
+  )
   const [skillsHarnessPreferredPlugin, setSkillsHarnessPreferredPlugin] = useState<{
     id?: string
     name?: string
-  } | null>(null)
+  } | null>(initialSkillCatalogState.preferredPlugin)
+  const skillsLoadRequestIdRef = useRef(0)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [userInputDialogLayout, setUserInputDialogLayout] =
     useState<UserInputRequestDialogLayout | null>(null)
@@ -1672,68 +1733,17 @@ export function ChatContainer({
   const [queuePumpTick, setQueuePumpTick] = useState(0)
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
-  const chatReportRetryQueuesRef = useRef<
-    Record<string, Array<{ batch: ChatReportBatch; attempt: number }>>
+  const chatReportRetryBatchesRef = useRef<
+    Record<string, { batch: ChatReportBatch; attempt: number } | undefined>
   >({})
+  const chatReportPendingBatchesRef = useRef<
+    Record<string, { batch: ChatReportBatch; attempt: number } | undefined>
+  >({})
+  const chatReportAbortControllersRef = useRef<Record<string, AbortController | undefined>>({})
   const chatReportDisposedRef = useRef(false)
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
   const stream = streamData.stream
-
-  useEffect(() => {
-    const { ipcRenderer } = window.electron
-
-    // 主动请求版本，不依赖推送时序
-    ipcRenderer
-      .invoke("get-version")
-      .then((ver: unknown) => {
-        console.log("版本 (invoke)：", ver)
-        if (ver) {
-          localStorage.setItem("version", ver as string)
-          updateMMJUserInfo()
-        }
-      })
-      .catch((e: unknown) => console.warn("get-version failed:", e))
-
-    // 保留推送监听作为备用
-    const removeListener = ipcRenderer.on("version", (ver: unknown) => {
-      console.log("版本 (push)：", ver)
-      localStorage.setItem("version", ver as string)
-      updateMMJUserInfo()
-    })
-
-    return () => {
-      if (typeof removeListener === "function") removeListener()
-    }
-  }, [])
-
-  useEffect(() => {
-    const { ipcRenderer } = window.electron
-
-    // 主动请求 IP，不依赖推送时序
-    ipcRenderer
-      .invoke("get-local-ip")
-      .then((ip: unknown) => {
-        console.log("local ip (invoke)：", ip)
-        if (ip) {
-          localStorage.setItem("localIp", ip as string)
-          updateMMJUserInfo()
-        }
-      })
-      .catch((e: unknown) => console.warn("get-local-ip failed:", e))
-
-    // 保留推送监听作为备用（例如网络变化时主进程重新推送）
-    const removeListener = ipcRenderer.on("ip", (ver: unknown) => {
-      console.log("local ip (push)：", ver)
-      if (ver) {
-        localStorage.setItem("localIp", ver as string)
-      }
-    })
-
-    return () => {
-      if (typeof removeListener === "function") removeListener()
-    }
-  }, [])
 
   const {
     threads,
@@ -1881,68 +1891,94 @@ export function ChatContainer({
   // invalidating its own identity (useCallback with empty deps).
   const harnessFeatureBindingRef = useRef(harnessFeatureBinding)
   harnessFeatureBindingRef.current = harnessFeatureBinding
+  const chatSurfaceRef = useRef(surface)
+  chatSurfaceRef.current = surface
 
-  // Define loadSkills function at component level so it can be accessed everywhere
+  // Keep a stable callback for both plugin-version effects and the application-level
+  // skills:changed bridge. The shared cache makes concurrent Chat/RightPanel reads one request.
   const loadSkills = useCallback(async (): Promise<void> => {
-    setSkillsLoading(true)
+    const requestId = ++skillsLoadRequestIdRef.current
     const binding = harnessFeatureBindingRef.current
+    const harnessScoped = chatSurfaceRef.current !== "default" || Boolean(binding)
     const targetProjectId = binding?.projectId ?? null
     setSkillsLoadTargetProjectId(targetProjectId)
-    try {
-      const pluginSkillsPromise =
-        typeof window.api.skills.listPlugins === "function"
-          ? window.api.skills.listPlugins().catch((error) => {
-              console.warn("[ChatContainer] Failed to load plugin skills:", error)
-              return []
-            })
-          : Promise.resolve([])
-      // Pull plugin skills alongside built-in/custom so the slash popover and
-      // welcome-screen skill cards can surface them. Plugin-shipped skills go
-      // through their own enable/disable lifecycle (plugin-level, not the
-      // disabled-skills list), and listPlugins() already filters by
-      // plugin.enabled, so we don't apply disabledSet to them here.
-      const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
-        window.api.skills.list(),
-        pluginSkillsPromise,
-        window.api.skills.getDisabled()
-      ])
-      const disabledSet = new Set(disabledList.map(normalizeSkillId))
-      setDisabledSkillIds(disabledSet)
-      const availableSkills = loadedSkills.filter(
-        (s) => s.source === "project" || s.source === "user"
-      )
+    const pluginVersion = useAppStore.getState().pluginVersion
 
-      // In harness mode, resolve the project's bound plugin so slash surfaces
-      // only expose standalone skills and skills owned by that plugin.
-      let preferredPlugin: { id?: string; name?: string } | null = null
-      if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
-        try {
-          const projects = await window.api.harnessBoard.listProjects()
-          const project = projects.find((p) => p.projectId === binding.projectId)
-          if (project) {
-            preferredPlugin = {
-              id: project.harnessAdapter.id,
-              name: project.harnessAdapter.name
-            }
-          }
-        } catch {
-          // Non-critical: fall through without a preference.
-        }
-      }
-
-      // Keep same-name standalone/plugin rows visible outside harness mode; in
-      // harness mode, plugin skills are restricted to the bound plugin.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
-      setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+    const applySnapshot = (
+      snapshot: NonNullable<ReturnType<typeof readSkillCatalogCache>>,
+      preferredPlugin: HarnessPreferredPlugin
+    ): void => {
+      if (requestId !== skillsLoadRequestIdRef.current) return
+      const projection = projectChatSkillCatalog(snapshot, {
+        harnessScoped,
+        preferredPlugin
+      })
+      setSkills(projection.skills)
+      setDisabledSkillIds(projection.disabledSkillIds)
       setSkillsHarnessProjectId(targetProjectId)
       setSkillsHarnessPreferredPlugin(preferredPlugin)
+      setSkillsLoading(false)
+    }
+
+    const cachedSkills = readSkillCatalogCache()
+    const cachedHarnessCatalog = readHarnessBoardCatalogCache()
+    const cachedHarnessPreferredPlugin = binding
+      ? getCachedHarnessPreferredPlugin(binding.projectId)
+      : null
+    if (cachedSkills) {
+      const preferredPlugin = binding
+        ? getCachedHarnessPreferredPlugin(binding.projectId)
+        : null
+      const cachedProjection = projectChatSkillCatalog(cachedSkills, {
+        harnessScoped,
+        preferredPlugin
+      })
+      setSkills(cachedProjection.skills)
+      setDisabledSkillIds(cachedProjection.disabledSkillIds)
+      setSkillsHarnessPreferredPlugin(preferredPlugin)
+      setSkillsHarnessProjectId(!binding || cachedHarnessPreferredPlugin ? targetProjectId : null)
+    }
+    if (
+      isSkillCatalogFresh(cachedSkills, pluginVersion) &&
+      (!binding || cachedHarnessPreferredPlugin)
+    ) {
+      applySnapshot(
+        cachedSkills,
+        cachedHarnessPreferredPlugin
+      )
+      return
+    }
+
+    setSkillsLoading(true)
+    try {
+      const skillCatalogPromise = revalidateSkillCatalog(pluginVersion)
+      const harnessCatalogPromise = !binding
+        ? Promise.resolve(null)
+        : cachedHarnessPreferredPlugin && cachedHarnessCatalog
+          ? Promise.resolve(cachedHarnessCatalog)
+          : window.api.harnessBoard.catalogPage({
+              requestScope: "chat-binding",
+              projectId: binding.projectId,
+              projectLimit: 1,
+              includeRegistry: false
+            }).catch((error) => {
+              console.warn("[ChatContainer] Failed to resolve harness skill binding:", error)
+              return null
+            })
+      const [snapshot, harnessCatalog] = await Promise.all([
+        skillCatalogPromise,
+        harnessCatalogPromise
+      ])
+      const project = binding
+        ? harnessCatalog?.projects.find((candidate) => candidate.projectId === binding.projectId)
+        : null
+      const preferredPlugin = project
+        ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name }
+        : null
+      applySnapshot(snapshot, preferredPlugin)
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
-      setSkills([])
-      setSkillsHarnessProjectId(null)
-      setSkillsHarnessPreferredPlugin(null)
-    } finally {
-      setSkillsLoading(false)
+      if (requestId === skillsLoadRequestIdRef.current) setSkillsLoading(false)
     }
   }, [])
 
@@ -2069,6 +2105,7 @@ export function ChatContainer({
 
     return () => {
       cancelled = true
+      void window.api.harnessBoard.cancelDialogTips().catch(() => undefined)
     }
   }, [
     harnessDialogTipsProjectId,
@@ -2087,11 +2124,7 @@ export function ChatContainer({
     useCallback(() => threadContext.getHookLogBuckets(threadId), [threadContext, threadId])
   )
 
-  const hookLogBucketByTurnId = useMemo(() => {
-    const map = new Map<string, HookLogBucket>()
-    for (const bucket of hookLogBuckets) map.set(bucket.turnId, bucket)
-    return map
-  }, [hookLogBuckets])
+  const hookLogBucketByTurnId = threadProjectionRuntime.projectHookLogBucketMap(hookLogBuckets)
   const [hookLogConfig, setHookLogConfig] = useState<{ enabled: boolean; diagnostic: boolean }>({
     enabled: false,
     diagnostic: false
@@ -2184,12 +2217,13 @@ export function ChatContainer({
             toast.error("当前环境变量强制开启 Agent Team，不能切换到其他执行模式")
             return
           }
-          const [workers, hasPendingNotifications] = await Promise.all([
-            window.api.agent
-              .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
-              .catch(() => []),
-            window.api.agent.hasCoordinatorWorkerNotifications(threadId).catch(() => false)
-          ])
+          const workers = await window.api.agent
+            .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
+            .catch(() => [])
+          if (requestId !== agentModeChangeRequestRef.current) return
+          const hasPendingNotifications = await window.api.agent
+            .hasCoordinatorWorkerNotifications(threadId)
+            .catch(() => false)
           if (requestId !== agentModeChangeRequestRef.current) return
           const hasRemoteUnresolvedWorkers = workers.some(
             (worker) => worker.status === "running" || worker.notification_acknowledged === false
@@ -2285,6 +2319,7 @@ export function ChatContainer({
   const [dragOver, setDragOver] = useState(false)
   const attachmentsRef = useRef<FileAttachment[]>([])
   const mentionedFilesRef = useRef<MentionedWorkspaceFile[]>([])
+  const activeAtFilePreviewTokensRef = useRef(new Set<string>())
 
   // Keep ref in sync with state
   useEffect(() => {
@@ -2293,6 +2328,18 @@ export function ChatContainer({
   useEffect(() => {
     mentionedFilesRef.current = mentionedFiles
   }, [mentionedFiles])
+  useEffect(
+    () => () => {
+      for (const requestToken of activeAtFilePreviewTokensRef.current) {
+        void window.api.workspace.cancelFilePreview({
+          lanePrefix: AT_FILE_PREVIEW_LANE,
+          requestToken
+        })
+      }
+      activeAtFilePreviewTokensRef.current.clear()
+    },
+    []
+  )
 
   const totalAttachmentChars = useMemo(
     () => attachments.reduce((sum, a) => sum + a.content.length, 0),
@@ -2306,9 +2353,9 @@ export function ChatContainer({
   const totalPendingFileCount = attachments.length + mentionedFiles.length
   const hasPendingFilePayload = totalPendingFileCount > 0
 
-  const handleFileSelectByPath = useCallback(
-    async (filePaths: string[]) => {
-      if (filePaths.length === 0 || attachmentLoading) return
+  const handleAttachmentInputs = useCallback(
+    async (inputs: PendingAttachmentInput[]) => {
+      if (inputs.length === 0 || attachmentLoading) return
       setAttachmentLoading(true)
       clearError()
       try {
@@ -2320,19 +2367,22 @@ export function ChatContainer({
           ...mentionedFilesRef.current.map((item) => item.absolutePath)
         ])
 
-        for (const filePath of filePaths) {
+        for (const input of inputs) {
+          const displayIdentity = input.kind === "selected" ? input.filePath : input.fileName
           // #7: skip duplicates
-          if (existingPaths.has(filePath)) {
-            const dupName = filePath.replace(/^.*[/\\]/, "") || filePath
+          if (existingPaths.has(displayIdentity)) {
+            const dupName = displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             setError(`文件"${dupName}"已添加，跳过重复`)
             continue
           }
 
           // #6: check extension before calling backend
-          const lastDot = filePath.lastIndexOf(".")
-          const ext = lastDot >= 0 ? filePath.substring(lastDot).toLowerCase() : ""
+          const lastDot = displayIdentity.lastIndexOf(".")
+          const ext =
+            lastDot >= 0 ? displayIdentity.substring(lastDot).toLowerCase() : ""
           if (!ext || !SUPPORTED_EXTS.has(ext)) {
-            const fileName = filePath.replace(/^.*[/\\]/, "") || filePath
+            const fileName =
+              displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             if (ext === ".doc") {
               setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
             } else {
@@ -2351,7 +2401,18 @@ export function ChatContainer({
             setError(`附件总内容已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
             break
           }
-          const result = await window.api.file.parse(filePath, remaining)
+          const result =
+            input.kind === "selected"
+              ? await window.api.file.parseSelected({
+                  grant: input.grant,
+                  filePath: input.filePath,
+                  maxLength: remaining
+                })
+              : await window.api.file.parseBytes({
+                  fileName: input.fileName,
+                  bytes: input.bytes,
+                  maxLength: remaining
+                })
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
@@ -2387,10 +2448,13 @@ export function ChatContainer({
       return
     }
     const result = await window.api.file.select()
-    if (!result.canceled && result.filePaths.length > 0) {
-      await handleFileSelectByPath(result.filePaths)
+    if (result.error) setError(result.error)
+    if (!result.canceled && result.files.length > 0) {
+      await handleAttachmentInputs(
+        result.files.map((file) => ({ kind: "selected" as const, ...file }))
+      )
     }
-  }, [handleFileSelectByPath, setError])
+  }, [handleAttachmentInputs, setError])
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
@@ -2409,15 +2473,30 @@ export function ChatContainer({
       if (attachmentLoading) return
       const files = e.dataTransfer.files
       if (files.length > 0) {
-        const paths = Array.from(files)
-          .map((f) => window.api.file.getFilePath(f))
-          .filter((p) => !!p)
-        if (paths.length > 0) {
-          await handleFileSelectByPath(paths)
+        const availableSlots = Math.max(
+          0,
+          MAX_ATTACHMENTS - attachmentsRef.current.length - mentionedFilesRef.current.length
+        )
+        const inputs: PendingAttachmentInput[] = []
+        for (const file of Array.from(files).slice(0, availableSlots)) {
+          const lastDot = file.name.lastIndexOf(".")
+          const ext = lastDot >= 0 ? file.name.substring(lastDot).toLowerCase() : ""
+          if (!SUPPORTED_EXTS.has(ext)) {
+            setError(`不支持的文件类型"${file.name}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            continue
+          }
+          if (file.size > MAX_ATTACHMENT_FILE_BYTES) {
+            setError(`文件"${file.name}"过大，单文件不超过 5MB`)
+            continue
+          }
+          inputs.push({ kind: "bytes", fileName: file.name, bytes: await file.arrayBuffer() })
+        }
+        if (inputs.length > 0) {
+          await handleAttachmentInputs(inputs)
         }
       }
     },
-    [handleFileSelectByPath, attachmentLoading]
+    [handleAttachmentInputs, attachmentLoading, setError]
   )
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -2462,21 +2541,9 @@ export function ChatContainer({
       setModelContextLimit(undefined)
       return
     }
-    let ignore = false
-    window.api.models
-      .list()
-      .then((models) => {
-        if (ignore) return
-        const match = models.find((model) => model.id === currentModel)
-        setModelContextLimit(match?.maxTokens)
-      })
-      .catch(() => {
-        if (!ignore) setModelContextLimit(undefined)
-      })
-    return () => {
-      ignore = true
-    }
-  }, [currentModel])
+    const match = models.find((model) => model.id === currentModel)
+    setModelContextLimit(match?.maxTokens)
+  }, [currentModel, models])
 
   useEffect(() => {
     const fetchYoloMode = (): void => {
@@ -2498,34 +2565,71 @@ export function ChatContainer({
   const uploadLoChatDataForThread = useCallback(
     async (targetThreadId: string, batch: ChatReportBatch, attempt = 0) => {
       if (chatReportDisposedRef.current) return
+      if (chatReportAbortControllersRef.current[targetThreadId]) {
+        // Per thread, retain only the newest pending report while one bounded request is active.
+        chatReportPendingBatchesRef.current[targetThreadId] = { batch, attempt }
+        return
+      }
       const reservedIds = reserveChatReportMessageIds(
         targetThreadId,
         batch.messageIds
       )
       if (reservedIds.length === 0) return
 
+      const controller = new AbortController()
+      chatReportAbortControllersRef.current[targetThreadId] = controller
       try {
-        await uploadChatData(targetThreadId, batch.payload)
+        await uploadChatData(targetThreadId, batch.payload, controller.signal)
         markChatReportUploadSucceeded(targetThreadId, reservedIds)
       } catch (error) {
         markChatReportUploadFailed(targetThreadId, reservedIds)
-        if (!chatReportDisposedRef.current && attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS) {
-          const retryQueue = (chatReportRetryQueuesRef.current[targetThreadId] ??= [])
-          retryQueue.push({ batch, attempt: attempt + 1 })
+        if (
+          !controller.signal.aborted &&
+          !chatReportDisposedRef.current &&
+          attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS
+        ) {
+          chatReportRetryBatchesRef.current[targetThreadId] = {
+            batch,
+            attempt: attempt + 1
+          }
           if (!chatReportRetryTimersRef.current[targetThreadId]) {
             const retryThreadId = targetThreadId
             const retryDelayMs = Math.min(CHAT_REPORT_RETRY_DELAY_MS * 2 ** attempt, 30_000)
             chatReportRetryTimersRef.current[retryThreadId] = window.setTimeout(() => {
               delete chatReportRetryTimersRef.current[retryThreadId]
               if (chatReportDisposedRef.current) return
-              const retryItems = chatReportRetryQueuesRef.current[retryThreadId]?.splice(0) ?? []
-              for (const retryItem of retryItems) {
-                void uploadLoChatDataForThread(retryThreadId, retryItem.batch, retryItem.attempt)
+              const retryItem = chatReportRetryBatchesRef.current[retryThreadId]
+              delete chatReportRetryBatchesRef.current[retryThreadId]
+              if (
+                retryItem &&
+                !chatReportAbortControllersRef.current[retryThreadId] &&
+                !chatReportPendingBatchesRef.current[retryThreadId]
+              ) {
+                void uploadLoChatDataForThread(
+                  retryThreadId,
+                  retryItem.batch,
+                  retryItem.attempt
+                )
               }
             }, retryDelayMs)
           }
         }
         console.warn("[Upload] chat数据上报失败:", error)
+      } finally {
+        if (chatReportAbortControllersRef.current[targetThreadId] === controller) {
+          delete chatReportAbortControllersRef.current[targetThreadId]
+        }
+        if (!chatReportDisposedRef.current) {
+          const pending = chatReportPendingBatchesRef.current[targetThreadId]
+          delete chatReportPendingBatchesRef.current[targetThreadId]
+          if (pending) {
+            const retryTimer = chatReportRetryTimersRef.current[targetThreadId]
+            if (retryTimer) window.clearTimeout(retryTimer)
+            delete chatReportRetryTimersRef.current[targetThreadId]
+            delete chatReportRetryBatchesRef.current[targetThreadId]
+            void uploadLoChatDataForThread(targetThreadId, pending.batch, pending.attempt)
+          }
+        }
       }
     },
     []
@@ -2556,9 +2660,14 @@ export function ChatContainer({
       for (const timer of Object.values(chatReportRetryTimersRef.current)) {
         window.clearTimeout(timer)
       }
+      for (const controller of Object.values(chatReportAbortControllersRef.current)) {
+        controller?.abort(new DOMException("Chat surface disposed", "AbortError"))
+      }
       chatReportUploadTimersRef.current = {}
       chatReportRetryTimersRef.current = {}
-      chatReportRetryQueuesRef.current = {}
+      chatReportRetryBatchesRef.current = {}
+      chatReportPendingBatchesRef.current = {}
+      chatReportAbortControllersRef.current = {}
     }
   }, [])
 
@@ -2900,19 +3009,15 @@ export function ChatContainer({
     () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
     [messagesContentVersion, threadMessages]
   )
-  const [projectLiveDisplayMessages] = useState(createLiveDisplayMessageProjector)
-  const liveDisplayProjection = projectLiveDisplayMessages(
+  const liveDisplayProjection = threadProjectionRuntime.projectLiveDisplayMessages(
     threadMessages,
     streamData.liveMessages || []
   )
   const liveDisplayMessages = liveDisplayProjection.messages
-  const [chatMessageProjectors] = useState(
-    () => new WeakMap<Message[], ReturnType<typeof createChatMessageProjector>>()
-  )
-  let projectChatMessages = chatMessageProjectors.get(threadDisplayBaseline)
+  let projectChatMessages = threadProjectionRuntime.chatMessageProjectors.get(threadDisplayBaseline)
   if (!projectChatMessages) {
     projectChatMessages = createChatMessageProjector()
-    chatMessageProjectors.set(threadDisplayBaseline, projectChatMessages)
+    threadProjectionRuntime.chatMessageProjectors.set(threadDisplayBaseline, projectChatMessages)
   }
   const displayMessageProjection = projectChatMessages(
     threadDisplayBaseline,
@@ -2924,49 +3029,20 @@ export function ChatContainer({
   const displayMessages = displayMessageProjection.messages
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
-  const [projectChatScrollQuestionRevision] = useState(
-    createChatScrollQuestionRevisionProjector
-  )
-  const chatScrollQuestionStructureRevision = projectChatScrollQuestionRevision({
-    scopeKey: threadId,
-    messages: displayMessages,
+  const chatScrollQuestionStructureRevision =
+    threadProjectionRuntime.projectChatScrollQuestionRevision({
+      scopeKey: threadId,
+      messages: displayMessages,
+      structureVersion: displayMessagesStructureVersion,
+      changedMessages: displayMessageProjection.changedMessages
+    })
+  const stableMessageIndexProjection = threadProjectionRuntime.projectStableMessageIndexes({
+    baseline: threadDisplayBaseline,
+    indexById: displayMessageProjection.indexById,
     structureVersion: displayMessagesStructureVersion,
-    changedMessages: displayMessageProjection.changedMessages
+    hookLogBucketByTurnId,
+    hookLogEnabled: hookLogConfig.enabled
   })
-  const stableMessageIndexProjection = useMemo(
-    () => {
-      const visibleIndexes: number[] = []
-      const userMessageIds = new Set<string>()
-      let lastUserIndex = -1
-      let previousVisibleIndex = -1
-      let requiresSort = false
-
-      for (const message of threadDisplayBaseline) {
-        if (message.role === "user") userMessageIds.add(message.id)
-        const displayIndex = displayMessageProjection.indexById.get(message.id)
-        if (displayIndex === undefined) continue
-        if (message.role === "user") lastUserIndex = Math.max(lastUserIndex, displayIndex)
-        const hasHookLogChip = Boolean(
-          hookLogConfig.enabled &&
-            message.role === "user" &&
-            hookLogBucketByTurnId.get(message.id)?.entries.length
-        )
-        if (!messageHasVisibleRow(message, hasHookLogChip)) continue
-        if (displayIndex < previousVisibleIndex) requiresSort = true
-        previousVisibleIndex = displayIndex
-        visibleIndexes.push(displayIndex)
-      }
-      if (requiresSort) visibleIndexes.sort((left, right) => left - right)
-      return { visibleIndexes, userMessageIds, lastUserIndex }
-    },
-    [
-      displayMessageProjection.indexById,
-      displayMessagesStructureVersion,
-      hookLogBucketByTurnId,
-      hookLogConfig.enabled,
-      threadDisplayBaseline
-    ]
-  )
   const orderedStableVisibleMessageIndexes = stableMessageIndexProjection.visibleIndexes
   const hasHookLogChipForMessage = useCallback(
     (message: Message): boolean =>
@@ -2977,8 +3053,7 @@ export function ChatContainer({
       ),
     [hookLogBucketByTurnId, hookLogConfig.enabled]
   )
-  const [projectDynamicLiveVisibility] = useState(createDynamicLiveVisibilityProjector)
-  const dynamicVisibilityProjection = projectDynamicLiveVisibility({
+  const dynamicVisibilityProjection = threadProjectionRuntime.projectDynamicLiveVisibility({
     live: liveDisplayProjection,
     displayMessages,
     displayIndexById: displayMessageProjection.indexById,
@@ -3006,32 +3081,18 @@ export function ChatContainer({
     return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}`
   }, [displayMessages.length, displayMessagesContentVersion, isLoading, searchOpen])
 
-  const detachedHookLogBuckets = useMemo(() => {
-    // A content-only assistant token changes liveDisplayMessages, but cannot
-    // attach or detach a hook bucket. Rebuild this history-sized membership
-    // index only when the projected transcript structure changes.
-    const userMessageIds = new Set<string>()
-    for (const message of displayMessages) {
-      if (message.role === "user") userMessageIds.add(message.id)
-    }
-    return hookLogBuckets.filter(
-      (bucket) => bucket.entries.length > 0 && !userMessageIds.has(bucket.turnId)
-    )
-  }, [displayMessages, displayMessagesStructureVersion, hookLogBuckets])
+  const detachedHookLogBuckets = threadProjectionRuntime.projectDetachedHookLogBuckets({
+    displayMessages,
+    structureVersion: displayMessagesStructureVersion,
+    hookLogBuckets
+  })
 
-  const visibleMessageIndexes = useMemo(
-    () =>
-      mergeVisibleChatMessageIndexes(
-        orderedStableVisibleMessageIndexes,
-        dynamicVisibilityByIndex,
-        orderedDynamicVisibleMessageIndexes
-      ),
-    [
-      dynamicVisibilityProjection.version,
-      orderedDynamicVisibleMessageIndexes,
-      orderedStableVisibleMessageIndexes
-    ]
-  )
+  const visibleMessageIndexes = threadProjectionRuntime.projectVisibleMessageIndexes({
+    stableIndexes: orderedStableVisibleMessageIndexes,
+    dynamicVisibilityByIndex,
+    orderedDynamicIndexes: orderedDynamicVisibleMessageIndexes,
+    dynamicVersion: dynamicVisibilityProjection.version
+  })
   const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
   const lastContentMessageId =
     lastVisibleMessageIndex === undefined
@@ -3041,111 +3102,114 @@ export function ChatContainer({
   // Ordinary assistant tokens update only the changed display slot. Keep the
   // tool projection stable and replace a slot only when that changed row is
   // itself tool-relevant.
-  const toolDerivationProjection = useStableToolDerivationMessages(
+  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
     displayMessages,
     displayMessageProjection.changedMessages,
     displayMessagesStructureVersion
   )
   const toolDerivationMessages = toolDerivationProjection.messages
-  const toolResults = useMemo(
-    () => buildToolResultAssociations(toolDerivationMessages),
-    [toolDerivationMessages, toolDerivationProjection.version]
-  )
-
-  const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
-    () => buildMessageBubbleTimingMeta(displayMessages),
-    [displayMessages, displayMessagesStructureVersion]
-  )
-
-  const { toolCallDisplayStates, pendingApprovalToolCallKeys } = useMemo(() => {
-    const orderedToolCalls: Array<{
-      key: string
-      call: { id: string; name: string; args: Record<string, unknown> }
-    }> = []
-
-    for (const message of toolDerivationMessages) {
-      if (!Array.isArray(message.tool_calls)) continue
-      message.tool_calls.forEach((toolCall, index) => {
-        if (!toolCall?.id) return
-        orderedToolCalls.push({
-          key: getWorkerToolUiKey(message.id, toolCall.id, index),
-          call: toolCall
-        })
-      })
-    }
-
-    const lastOccurrenceKeyByCallId = new Map<string, string>()
-    for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
-
-    const currentApprovalIds = new Set<string>()
-    if (pendingApproval?.pendingToolCallIds?.length) {
-      for (const id of pendingApproval.pendingToolCallIds) {
-        if (id) currentApprovalIds.add(id)
-      }
-    } else if (pendingApproval?.tool_call?.id) {
-      currentApprovalIds.add(pendingApproval.tool_call.id)
-    }
-    const approvalKeys = new Set<string>()
-    for (const id of currentApprovalIds) {
-      const key = lastOccurrenceKeyByCallId.get(id)
-      if (key) approvalKeys.add(key)
-    }
-
-    let activeAssigned = false
-    const nextStates = new Map<string, ToolCallState>()
-
-    for (const { key, call: toolCall } of orderedToolCalls) {
-      const baseState =
-        lastOccurrenceKeyByCallId.get(toolCall.id) === key
-          ? toolCallStates[toolCall.id]
-          : undefined
-      const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
-      const result = toolResults.get(key)
-      let status: ToolCallStatus
-
-      if (result !== undefined) {
-        status = result.is_error ? "failed" : "completed"
-      } else if (isTerminalToolCallStatus(baseState?.status)) {
-        status = baseState!.status
-      } else if (approvalKeys.has(key)) {
-        status = "awaiting_approval"
-        activeAssigned = true
-      } else if (!isLoading) {
-        status = "interrupted"
-      } else if (!activeAssigned) {
-        status = "running"
-        activeAssigned = true
-      } else {
-        status = "queued"
-      }
-
-      nextStates.set(key, {
-        id: toolCall.id,
-        status,
-        name: toolCall.name || baseState?.name,
-        args: mergedArgs,
-        command: getToolCallCommand(mergedArgs) || baseState?.command,
-        filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
-        reason: baseState?.reason,
-        operation: baseState?.operation,
-        code: getToolCallCode(mergedArgs) || baseState?.code,
-        timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
-        updatedAt: baseState?.updatedAt ?? new Date()
-      })
-    }
-
-    return {
-      toolCallDisplayStates: nextStates,
-      pendingApprovalToolCallKeys: approvalKeys
-    }
-  }, [
-    isLoading,
-    pendingApproval,
-    toolCallStates,
+  const toolResults = threadProjectionRuntime.projectToolResults(
     toolDerivationMessages,
-    toolDerivationProjection.version,
-    toolResults
-  ])
+    toolDerivationProjection.version
+  )
+
+  const { assistantDurationMsById, userSendTimeLabelById } =
+    threadProjectionRuntime.projectTimingMeta(
+      displayMessages,
+      displayMessagesStructureVersion
+    )
+
+  const { toolCallDisplayStates, pendingApprovalToolCallKeys } =
+    threadProjectionRuntime.projectToolCallDisplayState({
+      messages: toolDerivationMessages,
+      projectionVersion: toolDerivationProjection.version,
+      toolResults,
+      toolCallStates,
+      pendingApproval,
+      isLoading,
+      compute: () => {
+        const orderedToolCalls: Array<{
+          key: string
+          call: { id: string; name: string; args: Record<string, unknown> }
+        }> = []
+
+        for (const message of toolDerivationMessages) {
+          if (!Array.isArray(message.tool_calls)) continue
+          message.tool_calls.forEach((toolCall, index) => {
+            if (!toolCall?.id) return
+            orderedToolCalls.push({
+              key: getWorkerToolUiKey(message.id, toolCall.id, index),
+              call: toolCall
+            })
+          })
+        }
+
+        const lastOccurrenceKeyByCallId = new Map<string, string>()
+        for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
+
+        const currentApprovalIds = new Set<string>()
+        if (pendingApproval?.pendingToolCallIds?.length) {
+          for (const id of pendingApproval.pendingToolCallIds) {
+            if (id) currentApprovalIds.add(id)
+          }
+        } else if (pendingApproval?.tool_call?.id) {
+          currentApprovalIds.add(pendingApproval.tool_call.id)
+        }
+        const approvalKeys = new Set<string>()
+        for (const id of currentApprovalIds) {
+          const key = lastOccurrenceKeyByCallId.get(id)
+          if (key) approvalKeys.add(key)
+        }
+
+        let activeAssigned = false
+        const nextStates = new Map<string, ToolCallState>()
+
+        for (const { key, call: toolCall } of orderedToolCalls) {
+          const baseState =
+            lastOccurrenceKeyByCallId.get(toolCall.id) === key
+              ? toolCallStates[toolCall.id]
+              : undefined
+          const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
+          const result = toolResults.get(key)
+          let status: ToolCallStatus
+
+          if (result !== undefined) {
+            status = result.is_error ? "failed" : "completed"
+          } else if (isTerminalToolCallStatus(baseState?.status)) {
+            status = baseState!.status
+          } else if (approvalKeys.has(key)) {
+            status = "awaiting_approval"
+            activeAssigned = true
+          } else if (!isLoading) {
+            status = "interrupted"
+          } else if (!activeAssigned) {
+            status = "running"
+            activeAssigned = true
+          } else {
+            status = "queued"
+          }
+
+          nextStates.set(key, {
+            id: toolCall.id,
+            status,
+            name: toolCall.name || baseState?.name,
+            args: mergedArgs,
+            command: getToolCallCommand(mergedArgs) || baseState?.command,
+            filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
+            reason: baseState?.reason,
+            operation: baseState?.operation,
+            code: getToolCallCode(mergedArgs) || baseState?.code,
+            timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
+            updatedAt: baseState?.updatedAt ?? new Date()
+          })
+        }
+
+        return {
+          toolCallDisplayStates: nextStates,
+          pendingApprovalToolCallKeys: approvalKeys
+        }
+      }
+    })
 
   const buildSearchDocument = useCallback(
     (message: Message, sortIndex: number): ChatSearchDocument | null => {
@@ -4260,28 +4324,18 @@ export function ChatContainer({
         }
 
         clearError()
-          void (async () => {
-            let contentChars = 0
-            try {
-              const readResult = await window.api.workspace.readFile(
-                threadId,
-                selection.mentionedFile.workspaceFilePath
-              )
-              if (readResult.success && typeof readResult.content === "string") {
-                contentChars = readResult.content.length
-              }
-            } catch {
-              contentChars = 0
-            }
-
-            setMentionedFiles((prev) => [
-              ...prev,
-              {
-                ...selection.mentionedFile,
-                contentChars
-              }
-            ])
-          })()
+        setMentionedFiles((prev) => {
+          if (
+            prev.some(
+              (candidate) => candidate.absolutePath === selection.mentionedFile.absolutePath
+            )
+          ) {
+            return prev
+          }
+          const next = [...prev, selection.mentionedFile]
+          mentionedFilesRef.current = next
+          return next
+        })
 
         const { nextInput, nextCursor } = removeAtFileTokenFromInput(input, {
           startPos: atFileMentions.mode.startPos,
@@ -4298,7 +4352,7 @@ export function ChatContainer({
         setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
       }
     },
-    [atFileMentions.mode, clearError, input, setError, setInput, threadId, workspacePath]
+    [atFileMentions.mode, clearError, input, setError, setInput, workspacePath]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
@@ -4716,22 +4770,48 @@ export function ChatContainer({
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
+      const atFileRequestToken = crypto.randomUUID()
+      activeAtFilePreviewTokensRef.current.add(atFileRequestToken)
+      const cancelAtFileReads = (): void => {
+        void window.api.workspace.cancelFilePreview({
+          lanePrefix: AT_FILE_PREVIEW_LANE,
+          requestToken: atFileRequestToken
+        })
+      }
+      let atFileResolution: Awaited<ReturnType<typeof resolveAtFileAttachments>>
+      try {
+        atFileResolution = await resolveAtFileAttachments({
+          rawMessage,
+          attachments: claimedAttachments,
+          mentionedFiles: claimedMentionedFiles,
+          workspacePath,
+          workspaceFiles,
+          maxAttachments: MAX_ATTACHMENTS,
+          maxTotalChars: MAX_TOTAL_CHARS,
+          readWorkspaceFile: (filePath, maxChars) =>
+            readBoundedWorkspaceMentionFile({
+              maxChars,
+              readPage: (offset) =>
+                window.api.workspace.readFilePreview({
+                  source: { threadId, filePath },
+                  offset,
+                  lane: AT_FILE_PREVIEW_LANE,
+                  requestToken: atFileRequestToken
+                })
+            }),
+          cancelWorkspaceFileReads: cancelAtFileReads
+        })
+      } finally {
+        activeAtFilePreviewTokensRef.current.delete(atFileRequestToken)
+        cancelAtFileReads()
+      }
       const {
         cleanedMessage,
         attachments: resolvedAttachments,
         mentionCountLimitHit,
         mentionAttachmentLimitHit,
         warningMessage: atFileWarningMessage
-      } = await resolveAtFileAttachments({
-        rawMessage,
-        attachments: claimedAttachments,
-        mentionedFiles: claimedMentionedFiles,
-        workspacePath,
-        workspaceFiles,
-        maxAttachments: MAX_ATTACHMENTS,
-        maxTotalChars: MAX_TOTAL_CHARS,
-        readWorkspaceFile: (filePath) => window.api.workspace.readFile(threadId, filePath)
-      })
+      } = atFileResolution
       rawMessage = cleanedMessage
 
       // These are delivery warnings, not run failures. A thread error blocks the
@@ -5762,16 +5842,23 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId])
+    return () => {
+      skillsLoadRequestIdRef.current += 1
+      void window.api.harnessBoard.cancelCatalogRequests("chat-binding").catch(() => undefined)
+    }
+  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId, surface])
 
-  // Main broadcasts `skills:changed` after skill evolution writes, optimizer
-  // patches, and plugin SKILL.md edits via the file editor. Subscribe so the
-  // slash popover and welcome-tree get a fresh list without waiting for the
-  // user to re-open `/` (which already triggers a re-fetch on its own).
+  // One application-lifetime bridge translates skills:changed into one cache
+  // revision. ChatContainer and RightPanel then share the same refresh promise.
   useEffect(() => {
-    return window.api.skills.onChanged(() => {
+    const unsubscribe = subscribeSkillCatalogInvalidation(() => {
       void loadSkills()
     })
+    ensureSkillsChangedInvalidationSource((listener) => window.api.skills.onChanged(listener))
+    ensureDisabledSkillsChangedInvalidationSource((listener) =>
+      window.api.hooks.onChanged(listener)
+    )
+    return unsubscribe
   }, [loadSkills])
 
   // ── Skill creation human-confirmation listener ──────────

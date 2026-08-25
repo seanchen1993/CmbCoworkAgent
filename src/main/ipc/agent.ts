@@ -56,6 +56,10 @@ import {
   updateThread,
   upsertThreadMessages
 } from "../db"
+import {
+  isThreadMetadataHydrationWorkerUnavailable,
+  readThreadWorkspacePathInWorker
+} from "../thread-metadata-hydration/client"
 import { summarizeAndSave } from "../memory/summarizer"
 import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
 import { scanMemoryFiles, type MemoryType } from "../memory/manifest"
@@ -577,12 +581,61 @@ const focusedCoordinatorWorkerStreamByWindow = new Map<
   Map<string, FocusedCoordinatorWorkerStream>
 >()
 const coordinatorWorkerUpdateBindingsByWindow = new Map<number, Set<string>>()
+const coordinatorWorkerRestoreByWindow = new Map<
+  number,
+  { threadId: string; controller: AbortController }
+>()
 const DEBUG_COORDINATOR_WORKER_STREAM = process.env.CMB_COORDINATOR_WORKER_STREAM_DEBUG === "1"
 const ACTIVE_RUN_REPLACEMENT_WARN_MS = 5_000
 const ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS = 30_000
 
 function coordinatorWorkerUpdateKey(windowId: number): string {
   return `coordinator-workers:${windowId}`
+}
+
+function beginCoordinatorWorkerRestore(
+  window: BrowserWindow,
+  threadId: string
+): AbortController {
+  const previous = coordinatorWorkerRestoreByWindow.get(window.id)
+  previous?.controller.abort(
+    new DOMException("Coordinator worker restore was superseded.", "AbortError")
+  )
+  const controller = new AbortController()
+  coordinatorWorkerRestoreByWindow.set(window.id, { threadId, controller })
+  return controller
+}
+
+function finishCoordinatorWorkerRestore(
+  windowId: number,
+  controller: AbortController
+): void {
+  if (coordinatorWorkerRestoreByWindow.get(windowId)?.controller === controller) {
+    coordinatorWorkerRestoreByWindow.delete(windowId)
+  }
+}
+
+function cancelCoordinatorWorkerRestore(windowId: number, threadId?: string): void {
+  const current = coordinatorWorkerRestoreByWindow.get(windowId)
+  if (!current || (threadId && current.threadId !== threadId)) return
+  current.controller.abort(
+    new DOMException("Coordinator worker restore was cancelled.", "AbortError")
+  )
+  coordinatorWorkerRestoreByWindow.delete(windowId)
+}
+
+async function readCoordinatorWorkspacePath(threadId: string): Promise<string | undefined> {
+  try {
+    return (await readThreadWorkspacePathInWorker(threadId)) ?? undefined
+  } catch (error) {
+    if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+    const thread = getThreadCore(threadId)
+    const metadata =
+      thread?.metadata && typeof thread.metadata === "string"
+        ? (JSON.parse(thread.metadata) as Record<string, unknown>)
+        : {}
+    return typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+  }
 }
 
 function trackCoordinatorWorkerUpdateBinding(window: BrowserWindow, threadId: string): string {
@@ -592,6 +645,7 @@ function trackCoordinatorWorkerUpdateBinding(window: BrowserWindow, threadId: st
     boundThreads = new Set()
     coordinatorWorkerUpdateBindingsByWindow.set(window.id, boundThreads)
     window.once("closed", () => {
+      cancelCoordinatorWorkerRestore(window.id)
       const threads = coordinatorWorkerUpdateBindingsByWindow.get(window.id)
       coordinatorWorkerUpdateBindingsByWindow.delete(window.id)
       for (const boundThreadId of threads ?? []) {
@@ -604,6 +658,7 @@ function trackCoordinatorWorkerUpdateBinding(window: BrowserWindow, threadId: st
 }
 
 function untrackCoordinatorWorkerUpdateBinding(window: BrowserWindow, threadId: string): void {
+  cancelCoordinatorWorkerRestore(window.id, threadId)
   const updateKey = coordinatorWorkerUpdateKey(window.id)
   coordinatorWorkerManager.unbindWorkerUpdates(threadId, updateKey)
   const boundThreads = coordinatorWorkerUpdateBindingsByWindow.get(window.id)
@@ -5134,16 +5189,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const threadId = payload.threadId?.trim()
       if (!threadId) return []
       const subscribeUpdates = payload.subscribeUpdates !== false
+      const window = BrowserWindow.fromWebContents(event.sender)
+      const restoreController =
+        subscribeUpdates && window && !window.isDestroyed()
+          ? beginCoordinatorWorkerRestore(window, threadId)
+          : null
 
       try {
-        const window = BrowserWindow.fromWebContents(event.sender)
-        const thread = getThreadCore(threadId)
-        const metadata =
-          thread?.metadata && typeof thread.metadata === "string"
-            ? (JSON.parse(thread.metadata) as Record<string, unknown>)
-            : {}
-        const workspacePath =
-          typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+        const workspacePath = await readCoordinatorWorkspacePath(threadId)
         const updateKey =
           subscribeUpdates && window && !window.isDestroyed()
             ? trackCoordinatorWorkerUpdateBinding(window, threadId)
@@ -5164,20 +5217,26 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   workerEvent
                 )
             : undefined
-        const existingWorkers = coordinatorWorkerManager.readWorkers(threadId)
-        if (existingWorkers.length > 0 && subscribeUpdates) {
-          coordinatorWorkerManager.bindWorkerUpdates(threadId, onUpdate, updateKey)
-        } else if (workspacePath) {
+        if (workspacePath) {
           await coordinatorWorkerManager.restoreWorkersForThread({
             parentThreadId: threadId,
             workspacePath,
             mode: "recent",
             onUpdate,
-            onUpdateKey: updateKey
+            onUpdateKey: updateKey,
+            signal: restoreController?.signal
           })
+        } else if (subscribeUpdates) {
+          coordinatorWorkerManager.bindWorkerUpdates(threadId, onUpdate, updateKey)
         }
       } catch (error) {
-        console.warn("[Agent] Failed to refresh coordinator workers:", error)
+        if (!(error instanceof Error && error.name === "AbortError")) {
+          console.warn("[Agent] Failed to refresh coordinator workers:", error)
+        }
+      } finally {
+        if (restoreController && window) {
+          finishCoordinatorWorkerRestore(window.id, restoreController)
+        }
       }
 
       return limitCoordinatorWorkersForRenderer(coordinatorWorkerManager.readWorkers(threadId))
@@ -5191,35 +5250,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!threadId) return
       const window = BrowserWindow.fromWebContents(event.sender)
       if (!window || window.isDestroyed()) return
+      cancelCoordinatorWorkerRestore(window.id, threadId)
       untrackCoordinatorWorkerUpdateBinding(window, threadId)
     }
   )
 
   ipcMain.handle(
     "agent:coordinator-worker-notifications-pending",
-    async (_event, payload: { threadId?: string }): Promise<boolean> => {
+    (_event, payload: { threadId?: string }): boolean => {
       const threadId = payload.threadId?.trim()
       if (!threadId) return false
-      if (!coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)) {
-        try {
-          const thread = getThreadCore(threadId)
-          const metadata =
-            thread?.metadata && typeof thread.metadata === "string"
-              ? (JSON.parse(thread.metadata) as Record<string, unknown>)
-              : {}
-          const workspacePath =
-            typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
-          if (workspacePath) {
-            await coordinatorWorkerManager.restoreWorkersForThread({
-              parentThreadId: threadId,
-              workspacePath,
-              mode: "active"
-            })
-          }
-        } catch (error) {
-          console.warn("[Agent] Failed to refresh coordinator worker notifications:", error)
-        }
-      }
+      // Persisted state is restored by agent:coordinator-workers first. Keeping
+      // this endpoint memory-only prevents a harmless notification probe from
+      // starting a second unbounded directory scan that cannot be cancelled by
+      // the renderer which already left the task.
       return coordinatorWorkerManager.hasAutoRunnableNotifications(threadId)
     }
   )

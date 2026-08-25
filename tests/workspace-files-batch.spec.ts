@@ -68,6 +68,11 @@ async function main(): Promise<void> {
     /\[\.\.\.files\]\.sort/,
     "file-tree construction must not globally copy-sort every file"
   )
+  assert.match(
+    rightPanel,
+    /FILE_TREE_NODE_PAGE_SIZE = 200[\s\S]*nodes\.slice\(pageStart, pageEnd\)/,
+    "a 50k-file root or expanded directory must mount only one bounded DOM page"
+  )
 
   assert.match(
     preload,

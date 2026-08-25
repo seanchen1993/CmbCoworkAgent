@@ -8,6 +8,7 @@ const disabledChatReportThreads = new Map<string, number>()
 
 export const CHAT_REPORT_UPLOAD_CACHE_MAX_THREADS = 64
 export const CHAT_REPORT_UPLOAD_CACHE_MAX_IDS_PER_THREAD = 256
+export const CHAT_REPORT_UPLOAD_CACHE_MAX_IN_FLIGHT_IDS_PER_THREAD = 128
 const CHAT_REPORT_DISABLED_THREAD_MAX_ENTRIES = 256
 const CHAT_REPORT_DISABLED_THREAD_TTL_MS = 2 * 60_000
 
@@ -33,6 +34,17 @@ function pruneThreadStates(): void {
     if (state.inFlightIds.size > 0) continue
     chatReportUploadByThread.delete(threadId)
   }
+}
+
+function makeRoomForThreadState(threadId: string): boolean {
+  if (chatReportUploadByThread.has(threadId)) return true
+  if (chatReportUploadByThread.size < CHAT_REPORT_UPLOAD_CACHE_MAX_THREADS) return true
+  for (const [candidateThreadId, state] of chatReportUploadByThread) {
+    if (state.inFlightIds.size > 0) continue
+    chatReportUploadByThread.delete(candidateThreadId)
+    if (chatReportUploadByThread.size < CHAT_REPORT_UPLOAD_CACHE_MAX_THREADS) return true
+  }
+  return false
 }
 
 function pruneDisabledThreads(now = Date.now()): void {
@@ -69,9 +81,11 @@ function getChatReportUploadState(threadId: string): ChatReportUploadState {
 
 export function reserveChatReportMessageIds(threadId: string, messageIds: string[]): string[] {
   if (isChatReportThreadDisabled(threadId)) return []
+  if (!makeRoomForThreadState(threadId)) return []
   const state = getChatReportUploadState(threadId)
   const reserved: string[] = []
   for (const messageId of messageIds) {
+    if (state.inFlightIds.size >= CHAT_REPORT_UPLOAD_CACHE_MAX_IN_FLIGHT_IDS_PER_THREAD) break
     if (state.uploadedIds.has(messageId) || state.inFlightIds.has(messageId)) continue
     state.inFlightIds.add(messageId)
     reserved.push(messageId)

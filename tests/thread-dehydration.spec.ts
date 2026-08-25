@@ -72,6 +72,26 @@ assert.equal(Object.keys(dehydrated.subagentTranscripts).length, 0)
 assert.equal(dehydrated.workflowRun, null)
 assert.equal(dehydrated.goalUi.goal, null)
 assert.equal(
+  dehydrated.historyLoading,
+  true,
+  "a dehydrated transcript must remain a loading shell until its bounded page is published"
+)
+assert.equal(dehydrated.dehydrated, true)
+
+const dehydratedWithTabs = createDehydratedThreadStatePatch({
+  openFiles: [{ path: "src/main.ts", name: "main.ts" }],
+  activeTab: "src/main.ts"
+})
+assert.deepEqual(dehydratedWithTabs.openFiles, [
+  { path: "src/main.ts", name: "main.ts" }
+])
+assert.equal(dehydratedWithTabs.activeTab, "src/main.ts")
+assert.notEqual(
+  dehydratedWithTabs.openFiles,
+  dehydrated.openFiles,
+  "retained tab paths must be copied, not share a mutable state array"
+)
+assert.equal(
   JSON.stringify(dehydrated.fileContents).length,
   2,
   "dehydrated file preview bytes must be reduced to an empty object"

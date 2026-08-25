@@ -11,6 +11,7 @@ import { mergeThreadValueObjects } from "../../shared/thread-values"
 import {
   GOAL_UI_EVENT_LIMIT,
   GOAL_USER_MESSAGE_EVENT_PREFIX,
+  isStaleCheckpointBoundaryNoticeMessage,
   STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES,
   STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES
 } from "../../shared/goal-events"
@@ -37,6 +38,12 @@ import {
   SUBAGENT_TRANSCRIPT_STARTUP_BUCKET_LIMIT
 } from "../../shared/subagent-transcript-storage"
 import { createHash } from "crypto"
+import {
+  legacySubagentMigrationBatchTransactionBytes,
+  LEGACY_SUBAGENT_MIGRATION_BATCH_BYTES,
+  LEGACY_SUBAGENT_MIGRATION_BATCH_ROWS,
+  type LegacySubagentMigrationRow
+} from "../legacy-subagent-migration/protocol"
 
 let db: NativeSqliteAdapter | null = null
 type ThreadMessageRole = Message["role"]
@@ -542,6 +549,26 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
       updated_at INTEGER NOT NULL
     )
   `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS legacy_checkpoint_transcript_migrations (
+      thread_id TEXT PRIMARY KEY,
+      checkpoint_id TEXT NOT NULL,
+      total_messages INTEGER NOT NULL,
+      next_index INTEGER NOT NULL,
+      current_fragment_index INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+
+  const legacyTranscriptMigrationColumns =
+    db.exec("PRAGMA table_info(legacy_checkpoint_transcript_migrations)")?.[0]?.values ?? []
+  if (!legacyTranscriptMigrationColumns.some((column) => column[1] === "current_fragment_index")) {
+    db.run(
+      "ALTER TABLE legacy_checkpoint_transcript_migrations ADD COLUMN current_fragment_index INTEGER NOT NULL DEFAULT 0"
+    )
+  }
 
   db.run(`
     CREATE TABLE IF NOT EXISTS thread_message_fragments (
@@ -1193,6 +1220,13 @@ function normalizeThreadMessagesPageLimit(limit: number | undefined): number {
   return Math.min(MAX_THREAD_MESSAGES_PAGE_LIMIT, Math.max(1, Math.floor(limit)))
 }
 
+function normalizeThreadMessagesPageByteBudget(byteBudget: number | undefined): number {
+  if (!Number.isFinite(byteBudget) || byteBudget === undefined || byteBudget <= 0) {
+    return THREAD_MESSAGES_PAGE_BYTE_BUDGET
+  }
+  return Math.min(THREAD_MESSAGES_PAGE_BYTE_BUDGET, Math.max(1, Math.floor(byteBudget)))
+}
+
 /**
  * Read one durable transcript page without materializing or parsing the stable
  * prefix. The compound cursor is defensive: ordinals are intended to be
@@ -1204,6 +1238,7 @@ export function getThreadMessagesPage(
 ): ThreadMessagesPage {
   const database = getDb()
   const limit = normalizeThreadMessagesPageLimit(options.limit)
+  const byteBudget = normalizeThreadMessagesPageByteBudget(options.byteBudget)
   const hasBeforeOrdinal =
     Number.isSafeInteger(options.beforeOrdinal) && (options.beforeOrdinal ?? -1) >= 0
   const normalizedBeforeMessageId = options.beforeMessageId?.trim() ?? ""
@@ -1292,7 +1327,7 @@ export function getThreadMessagesPage(
     if (selectedCandidates.length >= limit) break
     if (
       selectedCandidates.length > 0 &&
-      selectedBytes + candidate.estimated_bytes > THREAD_MESSAGES_PAGE_BYTE_BUDGET
+      selectedBytes + candidate.estimated_bytes > byteBudget
     ) {
       break
     }
@@ -2626,55 +2661,151 @@ export function replaceThreadSubagentManifestBuckets(
   saveToDisk()
 }
 
+export interface LegacyThreadSubagentBatchInsertResult {
+  threadExists: boolean
+  insertedRows: number
+  existingRows: number
+}
+
 /**
- * Idempotent legacy migration. Existing partial row buckets are merged over
- * the inline manifest, and removing the giant thread_values key commits in
- * the same transaction so a crash can never strand one half of the migration.
+ * Commit one worker-normalized legacy batch. Existing row IDs always win, so
+ * a crash/retry or a live write between process incarnations cannot be rolled
+ * back to the older inline value. The transaction is synchronous and bounded;
+ * callers yield only after it has committed.
  */
-export function migrateLegacyThreadSubagentManifestBuckets(
+export function insertLegacyThreadSubagentManifestBatch(
   threadId: string,
-  transcripts: Record<string, unknown>,
-  nextThreadValuesJson: string
-): boolean {
+  rows: readonly LegacySubagentMigrationRow[]
+): LegacyThreadSubagentBatchInsertResult {
+  if (rows.length > LEGACY_SUBAGENT_MIGRATION_BATCH_ROWS) {
+    throw new Error(
+      `Legacy subagent migration batch exceeds ${LEGACY_SUBAGENT_MIGRATION_BATCH_ROWS} rows`
+    )
+  }
+  const transactionBytes = legacySubagentMigrationBatchTransactionBytes(threadId, rows)
+  if (transactionBytes > LEGACY_SUBAGENT_MIGRATION_BATCH_BYTES) {
+    throw new Error(
+      `Legacy subagent migration transaction exceeds ` +
+        `${LEGACY_SUBAGENT_MIGRATION_BATCH_BYTES} UTF-8 binding bytes`
+    )
+  }
   const database = getDb()
-  if (!threadExists(threadId)) return false
-  database.run("BEGIN")
+  database.run("BEGIN IMMEDIATE")
   try {
-    for (const [subagentId, rawMessages] of Object.entries(transcripts)) {
-      if (!Array.isArray(rawMessages)) continue
-      const stmt = database.prepare(
-        `SELECT thread_id, subagent_id, message_id, manifest_json, ordinal, updated_at
+    if (!threadExists(threadId)) {
+      database.run("ROLLBACK")
+      return { threadExists: false, insertedRows: 0, existingRows: 0 }
+    }
+
+    const bucketStates = new Map<
+      string,
+      { messageCount: number; nextOrdinal: number; updatedAt: number }
+    >()
+    let insertedRows = 0
+    let existingRows = 0
+    for (const row of rows) {
+      if (
+        !row.subagentId ||
+        !row.messageId ||
+        !row.storageMessageId ||
+        typeof row.manifestJson !== "string" ||
+        row.manifestJson.length === 0
+      ) {
+        continue
+      }
+      const existingStmt = database.prepare(
+        `SELECT 1 AS present
          FROM thread_subagent_messages
-         WHERE thread_id = ? AND subagent_id = ?
-         ORDER BY ordinal ASC, message_id ASC`
+         WHERE thread_id = ? AND subagent_id = ? AND message_id = ?
+         LIMIT 1`
       )
-      stmt.bind([threadId, subagentId])
-      const existingMessages: unknown[] = []
+      existingStmt.bind([threadId, row.subagentId, row.storageMessageId])
+      let alreadyExists = false
       try {
-        while (stmt.step()) {
-          existingMessages.push(
-            parseSubagentManifestRow(stmt.getAsObject() as unknown as ThreadSubagentMessageRow)
+        alreadyExists = existingStmt.step()
+      } finally {
+        existingStmt.free()
+      }
+      if (alreadyExists) {
+        existingRows += 1
+        continue
+      }
+
+      let bucketState = bucketStates.get(row.subagentId)
+      if (!bucketState) {
+        const bucket = getThreadSubagentBucketRow(database, threadId, row.subagentId)
+        if (bucket) {
+          bucketState = {
+            messageCount: Math.max(0, Number(bucket.message_count) || 0),
+            nextOrdinal: Math.max(0, Number(bucket.next_ordinal) || 0),
+            updatedAt: Date.now()
+          }
+        } else {
+          const repairStmt = database.prepare(
+            `SELECT COUNT(*) AS message_count,
+                    COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal
+             FROM thread_subagent_messages
+             WHERE thread_id = ? AND subagent_id = ?`
+          )
+          repairStmt.bind([threadId, row.subagentId])
+          let messageCount = 0
+          let nextOrdinal = 0
+          try {
+            if (repairStmt.step()) {
+              const repair = repairStmt.getAsObject()
+              messageCount = Math.max(0, Number(repair.message_count) || 0)
+              nextOrdinal = Math.max(0, Number(repair.next_ordinal) || 0)
+            }
+          } finally {
+            repairStmt.free()
+          }
+          bucketState = { messageCount, nextOrdinal, updatedAt: Date.now() }
+          database.run(
+            `INSERT INTO thread_subagent_buckets (
+               thread_id, subagent_id, message_count, next_ordinal, updated_at
+             ) VALUES (?, ?, ?, ?, ?)`,
+            [
+              threadId,
+              row.subagentId,
+              bucketState.messageCount,
+              bucketState.nextOrdinal,
+              bucketState.updatedAt
+            ]
           )
         }
-      } finally {
-        stmt.free()
+        bucketStates.set(row.subagentId, bucketState)
       }
-      const mergedMessages = mergeSubagentTranscriptManifestMessages(
-        rawMessages,
-        existingMessages
+
+      database.run(
+        `INSERT INTO thread_subagent_messages (
+           thread_id, subagent_id, message_id, manifest_json, ordinal, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          threadId,
+          row.subagentId,
+          row.storageMessageId,
+          row.manifestJson,
+          bucketState.nextOrdinal,
+          Date.now()
+        ]
       )
-      replaceThreadSubagentBucketWithinTransaction(
-        database,
-        threadId,
-        subagentId,
-        mergedMessages
+      bucketState.messageCount += 1
+      bucketState.nextOrdinal += 1
+      bucketState.updatedAt = Date.now()
+      insertedRows += 1
+    }
+
+    for (const [subagentId, state] of bucketStates) {
+      database.run(
+        `UPDATE thread_subagent_buckets
+         SET message_count = ?, next_ordinal = ?, updated_at = ?
+         WHERE thread_id = ? AND subagent_id = ?`,
+        [state.messageCount, state.nextOrdinal, state.updatedAt, threadId, subagentId]
       )
     }
-    database.run("UPDATE threads SET thread_values = ? WHERE thread_id = ?", [
-      nextThreadValuesJson,
-      threadId
-    ])
     database.run("COMMIT")
+    saveToDisk()
+    return { threadExists: true, insertedRows, existingRows }
   } catch (error) {
     try {
       database.run("ROLLBACK")
@@ -2683,8 +2814,6 @@ export function migrateLegacyThreadSubagentManifestBuckets(
     }
     throw error
   }
-  saveToDisk()
-  return true
 }
 
 export function hasThreadSubagentManifestRows(threadId: string): boolean {
@@ -4771,42 +4900,73 @@ export function getThreadValuesJsonPage(afterRowId = 0, limit = 16): RawJsonScan
 }
 
 /**
- * Return thread_values without deprecated lifetime timing maps. SQLite removes
- * the large keys before the string crosses into JavaScript, then persists the
- * compact value so legacy cleanup is paid at most once per opened thread.
+ * Read the compact hydration projection without mutating the thread. The large
+ * legacy fields stay inside SQLite; opening a thread must never trigger a write
+ * or copy the inline subagent transcript into the main-process heap.
  */
 export function getThreadHydrationValuesJson(
   threadId: string
 ): string | null | undefined {
   const database = getDb()
-  // Keep the large source JSON inside SQLite. A SELECT-then-UPDATE would copy
-  // the complete legacy timing maps through JS just to bind them back again.
-  database.run(
-    `UPDATE threads
-     SET thread_values = json_remove(
-       thread_values,
-       '$.messageTimes',
-       '$.messageTimeOrder',
-       '$.internalGoalMessageTimes',
-       '$.internalGoalMessageTimeOrder'
-     )
-     WHERE thread_id = ?
-       AND thread_values IS NOT NULL
-       AND json_valid(thread_values)
-       AND (
-         json_type(thread_values, '$.messageTimes') IS NOT NULL OR
-         json_type(thread_values, '$.messageTimeOrder') IS NOT NULL OR
-         json_type(thread_values, '$.internalGoalMessageTimes') IS NOT NULL OR
-         json_type(thread_values, '$.internalGoalMessageTimeOrder') IS NOT NULL
-       )`,
-    [threadId]
+  const stmt = database.prepare(
+    `SELECT CASE
+       WHEN thread_values IS NULL THEN NULL
+       WHEN json_valid(thread_values) THEN json_remove(
+         thread_values,
+         '$.subagentTranscripts',
+         '$.messageTimes',
+         '$.messageTimeOrder',
+         '$.internalGoalMessageTimes',
+         '$.internalGoalMessageTimeOrder'
+       )
+       ELSE '{}'
+     END AS hydration_values
+     FROM threads
+     WHERE thread_id = ?`
   )
-  return getThreadValuesJson(threadId)
+  stmt.bind([threadId])
+  try {
+    if (!stmt.step()) return undefined
+    const value = (stmt.getAsObject() as { hydration_values?: unknown }).hydration_values
+    return typeof value === "string" ? value : null
+  } finally {
+    stmt.free()
+  }
+}
+
+/**
+ * Renderer hydration projection. Large main-process-only file-history metadata
+ * and legacy thread-value payloads must never enter the synchronous fallback.
+ */
+export function getThreadHydrationCore(threadId: string): ThreadSummaryRow | null {
+  const database = getDb()
+  const stmt = database.prepare(
+    `SELECT thread_id, created_at, updated_at,
+            CASE
+              WHEN metadata IS NULL THEN NULL
+              WHEN json_valid(metadata) THEN json_remove(
+                metadata,
+                '$.llmFileHistory',
+                '$.llmModifiedFiles',
+                '$.llmRecentlyRevertedFiles'
+              )
+              ELSE '{}'
+            END AS metadata,
+            status, title
+     FROM threads
+     WHERE thread_id = ?`
+  )
+  stmt.bind([threadId])
+  try {
+    if (!stmt.step()) return null
+    return stmt.getAsObject() as unknown as ThreadSummaryRow
+  } finally {
+    stmt.free()
+  }
 }
 
 export interface LegacyThreadSubagentMigrationPayload {
-  legacyTranscriptsJson: string | null
-  nextThreadValuesJson: string
+  legacyValueJson: string | null
   hasLegacyValue: boolean
 }
 
@@ -4823,21 +4983,10 @@ export function getLegacyThreadSubagentMigrationPayload(
     `SELECT
        CASE
          WHEN json_valid(thread_values)
-           AND json_type(thread_values, '$.subagentTranscripts') = 'object'
-         THEN json_extract(thread_values, '$.subagentTranscripts')
+           AND json_type(thread_values, '$.subagentTranscripts') IS NOT NULL
+         THEN json_quote(json_extract(thread_values, '$.subagentTranscripts'))
          ELSE NULL
-       END AS legacy_transcripts_json,
-       CASE
-         WHEN json_valid(thread_values) THEN json_remove(
-           thread_values,
-           '$.subagentTranscripts',
-           '$.messageTimes',
-           '$.messageTimeOrder',
-           '$.internalGoalMessageTimes',
-           '$.internalGoalMessageTimeOrder'
-         )
-         ELSE '{}'
-       END AS next_thread_values_json,
+       END AS legacy_value_json,
        CASE
          WHEN json_valid(thread_values)
          THEN json_type(thread_values, '$.subagentTranscripts') IS NOT NULL
@@ -4850,23 +4999,95 @@ export function getLegacyThreadSubagentMigrationPayload(
   try {
     if (!stmt.step()) return undefined
     const row = stmt.getAsObject() as {
-      legacy_transcripts_json?: unknown
-      next_thread_values_json?: unknown
+      legacy_value_json?: unknown
       has_legacy_value?: unknown
     }
     return {
-      legacyTranscriptsJson:
-        typeof row.legacy_transcripts_json === "string"
-          ? row.legacy_transcripts_json
-          : null,
-      nextThreadValuesJson:
-        typeof row.next_thread_values_json === "string"
-          ? row.next_thread_values_json
-          : "{}",
+      legacyValueJson:
+        typeof row.legacy_value_json === "string" ? row.legacy_value_json : null,
       hasLegacyValue: Number(row.has_legacy_value) !== 0
     }
   } finally {
     stmt.free()
+  }
+}
+
+export type LegacyThreadSubagentMigrationFinalization =
+  | "removed"
+  | "changed"
+  | "missing"
+
+/**
+ * Remove the inline snapshot only after every parsed row has committed. The
+ * JSON-token comparison is a snapshot CAS: unrelated concurrent value edits
+ * are preserved, while a changed inline transcript forces a full retry.
+ */
+export function finalizeLegacyThreadSubagentMigration(
+  threadId: string,
+  expectedLegacyValueJson: string
+): LegacyThreadSubagentMigrationFinalization {
+  const database = getDb()
+  database.run("BEGIN IMMEDIATE")
+  try {
+    if (!threadExists(threadId)) {
+      database.run("ROLLBACK")
+      return "missing"
+    }
+    database.run(
+      `UPDATE threads
+       SET thread_values = json_remove(
+         thread_values,
+         '$.subagentTranscripts',
+         '$.messageTimes',
+         '$.messageTimeOrder',
+         '$.internalGoalMessageTimes',
+         '$.internalGoalMessageTimeOrder'
+       )
+       WHERE thread_id = ?
+         AND json_valid(thread_values)
+         AND json_type(thread_values, '$.subagentTranscripts') IS NOT NULL
+         AND json_quote(json_extract(thread_values, '$.subagentTranscripts')) = ?`,
+      [threadId, expectedLegacyValueJson]
+    )
+    const changesStmt = database.prepare("SELECT changes() AS changed_rows")
+    let changedRows = 0
+    try {
+      if (changesStmt.step()) {
+        changedRows = Number(changesStmt.getAsObject().changed_rows) || 0
+      }
+    } finally {
+      changesStmt.free()
+    }
+    if (changedRows > 0) {
+      database.run("COMMIT")
+      saveToDisk()
+      return "removed"
+    }
+
+    const legacyStmt = database.prepare(
+      `SELECT json_type(thread_values, '$.subagentTranscripts') AS legacy_type
+       FROM threads
+       WHERE thread_id = ?`
+    )
+    legacyStmt.bind([threadId])
+    let hasLegacyValue = false
+    try {
+      if (legacyStmt.step()) {
+        hasLegacyValue =
+          typeof legacyStmt.getAsObject().legacy_type === "string"
+      }
+    } finally {
+      legacyStmt.free()
+    }
+    database.run("COMMIT")
+    return hasLegacyValue ? "changed" : "removed"
+  } catch (error) {
+    try {
+      database.run("ROLLBACK")
+    } catch {
+      // Preserve the original transaction error.
+    }
+    throw error
   }
 }
 
@@ -4975,7 +5196,10 @@ export function mergeThreadValues(
   threadId: string,
   patch: Record<string, unknown>
 ): ThreadRow | null {
-  const existingValues = getThreadValuesJson(threadId)
+  // Dedicated sidecars own subagent transcripts and durable message timing.
+  // Merge only the compact projection so a cold mutation never parses or
+  // re-persists their legacy lifetime maps.
+  const existingValues = getThreadHydrationValuesJson(threadId)
   if (existingValues === undefined) return null
 
   const merged = mergeThreadValueObjects(parseThreadValues(existingValues), patch)
@@ -4997,6 +5221,9 @@ export function deleteThread(threadId: string): void {
     database.run("DELETE FROM thread_message_fragment_states WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_messages WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_message_buckets WHERE thread_id = ?", [threadId])
+    database.run("DELETE FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?", [
+      threadId
+    ])
     database.run("DELETE FROM thread_goal_events WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_goals WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM threads WHERE thread_id = ?", [threadId])
@@ -5093,25 +5320,124 @@ export function getThreadGoalEvents(
   return events
 }
 
-function readThreadGoalEvents(
-  sql: string,
-  params: Array<string | number | null>
+const NON_TRANSCRIPT_GOAL_COMMANDS = new Set([
+  "/goal",
+  "/goal status",
+  "/goal pause",
+  ...GOAL_CLEAR_ALIASES.map((alias) => `/goal ${alias}`)
+])
+
+function isRestorableGoalUserEventMessage(message: string): boolean {
+  const trimmed = message.trim()
+  if (!trimmed.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)) return false
+  const command = trimmed.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length).trim().toLowerCase()
+  return !NON_TRANSCRIPT_GOAL_COMMANDS.has(command)
+}
+
+/**
+ * Emergency main-process fallback used only when the metadata worker cannot
+ * start. SQL truncates each message before it enters JS and the loop enforces
+ * an aggregate response ceiling, so a hostile legacy event cannot freeze the
+ * Electron event loop.
+ */
+export function getThreadGoalEventsHydrationFallback(
+  threadId: string,
+  options: { limit?: number; byteBudget?: number; restore?: boolean; scanLimit?: number } = {}
 ): ThreadGoalEventRow[] {
   const database = getDb()
-  const stmt = database.prepare(sql)
-  stmt.bind(params)
+  const limit = Math.min(32, Math.max(1, Math.floor(options.limit ?? 32)))
+  const byteBudget = Math.min(
+    256 * 1024,
+    Math.max(32 * 1024, Math.floor(options.byteBudget ?? 256 * 1024))
+  )
+  const scanLimit = Math.min(500, Math.max(limit, Math.floor(options.scanLimit ?? 500)))
+  const excludedCommands = [...NON_TRANSCRIPT_GOAL_COMMANDS]
+  const restorePredicate = `
+    (
+      substr(trim(message), 1, length(?)) = ?
+      AND lower(trim(substr(trim(message), length(?) + 1)))
+        NOT IN (${excludedCommands.map(() => "?").join(", ")})
+    )
+    OR trim(message) IN (${STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES.map(() => "?").join(", ")})
+    OR ${STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES.map(
+      () => "substr(trim(message), 1, length(?)) = ?"
+    ).join(" OR ")}`
+  const statementSql = options.restore
+    ? `WITH scanned AS (
+         SELECT event_id, thread_id, goal_id, active_window_id,
+                substr(message, 1, 8192) AS message,
+                length(message) AS original_message_chars,
+                created_at
+         FROM (
+           SELECT event_id, thread_id, goal_id, active_window_id, message, created_at
+           FROM thread_goal_events
+           WHERE thread_id = ?
+           ORDER BY created_at DESC, event_id DESC
+           LIMIT ?
+         )
+       ), selected AS (
+         SELECT * FROM scanned
+         WHERE event_id IN (
+           SELECT event_id FROM scanned ORDER BY created_at DESC, event_id DESC LIMIT ?
+         ) OR (${restorePredicate})
+       )
+       SELECT * FROM (
+         SELECT * FROM selected ORDER BY created_at DESC, event_id DESC LIMIT ?
+       ) ORDER BY created_at ASC, event_id ASC`
+    : `SELECT * FROM (
+         SELECT event_id, thread_id, goal_id, active_window_id,
+                substr(message, 1, 8192) AS message,
+                length(message) AS original_message_chars,
+                created_at
+         FROM thread_goal_events
+         WHERE thread_id = ?
+         ORDER BY created_at DESC, event_id DESC
+         LIMIT ?
+       ) ORDER BY created_at ASC, event_id ASC`
+  const stmt = database.prepare(statementSql)
+  const restoreBindings = [
+    GOAL_USER_MESSAGE_EVENT_PREFIX,
+    GOAL_USER_MESSAGE_EVENT_PREFIX,
+    GOAL_USER_MESSAGE_EVENT_PREFIX,
+    ...excludedCommands,
+    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES,
+    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES.flatMap((prefix) => [prefix, prefix])
+  ]
+  stmt.bind(
+    options.restore
+      ? [threadId, scanLimit, limit, ...restoreBindings, Math.min(96, limit + 64)]
+      : [threadId, limit]
+  )
   const events: ThreadGoalEventRow[] = []
+  let responseBytes = 0
   try {
     while (stmt.step()) {
-      const row = stmt.getAsObject() as unknown as ThreadGoalEventRow
+      const row = stmt.getAsObject() as {
+        event_id?: unknown
+        thread_id?: unknown
+        goal_id?: unknown
+        active_window_id?: unknown
+        message?: unknown
+        original_message_chars?: unknown
+        created_at?: unknown
+      }
+      if (typeof row.thread_id !== "string" || typeof row.message !== "string") continue
+      const wasTruncated = Number(row.original_message_chars) > row.message.length
+      const message = wasTruncated
+        ? `${row.message}\n…[历史 Goal 事件已截断]`
+        : row.message
+      const eventBytes = Buffer.byteLength(message) + 160
+      if (events.length > 0 && responseBytes + eventBytes > byteBudget) continue
       events.push({
         event_id: Number(row.event_id),
         thread_id: row.thread_id,
-        goal_id: row.goal_id,
-        active_window_id: row.active_window_id ?? null,
-        message: row.message,
+        goal_id: typeof row.goal_id === "string" ? row.goal_id : null,
+        active_window_id:
+          typeof row.active_window_id === "string" ? row.active_window_id : null,
+        message,
         created_at: Number(row.created_at)
       })
+      responseBytes += eventBytes
     }
   } finally {
     stmt.free()
@@ -5121,68 +5447,27 @@ function readThreadGoalEvents(
 
 export function getThreadGoalEventsForRestore(
   threadId: string,
-  options: { recentLimit?: number } = {}
+  options: { recentLimit?: number; scanLimit?: number } = {}
 ): ThreadGoalEventRow[] {
-  const recentLimit =
+  // Restore is on the thread-open critical path. Read one bounded tail window
+  // instead of running message predicates over the complete goal-event history.
+  // The default mirrors the durable transcript page size, and the existing
+  // message-page normalizer also caps hostile/accidental caller values at 1,000.
+  const scanLimit = normalizeThreadMessagesPageLimit(options.scanLimit)
+  const requestedRecentLimit =
     typeof options.recentLimit === "number" &&
     Number.isFinite(options.recentLimit) &&
     options.recentLimit > 0
       ? Math.floor(options.recentLimit)
       : GOAL_UI_EVENT_LIMIT
+  const recentLimit = Math.min(scanLimit, requestedRecentLimit)
+  const scannedEvents = getThreadGoalEvents(threadId, { limit: scanLimit })
+  const recentStart = Math.max(0, scannedEvents.length - recentLimit)
 
-  const eventById = new Map<number, ThreadGoalEventRow>()
-  const addEvents = (events: ThreadGoalEventRow[]) => {
-    for (const event of events) {
-      eventById.set(event.event_id, event)
-    }
-  }
-  const nonTranscriptGoalCommands = [
-    "/goal",
-    "/goal status",
-    "/goal pause",
-    ...GOAL_CLEAR_ALIASES.map((alias) => `/goal ${alias}`)
-  ]
-
-  addEvents(
-    readThreadGoalEvents(
-      `SELECT * FROM thread_goal_events
-       WHERE thread_id = ?
-         AND substr(message, 1, ?) = ?
-         AND lower(trim(substr(message, ?))) NOT IN (${nonTranscriptGoalCommands
-           .map(() => "?")
-           .join(", ")})
-       ORDER BY created_at ASC, event_id ASC`,
-      [
-        threadId,
-        GOAL_USER_MESSAGE_EVENT_PREFIX.length,
-        GOAL_USER_MESSAGE_EVENT_PREFIX,
-        GOAL_USER_MESSAGE_EVENT_PREFIX.length + 1,
-        ...nonTranscriptGoalCommands
-      ]
-    )
-  )
-
-  const boundaryPredicates = [
-    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES.map(() => "message = ?"),
-    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES.map(() => "substr(message, 1, ?) = ?")
-  ]
-  const boundaryParams: Array<string | number | null> = [
-    threadId,
-    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES,
-    ...STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES.flatMap((prefix) => [prefix.length, prefix])
-  ]
-  addEvents(
-    readThreadGoalEvents(
-      `SELECT * FROM thread_goal_events
-       WHERE thread_id = ? AND (${boundaryPredicates.join(" OR ")})
-       ORDER BY created_at ASC, event_id ASC`,
-      boundaryParams
-    )
-  )
-
-  addEvents(getThreadGoalEvents(threadId, { limit: recentLimit }))
-
-  return [...eventById.values()].sort(
-    (a, b) => a.created_at - b.created_at || a.event_id - b.event_id
+  return scannedEvents.filter(
+    (event, index) =>
+      index >= recentStart ||
+      isRestorableGoalUserEventMessage(event.message) ||
+      isStaleCheckpointBoundaryNoticeMessage(event.message)
   )
 }

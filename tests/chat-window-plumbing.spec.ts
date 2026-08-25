@@ -3,7 +3,14 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 async function main(): Promise<void> {
-  const [container, virtualList, navigator, search, scrollToBottomButton] = await Promise.all([
+  const [
+    container,
+    virtualList,
+    navigator,
+    search,
+    scrollToBottomButton,
+    threadProjectionCache
+  ] = await Promise.all([
     readFile(
       resolve(__dirname, "../src/renderer/src/components/chat/ChatContainer.tsx"),
       "utf8"
@@ -23,12 +30,17 @@ async function main(): Promise<void> {
     readFile(
       resolve(__dirname, "../src/renderer/src/components/chat/ChatScrollToBottomButton.tsx"),
       "utf8"
+    ),
+    readFile(
+      resolve(__dirname, "../src/renderer/src/lib/chat-thread-projection-cache.ts"),
+      "utf8"
     )
   ])
 
   assert.match(container, /const displayMessageProjection = projectChatMessages\(/)
   assert.match(container, /getThreadDisplayBaseline\(threadMessages, messagesContentVersion\)/)
-  assert.match(container, /mergeVisibleChatMessageIndexes\(/)
+  assert.match(container, /threadProjectionRuntime\.projectVisibleMessageIndexes\(/)
+  assert.match(threadProjectionCache, /mergeVisibleChatMessageIndexes\(/)
   assert.match(container, /historyMessageTotal - historyLoadedMessageCount/)
   assert.match(container, /onLoadEarlierHistoryPage=\{loadEarlierHistoryPage\}/)
   assert.match(container, /contentVersion=\{displayMessagesContentVersion\}/)
@@ -36,9 +48,9 @@ async function main(): Promise<void> {
   assert.doesNotMatch(container, /messageWindow/)
   assert.match(
     container,
-    /useStableToolDerivationMessages\(\s*displayMessages,\s*displayMessageProjection\.changedMessages,\s*displayMessagesStructureVersion/
+    /threadProjectionRuntime\.projectToolDerivationMessages\(\s*displayMessages,\s*displayMessageProjection\.changedMessages,\s*displayMessagesStructureVersion/
   )
-  assert.match(container, /createIncrementalToolDerivationProjector/)
+  assert.match(threadProjectionCache, /createIncrementalToolDerivationProjector/)
   assert.doesNotMatch(container, /useStableToolDerivationMessages\(displayMessages\)/)
 
   assert.match(virtualList, /CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD = 100/)

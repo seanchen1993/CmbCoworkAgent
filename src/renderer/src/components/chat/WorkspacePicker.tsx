@@ -10,11 +10,12 @@ import {
   RefreshCw,
   Trash2
 } from "lucide-react"
-import { useState, useEffect, memo } from "react"
+import { useState, useEffect, memo, useCallback } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { useCurrentThread } from "@/lib/thread-context"
+import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
+import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
 import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
@@ -93,8 +94,18 @@ function WorkspacePickerImpl({
   threadId,
   onGitStatusChange
 }: WorkspacePickerProps): React.JSX.Element {
-  const { workspacePath, setWorkspacePath, setWorkspaceFiles, messages } = useCurrentThread(threadId)
-  const canChangeWorkspace = messages.length === 0
+  const workspacePath = useThreadStateSelector(
+    threadId,
+    useCallback((state) => state.workspacePath, [])
+  )
+  const canChangeWorkspace =
+    useThreadStateSelector(
+      threadId,
+      useCallback((state) => state.messages.length === 0, [])
+    ) ?? true
+  const threadActions = useThreadActions(threadId)
+  const setWorkspacePath = threadActions?.setWorkspacePath
+  const setWorkspaceFiles = threadActions?.setWorkspaceFiles
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
 
@@ -167,7 +178,7 @@ function WorkspacePickerImpl({
 
       const p = await window.api.workspace.get(threadId)
       if (cancelled) return
-      setWorkspacePath(p)
+      setWorkspacePath?.(p)
       if (p) {
         const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false, threadId })
         if (cancelled) return
@@ -176,9 +187,9 @@ function WorkspacePickerImpl({
         setIsWorktreePath(gitInfo.isWorktreePath)
         onGitStatusChange?.(threadId, gitInfo.isGit)
 
-        // Load worktree context from thread metadata
-        const thread = await window.api.threads.get(threadId)
-        if (cancelled) return
+        // The bounded task directory already contains the worktree projection. Reuse it instead
+        // of issuing a second metadata hydration request on every ChatContainer remount.
+        const thread = useAppStore.getState().threads.find((item) => item.thread_id === threadId)
         const meta = thread?.metadata as Record<string, unknown> | undefined
         if (meta?.isWorktree && meta.gitRoot && meta.worktreeBranch) {
           setIsWorktree(true)
@@ -191,9 +202,15 @@ function WorkspacePickerImpl({
         onGitStatusChange?.(threadId, false)
       }
     }
-    loadWorkspace()
+    void loadWorkspace().catch((error) => {
+      if (cancelled || (error instanceof DOMException && error.name === "AbortError")) return
+      console.error("[WorkspacePicker] Failed to load workspace:", error)
+    })
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      void window.api.workspace.cancelGitPanelReads("workspace-probe").catch(() => undefined)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
 
@@ -211,6 +228,7 @@ function WorkspacePickerImpl({
   }, [canChangeWorkspace, isWorktree])
 
   async function handleSelectFolder(): Promise<void> {
+    if (!setWorkspacePath || !setWorkspaceFiles) return
     const selection = await selectWorkspaceFolder(
       threadId,
       setWorkspacePath,
@@ -258,7 +276,7 @@ function WorkspacePickerImpl({
         result.baseBranch,
         result.baseCommit
       )
-      setWorkspacePath(result.path)
+      setWorkspacePath?.(result.path)
       setIsWorktree(true)
       setWorktreeBranch(result.branch)
       setWorktreeBaseBranch(result.baseBranch ?? null)
@@ -267,7 +285,7 @@ function WorkspacePickerImpl({
       const diskResult = await loadWorkspaceFilesDeduped(threadId, result.path, {
         requestTrailingRescan: true
       })
-      if (diskResult.success && diskResult.files) setWorkspaceFiles(diskResult.files)
+      if (diskResult.success && diskResult.files) setWorkspaceFiles?.(diskResult.files)
       setCreatingWorktree(false)
       setBranchName("")
       await refreshWorktreeList(gitRoot)

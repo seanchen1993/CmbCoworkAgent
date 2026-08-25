@@ -56,6 +56,7 @@ type ThreadHistoryEntry = {
   checkpoint?: {
     channel_values?: {
       messages?: unknown[]
+      __cmb_original_message_count?: number
     }
   }
 }
@@ -1015,7 +1016,13 @@ export function WorkerStreamPanel(): React.JSX.Element {
         }
 
         const history = buildWorkerCheckpointHistory(rawMessages, workerThreadId)
-        setTruncatedHistoryCount(history.truncatedCount)
+        const originalMessageCount =
+          latestCheckpoint?.checkpoint?.channel_values?.__cmb_original_message_count
+        const workerOmittedCount =
+          typeof originalMessageCount === "number" && originalMessageCount > rawMessages.length
+            ? originalMessageCount - rawMessages.length
+            : 0
+        setTruncatedHistoryCount(workerOmittedCount + history.truncatedCount)
         setHistoryMessages(history.messages)
       } catch (error) {
         console.error("[WorkerStreamPanel] Failed to load worker checkpoint:", error)

@@ -9,6 +9,7 @@ import {
 } from "../src/renderer/src/lib/chat-report-batch.ts"
 import {
   CHAT_REPORT_UPLOAD_CACHE_MAX_IDS_PER_THREAD,
+  CHAT_REPORT_UPLOAD_CACHE_MAX_IN_FLIGHT_IDS_PER_THREAD,
   CHAT_REPORT_UPLOAD_CACHE_MAX_THREADS,
   clearChatReportUploadState,
   markChatReportMessageIdsUploaded,
@@ -106,6 +107,20 @@ function testChatReportCacheBoundsThreadsAndIds(): void {
     "the newest thread should retain its dedupe state"
   )
 
+  const inFlightThreadId = "report-in-flight-ring"
+  clearChatReportUploadState(inFlightThreadId)
+  assert.equal(
+    reserveChatReportMessageIds(
+      inFlightThreadId,
+      Array.from(
+        { length: CHAT_REPORT_UPLOAD_CACHE_MAX_IN_FLIGHT_IDS_PER_THREAD + 100 },
+        (_, index) => `in-flight-${index}`
+      )
+    ).length,
+    CHAT_REPORT_UPLOAD_CACHE_MAX_IN_FLIGHT_IDS_PER_THREAD,
+    "a stalled request must not retain an unbounded id set"
+  )
+
   const boundedThreadId = "report-id-ring"
   clearChatReportUploadState(boundedThreadId)
   const uploadedIds = Array.from(
@@ -124,7 +139,7 @@ function testChatReportCacheBoundsThreadsAndIds(): void {
     "the per-thread ring should retain its newest uploaded id"
   )
 
-  for (const threadId of [...threadIds, boundedThreadId]) {
+  for (const threadId of [...threadIds, boundedThreadId, inFlightThreadId]) {
     clearChatReportUploadState(threadId)
   }
 }
@@ -149,13 +164,20 @@ async function testChatContainerCancelsComponentOwnedWork(): Promise<void> {
   )
   assert.match(
     source,
-    /chatReportDisposedRef\.current = true[\s\S]*Object\.values\(chatReportUploadTimersRef\.current\)[\s\S]*Object\.values\(chatReportRetryTimersRef\.current\)[\s\S]*chatReportRetryQueuesRef\.current = \{\}/,
-    "unmount must cancel upload/retry timers and release queued batches"
+    /chatReportDisposedRef\.current = true[\s\S]*Object\.values\(chatReportUploadTimersRef\.current\)[\s\S]*Object\.values\(chatReportRetryTimersRef\.current\)[\s\S]*Object\.values\(chatReportAbortControllersRef\.current\)[\s\S]*controller\?\.abort[\s\S]*chatReportPendingBatchesRef\.current = \{\}/,
+    "unmount must abort uploads, cancel timers and release the bounded pending batch"
   )
 }
 
-testTenThousandMessageHistoryReadsOnlyRecentTurn()
-testChatReportContentBudgetIsBounded()
-testChatReportCacheBoundsThreadsAndIds()
-await testChatContainerCancelsComponentOwnedWork()
-console.log("chat report performance contracts passed")
+async function main(): Promise<void> {
+  testTenThousandMessageHistoryReadsOnlyRecentTurn()
+  testChatReportContentBudgetIsBounded()
+  testChatReportCacheBoundsThreadsAndIds()
+  await testChatContainerCancelsComponentOwnedWork()
+  console.log("chat report performance contracts passed")
+}
+
+void main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

@@ -1,6 +1,8 @@
 export interface OpenResourcePreviewDetail {
   threadId: string
   filePath: string
+  /** Main-issued capability for a trusted non-workspace file. */
+  externalPreviewGrant?: string
 }
 
 const RESOURCE_PREVIEW_OPEN_EVENT = "resource-preview:open"

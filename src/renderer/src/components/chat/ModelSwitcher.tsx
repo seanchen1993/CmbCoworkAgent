@@ -1,16 +1,26 @@
-import { useState, useEffect, memo } from "react"
+import { useState, useEffect, memo, useMemo, useSyncExternalStore } from "react"
 import { useShallow } from "zustand/react/shallow"
 import { ChevronDown, Check, Key, Zap, Info } from "lucide-react"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Button } from "@/components/ui/button"
 import { useAppStore } from "@/lib/store"
-import { useCurrentThread } from "@/lib/thread-context"
+import {
+  useThreadActions,
+  useThreadStateSelector,
+  type ThreadState
+} from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 import {
   resolveHydratedThreadModel,
   type ModelRoutingMode
 } from "../../../../shared/thread-model-selection"
 import { CustomModelDialog } from "./CustomModelDialog"
+import {
+  invalidateModelCatalogCache,
+  readModelCatalogCache,
+  subscribeModelCatalog,
+  updateCachedRoutingMode
+} from "@/lib/model-catalog-cache"
 
 function CustomIcon({ className }: { className?: string }): React.JSX.Element {
   return (
@@ -24,56 +34,40 @@ interface ModelSwitcherProps {
   threadId: string
 }
 
+const selectCurrentModel = (state: ThreadState): string => state.currentModel
+const selectRoutingResult = (state: ThreadState): ThreadState["routingResult"] =>
+  state.routingResult
+
 export const ModelSwitcher = memo(ModelSwitcherImpl)
 
 function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const [customDialogOpen, setCustomDialogOpen] = useState(false)
   const [dialogModelId, setDialogModelId] = useState<string | undefined>(undefined)
-  const [routingMode, setRoutingMode] = useState<ModelRoutingMode>("pinned")
-  const [routingModeLoaded, setRoutingModeLoaded] = useState(false)
-  const [defaultModelId, setDefaultModelId] = useState("")
-
-  const { models, loadModels, loadProviders } = useAppStore(
+  const { models, threads, loadModels } = useAppStore(
     useShallow((state) => ({
       models: state.models,
-      loadModels: state.loadModels,
-      loadProviders: state.loadProviders
+      threads: state.threads,
+      loadModels: state.loadModels
     }))
   )
-  const { currentModel, restoreCurrentModel, setCurrentModel, routingResult } =
-    useCurrentThread(threadId)
-
-  // Load global routing mode on mount
-  useEffect(() => {
-    let cancelled = false
-    void window.api.routing
-      .getMode()
-      .then((mode) => {
-        if (!cancelled) setRoutingMode(mode)
-      })
-      .catch((error) => {
-        console.warn("[ModelSwitcher] Failed to load routing mode; using pinned:", error)
-      })
-      .finally(() => {
-        if (!cancelled) setRoutingModeLoaded(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const modelCatalog = useSyncExternalStore(
+    subscribeModelCatalog,
+    readModelCatalogCache,
+    readModelCatalogCache
+  )
+  const routingMode: ModelRoutingMode = modelCatalog?.routingMode ?? "pinned"
+  const routingModeLoaded = modelCatalog !== null
+  const defaultModelId = modelCatalog?.defaultModelId ?? ""
+  const currentModel = useThreadStateSelector(threadId, selectCurrentModel) ?? ""
+  const routingResult = useThreadStateSelector(threadId, selectRoutingResult)
+  const threadActions = useThreadActions(threadId)
+  const restoreCurrentModel = threadActions?.restoreCurrentModel
+  const setCurrentModel = threadActions?.setCurrentModel
 
   useEffect(() => {
-    const reloadModels = (): void => {
-      void loadModels()
-      void loadProviders()
-      void window.api.models.getDefault().then(setDefaultModelId)
-    }
-    reloadModels()
-    return window.api.models.onChanged(() => {
-      reloadModels()
-    })
-  }, [loadModels, loadProviders])
+    void loadModels()
+  }, [loadModels])
 
   const selectedModel = models.find((m) => m.id === currentModel)
 
@@ -90,43 +84,37 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
     : null
   const routedTierLabel = routingResult?.resolvedTier === "economy" ? "经济" : routingResult?.resolvedTier === "premium" ? "强力" : null
 
-  const hydrationKey = routingModeLoaded ? `${threadId}:${routingMode}` : null
-  const [hydratedModelKey, setHydratedModelKey] = useState<string | null>(null)
+  const threadSummary = useMemo(
+    () => threads.find((thread) => thread.thread_id === threadId) ?? null,
+    [threadId, threads]
+  )
+  const hydratedModel = useMemo(
+    () =>
+      routingModeLoaded
+        ? resolveHydratedThreadModel(threadSummary?.metadata, routingMode)
+        : { modelId: null },
+    [routingMode, routingModeLoaded, threadSummary]
+  )
+  const effectiveCurrentModel = currentModel || hydratedModel.modelId || ""
 
   useEffect(() => {
-    if (!hydrationKey) return
-    let cancelled = false
-    void window.api.threads
-      .get(threadId)
-      .then((thread) => {
-        if (cancelled) return
-        const hydrated = resolveHydratedThreadModel(thread?.metadata, routingMode)
-        if (hydrated.modelId) {
-          // Hydration only restores the model used by the current view. Persisting here
-          // would turn a read-only session open into an updated_at change.
-          restoreCurrentModel(hydrated.modelId)
-        }
-      })
-      .catch((error) => {
-        console.warn(`[ModelSwitcher] Failed to hydrate model for thread ${threadId}:`, error)
-      })
-      .finally(() => {
-        if (!cancelled) setHydratedModelKey(hydrationKey)
-      })
-    return () => {
-      cancelled = true
+    if (hydratedModel.modelId && hydratedModel.modelId !== currentModel) {
+      // Hydration only restores the model used by the current view. Persisting here
+      // would turn a read-only session open into an updated_at change.
+      restoreCurrentModel?.(hydratedModel.modelId)
     }
-  }, [hydrationKey, restoreCurrentModel, routingMode, threadId])
+  }, [currentModel, hydratedModel.modelId, restoreCurrentModel])
 
   useEffect(() => {
-    if (!hydrationKey || hydratedModelKey !== hydrationKey || models.length === 0) return
+    if (!routingModeLoaded || models.length === 0) return
 
-    const hasValidSelection = currentModel && models.some((m) => m.id === currentModel)
-    if (!hasValidSelection && currentModel?.startsWith("custom:")) {
-      const legacyModelName = currentModel.slice("custom:".length)
+    const hasValidSelection =
+      effectiveCurrentModel && models.some((m) => m.id === effectiveCurrentModel)
+    if (!hasValidSelection && effectiveCurrentModel.startsWith("custom:")) {
+      const legacyModelName = effectiveCurrentModel.slice("custom:".length)
       const migrated = models.find((m) => m.model === legacyModelName)
       if (migrated) {
-        setCurrentModel(migrated.id)
+        setCurrentModel?.(migrated.id)
         return
       }
     }
@@ -135,12 +123,12 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
       const preferred =
         models.find((model) => model.id === defaultModelId && model.available) ??
         models.find((model) => model.available)
-      if (preferred) setCurrentModel(preferred.id)
+      if (preferred) setCurrentModel?.(preferred.id)
     }
-  }, [models, currentModel, defaultModelId, setCurrentModel, hydratedModelKey, hydrationKey])
+  }, [defaultModelId, effectiveCurrentModel, models, routingModeLoaded, setCurrentModel])
 
   function handleModelSelect(modelId: string): void {
-    setCurrentModel(modelId)
+    setCurrentModel?.(modelId)
     setOpen(false)
   }
 
@@ -211,7 +199,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
               onClick={() => {
                 if (!canEnableRouting || !routingModeLoaded) return
                 const next: ModelRoutingMode = routingMode === "auto" ? "pinned" : "auto"
-                setRoutingMode(next)
+                updateCachedRoutingMode(next)
                 void window.api.routing.setMode(next)
               }}
               className={cn(
@@ -300,14 +288,14 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
         open={customDialogOpen}
         selectedModelId={dialogModelId}
         onModelSaved={(modelId) => {
-          setCurrentModel(modelId)
+          setCurrentModel?.(modelId)
         }}
         onOpenChange={(isOpen) => {
           setCustomDialogOpen(isOpen)
           if (!isOpen) {
             setDialogModelId(undefined)
-            loadProviders()
-            loadModels()
+            invalidateModelCatalogCache()
+            void loadModels(true)
           }
         }}
       />

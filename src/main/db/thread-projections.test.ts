@@ -113,7 +113,7 @@ describe("thread database narrow projections", () => {
     )
   })
 
-  it("removes 20k legacy timing entries before values cross into JavaScript", () => {
+  it("projects away 20k legacy timing entries without mutating the thread", () => {
     const messageTimes: Record<string, { start_at: string; marker: string }> = {}
     const messageTimeOrder: Array<{ id: string; start_at: string; marker: string }> = []
     for (let index = 0; index < 20_000; index += 1) {
@@ -150,7 +150,7 @@ describe("thread database narrow projections", () => {
     }
 
     expect(JSON.parse(hydrationValues ?? "{}")).toEqual({ keep: { small: true } })
-    expect(threadDb.getThreadValuesJson(TARGET_THREAD_ID)).toBe(hydrationValues)
+    expect(threadDb.getThreadValuesJson(TARGET_THREAD_ID)).toBe(legacyValues)
   })
 
   it("projects a legacy subagent sidecar without copying adjacent timing maps", () => {
@@ -170,19 +170,25 @@ describe("thread database narrow projections", () => {
 
     const payload = threadDb.getLegacyThreadSubagentMigrationPayload(TARGET_THREAD_ID)
     expect(payload).toMatchObject({ hasLegacyValue: true })
-    expect(payload?.legacyTranscriptsJson).not.toContain("ADJACENT_TIMING_MAP_POISON")
-    expect(JSON.parse(payload?.nextThreadValuesJson ?? "{}")).toEqual({ keep: "small" })
-    const legacyTranscripts = JSON.parse(payload?.legacyTranscriptsJson ?? "{}") as Record<
-      string,
-      unknown
-    >
+    expect(payload?.legacyValueJson).not.toContain("ADJACENT_TIMING_MAP_POISON")
+    const message = { id: "worker-message", role: "assistant", content: "finished" }
     expect(
-      threadDb.migrateLegacyThreadSubagentManifestBuckets(
+      threadDb.insertLegacyThreadSubagentManifestBatch(TARGET_THREAD_ID, [
+        {
+          subagentId: "worker",
+          messageId: message.id,
+          storageMessageId: message.id,
+          manifestJson: JSON.stringify(message),
+          estimatedBytes: JSON.stringify(message).length
+        }
+      ])
+    ).toMatchObject({ threadExists: true, insertedRows: 1 })
+    expect(
+      threadDb.finalizeLegacyThreadSubagentMigration(
         TARGET_THREAD_ID,
-        legacyTranscripts,
-        payload?.nextThreadValuesJson ?? "{}"
+        payload?.legacyValueJson ?? "{}"
       )
-    ).toBe(true)
+    ).toBe("removed")
 
     expect(threadDb.getThreadValuesJson(TARGET_THREAD_ID)).toBe('{"keep":"small"}')
     expect(threadDb.getThreadSubagentManifestPage(TARGET_THREAD_ID, "worker").messages).toEqual([
