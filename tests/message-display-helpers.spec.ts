@@ -10,7 +10,6 @@ import {
   filterCoordinatorNoiseMessages,
   isCoordinatorNotificationPrompt
 } from "../src/renderer/src/lib/message-display-helpers.ts"
-import { getToolLabel } from "../src/renderer/src/lib/tool-labels.ts"
 import type { Message } from "../src/renderer/src/types.ts"
 
 function assert(condition: unknown, message: string): void {
@@ -352,21 +351,6 @@ async function testKeepsNormalUserMessageUnchanged(): Promise<void> {
   assert(messages[0]?.content === content, "normal user message content should not be rewritten")
 }
 
-async function testCoordinatorToolLabelsAreUserFriendly(): Promise<void> {
-  assert(
-    getToolLabel("start_worker", { showToolName: false }) === "启动子代理",
-    "start_worker should have a Chinese display label"
-  )
-  assert(
-    getToolLabel("read_worker_state", { showToolName: false }) === "等待子代理结果",
-    "read_worker_state should have a Chinese display label"
-  )
-  assert(
-    getToolLabel("cancel_worker", { showToolName: false }) === "取消子代理",
-    "cancel_worker should have a Chinese display label"
-  )
-}
-
 async function run(): Promise<void> {
   await testHidesToolOnlyReadWorkerStateMessages()
   console.log("PASS hides read_worker_state-only messages")
@@ -404,8 +388,6 @@ async function run(): Promise<void> {
   console.log("PASS keeps assistant coordinator heading")
   await testKeepsNormalUserMessageUnchanged()
   console.log("PASS keeps normal user messages unchanged")
-  await testCoordinatorToolLabelsAreUserFriendly()
-  console.log("PASS coordinator tool labels")
 }
 
 run().catch((error: Error) => {

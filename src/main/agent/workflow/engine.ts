@@ -111,7 +111,6 @@ interface SharedRuntime {
   agentsCached: number
   agentsFailed: number
   outputTokens: number
-  depth: number
   callSeq: number
 }
 
@@ -150,7 +149,6 @@ export async function runWorkflowEngine(
     agentsCached: 0,
     agentsFailed: 0,
     outputTokens: 0,
-    depth: 0,
     callSeq: 0
   }
   // Content-based replay (official semantics): index the journal by call-identity
@@ -160,7 +158,8 @@ export async function runWorkflowEngine(
   // run's real latency and the resumed run's instant cache) at 100% cache-hit.
   // The same hash appearing N times → N entries consumed in arrival order (their
   // results are interchangeable, being the same input).
-  const resumed = options.runStore.state.journal.length > 0
+  const resumed =
+    options.runStore.state.resumed === true || options.runStore.state.journal.length > 0
   const availableByHash = new Map<string, WorkflowJournalEntry[]>()
   for (const entry of options.runStore.state.journal) {
     const bucket = availableByHash.get(entry.hash)
@@ -330,8 +329,8 @@ export async function runWorkflowEngine(
   runtimeDeadlineTimer.unref?.()
 
   const drainPendingAgents = async (): Promise<void> => {
-    // A script may fire agent() calls without awaiting them; their results are
-    // already journaled as they land, but finalize must not race their events.
+    // A script may fire agent() calls without awaiting them; finalize must not
+    // race their events.
     // Loop with a FRESH snapshot each round, and only conclude after one full
     // macrotask of quiescence — a settling agent's .then chain registers its
     // follow-up agent() marker in a microtask that can otherwise slip past a
@@ -364,7 +363,8 @@ export async function runWorkflowEngine(
       name: options.parsed.meta.name,
       description: options.parsed.meta.description,
       phases: (options.parsed.meta.phases ?? []).map((phase) => phase.title),
-      resumed
+      resumed,
+      worktrees: options.runStore.state.worktrees
     })
     const globals = buildWorkflowGlobals({
       ...options,
@@ -693,6 +693,7 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         `opts.isolation "${request.ignoredIsolation}" is not supported here — running in the shared workspace (file writes are serialized across the run)`
       )
     }
+    const isolated = request.options.isolation === "worktree"
     // Reserve the slot and the resume key synchronously (no await in between),
     // so a parallel() fan-out cannot overshoot the agent cap or race callSeq.
     shared.agentCount += 1
@@ -737,7 +738,11 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
               disallowedTools: [...agentProfile.disallowedTools].sort(),
               shellAccess: agentProfile.shellAccess
             }
-          : null
+          : null,
+        // Preserve the pre-worktree hash for ordinary agents so existing journals
+        // still replay after an upgrade. An explicitly isolated call gets a
+        // distinct identity and can never consume a shared-workspace entry.
+        ...(request.options.isolation ? { isolation: request.options.isolation } : {})
       })
     )
 
@@ -832,7 +837,8 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
           signal,
           roleSystemPrompt: agentProfile?.systemPrompt,
           disallowedTools: agentProfile?.disallowedTools,
-          shellAccess: agentProfile?.shellAccess
+          shellAccess: agentProfile?.shellAccess,
+          isolation: request.options.isolation
         })
         throwIfAborted()
 
@@ -855,7 +861,16 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         const structuredOversized =
           structuredSafe !== undefined &&
           (structuredSerialization?.json?.length ?? 0) > WORKFLOW_RESULT_MAX_CHARS
-        if (structuredOversized) {
+        if (isolated) {
+          // An isolated agent's real deliverable is its owned checkout, not only
+          // its text. Replaying it would require revalidating the persisted
+          // checkout/branch/manifest as one unit. Keep resume simple and honest:
+          // rerun the call in a fresh worktree; the previous deliverable remains
+          // independently visible for explicit Merge or Discard.
+          log(
+            `${label}: isolated (worktree) agents are not journaled — a resume re-runs this call in a fresh worktree`
+          )
+        } else if (structuredOversized) {
           log(
             `${label}: structured result too large to journal — only this call re-runs on resume (content-based matching; other agents still replay from cache)`
           )
@@ -900,7 +915,14 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         // path matches the cached-replay path (which returns toJsonSafe too) and
         // never hands a host-realm object to a caller that bypasses the sandbox
         // bridge (e.g. a direct unit test).
-        return request.options.schema ? structuredSafe : text
+        const hasSchema = request.options.schema !== undefined
+        const value = hasSchema ? structuredSafe : text
+        // Worktree ownership is intentionally an out-of-band host concern. Keep
+        // agent()'s business result identical whether the child ran shared or in
+        // an isolated checkout: schema calls return the exact validated object;
+        // non-schema calls return their final text. The run ledger and UI retain
+        // branch/path/status for review and integration.
+        return value
       } catch (error) {
         if (signal.aborted || isWorkflowAbortError(error)) throw new WorkflowAbortError()
         if (isWorkflowFatalError(error)) throw error
@@ -1010,7 +1032,10 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
 
   const workflowFn = async (nameOrRef: unknown, childArgs?: unknown): Promise<unknown> => {
     if (signal.aborted) return parkForever()
-    if (context.childName || shared.depth >= 1) {
+    // Nesting is a property of THIS call's context, not of the whole parent run.
+    // A run may legitimately start several sibling child workflows via parallel();
+    // a shared counter would misclassify the second sibling as a child of the first.
+    if (context.childName) {
       throw new WorkflowFatalError("workflow() cannot be called from within a child workflow")
     }
     const { source, name } = loadChildWorkflowSource(context.workspacePath, nameOrRef)
@@ -1022,30 +1047,25 @@ function buildWorkflowGlobals(context: GlobalsContext): Record<string, unknown> 
         `child workflow "${name}" is invalid: ${describeWorkflowError(error)}`
       )
     }
-    shared.depth += 1
     log(`running child workflow ${parsedChild.meta.name}`)
-    try {
-      const childGlobals = buildWorkflowGlobals({
-        ...context,
-        parsed: parsedChild,
-        args: childArgs,
-        childName: parsedChild.meta.name,
-        // Key the journal on the child SCRIPT content, so two different child files
-        // with the same meta.name can't cross-hit each other's cache (#5).
-        childCacheKey: sha256Hex(source)
+    const childGlobals = buildWorkflowGlobals({
+      ...context,
+      parsed: parsedChild,
+      args: childArgs,
+      childName: parsedChild.meta.name,
+      // Key the journal on the child SCRIPT content, so two different child files
+      // with the same meta.name can't cross-hit each other's journal cache.
+      childCacheKey: sha256Hex(source)
+    })
+    // A child workflow's return value is consumed by the parent script; its
+    // value is already vm-serialized plain JSON (no hostile getters survive).
+    return (
+      await runWorkflowScriptInSandbox({
+        body: parsedChild.body,
+        globals: childGlobals,
+        signal
       })
-      // A child workflow's return value is consumed by the parent script; its
-      // value is already vm-serialized plain JSON (no hostile getters survive).
-      return (
-        await runWorkflowScriptInSandbox({
-          body: parsedChild.body,
-          globals: childGlobals,
-          signal
-        })
-      ).value
-    } finally {
-      shared.depth -= 1
-    }
+    ).value
   }
 
   // Guest file IO (read/write/glob/exists), workspace-jailed. Lets the script
@@ -1271,6 +1291,8 @@ function normalizeAgentArgs(
   prompt: string
   options: WorkflowAgentOptions
   agentType?: string
+  /** Legacy unsupported values remain a warning-only no-op. Only the explicit
+   * `worktree` value opts into the new execution mode. */
   ignoredIsolation?: string
 } {
   if (typeof prompt !== "string" || !prompt.trim()) {
@@ -1332,17 +1354,19 @@ function normalizeAgentArgs(
     // garbage structured output through.
     assertSupportedJsonSchema(options.schema)
   }
-  // worktree/remote isolation isn't supported here (subagents already run in
-  // their own session, and file writes are serialized across the run). Rather
-  // than throw — which would crash a whole script just because a mid-tier model
-  // pulled `isolation: 'worktree'` from training — warn and ignore. agentType is
-  // stricter because a miss there could drop an intended permissions boundary.
+  // Keep the old warning-only behavior for values the workflow engine has never
+  // implemented. This change adds exactly one opt-in value (`worktree`); turning
+  // old model-generated or hand-authored values into hard failures would change
+  // existing workflows rather than add a feature.
   const ignoredIsolation =
-    typeof candidate.isolation === "string" && candidate.isolation.trim()
-      ? candidate.isolation.trim()
-      : candidate.isolation !== undefined
-        ? "(unsupported)"
-        : undefined
+    candidate.isolation !== undefined && candidate.isolation !== "worktree"
+      ? typeof candidate.isolation === "string" && candidate.isolation.trim()
+        ? candidate.isolation.trim()
+        : "(unsupported)"
+      : undefined
+  if (candidate.isolation === "worktree") {
+    options.isolation = "worktree"
+  }
   return { prompt, options, agentType, ignoredIsolation }
 }
 

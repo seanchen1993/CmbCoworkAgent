@@ -30,6 +30,7 @@ import {
 } from "../agent/thread-run-lease"
 import type { ScheduledTask } from "../types"
 import { executeImInboxScheduledTask } from "./im/inbox-scheduler"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 
 const TICK_INTERVAL_MS = 60_000
 const ONCE_EXPIRE_MS = 30 * 60_000 // once tasks older than 30 min are auto-disabled instead of executed
@@ -325,7 +326,7 @@ async function executeTask(taskId: string): Promise<void> {
         configurable: { thread_id: threadId },
         signal: abortController.signal,
         streamMode: ["messages", "values"],
-        recursionLimit: 1000
+        recursionLimit: getAgentGraphRecursionLimit()
       }
     )
 

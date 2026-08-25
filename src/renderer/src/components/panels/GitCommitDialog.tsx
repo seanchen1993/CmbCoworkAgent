@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react"
 import { Dialog, DialogContent } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
@@ -26,6 +26,12 @@ const COMMIT_TYPES = [
 
 export type CommitType = (typeof COMMIT_TYPES)[number]["value"]
 
+export interface GitCommitRepositoryOption {
+  path: string
+  displayPath: string
+  gitRoot: string
+}
+
 interface GitCommitDialogProps {
   open: boolean
   running: boolean
@@ -34,13 +40,18 @@ interface GitCommitDialogProps {
   additions: number
   deletions: number
   cardNumber: string
-  commitType: CommitType
+  commitType: CommitType | ""
   commitMessage: string
   commitHistory: GitCommitHistoryRecord[]
   preferredTaskText?: string
+  repositories?: GitCommitRepositoryOption[]
+  repositoryPath?: string | null
+  repositoryLoading?: boolean
+  isWorktree?: boolean
   onOpenChange: (open: boolean) => void
+  onRepositoryPathChange?: (value: string) => void
   onCardNumberChange: (value: string, card?: TaskCardItem | null) => void
-  onCommitTypeChange: (value: CommitType) => void
+  onCommitTypeChange: (value: CommitType | "") => void
   onCommitMessageChange: (value: string) => void
   onHistorySelect: (record: GitCommitHistoryRecord) => void
   onSubmit: () => void
@@ -58,7 +69,12 @@ export function GitCommitDialog({
   commitMessage,
   commitHistory,
   preferredTaskText,
+  repositories = [],
+  repositoryPath,
+  repositoryLoading = false,
+  isWorktree = false,
   onOpenChange,
+  onRepositoryPathChange,
   onCardNumberChange,
   onCommitTypeChange,
   onCommitMessageChange,
@@ -66,7 +82,6 @@ export function GitCommitDialog({
   onSubmit
 }: GitCommitDialogProps): React.JSX.Element {
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | undefined>(undefined)
-  const selectedHistoryIdRef = useRef<string | undefined>(undefined)
   const cardValue = cardNumber.trim()
   const messageValue = commitMessage.trim()
   const finalMessagePreview = cardValue
@@ -74,43 +89,26 @@ export function GitCommitDialog({
     : ""
   const noSelectedFiles = fileCount <= 0
   const cardMissing = !noSelectedFiles && !cardValue
+  const commitTypeMissing = !noSelectedFiles && !commitType
   const messageMissing = !noSelectedFiles && !messageValue
+  const repositoryRequired = repositories.length > 1
+  const repositoryMissing = repositoryRequired && !repositoryPath
   const historySelectValue =
     selectedHistoryId && commitHistory.some((record) => record.id === selectedHistoryId)
       ? selectedHistoryId
       : undefined
 
   useEffect(() => {
-    selectedHistoryIdRef.current = selectedHistoryId
-  }, [selectedHistoryId])
+    if (open) return
 
-  useEffect(() => {
     const timer = window.setTimeout(() => {
-      if (!open) {
-        setSelectedHistoryId(undefined)
-        return
-      }
-
-      const latest = commitHistory[0]
-      if (!latest) {
-        setSelectedHistoryId(undefined)
-        return
-      }
-
-      const currentHistoryId = selectedHistoryIdRef.current
-      const selectedExists = currentHistoryId
-        ? commitHistory.some((record) => record.id === currentHistoryId)
-        : false
-      if (selectedExists) return
-
-      setSelectedHistoryId(latest.id)
-      onHistorySelect(latest)
+      setSelectedHistoryId(undefined)
     }, 0)
 
     return () => {
       window.clearTimeout(timer)
     }
-  }, [open, commitHistory, onHistorySelect])
+  }, [open])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -120,15 +118,66 @@ export function GitCommitDialog({
         </div>
 
         <div className="rounded-xl border border-border/70 bg-muted/25 p-3 mx-4 space-y-2">
+          {repositoryRequired && (
+            <div className="space-y-1.5 pb-2 border-b border-border/60">
+              <div className="flex items-center justify-between text-xs">
+                <label htmlFor="git-commit-repository" className="font-medium text-foreground">
+                  提交仓库
+                </label>
+                <span
+                  className={cn(
+                    "text-[11px]",
+                    repositoryMissing ? "text-destructive" : "text-muted-foreground"
+                  )}
+                >
+                  必填
+                </span>
+              </div>
+              <Select
+                value={repositoryPath ?? undefined}
+                onValueChange={(value) => onRepositoryPathChange?.(value)}
+                disabled={running}
+              >
+                <SelectTrigger
+                  id="git-commit-repository"
+                  className={cn(
+                    "w-full bg-background",
+                    repositoryMissing &&
+                      "border-destructive/50 focus-visible:ring-destructive/40"
+                  )}
+                >
+                  <SelectValue placeholder="选择本次 Commit 的目标仓库" />
+                </SelectTrigger>
+                <SelectContent>
+                  {repositories.map((repository) => (
+                    <SelectItem key={repository.path} value={repository.path}>
+                      {repository.displayPath}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {repositoryMissing && (
+                <div className="text-[11px] leading-5 text-muted-foreground">
+                  当前视图包含多个仓库，请在此选择一个具体仓库；本次提交只会包含该仓库中已勾选的文件。
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-3 text-xs">
             <span className="text-muted-foreground">分支</span>
             <span
               className="font-mono text-foreground truncate max-w-[300px]"
               title={branch || "-"}
             >
-              {branch || "-"}
+              {repositoryLoading ? "读取中..." : branch || "-"}
             </span>
           </div>
+          {isWorktree && (
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="text-muted-foreground">工作区类型</span>
+              <span className="font-medium text-blue-600 dark:text-blue-400">Git Worktree</span>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-3 text-xs">
             <span className="text-muted-foreground">变更</span>
             <span className="font-medium">
@@ -204,9 +253,26 @@ export function GitCommitDialog({
               <label htmlFor="git-commit-type" className="font-medium text-foreground">
                 提交类型
               </label>
+              <span
+                className={cn(
+                  "text-[11px]",
+                  commitTypeMissing ? "text-destructive" : "text-muted-foreground"
+                )}
+              >
+                必填
+              </span>
             </div>
-            <Select value={commitType} onValueChange={onCommitTypeChange}>
-              <SelectTrigger id="git-commit-type" className="w-full">
+            <Select
+              value={commitType}
+              onValueChange={(value) => onCommitTypeChange(value as CommitType)}
+            >
+              <SelectTrigger
+                id="git-commit-type"
+                className={cn(
+                  "w-full",
+                  commitTypeMissing && "border-destructive/50 focus-visible:ring-destructive/40"
+                )}
+              >
                 <SelectValue placeholder="选择提交类型" />
               </SelectTrigger>
               <SelectContent>
@@ -271,7 +337,14 @@ export function GitCommitDialog({
             id="git-commit-button"
             type="button"
             className="w-full h-9"
-            disabled={running || cardMissing || messageMissing || noSelectedFiles}
+            disabled={
+              running ||
+              repositoryMissing ||
+              cardMissing ||
+              commitTypeMissing ||
+              messageMissing ||
+              noSelectedFiles
+            }
             onClick={onSubmit}
           >
             {running ? (

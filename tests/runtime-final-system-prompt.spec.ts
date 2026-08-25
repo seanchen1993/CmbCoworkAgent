@@ -8,10 +8,27 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
+import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages"
+import { convertMessagesToCompletionsMessageParams } from "@langchain/openai"
 
 import { loadAgentsPromptForWorkspace } from "../src/main/agent/agents-md.ts"
-import { createDeepAgent, getSystemPrompt } from "../src/main/agent/runtime.ts"
+import {
+  createConciseOutputStyleTurnReminderMiddleware,
+  createDeepAgent,
+  createOutputStyleTurnReminderMiddleware,
+  getSystemPrompt
+} from "../src/main/agent/runtime.ts"
+import {
+  CONCISE_OUTPUT_STYLE_PROMPT,
+  CONCISE_OUTPUT_STYLE_TURN_REMINDER,
+  EXPLANATORY_OUTPUT_STYLE_PROMPT,
+  EXPLANATORY_OUTPUT_STYLE_TURN_REMINDER,
+  LEARNING_OUTPUT_STYLE_PROMPT,
+  LEARNING_OUTPUT_STYLE_TURN_REMINDER,
+  OUTPUT_STYLE_IDENTITY_PROMPT
+} from "../src/main/agent/system-prompt.ts"
 import type { HarnessFeatureAgentContext } from "../src/main/harness-board/service.ts"
+import type { AgentOutputStyle } from "../src/shared/agent-output-style.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) {
@@ -225,7 +242,7 @@ async function buildRuntimePromptFromHarnessContext(
 ): Promise<RuntimePromptBuildResult> {
   let runtimePrompt = buildBaseRuntimePrompt(workspacePath, harnessContext.systemPromptInject, {
     includeBackgroundExec: true,
-    includeSubagents: harnessContext.featureId ? (harnessContext.enableTaskTool ?? true) : true
+    includeSubagents: true
   })
   const normalizedHarnessAgentsPrompt = harnessContext.harnessAgentsPrompt?.trim()
   const enableAgentsPrompt = harnessContext.enableAgentsPrompt !== false
@@ -261,7 +278,11 @@ async function buildRuntimePromptFromHarnessContext(
   }
 }
 
-function captureFinalSystemPrompt(systemPrompt: string): string {
+function captureFinalSystemPrompt(
+  systemPrompt: string,
+  conciseModeEnabled = false,
+  outputStyle?: AgentOutputStyle
+): string {
   let captured = ""
   createDeepAgent({
     model: "test-model",
@@ -271,6 +292,8 @@ function captureFinalSystemPrompt(systemPrompt: string): string {
     mainFilesystemEnabled: false,
     mainTodosEnabled: false,
     mainSubagentsEnabled: false,
+    conciseModeEnabled,
+    outputStyle,
     onFinalSystemPrompt: (prompt: string) => {
       captured = prompt
     }
@@ -282,6 +305,7 @@ function captureTaskSubagentPrompts(options: {
   projectMode: boolean
   projectContext?: string
   mainSubagentsEnabled?: boolean
+  conciseModeEnabled?: boolean
 }): Map<string, string> {
   let captured: TaskSubagentPromptSnapshot[] = []
   createDeepAgent({
@@ -291,6 +315,7 @@ function captureTaskSubagentPrompts(options: {
     mainFilesystemEnabled: false,
     mainTodosEnabled: false,
     mainSubagentsEnabled: options.mainSubagentsEnabled ?? true,
+    conciseModeEnabled: options.conciseModeEnabled ?? false,
     subagentExtraSystemPrompt: options.projectContext,
     subagentExtraSystemPromptForRestrictedRoles: options.projectMode,
     registrySubagentSpecs: [
@@ -386,6 +411,356 @@ function testTaskSubagentPromptModeMatrix(): void {
     mainSubagentsEnabled: false
   })
   assert(disabledPrompts.size === 0, "disabled task middleware should not resolve subagent prompts")
+
+  const concisePrompts = captureTaskSubagentPrompts({
+    projectMode: true,
+    projectContext: TASK_PROJECT_CONTEXT,
+    conciseModeEnabled: true
+  })
+  for (const [name, prompt] of concisePrompts) {
+    assert(
+      !prompt.includes(CONCISE_OUTPUT_STYLE_PROMPT),
+      `${name} should not inherit the main agent concise output style`
+    )
+    assert(
+      !prompt.includes(CONCISE_OUTPUT_STYLE_TURN_REMINDER),
+      `${name} should not inherit the main agent concise turn reminder`
+    )
+  }
+}
+
+async function testConciseOutputStyleContract(): Promise<void> {
+  const runtimePrompt = "CONCISE_STYLE_RUNTIME_PROMPT"
+  const defaultPrompt = captureFinalSystemPrompt(runtimePrompt)
+  assert(
+    defaultPrompt === `${runtimePrompt}\n\n${LANGCHAIN_BASE_PROMPT}`,
+    "disabled concise mode must preserve the existing final system prompt byte-for-byte"
+  )
+  assert(
+    !defaultPrompt.includes(CONCISE_OUTPUT_STYLE_PROMPT),
+    "disabled concise mode must not inject the output style"
+  )
+  assert(
+    !defaultPrompt.includes(OUTPUT_STYLE_IDENTITY_PROMPT),
+    "default mode must preserve the original identity framing"
+  )
+
+  const concisePrompt = captureFinalSystemPrompt(runtimePrompt, true)
+  assert(
+    concisePrompt ===
+      `${OUTPUT_STYLE_IDENTITY_PROMPT}\n\n${defaultPrompt}\n\n${CONCISE_OUTPUT_STYLE_PROMPT}`,
+    "enabled concise mode should use Claude Code's output-style identity framing"
+  )
+  assert(
+    countOccurrences(concisePrompt, CONCISE_OUTPUT_STYLE_PROMPT) === 1,
+    "enabled concise mode should inject the full style exactly once"
+  )
+
+  const middleware = createConciseOutputStyleTurnReminderMiddleware()
+  assert(middleware.wrapModelCall, "concise reminder middleware should expose wrapModelCall")
+
+  const originalSystemMessage = new SystemMessage("ORIGINAL_SYSTEM_PROMPT")
+  const originalUserMessage = new HumanMessage("ORIGINAL_USER_PROMPT")
+  let forwardedRequest: { systemMessage?: SystemMessage; messages?: HumanMessage[] } | undefined
+  await middleware.wrapModelCall!(
+    { systemMessage: originalSystemMessage, messages: [originalUserMessage] } as never,
+    async (request: unknown) => {
+      forwardedRequest = request as { systemMessage?: SystemMessage; messages?: HumanMessage[] }
+      return {} as never
+    }
+  )
+  const forwardedContent = JSON.stringify(forwardedRequest?.messages?.[0]?.content)
+  assert(
+    forwardedContent.includes(CONCISE_OUTPUT_STYLE_TURN_REMINDER),
+    "enabled concise mode should merge an ephemeral reminder into the current user turn"
+  )
+  assert(
+    forwardedRequest?.systemMessage === originalSystemMessage,
+    "user-turn reminder injection must preserve the system message"
+  )
+  assert(
+    !JSON.stringify(originalUserMessage.content).includes(CONCISE_OUTPUT_STYLE_TURN_REMINDER),
+    "concise reminder middleware must not mutate the source user message"
+  )
+  assert(
+    forwardedRequest?.messages?.length === 1 &&
+      forwardedRequest.messages[0] !== originalUserMessage &&
+      forwardedRequest.messages[0] instanceof HumanMessage,
+    "user-turn reminder injection must replace only the last message without adding a turn"
+  )
+
+  const humanBlockContent = [
+    { type: "text" as const, text: "ORIGINAL_USER_BLOCK" },
+    { type: "image_url" as const, image_url: { url: "data:image/png;base64,AA==" } }
+  ]
+  const originalBlockUserMessage = new HumanMessage({ content: humanBlockContent })
+  let blockUserRequest: { messages?: HumanMessage[] } | undefined
+  await middleware.wrapModelCall!(
+    { systemMessage: originalSystemMessage, messages: [originalBlockUserMessage] } as never,
+    async (request: unknown) => {
+      blockUserRequest = request as { messages?: HumanMessage[] }
+      return {} as never
+    }
+  )
+  assert(
+    Array.isArray(blockUserRequest?.messages?.[0]?.content) &&
+      blockUserRequest.messages[0].content.length === humanBlockContent.length + 1 &&
+      JSON.stringify(blockUserRequest.messages[0].content).includes(
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ),
+    "user-turn reminder injection must preserve block content and append one text block"
+  )
+  assert(
+    originalBlockUserMessage.content === humanBlockContent &&
+      !JSON.stringify(originalBlockUserMessage.content).includes(
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ),
+    "block user reminder injection must not mutate source content"
+  )
+
+  const toolArtifact = { fullOutput: "FULL_OUTPUT" }
+  const toolMetadata = { provider: "test" }
+  const toolAdditionalKwargs = { source: "unit" }
+  const toolResponseMetadata = { latencyMs: 10 }
+  const originalToolMessage = new ToolMessage({
+    content: "ORIGINAL_TOOL_RESULT",
+    tool_call_id: "tool-call-1",
+    id: "tool-message-1",
+    name: "execute",
+    status: "success",
+    artifact: toolArtifact,
+    metadata: toolMetadata,
+    additional_kwargs: toolAdditionalKwargs,
+    response_metadata: toolResponseMetadata
+  })
+  const assistantToolCall = new AIMessage({
+    content: "",
+    tool_calls: [{ id: "tool-call-1", name: "execute", args: {} }]
+  })
+  let toolRequest: { systemMessage?: SystemMessage; messages?: unknown[] } | undefined
+  await middleware.wrapModelCall!(
+    {
+      systemMessage: originalSystemMessage,
+      messages: [assistantToolCall, originalToolMessage]
+    } as never,
+    async (request: unknown) => {
+      toolRequest = request as { systemMessage?: SystemMessage; messages?: unknown[] }
+      return {} as never
+    }
+  )
+  const forwardedToolMessage = toolRequest?.messages?.[1]
+  assert(
+    toolRequest?.messages?.length === 2 &&
+      toolRequest.messages[0] === assistantToolCall &&
+      forwardedToolMessage instanceof ToolMessage &&
+      forwardedToolMessage !== originalToolMessage,
+    "tool-turn reminder injection must replace only the last tool result without adding a user turn"
+  )
+  assert(
+    JSON.stringify(forwardedToolMessage.content).includes(CONCISE_OUTPUT_STYLE_TURN_REMINDER) &&
+      !JSON.stringify(originalToolMessage.content).includes(CONCISE_OUTPUT_STYLE_TURN_REMINDER),
+    "tool-turn reminder injection must be ephemeral and must not mutate source content"
+  )
+  assert(
+    forwardedToolMessage.tool_call_id === originalToolMessage.tool_call_id &&
+      forwardedToolMessage.id === originalToolMessage.id &&
+      forwardedToolMessage.name === originalToolMessage.name &&
+      forwardedToolMessage.status === originalToolMessage.status &&
+      forwardedToolMessage.artifact === toolArtifact &&
+      forwardedToolMessage.metadata === toolMetadata &&
+      forwardedToolMessage.additional_kwargs === toolAdditionalKwargs &&
+      forwardedToolMessage.response_metadata === toolResponseMetadata,
+    "tool-turn reminder injection must preserve every ToolMessage routing and metadata field"
+  )
+  assert(
+    toolRequest?.systemMessage === originalSystemMessage,
+    "tool-turn reminder injection must preserve the system message"
+  )
+
+  const serializedToolRequest = convertMessagesToCompletionsMessageParams({
+    messages: toolRequest?.messages as [AIMessage, ToolMessage],
+    model: "openai-compatible-model"
+  })
+  assert(
+    serializedToolRequest.length === 2 &&
+      serializedToolRequest[1].role === "tool" &&
+      "tool_call_id" in serializedToolRequest[1] &&
+      serializedToolRequest[1].tool_call_id === "tool-call-1" &&
+      JSON.stringify(serializedToolRequest[1].content).includes(CONCISE_OUTPUT_STYLE_TURN_REMINDER),
+    "OpenAI-compatible serialization must retain the tool role, call id, and reminder"
+  )
+
+  let repeatedToolRequest: { messages?: unknown[] } | undefined
+  await middleware.wrapModelCall!(
+    {
+      systemMessage: originalSystemMessage,
+      messages: [assistantToolCall, originalToolMessage]
+    } as never,
+    async (request: unknown) => {
+      repeatedToolRequest = request as { messages?: unknown[] }
+      return {} as never
+    }
+  )
+  assert(
+    countOccurrences(
+      JSON.stringify(repeatedToolRequest?.messages?.[1]),
+      CONCISE_OUTPUT_STYLE_TURN_REMINDER
+    ) === 1 &&
+      countOccurrences(
+        JSON.stringify(originalToolMessage.content),
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ) === 0,
+    "reusing checkpoint messages across model calls must inject exactly one ephemeral reminder"
+  )
+
+  const earlierToolMessage = new ToolMessage({
+    content: "EARLIER_TOOL_RESULT",
+    tool_call_id: "tool-call-earlier"
+  })
+  let consecutiveToolRequest: { messages?: unknown[] } | undefined
+  await middleware.wrapModelCall!(
+    {
+      systemMessage: originalSystemMessage,
+      messages: [assistantToolCall, earlierToolMessage, originalToolMessage]
+    } as never,
+    async (request: unknown) => {
+      consecutiveToolRequest = request as { messages?: unknown[] }
+      return {} as never
+    }
+  )
+  assert(
+    consecutiveToolRequest?.messages?.length === 3 &&
+      consecutiveToolRequest.messages[1] === earlierToolMessage &&
+      !JSON.stringify(consecutiveToolRequest.messages[1]).includes(
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ) &&
+      JSON.stringify(consecutiveToolRequest.messages[2]).includes(
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ),
+    "parallel tool results must keep earlier siblings intact and smoosh the reminder into only the last result"
+  )
+
+  const originalBlockToolMessage = new ToolMessage({
+    content: [{ type: "text" as const, text: "ORIGINAL_TOOL_BLOCK" }],
+    tool_call_id: "tool-call-2"
+  })
+  let blockToolRequest: { messages?: unknown[] } | undefined
+  await middleware.wrapModelCall!(
+    { systemMessage: originalSystemMessage, messages: [originalBlockToolMessage] } as never,
+    async (request: unknown) => {
+      blockToolRequest = request as { messages?: unknown[] }
+      return {} as never
+    }
+  )
+  const forwardedBlockToolMessage = blockToolRequest?.messages?.[0]
+  assert(
+    forwardedBlockToolMessage instanceof ToolMessage &&
+      Array.isArray(forwardedBlockToolMessage.content) &&
+      forwardedBlockToolMessage.content.length === 2 &&
+      JSON.stringify(forwardedBlockToolMessage.content).includes(
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ) &&
+      Array.isArray(originalBlockToolMessage.content) &&
+      originalBlockToolMessage.content.length === 1,
+    "tool-turn reminder injection must preserve block content and append one text block"
+  )
+
+  const assistantMessage = new AIMessage("ORIGINAL_ASSISTANT_MESSAGE")
+  let fallbackRequest: { systemMessage?: SystemMessage; messages?: unknown[] } | undefined
+  await middleware.wrapModelCall!(
+    { systemMessage: originalSystemMessage, messages: [assistantMessage] } as never,
+    async (request: unknown) => {
+      fallbackRequest = request as { systemMessage?: SystemMessage; messages?: unknown[] }
+      return {} as never
+    }
+  )
+  assert(
+    fallbackRequest?.messages?.length === 1 &&
+      fallbackRequest.messages[0] === assistantMessage &&
+      JSON.stringify(fallbackRequest.systemMessage?.content).includes(
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ) &&
+      !JSON.stringify(originalSystemMessage.content).includes(CONCISE_OUTPUT_STYLE_TURN_REMINDER),
+    "unexpected message shapes must use an ephemeral system fallback without adding a user turn"
+  )
+
+  let emptyFallbackRequest: { systemMessage?: SystemMessage; messages?: unknown[] } | undefined
+  await middleware.wrapModelCall!({ messages: [] } as never, async (request: unknown) => {
+    emptyFallbackRequest = request as { systemMessage?: SystemMessage; messages?: unknown[] }
+    return {} as never
+  })
+  assert(
+    emptyFallbackRequest?.messages?.length === 0 &&
+      emptyFallbackRequest.systemMessage instanceof SystemMessage &&
+      JSON.stringify(emptyFallbackRequest.systemMessage.content).includes(
+        CONCISE_OUTPUT_STYLE_TURN_REMINDER
+      ),
+    "empty requests must receive a system fallback without creating a user turn"
+  )
+}
+
+async function testAdditionalOutputStyleContracts(): Promise<void> {
+  const runtimePrompt = "ADDITIONAL_STYLE_RUNTIME_PROMPT"
+  const defaultPrompt = captureFinalSystemPrompt(runtimePrompt)
+  const styles: Array<{
+    style: AgentOutputStyle
+    prompt: string
+    reminder: string
+  }> = [
+    {
+      style: "explanatory",
+      prompt: EXPLANATORY_OUTPUT_STYLE_PROMPT,
+      reminder: EXPLANATORY_OUTPUT_STYLE_TURN_REMINDER
+    },
+    {
+      style: "learning",
+      prompt: LEARNING_OUTPUT_STYLE_PROMPT,
+      reminder: LEARNING_OUTPUT_STYLE_TURN_REMINDER
+    }
+  ]
+
+  for (const { style, prompt, reminder } of styles) {
+    const styledPrompt = captureFinalSystemPrompt(runtimePrompt, false, style)
+    assert(
+      styledPrompt === `${OUTPUT_STYLE_IDENTITY_PROMPT}\n\n${defaultPrompt}\n\n${prompt}`,
+      `${style} should use Claude Code's output-style identity framing`
+    )
+    assert(
+      countOccurrences(styledPrompt, prompt) === 1,
+      `${style} should inject its full system prompt exactly once`
+    )
+
+    const middleware = createOutputStyleTurnReminderMiddleware(style)
+    const originalUserMessage = new HumanMessage("ORIGINAL_USER_PROMPT")
+    let forwardedRequest: { messages?: HumanMessage[] } | undefined
+    await middleware.wrapModelCall!(
+      { messages: [originalUserMessage] } as never,
+      async (request: unknown) => {
+        forwardedRequest = request as { messages?: HumanMessage[] }
+        return {} as never
+      }
+    )
+    assert(
+      JSON.stringify(forwardedRequest?.messages?.[0]?.content).includes(reminder),
+      `${style} should merge its ephemeral reminder into the current user turn`
+    )
+    assert(
+      !JSON.stringify(originalUserMessage.content).includes(reminder),
+      `${style} reminder middleware must not mutate the source user message`
+    )
+  }
+
+  for (const prompt of [
+    CONCISE_OUTPUT_STYLE_PROMPT,
+    EXPLANATORY_OUTPUT_STYLE_PROMPT,
+    LEARNING_OUTPUT_STYLE_PROMPT
+  ]) {
+    assert(!defaultPrompt.includes(prompt), "default output style must not inject any style prompt")
+  }
+  assert(
+    !defaultPrompt.includes(OUTPUT_STYLE_IDENTITY_PROMPT),
+    "default output style must not inject Claude Code's style identity framing"
+  )
 }
 
 function printFinalPrompt(label: string, prompt: string): void {
@@ -491,6 +866,10 @@ async function run(): Promise<void> {
     console.log("PASS Solo task-tool prompt exclusion")
     testTaskSubagentPromptModeMatrix()
     console.log("PASS task subagent prompt mode matrix")
+    await testConciseOutputStyleContract()
+    console.log("PASS concise output style contract")
+    await testAdditionalOutputStyleContracts()
+    console.log("PASS additional output style contracts")
   })
 }
 
@@ -501,7 +880,7 @@ async function runHarnessCliMode(cliOptions: CliOptions): Promise<void> {
   const { buildHarnessFeatureAgentContext } = await import(
     "../src/main/harness-board/service.ts"
   )
-  const harnessContext = buildHarnessFeatureAgentContext({
+  const harnessContext = await buildHarnessFeatureAgentContext({
     harnessFeature: {
       projectId,
       slug: feature,

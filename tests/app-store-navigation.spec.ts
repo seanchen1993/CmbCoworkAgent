@@ -30,10 +30,23 @@ function resetNavigationState(): void {
     showCustomizeView: false,
     showDashboardView: false,
     showKanbanView: false,
+    rightModule: "work",
+    rightPanelCollapsed: true,
     workerFocusView: null,
     workerFocusMessagesThreadId: null,
     workerFocusMessages: []
   })
+}
+
+async function testBrowserPanelOpenRequestUsesGlobalStore(): Promise<void> {
+  resetNavigationState()
+  useAppStore.getState().requestOpenBrowserPanel()
+
+  const state = useAppStore.getState()
+  assert(
+    state.rightModule === "browser" && !state.rightPanelCollapsed,
+    "browser panel request should select the browser module and expand the right panel"
+  )
 }
 
 async function testHarnessBoardClearsWorkerFocus(): Promise<void> {
@@ -67,6 +80,8 @@ async function testClaudeCodeMainViewClearsWorkerFocus(): Promise<void> {
 }
 
 async function run(): Promise<void> {
+  await testBrowserPanelOpenRequestUsesGlobalStore()
+  console.log("PASS browser panel open request uses global store")
   await testHarnessBoardClearsWorkerFocus()
   console.log("PASS harness board clears worker focus")
   await testClaudeCodeMainViewClearsWorkerFocus()

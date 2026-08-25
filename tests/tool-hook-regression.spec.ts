@@ -11,6 +11,12 @@ import { clearFailureFuseState, recordToolFailure } from "../src/main/agent/fail
 import { clearFailureFiredState, markFailureFired } from "../src/main/hooks/tool-failure.ts"
 import { mergeUpdatedInput } from "../src/main/hooks/updated-input.ts"
 import type { HookScopeController } from "../src/main/hooks/scope.ts"
+import {
+  HOOK_AGENT_OWNER_METADATA_KEY,
+  getCurrentHookAgentId,
+  getHookAgentIdFromRequest,
+  runWithHookAgentId
+} from "../src/main/hooks/execution-context.ts"
 
 type MiddlewareRequest = {
   toolCall?: { name?: string; args?: unknown }
@@ -151,6 +157,185 @@ async function testWrapperToolsBypassToolHooks(): Promise<void> {
     assert(calls.length === 0, `${toolName} should bypass hook resolution entirely`)
     assert((result as { ok?: boolean }).ok === true, `${toolName} should return handler output`)
   }
+}
+
+function testAgentOwnerRequestShapes(): void {
+  const key = HOOK_AGENT_OWNER_METADATA_KEY
+  const requests = [
+    { runtime: { configurable: { [key]: "runtime-configurable" } } },
+    { runtime: { config: { configurable: { [key]: "runtime-config-configurable" } } } },
+    { configurable: { [key]: "request-configurable" } },
+    { metadata: { [key]: "request-metadata" } },
+    { runtime: { metadata: { [key]: "runtime-metadata" } } }
+  ]
+  const expected = [
+    "runtime-configurable",
+    "runtime-config-configurable",
+    "request-configurable",
+    "request-metadata",
+    "runtime-metadata"
+  ]
+
+  requests.forEach((request, index) => {
+    assert(
+      getHookAgentIdFromRequest(request) === expected[index],
+      `request owner shape ${index + 1} should resolve ${expected[index]}`
+    )
+  })
+}
+
+async function testSkippedToolHandlerSeesOwnerAgentContext(): Promise<void> {
+  let hookResolutionCount = 0
+  let observedAgentId: string | undefined
+  const middleware = createToolHookMiddleware({
+    workspacePath: "C:/workspace",
+    threadId: "thread-agent-context",
+    hookScope: makeNoopHookScope(),
+    resolveHooksForContext: () => {
+      hookResolutionCount += 1
+      return []
+    },
+    skipToolNames: new Set(["read_file"])
+  })
+
+  await middleware.wrapToolCall(
+    {
+      toolCall: { id: "read-owner", name: "read_file", args: {} },
+      runtime: {
+        configurable: { [HOOK_AGENT_OWNER_METADATA_KEY]: "  agent-owner  " }
+      }
+    },
+    async () => {
+      await Promise.resolve()
+      observedAgentId = getCurrentHookAgentId()
+      return "file contents"
+    }
+  )
+
+  assert(observedAgentId === "agent-owner", "skipped tool handler should inherit request owner")
+  assert(hookResolutionCount === 0, "skipped tool should continue bypassing hook resolution")
+  assert(getCurrentHookAgentId() === undefined, "agent context should end with the tool call")
+}
+
+async function testConcurrentToolOwnersStayIsolated(): Promise<void> {
+  const middleware = createToolHookMiddleware({
+    workspacePath: "C:/workspace",
+    threadId: "thread-concurrent-agent-context",
+    hookScope: makeNoopHookScope(),
+    resolveHooksForContext: () => [],
+    skipToolNames: new Set(["read_file"])
+  })
+  const observations = new Map<string, string[]>()
+  let enteredHandlers = 0
+  let releaseHandlers: (() => void) | undefined
+  const handlersMayFinish = new Promise<void>((resolve) => {
+    releaseHandlers = resolve
+  })
+  const invoke = async (agentId: string, request: Record<string, unknown>) =>
+    middleware.wrapToolCall(
+      {
+        ...request,
+        toolCall: { id: `read-${agentId}`, name: "read_file", args: {} }
+      },
+      async () => {
+        const seen = [getCurrentHookAgentId() ?? "missing"]
+        observations.set(agentId, seen)
+        enteredHandlers += 1
+        if (enteredHandlers === 2) releaseHandlers?.()
+        await handlersMayFinish
+        await Promise.resolve()
+        seen.push(getCurrentHookAgentId() ?? "missing")
+        return agentId
+      }
+    )
+
+  await Promise.all([
+    invoke("agent-a", {
+      runtime: {
+        config: { configurable: { [HOOK_AGENT_OWNER_METADATA_KEY]: "agent-a" } }
+      }
+    }),
+    invoke("agent-b", { metadata: { [HOOK_AGENT_OWNER_METADATA_KEY]: "agent-b" } })
+  ])
+
+  assert(
+    observations.get("agent-a")?.join(",") === "agent-a,agent-a",
+    "concurrent agent-a context should remain isolated across awaits"
+  )
+  assert(
+    observations.get("agent-b")?.join(",") === "agent-b,agent-b",
+    "concurrent agent-b context should remain isolated across awaits"
+  )
+  assert(getCurrentHookAgentId() === undefined, "concurrent contexts should not leak after completion")
+}
+
+async function testMissingOwnerDoesNotReuseStaleContext(): Promise<void> {
+  const middleware = createToolHookMiddleware({
+    workspacePath: "C:/workspace",
+    threadId: "thread-missing-agent-context",
+    hookScope: makeNoopHookScope(),
+    resolveHooksForContext: () => [],
+    skipToolNames: new Set(["read_file"])
+  })
+  const invokeWithoutOwner = (observe: (agentId: string | undefined) => void) =>
+    middleware.wrapToolCall(
+      { toolCall: { id: "read-without-owner", name: "read_file", args: {} } },
+      async () => {
+        observe(getCurrentHookAgentId())
+        return "file contents"
+      }
+    )
+
+  await middleware.wrapToolCall(
+    {
+      toolCall: { id: "read-with-owner", name: "read_file", args: {} },
+      configurable: { [HOOK_AGENT_OWNER_METADATA_KEY]: "previous-agent" }
+    },
+    async () => "owned file contents"
+  )
+  let unownedObservation = "not-called" as string | undefined
+  await invokeWithoutOwner((agentId) => {
+    unownedObservation = agentId
+  })
+  assert(unownedObservation === undefined, "an unowned call should not reuse a prior agent context")
+
+  let inheritedObservation: string | undefined
+  await runWithHookAgentId("parent-agent", () =>
+    invokeWithoutOwner((agentId) => {
+      inheritedObservation = agentId
+    })
+  )
+  assert(inheritedObservation === "parent-agent", "an unowned call should inherit its active parent")
+  assert(getCurrentHookAgentId() === undefined, "parent agent context should be released after callback")
+}
+
+async function testStaticAgentFallbackBuildsHookContext(): Promise<void> {
+  const hookAgentIds: Array<string | undefined> = []
+  let handlerAgentId: string | undefined
+  const middleware = createToolHookMiddleware({
+    workspacePath: "C:/workspace",
+    threadId: "thread-static-agent-context",
+    agentId: " static-agent ",
+    hookScope: makeNoopHookScope(),
+    resolveHooksForContext: (_event, context) => {
+      hookAgentIds.push(context.agentId)
+      return []
+    }
+  })
+
+  await middleware.wrapToolCall(
+    { toolCall: { id: "static-agent-tool", name: "demo_tool", args: {} } },
+    async () => {
+      handlerAgentId = getCurrentHookAgentId()
+      return "ok"
+    }
+  )
+
+  assert(handlerAgentId === "static-agent", "static agent id should establish handler context")
+  assert(
+    hookAgentIds.join(",") === "static-agent,static-agent",
+    "static agent id should populate pre and post hook contexts"
+  )
 }
 
 async function testNonSkippedToolStillRunsHooks(): Promise<void> {
@@ -531,20 +716,30 @@ async function run(): Promise<void> {
   console.log("PASS R1 mergeUpdatedInput skips unsafe keys")
   await testWrapperToolsBypassToolHooks()
   console.log("PASS R2 wrapper tools bypass outer tool hooks")
+  testAgentOwnerRequestShapes()
+  console.log("PASS R3 agent owner metadata resolves from all supported request shapes")
+  await testSkippedToolHandlerSeesOwnerAgentContext()
+  console.log("PASS R4 skipped tool handler sees its request owner context")
+  await testConcurrentToolOwnersStayIsolated()
+  console.log("PASS R5 concurrent tool owner contexts do not cross or leak")
+  await testMissingOwnerDoesNotReuseStaleContext()
+  console.log("PASS R6 missing owner does not reuse stale context and inherits an active parent")
+  await testStaticAgentFallbackBuildsHookContext()
+  console.log("PASS R7 static agent fallback populates handler and hook contexts")
   await testNonSkippedToolStillRunsHooks()
-  console.log("PASS R3 non-skipped tools still run outer tool hooks")
+  console.log("PASS R8 non-skipped tools still run outer tool hooks")
   await testFailureFuseWarnsThenStrongWarnsInAwaitedToolHookFlow()
-  console.log("PASS R4 failure fuse warns then strong-warns in awaited tool hook flow")
+  console.log("PASS R9 failure fuse warns then strong-warns in awaited tool hook flow")
   await testFailureFuseUserNoticeDoesNotInjectModelFeedback()
-  console.log("PASS R5 user-only failure fuse notice does not inject model feedback")
+  console.log("PASS R10 user-only failure fuse notice does not inject model feedback")
   await testFailureFuseModelFeedbackDoesNotNotifyUser()
-  console.log("PASS R6 model-only failure fuse feedback does not notify user")
+  console.log("PASS R11 model-only failure fuse feedback does not notify user")
   await testObjectToolFailureFeedsFailureFuse()
-  console.log("PASS R7 object-shaped tool failures feed failure fuse")
+  console.log("PASS R12 object-shaped tool failures feed failure fuse")
   await testRecoveredToolMessageErrorFeedsFailureFuse()
-  console.log("PASS R8 recovered ToolMessage status=error failures feed failure fuse")
+  console.log("PASS R13 recovered ToolMessage status=error failures feed failure fuse")
   await testRecoveredThrowPathToolMessageDoesNotDoubleCount()
-  console.log("PASS R9 recovered throw-path ToolMessage failures do not double-count")
+  console.log("PASS R14 recovered throw-path ToolMessage failures do not double-count")
 }
 
 run().catch((err: Error) => {

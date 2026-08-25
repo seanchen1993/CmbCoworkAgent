@@ -22,6 +22,7 @@ import {
   WorkflowAbortError,
   getWorkflowAgentTimeoutMs,
   isWorkflowAbortError,
+  type WorkflowWorktreeIsolationBoundary,
   type WorkflowSubagentResult
 } from "./types"
 import { WORKFLOW_SUBAGENT_BASE_PROMPT, buildWorkflowSubagentStructuredPrompt } from "./prompts"
@@ -30,6 +31,7 @@ import {
   TRACE_REASONING_MAX_CHARS,
   truncateReasoningForTrace
 } from "../../../shared/model-reasoning"
+import { getAgentGraphRecursionLimit } from "../../../shared/agent-runtime-limits"
 
 const STRUCTURED_OUTPUT_FATAL_ERROR = Symbol.for("cmb.workflow.structured_output.fatal")
 // Explicitly marks a structured-output failure as "retry on a fresh session" so the
@@ -83,6 +85,7 @@ export interface WorkflowSubagentDeps {
   /** Creates a one-shot agent runtime for a subagent thread. */
   createRuntime: (options: {
     threadId: string
+    agentId: string
     modelId?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -91,6 +94,8 @@ export interface WorkflowSubagentDeps {
     disallowedTools?: string[]
     /** agentType-resolved shell policy. Undefined = full. */
     shellAccess?: AgentShellAccess
+    /** Immutable checkout identity used by file-root and Git guards. */
+    worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   }) => Promise<WorkflowSubagentRuntime>
   /** Tears down per-thread resources (checkpointer, sandbox ACLs). */
   cleanupThread: (threadId: string) => Promise<void>
@@ -121,6 +126,8 @@ export interface RunWorkflowSubagentRequest {
   disallowedTools?: string[]
   /** agentType-resolved shell policy. Undefined = full. */
   shellAccess?: AgentShellAccess
+  /** Runtime checkout identity for the private worktree. */
+  worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   /**
    * Best-effort display tap: invoked with each "values" snapshot (the graph state
    * `{ messages: [...] }`) so the renderer can show this subagent's live tool stream.
@@ -313,6 +320,7 @@ async function runOnce(
   const runShort = request.runId.replace(/^wf_/, "")
   const attemptSuffix = attempt > 1 ? `_r${attempt}` : ""
   const threadId = `${deps.parentThreadId}__wf_${runShort}_a${request.agentIndex}${attemptSuffix}`
+  const agentId = `${request.runId}:agent:${request.agentIndex}`
 
   // Subagent lifetime signal: parent abort, plus optional per-agent timeout when
   // CMB_WORKFLOW_AGENT_TIMEOUT_MS is configured.
@@ -384,19 +392,24 @@ async function runOnce(
       : WORKFLOW_SUBAGENT_BASE_PROMPT
     // An agentType resolves to a focused role prompt; prepend it so the subagent
     // adopts the role while still honouring the workflow base/structured contract.
-    const extraSystemPrompt = request.roleSystemPrompt
+    const rolePrompt = request.roleSystemPrompt
       ? `${request.roleSystemPrompt}\n\n${baseExtraPrompt}`
       : baseExtraPrompt
+    const extraSystemPrompt = request.worktreeIsolation
+      ? `${rolePrompt}\n\nYou are running in an isolated Git worktree at \`${request.worktreeIsolation.workspaceRoot}\` on branch \`${request.worktreeIsolation.branch}\`, separate from the source working directory and other agents. It starts from the frozen committed source HEAD; staged, unstaged, and untracked changes in the source checkout are not present. For this isolated worktree, these native Git instructions override the ordinary task-card commit workflow. Work normally with native Git: use \`git add\` and \`git commit\` to commit exactly the changes you intend to deliver, and leave the worktree clean. Never commit sensitive files such as \`.env\` files, credentials, API keys, or private keys; before force-adding an ignored file, verify that it contains no sensitive data. Do not switch to or modify another existing branch, and do not merge back into the source branch yourself. Do not push unless the task explicitly requires publishing this transient branch and the user approves it. The checkout is removed if unchanged or preserved for review if changed.`
+      : rolePrompt
 
     const { runtime, modelFellBack } = await createRuntimeWithModelFallback(deps, {
       threadId,
+      agentId,
       model: request.model,
       extraSystemPrompt,
       abortSignal: controller.signal,
       additionalTools,
       label: request.label,
       disallowedTools: request.disallowedTools,
-      shellAccess: request.shellAccess
+      shellAccess: request.shellAccess,
+      worktreeIsolation: request.worktreeIsolation
     })
     runTraceSideEffect("Workflow", () => {
       tracer?.setModelId(
@@ -417,7 +430,7 @@ async function runOnce(
       // generation exceeds 60s (e.g. write_file of a large file). consumeValuesStream
       // skips non-"values" chunks, so the token stream is otherwise ignored.
       streamMode: ["values", "messages"] as Array<"values" | "messages">,
-      recursionLimit: 1000
+      recursionLimit: getAgentGraphRecursionLimit()
     }
     const stopAfterStructuredAccepted =
       request.schema === undefined
@@ -639,6 +652,7 @@ export async function createRuntimeWithModelFallback(
   deps: WorkflowSubagentDeps,
   options: {
     threadId: string
+    agentId: string
     model?: string
     extraSystemPrompt: string
     abortSignal: AbortSignal
@@ -646,15 +660,18 @@ export async function createRuntimeWithModelFallback(
     label: string
     disallowedTools?: string[]
     shellAccess?: AgentShellAccess
+    worktreeIsolation?: WorkflowWorktreeIsolationBoundary
   }
 ): Promise<{ runtime: WorkflowSubagentRuntime; modelFellBack: boolean }> {
   const baseOptions = {
     threadId: options.threadId,
+    agentId: options.agentId,
     extraSystemPrompt: options.extraSystemPrompt,
     abortSignal: options.abortSignal,
     additionalTools: options.additionalTools,
     disallowedTools: options.disallowedTools,
-    shellAccess: options.shellAccess
+    shellAccess: options.shellAccess,
+    worktreeIsolation: options.worktreeIsolation
   }
   if (options.model) {
     // Don't double-prefix known model references. Bare profile model names keep

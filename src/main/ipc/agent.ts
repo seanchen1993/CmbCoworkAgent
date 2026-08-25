@@ -10,6 +10,8 @@ import {
   type PhysicalStreamRunSetupGuard
 } from "../agent/physical-stream-run-setup"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
+import { resolveThreadOutputStyle, type AgentOutputStyle } from "../../shared/agent-output-style"
 import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
 import { getDurableRuntimeTail } from "./thread-runtime-tail"
 import { Command } from "@langchain/langgraph"
@@ -74,6 +76,7 @@ import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
 import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
 import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
+import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
   RUNTIME_RESTORED_GOAL_PAUSE_NOTICE
@@ -207,6 +210,11 @@ import { createPersistentThreadHookScope } from "../hooks/thread-scope-persisten
 import type { HookConfig, HookEvent, HookResult } from "../hooks/types"
 import { fireSessionStartOnce } from "../hooks/session-lifecycle"
 import { runHooksEnriched } from "../hooks/required-skill"
+import {
+  buildSubagentStartHookContext,
+  buildSubagentStopHookContext,
+  extractSubagentStartToolCallsFromStreamPayload
+} from "../hooks/subagent-context"
 import { isHookHaltError, throwIfHookHalt, type HookHaltError } from "../hooks/halt"
 import {
   getFailureFuseHaltError,
@@ -214,6 +222,12 @@ import {
   type FailureFuseDecision,
   type FailureFuseHaltError
 } from "../agent/failure-fuse"
+import {
+  clearActionStationarityState,
+  clearActionStationarityTurn,
+  getActionStationarityHaltError,
+  type ActionStationarityHaltError
+} from "../agent/action-stationarity"
 import { formatSkillUseBlock, parseSkillUseBlock } from "../agent/skill-lifecycle/marker"
 import type { SkillLifecycleMatch } from "../agent/skill-lifecycle/registry"
 import { createSkillUseTracker, type SkillUseTracker } from "../agent/skill-lifecycle/tracker"
@@ -310,6 +324,23 @@ import {
   type LocalThreadRunLeaseClaim
 } from "../agent/thread-run-lease"
 import { emitAppAttention } from "../app-attention-events"
+
+function withHarnessStageInvalidation(
+  callback: HookResultCallback,
+  projectId?: string,
+  featureSlug?: string
+): HookResultCallback {
+  return (event, hook, result): void => {
+    if (
+      hook.hookSourceType === "plugin" ||
+      hook.hookSourceType === "skill" ||
+      Boolean(hook.pluginRoot)
+    ) {
+      markHarnessStageAttributionDirty(projectId, featureSlug)
+    }
+    callback(event, hook, result)
+  }
+}
 
 const MIN_CHARS_FOR_MEMORY = 200
 const MAX_STOP_HOOK_REVISIONS = 2
@@ -1186,6 +1217,26 @@ function sendFailureFuseNotice(
   })
 }
 
+function sendActionStationarityHalt(
+  window: BrowserWindow,
+  channel: string,
+  error: ActionStationarityHaltError
+): void {
+  safeSendToWindow(window, channel, {
+    type: "custom",
+    data: {
+      type: "action_stationarity_tripped",
+      action: "halt",
+      reason: error.decision.reason,
+      toolName: error.decision.toolName,
+      fingerprint: error.decision.fingerprint,
+      count: error.decision.count,
+      threshold: error.decision.threshold
+    }
+  })
+  safeSendToWindow(window, channel, { type: "done" })
+}
+
 /**
  * Thread-scoped hook state shared across IPC handler boundaries. A new
  * `agent:invoke` starts a fresh turn, but keeps the thread-level persistent
@@ -1227,6 +1278,7 @@ function resetTurnStateForNewInvoke(
   initialUserMessage?: string,
   turnId?: string
 ): void {
+  if (state.turnId) clearActionStationarityTurn(threadId, state.turnId)
   const snapshot = state.hookScope.snapshot()
   state.hookScope = createPersistentThreadHookScope(threadId)
   state.hookScope.activatePersistentHookKeys(snapshot.persistentHookKeys ?? [])
@@ -1269,6 +1321,8 @@ function ensureTurnId(turnState: TurnState, threadId: string, label: string): st
 }
 
 function disposeTurnState(threadId: string): void {
+  const state = turnStates.get(threadId)
+  if (state?.turnId) clearActionStationarityTurn(threadId, state.turnId)
   turnStates.delete(threadId)
   clearAdoptionContext(threadId)
   discardAgentAutoCommitTracking(threadId)
@@ -1291,9 +1345,11 @@ export function disposeAllAgentThreadStates(): void {
     clearAdoptionContext(threadId)
   }
   turnStates.clear()
+  clearActionStationarityState()
 }
 
 function disposeTurnRuntimeState(threadId: string, state: TurnState): void {
+  if (state.turnId) clearActionStationarityTurn(threadId, state.turnId)
   state.skillUseTracker = createSkillUseTracker()
   state.skillHookKeys = new Set<string>()
   state.stopContextCollector = new StopHookContextCollector()
@@ -1397,9 +1453,11 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   /** Diagnostic-only callback for "matched event but filtered out by scope". */
   onHookSkipped?: ScopeSkipCallback
 }): Promise<void> {
-  const [msgChunk] = params.payload as [
-    { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown } | undefined
-  ]
+  const msgChunk = Array.isArray(params.payload)
+    ? (params.payload[0] as
+        | { id?: unknown; kwargs?: Record<string, unknown>; content?: unknown }
+        | undefined)
+    : undefined
   if (!msgChunk) return
 
   const kwargs = (msgChunk.kwargs || {}) as Record<string, unknown>
@@ -1414,7 +1472,7 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
   const additionalKwargs = kwargs.additional_kwargs as Record<string, unknown> | undefined
   const isErr =
     kwargs.status === "error" || kwargs.is_error === true || additionalKwargs?.is_error === true
-  const subagentStopContext: HookContext = {
+  const subagentStopContext = buildSubagentStopHookContext({
     workspacePath: params.workspacePath,
     pluginOutputDir: params.pluginOutputDir,
     systemId: params.systemId,
@@ -1427,13 +1485,11 @@ async function maybeRunSubagentStopHooksFromStreamPayload(params: {
     harnessNodeStatus: params.harnessNodeStatus,
     projectCode: params.projectCode,
     projectDir: params.projectDir,
-    sessionId: params.threadId,
+    threadId: params.threadId,
     turnId: params.turnId,
-    subagent: {
-      id: toolCallId,
-      status: isErr ? "failed" : "completed"
-    }
-  }
+    toolCallId,
+    failed: isErr
+  })
   const result = await runHooksEnriched(
     resolveEnabledHooksForRun(
       params.workspacePath,
@@ -1477,19 +1533,14 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
     const args = (tc.args ?? {}) as Record<string, unknown>
     const subagentType = typeof args.subagent_type === "string" ? args.subagent_type : undefined
     const taskDescription = typeof args.description === "string" ? args.description : undefined
-    const context: HookContext = {
+    const context = buildSubagentStartHookContext({
       workspacePath: params.workspacePath,
-      sessionId: params.threadId,
+      threadId: params.threadId,
       turnId: params.turnId,
-      subagent: { id, name: subagentType, status: "started" },
-      toolName: "task",
-      toolArgs: {
-        agent_id: id,
-        agent_type: subagentType,
-        tool_call_id: id,
-        task_description: taskDescription
-      }
-    }
+      toolCallId: id,
+      subagentType,
+      taskDescription
+    })
     runHooksEnriched(
       resolveEnabledHooksForRun(
         params.workspacePath,
@@ -1503,6 +1554,69 @@ function maybeRunSubagentStartHooksFromToolCalls(params: {
       params.onHookResult
     ).catch((e) => console.warn("[Hooks] SubagentStart hook error:", e))
   }
+}
+
+/**
+ * Apply the paired subagent lifecycle hooks for one serialized stream message.
+ * All physical stream entry points (initial, resume, and interrupt-continue)
+ * use this bridge so a resumed turn cannot emit SubagentStop without first
+ * observing the corresponding task tool call as SubagentStart.
+ */
+async function maybeRunSubagentLifecycleHooksFromStreamPayload(params: {
+  payload: unknown
+  workspacePath?: string
+  pluginOutputDir?: string
+  systemId?: string
+  pluginWorkspace?: string
+  featureId?: string
+  harnessProjectId?: string
+  harnessAdapterName?: string
+  harnessAdapterVersion?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
+  projectCode?: string
+  projectDir?: string
+  threadId: string
+  turnId?: string
+  hookScope: HookScopeController
+  firedStartIds: Set<string>
+  firedStopIds: Set<string>
+  onHookResult?: HookResultCallback
+  onStartHookSkipped?: ScopeSkipCallback
+  onStopHookSkipped?: ScopeSkipCallback
+}): Promise<void> {
+  maybeRunSubagentStartHooksFromToolCalls({
+    toolCalls: extractSubagentStartToolCallsFromStreamPayload(params.payload),
+    workspacePath: params.workspacePath,
+    threadId: params.threadId,
+    turnId: params.turnId,
+    hookScope: params.hookScope,
+    firedStartIds: params.firedStartIds,
+    onHookResult: params.onHookResult,
+    onHookSkipped: params.onStartHookSkipped
+  })
+
+  await maybeRunSubagentStopHooksFromStreamPayload({
+    payload: params.payload,
+    workspacePath: params.workspacePath,
+    pluginOutputDir: params.pluginOutputDir,
+    systemId: params.systemId,
+    pluginWorkspace: params.pluginWorkspace,
+    featureId: params.featureId,
+    harnessProjectId: params.harnessProjectId,
+    harnessAdapterName: params.harnessAdapterName,
+    harnessAdapterVersion: params.harnessAdapterVersion,
+    harnessNodeName: params.harnessNodeName,
+    harnessNodeStatus: params.harnessNodeStatus,
+    projectCode: params.projectCode,
+    projectDir: params.projectDir,
+    threadId: params.threadId,
+    turnId: params.turnId,
+    hookScope: params.hookScope,
+    firedToolCallIds: params.firedStopIds,
+    onHookResult: params.onHookResult,
+    onHookSkipped: params.onStopHookSkipped
+  })
 }
 
 /**
@@ -1819,8 +1933,8 @@ function createHarnessAgentmdLoadStatusHandler(
     try {
       const firstSuccess = markHarnessProjectSystemConstraintsLoaded(projectId)
       if (firstSuccess) {
-        // reportProjectSnapshotNow performs a synchronous project inspect before
-        // its first await; defer it so telemetry never delays runtime creation.
+        // Defer the asynchronous snapshot report so telemetry setup never delays
+        // runtime creation on this turn.
         setImmediate(() => void reportProjectSnapshotNow(projectId))
       }
     } catch (error) {
@@ -2461,6 +2575,10 @@ function shouldDisableNormalModeSubagents(
   metadata: Record<string, unknown>
 ): boolean {
   return agentMode === "normal" && metadata.subagentsEnabled === false
+}
+
+function getRequestedOutputStyle(metadata: Record<string, unknown>): AgentOutputStyle {
+  return resolveThreadOutputStyle(metadata)
 }
 
 function renderCoordinatorWorkerNotifications(
@@ -5447,7 +5565,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const bindingThread = getThread(threadId)
           if (bindingThread?.metadata) {
             const bindingMetadata = JSON.parse(bindingThread.metadata) as Record<string, unknown>
-            harnessFeatureBinding = resolveHarnessFeatureBindingContext(bindingMetadata)
+            harnessFeatureBinding = await resolveHarnessFeatureBindingContext(bindingMetadata)
             isWorkflowNotificationTrace =
               message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT &&
               getAgentModeFromMetadata(bindingMetadata) === "workflow"
@@ -5715,7 +5833,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           abortController.signal,
-          makeHookResultCallback(window, channel, turnState.turnId)
+          withHarnessStageInvalidation(
+            makeHookResultCallback(window, channel, turnState.turnId),
+            harnessFeatureBinding?.projectId,
+            harnessFeatureBinding?.slug
+          )
         )
         const onFailureFuseNotice = guardPhysicalStreamRunCallback(
           threadId,
@@ -5856,7 +5978,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const workspacePath = parsedThreadMetadata.workspacePath
           sessionWorkspacePath = workspacePath ?? undefined
-          const harnessAgentContext = getHarnessAgentContext(metadata, {
+          const harnessAgentContext = await getHarnessAgentContext(metadata, {
             workspacePath,
             featureBinding: harnessFeatureBinding
           })
@@ -6555,6 +6677,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               coordinatorTurnPrompt,
@@ -6855,6 +6978,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
 
           const processMessagesSideEffects = async (payload: unknown): Promise<void> => {
+            // Lifecycle hooks have control-flow semantics (SubagentStop can halt
+            // the parent turn), so keep them outside the best-effort metrics/
+            // tracing catch below. A HookHaltError must reach the stream owner.
+            await maybeRunSubagentLifecycleHooksFromStreamPayload({
+              payload,
+              workspacePath: sessionWorkspacePath,
+              threadId,
+              turnId: turnState.turnId,
+              hookScope,
+              pluginOutputDir: harnessAgentContext.pluginOutputDir,
+              systemId: harnessAgentContext.systemId,
+              ...getHarnessHookContext(harnessAgentContext),
+              firedStartIds: _subagentStartFired,
+              firedStopIds: _subagentStopFired,
+              onHookResult,
+              onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+              onStopHookSkipped: onHookSkippedFactory("SubagentStop")
+            })
+
             try {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const [msgChunk] = payload as [any]
@@ -6864,29 +7006,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               const classId: string[] = Array.isArray(msgChunk.id) ? msgChunk.id : []
               const className = classId[classId.length - 1] || ""
               const isAI = className.includes("AI")
-              const isTool = className.includes("Tool")
               const soloTaskOwnerId = normalModeSubagentsEnabled
                 ? getSoloTaskOwnerIdFromStreamPayload(payload)
                 : undefined
               const isCapturedSoloTaskMessage =
                 isAI && soloTaskTraceManager?.hasCapturedTask(soloTaskOwnerId) === true
-
-              // SubagentStop — a "task" tool message signals subagent completion
-              if (isTool && kwargs.name === "task" && kwargs.tool_call_id) {
-                await maybeRunSubagentStopHooksFromStreamPayload({
-                  payload,
-                  workspacePath: sessionWorkspacePath,
-                  threadId,
-                  turnId: turnState.turnId,
-                  hookScope,
-                  pluginOutputDir: harnessAgentContext.pluginOutputDir,
-                  systemId: harnessAgentContext.systemId,
-                  ...getHarnessHookContext(harnessAgentContext),
-                  firedToolCallIds: _subagentStopFired,
-                  onHookResult,
-                  onHookSkipped: onHookSkippedFactory("SubagentStop")
-                })
-              }
 
               if (!isAI) return
 
@@ -6923,16 +7047,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
               }
               if (!toolCalls || toolCalls.length === 0) return
-              maybeRunSubagentStartHooksFromToolCalls({
-                toolCalls,
-                workspacePath,
-                threadId,
-                turnId: turnState.turnId,
-                hookScope,
-                firedStartIds: _subagentStartFired,
-                onHookResult,
-                onHookSkipped: onHookSkippedFactory("SubagentStart")
-              })
               if (msgId && _countedAiMsgIds.has(msgId)) return
               if (msgId) _countedAiMsgIds.add(msgId)
 
@@ -7395,6 +7509,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error: unknown,
             label: string
           ): Promise<boolean> => {
+            if (isHookHaltError(error)) throw error
             if (!isRetryableApiError(error) || remainingCandidates.length === 0) {
               return false
             }
@@ -7480,6 +7595,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               await consumeStreamWithSideEffects(activeStream)
               break // Stream completed successfully
             } catch (midStreamErr) {
+              if (isHookHaltError(midStreamErr)) throw midStreamErr
               const currentAgent = agent
               if (!currentAgent) throw midStreamErr
               const retry = await retryStreamAfterDisconnect(
@@ -8304,6 +8420,30 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
+          const actionStationarityHalt = getActionStationarityHaltError(error)
+          if (actionStationarityHalt) {
+            clearCoordinatorNotificationSelectedSkillsOnExit = true
+            console.warn(
+              "[Agent] Repeated identical tool calls halted turn:",
+              actionStationarityHalt.decision.reason
+            )
+            pauseActiveGoalForRuntimeStop(actionStationarityHalt.decision.reason)
+            sendActionStationarityHalt(window, channel, actionStationarityHalt)
+            syncUsedSkillsContext()
+            tracer.finish("cancelled", actionStationarityHalt.decision.reason).catch(() => {})
+            if (invokeRoutingResult) {
+              rememberRoutingFeedback(threadId, {
+                resolvedTier: invokeRoutingResult.resolvedTier,
+                resolvedModelId: usedModelId ?? invokeRoutingResult.resolvedModelId,
+                outcome: "cancelled",
+                toolCallCount: toolCallCounter.getCount(),
+                toolErrorCount,
+                lastInputTokens: highWaterInputTokens > 0 ? highWaterInputTokens : undefined
+              })
+            }
+            turnStateShouldDispose = true
+            return
+          }
           const failureFuseHalt = getFailureFuseHaltError(error)
           if (failureFuseHalt) {
             clearCoordinatorNotificationSelectedSkillsOnExit = true
@@ -8560,7 +8700,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const metadata = parsedThreadMetadata.metadata
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
-      const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+      const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
         window,
@@ -8848,7 +8988,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           runToken,
           abortController.signal,
-          makeHookResultCallback(window, channel, turnState.turnId)
+          withHarnessStageInvalidation(
+            makeHookResultCallback(window, channel, turnState.turnId),
+            harnessAgentContext.harnessProjectId,
+            harnessAgentContext.featureId
+          )
         )
         const onFailureFuseNotice = guardPhysicalStreamRunCallback(
           threadId,
@@ -9223,12 +9367,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let resumeStableStreamMessages: unknown[] = []
           const resumeInFlightMessageIds = new Set<string>()
           let pendingResumeMessagePayloads: unknown[] = []
+          const resumeSubagentStartFired = new Set<string>()
           const resumeSubagentStopFired = new Set<string>()
 
           const consumeResumeStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const commitPendingResumeMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingResumeMessagePayloads) {
-                await maybeRunSubagentStopHooksFromStreamPayload({
+                await maybeRunSubagentLifecycleHooksFromStreamPayload({
                   payload,
                   workspacePath,
                   threadId,
@@ -9237,9 +9382,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pluginOutputDir: harnessAgentContext.pluginOutputDir,
                   systemId: harnessAgentContext.systemId,
                   ...getHarnessHookContext(harnessAgentContext),
-                  firedToolCallIds: resumeSubagentStopFired,
+                  firedStartIds: resumeSubagentStartFired,
+                  firedStopIds: resumeSubagentStopFired,
                   onHookResult,
-                  onHookSkipped: onHookSkippedFactory("SubagentStop")
+                  onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+                  onStopHookSkipped: onHookSkippedFactory("SubagentStop")
                 })
                 stopContextCollector.processStreamChunk("messages", payload)
               }
@@ -9305,6 +9452,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               await consumeResumeStream(activeResumeStream)
               break
             } catch (midErr) {
+              if (isHookHaltError(midErr)) throw midErr
               const retry = await retryStreamAfterDisconnect(
                 midErr,
                 resumeStreamDisconnectRetries,
@@ -9475,6 +9623,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnStateShouldDispose = true
             return
           }
+          const actionStationarityHalt = getActionStationarityHaltError(error)
+          if (actionStationarityHalt) {
+            clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
+            console.warn(
+              "[Agent] Resume repeated identical tool calls halted turn:",
+              actionStationarityHalt.decision.reason
+            )
+            pauseActiveGoalAfterBoundary(
+              threadId,
+              window,
+              channel,
+              actionStationarityHalt.decision.reason,
+              boundaryGoalId,
+              boundaryGoalActiveWindowId
+            )
+            sendActionStationarityHalt(window, channel, actionStationarityHalt)
+            turnStateShouldDispose = true
+            return
+          }
           const failureFuseHalt = getFailureFuseHaltError(error)
           if (failureFuseHalt) {
             clearResumeCoordinatorNotificationSelectedSkillsOnExit = true
@@ -9636,7 +9803,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath
     const modelId = parsedThreadMetadata.modelId
-    const harnessAgentContext = getHarnessAgentContext(metadata, { workspacePath })
+    const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
       window,
@@ -9875,7 +10042,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         runToken,
         abortController.signal,
-        makeHookResultCallback(window, channel, turnState.turnId)
+        withHarnessStageInvalidation(
+          makeHookResultCallback(window, channel, turnState.turnId),
+          harnessAgentContext.harnessProjectId,
+          harnessAgentContext.featureId
+        )
       )
       const onFailureFuseNotice = guardPhysicalStreamRunCallback(
         threadId,
@@ -10090,7 +10261,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           configurable: { thread_id: threadId },
           signal: abortController.signal,
           streamMode: ["messages", "values"] as ("messages" | "values")[],
-          recursionLimit: 1000
+          recursionLimit: getAgentGraphRecursionLimit()
         }
 
         if (decision.type === "approve") {
@@ -10104,6 +10275,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             runLease: { owner: "desktop", runId: runToken },
             baseOptions: () => ({
               threadId,
+              outputStyle: getRequestedOutputStyle(metadata),
               currentRunMessageQueueOwnerToken: runToken,
               workspacePath,
               coordinatorTurnPrompt: interruptCoordinatorTurnPrompt,
@@ -10226,12 +10398,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           let intStableStreamMessages: unknown[] = []
           const intInFlightMessageIds = new Set<string>()
           let pendingIntMessagePayloads: unknown[] = []
+          const interruptSubagentStartFired = new Set<string>()
           const interruptSubagentStopFired = new Set<string>()
 
           const consumeInterruptStream = async (source: AsyncIterable<unknown>): Promise<void> => {
             const commitPendingInterruptMessageSideEffects = async (): Promise<void> => {
               for (const payload of pendingIntMessagePayloads) {
-                await maybeRunSubagentStopHooksFromStreamPayload({
+                await maybeRunSubagentLifecycleHooksFromStreamPayload({
                   payload,
                   workspacePath,
                   threadId,
@@ -10240,9 +10413,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   pluginOutputDir: harnessAgentContext.pluginOutputDir,
                   systemId: harnessAgentContext.systemId,
                   ...getHarnessHookContext(harnessAgentContext),
-                  firedToolCallIds: interruptSubagentStopFired,
+                  firedStartIds: interruptSubagentStartFired,
+                  firedStopIds: interruptSubagentStopFired,
                   onHookResult,
-                  onHookSkipped: onHookSkippedFactory("SubagentStop")
+                  onStartHookSkipped: onHookSkippedFactory("SubagentStart"),
+                  onStopHookSkipped: onHookSkippedFactory("SubagentStop")
                 })
                 stopContextCollector.processStreamChunk("messages", payload)
               }
@@ -10308,6 +10483,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               await consumeInterruptStream(activeIntStream)
               break
             } catch (midErr) {
+              if (isHookHaltError(midErr)) throw midErr
               const retry = await retryStreamAfterDisconnect(
                 midErr,
                 intStreamDisconnectRetries,
@@ -10484,6 +10660,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalActiveWindowId
           )
           sendHookHalt(window, channel, error)
+          turnStateShouldDispose = true
+          return
+        }
+        const actionStationarityHalt = getActionStationarityHaltError(error)
+        if (actionStationarityHalt) {
+          clearInterruptCoordinatorNotificationSelectedSkillsOnExit = true
+          console.warn(
+            "[Agent] Interrupt repeated identical tool calls halted turn:",
+            actionStationarityHalt.decision.reason
+          )
+          pauseActiveGoalAfterBoundary(
+            threadId,
+            window,
+            channel,
+            actionStationarityHalt.decision.reason,
+            boundaryGoalId,
+            boundaryGoalActiveWindowId
+          )
+          sendActionStationarityHalt(window, channel, actionStationarityHalt)
           turnStateShouldDispose = true
           return
         }

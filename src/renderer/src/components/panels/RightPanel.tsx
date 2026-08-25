@@ -45,6 +45,7 @@ import {
   type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
+import { getToolLabel } from "@/lib/tool-labels"
 import {
   hasLoadedWorkspaceFiles,
   loadWorkspaceFilesDeduped,
@@ -83,6 +84,9 @@ const FileViewer = lazy(() =>
 )
 const GitPanelView = lazy(() =>
   import("@/components/panels/GitPanelView").then((m) => ({ default: m.GitPanelView }))
+)
+const BrowserPanel = lazy(() =>
+  import("@/components/browser/BrowserPanel").then((m) => ({ default: m.BrowserPanel }))
 )
 
 const HEADER_HEIGHT = 52 // px
@@ -207,11 +211,9 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 
 interface RightPanelProps {
   threadId?: string | null
-  moduleMode: "work" | "preview" | "git"
   showSystemConstraints?: boolean
-  onRequestPreviewMode?: () => void
-  onRequestWorkMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
+  onBrowserFullscreenChange?: (isFullscreen: boolean) => void
 }
 
 function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
@@ -225,26 +227,28 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 
 export function RightPanel({
   threadId,
-  moduleMode,
   showSystemConstraints = false,
-  onRequestPreviewMode,
-  onRequestWorkMode,
-  onPreviewFullscreenChange
+  onPreviewFullscreenChange,
+  onBrowserFullscreenChange
 }: RightPanelProps): React.JSX.Element {
   const {
     currentThreadId: storeCurrentThreadId,
     pluginVersion,
+    rightModule,
     rightPanelWorkRequest,
     skillGenerationByThread,
+    setRightModule,
     setSkillGenerationPhase
   } =
     useAppStore(
       useShallow((s) => ({
         currentThreadId: s.currentThreadId,
         pluginVersion: s.pluginVersion,
+        rightModule: s.rightModule,
         rightPanelWorkRequest: s.rightPanelWorkRequest,
         // Subscribe to the whole map so we re-render when any thread's card changes
         skillGenerationByThread: s.skillGenerationByThread,
+        setRightModule: s.setRightModule,
         setSkillGenerationPhase: s.setSkillGenerationPhase
       }))
     )
@@ -649,31 +653,35 @@ export function RightPanel({
       setPreviewPath(latestResourceEvent.path)
       setPreviewReloadToken((v) => v + 1)
       if (switchToPreview) {
-        onRequestPreviewMode?.()
+        if (isHtmlPreviewPath(latestResourceEvent.path)) {
+          setRightModule("browser")
+        } else {
+          setRightModule("preview")
+        }
       }
     }
 
     // Render preview when this round finishes: true -> false
     if (!(wasLoading && !isLoading)) return
+    const shouldAutoSwitchToPreview = rightModule !== "git" && rightModule !== "browser"
     if (
       latestCompletedLlmBatch?.files?.length &&
       lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
     ) {
       lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-      // Never auto-open git panel. If user is already on git, only refresh preview data silently.
-      applyPreviewUpdate(moduleMode !== "git")
+      // Do not steal focus from operational panels; refresh preview data silently.
+      applyPreviewUpdate(shouldAutoSwitchToPreview)
       return
     }
 
-    // For non-edit resource events, respect current panel choice:
-    // if user stays on git panel, don't switch away; otherwise keep preview behavior.
-    applyPreviewUpdate(moduleMode !== "git")
+    // For non-edit resource events, respect current panel choice.
+    applyPreviewUpdate(shouldAutoSwitchToPreview)
   }, [
     streamData.isLoading,
     latestResourceEvent,
     latestCompletedLlmBatch,
-    onRequestPreviewMode,
-    moduleMode
+    rightModule,
+    setRightModule
   ])
 
   useEffect(() => {
@@ -703,16 +711,22 @@ export function RightPanel({
       if (!currentThreadId || threadId !== currentThreadId) return
       setPreviewPath(filePath)
       setPreviewReloadToken((v) => v + 1)
-      onRequestPreviewMode?.()
+      if (isHtmlPreviewPath(filePath)) {
+        setRightModule("browser")
+      } else {
+        setRightModule("preview")
+      }
     })
     return cleanup
-  }, [currentThreadId, onRequestPreviewMode])
+  }, [currentThreadId, setRightModule])
 
   useEffect(() => {
-    if (moduleMode !== "preview" || !previewPath) {
-      onPreviewFullscreenChange?.(false)
-    }
-  }, [moduleMode, previewPath, onPreviewFullscreenChange])
+    if (rightModule !== "preview" || !previewPath) onPreviewFullscreenChange?.(false)
+  }, [rightModule, previewPath, onPreviewFullscreenChange])
+
+  useEffect(() => {
+    if (rightModule !== "browser") onBrowserFullscreenChange?.(false)
+  }, [rightModule, onBrowserFullscreenChange])
 
   useEffect(() => {
     if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
@@ -750,7 +764,7 @@ export function RightPanel({
 
   // Calculate available content height
   const getAvailableContentHeight = useCallback(() => {
-    if (moduleMode !== "work") return 0
+    if (rightModule !== "work") return 0
     if (!containerRef.current) return 0
     const totalHeight = containerRef.current.clientHeight
 
@@ -780,7 +794,7 @@ export function RightPanel({
 
     return Math.max(0, totalHeight - used)
   }, [
-    moduleMode,
+    rightModule,
     tasksOpen,
     filesOpen,
     showSystemConstraints,
@@ -1219,7 +1233,7 @@ export function RightPanel({
   }, [getContentHeights])
 
   const allPanelsClosed =
-    moduleMode === "work" &&
+    rightModule === "work" &&
     !tasksOpen &&
     !filesOpen &&
     !(showSystemConstraints && systemConstraintsOpen) &&
@@ -1228,18 +1242,36 @@ export function RightPanel({
     !pluginsOpen &&
     !hooksOpen &&
     !lspOpen
+  const browserPreviewUrl = useMemo(() => {
+    if (!previewPath || !isHtmlPreviewPath(previewPath)) return null
+    return previewPath
+  }, [previewPath])
 
   return (
     <aside
       ref={containerRef}
       className={cn(
-        "flex w-full flex-col bg-transparent overflow-hidden",
+        "flex w-full flex-col bg-transparent overflow-hidden border-l",
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
-      {moduleMode === "preview" && (
-        <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-background">
-          <div className="bg-background p-2 h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
+      {rightModule === "browser" && (
+        <div className="flex h-full min-h-0 flex-col  bg-background">
+          <Suspense fallback={<LazySectionFallback label="加载 Browser..." />}>
+            <BrowserPanel
+              threadId={currentThreadId ?? null}
+              workspacePath={threadState?.workspacePath ?? null}
+              initialUrl={browserPreviewUrl}
+              reloadToken={previewReloadToken}
+              onFullscreenChange={onBrowserFullscreenChange}
+            />
+          </Suspense>
+        </div>
+      )}
+
+      {rightModule === "preview" && (
+        <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-white">
+          <div className="bg-white h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
             {previewPath ? (
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
@@ -1249,23 +1281,67 @@ export function RightPanel({
                 reloadToken={previewReloadToken}
                 onReload={() => setPreviewReloadToken((v) => v + 1)}
                 onFullscreenChange={onPreviewFullscreenChange}
-                onHidePreview={onRequestWorkMode}
+                onHidePreview={() => setRightModule("work")}
               />
             ) : (
-              <div className="h-full min-h-0 flex items-center justify-center p-4">
-                <div className="w-full max-w-sm rounded-2xl border border-border/70 bg-background-elevated/80 px-5 py-6 text-center shadow-sm">
-                  <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-xl border border-border bg-muted/30">
-                    <FileText className="size-5 text-muted-foreground" />
+              <div className="flex h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+                <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-4 py-5">
+                  <div className="mb-3">
+                    <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
+                      <FileText className="size-7" strokeWidth={1.7} />
+                    </div>
+                    <p className="text-[10px] font-semibold tracking-[0.18em] text-stone-500">
+                      FILE PREVIEW
+                    </p>
+                    <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
+                      从一个文件开始预览
+                    </h2>
+                    <p className="mt-2 text-xs leading-5 text-stone-600">
+                      生成或编辑文件后，新的可预览内容会自动在这里展示。
+                    </p>
                   </div>
-                  <div className="text-sm font-semibold text-foreground">暂无可预览文件</div>
-                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    生成或编辑文件后会自动在这里展示预览。 也可以在工具调用里点击预览图标快速打开。
-                  </p>
-                  <div className="mt-4 flex items-center justify-center gap-2">
+
+                  <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
+                    <div className="border-b border-stone-100 px-4 py-3">
+                      <p className="text-xs font-semibold text-stone-800">预览使用提示</p>
+                      <p className="mt-0.5 text-[11px] text-stone-500">
+                        把文件查看、跳转和验证集中到同一处。
+                      </p>
+                    </div>
+
+                    <div className="divide-y divide-stone-100">
+                      <div className="flex gap-3 px-4 py-3">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700">
+                          <Eye className="size-3.5" strokeWidth={1.8} />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-stone-800">在工具调用里快速打开</p>
+                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                            点击预览图标，就能把对应文件直接切到这里查看完整内容。
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-3 px-4 py-3">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
+                          <Sparkles className="size-3.5" strokeWidth={1.8} />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-stone-800">生成后自动接管预览区</p>
+                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                            当任务产出新的可预览文件时，这里会自动更新，不需要手动切换。
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between gap-3">
+                    <p className="text-[11px] text-stone-500">准备好后，回到工作区继续生成内容。</p>
                     <button
                       type="button"
-                      onClick={onRequestWorkMode}
-                      className="inline-flex items-center justify-center rounded-md border border-border/80 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                      onClick={() => setRightModule("work")}
+                      className="inline-flex h-9 shrink-0 items-center justify-center rounded-xl border border-stone-200/90 bg-white px-4 text-xs font-medium text-stone-700 shadow-[0_8px_20px_rgba(41,37,36,0.06)] transition-[transform,background-color,color,box-shadow] hover:bg-stone-50 hover:text-stone-900 hover:shadow-[0_12px_28px_rgba(41,37,36,0.1)] active:scale-[0.98]"
                     >
                       返回工作目录
                     </button>
@@ -1277,7 +1353,7 @@ export function RightPanel({
         </div>
       )}
 
-      {moduleMode === "git" && (
+      {rightModule === "git" && (
         <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-white">
           <div className="bg-white p-2 h-full min-h-0">
             <Suspense fallback={<LazySectionFallback label="加载 Git 面板..." />}>
@@ -1308,7 +1384,7 @@ export function RightPanel({
         </div>
       )}
 
-      {moduleMode === "work" && (
+      {rightModule === "work" && (
         <>
           {/* TASKS */}
           <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
@@ -1647,6 +1723,11 @@ function getPathExtension(filePath: string): string {
   return ext || ""
 }
 
+function isHtmlPreviewPath(filePath: string): boolean {
+  const ext = getPathExtension(filePath)
+  return ext === "html" || ext === "htm"
+}
+
 function isResourcePreviewPath(filePath: string): boolean {
   const ext = getPathExtension(filePath)
   return RESOURCE_PREVIEW_EXTENSIONS.has(ext)
@@ -1909,9 +1990,7 @@ function ResourcePreview({
   const supportsSourceView =
     extension === "md" ||
     extension === "markdown" ||
-    extension === "mdx" ||
-    extension === "html" ||
-    extension === "htm"
+    extension === "mdx"
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
   const canCopyContent = previewFileType.type === "code" || previewFileType.type === "text"
 
@@ -2001,7 +2080,7 @@ function ResourcePreview({
   }, [onFullscreenChange])
 
   return (
-    <div className="rounded-xl border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
+    <div className="border border-border/70 overflow-hidden bg-background flex flex-col min-h-0 h-full">
       <div className="sticky top-0 z-10 flex items-center justify-between gap-2 px-3 py-2 border-b border-border/70 bg-background-elevated/70 shrink-0">
         <div className="min-w-0">
           <div className="text-[12px] font-semibold truncate" title={filePath}>
@@ -2093,7 +2172,6 @@ function ResourcePreview({
             threadId={threadId}
             filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
             externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
-            htmlFillHeight
             reloadToken={reloadToken}
             previewMode={supportsSourceView ? previewMode : undefined}
           />
@@ -2762,7 +2840,11 @@ function CoordinatorWorkerCard({
           <div className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2 font-medium text-foreground/90">
               <Code2 className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate">{worker.last_tool_name || "等待工具调用"}</span>
+              <span className="truncate">
+                {worker.last_tool_name
+                  ? getToolLabel(worker.last_tool_name, { showToolName: false })
+                  : "等待工具调用"}
+              </span>
             </span>
             <span className="shrink-0 rounded-md border border-border/70 bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
               {worker.tool_call_count} 次

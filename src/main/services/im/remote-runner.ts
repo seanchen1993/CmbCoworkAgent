@@ -1,5 +1,6 @@
 import { HumanMessage } from "@langchain/core/messages"
 import { randomUUID } from "node:crypto"
+import { getAgentGraphRecursionLimit } from "../../../shared/agent-runtime-limits"
 import {
   closeCheckpointer,
   pinCheckpointer,
@@ -214,7 +215,6 @@ export function createImInboxRemotePolicy(
     ...(options.allowRequestUserInput ? {} : { disableRequestUserInput: true }),
     disableSubagents: true,
     disableMemoryInjection: true,
-    disableTaskTool: true,
     disableMcpTools: true,
     blockedToolNames: [...IM_INBOX_BLOCKED_TOOLS]
   }
@@ -269,8 +269,8 @@ export async function executePreparedRemoteStandardTurn(
   const hookScope = createPersistentThreadHookScope(threadId)
   const skillUseTracker = createSkillUseTracker()
   const skillHookKeys = new Set<string>()
-  const harnessFeature = resolveHarnessFeatureBindingContext(metadata)
-  const harnessContext: HarnessAgentContext = getHarnessAgentContext(metadata, {
+  const harnessFeature = await resolveHarnessFeatureBindingContext(metadata)
+  const harnessContext: HarnessAgentContext = await getHarnessAgentContext(metadata, {
     workspacePath,
     featureBinding: harnessFeature
   })
@@ -383,7 +383,7 @@ export async function executePreparedRemoteStandardTurn(
             configurable: { thread_id: threadId },
             signal,
             streamMode: ["messages", "values"],
-            recursionLimit: 1000
+            recursionLimit: getAgentGraphRecursionLimit()
           }
         )
         await streamConsumer.consume(stream, signal)
@@ -431,7 +431,7 @@ export async function executePreparedRemoteStandardTurn(
             configurable: { thread_id: threadId },
             signal,
             streamMode: ["messages", "values"],
-            recursionLimit: 1000
+            recursionLimit: getAgentGraphRecursionLimit()
           }
         )
         await streamConsumer.consume(stream, signal)
@@ -490,8 +490,7 @@ export async function executePreparedRemoteStandardTurn(
         ? { type: "done" }
         : {
             type: "error",
-            error:
-              terminalError instanceof Error ? terminalError.message : "远程任务执行失败"
+            error: terminalError instanceof Error ? terminalError.message : "远程任务执行失败"
           }
     )
     notifyRemoteThreadChanged()

@@ -837,8 +837,14 @@ export interface ApprovalRequest extends HITLRequest {
   suggestedCommitFilePaths?: string[]
   /** For git_commit: cwd that explicit pathspecs are relative to (after git -C) */
   suggestedCommitFileBasePath?: string
-  /** For git_commit/git_push: Git working directory resolved from cd / git -C. */
+  /** For git_commit/git_push: preferred Git operation target (normally the repository root). */
   suggestedGitWorktreePath?: string
+  /** For git_commit: concrete repository targets when the command cwd contains multiple repos. */
+  suggestedGitRepositories?: Array<{
+    path: string
+    displayPath: string
+    gitRoot: string
+  }>
   /** For git_commit: where suggestedCommitFilePaths came from */
   suggestedCommitFileSelectionSource?: "pathspec" | "staged"
   filePath?: string // target file path (for write_file/edit_file operations)
@@ -905,6 +911,7 @@ export interface UserInputRequest {
   requestId: string
   threadId: string
   questions: UserInputQuestion[]
+  autoResolutionMs?: number
   createdAt: string
 }
 

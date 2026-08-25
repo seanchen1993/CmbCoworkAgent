@@ -7,6 +7,8 @@ import {
   type CloseToTrayPromptEvent,
   type WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { ChatScrollSettings } from "../shared/chat-scroll"
+import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 import type {
   Thread,
   Message,
@@ -117,7 +119,35 @@ import type {
   TaskMmdSnapshot
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
+import type {
+  WorkflowWorktreeAction,
+  WorkflowWorktreeActionResponse
+} from "../main/ipc/workflow-worktree-payload"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import { BROWSER_PANEL_REQUEST_CHANNEL, BROWSER_SESSION_ID } from "../shared/browser-types"
+import type {
+  BrowserRecordingSession,
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
+  BrowserScreenshotResult,
+  ScriptRecordingStartOptions,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserRecordingDraftUpdateInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
+  BrowserState
+} from "../shared/browser-types"
+import { BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL } from "../shared/browser-types"
 import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
   APP_ATTENTION_CHANNEL,
@@ -177,6 +207,13 @@ const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response
 const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
 const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
+const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const PET_SETTINGS_CHANGED_CHANNEL = "pet:settingsChanged"
 
 function notifyAppAttention(kind: AppAttentionKind, threadId?: string): void {
@@ -202,6 +239,8 @@ function notifyForAgentStreamEvent(event: unknown, threadId?: string): void {
 // Simple electron API - replaces @electron-toolkit/preload
 const electronAPI = {
   openExternal: (url: string) => shell.openExternal(url),
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") =>
+    ipcRenderer.invoke("managed-links:open", id) as Promise<void>,
   openLoginWindow: () => ipcRenderer.invoke("open-login-window"),
   closeLoginWindow: () => ipcRenderer.invoke("close-login-window"),
   openLoginPage: () => ipcRenderer.invoke("open-login-page"),
@@ -235,6 +274,35 @@ const electronAPI = {
     ipcRenderer.on(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
     return () => ipcRenderer.removeListener(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, handler)
   },
+  getChatScrollSettings: (): Promise<ChatScrollSettings> =>
+    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_GET_CHANNEL) as Promise<ChatScrollSettings>,
+  setChatScrollSettings: (settings: Partial<ChatScrollSettings>): Promise<ChatScrollSettings> =>
+    ipcRenderer.invoke(CHAT_SCROLL_SETTINGS_SET_CHANNEL, settings) as Promise<ChatScrollSettings>,
+  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => {
+    const handler = (_event: unknown, settings: unknown): void => {
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) return
+      callback(settings as ChatScrollSettings)
+    }
+    ipcRenderer.on(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
+    return () => ipcRenderer.removeListener(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, handler)
+  },
+  getAgentRuntimeSettings: (): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(AGENT_RUNTIME_SETTINGS_GET_CHANNEL) as Promise<AgentRuntimeSettings>,
+  setAgentRuntimeRecursionLimit: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
+  setWorkflowWorktreeTimeoutMinutes: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
+  setWorkflowWorktreeRemoveTimeoutMinutes: (value: number): Promise<AgentRuntimeSettings> =>
+    ipcRenderer.invoke(
+      WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL,
+      value
+    ) as Promise<AgentRuntimeSettings>,
   onNotifyMsg: (callback: (msg: string) => void) => {
     ipcRenderer.on("notify-login-msg", (_event, data) => {
       callback(data)
@@ -255,6 +323,129 @@ const electronAPI = {
   process: {
     platform: process.platform,
     versions: process.versions
+  }
+}
+
+function createBrowserApi() {
+  return {
+    attach: (options?: BrowserAttachOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:attach", options) as Promise<BrowserState>
+    },
+    detach: (): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:detach") as Promise<BrowserState>
+    },
+    setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
+    },
+    navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
+    },
+    goBack: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goBack") as Promise<BrowserState>,
+    goForward: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goForward") as Promise<BrowserState>,
+    reload: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:reload") as Promise<BrowserState>,
+    stop: (): Promise<BrowserState> => ipcRenderer.invoke("browser:stop") as Promise<BrowserState>,
+    clearConsole: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
+    getState: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke(
+        "browser:startScriptRecording",
+        options
+      ) as Promise<BrowserRecordingSession>,
+    pauseScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:pauseScriptRecording") as Promise<BrowserRecordingSession>,
+    updateScriptRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke(
+        "browser:updateScriptRecordingDraft",
+        input
+      ) as Promise<BrowserRecordingSession>,
+    resumeScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:resumeScriptRecording") as Promise<BrowserRecordingSession>,
+    stopScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:stopScriptRecording") as Promise<BrowserRecordingSession>,
+    getScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:getScriptRecording") as Promise<BrowserRecordingSession>,
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ): Promise<BrowserScriptLibraryEntry> =>
+      ipcRenderer.invoke(
+        "browser:saveScriptLibraryEntry",
+        input
+      ) as Promise<BrowserScriptLibraryEntry>,
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ): Promise<BrowserScriptLibraryEntry[]> =>
+      ipcRenderer.invoke("browser:listScriptLibraryEntries", options) as Promise<
+        BrowserScriptLibraryEntry[]
+      >,
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput): Promise<string> =>
+      ipcRenderer.invoke("browser:readScriptLibraryScript", input) as Promise<string>,
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput): Promise<void> =>
+      ipcRenderer.invoke("browser:updateScriptLibraryEntry", input) as Promise<void>,
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput): Promise<void> =>
+      ipcRenderer.invoke("browser:deleteScriptLibraryEntry", input) as Promise<void>,
+    executeRecordingScript: (input: BrowserScriptExecutionInput): Promise<void> =>
+      ipcRenderer.invoke("browser:executeRecordingScript", input) as Promise<void>,
+    getScriptExecutionState: (): Promise<BrowserScriptExecutionState> =>
+      ipcRenderer.invoke("browser:getScriptExecutionState") as Promise<BrowserScriptExecutionState>,
+    cancelRecordingScriptExecution: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:cancelRecordingScriptExecution") as Promise<boolean>,
+    getCdpConfig: (): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
+    isProfileImportRuntimeEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:isProfileImportRuntimeEnabled") as Promise<boolean>,
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:saveCdpConfig", updates) as Promise<BrowserCdpConfig>,
+    captureScreenshot: (): Promise<BrowserScreenshotResult> =>
+      ipcRenderer.invoke("browser:captureScreenshot") as Promise<BrowserScreenshotResult>,
+    importProfileData: (
+      options: BrowserProfileImportOptions
+    ): Promise<BrowserProfileImportResult> =>
+      ipcRenderer.invoke(
+        "browser:importProfileData",
+        options
+      ) as Promise<BrowserProfileImportResult>,
+    disposeAllForRendererUnload: (): void => {
+      ipcRenderer.send("browser:disposeAllForRendererUnload")
+    },
+    onState: (callback: (state: BrowserState) => void): (() => void) => {
+      const channel = `browser:state:${BROWSER_SESSION_ID}`
+      const handler = (_: unknown, state: BrowserState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void): (() => void) => {
+      const handler = (_: unknown, request: BrowserPanelRequest): void => {
+        callback(request)
+      }
+      ipcRenderer.on(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      }
+    },
+    onScriptExecutionState: (
+      callback: (state: BrowserScriptExecutionState) => void
+    ): (() => void) => {
+      const handler = (_: unknown, state: BrowserScriptExecutionState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
+      }
+    }
   }
 }
 
@@ -597,6 +788,19 @@ const api = {
     cancelRun: (threadId: string, runId?: string): Promise<boolean> => {
       return ipcRenderer.invoke("workflow:cancel-run", { threadId, runId }) as Promise<boolean>
     },
+    worktreeAction: (
+      threadId: string,
+      runId: string,
+      worktreeId: string,
+      action: WorkflowWorktreeAction
+    ): Promise<WorkflowWorktreeActionResponse> => {
+      return ipcRenderer.invoke("workflow:worktree-action", {
+        threadId,
+        runId,
+        worktreeId,
+        action
+      }) as Promise<WorkflowWorktreeActionResponse>
+    },
     setAgentStreamInterest: (
       threadId: string,
       runId: string,
@@ -662,9 +866,6 @@ const api = {
     },
     get: (threadId: string): Promise<Thread | null> => {
       return ipcRenderer.invoke("threads:get", threadId)
-    },
-    getProjectSubagentsAvailable: (threadId: string): Promise<boolean> => {
-      return ipcRenderer.invoke("threads:getProjectSubagentsAvailable", threadId)
     },
     create: (metadata?: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:create", metadata)
@@ -1312,7 +1513,11 @@ const api = {
     },
     getGitPanelMeta: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: {
+        worktreePath?: string
+        includeSummary?: boolean
+        includePushability?: boolean
+      }
     ): Promise<{
       success: boolean
       isWorktree: boolean
@@ -1547,7 +1752,7 @@ const api = {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: { worktreePath?: string; agentInitiated?: boolean }
     ): Promise<{ success: boolean; error?: string }> => {
       return ipcRenderer.invoke("workspace:commitWorktree", {
         threadId,
@@ -2209,6 +2414,7 @@ const api = {
     list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
       ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
   },
+  browser: createBrowserApi(),
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
       ipcRenderer.invoke("heartbeat:getConfig") as Promise<HeartbeatConfig>,
@@ -3707,6 +3913,9 @@ const api = {
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
     }
+  },
+  app: {
+    restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
   },
   update: {
     check: (): Promise<

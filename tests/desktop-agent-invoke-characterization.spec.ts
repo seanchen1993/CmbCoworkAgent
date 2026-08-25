@@ -183,8 +183,8 @@ function testPromptSkillHookAndHarnessPreparation(): void {
   )
   const sharedFeatureBinding = sliceBetween(
     standardTurn,
-    "export function resolveHarnessFeatureBindingContext(",
-    "export function getHarnessAgentContext(",
+    "export async function resolveHarnessFeatureBindingContext(",
+    "export async function getHarnessAgentContext(",
     "shared Feature binding preparation"
   )
   assertSourceOrder(
@@ -195,9 +195,9 @@ function testPromptSkillHookAndHarnessPreparation(): void {
   assertSourceOrder(
     invoke,
     [
-      "resolveHarnessFeatureBindingContext(bindingMetadata)",
+      "await resolveHarnessFeatureBindingContext(bindingMetadata)",
       "createStandardTurnTrace({",
-      "const harnessAgentContext = getHarnessAgentContext(metadata",
+      "const harnessAgentContext = await getHarnessAgentContext(metadata",
       "await fireSessionStartOnce(",
       "const preparedPrompt = await prepareUserPromptForCurrentRun"
     ],

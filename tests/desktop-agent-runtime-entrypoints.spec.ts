@@ -100,7 +100,8 @@ assert(
   "scheduler Runtime must use a fresh, pinned thread"
 )
 assert(
-  sources.heartbeat.includes('const HEARTBEAT_THREAD_ID = "heartbeat"') &&
+  sources.heartbeat.includes('import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"') &&
+    sources.heartbeat.includes("const threadId = HEARTBEAT_THREAD_ID") &&
     sources.heartbeat.includes("releaseCheckpointerPin = pinCheckpointer(threadId)"),
   "heartbeat Runtime must use its fixed, pinned service thread"
 )

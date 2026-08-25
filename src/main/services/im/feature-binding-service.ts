@@ -131,7 +131,7 @@ export class ImFeatureBindingService {
   async listRemoteFeatures(projectId: string): Promise<ImRemoteFeatureListItem[]> {
     const projects = await this.listRemoteProjects()
     if (!projects.some((project) => project.id === projectId)) return []
-    const detail = this.dependencies.getProjectDetail(projectId)
+    const detail = await this.dependencies.getProjectDetail(projectId)
     if (detail.error || detail.projectState?.uiKind === "archived") return []
     return detail.runs.filter(activeFeature).map((run) => ({
       projectId,
@@ -175,11 +175,11 @@ export class ImFeatureBindingService {
       }
     }
 
-    let detail: ReturnType<typeof getHarnessProjectDetail>
-    let runDetail: ReturnType<typeof getHarnessRunDetail>
+    let detail: Awaited<ReturnType<typeof getHarnessProjectDetail>>
+    let runDetail: Awaited<ReturnType<typeof getHarnessRunDetail>>
     try {
-      detail = this.dependencies.getProjectDetail(projectId)
-      runDetail = this.dependencies.getRunDetail(projectId, featureSlug)
+      detail = await this.dependencies.getProjectDetail(projectId)
+      runDetail = await this.dependencies.getRunDetail(projectId, featureSlug)
     } catch {
       return {
         valid: false,
@@ -224,7 +224,7 @@ export class ImFeatureBindingService {
       }
     }
 
-    const harnessContext = this.dependencies.buildFeatureContext(
+    const harnessContext = await this.dependencies.buildFeatureContext(
       { harnessFeature: { projectId, slug: featureSlug, source: HARNESS_SOURCE } },
       { workspacePath }
     )
@@ -278,7 +278,7 @@ export class ImFeatureBindingService {
     }
     const validation = await this.validateFeature(feature.projectId, feature.slug)
     if (!validation.valid) return validation
-    const harnessContext = this.dependencies.buildFeatureContext(metadata, {
+    const harnessContext = await this.dependencies.buildFeatureContext(metadata, {
       workspacePath: normalizedWorkspace
     })
     if (!harnessContext) {

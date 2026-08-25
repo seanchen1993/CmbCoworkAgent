@@ -340,6 +340,7 @@ export interface Message {
  *   - `attachmentModelBlocks`   <attachment>…</attachment> XML appended for the model
  *   - `attachmentDisplayPrefix` "📎 name" lines shown in the user's bubble
  *   - `skillBlock`              trailing slash-command skill block, if any
+ *   - `builtinBrowser`          whether the draft should use the built-in browser prompt
  *   - `modelId`                 model selected when the draft was composed
  *   - `handoffRequestedAt`      set once the message has been steered into the
  *                               current run (awaiting injection); cleared on run end
@@ -350,6 +351,7 @@ export interface QueuedMessage {
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string
+  builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date
   created_at: Date
@@ -454,6 +456,12 @@ export interface HITLRequest {
   suggestedCommitMessage?: string
   suggestedCommitFilePaths?: string[]
   suggestedCommitFileBasePath?: string
+  suggestedGitWorktreePath?: string
+  suggestedGitRepositories?: Array<{
+    path: string
+    displayPath: string
+    gitRoot: string
+  }>
   suggestedCommitFileSelectionSource?: "pathspec" | "staged"
 }
 

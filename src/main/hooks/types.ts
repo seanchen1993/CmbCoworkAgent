@@ -230,6 +230,12 @@ export interface HookConfig {
 export interface HookResult {
   exitCode: number | null
   stdout: string
+  /**
+   * Original stdout for a successfully parsed structured Hook protocol envelope.
+   * The runner clears `stdout` so control JSON is never injected into tool feedback,
+   * while execution records use this field to keep the hook response observable.
+   */
+  rawStdout?: string
   stderr: string
   blocked: boolean // exit code 2 = intentional block (PreToolUse / UserPromptSubmit)
   /** Structured fields parsed from JSON stdout (exit 0 only) */

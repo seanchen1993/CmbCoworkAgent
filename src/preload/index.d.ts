@@ -1,5 +1,9 @@
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
+  WorkflowWorktreeAction,
+  WorkflowWorktreeActionResponse
+} from "../main/ipc/workflow-worktree-payload"
+import type {
   Thread,
   Message,
   ModelConfig,
@@ -109,13 +113,38 @@ import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
 import type {
+  BrowserRecordingSession,
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
+  BrowserRecordingDraftUpdateInput,
+  BrowserScreenshotResult,
+  ScriptRecordingStartOptions,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
+  BrowserState
+} from "../shared/browser-types"
+import type {
   CloseToTrayPromptAction,
   CloseToTrayPromptEvent,
   WindowCloseBehavior
 } from "../shared/close-to-tray"
+import type { ChatScrollSettings } from "../shared/chat-scroll"
+import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
@@ -129,6 +158,13 @@ interface ElectronAPI {
   getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
   setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
   onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
+  getChatScrollSettings: () => Promise<ChatScrollSettings>
+  setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
+  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
+  getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
@@ -895,6 +931,12 @@ interface CustomAPI {
     listRuns: (threadId: string) => Promise<unknown[]>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    worktreeAction: (
+      threadId: string,
+      runId: string,
+      worktreeId: string,
+      action: WorkflowWorktreeAction
+    ) => Promise<WorkflowWorktreeActionResponse>
     /** Register/deregister per-agent "viewing interest" (the focus panel is showing this
      * running agent) so the display-only live tap only serializes/broadcasts that agent. */
     setAgentStreamInterest: (
@@ -920,7 +962,6 @@ interface CustomAPI {
   threads: {
     list: () => Promise<Thread[]>
     get: (threadId: string) => Promise<Thread | null>
-    getProjectSubagentsAvailable: (threadId: string) => Promise<boolean>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
     listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
@@ -1279,7 +1320,11 @@ interface CustomAPI {
     }>
     getGitPanelMeta: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: {
+        worktreePath?: string
+        includeSummary?: boolean
+        includePushability?: boolean
+      }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1401,7 +1446,7 @@ interface CustomAPI {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: { worktreePath?: string; agentInitiated?: boolean }
     ) => Promise<{
       success: boolean
       error?: string
@@ -1670,6 +1715,49 @@ interface CustomAPI {
   }
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
+  }
+  browser: {
+    attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
+    detach: () => Promise<BrowserState>
+    setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
+    navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
+    goBack: () => Promise<BrowserState>
+    goForward: () => Promise<BrowserState>
+    reload: () => Promise<BrowserState>
+    stop: () => Promise<BrowserState>
+    clearConsole: () => Promise<BrowserState>
+    getState: () => Promise<BrowserState>
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ) => Promise<BrowserRecordingSession>
+    pauseScriptRecording: () => Promise<BrowserRecordingSession>
+    updateScriptRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ) => Promise<BrowserRecordingSession>
+    resumeScriptRecording: () => Promise<BrowserRecordingSession>
+    stopScriptRecording: () => Promise<BrowserRecordingSession>
+    getScriptRecording: () => Promise<BrowserRecordingSession>
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ) => Promise<BrowserScriptLibraryEntry>
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ) => Promise<BrowserScriptLibraryEntry[]>
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
+    executeRecordingScript: (input: BrowserScriptExecutionInput) => Promise<void>
+    getScriptExecutionState: () => Promise<BrowserScriptExecutionState>
+    cancelRecordingScriptExecution: () => Promise<boolean>
+    getCdpConfig: () => Promise<BrowserCdpConfig>
+    isProfileImportRuntimeEnabled: () => Promise<boolean>
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
+    captureScreenshot: () => Promise<BrowserScreenshotResult>
+    importProfileData: (options: BrowserProfileImportOptions) => Promise<BrowserProfileImportResult>
+    disposeAllForRendererUnload: () => void
+    onState: (callback: (state: BrowserState) => void) => () => void
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
+    onScriptExecutionState: (callback: (state: BrowserScriptExecutionState) => void) => () => void
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -2553,6 +2641,9 @@ interface CustomAPI {
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
+  }
+  app: {
+    restart: () => Promise<void>
   }
   update: {
     check: () => Promise<

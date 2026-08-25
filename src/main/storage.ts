@@ -29,7 +29,16 @@ import {
 import type { AgentAutoCommitSettings, AgentAutoCommitWorkspaceCard } from "./types"
 import { normalizeWorkspacePathKey } from "../shared/workspace-path"
 import { normalizeWindowCloseBehavior, type WindowCloseBehavior } from "../shared/close-to-tray"
-import { readdir, rm, mkdir } from "fs/promises"
+import { normalizeChatScrollSettings, type ChatScrollSettings } from "../shared/chat-scroll"
+import { readdir, rm, mkdir, readFile, writeFile } from "fs/promises"
+import {
+  isAgentGraphRecursionLimit,
+  isWorkflowWorktreeRemoveTimeoutMinutes,
+  isWorkflowWorktreeTimeoutMinutes,
+  normalizeAgentGraphRecursionLimit,
+  normalizeWorkflowWorktreeRemoveTimeoutMinutes,
+  normalizeWorkflowWorktreeTimeoutMinutes
+} from "../shared/agent-runtime-limits"
 import { app } from "electron"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type {
@@ -60,8 +69,17 @@ import {
   getPluginSkillSearchSources,
   readPluginManifest
 } from "./plugins/manifest"
+import type { BrowserCdpConfig } from "../shared/browser-types"
 import { getBundledBuiltinModelApiKey } from "./models/builtin-credential"
-const OPENWORK_DIR = join(homedir(), ".cmbcoworkagent")
+import {
+  calculateMaxCompatibleOutputTokens,
+  calculateSummarizationTriggerTokens
+} from "../shared/model-token-budget"
+
+const configuredOpenworkDir = process.env.CMB_COWORK_AGENT_HOME?.trim()
+const OPENWORK_DIR = configuredOpenworkDir
+  ? resolve(configuredOpenworkDir)
+  : join(homedir(), ".cmbcoworkagent")
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
 const CUSTOM_API_KEY_PREFIX = "CUSTOM_API_KEY__"
@@ -1177,6 +1195,18 @@ function normalizeMaxOutputTokens(value: unknown): number {
   return Math.min(MAX_MAX_OUTPUT_TOKENS, Math.max(MIN_MAX_OUTPUT_TOKENS, Math.floor(value)))
 }
 
+function normalizeStoredModelTokenBudget(
+  maxTokensValue: unknown,
+  maxOutputTokensValue: unknown
+): { maxTokens: number; maxOutputTokens: number } {
+  const maxTokens = normalizeMaxTokens(maxTokensValue)
+  const maxOutputTokens = Math.min(
+    normalizeMaxOutputTokens(maxOutputTokensValue),
+    calculateMaxCompatibleOutputTokens(maxTokens)
+  )
+  return { maxTokens, maxOutputTokens }
+}
+
 function normalizeTemperature(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_TEMPERATURE
@@ -1434,6 +1464,7 @@ export function setStoredDefaultModelId(modelId: string): void {
 }
 
 const WINDOW_CLOSE_BEHAVIOR_KEY = "windowCloseBehavior"
+const CHAT_SCROLL_SETTINGS_KEY = "chatScrollSettings"
 
 export function getWindowCloseBehavior(): WindowCloseBehavior {
   try {
@@ -1448,6 +1479,89 @@ export function setWindowCloseBehavior(behavior: WindowCloseBehavior): WindowClo
   const normalized = normalizeWindowCloseBehavior(behavior)
   getSettingsStore().set(WINDOW_CLOSE_BEHAVIOR_KEY, normalized)
   return normalized
+}
+
+export function getChatScrollSettings(): ChatScrollSettings {
+  try {
+    return normalizeChatScrollSettings(
+      getSettingsStore().get(CHAT_SCROLL_SETTINGS_KEY, {}) as Partial<ChatScrollSettings>
+    )
+  } catch (error) {
+    console.warn("[Storage] Failed to load chat scroll settings; using defaults:", error)
+    return normalizeChatScrollSettings({})
+  }
+}
+
+export function setChatScrollSettings(settings: Partial<ChatScrollSettings>): ChatScrollSettings {
+  const normalized = normalizeChatScrollSettings(settings)
+  getSettingsStore().set(CHAT_SCROLL_SETTINGS_KEY, normalized)
+  return normalized
+}
+
+const AGENT_GRAPH_RECURSION_LIMIT_KEY = "agentGraphRecursionLimit"
+
+export function getStoredAgentGraphRecursionLimit(): number {
+  try {
+    return normalizeAgentGraphRecursionLimit(
+      getSettingsStore().get(AGENT_GRAPH_RECURSION_LIMIT_KEY)
+    )
+  } catch (error) {
+    console.warn("[Storage] Failed to load agent graph recursion limit; using default:", error)
+    return normalizeAgentGraphRecursionLimit(undefined)
+  }
+}
+
+export function setStoredAgentGraphRecursionLimit(value: unknown): number {
+  if (!isAgentGraphRecursionLimit(value)) {
+    throw new Error("Agent graph recursion limit must be an integer between 25 and 100000")
+  }
+  getSettingsStore().set(AGENT_GRAPH_RECURSION_LIMIT_KEY, value)
+  return value
+}
+
+const WORKFLOW_WORKTREE_TIMEOUT_MINUTES_KEY = "workflowWorktreeTimeoutMinutes"
+
+export function getStoredWorkflowWorktreeTimeoutMinutes(): number {
+  try {
+    return normalizeWorkflowWorktreeTimeoutMinutes(
+      getSettingsStore().get(WORKFLOW_WORKTREE_TIMEOUT_MINUTES_KEY)
+    )
+  } catch (error) {
+    console.warn("[Storage] Failed to load workflow worktree timeout; using default:", error)
+    return normalizeWorkflowWorktreeTimeoutMinutes(undefined)
+  }
+}
+
+export function setStoredWorkflowWorktreeTimeoutMinutes(value: unknown): number {
+  if (!isWorkflowWorktreeTimeoutMinutes(value)) {
+    throw new Error("Workflow worktree timeout must be an integer between 1 and 120 minutes")
+  }
+  getSettingsStore().set(WORKFLOW_WORKTREE_TIMEOUT_MINUTES_KEY, value)
+  return value
+}
+
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_KEY = "workflowWorktreeRemoveTimeoutMinutes"
+
+export function getStoredWorkflowWorktreeRemoveTimeoutMinutes(): number {
+  try {
+    return normalizeWorkflowWorktreeRemoveTimeoutMinutes(
+      getSettingsStore().get(WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_KEY)
+    )
+  } catch (error) {
+    console.warn(
+      "[Storage] Failed to load workflow worktree removal timeout; using default:",
+      error
+    )
+    return normalizeWorkflowWorktreeRemoveTimeoutMinutes(undefined)
+  }
+}
+
+export function setStoredWorkflowWorktreeRemoveTimeoutMinutes(value: unknown): number {
+  if (!isWorkflowWorktreeRemoveTimeoutMinutes(value)) {
+    throw new Error("Workflow worktree removal timeout must be an integer between 1 and 10 minutes")
+  }
+  getSettingsStore().set(WORKFLOW_WORKTREE_REMOVE_TIMEOUT_MINUTES_KEY, value)
+  return value
 }
 
 /** Enabled expert-library agent names (专家团 opt-ins), persisted in the shared
@@ -1565,6 +1679,7 @@ function toPublicConfig(
   config: StoredCustomModelRecord,
   env?: Record<string, string>
 ): CustomModelPublicConfig {
+  const tokenBudget = normalizeStoredModelTokenBudget(config.maxTokens, config.maxOutputTokens)
   const enableThinking = resolveEnableThinkingSetting(
     config.enableThinking,
     config.interleavedThinking
@@ -1575,8 +1690,8 @@ function toPublicConfig(
     baseUrl: config.baseUrl,
     model: config.model,
     hasApiKey: !!getCustomModelApiKey(config.id, env),
-    maxTokens: normalizeMaxTokens(config.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(config.maxOutputTokens),
+    maxTokens: tokenBudget.maxTokens,
+    maxOutputTokens: tokenBudget.maxOutputTokens,
     temperature: normalizeTemperature(config.temperature),
     topP: normalizeTopP(config.topP),
     topK: normalizeTopK(config.topK),
@@ -1596,6 +1711,7 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
   migrateLegacyCustomModel()
   const env = parseEnvFile()
   return readCustomModelsRaw().map((item) => {
+    const tokenBudget = normalizeStoredModelTokenBudget(item.maxTokens, item.maxOutputTokens)
     const enableThinking = resolveEnableThinkingSetting(
       item.enableThinking,
       item.interleavedThinking
@@ -1606,8 +1722,8 @@ export function getCustomModelConfigs(): CustomModelConfig[] {
       baseUrl: item.baseUrl,
       model: item.model,
       apiKey: getCustomModelApiKey(item.id, env),
-      maxTokens: normalizeMaxTokens(item.maxTokens),
-      maxOutputTokens: normalizeMaxOutputTokens(item.maxOutputTokens),
+      maxTokens: tokenBudget.maxTokens,
+      maxOutputTokens: tokenBudget.maxOutputTokens,
       temperature: normalizeTemperature(item.temperature),
       topP: normalizeTopP(item.topP),
       topK: normalizeTopK(item.topK),
@@ -1628,6 +1744,7 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
   migrateLegacyCustomModel()
   const record = readCustomModelsRaw().find((item) => item.id === id)
   if (!record) return null
+  const tokenBudget = normalizeStoredModelTokenBudget(record.maxTokens, record.maxOutputTokens)
   const enableThinking = resolveEnableThinkingSetting(
     record.enableThinking,
     record.interleavedThinking
@@ -1638,8 +1755,8 @@ export function getCustomModelConfigById(id: string): CustomModelConfig | null {
     baseUrl: record.baseUrl,
     model: record.model,
     apiKey: getCustomModelApiKey(record.id),
-    maxTokens: normalizeMaxTokens(record.maxTokens),
-    maxOutputTokens: normalizeMaxOutputTokens(record.maxOutputTokens),
+    maxTokens: tokenBudget.maxTokens,
+    maxOutputTokens: tokenBudget.maxOutputTokens,
     temperature: normalizeTemperature(record.temperature),
     topP: normalizeTopP(record.topP),
     topK: normalizeTopK(record.topK),
@@ -1670,6 +1787,7 @@ export function upsertCustomModelConfig(
 
   const validatedMaxTokens = assertValidMaxTokens(config.maxTokens)
   const validatedMaxOutputTokens = assertValidMaxOutputTokens(config.maxOutputTokens)
+  calculateSummarizationTriggerTokens(validatedMaxTokens, validatedMaxOutputTokens)
   const validatedTemperature = assertValidTemperature(config.temperature)
   const validatedTopP = assertValidTopP(config.topP)
   const validatedTopK = assertValidTopK(config.topK)
@@ -2378,6 +2496,81 @@ export function resetLspConfig(): import("./types").LspConfig {
   const defaults = defaultLspConfig()
   writeFileSync(LSP_CONFIG_FILE, JSON.stringify(defaults, null, 2))
   return defaults
+}
+
+// ── Browser CDP Config ───────────────────────────────────────────────────────
+
+const BROWSER_CDP_CONFIG_FILE = join(OPENWORK_DIR, "browser-cdp-config.json")
+
+function defaultBrowserCdpConfig(): BrowserCdpConfig {
+  return {
+    enabled: false,
+    profileImportEnabled: false
+  }
+}
+
+function parseBrowserCdpConfigRecord(parsed: Record<string, unknown>): BrowserCdpConfig {
+  const defaults = defaultBrowserCdpConfig()
+  return {
+    enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
+    profileImportEnabled:
+      typeof parsed.profileImportEnabled === "boolean"
+        ? parsed.profileImportEnabled
+        : defaults.profileImportEnabled
+  }
+}
+
+export function getBrowserCdpConfig(): BrowserCdpConfig {
+  getOpenworkDir()
+  if (!existsSync(BROWSER_CDP_CONFIG_FILE)) return defaultBrowserCdpConfig()
+  try {
+    const content = readFileSync(BROWSER_CDP_CONFIG_FILE, "utf-8")
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    return parseBrowserCdpConfigRecord(parsed)
+  } catch {
+    return defaultBrowserCdpConfig()
+  }
+}
+
+export async function getBrowserCdpConfigAsync(): Promise<BrowserCdpConfig> {
+  await mkdir(OPENWORK_DIR, { recursive: true })
+  try {
+    const content = await readFile(BROWSER_CDP_CONFIG_FILE, "utf-8")
+    const parsed = JSON.parse(content) as Record<string, unknown>
+    return parseBrowserCdpConfigRecord(parsed)
+  } catch {
+    return defaultBrowserCdpConfig()
+  }
+}
+
+export function saveBrowserCdpConfig(updates: Partial<BrowserCdpConfig>): BrowserCdpConfig {
+  getOpenworkDir()
+  const current = getBrowserCdpConfig()
+  const next: BrowserCdpConfig = {
+    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
+    profileImportEnabled:
+      typeof updates.profileImportEnabled === "boolean"
+        ? updates.profileImportEnabled
+        : current.profileImportEnabled
+  }
+  writeFileSync(BROWSER_CDP_CONFIG_FILE, JSON.stringify(next, null, 2))
+  return next
+}
+
+export async function saveBrowserCdpConfigAsync(
+  updates: Partial<BrowserCdpConfig>
+): Promise<BrowserCdpConfig> {
+  await mkdir(OPENWORK_DIR, { recursive: true })
+  const current = await getBrowserCdpConfigAsync()
+  const next: BrowserCdpConfig = {
+    enabled: typeof updates.enabled === "boolean" ? updates.enabled : current.enabled,
+    profileImportEnabled:
+      typeof updates.profileImportEnabled === "boolean"
+        ? updates.profileImportEnabled
+        : current.profileImportEnabled
+  }
+  await writeFile(BROWSER_CDP_CONFIG_FILE, JSON.stringify(next, null, 2))
+  return next
 }
 
 // ── Plugins ──

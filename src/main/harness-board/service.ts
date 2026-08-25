@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "child_process"
+import { spawn, type ChildProcess } from "child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
 import type { Dirent } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
@@ -36,6 +36,7 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessProjectModeSubagentConfig,
+  HarnessRequestUserInputConfig,
   HarnessRunDetailViewModel,
   HarnessRunNode,
   HarnessSessionContextInjectionSource,
@@ -132,6 +133,35 @@ interface HarnessInvocationLogOptions {
   successResult?: HarnessInvocationSuccessLogMode
 }
 
+class HarnessInvocationSemaphore {
+  private active = 0
+  private readonly waiting: Array<() => void> = []
+
+  constructor(private readonly limit: number) {}
+
+  async acquire(): Promise<() => void> {
+    if (this.active < this.limit) {
+      this.active += 1
+    } else {
+      await new Promise<void>((resolvePromise) => {
+        this.waiting.push(resolvePromise)
+      })
+    }
+
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const next = this.waiting.shift()
+      if (next) {
+        next()
+      } else {
+        this.active -= 1
+      }
+    }
+  }
+}
+
 interface HarnessHookLogEntry {
   nodeId: string
   hook: HarnessRunNode["hooks"][number]
@@ -156,12 +186,17 @@ const HARNESS_LEAN_TOKEN_FILE = join(getOpenworkDir(), "leanstar-config.json")
 const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS = 45_000
 const HARNESS_ADAPTER_MAX_BUFFER = 10 * 1024 * 1024
+const HARNESS_INVOCATION_MAX_CONCURRENCY = 2
 const HARNESS_SESSION_CONTEXT_MAX_CHARS = 60_000
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const HARNESS_NAME_PATTERN = /^[\u4e00-\u9fffA-Za-z0-9_-]+$/u
 const HARNESS_NAME_RULE_MESSAGE = "仅支持中文、英文字母、数字、-、_，不允许空格"
 const CUSTOM_WORKFLOW_TEMPLATE_ID = "custom"
+
+const harnessInvocationSemaphore = new HarnessInvocationSemaphore(
+  HARNESS_INVOCATION_MAX_CONCURRENCY
+)
 
 const HARNESS_NODE_STATUSES = new Set<HarnessNodeStatus>([
   "not_started",
@@ -447,22 +482,19 @@ function pluginMatchesAdapterId(plugin: PluginMetadata, adapterId: string): bool
 function findPluginForAdapterSnapshot(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
   if (adapter.type !== "plugin") return null
   const plugins = getPlugins().filter(pluginHasBoardConfig)
+  const adapterId = normalizeText(adapter.id).trim()
+  if (adapterId) {
+    const plugin = plugins.find((item) => pluginAdapterId(item) === adapterId)
+    if (plugin) return plugin
+  }
+
   const adapterName = normalizeText(adapter.name).trim()
   if (adapterName) {
     const plugin = plugins.find((item) => item.name === adapterName)
     if (plugin) return plugin
   }
 
-  const adapterId = normalizeText(adapter.id).trim()
-  if (!adapterId) return null
-  return plugins.find((item) => pluginMatchesAdapterId(item, adapterId)) ?? null
-}
-
-function findPluginByAdapterName(adapter: HarnessAdapterSnapshot): PluginMetadata | null {
-  if (adapter.type !== "plugin") return null
-  const adapterName = normalizeText(adapter.name).trim()
-  if (!adapterName) return null
-  return getPlugins().find((item) => item.name === adapterName) ?? null
+  return null
 }
 
 function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
@@ -559,7 +591,7 @@ function adapterPluginDir(project: HarnessProjectMetadata): string {
 
 function findAdapterPlugin(project: HarnessProjectMetadata): PluginMetadata | null {
   const adapter = project["harness-adapter"]
-  return findPluginByAdapterName(adapter)
+  return findPluginForAdapterSnapshot(adapter)
 }
 
 function toTrimmedOutput(value: unknown): string {
@@ -899,11 +931,6 @@ function boardConfigPublicAgentmdDeployUnits(cwd: string): string[] {
   return parsed ? uniqueStringsInOrder(parsed.supported_deploy_units) : []
 }
 
-function boardConfigEnableTaskTool(cwd: string): boolean | undefined {
-  const parsed = readBoardConfig(cwd)
-  return typeof parsed?.enable_task_tool === "boolean" ? parsed.enable_task_tool : undefined
-}
-
 function boardConfigSupportsSessionContextInjection(cwd: string): boolean {
   return readBoardConfigInspectCommand(cwd, "sessionContext") !== null
 }
@@ -1096,32 +1123,6 @@ function hasConfiguredHarnessInvocation(
   return readBoardConfigInspectCommand(adapterPluginDir(project), mode) !== null
 }
 
-function runHarnessInvocation(
-  configured: ConfiguredHarnessInvocation,
-  logOptions?: HarnessInvocationLogOptions
-): Buffer {
-  const { cwd, invocation } = configured
-  if (logOptions) logHarnessInvocationStart(configured, logOptions)
-  try {
-    const stdoutBuffer = execFileSync(invocation.executable, invocation.args, {
-      cwd,
-      encoding: "buffer",
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: "utf-8",
-        PYTHONUTF8: "1"
-      },
-      maxBuffer: HARNESS_ADAPTER_MAX_BUFFER,
-      timeout: HARNESS_ADAPTER_TIMEOUT_MS
-    })
-    if (logOptions) logHarnessInvocationSuccess(stdoutBuffer, logOptions)
-    return stdoutBuffer
-  } catch (error) {
-    if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
-    throw new Error(formatAdapterError(error))
-  }
-}
-
 function createHarnessInvocationError(
   message: string,
   details: {
@@ -1163,10 +1164,11 @@ async function runHarnessInvocationAsync(
   logOptions: HarnessInvocationLogOptions | undefined,
   timeoutMs: number
 ): Promise<Buffer> {
-  const { cwd, invocation } = configured
-  if (logOptions) logHarnessInvocationStart(configured, logOptions)
+  const release = await harnessInvocationSemaphore.acquire()
 
   try {
+    const { cwd, invocation } = configured
+    if (logOptions) logHarnessInvocationStart(configured, logOptions)
     const stdoutBuffer = await new Promise<Buffer>((resolvePromise, rejectPromise) => {
       const child = spawn(invocation.executable, invocation.args, {
         cwd,
@@ -1265,18 +1267,32 @@ async function runHarnessInvocationAsync(
   } catch (error) {
     if (logOptions) logHarnessInvocationFailure(configured, logOptions, error)
     throw new Error(formatAdapterError(error))
+  } finally {
+    release()
   }
 }
 
-function runInspectAdapter(
+async function runInspectAdapter(
   project: HarnessProjectMetadata,
   mode: "project" | "run",
   feature?: string
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const invocation = buildConfiguredHarnessInvocation(project, mode, { feature })
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
-  const stdoutBuffer = runHarnessInvocation(invocation, harnessCommandLogOptions(mode))
+  const stdoutBuffer = await runHarnessInvocationAsync(
+    invocation,
+    harnessCommandLogOptions(mode),
+    HARNESS_ADAPTER_TIMEOUT_MS
+  )
 
+  return parseInspectAdapterOutput(invocation, configKey, stdoutBuffer)
+}
+
+function parseInspectAdapterOutput(
+  invocation: ConfiguredHarnessInvocation,
+  configKey: HarnessInspectCommandConfigKey,
+  stdoutBuffer: Buffer
+): Record<string, unknown> {
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
 
   if (!raw) {
@@ -1307,40 +1323,17 @@ function runInspectAdapter(
   }
 }
 
-function runHarnessJsonInvocation(
+async function runHarnessJsonInvocation(
   configured: ConfiguredHarnessInvocation,
   mode: HarnessInspectCommandName
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
-  const stdoutBuffer = runHarnessInvocation(configured, harnessCommandLogOptions(mode))
-  const raw = decodeAdapterBuffer(stdoutBuffer).trim()
-
-  if (!raw) {
-    logHarnessStatusResultFailure(
-      configured,
-      configKey,
-      stdoutBuffer,
-      "Inspect adapter returned empty output"
-    )
-    throw new Error("Inspect adapter returned empty output")
-  }
-
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    if (!isObject(parsed)) {
-      throw new Error("top-level JSON is not an object")
-    }
-    return parsed
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    logHarnessStatusResultFailure(
-      configured,
-      configKey,
-      stdoutBuffer,
-      `Inspect adapter returned invalid JSON: ${message}`
-    )
-    throw new Error(`Inspect adapter returned invalid JSON: ${message}`)
-  }
+  const stdoutBuffer = await runHarnessInvocationAsync(
+    configured,
+    harnessCommandLogOptions(mode),
+    HARNESS_ADAPTER_TIMEOUT_MS
+  )
+  return parseInspectAdapterOutput(configured, configKey, stdoutBuffer)
 }
 
 function assertSkipNodeInvocationResult(
@@ -1442,14 +1435,14 @@ function normalizeDynamicWorkflowConfigSnapshot(
   return templates.length > 0 ? { templates, nodes } : null
 }
 
-function getHarnessDynamicWorkflowConfigForProject(
+async function getHarnessDynamicWorkflowConfigForProject(
   project: HarnessProjectMetadata
-): HarnessDynamicWorkflowConfig | null {
+): Promise<HarnessDynamicWorkflowConfig | null> {
   try {
     const invocation = buildOptionalConfiguredHarnessInvocation(project, "dynamicWorkflow")
     if (!invocation) return null
 
-    const response = runHarnessJsonInvocation(invocation, "dynamicWorkflow")
+    const response = await runHarnessJsonInvocation(invocation, "dynamicWorkflow")
     if (response.ok !== true) return null
     return normalizeDynamicWorkflowConfigSnapshot(response)
   } catch (error) {
@@ -2318,6 +2311,7 @@ export function saveHarnessLeanTokenConfig(input: HarnessLeanTokenConfig): Harne
 function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
   const harnessAdapter = project["harness-adapter"]
   const plugin = findAdapterPlugin(project)
+  const resolvedAdapter = plugin ? pluginToHarnessAdapterSnapshot(plugin) : harnessAdapter
   const boardCompatibility = evaluateBoardPluginCompatibility(
     plugin,
     harnessAdapter.name || harnessAdapter.id
@@ -2340,9 +2334,9 @@ function toListItem(project: HarnessProjectMetadata): HarnessProjectListItem {
     sessionWorkspacePath: project.sessionWorkspacePath,
     systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt,
     harnessAdapter: {
-      id: harnessAdapter.id,
-      name: harnessAdapter.name,
-      type: harnessAdapter.type
+      id: resolvedAdapter.id,
+      name: resolvedAdapter.name,
+      type: resolvedAdapter.type
     },
     creator: project.creator,
     boardCompatibility,
@@ -2676,7 +2670,7 @@ function makeProjectDetailViewModel(
   }
 }
 
-function initializeHarnessProject(project: HarnessProjectMetadata): void {
+async function initializeHarnessProject(project: HarnessProjectMetadata): Promise<void> {
   try {
     const projectPath = projectDirectoryPath(project)
     if (existsSync(projectPath)) {
@@ -2686,7 +2680,11 @@ function initializeHarnessProject(project: HarnessProjectMetadata): void {
     const configured = buildConfiguredHarnessInvocation(project, "createProject")
 
     mkdirSync(projectPath, { recursive: true })
-    runHarnessInvocation(configured, harnessCommandLogOptions("createProject"))
+    await runHarnessInvocationAsync(
+      configured,
+      harnessCommandLogOptions("createProject"),
+      HARNESS_ADAPTER_TIMEOUT_MS
+    )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
@@ -2708,7 +2706,6 @@ export function readHarnessFeatureMetadata(
 export interface HarnessFeatureAgentContext {
   systemPromptInject?: string
   enableAgentsPrompt?: boolean
-  enableTaskTool?: boolean
   agentConfig?: HarnessAgentConfig
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
@@ -2734,6 +2731,8 @@ export interface HarnessFeatureAgentContext {
 
 export interface HarnessFeatureAgentContextOptions {
   workspacePath?: string
+  /** Resolve tool policy from the plugin while a project feature session is created. */
+  requestUserInputConfigSource?: "plugin" | "session_snapshot"
 }
 
 function isHarnessSessionContextOk(value: unknown): boolean {
@@ -2744,11 +2743,56 @@ export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
 
 export interface HarnessAgentConfig {
   agentMode?: HarnessRuntimeAgentMode
-  toolConfig?: Record<string, { enabled?: boolean }>
   subagentConfig?: HarnessProjectModeSubagentConfig
+  toolConfig?: {
+    requestUserInput?: HarnessRequestUserInputConfig
+  }
 }
 
-const HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS = new Set(["task"])
+export const DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG: HarnessRequestUserInputConfig = {
+  allowAutoResolution: false,
+  autoResolutionType: "select_first"
+}
+
+const REQUEST_USER_INPUT_TIMEOUT_MIN_MS = 30_000
+const REQUEST_USER_INPUT_TIMEOUT_MAX_MS = 240_000
+const REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS = 1_000
+
+function normalizeHarnessRequestUserInputConfig(
+  value: unknown
+): HarnessRequestUserInputConfig | undefined {
+  if (!isObject(value)) return undefined
+
+  if (value.allowAutoResolution !== true) {
+    return { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+  }
+
+  const defaultTimeoutMs =
+    typeof value.defaultTimeoutMs === "number" &&
+    Number.isInteger(value.defaultTimeoutMs) &&
+    value.defaultTimeoutMs >= REQUEST_USER_INPUT_TIMEOUT_MIN_MS &&
+    value.defaultTimeoutMs <= REQUEST_USER_INPUT_TIMEOUT_MAX_MS
+      ? value.defaultTimeoutMs
+      : undefined
+  const userMessage = normalizeText(value.userMessage).trim()
+  const autoResolutionType = value.autoResolutionType === "user_message" && userMessage
+    ? "user_message"
+    : "select_first"
+
+  return {
+    allowAutoResolution: true,
+    ...(defaultTimeoutMs !== undefined ? { defaultTimeoutMs } : {}),
+    autoResolutionType,
+    ...(autoResolutionType === "user_message"
+      ? { userMessage: userMessage.slice(0, REQUEST_USER_INPUT_TIMEOUT_MESSAGE_MAX_CHARS) }
+      : {})
+  }
+}
+
+function resolveHarnessRequestUserInputConfig(value: unknown): HarnessRequestUserInputConfig {
+  const normalized = normalizeHarnessRequestUserInputConfig(value)
+  return normalized ?? { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+}
 
 function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undefined {
   if (!isObject(value)) return undefined
@@ -2759,16 +2803,6 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
     value.agentMode === "agent_team"
       ? value.agentMode
       : undefined
-  const toolConfig: Record<string, { enabled?: boolean }> = {}
-  if (isObject(value.toolConfig)) {
-    for (const [toolName, config] of Object.entries(value.toolConfig)) {
-      if (!HARNESS_PROJECT_MODE_CUSTOMIZABLE_TOOLS.has(toolName) || !isObject(config)) continue
-      if (typeof config.enabled === "boolean") {
-        toolConfig[toolName] = { enabled: config.enabled }
-      }
-    }
-  }
-
   const normalizeStringList = (input: unknown): string[] => {
     if (!Array.isArray(input)) return []
     return [
@@ -2789,11 +2823,17 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
       }
     : undefined
 
-  if (!agentMode && Object.keys(toolConfig).length === 0 && !subagentConfig) return undefined
+  const requestUserInputConfig = isObject(value.toolConfig)
+    ? normalizeHarnessRequestUserInputConfig(value.toolConfig.requestUserInput)
+    : undefined
+
+  if (!agentMode && !subagentConfig && !requestUserInputConfig) return undefined
   return {
     ...(agentMode ? { agentMode } : {}),
-    ...(Object.keys(toolConfig).length > 0 ? { toolConfig } : {}),
-    ...(subagentConfig ? { subagentConfig } : {})
+    ...(subagentConfig ? { subagentConfig } : {}),
+    ...(requestUserInputConfig
+      ? { toolConfig: { requestUserInput: requestUserInputConfig } }
+      : {})
   }
 }
 
@@ -2810,11 +2850,11 @@ function formatSessionContextInjectWarning(detail: string): string {
     : "插件 AGENTS.md 注入失败，已回退到 CMBDevClaw AGENTS.md"
 }
 
-function readHarnessFeatureSessionContextAgentPrompt(
+async function readHarnessFeatureSessionContextAgentPrompt(
   project: HarnessProjectMetadata,
   featureId: string,
   options: { sessionWorkspacePath?: string } = {}
-): HarnessSessionContextInjectResult {
+): Promise<HarnessSessionContextInjectResult> {
   if (!hasConfiguredHarnessInvocation(project, "sessionContext")) {
     const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS.sessionContext
     const detail = `插件未配置 inspectCommands.${process.platform}.${configKey}`
@@ -2832,7 +2872,7 @@ function readHarnessFeatureSessionContextAgentPrompt(
       ...getHarnessSelectedDeployUnitsCommandOptions(project, featureId),
       sessionWorkspacePath: options.sessionWorkspacePath
     })
-    const result = runHarnessJsonInvocation(configured, "sessionContext")
+    const result = await runHarnessJsonInvocation(configured, "sessionContext")
     const message = normalizeText(result.message).trim()
     if (!isHarnessSessionContextOk(result.ok)) {
       console.warn("[HarnessBoard] session_context_inject returned not ok, fallback to CMBDevClaw AGENTS.md:", {
@@ -2881,10 +2921,10 @@ function readHarnessFeatureSessionContextAgentPrompt(
   }
 }
 
-export function buildHarnessFeatureAgentContext(
+export async function buildHarnessFeatureAgentContext(
   metadata: unknown,
   options: HarnessFeatureAgentContextOptions = {}
-): HarnessFeatureAgentContext | null {
+): Promise<HarnessFeatureAgentContext | null> {
   const feature = readHarnessFeatureMetadata(metadata)
   if (!feature) return null
 
@@ -2897,7 +2937,6 @@ export function buildHarnessFeatureAgentContext(
   const plugin = findAdapterPlugin(project)
   const staticSystemPromptInject = readBoardConfigPlatformText(cwd, "system_prompt_inject")
   const pluginOutputDir = readBoardConfigPlatformText(cwd, "plugin_dir_hook")
-  const boardConfigTaskToolEnabled = boardConfigEnableTaskTool(cwd)
   const systemId = normalizeText(project.systemId).trim()
   const featureBinding = findFeatureDeployUnitBinding(project.projectId, feature.slug)
   const sessionContextInjectionSource =
@@ -2916,11 +2955,22 @@ export function buildHarnessFeatureAgentContext(
       : undefined
   const renderedStaticPrompt = render(staticSystemPromptInject, "run")
   const sessionContextInjectResult = usePluginAgentsPrompt
-    ? readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, { sessionWorkspacePath })
+    ? await readHarnessFeatureSessionContextAgentPrompt(project, feature.slug, {
+        sessionWorkspacePath
+      })
     : undefined
-  const agentConfig = sessionContextInjectResult?.agentConfig
-  const enableTaskTool =
-    agentConfig?.toolConfig?.task?.enabled ?? boardConfigTaskToolEnabled
+  const pluginAgentConfig = sessionContextInjectResult?.agentConfig
+  const persistedToolConfig = isObject(metadata) && isObject(metadata.harnessFeature)
+    ? metadata.harnessFeature.requestUserInputConfig
+    : undefined
+  const requestUserInputConfig =
+    options.requestUserInputConfigSource === "plugin"
+      ? resolveHarnessRequestUserInputConfig(pluginAgentConfig?.toolConfig?.requestUserInput)
+      : resolveHarnessRequestUserInputConfig(persistedToolConfig)
+  const agentConfig: HarnessAgentConfig = {
+    ...(pluginAgentConfig ?? {}),
+    toolConfig: { requestUserInput: requestUserInputConfig }
+  }
   const harnessAgentsPrompt = sessionContextInjectResult?.prompt
   const pluginPromptLoaded = Boolean(harnessAgentsPrompt?.trim())
   const additionalWorkspaceRootMappings = resolveHarnessAdditionalWorkspaceRootMappings(
@@ -2940,7 +2990,6 @@ export function buildHarnessFeatureAgentContext(
   return {
     systemPromptInject,
     enableAgentsPrompt: !pluginPromptLoaded,
-    ...(enableTaskTool !== undefined ? { enableTaskTool } : {}),
     ...(agentConfig ? { agentConfig } : {}),
     ...(harnessAgentsPrompt ? { harnessAgentsPrompt } : {}),
     ...(!pluginPromptLoaded && additionalWorkspaceRoots.length > 0
@@ -2981,46 +3030,67 @@ export function buildHarnessFeatureAgentContext(
  * unlabeled node) so it never blocks a conversation. `status` is null when the
  * node status cannot be resolved (so an "unknown" bucket is never reported).
  */
-export function resolveHarnessFeatureCurrentStage(
+export async function resolveHarnessFeatureCurrentStage(
   projectId: string,
   slug: string
-): { name: string; status: string | null } | null {
+): Promise<{ name: string; status: string | null } | null> {
   try {
     const normalizedProjectId = normalizeText(projectId).trim()
     const normalizedSlug = normalizeText(slug).trim()
     if (!normalizedProjectId || !normalizedSlug) return null
     const project = requireProject(normalizedProjectId)
-    const snapshot = runInspectAdapter(project, "run", normalizedSlug)
-    const run = isObject(snapshot.run) ? snapshot.run : {}
-    const currentNodeId = normalizeText(run.currentNodeId).trim()
-    if (!currentNodeId) return null
-    const workflow = normalizeWorkflow(snapshot.workflow)
-    const node = workflow.nodes.find((n) => n.id === currentNodeId)
-    const label = normalizeText(node?.label).trim()
-    if (!label) return null
-    const group = normalizeText(node?.group).trim()
-    const name = group ? `${group}-${label}` : label
-
-    // Status of the current node *at this turn*, as a stable enum label. The run
-    // nodes array (plugin-provided) carries per-node nodeStatus; fall back to the
-    // run-level currentNodeStatus. Use the default label map so buckets stay
-    // stable regardless of any plugin-custom status label. "unknown" → null so we
-    // never report a noise bucket.
-    const runNode = Array.isArray(run.nodes)
-      ? run.nodes.find(
-          (n): n is Record<string, unknown> =>
-            isObject(n) && normalizeText(n.id).trim() === currentNodeId
-        )
-      : undefined
-    const rawStatus = runNode?.nodeStatus ?? run.currentNodeStatus
-    const nodeStatus = normalizeNodeStatus(rawStatus)
-    const status =
-      nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
-
-    return { name, status }
+    const snapshot = await runInspectAdapter(project, "run", normalizedSlug)
+    return resolveCurrentStageFromSnapshot(snapshot)
   } catch {
     return null
   }
+}
+
+function resolveCurrentStageFromSnapshot(
+  snapshot: Record<string, unknown>
+): { name: string; status: string | null } | null {
+  const run = isObject(snapshot.run) ? snapshot.run : {}
+  const currentNodeId = normalizeText(run.currentNodeId).trim()
+  if (!currentNodeId) return null
+  const workflow = normalizeWorkflow(snapshot.workflow)
+  const runNode = Array.isArray(run.nodes)
+    ? run.nodes.find(
+        (n): n is Record<string, unknown> =>
+          isObject(n) && normalizeText(n.id).trim() === currentNodeId
+      )
+    : undefined
+  return resolveCurrentStageFromWorkflow(
+    workflow,
+    currentNodeId,
+    runNode?.nodeStatus ?? run.currentNodeStatus
+  )
+}
+
+function resolveCurrentStageFromWorkflow(
+  workflow: HarnessWorkflow,
+  currentNodeId: string,
+  rawStatus: unknown
+): { name: string; status: string | null } | null {
+  const node = workflow.nodes.find((item) => item.id === currentNodeId)
+  const label = normalizeText(node?.label).trim()
+  if (!label) return null
+  const group = normalizeText(node?.group).trim()
+  const name = group ? `${group}-${label}` : label
+  const nodeStatus = normalizeNodeStatus(rawStatus)
+  const status =
+    nodeStatus === UNKNOWN_NODE_STATUS ? null : DEFAULT_NODE_STATUS_LABELS[nodeStatus]
+
+  return { name, status }
+}
+
+/** Reuse a Feature-page run refresh as an authoritative attribution snapshot. */
+export function resolveHarnessRunDetailCurrentStage(
+  detail: HarnessRunDetailViewModel
+): { name: string; status: string | null } | null {
+  const currentNodeId = normalizeText(detail.run.currentNodeId).trim()
+  if (!currentNodeId) return null
+  const currentNode = detail.run.nodes.find((node) => node.id === currentNodeId)
+  return resolveCurrentStageFromWorkflow(detail.workflow, currentNodeId, currentNode?.nodeStatus)
 }
 
 export function buildHarnessFeatureDialogTips(projectId: string, slug: string): string | null {
@@ -3050,13 +3120,6 @@ export function getHarnessProjectPublicAgentmdDeployUnits(projectId: string): st
   )
   if (!boardCompatibility.compatible) return []
   return boardConfigPublicAgentmdDeployUnits(plugin.path)
-}
-
-export function resolveHarnessProjectTaskToolEnabled(projectId: string): boolean | undefined {
-  const normalizedProjectId = normalizeText(projectId).trim()
-  if (!normalizedProjectId) return undefined
-  const project = requireProject(normalizedProjectId)
-  return boardConfigEnableTaskTool(adapterPluginDir(project))
 }
 
 export function getHarnessLocalAgentmdDeployUnitMappings(
@@ -3094,7 +3157,9 @@ export function getHarnessProjectAdapterSnapshot(projectId: string): HarnessAdap
   }
 }
 
-export function createHarnessProject(input: HarnessProjectCreateInput): HarnessProjectMetadata {
+export async function createHarnessProject(
+  input: HarnessProjectCreateInput
+): Promise<HarnessProjectMetadata> {
   validateCreateInput(input)
   const store = readProjectStore()
   validateProjectCodeUnique(input.projectCode, store)
@@ -3119,13 +3184,15 @@ export function createHarnessProject(input: HarnessProjectCreateInput): HarnessP
     }
   }
 
-  initializeHarnessProject(project)
+  await initializeHarnessProject(project)
   store.projects.unshift(project)
   writeProjectStore(store)
   return project
 }
 
-export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessFeatureCreateResult {
+export async function createHarnessFeature(
+  input: HarnessFeatureCreateInput
+): Promise<HarnessFeatureCreateResult> {
   validateFeatureCreateInput(input)
   const project = requireProject(input.projectId)
   const feature = input.feature.trim()
@@ -3151,7 +3218,11 @@ export function createHarnessFeature(input: HarnessFeatureCreateInput): HarnessF
       ...workflowOptions,
       ...selectedDeployUnitsOptions
     })
-    runHarnessInvocation(configured, harnessCommandLogOptions("createFeature"))
+    await runHarnessInvocationAsync(
+      configured,
+      harnessCommandLogOptions("createFeature"),
+      HARNESS_ADAPTER_TIMEOUT_MS
+    )
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error)
     if (raw.includes("已存在")) {
@@ -3192,7 +3263,9 @@ export function updateHarnessFeatureDeployUnits(
   return updateFeatureDeployUnitBinding(projectId, featureId, selectedDeployUnits)
 }
 
-export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNodeResult {
+export async function skipHarnessRunNode(
+  input: HarnessSkipNodeInput
+): Promise<HarnessSkipNodeResult> {
   const { projectId, slug, nodeId } = validateSkipNodeInput(input)
   const project = requireProject(projectId)
   const workspacePath = projectDirectoryPath(project)
@@ -3207,7 +3280,11 @@ export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNode
       nodeId
     })
     const logOptions = { ...harnessCommandLogOptions("skipNode"), successResult: "none" as const }
-    const stdoutBuffer = runHarnessInvocation(configured, logOptions)
+    const stdoutBuffer = await runHarnessInvocationAsync(
+      configured,
+      logOptions,
+      HARNESS_ADAPTER_TIMEOUT_MS
+    )
     assertSkipNodeInvocationResult(configured, stdoutBuffer)
     logHarnessInvocationSuccess(stdoutBuffer, harnessCommandLogOptions("skipNode"))
   } catch (error) {
@@ -3222,9 +3299,9 @@ export function skipHarnessRunNode(input: HarnessSkipNodeInput): HarnessSkipNode
   }
 }
 
-export function getHarnessDynamicWorkflowConfig(
+export async function getHarnessDynamicWorkflowConfig(
   projectId: string
-): HarnessDynamicWorkflowConfig | null {
+): Promise<HarnessDynamicWorkflowConfig | null> {
   const project = requireProject(projectId)
   return getHarnessDynamicWorkflowConfigForProject(project)
 }
@@ -3586,15 +3663,17 @@ export async function syncHarnessProjectConstraints(
   }
 }
 
-export function getHarnessProjectDetail(projectId: string): HarnessProjectDetailViewModel {
-  return getHarnessProjectDetails([projectId])[projectId]
+export async function getHarnessProjectDetail(
+  projectId: string
+): Promise<HarnessProjectDetailViewModel> {
+  return (await getHarnessProjectDetails([projectId]))[projectId]
 }
 
-function runInspectAdapterBatch(
+async function runInspectAdapterBatch(
   projects: HarnessProjectMetadata[],
   mode: "project",
   cwd: string
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const firstProject = projects[0]
   const configuredCommand = readBoardConfigInspectCommand(cwd, mode)
   if (!configuredCommand) {
@@ -3615,9 +3694,10 @@ function runInspectAdapterBatch(
     }
   }
   const configKey = HARNESS_INSPECT_COMMAND_CONFIG_KEYS[mode]
-  const stdoutBuffer = runHarnessInvocation(
+  const stdoutBuffer = await runHarnessInvocationAsync(
     configured,
-    harnessCommandLogOptions(mode, `${projects.length} project(s)`)
+    harnessCommandLogOptions(mode, `${projects.length} project(s)`),
+    HARNESS_ADAPTER_TIMEOUT_MS
   )
 
   const raw = decodeAdapterBuffer(stdoutBuffer).trim()
@@ -3678,9 +3758,9 @@ function projectAdapterLoadedStatus(project: HarnessProjectMetadata): HarnessSta
   return okStatus("inspected", `${adapterName} 已加载`)
 }
 
-export function getHarnessProjectDetails(
+export async function getHarnessProjectDetails(
   projectIds: string[]
-): Record<string, HarnessProjectDetailViewModel> {
+): Promise<Record<string, HarnessProjectDetailViewModel>> {
   if (projectIds.length === 0) return {}
 
   const projects = projectIds.map((id) => requireProject(id))
@@ -3735,7 +3815,7 @@ export function getHarnessProjectDetails(
 
   for (const group of groups.values()) {
     try {
-      const snapshot = runInspectAdapterBatch(group.projects, "project", group.cwd)
+      const snapshot = await runInspectAdapterBatch(group.projects, "project", group.cwd)
       const workflow = normalizeWorkflow(snapshot.workflow)
       if (!isObject(snapshot.projects)) {
         throw new Error("Inspect adapter returned invalid batch JSON: projects is not an object")
@@ -3778,9 +3858,12 @@ export function getHarnessProjectDetails(
   return result
 }
 
-export function getHarnessRunDetail(projectId: string, slug: string): HarnessRunDetailViewModel {
+export async function getHarnessRunDetail(
+  projectId: string,
+  slug: string
+): Promise<HarnessRunDetailViewModel> {
   const project = requireProject(projectId)
-  const snapshot = runInspectAdapter(project, "run", slug)
+  const snapshot = await runInspectAdapter(project, "run", slug)
   const workflow = normalizeWorkflow(snapshot.workflow)
   const run = isObject(snapshot.run) ? snapshot.run : {}
   const featureSlug = normalizeText(run.featureId) || normalizeText(run.featureName) || slug

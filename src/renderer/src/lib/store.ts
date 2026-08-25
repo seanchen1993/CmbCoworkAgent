@@ -8,6 +8,7 @@ import type {
   ForkableCheckpoint,
   ThreadForkParams
 } from "@/types"
+import type { BrowserCdpConfig } from "../../../shared/browser-types"
 import { findFirstChatThread, isHarnessProjectModeThread } from "./thread-classification"
 import { queueStorageKey } from "./queued-message-content"
 import {
@@ -19,9 +20,17 @@ import {
   normalizeCompleteMessageIds,
   normalizeMessageRoleCollisionIds
 } from "../../../shared/message-role-collision"
+import {
+  normalizeChatScrollSettings,
+  type ChatScrollSettings
+} from "../../../shared/chat-scroll"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
+export const DEFAULT_BROWSER_CDP_CONFIG: BrowserCdpConfig = {
+  enabled: false,
+  profileImportEnabled: false
+}
 
 function contentTextLength(content: Message["content"] | undefined): number {
   if (typeof content === "string") return content.length
@@ -743,6 +752,8 @@ export interface RightPanelWorkRequest {
   threadId: string
 }
 
+export type RightModule = "work" | "preview" | "git" | "browser"
+
 /** Focus on one dynamic-workflow subagent's live tool stream. Keyed by the PARENT
  * threadId (the live panel's thread) + the run's agentIndex. Display-only. */
 export interface WorkflowAgentFocusView {
@@ -767,9 +778,12 @@ interface AppState {
 
   // Right panel state (UI state, not thread data)
   rightPanelTab: "todos" | "files" | "subagents"
+  rightModule: RightModule
 
   // Settings dialog state
   settingsOpen: boolean
+  browserCdpConfig: BrowserCdpConfig
+  chatScrollSettings: ChatScrollSettings
 
   // Sidebar state
   sidebarCollapsed: boolean
@@ -853,9 +867,14 @@ interface AppState {
 
   // Panel actions
   setRightPanelTab: (tab: "todos" | "files" | "subagents") => void
+  setRightModule: (module: RightModule) => void
+  requestOpenBrowserPanel: () => void
 
   // Settings actions
   setSettingsOpen: (open: boolean) => void
+  setChatScrollSettings: (settings: ChatScrollSettings) => void
+  loadChatScrollSettings: () => Promise<void>
+  setBrowserCdpConfig: (config: BrowserCdpConfig) => void
 
   // Sidebar actions
   toggleSidebar: () => void
@@ -952,7 +971,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   models: [],
   providers: [],
   rightPanelTab: "todos",
+  rightModule: "work",
   settingsOpen: false,
+  chatScrollSettings: normalizeChatScrollSettings({}),
+  browserCdpConfig: DEFAULT_BROWSER_CDP_CONFIG,
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
   rightPanelWorkRequest: null,
@@ -1166,9 +1188,37 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ rightPanelTab: tab })
   },
 
+  setRightModule: (rightModule: RightModule) => {
+    set({ rightModule })
+  },
+
+  requestOpenBrowserPanel: () => {
+    set({
+      rightModule: "browser",
+      rightPanelCollapsed: false
+    })
+  },
+
   // Settings actions
   setSettingsOpen: (open: boolean) => {
     set({ settingsOpen: open })
+  },
+
+  setChatScrollSettings: (settings: ChatScrollSettings) => {
+    set({ chatScrollSettings: normalizeChatScrollSettings(settings) })
+  },
+
+  loadChatScrollSettings: async () => {
+    try {
+      const chatScrollSettings = await window.electron.getChatScrollSettings()
+      get().setChatScrollSettings(chatScrollSettings)
+    } catch (error) {
+      console.warn("[Store] Failed to load chat scroll settings; using defaults:", error)
+    }
+  },
+
+  setBrowserCdpConfig: (browserCdpConfig: BrowserCdpConfig) => {
+    set({ browserCdpConfig })
   },
 
   // Sidebar actions

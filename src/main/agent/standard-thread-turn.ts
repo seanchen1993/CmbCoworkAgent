@@ -7,8 +7,7 @@ import type {
 import {
   buildHarnessFeatureAgentContext,
   readHarnessFeatureMetadata,
-  resolveHarnessFeatureCurrentStage,
-  resolveHarnessProjectTaskToolEnabled
+  resolveHarnessFeatureCurrentStage
 } from "../harness-board/service"
 import {
   getDisabledSkillDirs,
@@ -39,6 +38,7 @@ import { getAgentModeFromMetadata, type AgentMode } from "./coordinator-mode"
 import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
+import { primeHarnessStageAttribution } from "../services/harness-stage-attribution"
 
 export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat"
 
@@ -74,7 +74,6 @@ export function parseStandardThreadMetadata(
 export interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
-  enableTaskTool?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig
   isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
@@ -132,12 +131,13 @@ export function getHarnessHookContext(
   }
 }
 
-function resolveHarnessCurrentStageForContext(
+async function resolveHarnessCurrentStageForContext(
   projectId?: string,
   slug?: string
-): Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus"> {
+): Promise<Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus">> {
   if (!projectId || !slug) return {}
-  const currentStage = resolveHarnessFeatureCurrentStage(projectId, slug)
+  const currentStage = await resolveHarnessFeatureCurrentStage(projectId, slug)
+  primeHarnessStageAttribution(projectId, slug, currentStage)
   if (!currentStage?.name) return {}
   return {
     harnessNodeName: currentStage.name,
@@ -145,13 +145,14 @@ function resolveHarnessCurrentStageForContext(
   }
 }
 
-export function resolveHarnessFeatureBindingContext(
+export async function resolveHarnessFeatureBindingContext(
   metadata: unknown
-): HarnessFeatureBindingContext | undefined {
+): Promise<HarnessFeatureBindingContext | undefined> {
   try {
     const binding = readHarnessFeatureMetadata(metadata)
     if (!binding) return undefined
-    const currentStage = resolveHarnessFeatureCurrentStage(binding.projectId, binding.slug)
+    const currentStage = await resolveHarnessFeatureCurrentStage(binding.projectId, binding.slug)
+    primeHarnessStageAttribution(binding.projectId, binding.slug, currentStage)
     return {
       ...binding,
       ...(currentStage?.name ? { nodeName: currentStage.name } : {}),
@@ -162,10 +163,10 @@ export function resolveHarnessFeatureBindingContext(
   }
 }
 
-export function getHarnessAgentContext(
+export async function getHarnessAgentContext(
   metadata: Record<string, unknown>,
   options: { workspacePath?: string; featureBinding?: HarnessFeatureBindingContext } = {}
-): HarnessAgentContext {
+): Promise<HarnessAgentContext> {
   const harnessProjectSession =
     metadata.harnessProjectSession &&
     typeof metadata.harnessProjectSession === "object" &&
@@ -174,22 +175,14 @@ export function getHarnessAgentContext(
       : undefined
   const isHarnessProjectSession = Boolean(harnessProjectSession)
   const harnessFeature = readHarnessFeatureMetadata(metadata)
-  const isHarnessProjectContext = isHarnessProjectSession || Boolean(harnessFeature)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
   try {
-    const projectSessionTaskToolEnabled =
-      typeof harnessProjectSession?.projectId === "string"
-        ? resolveHarnessProjectTaskToolEnabled(harnessProjectSession.projectId)
-        : undefined
-    const featureContext = buildHarnessFeatureAgentContext(metadata, {
+    const featureContext = await buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
     if (!featureContext) {
       return {
         ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-        ...(projectSessionTaskToolEnabled !== undefined
-          ? { enableTaskTool: projectSessionTaskToolEnabled }
-          : {}),
         ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
       }
     }
@@ -199,7 +192,7 @@ export function getHarnessAgentContext(
             harnessNodeName: options.featureBinding.nodeName,
             harnessNodeStatus: options.featureBinding.nodeStatus
           }
-        : resolveHarnessCurrentStageForContext(
+        : await resolveHarnessCurrentStageForContext(
             featureContext.harnessProjectId,
             featureContext.featureId
           )
@@ -207,7 +200,6 @@ export function getHarnessAgentContext(
     return {
       pluginPromptInject: featureContext.systemPromptInject,
       enableAgentsPrompt: featureContext.enableAgentsPrompt,
-      enableTaskTool: featureContext.enableTaskTool,
       subagentConfig: featureContext.agentConfig?.subagentConfig,
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
       harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
@@ -233,7 +225,6 @@ export function getHarnessAgentContext(
     console.warn("[HarnessBoard] Failed to build harness agent context:", error)
     return {
       ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-      ...(isHarnessProjectContext ? { enableTaskTool: false } : {}),
       ...(harnessFeature
         ? { featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }
         : {}),
@@ -634,7 +625,6 @@ export interface RemoteTurnPolicy {
   disableSubagents?: boolean
   disableMemoryInjection?: boolean
   disableAgentsPrompt?: boolean
-  disableTaskTool?: boolean
   disableMcpTools?: boolean
   blockedToolNames?: string[]
   filesystemAccess?: CreateAgentRuntimeOptions["filesystemAccess"]
@@ -660,7 +650,8 @@ function harnessRuntimeOptions(
   context: HarnessAgentContext | undefined
 ): Partial<CreateAgentRuntimeOptions> {
   if (!context) return {}
-  const { sessionContextInjectWarning: _sessionContextInjectWarning, ...runtimeOptions } = context
+  const runtimeOptions = { ...context }
+  delete runtimeOptions.sessionContextInjectWarning
   return runtimeOptions
 }
 
@@ -677,7 +668,6 @@ function applyRemoteTurnPolicy(
     ...(policy.disableSubagents ? { disableSubagents: true } : {}),
     ...(policy.disableMemoryInjection ? { disableMemoryInjection: true } : {}),
     ...(policy.disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-    ...(policy.disableTaskTool ? { enableTaskTool: false } : {}),
     ...(policy.disableMcpTools ? { disableMcpTools: true } : {}),
     ...(policy.blockedToolNames ? { blockedToolNames: policy.blockedToolNames } : {}),
     ...(policy.filesystemAccess ? { filesystemAccess: policy.filesystemAccess } : {})

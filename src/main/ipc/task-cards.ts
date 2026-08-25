@@ -7,9 +7,8 @@ import type {
   TaskCardsQuery
 } from "../../shared/task-card-types"
 import { normalizeTaskCardsPayload } from "../../shared/task-card-types"
+import { getHiddenEndpoint } from "../security/hidden-endpoints"
 
-const DEFAULT_TASK_CARDS_ENDPOINT =
-  "https://devops-kanban.paas.cmbchina.cn/api-market/v2/rest/tasks/by-assignee"
 const TASK_CARDS_CACHE_TTL_MS = 90_000
 const TASK_CARDS_TIMEOUT_MS = 15_000
 const TASK_CARDS_CACHE_LIMIT = 8
@@ -224,7 +223,7 @@ function normalizeQuery(query?: TaskCardsQuery): NormalizedTaskCardsQuery {
 function getTaskCardsEndpoint(): string {
   const viteEnv = (import.meta.env ?? {}) as Record<string, string | undefined>
   const configured = viteEnv.VITE_TASK_CARDS_ENDPOINT?.trim()
-  return configured || process.env.CMB_TASK_CARDS_ENDPOINT || DEFAULT_TASK_CARDS_ENDPOINT
+  return configured || process.env.CMB_TASK_CARDS_ENDPOINT || getHiddenEndpoint("taskCards")
 }
 
 function isTaskCardsMockEnabled(): boolean {

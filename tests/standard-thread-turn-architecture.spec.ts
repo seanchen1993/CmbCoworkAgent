@@ -42,8 +42,8 @@ for (const electronDependency of ['from "electron"', "BrowserWindow", "ipcMain",
 
 for (const sharedApi of [
   "export function parseStandardThreadMetadata(",
-  "export function resolveHarnessFeatureBindingContext(",
-  "export function getHarnessAgentContext(",
+  "export async function resolveHarnessFeatureBindingContext(",
+  "export async function getHarnessAgentContext(",
   "export function getHarnessHookContext(",
   "export async function prepareStandardUserPrompt(",
   "export async function resolveStandardTurnRouting(",
@@ -109,8 +109,7 @@ for (const restrictivePolicyMapping of [
   "policy.disableRequestUserInput ? { enableRequestUserInput: false }",
   "policy.disableSubagents ? { disableSubagents: true }",
   "policy.disableMemoryInjection ? { disableMemoryInjection: true }",
-  "policy.disableAgentsPrompt ? { enableAgentsPrompt: false }",
-  "policy.disableTaskTool ? { enableTaskTool: false }"
+  "policy.disableAgentsPrompt ? { enableAgentsPrompt: false }"
 ]) {
   assertIncludes(
     shared,

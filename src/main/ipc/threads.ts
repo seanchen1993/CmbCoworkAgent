@@ -1,5 +1,6 @@
 import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
-import { existsSync } from "fs"
+import { constants as fsConstants, existsSync } from "fs"
+import { copyFile, lstat, mkdir } from "fs/promises"
 import path from "path"
 import Store from "electron-store"
 import AdmZip from "adm-zip"
@@ -48,6 +49,7 @@ import {
   commitWorkflowThreadDisposal,
   deleteWorkflowRunsForThread,
   isWorkflowThreadMarkedDisposed,
+  countUnresolvedWorkflowWorktrees,
   markWorkflowThreadDisposed,
   rollbackWorkflowThreadDisposal
 } from "../agent/workflow/run-store"
@@ -56,9 +58,19 @@ import {
   deleteCoordinatorWorkerArtifacts
 } from "../agent/coordinator-worker-manager"
 import { getAgentModeFromMetadata } from "../agent/coordinator-mode"
+import { isAgentOutputStyle } from "../../shared/agent-output-style"
 import { deleteTaskMmdThread } from "../agent/task-mmd/storage"
+import {
+  deleteProjectThreadDataDirectory,
+  getProjectThreadDataDirectory
+} from "../agent/context-history-path"
 import { generateTitle } from "../services/title-generator"
 import { imRemoteAccessService } from "../services/im/remote-access-service"
+import {
+  finalizeWorkflowWorktreeRecord,
+  identifyRepository,
+  listWorkflowWorktreeRecordsForPrune
+} from "../services/git-worktree"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { getDefaultModel } from "./models"
@@ -111,7 +123,7 @@ import {
 import { persistedMessageToRuntimeMessage } from "./thread-runtime-tail"
 import {
   buildHarnessFeatureAgentContext,
-  resolveHarnessProjectTaskToolEnabled
+  DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
 } from "../harness-board/service"
 import {
   acquireSubagentTranscriptBlobReadPin,
@@ -221,20 +233,21 @@ async function assertCanPersistExplicitNormalMode(
   currentMetadata: Record<string, unknown>,
   nextMetadata: Record<string, unknown>
 ): Promise<void> {
-  // Block a workspace switch WHILE staying in workflow mode: run files live under
-  // the OLD workspace's .cmbdevclaw, but hydrate / completion notification / history
-  // all look runs up by the thread's CURRENT workspacePath — switching orphans an
-  // active or pending run. The leave guard below doesn't fire here (the mode is
-  // unchanged), so cover it explicitly with the same active/pending condition. (#2)
+  // Any workspace switch must keep the old workspace pinned while it owns an
+  // active/pending run or an unresolved retained worktree. This also covers a
+  // combined mode+workspace update without blocking a mode-only change.
   if (
-    currentMetadata.agentMode === "workflow" &&
-    nextMetadata.agentMode === "workflow" &&
     typeof currentMetadata.workspacePath === "string" &&
     typeof nextMetadata.workspacePath === "string" &&
     nextMetadata.workspacePath !== currentMetadata.workspacePath &&
-    workflowRunManager.isBusyForThread(threadId, currentMetadata.workspacePath)
+    (await workflowRunManager.isWorkspacePinnedForThread(
+      threadId,
+      currentMetadata.workspacePath
+    ))
   ) {
-    throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换工作目录。")
+    throw new Error(
+      "仍有动态工作流、待汇报结果或尚未处理的 worktree，请先完成 Merge/Discard/Cleanup 后再切换工作目录。"
+    )
   }
   // Leaving workflow mode (to ANY non-workflow mode — normal OR coordinator) must
   // be blocked while a run is active or its result is still pending, or the
@@ -347,31 +360,6 @@ function parseJsonObject(raw: string | null | undefined): Record<string, unknown
 
 function parseThreadValues(raw: string | null | undefined): Record<string, unknown> {
   return parseJsonObject(raw) ?? {}
-}
-
-function resolveProjectSubagentsAvailable(metadata: Record<string, unknown> | undefined): boolean {
-  if (!metadata) return true
-  const hasHarnessFeature =
-    metadata.harnessFeature !== null &&
-    typeof metadata.harnessFeature === "object" &&
-    !Array.isArray(metadata.harnessFeature)
-  const hasHarnessProjectSession =
-    metadata.harnessProjectSession !== null &&
-    typeof metadata.harnessProjectSession === "object" &&
-    !Array.isArray(metadata.harnessProjectSession)
-  if (!hasHarnessFeature && !hasHarnessProjectSession) return true
-
-  const projectBinding = (
-    hasHarnessFeature ? metadata.harnessFeature : metadata.harnessProjectSession
-  ) as Record<string, unknown>
-  const projectId =
-    typeof projectBinding.projectId === "string" ? projectBinding.projectId : undefined
-  try {
-    return (projectId ? resolveHarnessProjectTaskToolEnabled(projectId) : undefined) ?? true
-  } catch (error) {
-    console.warn("[Threads] Failed to resolve project subagent policy:", error)
-    return false
-  }
 }
 
 function serializeThreadRow(row: NonNullable<ReturnType<typeof getThread>>): Thread {
@@ -747,6 +735,43 @@ function copyForkGitMetadataIfWorkspaceMatches(input: {
   if (gitContext) targetMetadata.gitContext = gitContext
 }
 
+function copyForkHarnessMetadata(input: {
+  sourceMetadata: Record<string, unknown>
+  targetMetadata: Record<string, unknown>
+}): void {
+  const { sourceMetadata, targetMetadata } = input
+  const harnessFeature = sourceMetadata.harnessFeature
+  const hasHarnessFeature =
+    isPlainRecord(harnessFeature) &&
+    typeof harnessFeature.projectId === "string" &&
+    harnessFeature.projectId.trim().length > 0 &&
+    typeof harnessFeature.slug === "string" &&
+    harnessFeature.slug.trim().length > 0
+
+  if (hasHarnessFeature) {
+    targetMetadata.harnessFeature = { ...harnessFeature }
+  }
+
+  const harnessProjectSession = sourceMetadata.harnessProjectSession
+  const hasHarnessProjectSession =
+    isPlainRecord(harnessProjectSession) &&
+    typeof harnessProjectSession.projectId === "string" &&
+    harnessProjectSession.projectId.trim().length > 0 &&
+    typeof harnessProjectSession.kind === "string" &&
+    harnessProjectSession.kind.trim().length > 0
+
+  if (hasHarnessProjectSession) {
+    targetMetadata.harnessProjectSession = { ...harnessProjectSession }
+  }
+
+  if (
+    (hasHarnessFeature || hasHarnessProjectSession) &&
+    typeof sourceMetadata.disableAgentsPrompt === "boolean"
+  ) {
+    targetMetadata.disableAgentsPrompt = sourceMetadata.disableAgentsPrompt
+  }
+}
+
 function isValidForkWorkspacePath(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0
 }
@@ -923,6 +948,7 @@ function buildForkMetadata(input: {
     workspacePath,
     hasWorkspacePathOverride
   })
+  copyForkHarnessMetadata({ sourceMetadata, targetMetadata: next })
 
   const model = overrides?.model ?? sourceMetadata.model
   if (typeof model === "string" && model.trim()) next.model = model
@@ -937,6 +963,11 @@ function buildForkMetadata(input: {
 
   const memoryEnabled = overrides?.memoryEnabled ?? sourceMetadata.memoryEnabled
   if (typeof memoryEnabled === "boolean") next.memoryEnabled = memoryEnabled
+
+  if (isAgentOutputStyle(sourceMetadata.outputStyle)) {
+    next.outputStyle = sourceMetadata.outputStyle
+  }
+  if (sourceMetadata.conciseModeEnabled === true) next.conciseModeEnabled = true
 
   const nextTitle = overrides?.title?.trim() || title?.trim() || sourceTitle || sourceThreadId
   next.title = nextTitle
@@ -953,6 +984,27 @@ interface ForkCheckpointHistoryEntry {
   checkpoint: CheckpointTuple["checkpoint"]
   metadata: CheckpointMetadata
   parentCheckpointId?: string
+}
+
+const FORK_PRIVATE_SUMMARIZATION_STATE_KEYS = [
+  "_summarizationEvent",
+  "_summarizationSessionId",
+  "_cmbSummarizationOwner"
+] as const
+
+function copyCheckpointWithoutSourceSummarizationState(
+  checkpoint: CheckpointTuple["checkpoint"]
+): CheckpointTuple["checkpoint"] {
+  const copied = copyCheckpoint(checkpoint)
+  const channelValues = copied.channel_values
+  if (!channelValues || typeof channelValues !== "object" || Array.isArray(channelValues)) {
+    return copied
+  }
+
+  for (const key of FORK_PRIVATE_SUMMARIZATION_STATE_KEYS) {
+    delete (channelValues as Record<string, unknown>)[key]
+  }
+  return copied
 }
 
 function fallbackForkCheckpointMetadata(): CheckpointMetadata {
@@ -1027,9 +1079,16 @@ function buildForkCheckpointHistory(input: {
   const entries = input.sourceHistoryTuples.map((tuple) => {
     const checkpointId = getCheckpointId(tuple)
     const parentCheckpointId = getTupleParentCheckpointId(tuple)
+    const sourceCheckpoint =
+      checkpointId === input.selectedCheckpointId ? input.selectedCheckpoint : tuple.checkpoint
     return {
-      checkpoint:
-        checkpointId === input.selectedCheckpointId ? input.selectedCheckpoint : tuple.checkpoint,
+      // A fork owns a new app-managed artifact directory. Keeping the source
+      // event would leave its effective prompt pointing at the source thread's
+      // absolute history path (and potentially expose history appended after
+      // the fork boundary). The raw messages remain in the checkpoint, while
+      // referenced evicted tool payloads are copied into the target directory
+      // before commit, so the target can continue independently.
+      checkpoint: copyCheckpointWithoutSourceSummarizationState(sourceCheckpoint),
       metadata:
         checkpointId === input.selectedCheckpointId
           ? input.selectedMetadata
@@ -1092,9 +1151,102 @@ async function putForkCheckpointHistory(input: {
   }
 }
 
+const LARGE_TOOL_RESULT_PATH_PREFIX = "/large_tool_results/"
+const LARGE_TOOL_RESULT_REFERENCE_PATTERN =
+  /saved in the filesystem at this path: (\/large_tool_results\/[^\s]+)/g
+
+function collectReferencedLargeToolResultNames(checkpoint: Checkpoint): string[] {
+  const names = new Set<string>()
+  for (const message of getCheckpointChannelMessages(checkpoint) ?? []) {
+    if (getMessageRole(message) !== "tool") continue
+    const content = stringifyContent(getCheckpointMessageContent(message))
+    for (const match of content.matchAll(LARGE_TOOL_RESULT_REFERENCE_PATTERN)) {
+      const logicalPath = match[1]
+      const name = logicalPath.slice(LARGE_TOOL_RESULT_PATH_PREFIX.length)
+      if (
+        !name ||
+        name === "." ||
+        name === ".." ||
+        name.includes("/") ||
+        name.includes("\\") ||
+        name.includes("\0")
+      ) {
+        throw new Error(
+          `Fork checkpoint contains an invalid large tool result path: ${logicalPath}`
+        )
+      }
+      names.add(name)
+    }
+  }
+  return [...names]
+}
+
+async function resolveForkLargeToolResultSource(
+  candidates: readonly string[]
+): Promise<string | null> {
+  for (const candidate of candidates) {
+    try {
+      const stats = await lstat(candidate)
+      if (stats.isSymbolicLink() || !stats.isFile()) {
+        throw new Error(`Fork large tool result is not a regular file: ${candidate}`)
+      }
+      return candidate
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      throw error
+    }
+  }
+  return null
+}
+
+async function copyForkLargeToolResults(input: {
+  checkpoints: readonly Checkpoint[]
+  sourceThreadId: string
+  sourceWorkspacePath: string | null
+  targetThreadId: string
+  targetWorkspacePath: string | null
+}): Promise<void> {
+  const referencedNames = [
+    ...new Set(input.checkpoints.flatMap(collectReferencedLargeToolResultNames))
+  ]
+  if (referencedNames.length === 0) return
+  if (!input.sourceWorkspacePath || !input.targetWorkspacePath) {
+    throw new Error(
+      "Fork checkpoint references large tool results but the workspace path is missing."
+    )
+  }
+
+  const [sourceThreadDataDirectory, targetThreadDataDirectory] = await Promise.all([
+    getProjectThreadDataDirectory(input.sourceWorkspacePath, input.sourceThreadId),
+    getProjectThreadDataDirectory(input.targetWorkspacePath, input.targetThreadId)
+  ])
+  const sourceManagedDirectory = path.join(sourceThreadDataDirectory, "large_tool_results")
+  const sourceLegacyDirectory = path.join(
+    input.sourceWorkspacePath,
+    ".cmbdevclaw",
+    "large_tool_results"
+  )
+  const targetDirectory = path.join(targetThreadDataDirectory, "large_tool_results")
+
+  await mkdir(targetDirectory, { recursive: true, mode: 0o700 })
+  for (const name of referencedNames) {
+    const sourcePath = await resolveForkLargeToolResultSource([
+      path.join(sourceManagedDirectory, name),
+      path.join(sourceLegacyDirectory, name)
+    ])
+    if (!sourcePath) {
+      console.warn(
+        `[Threads] Fork source is missing referenced large tool result ${LARGE_TOOL_RESULT_PATH_PREFIX}${name}; preserving the preview-only checkpoint.`
+      )
+      continue
+    }
+    await copyFile(sourcePath, path.join(targetDirectory, name), fsConstants.COPYFILE_EXCL)
+  }
+}
+
 async function cleanupFailedFork(
   targetThreadId: string,
-  options: { rowCreated: boolean }
+  options: { rowCreated: boolean; workspacePath: string | null }
 ): Promise<void> {
   try {
     deleteThreadCheckpoint(targetThreadId)
@@ -1106,6 +1258,13 @@ async function cleanupFailedFork(
       dbDeleteThread(targetThreadId)
     } catch (error) {
       console.warn("[Threads] Failed to cleanup fork thread row:", error)
+    }
+  }
+  if (options.workspacePath) {
+    try {
+      await deleteProjectThreadDataDirectory(options.workspacePath, targetThreadId)
+    } catch (error) {
+      console.warn("[Threads] Failed to cleanup fork app-managed data:", error)
     }
   }
 }
@@ -1247,6 +1406,8 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       parseThreadValues(sourceRow.thread_values),
       transcriptIndex
     )
+    const targetWorkspacePath =
+      typeof targetMetadata.workspacePath === "string" ? targetMetadata.workspacePath : null
 
     let targetSaver: SqlJsSaver | null = null
     let rowCreated = false
@@ -1265,6 +1426,13 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
         selectedCheckpointId: checkpointId,
         selectedCheckpoint: forkCheckpoint,
         selectedMetadata: checkpointMetadata
+      })
+      await copyForkLargeToolResults({
+        checkpoints: checkpointHistory.map((entry) => entry.checkpoint),
+        sourceThreadId,
+        sourceWorkspacePath: workspacePath,
+        targetThreadId,
+        targetWorkspacePath
       })
       targetSaver = new SqlJsSaver(getThreadCheckpointPath(targetThreadId), undefined, {
         maxRootCheckpoints: Math.max(1, checkpointHistory.length),
@@ -1317,7 +1485,7 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
           console.warn("[Threads] Failed to close fork target saver:", closeError)
         }
       }
-      await cleanupFailedFork(targetThreadId, { rowCreated })
+      await cleanupFailedFork(targetThreadId, { rowCreated, workspacePath: targetWorkspacePath })
       throw error
     }
   })
@@ -2236,12 +2404,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  ipcMain.handle("threads:getProjectSubagentsAvailable", async (_event, threadId: string) => {
-    const row = getThread(threadId)
-    if (!row) throw new Error("Thread not found")
-    return resolveProjectSubagentsAvailable(parseJsonObject(row.metadata))
-  })
-
   ipcMain.handle("threads:messages", async (_event, threadId: string) => {
     return getThreadMessages(threadId)
   })
@@ -2285,6 +2447,18 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     const threadId = uuid()
     // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
     const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
+    const harnessFeatureMetadata =
+      nextMetadata.harnessFeature &&
+      typeof nextMetadata.harnessFeature === "object" &&
+      !Array.isArray(nextMetadata.harnessFeature)
+        ? (nextMetadata.harnessFeature as Record<string, unknown>)
+        : undefined
+    if (harnessFeatureMetadata) {
+      nextMetadata.harnessFeature = {
+        ...harnessFeatureMetadata,
+        requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
+      }
+    }
 
     // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
     // 这样可以兼容两种场景：
@@ -2303,11 +2477,26 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
     }
 
+    let harnessContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>> = null
+    try {
+      const workspacePath =
+        typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
+      harnessContext = await buildHarnessFeatureAgentContext(nextMetadata, {
+        workspacePath,
+        requestUserInputConfigSource: "plugin"
+      })
+      if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
+        nextMetadata.harnessFeature = {
+          ...harnessFeatureMetadata,
+          requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
+        }
+      }
+    } catch (error) {
+      console.warn("[Threads] Failed to resolve Harness request_user_input policy:", error)
+    }
+
     if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode")) {
       try {
-        const workspacePath =
-          typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
-        const harnessContext = buildHarnessFeatureAgentContext(nextMetadata, { workspacePath })
         const initialAgentMode = harnessContext?.agentConfig?.agentMode
         if (initialAgentMode === "solo") {
           nextMetadata.agentMode = "normal"
@@ -2817,6 +3006,55 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         }
       }
       workspacePath = workspacePath ?? activeWorkspaceFallback
+      let unresolvedManifestWorktree = false
+      if (workspacePath) {
+        const repository = await identifyRepository(workspacePath)
+        if (repository) {
+          const manifestState = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
+          if (!manifestState.reliable) {
+            throw new Error(
+              "检测到损坏的 workflow worktree 记录；为保护可能残留的工作，任务未删除。请修复该工作区的 worktree 记录后重试。"
+            )
+          }
+          for (const record of manifestState.records) {
+            if (record.threadId !== threadId) continue
+            const terminal = record.status === "merged" || record.status === "discarded"
+            const alreadyCleaned = terminal && record.cleanupPending !== true && !existsSync(record.directory)
+            if (!alreadyCleaned) {
+              unresolvedManifestWorktree = true
+              break
+            }
+            // A process can crash after run.json has recorded terminal cleanup
+            // but before its small ownership tombstone is finalized. This is no
+            // longer user work; finish the idempotent CAS-protected finalizer
+            // before allowing the thread (and its recovery entry point) to go.
+            if (!(await finalizeWorkflowWorktreeRecord(record).catch(() => false))) {
+              unresolvedManifestWorktree = true
+              break
+            }
+          }
+        }
+      }
+      const unresolvedWorktreeCount =
+        (workspacePath ? countUnresolvedWorkflowWorktrees(workspacePath, threadId) : 0) +
+        workflowRunManager
+          .listFlushFailedRuns(threadId)
+          .reduce(
+            (count, run) =>
+              count +
+              (run.worktrees ?? []).filter(
+                (record) =>
+                  (record.status !== "merged" && record.status !== "discarded") ||
+                  record.cleanupPending === true ||
+                  existsSync(record.directory)
+              ).length,
+            0
+          )
+      if (unresolvedManifestWorktree || unresolvedWorktreeCount > 0) {
+        throw new Error(
+          "该任务仍有未处理或待清理的 workflow worktree；请先在运行历史中合并、丢弃或按错误提示完成手工清理，再删除任务。"
+        )
+      }
       const hookChannel = `agent:stream:${threadId}`
       await fireSessionEnd(
         threadId,
@@ -2924,6 +3162,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     coordinatorWorkerManager.forgetThread(threadId)
     forgetCoordinatorThreadState(threadId)
     if (workspacePath) {
+      try {
+        await deleteProjectThreadDataDirectory(workspacePath, threadId)
+        console.log("[Threads] Deleted app-managed thread history and large results")
+      } catch (e) {
+        console.warn("[Threads] Failed to delete app-managed thread data:", e)
+      }
       try {
         await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)
         console.log("[Threads] Deleted coordinator worker artifacts")

@@ -2,10 +2,16 @@ import { existsSync, statSync, watch, type FSWatcher } from "fs"
 import { dirname, resolve } from "path"
 import { BrowserWindow } from "electron"
 import type { HarnessWatchRef } from "../../shared/harness-board-types"
+import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 
 interface WatchEntry {
   watcher: FSWatcher
   timer: NodeJS.Timeout | null
+}
+
+interface HarnessRunAttributionTarget {
+  projectId: string
+  featureSlug: string
 }
 
 const activeWatchers = new Map<string, WatchEntry[]>()
@@ -48,7 +54,8 @@ function emitChanged(scopeKey: string, workspacePath: string, ref: HarnessWatchR
 export function startHarnessWatchRefs(
   scopeKey: string,
   workspacePath: string,
-  refs: HarnessWatchRef[]
+  refs: HarnessWatchRef[],
+  attributionTarget?: HarnessRunAttributionTarget
 ): void {
   stopHarnessWatchRefs(scopeKey)
 
@@ -60,6 +67,15 @@ export function startHarnessWatchRefs(
     try {
       const entry: WatchEntry = {
         watcher: watch(watchPath, { recursive: false }, () => {
+          // The Feature page reloads feature_status after any run watch ref
+          // changes. Share that same signal with code_gen attribution even when
+          // the renderer refresh is still inside its debounce window.
+          if (attributionTarget) {
+            markHarnessStageAttributionDirty(
+              attributionTarget.projectId,
+              attributionTarget.featureSlug
+            )
+          }
           if (entry.timer) {
             clearTimeout(entry.timer)
           }

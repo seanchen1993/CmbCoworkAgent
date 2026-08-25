@@ -14,16 +14,8 @@ import {
   AlertCircle,
   X,
   FileText,
-  FileSpreadsheet,
-  Presentation,
-  Search,
-  Palette,
-  FlaskConical,
   Code2,
-  LayoutTemplate,
-  Settings2,
   ChevronDown,
-  ChevronRight,
   ChevronUp,
   ShieldCheck,
   Info,
@@ -58,8 +50,6 @@ import {
 } from "lucide-react"
 import type { FileAttachment, QueuedMessage } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -80,6 +70,10 @@ import {
   subscribePendingHarnessNextActions
 } from "@/lib/harness-next-action"
 import { cn } from "@/lib/utils"
+import {
+  getAppleIntelligenceGlowEnabled,
+  subscribeAppleIntelligenceGlow
+} from "@/lib/apple-intelligence-glow"
 import { useShallow } from "zustand/react/shallow"
 import {
   useCurrentThread,
@@ -113,9 +107,11 @@ import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
 import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
+import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
+import { ChatMessageCount } from "./ChatMessageCount"
 import {
   getSystemConstraintsLoadCounts,
   hasNoLoadedSystemConstraints,
@@ -135,23 +131,24 @@ import type {
 } from "@/types"
 import { MessageBubble } from "./MessageBubble"
 import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import { ChatSearchOverlay } from "./ChatSearchOverlay"
-import { SkillsByCategorySection } from "./SkillsByCategorySection"
+import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
 import { uploadChatData, ChatReportPayload } from "@/api"
-import { marketApi, MarketItem } from "../../api/market"
-import {
-  buildMarketInstalledFlags,
-  isMarketVersionDifferent,
-  marketInstalledVersionStorage,
-  MarketUpdateBadge
-} from "@/components/customize/MarketPanel/MarketUpdateBadge"
 import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
+import {
+  getBuiltinBrowserTitleSource,
+  isBuiltinBrowserCommandSelection,
+  parseBuiltinBrowserEditDraft,
+  resolveBuiltinBrowserVisibleUserText,
+  shouldRemoveBuiltinBrowserChipWithBackspace
+} from "@/features/builtin-browser/chat-integration"
 import {
   isBareGoalSlashCommandInput,
   isGoalSlashControlCommandInput,
@@ -176,6 +173,11 @@ import {
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import {
+  CHAT_AUTO_SCROLL_ALWAYS,
+  normalizeChatAutoScrollMessageLimit
+} from "../../../../shared/chat-scroll"
+import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
@@ -188,7 +190,6 @@ import {
   classifyGuidedMessage
 } from "@/lib/queued-message-content"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
-import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
@@ -215,7 +216,6 @@ import {
   tryAcquireSubmitInFlightLock,
   type SubmitInFlightLockRef
 } from "@/lib/submit-in-flight-lock"
-import { groupWelcomeSkills } from "./skill-grouping"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
@@ -224,180 +224,28 @@ import { HookLogChip, HookLogModal } from "./HookLogViews"
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
 
-const MARKET_SKILLS_CACHE_TTL_MS = 10 * 60 * 1000
-
-interface MarketSkillsSnapshot {
-  allSkills: MarketItem[]
-  goodSkills: MarketItem[]
-  fetchedAt: number
-}
-
-// Min gap between featured-skill install passes. Throttling both success and
-// failure to this interval means: market version updates are re-checked
-// periodically (no permanent "done" latch), while a permanently-failing skill
-// is retried at most once per interval instead of on every session entry.
-const FEATURED_INSTALL_RETRY_MS = 10 * 60 * 1000
-
-let marketSkillsSnapshot: MarketSkillsSnapshot | null = null
-let marketSkillsRequest: Promise<MarketSkillsSnapshot> | null = null
-let featuredSkillsInstallRequest: Promise<boolean> | null = null
-// Timestamp of the last install pass (0 = never). Combined with the per-skill
-// version check inside installFeaturedSkills, this re-checks for updates after
-// the interval and avoids re-downloading on every mount.
-let lastFeaturedInstallAttemptAt = 0
-
-async function loadMarketSkillsSnapshot(): Promise<MarketSkillsSnapshot> {
-  const now = Date.now()
-  if (marketSkillsSnapshot && now - marketSkillsSnapshot.fetchedAt < MARKET_SKILLS_CACHE_TTL_MS) {
-    return marketSkillsSnapshot
-  }
-
-  if (!marketSkillsRequest) {
-    marketSkillsRequest = marketApi
-      .getSkills()
-      .then((res) => {
-        const allSkills = res?.data || []
-        const snapshot = {
-          allSkills,
-          goodSkills: allSkills.filter((it) => it.featured === "精品"),
-          fetchedAt: Date.now()
-        }
-        marketSkillsSnapshot = snapshot
-        return snapshot
-      })
-      .finally(() => {
-        marketSkillsRequest = null
-      })
-  }
-
-  return marketSkillsRequest
-}
-
-async function installFeaturedSkills(
-  goodSkills: MarketItem[]
-): Promise<{ changed: boolean; hadFailure: boolean }> {
-  if (goodSkills.length === 0) return { changed: false, hadFailure: false }
-
-  console.log("Starting automatic installation of good skills...")
-  let skillsMetadata = await window.api.skills.list()
-  let changed = false
-  let hadFailure = false
-
-  for (const skill of goodSkills) {
-    try {
-      const skillName = skill.name || skill.id || ""
-
-      if (!skillName) {
-        console.error("Skill name is required for installation:", skill)
-        continue
-      }
-
-      console.log(`Installing skill: ${skillName}`)
-      const existingSkill = skillsMetadata.find((s) => s.name === skillName)
-
-      // 精品技能会在欢迎页初始化时自动补齐。为了避免每次进入会话都重复下载：
-      // 1. 本地没有这个技能：需要安装；
-      // 2. 本地有技能但没有安装版本记录：无法判断是否最新，按用户要求默认重新安装；
-      // 3. 本地安装版本和市场版本不一致：需要删除旧技能后重新安装；
-      // 4. 本地安装版本和市场版本一致：跳过安装，保留现有技能目录。
-      const installedVersion = marketInstalledVersionStorage.getVersion(skillName, "skill")
-      const shouldInstall =
-        !existingSkill ||
-        !installedVersion ||
-        isMarketVersionDifferent(installedVersion, skill.version)
-
-      if (!shouldInstall) {
-        console.log(`Skill ${skillName} is already up to date, skipping install.`)
-        continue
-      }
-
-      if (existingSkill) {
-        console.log(`Deleting existing skill: ${existingSkill.path}`)
-        try {
-          await window.api.skills.delete(existingSkill.path)
-          skillsMetadata = skillsMetadata.filter((s) => s.path !== existingSkill.path)
-        } catch (deleteError) {
-          console.warn(
-            `Failed to delete existing skill ${skillName}, continuing with install:`,
-            deleteError
-          )
-        }
-      }
-
-      const response = await marketApi.downloadItem(skillName, "skill", false)
-
-      if (response.success) {
-        marketInstalledVersionStorage.setVersion(skillName, "skill", skill.version)
-        changed = true
-        console.log(`Successfully installed skill: ${skillName}`)
-      } else {
-        hadFailure = true
-        console.error(`Failed to install skill ${skillName}:`, response.error)
-      }
-    } catch (error) {
-      hadFailure = true
-      console.error(`Failed to install skill ${skill.name}:`, error)
+function interruptionNoticeCopy(event: string, action: string): {
+  title: string
+  explanation: string
+} {
+  if (event.startsWith("Failure fuse")) {
+    return {
+      title: "工具失败熔断已停止本轮",
+      explanation:
+        "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
     }
   }
-
-  console.log("Finished automatic installation of good skills")
-  return { changed, hadFailure }
-}
-
-async function installFeaturedSkillsOnce(goodSkills: MarketItem[]): Promise<boolean> {
-  if (goodSkills.length === 0) return false
-
-  // Share an already-running pass.
-  if (featuredSkillsInstallRequest) return featuredSkillsInstallRequest
-
-  // Throttle passes to one per retry window (applies to both success and
-  // failure): updates are re-checked after the interval via the per-skill
-  // version comparison, and a permanently-failing skill is not re-downloaded on
-  // every session entry.
-  const now = Date.now()
-  if (
-    lastFeaturedInstallAttemptAt !== 0 &&
-    now - lastFeaturedInstallAttemptAt < FEATURED_INSTALL_RETRY_MS
-  ) {
-    return false
+  if (event.startsWith("Tool-call loop")) {
+    return {
+      title: "重复工具调用熔断已停止本轮",
+      explanation:
+        "这是重复工具调用熔断结果，不是 Hook 策略或应用崩溃。你可以调整策略后发送新消息继续对话。"
+    }
   }
-  lastFeaturedInstallAttemptAt = now
-
-  featuredSkillsInstallRequest = installFeaturedSkills(goodSkills)
-    .then(({ changed }) => changed)
-    .finally(() => {
-      featuredSkillsInstallRequest = null
-    })
-
-  return featuredSkillsInstallRequest
-}
-
-type WelcomeSkillCard = {
-  skill: SkillMetadata
-  label: string
-  icon: React.JSX.Element
-  installedVersion?: string | null
-  currentVersion?: string | null
-  updateAvailable?: boolean
-}
-
-type WelcomeSkillSceneGroup = {
-  category: string
-  cards: WelcomeSkillCard[]
-}
-
-type WelcomeSkillTreeNode = {
-  key: string
-  label: string
-  card?: WelcomeSkillCard
-  children: WelcomeSkillTreeNode[]
-}
-
-function getWelcomeSkillTreePath(skill: SkillMetadata): string {
-  const id = skill.id?.startsWith("plugin:") ? skill.id.split("/").slice(1).join("/") : skill.id
-  return String(skill.relativePath || id || skill.name || "")
-    .replace(/\\/g, "/")
-    .replace(/^\/+|\/+$/g, "")
+  return {
+    title: action === "halt" ? "Hook 已停止本轮" : "Hook 已阻断本轮",
+    explanation: "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"
+  }
 }
 
 function formatGoalDuration(createdAt: number, updatedAt: number, active: boolean): string {
@@ -850,260 +698,6 @@ function GoalStatusPanel({
   )
 }
 
-function buildWelcomeSkillTree(cards: WelcomeSkillCard[]): WelcomeSkillTreeNode[] {
-  const root: WelcomeSkillTreeNode = { key: "root", label: "root", children: [] }
-  const indexByNode = new WeakMap<WelcomeSkillTreeNode, Map<string, WelcomeSkillTreeNode>>()
-
-  const getIndex = (node: WelcomeSkillTreeNode): Map<string, WelcomeSkillTreeNode> => {
-    let index = indexByNode.get(node)
-    if (!index) {
-      index = new Map(node.children.map((child) => [normalizeSkillId(child.label), child]))
-      indexByNode.set(node, index)
-    }
-    return index
-  }
-
-  for (const card of cards) {
-    const segments = getWelcomeSkillTreePath(card.skill).split("/").filter(Boolean)
-    const fallbackSegments = segments.length > 0 ? segments : [card.skill.name]
-    let current = root
-
-    for (const segment of fallbackSegments) {
-      const normalized = normalizeSkillId(segment)
-      const childIndex = getIndex(current)
-      let child = childIndex.get(normalized)
-      if (!child) {
-        child = { key: `${current.key}/${normalized}`, label: segment, children: [] }
-        current.children.push(child)
-        childIndex.set(normalized, child)
-      }
-      current = child
-    }
-
-    current.card = card
-  }
-
-  const sortNodes = (nodes: WelcomeSkillTreeNode[]): WelcomeSkillTreeNode[] =>
-    [...nodes]
-      .sort((a, b) => {
-        const labelA = a.card?.label || a.label
-        const labelB = b.card?.label || b.label
-        return labelA.localeCompare(labelB, "zh-CN")
-      })
-      .map((node) => ({ ...node, children: sortNodes(node.children) }))
-
-  return sortNodes(root.children)
-}
-
-function countWelcomeSkillTreeCards(node: WelcomeSkillTreeNode): number {
-  return (
-    (node.card ? 1 : 0) +
-    node.children.reduce((sum, child) => sum + countWelcomeSkillTreeCards(child), 0)
-  )
-}
-
-function getWelcomeSkillTopLevelKey(skill: SkillMetadata): string {
-  return normalizeSkillId(
-    getWelcomeSkillTreePath(skill).split("/").filter(Boolean)[0] || skill.name
-  )
-}
-
-function limitWelcomeSkillsByTopLevel(
-  skills: SkillMetadata[],
-  previewLimit: number
-): SkillMetadata[] {
-  if (previewLimit <= 0) return []
-  const selectedRoots = new Set<string>()
-
-  for (const skill of skills) {
-    selectedRoots.add(getWelcomeSkillTopLevelKey(skill))
-    if (selectedRoots.size >= previewLimit) break
-  }
-
-  return skills.filter((skill) => selectedRoots.has(getWelcomeSkillTopLevelKey(skill)))
-}
-
-function WelcomeSkillButton(props: {
-  card: WelcomeSkillCard
-  disabled?: boolean
-  onUseSkill: (skill: SkillMetadata, label?: string) => void
-  getSkillShowLabel: (name: string) => string
-}): React.JSX.Element {
-  const { card, disabled = false, onUseSkill, getSkillShowLabel } = props
-  const label = getSkillShowLabel(card.label)
-
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => {
-        if (!disabled) onUseSkill(card.skill, card.label)
-      }}
-      className={cn(
-        "group w-full rounded-xl border px-3 py-2 text-left transition-all",
-        disabled
-          ? "cursor-not-allowed border-border/70 bg-background/60 opacity-65"
-          : "border-slate-300/90 bg-slate-50/70 shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:border-slate-400/95 hover:bg-slate-100/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] dark:border-slate-600/85 dark:bg-slate-900/35 dark:hover:border-slate-500/95 dark:hover:bg-slate-800/55"
-      )}
-    >
-      <div className="flex items-center gap-2 min-w-0">
-        <div
-          className={cn(
-            "rounded-md border p-1.5 transition-colors",
-            disabled
-              ? "border-border/70 bg-background/70 text-muted-foreground"
-              : "border-slate-300/90 bg-white/80 text-slate-500 group-hover:text-slate-700 dark:border-slate-600/80 dark:bg-slate-900/45 dark:text-slate-300 dark:group-hover:text-slate-100"
-          )}
-        >
-          {card.icon}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <div
-              className={cn(
-                "min-w-0 flex-1 text-xs leading-5 truncate whitespace-nowrap",
-                disabled ? "text-muted-foreground line-through" : "text-foreground"
-              )}
-            >
-              {label}
-            </div>
-            {/* 仅当市场版本与本地安装版本不一致时展示更新标识；具体版本差异在 tooltip 中展示。 */}
-            {card.updateAvailable && (
-              <MarketUpdateBadge
-                typeLabel="技能"
-                installedVersion={card.installedVersion}
-                currentVersion={card.currentVersion}
-                className="text-[10px] px-1.5 py-0"
-              />
-            )}
-          </div>
-        </div>
-      </div>
-    </button>
-  )
-}
-
-function WelcomeSkillTree(props: {
-  cards: WelcomeSkillCard[]
-  disabled?: boolean
-  onUseSkill: (skill: SkillMetadata, label?: string) => void
-  getSkillShowLabel: (name: string) => string
-}): React.JSX.Element {
-  const { cards, disabled = false, onUseSkill, getSkillShowLabel } = props
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set())
-  const tree = useMemo(() => buildWelcomeSkillTree(cards), [cards])
-  const toggleNode = useCallback((nodeKey: string) => {
-    setExpandedNodes((prev) => {
-      const next = new Set(prev)
-      if (next.has(nodeKey)) next.delete(nodeKey)
-      else next.add(nodeKey)
-      return next
-    })
-  }, [])
-
-  return (
-    <WelcomeSkillTreeList
-      nodes={tree}
-      disabled={disabled}
-      nested={false}
-      expandedNodes={expandedNodes}
-      onToggleNode={toggleNode}
-      onUseSkill={onUseSkill}
-      getSkillShowLabel={getSkillShowLabel}
-    />
-  )
-}
-
-function WelcomeSkillTreeList(props: {
-  nodes: WelcomeSkillTreeNode[]
-  disabled: boolean
-  nested: boolean
-  expandedNodes: Set<string>
-  onToggleNode: (nodeKey: string) => void
-  onUseSkill: (skill: SkillMetadata, label?: string) => void
-  getSkillShowLabel: (name: string) => string
-}): React.JSX.Element {
-  const { nodes, disabled, nested, expandedNodes, onToggleNode, onUseSkill, getSkillShowLabel } =
-    props
-
-  return (
-    <div className={nested ? "grid grid-cols-1 gap-1.5" : "grid grid-cols-2 md:grid-cols-4 gap-2"}>
-      {nodes.map((node) => {
-        const childrenExpanded = expandedNodes.has(node.key)
-        const childCount = node.children.reduce(
-          (sum, child) => sum + countWelcomeSkillTreeCards(child),
-          0
-        )
-
-        return (
-          <div key={node.key} className="min-w-0 space-y-1.5">
-            {node.card ? (
-              <WelcomeSkillButton
-                card={node.card}
-                disabled={disabled}
-                onUseSkill={onUseSkill}
-                getSkillShowLabel={getSkillShowLabel}
-              />
-            ) : (
-              <button
-                type="button"
-                onClick={() => onToggleNode(node.key)}
-                className="w-full rounded-xl border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left hover:bg-muted/35"
-              >
-                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    {childrenExpanded ? (
-                      <ChevronDown className="size-3 shrink-0" />
-                    ) : (
-                      <ChevronRight className="size-3 shrink-0" />
-                    )}
-                    <span className="truncate">{node.label}</span>
-                  </span>
-                  <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
-                    {childCount}
-                  </Badge>
-                </div>
-              </button>
-            )}
-
-            {node.children.length > 0 && (
-              <button
-                type="button"
-                onClick={() => onToggleNode(node.key)}
-                className="flex min-h-7 w-full items-center gap-2 rounded-lg border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
-              >
-                {expandedNodes.has(node.key) ? (
-                  <ChevronDown className="size-3 shrink-0" />
-                ) : (
-                  <ChevronRight className="size-3 shrink-0" />
-                )}
-                <span className="min-w-0 flex-1 truncate">子技能</span>
-                <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
-                  {childCount}
-                </Badge>
-              </button>
-            )}
-
-            {expandedNodes.has(node.key) && (
-              <div className="border-l border-border/60 pl-2">
-                <WelcomeSkillTreeList
-                  nodes={node.children}
-                  disabled={disabled}
-                  nested
-                  expandedNodes={expandedNodes}
-                  onToggleNode={onToggleNode}
-                  onUseSkill={onUseSkill}
-                  getSkillShowLabel={getSkillShowLabel}
-                />
-              </div>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 interface AgentStreamValues {
   todos?: Array<{ id?: string; content?: string; status?: string }>
 }
@@ -1294,7 +888,6 @@ const RECOVERABLE_QUEUE_ERRORS = new Set([
   QUEUE_MODEL_UNAVAILABLE_ERROR,
   QUEUE_WORKSPACE_REQUIRED_ERROR
 ])
-const GOOD_SKILLS_PREVIEW_LIMIT = 4
 const CHAT_REPORT_UPLOAD_DEBOUNCE_MS = 250
 const CHAT_REPORT_RETRY_DELAY_MS = 1_000
 const CHAT_REPORT_MAX_RETRY_ATTEMPTS = 3
@@ -2065,8 +1658,6 @@ export function ChatContainer({
     id?: string
     name?: string
   } | null>(null)
-  const [showAllProgrammingSkills, setShowAllProgrammingSkills] = useState(false)
-  const [showAllCustomSkills, setShowAllCustomSkills] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [userInputDialogLayout, setUserInputDialogLayout] =
     useState<UserInputRequestDialogLayout | null>(null)
@@ -2088,7 +1679,14 @@ export function ChatContainer({
   )
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
+  const chatScrollSettings = useAppStore((state) => state.chatScrollSettings)
+  const chatScrollLimitNoticeKeyRef = useRef<string | null>(null)
   const [glowVisible, setGlowVisible] = useState(false)
+  const appleIntelligenceGlowEnabled = useSyncExternalStore(
+    subscribeAppleIntelligenceGlow,
+    getAppleIntelligenceGlowEnabled,
+    () => false
+  )
   // NUX (first-run sandbox setup)
   const [showNux, setShowNux] = useState<boolean>(false)
   const [nuxLoading, setNuxLoading] = useState(false)
@@ -2233,11 +1831,8 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
-  const [projectSubagentsAvailable, setProjectSubagentsAvailable] = useState<boolean | null>(null)
-  const disableMultiModeOption =
-    isProjectModeAgentContext && projectSubagentsAvailable !== true
   const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
-  const disableWorkflowModeOption = isProjectModeAgentContext
+  const disableWorkflowModeOption = false
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
     getPendingHarnessNextActionVersion,
@@ -2248,27 +1843,6 @@ export function ChatContainer({
     [pendingHarnessNextActionVersion, threadId]
   )
   const pendingHarnessDialogTips = pendingHarnessNextAction?.dialogTips?.trim() || null
-
-  useEffect(() => {
-    if (!isProjectModeAgentContext) {
-      setProjectSubagentsAvailable(null)
-      return
-    }
-    let cancelled = false
-    setProjectSubagentsAvailable(null)
-    void window.api.threads
-      .getProjectSubagentsAvailable(threadId)
-      .then((available) => {
-        if (!cancelled) setProjectSubagentsAvailable(available)
-      })
-      .catch((error) => {
-        console.warn("[ChatContainer] Failed to load project subagent policy:", error)
-        if (!cancelled) setProjectSubagentsAvailable(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [isProjectModeAgentContext, threadId])
 
   const resolveAgentMode = useCallback(
     async (metadata: Record<string, unknown>): Promise<ChatAgentMode> => {
@@ -2350,10 +1924,6 @@ export function ChatContainer({
     disableWorkflowModeOption
   ])
 
-  const allSkillsRef = useRef<MarketItem[]>([])
-  const [marketSkillsData, setMarketSkillsData] = useState<MarketItem[]>([])
-  const [goodSkillsData, setGoodSkillsData] = useState<MarketItem[]>([])
-
   // Stable ref so loadSkills can read the latest harness binding without
   // invalidating its own identity (useCallback with empty deps).
   const harnessFeatureBindingRef = useRef(harnessFeatureBinding)
@@ -2423,32 +1993,6 @@ export function ChatContainer({
     }
   }, [])
 
-  const queryRemoteSkills = useCallback(async () => {
-    try {
-      const { allSkills, goodSkills } = await loadMarketSkillsSnapshot()
-      allSkillsRef.current = allSkills
-      setMarketSkillsData(allSkills)
-      setGoodSkillsData(goodSkills)
-
-      const installed = await installFeaturedSkillsOnce(goodSkills)
-      if (installed) {
-        await loadSkills()
-      }
-    } catch (error) {
-      console.error("Failed to query remote skills:", error)
-    }
-  }, [loadSkills])
-
-  const getSkillShowLabel = useCallback((name: string): string => {
-    const target = allSkillsRef.current?.find((it) => it.name === name || it.chinese_name === name)
-    return target?.chinese_name || name || ""
-  }, [])
-
-  const getTargetRemoteSkill = useCallback((name: string) => {
-    const target = allSkillsRef.current?.find((it) => it.name === name || it.chinese_name === name)
-    return target?.guidance || ""
-  }, [])
-
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
@@ -2507,7 +2051,9 @@ export function ChatContainer({
     setContextReminder,
     setDraftInput: setInput,
     setHarnessNextActionDialogTips,
-    setDraftSkill: setSelectedSkill
+    setDraftSkill: setSelectedSkill,
+    draftBuiltinBrowser: selectedBuiltinBrowser,
+    setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
@@ -2657,10 +2203,6 @@ export function ChatContainer({
       }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
-        if (disableMultiModeOption && nextMode === "multi") {
-          toast.error("项目配置已禁用 task 子代理，不能使用 Multi。")
-          return
-        }
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
           toast.error("项目模式暂不支持 Agent Team。")
           return
@@ -2745,7 +2287,6 @@ export function ChatContainer({
     },
     [
       disableCoordinatorModeOption,
-      disableMultiModeOption,
       disableWorkflowModeOption,
       historyLoading,
       threadId,
@@ -2982,7 +2523,6 @@ export function ChatContainer({
   }, [currentModel])
 
   useEffect(() => {
-    queryRemoteSkills()
     const fetchYoloMode = (): void => {
       window.api.sandbox
         .getYoloMode()
@@ -2997,7 +2537,7 @@ export function ChatContainer({
     }
     fetchYoloMode()
     return window.api.sandbox.onChanged(fetchYoloMode)
-  }, [queryRemoteSkills])
+  }, [])
 
   const uploadLoChatDataForThread = useCallback(
     async (targetThreadId: string, msgs: Message[], attempt = 0) => {
@@ -3286,6 +2826,11 @@ export function ChatContainer({
           suggestedCommitFilePaths?: string[]
           suggestedCommitFileBasePath?: string
           suggestedGitWorktreePath?: string
+          suggestedGitRepositories?: Array<{
+            path: string
+            displayPath: string
+            gitRoot: string
+          }>
           suggestedCommitFileSelectionSource?: "pathspec" | "staged"
         })
       | null
@@ -3381,6 +2926,10 @@ export function ChatContainer({
 
   // Apple Intelligence glow: loading 时显示，淡出由 CSS animation + onAnimationEnd 控制
   useEffect(() => {
+    if (!appleIntelligenceGlowEnabled) {
+      setGlowVisible(false)
+      return
+    }
     if (isLoading) {
       setGlowVisible(true)
       return
@@ -3388,7 +2937,7 @@ export function ChatContainer({
     // 兜底：如果 transitionEnd 未触发（快速切换等边界情况），3s 后强制隐藏
     const timer = setTimeout(() => setGlowVisible(false), 3000)
     return () => clearTimeout(timer)
-  }, [isLoading])
+  }, [appleIntelligenceGlowEnabled, isLoading])
 
   const displayMessages = useMemo(() => {
     const normalizedLiveMessages = normalizeLiveStreamMessageIds(
@@ -3482,6 +3031,11 @@ export function ChatContainer({
     return filterCoordinatorNoiseMessages(cleanedMessages)
   }, [threadMessages, streamData.liveMessages, streamData.messages])
 
+  const chatScrollNavigatorMessages = useMemo(
+    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
+    [threadMessages]
+  )
+
   // Key that drives in-session search re-matching. Message count and isLoading
   // stay constant while tokens append to the SAME streaming message, so fold in
   // the last message's text length — otherwise search misses text that is still
@@ -3491,6 +3045,23 @@ export function ChatContainer({
     const lastTextLength = last ? getMessageText(last.content).length : 0
     return `${displayMessages.length}:${isLoading}:${lastTextLength}`
   }, [displayMessages, isLoading])
+
+  const chatAutoScrollTriggerKey = useMemo(() => {
+    const last = displayMessages[displayMessages.length - 1]
+    const lastTextLength = last ? getMessageText(last.content).length : 0
+    const lastReasoningLength =
+      last && typeof last.reasoning === "string" ? last.reasoning.length : 0
+    const lastToolCallCount = Array.isArray(last?.tool_calls) ? last.tool_calls.length : 0
+    return [
+      displayMessages.length,
+      isLoading ? 1 : 0,
+      last?.id ?? "",
+      lastTextLength,
+      lastReasoningLength,
+      lastToolCallCount,
+      queuedMessages.length
+    ].join(":")
+  }, [displayMessages, isLoading, queuedMessages.length])
 
   const detachedHookLogBuckets = useMemo(() => {
     const userMessageIds = new Set(
@@ -3647,6 +3218,49 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
+  const scrollToConversationBottom = useCallback((): void => {
+    const viewport = getViewport()
+    if (!viewport) return
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+  }, [getViewport])
+
+  useEffect(() => {
+    if (historyLoading || pendingApproval || pendingUserInput) return
+
+    const configuredLimit = normalizeChatAutoScrollMessageLimit(
+      chatScrollSettings.autoScrollMessageLimit
+    )
+    if (
+      configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS &&
+      displayMessages.length > configuredLimit
+    ) {
+      const noticeKey = `${threadId}:${configuredLimit}`
+      if (chatScrollLimitNoticeKeyRef.current !== noticeKey) {
+        chatScrollLimitNoticeKeyRef.current = noticeKey
+        toast.warning(
+          `会话消息已超过 ${configuredLimit} 条，已暂停自动置底。可前往“自定义 / 基础功能 / 通用”调整自动置底消息数量。`
+        )
+      }
+      return
+    }
+
+    const viewport = getViewport()
+    if (!viewport) return
+    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+    if (bottomDistance <= 200) {
+      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    }
+  }, [
+    chatAutoScrollTriggerKey,
+    chatScrollSettings.autoScrollMessageLimit,
+    displayMessages.length,
+    getViewport,
+    historyLoading,
+    pendingApproval,
+    pendingUserInput,
+    threadId
+  ])
+
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
   // fires regardless of where focus is — a root-scoped listener missed the common
   // case where focus sits on <body> after clicking the transcript. The visibility
@@ -3714,16 +3328,6 @@ export function ChatContainer({
     }
   }, [getViewport, historyLoading, threadId])
 
-  // stream 输出的过程中，如果用户正处于底部，那么继续保持底部
-  useEffect(() => {
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-    }
-  }, [contextCompaction?.id, contextCompaction?.phase, streamData, isLoading])
-
   // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus()
@@ -3755,7 +3359,7 @@ export function ChatContainer({
       return
     }
     if (historyLoading) return
-    if (threadMessages.length > 0 || input.trim() || selectedSkill) {
+    if (threadMessages.length > 0 || input.trim() || selectedSkill || selectedBuiltinBrowser) {
       consumePendingHarnessNextAction(threadId)
       return
     }
@@ -3785,6 +3389,8 @@ export function ChatContainer({
     selectedSkill,
     setInput,
     setSelectedSkill,
+    selectedBuiltinBrowser,
+    setSelectedBuiltinBrowser,
     skillsHarnessPreferredPlugin,
     skillsHarnessProjectId,
     skillsLoadTargetProjectId,
@@ -3796,7 +3402,8 @@ export function ChatContainer({
   const slash = useSlashCommands({
     input,
     skills: enabledSkillsForSlash,
-    skillSelected: selectedSkill !== null
+    skillSelected: selectedSkill !== null,
+    browserSelected: selectedBuiltinBrowser
   })
   const atFileMentions = useAtFileMentions({
     input,
@@ -3805,7 +3412,8 @@ export function ChatContainer({
     disabled: slash.mode.kind === "slash" || !workspacePath
   })
   const slashPopoverKind = slash.mode.kind
-  const hasPendingGoalTransportPayload = hasPendingFilePayload || selectedSkill !== null
+  const hasPendingGoalTransportPayload =
+    hasPendingFilePayload || selectedSkill !== null || selectedBuiltinBrowser
   const hasActiveGoalRunning = goalUi.goal?.status === "active"
   const goalControlAllowedWhileLoading =
     streamData.isLoading && !scheduledTaskLoading && hasActiveGoalRunning
@@ -3899,14 +3507,23 @@ export function ChatContainer({
   const applySkillSelection = useCallback(
     (s: SkillMetadata) => {
       setSelectedSkill(s)
+      setSelectedBuiltinBrowser(false)
       setInput("")
       slashResetSelection()
     },
-    [setInput, slashResetSelection, setSelectedSkill]
+    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
   const applySlashCommand = useCallback(
     (command: SlashCommandItem) => {
+      if (isBuiltinBrowserCommandSelection(command)) {
+        setSelectedSkill(null)
+        setSelectedBuiltinBrowser(true)
+        setInput("")
+        slashResetSelection()
+        return
+      }
+
       const nextInput = command.insertText
       setInput(nextInput)
       slashResetSelection()
@@ -3917,7 +3534,12 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [setInput, slashResetSelection]
+    [
+      setInput,
+      setSelectedBuiltinBrowser,
+      setSelectedSkill,
+      slashResetSelection
+    ]
   )
 
   const applyAtFileMention = useCallback(
@@ -4231,7 +3853,7 @@ export function ChatContainer({
       !isGoalSlashInput &&
       (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
-      (!trimmedInput && !hasPendingFilePayload && !selectedSkill) ||
+      (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
       (isLoading && !allowSubmitWhileLoading && !willEnqueueWhileBusy) ||
       !stream
@@ -4251,7 +3873,7 @@ export function ChatContainer({
       isGoalSlashTransportSensitiveControlCommandInput(trimmedInput)
     if (goalControlWithPendingTransport) {
       setError(
-        "附件和显式技能不会用于 /goal 控制命令。请先移除附件/技能，或改成 /goal <目标/完成条件>。"
+        "附件、显式技能和内置浏览器模式不会用于 /goal 控制命令。请先移除它们，或改成 /goal <目标/完成条件>。"
       )
       return
     }
@@ -4372,11 +3994,6 @@ export function ChatContainer({
         toast.error("Agent 模式保存失败，消息未发送；再次发送将使用原模式")
         return
       }
-      if (isProjectModeAgentContext && projectSubagentsAvailable === null) {
-        toast.message("正在加载项目执行策略，请稍后重试")
-        return
-      }
-
       // Reset both the error message and its structured detail at turn start so
       // no stale diagnostics linger into the new turn.
       if (threadError || errorDetail) {
@@ -4408,6 +4025,7 @@ export function ChatContainer({
       // the preparation guard, while text typed during the await goes into a
       // fresh composer and is not cleared when this draft is enqueued.
       const skill = selectedSkill
+      const browser = selectedBuiltinBrowser
       const claimedAttachments = attachments
       const claimedMentionedFiles = mentionedFiles
       let rawMessage = trimmedInput
@@ -4451,6 +4069,12 @@ export function ChatContainer({
       }
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
+      const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
+      const visibleUserText = resolveBuiltinBrowserVisibleUserText({
+        browserSelected: browser,
+        fallbackUserText,
+        rawMessage
+      })
       // If user only uploaded files without text, add a default prompt.
       // skill-only sends (text empty, no attachments) still fall into this branch
       // because the default prompt requires attachments — for skill-only we let
@@ -4459,12 +4083,13 @@ export function ChatContainer({
       // instruction will tell the model what to do with the attachment, and a
       // generic "请分析以下文件内容" would compete with it.
       const userText = rawMessage || (attachmentPayload && !skill ? "请分析以下文件内容。" : "")
+      if (browser) setSelectedBuiltinBrowser(false)
       if (shouldOpenGoalDetailsForStatus) {
         setGoalDetailsOpen(true)
       }
       insertLog(
         (willEnqueueWhileBusy ? "queue: " : "send: ") +
-          (userText || (skill ? `[skill-only: ${skill.name}]` : ""))
+          (visibleUserText || (skill ? `[skill-only: ${skill.name}]` : ""))
       )
 
       const isFirstMessage = threadMessages.length === 0
@@ -4509,6 +4134,7 @@ export function ChatContainer({
         attachmentModelBlocks,
         attachmentDisplayPrefix,
         skillBlock,
+        builtinBrowser: browser,
         modelId: currentModel,
         created_at: new Date(),
         updated_at: new Date()
@@ -4523,12 +4149,7 @@ export function ChatContainer({
         // auto-drain once idle. Cleared here (not merely "past the guards") so a
         // FAILED submit attempt right after Stop can't accidentally un-suppress.
         setQueueAutoDrainSuppressed(false)
-        // The queue panel just grew the composer, shrinking the transcript
-        // viewport — re-pin it to the bottom (mirrors the send path) so the last
-        // message isn't left visually cut off above the panel.
         requestAnimationFrame(() => {
-          const viewport = getViewport()
-          if (viewport) viewport.scrollTop = viewport.scrollHeight
           inputRef.current?.focus()
         })
         return
@@ -4552,9 +4173,6 @@ export function ChatContainer({
       if (disableWorkflowModeOption && submitAgentMode === "workflow") {
         submitAgentMode = "normal"
       }
-      if (disableMultiModeOption && submitAgentMode === "multi") {
-        submitAgentMode = "normal"
-      }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
         submitAgentMode = await loadResolvedAgentMode()
           .then((resolvedMode) => {
@@ -4568,16 +4186,12 @@ export function ChatContainer({
         if (disableWorkflowModeOption && submitAgentMode === "workflow") {
           submitAgentMode = "normal"
         }
-        if (disableMultiModeOption && submitAgentMode === "multi") {
-          submitAgentMode = "normal"
-        }
         agentModeHydratedRef.current = true
         if (submitAgentMode !== agentMode) {
           setAgentMode(submitAgentMode)
         }
       }
       if (
-        (disableMultiModeOption && agentMode === "multi") ||
         (disableCoordinatorModeOption && agentMode === "coordinator") ||
         (disableWorkflowModeOption && agentMode === "workflow")
       ) {
@@ -4618,18 +4232,17 @@ export function ChatContainer({
                 .commandText.replace(/^\/goal\b/i, "")
                 .trim()
             : ""
-          const titleSource =
-            (isGoalSlashInput ? goalTitleSource : userText) || (skill ? `使用 ${skill.name}` : "")
+          let titleSource = isGoalSlashInput ? goalTitleSource : visibleUserText
+          if (!titleSource && skill) {
+            titleSource = `使用 ${skill.name}`
+          }
+          if (!titleSource) {
+            titleSource = getBuiltinBrowserTitleSource(browser)
+          }
           if (titleSource) {
             generateTitleForFirstMessage(threadId, titleSource)
           }
         }
-      }
-
-      // 发送消息，滚动到底部
-      const viewport = getViewport()
-      if (viewport) {
-        viewport.scrollTop = viewport.scrollHeight
       }
 
       const startTime = Date.now()
@@ -5000,7 +4613,6 @@ export function ChatContainer({
       } catch {
         return
       }
-      if (isProjectModeAgentContext && projectSubagentsAvailable === null) return
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
@@ -5010,9 +4622,6 @@ export function ChatContainer({
           ? "coordinator"
           : persistedAgentModeRef.current
       if (disableWorkflowModeOption && submitAgentMode === "workflow") {
-        submitAgentMode = "normal"
-      }
-      if (disableMultiModeOption && submitAgentMode === "multi") {
         submitAgentMode = "normal"
       }
       if (!coordinatorPrefixed && !agentModeHydratedRef.current) {
@@ -5028,16 +4637,12 @@ export function ChatContainer({
         if (disableWorkflowModeOption && submitAgentMode === "workflow") {
           submitAgentMode = "normal"
         }
-        if (disableMultiModeOption && submitAgentMode === "multi") {
-          submitAgentMode = "normal"
-        }
         agentModeHydratedRef.current = true
         if (submitAgentMode !== agentMode) {
           setAgentMode(submitAgentMode)
         }
       }
       if (
-        (disableMultiModeOption && agentMode === "multi") ||
         (disableCoordinatorModeOption && agentMode === "coordinator") ||
         (disableWorkflowModeOption && agentMode === "workflow")
       ) {
@@ -5103,14 +4708,11 @@ export function ChatContainer({
       currentModel,
       deleteQueuedMessage,
       disableCoordinatorModeOption,
-      disableMultiModeOption,
       disableWorkflowModeOption,
       generateTitleForFirstMessage,
       getQueuedMessage,
-      isProjectModeAgentContext,
       loadResolvedAgentMode,
       models,
-      projectSubagentsAvailable,
       setActiveTurnStartTime,
       setError,
       stream,
@@ -5233,7 +4835,6 @@ export function ChatContainer({
   // a re-check after each settle.
   useEffect(() => {
     if (queueAutoDrainSuppressed) return
-    if (isProjectModeAgentContext && projectSubagentsAvailable === null) return
     if (submitInFlightRef.current.has(threadId)) return
     if (isLoading || pendingApproval || threadError || !stream) return
     if (historyLoading || readOnly || contextReminderPending) return
@@ -5297,12 +4898,10 @@ export function ChatContainer({
     currentModel,
     hasActiveGoalRunning,
     historyLoading,
-    isProjectModeAgentContext,
     isLoading,
     models,
     pendingApproval,
     prependQueuedMessage,
-    projectSubagentsAvailable,
     queueAutoDrainSuppressed,
     queuePumpTick,
     queuedMessages,
@@ -5392,7 +4991,7 @@ export function ChatContainer({
       }
     }
 
-    // Backspace at start of empty input removes the skill chip.
+    // Backspace at start of empty input removes the selected skill/browser chip.
     // Skip while IME is composing — there Backspace edits the pinyin buffer,
     // not the textarea, and the user doesn't intend to drop the chip.
     if (e.key === "Backspace" && !isComposing && input.length === 0 && mentionedFiles.length > 0) {
@@ -5404,6 +5003,19 @@ export function ChatContainer({
     if (e.key === "Backspace" && !isComposing && selectedSkill && input.length === 0) {
       e.preventDefault()
       setSelectedSkill(null)
+      return
+    }
+
+    if (
+      shouldRemoveBuiltinBrowserChipWithBackspace({
+        browserSelected: selectedBuiltinBrowser,
+        inputLength: input.length,
+        isComposing,
+        key: e.key
+      })
+    ) {
+      e.preventDefault()
+      setSelectedBuiltinBrowser(false)
       return
     }
 
@@ -5769,119 +5381,6 @@ export function ChatContainer({
     [getSkillId]
   )
 
-  const getSkillSummary = useCallback(
-    (skill: SkillMetadata): string => {
-      const skillId = getSkillId(skill)
-
-      // For custom skills, use the skill's name or description
-      if (skill.source === "user") {
-        return skill.name || skillId || "自定义技能"
-      }
-
-      // Built-in skill summaries
-      const summaryMap: Record<string, string> = {
-        "algorithmic-art": "生成艺术图案",
-        "brand-guidelines": "统一品牌风格",
-        "canvas-design": "设计视觉海报",
-        docx: "编辑 Word 文档",
-        "doc-coauthoring": "协作撰写文档",
-        "frontend-design": "设计前端界面",
-        "internal-comms": "撰写内部沟通稿",
-        "mcp-builder": "搭建 MCP 服务",
-        pdf: "处理 PDF 文档",
-        pptx: "制作演示文稿",
-        "skill-creator": "创建新技能包",
-        "slack-gif-creator": "制作 Slack 动图",
-        "theme-factory": "应用主题风格",
-        "web-app-testing": "测试 Web 应用",
-        "webapp-testing": "测试 Web 应用",
-        "web-artifacts-builder": "构建交互页面",
-        xlsx: "处理表格数据",
-        "security-review": "安全代码审查",
-        "code-review-expert": "结构化代码审查",
-        "vercel-react-best-practices": "React 最佳实践",
-        "audit-website": "网站安全审计",
-        "supabase-postgres-best-practices": "PostgreSQL 优化",
-        "typescript-advanced-types": "TS 高级类型优化",
-        "api-design-principles": "API 设计原则",
-        "architecture-patterns": "架构模式设计",
-        "error-handling-patterns": "错误处理模式",
-        "planning-with-files": "文件驱动规划",
-        "scheduler-assistant": "定时任务管理"
-      }
-      return summaryMap[skillId] || "完成专项任务"
-    },
-    [getSkillId]
-  )
-
-  const getSkillIcon = useCallback(
-    (skill: SkillMetadata): React.JSX.Element => {
-      const skillId = getSkillId(skill)
-      const iconMap: Record<string, React.JSX.Element> = {
-        "algorithmic-art": <Palette className="size-4" />,
-        "brand-guidelines": <Palette className="size-4" />,
-        "canvas-design": <LayoutTemplate className="size-4" />,
-        docx: <FileText className="size-4" />,
-        "doc-coauthoring": <FileText className="size-4" />,
-        "frontend-design": <LayoutTemplate className="size-4" />,
-        "internal-comms": <FileText className="size-4" />,
-        "mcp-builder": <Code2 className="size-4" />,
-        pdf: <FileText className="size-4" />,
-        pptx: <Presentation className="size-4" />,
-        "skill-creator": <Settings2 className="size-4" />,
-        "slack-gif-creator": <FlaskConical className="size-4" />,
-        "theme-factory": <Palette className="size-4" />,
-        "web-app-testing": <FlaskConical className="size-4" />,
-        "webapp-testing": <FlaskConical className="size-4" />,
-        "web-artifacts-builder": <LayoutTemplate className="size-4" />,
-        xlsx: <FileSpreadsheet className="size-4" />,
-        "security-review": <Code2 className="size-4" />,
-        "code-review-expert": <Code2 className="size-4" />,
-        "vercel-react-best-practices": <Code2 className="size-4" />,
-        "audit-website": <ShieldCheck className="size-4" />,
-        "supabase-postgres-best-practices": <Database className="size-4" />,
-        "typescript-advanced-types": <Code2 className="size-4" />,
-        "api-design-principles": <Layers className="size-4" />,
-        "architecture-patterns": <Layers className="size-4" />,
-        "error-handling-patterns": <AlertCircle className="size-4" />,
-        "planning-with-files": <FileText className="size-4" />,
-        "scheduler-assistant": <Clock className="size-4" />
-      }
-      return iconMap[skillId] || <Search className="size-4" />
-    },
-    [getSkillId]
-  )
-
-  const programmingSkillIds = useMemo(
-    () =>
-      new Set([
-        "security-review",
-        "code-review-expert",
-        "vercel-react-best-practices",
-        "audit-website",
-        "supabase-postgres-best-practices",
-        "typescript-advanced-types",
-        "api-design-principles",
-        "architecture-patterns",
-        "error-handling-patterns",
-        "planning-with-files",
-        "mcp-builder",
-        "webapp-testing",
-        "frontend-design"
-      ]),
-    []
-  )
-
-  const isProgrammingSkill = useCallback(
-    (skill: SkillMetadata): boolean => programmingSkillIds.has(getSkillId(skill)),
-    [getSkillId, programmingSkillIds]
-  )
-
-  const { generalSkills, programmingSkills, enabledCustomSkills, disabledLocalSkills } =
-    useMemo(() => {
-      return groupWelcomeSkills(skills, goodSkillsData, isLocalSkillDisabled, isProgrammingSkill)
-    }, [skills, isLocalSkillDisabled, isProgrammingSkill, goodSkillsData])
-
   const handleOpenMarketBySecondaryCategory = useCallback(
     (secondaryCategory: string): void => {
       useAppStore.setState({
@@ -5922,436 +5421,43 @@ export function ChatContainer({
     [setShowCustomizeView]
   )
 
-  const programmingSkillCards = useMemo(() => {
-    const source = showAllProgrammingSkills ? programmingSkills : programmingSkills.slice(0, 8)
-    return source.map((skill) => ({
-      skill,
-      label: getSkillSummary(skill),
-      icon: getSkillIcon(skill)
-    }))
-  }, [showAllProgrammingSkills, programmingSkills, getSkillSummary, getSkillIcon])
-
-  const marketSkillCategoryByName = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const item of marketSkillsData) {
-      if (!item.category) continue
-      map.set(item.name, item.category)
-      if (item.chinese_name) map.set(item.chinese_name, item.category)
-    }
-    return map
-  }, [marketSkillsData])
-
-  const marketSkillUpdateByName = useMemo(() => {
-    // 把市场技能列表转换成“技能名 -> 更新信息”的索引，供“我安装的技能”tab 快速匹配。
-    // 同时写入英文名和中文名两种 key，是因为本地技能元数据和市场展示数据可能使用不同名称。
-    const map = new Map<
-      string,
-      {
-        installedVersion?: string
-        currentVersion?: string | null
-        updateAvailable: boolean
-        displayName: string
-      }
-    >()
-
-    for (const item of marketSkillsData) {
-      // 这里复用 MarketPanel 的版本比较规则：
-      // 只有本地已记录安装版本、市场也返回版本，并且两者不一致时才显示“有更新”。
-      const flags = buildMarketInstalledFlags(item, "skill", true)
-      const updateInfo = {
-        installedVersion: flags.installedVersion,
-        currentVersion: item.version,
-        updateAvailable: flags.updateAvailable,
-        displayName: item.chinese_name || item.name
-      }
-      map.set(item.name, updateInfo)
-      if (item.chinese_name) map.set(item.chinese_name, updateInfo)
-    }
-
-    return map
-  }, [marketSkillsData])
-
-  const getSkillMarketUpdateInfo = useCallback(
-    (skill: SkillMetadata) => {
-      // 优先按本地技能名匹配市场条目；少数技能名来自目录路径时，再用 relativePath 兜底。
-      return (
-        marketSkillUpdateByName.get(skill.name) ||
-        (skill.relativePath ? marketSkillUpdateByName.get(skill.relativePath) : undefined) ||
-        null
-      )
-    },
-    [marketSkillUpdateByName]
-  )
-
-  const getSkillSceneCategory = useCallback(
-    (skill: SkillMetadata): string => {
-      const category =
-        skill.metadata?.category ||
-        marketSkillCategoryByName.get(skill.name) ||
-        DEFAULT_SCENE_CATEGORY
-      return category.trim() || DEFAULT_SCENE_CATEGORY
-    },
-    [marketSkillCategoryByName]
-  )
-
-  const buildWelcomeSkillGroups = useCallback(
-    (sourceSkills: SkillMetadata[]): WelcomeSkillSceneGroup[] => {
-      const groups = new Map<string, WelcomeSkillCard[]>()
-      for (const skill of sourceSkills) {
-        const category = getSkillSceneCategory(skill)
-        const cards = groups.get(category) ?? []
-        cards.push({
-          skill,
-          label: getSkillSummary(skill),
-          icon: getSkillIcon(skill),
-          // 将市场版本信息挂到技能卡片上，树形渲染时即可决定是否展示“有更新”标识。
-          ...getSkillMarketUpdateInfo(skill)
-        })
-        groups.set(category, cards)
-      }
-
-      const categoryOrder = new Map<string, number>(
-        SCENE_CATEGORY_OPTIONS.map((category, index) => [category, index])
-      )
-      return [...groups.entries()]
-        .sort(([a], [b]) => {
-          const rankA = categoryOrder.get(a) ?? Number.MAX_SAFE_INTEGER
-          const rankB = categoryOrder.get(b) ?? Number.MAX_SAFE_INTEGER
-          return rankA === rankB ? a.localeCompare(b, "zh-CN") : rankA - rankB
-        })
-        .map(([category, cards]) => ({ category, cards }))
-    },
-    [getSkillIcon, getSkillMarketUpdateInfo, getSkillSceneCategory, getSkillSummary]
-  )
-
-  const enabledCustomSkillGroups = useMemo(() => {
-    const source = showAllCustomSkills
-      ? enabledCustomSkills
-      : limitWelcomeSkillsByTopLevel(enabledCustomSkills, 8)
-    return buildWelcomeSkillGroups(source)
-  }, [buildWelcomeSkillGroups, enabledCustomSkills, showAllCustomSkills])
-
-  const disabledCustomSkillGroups = useMemo(
-    () => buildWelcomeSkillGroups(disabledLocalSkills),
-    [buildWelcomeSkillGroups, disabledLocalSkills]
-  )
-  const customSkillUpdates = useMemo(
-    () =>
-      // 统计已启用和已禁用的用户技能中有哪些存在市场新版本，用于 tab 上显示更新数量；
-      // 这里只计算数量和卡片标识，不弹 toast，避免进入会话时打扰用户。
-      [...enabledCustomSkills, ...disabledLocalSkills]
-        .map((skill) => ({
-          skill,
-          updateInfo: getSkillMarketUpdateInfo(skill)
-        }))
-        .filter((entry) => entry.updateInfo?.updateAvailable),
-    [disabledLocalSkills, enabledCustomSkills, getSkillMarketUpdateInfo]
-  )
-  const customSkillUpdateCount = customSkillUpdates.length
-
-  const helpSceneSkillIds = useMemo(() => new Set(["scheduler-assistant", "skill-creator"]), [])
-  const helpSceneSkillCards = useMemo(() => {
-    return generalSkills
-      .filter((skill) => helpSceneSkillIds.has(getSkillId(skill)))
-      .map((skill) => ({
-        skill,
-        label: getSkillSummary(skill),
-        icon: getSkillIcon(skill)
-      }))
-  }, [generalSkills, helpSceneSkillIds, getSkillId, getSkillSummary, getSkillIcon])
-
   const handleUseSkillPrompt = useCallback(
-    (skill: SkillMetadata, label?: string): void => {
-      const custPrompt = label ? getTargetRemoteSkill(label) : ""
+    (skill: SkillMetadata, customPrompt?: string): void => {
       const prompt = buildSkillPrompt(skill)
-      setInput(custPrompt || prompt)
+      const nextInput = customPrompt || prompt
+      setInput(nextInput)
       requestAnimationFrame(() => {
         const textarea = inputRef.current
         if (!textarea) return
         textarea.focus()
-        const cursor = prompt.length
+        const cursor = nextInput.length
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [buildSkillPrompt, setInput, getTargetRemoteSkill]
+    [buildSkillPrompt, setInput]
   )
-
-  const handleCopyToClipboard = useCallback((text: string) => {
-    navigator.clipboard.writeText(text).then(
-      () => {
-        toast.success("已复制目标链接到剪切板，请在浏览器中打开查看")
-      },
-      (err) => {
-        console.error("Failed to copy text: ", err)
-        toast.error("复制失败，请重试")
-      }
-    )
-  }, [])
 
   const welcomePane = useMemo(() => {
     if (displayMessages.length !== 0 || isLoading || historyLoading) return null
 
     return (
-      <div className="pt-6 pb-8">
+      <div className="pt-6">
         {(shouldShowHarnessDialogTips || shouldShowNextActionDialogTips) && harnessDialogTips ? (
           <DialogTipsMarkdown content={harnessDialogTips} />
         ) : !shouldShowWelcomeHeadline || harnessFeatureBinding ? null : (
           <RotatingHeadline />
         )}
-        {skillsLoading ? (
-          <div className="text-sm text-muted-foreground text-center py-10">正在加载技能列表...</div>
-        ) : skills.length === 0 ? null : (
-          <div className="space-y-3">
-            {programmingSkillCards.length > 0 && (
-              <div className="space-y-2">
-                <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                  编程场景
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                  {programmingSkillCards.map(({ skill, label, icon }) => (
-                    <button
-                      key={label + skill.path}
-                      type="button"
-                      onClick={() => handleUseSkillPrompt(skill)}
-                      className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                          {icon}
-                        </div>
-                        <div className="text-xs text-foreground leading-5">{label}</div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-                {programmingSkills.length > 8 && (
-                  <button
-                    type="button"
-                    onClick={() => setShowAllProgrammingSkills((prev) => !prev)}
-                    className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                  >
-                    {showAllProgrammingSkills ? (
-                      <>
-                        <ChevronUp className="size-3.5" />
-                        <span>收起</span>
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="size-3.5" />
-                        <span>展开更多（+{programmingSkills.length - 8}）</span>
-                      </>
-                    )}
-                  </button>
-                )}
-              </div>
-            )}
-            {shouldShowWelcomeSkillTabs && (
-              <Tabs defaultValue="skills-by-category" className="space-y-3">
-                <TabsList className="grid h-9 w-full grid-cols-3">
-                  <TabsTrigger value="skills-by-category" className="text-xs">
-                    场景技能
-                  </TabsTrigger>
-                  <TabsTrigger value="installed-skills" className="text-xs gap-1.5">
-                    我安装的技能
-                    {customSkillUpdateCount > 0 && (
-                      <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-teal-100 px-1 text-[10px] font-semibold leading-none text-teal-700 dark:bg-teal-900/40 dark:text-teal-200">
-                        {customSkillUpdateCount}
-                      </span>
-                    )}
-                  </TabsTrigger>
-                  <TabsTrigger value="help" className="text-xs">
-                    帮助
-                  </TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="skills-by-category" className="mt-0">
-                  <SkillsByCategorySection
-                    skills={enabledSkillsForSlash}
-                    previewLimit={GOOD_SKILLS_PREVIEW_LIMIT}
-                    onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
-                    onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
-                    onOpenMarketBySkill={handleOpenMarketBySkill}
-                    onUseSkillPrompt={handleUseSkillPrompt}
-                  />
-                </TabsContent>
-
-                <TabsContent value="installed-skills" className="mt-0 space-y-3">
-                  {enabledCustomSkillGroups.length > 0 ? (
-                    <div className="rounded-lg border border-emerald-200/70 bg-emerald-50/35 px-2 py-2 dark:border-emerald-900/40 dark:bg-emerald-950/10">
-                      <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                        <span>已启用技能</span>
-                        <Badge
-                          variant="outline"
-                          className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                        >
-                          {enabledCustomSkills.length}
-                        </Badge>
-                      </div>
-                      <div className="space-y-3">
-                        {enabledCustomSkillGroups.map((group) => (
-                          <div key={group.category} className="space-y-2">
-                            <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                              {group.category}
-                            </div>
-                            <WelcomeSkillTree
-                              cards={group.cards}
-                              onUseSkill={handleUseSkillPrompt}
-                              getSkillShowLabel={getSkillShowLabel}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      className="group w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
-                          <CircleAlert className={"size-4"} />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-xs text-foreground leading-5 truncate whitespace-nowrap">
-                            暂无
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  )}
-
-                  {enabledCustomSkills.length > 8 && (
-                    <button
-                      type="button"
-                      onClick={() => setShowAllCustomSkills((prev) => !prev)}
-                      className="mx-auto flex items-center gap-1 rounded-full border border-border/70 bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
-                    >
-                      {showAllCustomSkills ? (
-                        <>
-                          <ChevronUp className="size-3.5" />
-                          <span>收起</span>
-                        </>
-                      ) : (
-                        <>
-                          <ChevronDown className="size-3.5" />
-                          <span>展开更多（+{enabledCustomSkills.length - 8}）</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-
-                  {disabledLocalSkills.length > 0 && (
-                    <details className="rounded-lg border border-border/70 bg-muted/20 px-2 py-2">
-                      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-muted-foreground">
-                        <span>已禁用技能</span>
-                        <Badge
-                          variant="outline"
-                          className="h-5 min-w-6 justify-center px-1.5 text-[10px]"
-                        >
-                          {disabledLocalSkills.length}
-                        </Badge>
-                      </summary>
-                      <div className="mt-2 space-y-2">
-                        {disabledCustomSkillGroups.map((group) => (
-                          <div key={group.category} className="space-y-2">
-                            <div className="text-xs text-muted-foreground/80 font-medium tracking-wider">
-                              {group.category}
-                            </div>
-                            <WelcomeSkillTree
-                              cards={group.cards}
-                              disabled
-                              onUseSkill={handleUseSkillPrompt}
-                              getSkillShowLabel={getSkillShowLabel}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  )}
-                </TabsContent>
-
-                <TabsContent value="help" className="mt-0 space-y-2">
-                  {helpSceneSkillCards.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                        通用场景
-                      </div>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                        {helpSceneSkillCards.map(({ skill, label, icon }) => (
-                          <button
-                            key={label + skill.path}
-                            type="button"
-                            onClick={() => handleUseSkillPrompt(skill)}
-                            className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                                {icon}
-                              </div>
-                              <div className="text-xs text-foreground leading-5">{label}</div>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  <div className="text-xs text-muted-foreground font-medium tracking-wider">
-                    帮助
-                  </div>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                    <button
-                      onClick={async () => {
-                        const instructionUrl = import.meta.env.VITE_INTRUCTION_URL
-                        handleCopyToClipboard(instructionUrl)
-                      }}
-                      type="button"
-                      className="group w-full rounded-xl border border-border/70 bg-background/90 px-3 py-2 text-left hover:bg-accent/35 hover:border-border transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="rounded-md border border-border/80 p-1.5 text-muted-foreground group-hover:text-foreground transition-colors">
-                          <Notebook size={14} />
-                        </div>
-                        <div className="text-xs text-foreground leading-5">操作说明文档</div>
-                      </div>
-                    </button>
-                    {/*<UpdateActionButton />*/}
-                  </div>
-                </TabsContent>
-              </Tabs>
-            )}
-          </div>
-        )}
       </div>
     )
   }, [
-    disabledCustomSkillGroups,
-    disabledLocalSkills.length,
     displayMessages.length,
-    enabledCustomSkillGroups,
-    enabledCustomSkills.length,
-    enabledSkillsForSlash,
-    handleCopyToClipboard,
-    handleOpenMarketBySecondaryCategory,
-    handleOpenMarketBySkill,
-    handleOpenOrganizationSkillMarket,
-    handleUseSkillPrompt,
     harnessDialogTips,
     harnessFeatureBinding,
-    helpSceneSkillCards,
     historyLoading,
     isLoading,
-    getSkillShowLabel,
-    programmingSkillCards,
-    programmingSkills.length,
     shouldShowHarnessDialogTips,
     shouldShowNextActionDialogTips,
-    shouldShowWelcomeHeadline,
-    shouldShowWelcomeSkillTabs,
-    showAllCustomSkills,
-    showAllProgrammingSkills,
-    skills.length,
-    skillsLoading,
-    customSkillUpdateCount
+    shouldShowWelcomeHeadline
   ])
 
   const extractMessageText = useCallback((content: Message["content"]): string => {
@@ -6368,6 +5474,8 @@ export function ChatContainer({
       // name as text is never useful.
       const skillParsed = parseSkillUseBlock(original)
       const bodyAfterSkill = skillParsed ? skillParsed.rest : original
+      const browserParsed = parseBuiltinBrowserEditDraft(bodyAfterSkill)
+      const bodyAfterBrowser = browserParsed.visibleText
       let missingSkillName: string | null = null
       // Only touch selectedSkill when the edited message itself carried a skill
       // ref. Editing an unrelated old message must NOT silently wipe whatever
@@ -6387,7 +5495,13 @@ export function ChatContainer({
           missingSkillName = skillParsed.skillName
         }
       }
-      const withoutAttachmentPreview = bodyAfterSkill.replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "").trim()
+      if (browserParsed.browserSelected) {
+        setSelectedSkill(null)
+        setSelectedBuiltinBrowser(true)
+      }
+      const withoutAttachmentPreview = bodyAfterBrowser
+        .replace(/^(?:📎[^\n]*\n)+(?:\n)?/u, "")
+        .trim()
       // For attachment-only messages (no real text), `withoutAttachmentPreview`
       // is empty. Fallback to "" rather than `bodyAfterSkill` — refilling the
       // 📎 line previews into the composer would have them re-sent as literal
@@ -6408,7 +5522,7 @@ export function ChatContainer({
         toast.success("已填充到输入框，编辑后可重新发送")
       }
     },
-    [extractMessageText, setInput, skills, setSelectedSkill]
+    [extractMessageText, setInput, setSelectedBuiltinBrowser, skills, setSelectedSkill]
   )
 
   const handleSetGoalFromMessage = useCallback(
@@ -6544,14 +5658,21 @@ export function ChatContainer({
       messageForkTarget.checkpoint.messageForkMode === "checkpoint"
         ? undefined
         : (messageForkTarget.checkpoint.resolvedMessageId ?? messageForkTarget.message.id)
+    const preserveHarnessView = surface !== "default"
     setForkingMessageId(messageForkTarget.message.id)
     try {
-      await forkThread({
-        sourceThreadId: messageForkTarget.sourceThreadId,
-        checkpointId: messageForkTarget.checkpoint.checkpointId,
-        ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
-        overrides
-      })
+      const forkedThread = await forkThread(
+        {
+          sourceThreadId: messageForkTarget.sourceThreadId,
+          checkpointId: messageForkTarget.checkpoint.checkpointId,
+          ...(resolvedMessageId ? { messageId: resolvedMessageId } : {}),
+          overrides
+        },
+        preserveHarnessView ? { preserveView: true } : undefined
+      )
+      if (preserveHarnessView) {
+        onHarnessSessionCreated?.(forkedThread.thread_id)
+      }
       toast.success("已从这条消息创建新会话")
       resetMessageForkDialog()
     } catch (error) {
@@ -6568,7 +5689,9 @@ export function ChatContainer({
     forkingMessageId,
     handleSelectForkWorkspace,
     messageForkTarget,
-    resetMessageForkDialog
+    onHarnessSessionCreated,
+    resetMessageForkDialog,
+    surface
   ])
 
   const handleEditGoal = useCallback((): void => {
@@ -6746,6 +5869,9 @@ export function ChatContainer({
                       : remoteThread?.status === "interrupted"
                         ? "已中止"
                         : "空闲"
+  const interruptionNotice = hookInterruption
+    ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
+    : null
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -6914,15 +6040,15 @@ export function ChatContainer({
       {nuxDialog}
 
       <ChatScrollNavigator
-        messages={displayMessages}
+        messages={chatScrollNavigatorMessages}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
       >
-        {({ reserveRightSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveRightSpace && "md:pr-[20px]")}
+                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
                 style={
                   userInputScrollPadding
                     ? { paddingBottom: `${userInputScrollPadding}px` }
@@ -6952,6 +6078,20 @@ export function ChatContainer({
                     </div>
                   )}
                   {welcomePane}
+                  {displayMessages.length === 0 && !isLoading && !historyLoading && (
+                    <WelcomeSkills
+                      skills={skills}
+                      skillsLoading={skillsLoading}
+                      enabledSkillsForSlash={enabledSkillsForSlash}
+                      shouldShowWelcomeSkillTabs={shouldShowWelcomeSkillTabs}
+                      isLocalSkillDisabled={isLocalSkillDisabled}
+                      onSkillsInstalled={loadSkills}
+                      onUseSkillPrompt={handleUseSkillPrompt}
+                      onOpenMarketByCategory={handleOpenMarketBySecondaryCategory}
+                      onOpenOrganizationSkillMarket={handleOpenOrganizationSkillMarket}
+                      onOpenMarketBySkill={handleOpenMarketBySkill}
+                    />
+                  )}
                   <ChatMessageList
                     messages={displayMessages}
                     perMessageFlags={perMessageFlags}
@@ -7041,11 +6181,7 @@ export function ChatContainer({
                       <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "工具失败熔断已停止本轮"
-                            : hookInterruption.action === "halt"
-                              ? "Hook 已停止本轮"
-                              : "Hook 已阻断本轮"}
+                          {interruptionNotice?.title}
                         </div>
                         <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
                           <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
@@ -7062,9 +6198,7 @@ export function ChatContainer({
                           </div>
                         )}
                         <div className="text-xs text-muted-foreground mt-2">
-                          {hookInterruption.event.startsWith("Failure fuse")
-                            ? "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
-                            : "这是 Hook 策略结果，不是 Agent 运行错误。你可以发送新消息继续对话。"}
+                          {interruptionNotice?.explanation}
                         </div>
                       </div>
                       <button
@@ -7097,7 +6231,7 @@ export function ChatContainer({
                 (!yoloModeLoaded || yoloMode) &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
-                <div className={cn("px-4 pb-2", reserveRightSpace && "md:pr-20")}>
+                <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
                   {(() => {
                     const approval = pendingApproval as unknown as Record<string, unknown>
                     const operation = approval.operation
@@ -7372,11 +6506,11 @@ export function ChatContainer({
               workspacePath={workspacePath}
               currentThreadMetadata={currentThread?.metadata}
               createThread={createThread}
-              reserveRightSpace={reserveRightSpace}
+              reserveLeftSpace={reserveLeftSpace}
               onHarnessSessionCreated={onHarnessSessionCreated}
             />
             {goalUi.goal && (
-              <div className={cn("px-4 pb-1", reserveRightSpace && "md:pr-[20px]")}>
+              <div className={cn("px-4 pb-1", reserveLeftSpace && "md:pl-[20px]")}>
                 <GoalStatusPanel
                   goalUi={goalUi}
                   open={goalDetailsOpen}
@@ -7391,7 +6525,7 @@ export function ChatContainer({
               className={cn(
                 "px-4 pb-4",
                 goalUi.goal ? "pt-1" : "pt-4",
-                reserveRightSpace && "md:pr-[20px]"
+                reserveLeftSpace && "md:pl-[20px]"
               )}
             >
               {showGitChangeNotice && (
@@ -7423,6 +6557,11 @@ export function ChatContainer({
                 </div>
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
+                <ChatScrollToBottomButton
+                  getViewport={getViewport}
+                  onScrollToBottom={scrollToConversationBottom}
+                  resetKey={threadId}
+                />
                 <SlashCommandPopover
                   mode={slash.mode}
                   selectedIdx={slash.selectedIdx}
@@ -7597,7 +6736,7 @@ export function ChatContainer({
                         "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
                         pendingUserInput
                           ? "border-primary/25 bg-background"
-                          : glowVisible
+                          : appleIntelligenceGlowEnabled && glowVisible
                             ? "bg-white/80"
                             : "bg-white",
                         dragOver && "border-primary"
@@ -7615,7 +6754,12 @@ export function ChatContainer({
                           />
                         </div>
                       )}
-                      {glowVisible && !pendingUserInput && (
+                      {selectedBuiltinBrowser && (
+                        <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                          <BuiltinBrowserChip onRemove={() => setSelectedBuiltinBrowser(false)} />
+                        </div>
+                      )}
+                      {appleIntelligenceGlowEnabled && glowVisible && !pendingUserInput && (
                         <div
                           className={cn(
                             "siri-bg-glow rounded-xl",
@@ -7735,9 +6879,8 @@ export function ChatContainer({
                           <ModelSwitcher threadId={threadId} />
                           <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
-                            showWorkflow={!isProjectModeAgentContext}
+                            showWorkflow
                             mode={
-                              (disableMultiModeOption && agentMode === "multi") ||
                               (disableCoordinatorModeOption && agentMode === "coordinator") ||
                               (disableWorkflowModeOption && agentMode === "workflow")
                                 ? "normal"
@@ -7746,24 +6889,18 @@ export function ChatContainer({
                             locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
-                              disableMultiModeOption ||
                               disableCoordinatorModeOption ||
                               disableWorkflowModeOption
                                 ? {
-                                    multi: disableMultiModeOption,
                                     coordinator: disableCoordinatorModeOption,
                                     workflow: disableWorkflowModeOption
                                   }
                                 : undefined
                             }
                             disabledModeReasons={
-                              disableMultiModeOption ||
                               disableCoordinatorModeOption ||
                               disableWorkflowModeOption
                                 ? {
-                                    multi: disableMultiModeOption
-                                      ? "项目配置已禁用 task 子代理。"
-                                      : undefined,
                                     coordinator: disableCoordinatorModeOption
                                       ? "项目模式暂不支持 Agent Team。"
                                       : undefined,
@@ -7879,7 +7016,10 @@ export function ChatContainer({
                                 type="submit"
                                 disabled={
                                   effectiveInputDisabled ||
-                                  (!input.trim() && !hasPendingFilePayload && !selectedSkill) ||
+                                  (!input.trim() &&
+                                    !hasPendingFilePayload &&
+                                    !selectedSkill &&
+                                    !selectedBuiltinBrowser) ||
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
@@ -7905,6 +7045,7 @@ export function ChatContainer({
                         suggestedFilePaths={agentCommitApproval?.suggestedCommitFilePaths}
                         suggestedFileBasePath={agentCommitApproval?.suggestedCommitFileBasePath}
                         suggestedGitWorktreePath={agentCommitApproval?.suggestedGitWorktreePath}
+                        suggestedGitRepositories={agentCommitApproval?.suggestedGitRepositories}
                         suggestedFileSelectionSource={
                           agentCommitApproval?.suggestedCommitFileSelectionSource
                         }
@@ -7916,6 +7057,7 @@ export function ChatContainer({
                   {/*chat container bottom panel */}
                   <div className={"flex items-center justify-between"}>
                     <div className={"flex items-center gap-2"}>
+                      <ChatMessageCount count={displayMessages.length} />
                       {yoloMode && (
                         <button
                           type="button"
@@ -7928,6 +7070,9 @@ export function ChatContainer({
                         </button>
                       )}
                       <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                      {(agentMode === "normal" || agentMode === "multi") && (
+                        <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
+                      )}
                       <SystemPromptPreviewButton threadId={threadId} />
                       <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                       {tokenUsage && (
