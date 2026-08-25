@@ -23,6 +23,20 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 3_00
   }
 }
 
+function base64UrlJson(value: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify(value), "utf8")
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+}
+
+function unsignedJwt(expiresAtMs: number): string {
+  return `${base64UrlJson({ alg: "none", typ: "JWT" })}.${base64UrlJson({
+    exp: Math.floor(expiresAtMs / 1_000)
+  })}.signature`
+}
+
 async function main(): Promise<void> {
   assert.equal(
     normalizeImGatewayUrlOverride("  wss://gateway.example.com/ws/desktop  "),
@@ -363,6 +377,28 @@ async function main(): Promise<void> {
     /同步会话路由/
   )
   legacyAmbiguousClient.stop()
+
+  let preflightToken = unsignedJwt(Date.now() - 60_000)
+  let preflightRefreshCount = 0
+  const preflightRefreshingClient = new ImGatewayWsClient({
+    url: () => `ws://127.0.0.1:${address.port}/ws`,
+    token: () => preflightToken,
+    appVersion: "test",
+    onAuthenticationRequired: async () => {
+      preflightRefreshCount += 1
+      preflightToken = "preflight-refreshed-token"
+      return true
+    },
+    onRemoteEvent: () => undefined
+  })
+  preflightRefreshingClient.start()
+  await waitFor(
+    () => preflightRefreshingClient.isAuthenticated(),
+    "authentication refresh before expired JWT handshake"
+  )
+  assert.equal(preflightRefreshCount, 1)
+  assert.equal(authorization, "Bearer preflight-refreshed-token")
+  preflightRefreshingClient.stop()
 
   let refreshingToken = "expired-token"
   let authenticationRefreshCount = 0

@@ -20,6 +20,8 @@ const CONNECT_TIMEOUT_MS = 10_000
 const COMMAND_TIMEOUT_MS = 15_000
 const RECONNECT_MAX_MS = 60_000
 const MAX_FRAME_BYTES = 64 * 1024
+const AUTHENTICATION_REFRESH_SKEW_MS = 5 * 60_000
+const MAX_TIMER_DELAY_MS = 2_147_000_000
 const DEFAULT_ROUTE_SYNC_EXTENSION = "sync-default-route-v1"
 const PERMANENT_REPLY_REASON_CODES = new Set([
   "PRINCIPAL_MISMATCH",
@@ -135,6 +137,22 @@ function diagnosticCloseReason(value: Buffer): string | null {
   return diagnosticText(value.toString("utf8"), 160)
 }
 
+function jwtExpiresAtMs(token: string): number | null {
+  const parts = token.split(".")
+  if (parts.length !== 3 || !parts[1]) return null
+  try {
+    const normalized = parts[1].replace(/-/g, "+").replace(/_/g, "/")
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=")
+    const payload = record(JSON.parse(Buffer.from(padded, "base64").toString("utf8")))
+    const expiresAtSeconds = payload?.exp
+    if (typeof expiresAtSeconds !== "number" || !Number.isFinite(expiresAtSeconds)) return null
+    const expiresAtMs = expiresAtSeconds * 1_000
+    return Number.isSafeInteger(expiresAtMs) && expiresAtMs > 0 ? expiresAtMs : null
+  } catch {
+    return null
+  }
+}
+
 export class ImGatewayWsClient implements ImGatewayClientPort {
   private socket: WebSocket | null = null
   private stopped = true
@@ -142,6 +160,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined
   private connectTimer: ReturnType<typeof setTimeout> | undefined
+  private authenticationRefreshTimer: ReturnType<typeof setTimeout> | undefined
   private connectionGeneration = 0
   private connectionToken: string | null = null
   private reconnectBlocked = false
@@ -340,11 +359,24 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       connectionState: "connecting",
       authenticationFailed: false,
       lastError: null,
+      lastHandshakeStatus: null,
       lastTransportError: null,
       sessionId: null,
       principalId: null,
       routes: []
     })
+    const tokenExpiresAt = jwtExpiresAtMs(token)
+    if (
+      tokenExpiresAt !== null &&
+      tokenExpiresAt <= this.now() + AUTHENTICATION_REFRESH_SKEW_MS
+    ) {
+      console.info("[IM Gateway] token-refresh:preflight", {
+        expiresAt: new Date(tokenExpiresAt).toISOString(),
+        expired: tokenExpiresAt <= this.now()
+      })
+      this.beginAuthenticationRefresh(token, generation, null, "preflight")
+      return
+    }
     let socket: WebSocket
     try {
       socket = new WebSocket(url, {
@@ -434,6 +466,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       if (this.connectTimer) clearTimeout(this.connectTimer)
       this.connectTimer = undefined
       this.stopHeartbeat()
+      this.stopAuthenticationRefreshTimer()
       this.updateStatus({
         lastCloseCode: code,
         lastCloseReason: diagnosticCloseReason(reason)
@@ -535,6 +568,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           reconnectAttempt: 0
         })
         this.startHeartbeat(heartbeatIntervalSeconds)
+        this.scheduleAuthenticationRefresh()
         this.syncCommandId = this.sendEnvelope("SYNC_REQUEST", {})
         return
       }
@@ -895,6 +929,17 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     const rejectedToken = this.connectionToken
     if (this.stopped || !socket || !rejectedToken) return
 
+    this.beginAuthenticationRefresh(rejectedToken, generation, socket, "gateway")
+  }
+
+  private beginAuthenticationRefresh(
+    rejectedToken: string,
+    generation: number,
+    socket: WebSocket | null,
+    trigger: "preflight" | "gateway" | "proactive"
+  ): void {
+    if (this.stopped || this.connectionGeneration !== generation) return
+
     this.rejectPending(new ImGatewayCommandError("登录已过期", { reasonCode: "AUTH_REQUIRED" }))
     if (!this.options.onAuthenticationRequired || this.authenticationRefreshAttempted) {
       this.authenticationRefreshInFlight = false
@@ -906,15 +951,17 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         routes: [],
         lastError: "登录失效，请重新登录。"
       })
-      socket.terminate()
+      if (socket) socket.terminate()
       return
     }
 
+    console.info("[IM Gateway] token-refresh:started", { trigger })
     this.authenticationRefreshAttempted = true
     this.authenticationRefreshInFlight = true
     if (this.connectTimer) clearTimeout(this.connectTimer)
     this.connectTimer = undefined
     this.stopHeartbeat()
+    this.stopAuthenticationRefreshTimer()
     this.updateStatus({
       connectionState: "connecting",
       authenticationFailed: false,
@@ -923,9 +970,9 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
       routes: [],
       lastError: "登录已过期，正在刷新…"
     })
-    if (socket.readyState === WebSocket.OPEN) {
+    if (socket?.readyState === WebSocket.OPEN) {
       socket.close(4003, "authentication required")
-    } else {
+    } else if (socket) {
       socket.terminate()
     }
 
@@ -935,6 +982,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
         if (this.stopped || this.connectionGeneration !== generation) return
         this.authenticationRefreshInFlight = false
         if (!refreshed) {
+          console.warn("[IM Gateway] token-refresh:failed", { trigger })
           this.updateStatus({
             connectionState: "error",
             authenticationFailed: true,
@@ -945,11 +993,16 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           })
           return
         }
+        console.info("[IM Gateway] token-refresh:succeeded", { trigger })
         this.connect()
       })
-      .catch(() => {
+      .catch((error) => {
         if (this.stopped || this.connectionGeneration !== generation) return
         this.authenticationRefreshInFlight = false
+        console.warn("[IM Gateway] token-refresh:error", {
+          trigger,
+          message: error instanceof Error ? diagnosticText(error.message) : "unknown"
+        })
         this.updateStatus({
           connectionState: "error",
           authenticationFailed: true,
@@ -959,6 +1012,40 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
           lastError: "登录刷新失败，请重新登录。"
         })
       })
+  }
+
+  private scheduleAuthenticationRefresh(): void {
+    this.stopAuthenticationRefreshTimer()
+    const token = this.connectionToken
+    if (!token) return
+    const expiresAt = jwtExpiresAtMs(token)
+    if (expiresAt === null) return
+    const remaining = expiresAt - this.now() - AUTHENTICATION_REFRESH_SKEW_MS
+    const delay = Math.max(0, Math.min(remaining, MAX_TIMER_DELAY_MS))
+    this.authenticationRefreshTimer = setTimeout(() => {
+      this.authenticationRefreshTimer = undefined
+      if (this.stopped || this.connectionToken !== token) return
+      if (expiresAt > this.now() + AUTHENTICATION_REFRESH_SKEW_MS) {
+        this.scheduleAuthenticationRefresh()
+        return
+      }
+      const socket = this.socket
+      if (!socket) return
+      console.info("[IM Gateway] token-refresh:proactive", {
+        expiresAt: new Date(expiresAt).toISOString()
+      })
+      this.beginAuthenticationRefresh(
+        token,
+        this.connectionGeneration,
+        socket,
+        "proactive"
+      )
+    }, delay)
+  }
+
+  private stopAuthenticationRefreshTimer(): void {
+    if (this.authenticationRefreshTimer) clearTimeout(this.authenticationRefreshTimer)
+    this.authenticationRefreshTimer = undefined
   }
 
   private updateStatus(patch: Partial<ImGatewayWsStatus>): void {
@@ -972,6 +1059,7 @@ export class ImGatewayWsClient implements ImGatewayClientPort {
     this.reconnectTimer = undefined
     this.connectTimer = undefined
     this.stopHeartbeat()
+    this.stopAuthenticationRefreshTimer()
   }
 
   private rejectPending(error: Error): void {
