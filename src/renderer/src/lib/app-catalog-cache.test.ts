@@ -207,6 +207,34 @@ describe("application catalog cache", () => {
     expect(readSkillCatalogCache()?.localSkills[0]?.name).toBe("new")
   })
 
+  it("preserves the last snapshot after a Worker failure and allows a clean retry", async () => {
+    const stale = await revalidateSkillCatalog("old", async () => ({
+      localSkills: [skill("scheduler-assistant", { source: "project" })],
+      pluginSkills: [],
+      disabledSkillIds: []
+    }))
+    const failedLoader = vi.fn(async () => {
+      throw new Error("skill catalog worker unavailable")
+    })
+
+    await expect(revalidateSkillCatalog("new", failedLoader)).rejects.toThrow(
+      "skill catalog worker unavailable"
+    )
+    expect(readSkillCatalogCache()).toBe(stale)
+
+    const retryLoader = vi.fn(async () => ({
+      localSkills: [skill("skill-creator", { source: "project" })],
+      pluginSkills: [],
+      disabledSkillIds: []
+    }))
+    const fresh = await revalidateSkillCatalog("new", retryLoader)
+
+    expect(failedLoader).toHaveBeenCalledTimes(1)
+    expect(retryLoader).toHaveBeenCalledTimes(1)
+    expect(fresh.localSkills[0]?.name).toBe("skill-creator")
+    expect(readSkillCatalogCache()).toBe(fresh)
+  })
+
   it("invalidates exactly on revision/version and memoizes harness projections", async () => {
     const localSkills = Array.from({ length: 10_000 }, (_, index) => skill(`local-${index}`))
     const pluginSkills = Array.from({ length: 10_000 }, (_, index) =>

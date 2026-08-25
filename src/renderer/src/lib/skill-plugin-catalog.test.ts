@@ -66,6 +66,34 @@ describe("renderer skill/plugin catalog pagination", () => {
     expect(responseBytes).toHaveLength(Math.ceil(20_000 / 128) + 1)
   })
 
+  it("surfaces Worker failures without falling back to main-process directory scans", async () => {
+    const list = vi.fn(async () => [])
+    const listPlugins = vi.fn(async () => [])
+    const getDisabled = vi.fn(async () => [])
+    vi.stubGlobal("window", {
+      api: {
+        skills: {
+          catalog: {
+            read: vi.fn(async () => {
+              throw new Error("skill catalog worker unavailable")
+            }),
+            cancel: vi.fn(async () => undefined)
+          },
+          list,
+          listPlugins,
+          getDisabled
+        }
+      }
+    })
+
+    await expect(loadSkillCatalogPages("failed", "test-catalog")).rejects.toThrow(
+      "skill catalog worker unavailable"
+    )
+    expect(list).not.toHaveBeenCalled()
+    expect(listPlugins).not.toHaveBeenCalled()
+    expect(getDisabled).not.toHaveBeenCalled()
+  })
+
   it("keeps Customize Skills and Plugins initial DOM at 128 with explicit expansion", () => {
     const skillsSource = readFileSync(
       new URL("../components/customize/SkillsPanel.tsx", import.meta.url),
@@ -80,10 +108,20 @@ describe("renderer skill/plugin catalog pagination", () => {
     expect(skillsSource).toContain(
       "useState(SKILL_PLUGIN_CATALOG_RENDER_BATCH)"
     )
+    expect(skillsSource).toContain("useState(() => readSkillCatalogCache())")
+    expect(skillsSource).toContain('skillCatalogLoadState === "loading"')
+    expect(skillsSource).toContain('skillCatalogLoadState === "error"')
+    expect(skillsSource).toContain(
+      'skillCatalogLoadState === "ready" && builtinSkills.length === 0'
+    )
+    expect(skillsSource).toContain("snapshot === cachedBeforeRefresh")
+    expect(skillsSource).toContain("recoveredEmptySkillCatalogKeys.has(snapshot.key)")
+    expect(skillsSource).toContain("builtinSkills.length > 0 &&")
     expect(skillsSource).toContain("filteredBuiltin.slice(0, visibleSkillLimit)")
     expect(skillsSource).toContain("加载更多（剩余")
-    expect(pluginsSource).toContain(
-      "useState(\n    SKILL_PLUGIN_CATALOG_RENDER_BATCH\n  )"
+    expect(skillsSource).not.toContain("window.api.skills.list()")
+    expect(pluginsSource).toMatch(
+      /useState\(\s*SKILL_PLUGIN_CATALOG_RENDER_BATCH\s*\)/
     )
     expect(pluginsSource).toContain(
       "filteredPlugins.slice(0, visiblePluginLimit)"

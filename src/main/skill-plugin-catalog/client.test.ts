@@ -10,7 +10,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { SkillPluginCatalogPage } from "../types"
 import {
   SkillPluginCatalogClient,
-  SkillPluginCatalogRequestCancelledError
+  SkillPluginCatalogRequestCancelledError,
+  SkillPluginCatalogWorkerUnavailableError
 } from "./client"
 import {
   SKILL_PLUGIN_CATALOG_MAX_RESPONSE_BYTES,
@@ -149,6 +150,32 @@ describe("SkillPluginCatalogClient", () => {
     await expect(latest).resolves.toEqual({
       filePath: "C:\\catalog-fixture\\custom-skills\\beta\\SKILL.md"
     })
+  })
+
+  it("creates a fresh isolated Worker after the previous Worker fails", async () => {
+    const workers = [new FakeCatalogWorker(), new FakeCatalogWorker()]
+    let factoryCalls = 0
+    const client = trackClient(
+      new SkillPluginCatalogClient(
+        async () => workers[factoryCalls++] as unknown as WorkerType,
+        () => makeSource("C:\\catalog-fixture")
+      )
+    )
+
+    const failed = client.readPage({ kind: "skills", revision: "1" }, "renderer:retry")
+    await waitForRequests(workers[0], 1)
+    workers[0].emit("error", new Error("worker crashed"))
+    await expect(failed).rejects.toBeInstanceOf(SkillPluginCatalogWorkerUnavailableError)
+
+    const retried = client.readPage({ kind: "skills", revision: "2" }, "renderer:retry")
+    await waitForRequests(workers[1], 1)
+    workers[1].emit(
+      "message",
+      successResponse(workers[1].requests[0].requestId, emptyPage("skills"))
+    )
+
+    await expect(retried).resolves.toMatchObject({ kind: "skills" })
+    expect(factoryCalls).toBe(2)
   })
 
   it("parses 20k skills plus a 2 MiB file off-main while pages stay bounded", async () => {
