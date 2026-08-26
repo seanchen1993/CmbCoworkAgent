@@ -772,6 +772,9 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
 
 async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   const sidebar = await readProjectFile("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
+  const harnessBoard = await readProjectFile(
+    "src/renderer/src/components/harness-board/HarnessBoardView.tsx"
+  )
 
   assertIncludes(
     sidebar,
@@ -787,6 +790,11 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
     sidebar,
     /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*hasRunningCoordinatorWorker\s*\|\|\s*Boolean\(threadSummary\?\.workflowRunning\)/u,
     "sidebar keeps spinner active after main stream completes while worker is running"
+  )
+  assertMatches(
+    harnessBoard,
+    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*threadState\?\.workflowRunning\s*===\s*true/u,
+    "project-mode sidebar keeps spinner active while a dynamic workflow is running"
   )
   assertSourceOrder(
     sidebar,

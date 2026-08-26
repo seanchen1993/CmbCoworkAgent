@@ -1,4 +1,3 @@
-import { homedir } from "os"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { createHash } from "crypto"
 import { v4 as uuid } from "uuid"
@@ -41,6 +40,7 @@ import {
   normalizeWorkflowWorktreeTimeoutMinutes
 } from "../shared/agent-runtime-limits"
 import { app } from "electron"
+import { getCmbCoworkAgentDataRoot } from "./app-data-root"
 import { resolveMcpConnectorKind } from "./mcp/connector-kind"
 import type {
   PluginHookMetadata,
@@ -78,10 +78,7 @@ import {
 } from "../shared/model-token-budget"
 import { getHookDateKey } from "../shared/hook-time"
 
-const configuredOpenworkDir = process.env.CMB_COWORK_AGENT_HOME?.trim()
-const OPENWORK_DIR = configuredOpenworkDir
-  ? resolve(configuredOpenworkDir)
-  : join(homedir(), ".cmbcoworkagent")
+const OPENWORK_DIR = getCmbCoworkAgentDataRoot()
 const ENV_FILE = join(OPENWORK_DIR, ".env")
 
 const CUSTOM_API_KEY_PREFIX = "CUSTOM_API_KEY__"
