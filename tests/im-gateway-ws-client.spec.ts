@@ -451,25 +451,35 @@ async function main(): Promise<void> {
   )
   refreshingClient.stop()
 
-  let failedRefreshCount = 0
-  const unrecoverableClient = new ImGatewayWsClient({
+  let transientRefreshToken = "expired-token-transient-refresh"
+  let transientRefreshCount = 0
+  const transientRefreshClient = new ImGatewayWsClient({
     url: () => `ws://127.0.0.1:${address.port}/ws`,
-    token: () => "expired-token-still-invalid",
+    token: () => transientRefreshToken,
     appVersion: "test",
     onAuthenticationRequired: async () => {
-      failedRefreshCount += 1
+      transientRefreshCount += 1
+      if (transientRefreshCount === 1) return false
+      transientRefreshToken = "recovered-after-transient-refresh-failure"
       return true
     },
     onRemoteEvent: () => undefined
   })
-  unrecoverableClient.start()
+  transientRefreshClient.start()
   await waitFor(
-    () => unrecoverableClient.getStatus().authenticationFailed,
-    "single authentication refresh retry"
+    () => transientRefreshCount === 1 && transientRefreshClient.getStatus().lastError !== null,
+    "automatic authentication refresh retry scheduling"
   )
-  assert.equal(failedRefreshCount, 1, "an invalid refreshed token must not cause a refresh loop")
-  assert.equal(unrecoverableClient.getStatus().lastHandshakeStatus, 401)
-  unrecoverableClient.stop()
+  assert.equal(transientRefreshClient.getStatus().authenticationFailed, false)
+  assert.match(transientRefreshClient.getStatus().lastError ?? "", /自动重试/)
+  await waitFor(
+    () => transientRefreshClient.isAuthenticated(),
+    "authentication recovery after a transient refresh failure",
+    4_000
+  )
+  assert.equal(transientRefreshCount, 2)
+  assert.equal(authorization, "Bearer recovered-after-transient-refresh-failure")
+  transientRefreshClient.stop()
 
   const missingRobotClient = new ImGatewayWsClient({
     url: () => `ws://127.0.0.1:${address.port}/ws`,
