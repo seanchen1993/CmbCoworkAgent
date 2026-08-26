@@ -27,6 +27,19 @@ import {
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
+const rendererDeletingThreadIds = new Set<string>()
+const rendererRetiredThreadIds = new Set<string>()
+
+/** Prevent delayed renderer work from touching a Thread once deletion starts. */
+export function isThreadDeletionPending(threadId: string): boolean {
+  return rendererDeletingThreadIds.has(threadId) || rendererRetiredThreadIds.has(threadId)
+}
+
+/** A successful backend delete permanently retires this renderer incarnation. */
+export function isThreadRetired(threadId: string): boolean {
+  return rendererRetiredThreadIds.has(threadId)
+}
+
 export const DEFAULT_BROWSER_CDP_CONFIG: BrowserCdpConfig = {
   enabled: false,
   profileImportEnabled: false
@@ -1108,8 +1121,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   deleteThread: async (threadId: string) => {
     console.log("[Store] Deleting thread:", threadId)
+    rendererDeletingThreadIds.add(threadId)
     try {
       await window.api.threads.delete(threadId)
+      rendererDeletingThreadIds.delete(threadId)
+      rendererRetiredThreadIds.add(threadId)
       console.log("[Store] Thread deleted from backend")
       // The draft-message queue is persisted to localStorage independent of the
       // DB thread record (thread-context.tsx's persistQueuedMessages) so it
@@ -1151,13 +1167,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
       })
     } catch (error) {
+      rendererDeletingThreadIds.delete(threadId)
       console.error("[Store] Failed to delete thread:", error)
       throw error
     }
   },
 
   updateThread: async (threadId: string, updates: Partial<Thread>) => {
+    if (isThreadDeletionPending(threadId)) return
     const updated = await window.api.threads.update(threadId, updates)
+    if (isThreadDeletionPending(threadId)) return
     set((state) => ({
       threads: state.threads.map((t) => (t.thread_id === threadId ? updated : t))
     }))

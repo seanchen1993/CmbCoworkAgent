@@ -9499,8 +9499,8 @@ export function HarnessBoardView({
     if (!sidebarThreadToDelete) return
     try {
       const deletingThreadId = sidebarThreadToDelete.thread_id
-      cleanupThread(sidebarThreadToDelete.thread_id)
       await deleteThread(sidebarThreadToDelete.thread_id)
+      cleanupThread(sidebarThreadToDelete.thread_id)
       markRead(deletingThreadId)
       if (selectedProjectSessionRef.current?.threadId === deletingThreadId) {
         setSelectedProjectSession(null)

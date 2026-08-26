@@ -685,7 +685,11 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
     assert.equal(revoked.allowed ? null : revoked.reasonCode, "REMOTE_GRANT_INVALID")
 
     await context.access.disableThread("desktop-thread")
-    assert.equal(context.conversations.getSelectedTarget(route.conversationKey)?.state, "suspended")
+    assert.equal(
+      context.conversations.getSelectedTarget(route.conversationKey),
+      null,
+      "without an existing inbox, revocation clears the invalid active pointer"
+    )
     const recovered = await router.handle({ ...route, command: parseImCommand("/收件箱")! })
     assert(recovered.includes("已切换到【收件箱】"))
   } finally {
@@ -725,6 +729,86 @@ async function testControlIngressCompletesOutsideTurnQueueAndSelectionExpires():
       () => context.selections.select("conversation-1", "project", 1),
       (error: unknown) =>
         error instanceof ImSelectionContextError && error.code === "SELECTION_EXPIRED"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDeletedSelectedThreadFallsBackToInbox(): Promise<void> {
+  const context = await createContext()
+  const route = { conversationKey: "conversation-1", principalId: "principal-1" }
+  const gateway = new TestGateway()
+  const ingress = new ImIngressSequencer({
+    conversationState: context.conversations,
+    eventStore: context.events,
+    inboxService: context.inbox,
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
+  })
+  try {
+    const inbox = await context.inbox.ensureInbox(route)
+    context.makeThread("deleting-thread", {
+      title: "待删除会话",
+      workspacePath: context.root,
+      agentMode: "normal"
+    })
+    const grant = await context.access.enableThread({ route, threadId: "deleting-thread" })
+    const target = await context.access.bindThreadGrant({
+      route,
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      target.targetId
+    )
+
+    await context.access.disableThread("deleting-thread")
+    context.threads.delete("deleting-thread")
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      inbox.targetId,
+      "normal deletion immediately returns an active route to inbox"
+    )
+
+    // Reproduce a database left by the old implementation: the selected pointer
+    // still references a suspended target. New ingress must repair it before the
+    // event store freezes its target snapshot, including for control commands.
+    await context.conversations.updateTargetState(target.targetId, "active")
+    await context.conversations.setActiveTarget(route.conversationKey, target.targetId)
+    await context.conversations.updateTargetState(target.targetId, "suspended", "THREAD_DELETED")
+    const recovered = await ingress.receiveControlEvent(
+      eventFixture(9, "/当前"),
+      async () => "已恢复"
+    )
+    assert.equal(recovered.event.state, "completed")
+    assert.equal(recovered.event.targetSnapshot?.targetId, inbox.targetId)
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      inbox.targetId
+    )
+
+    // Even a corrupted legacy row that still marks a missing desktop Thread as
+    // active must recover before the next event snapshot is persisted.
+    await context.conversations.updateTargetState(target.targetId, "active")
+    await context.conversations.setActiveTarget(route.conversationKey, target.targetId)
+    const recoveredFromActiveMissing = await ingress.receiveControlEvent(
+      eventFixture(10, "/当前"),
+      async () => "再次恢复"
+    )
+    assert.equal(recoveredFromActiveMissing.event.state, "completed")
+    assert.equal(recoveredFromActiveMissing.event.targetSnapshot?.targetId, inbox.targetId)
+    assert.deepEqual(
+      context.conversations
+        .listTargets(route.conversationKey)
+        .find(({ snapshot }) => snapshot.targetId === target.targetId),
+      {
+        snapshot: target,
+        state: "suspended",
+        suspendReason: "TARGET_THREAD_MISSING"
+      }
     )
   } finally {
     context.database.close()
@@ -809,6 +893,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     "testControlIngressCompletesOutsideTurnQueueAndSelectionExpires",
     testControlIngressCompletesOutsideTurnQueueAndSelectionExpires
   ],
+  ["testDeletedSelectedThreadFallsBackToInbox", testDeletedSelectedThreadFallsBackToInbox],
   [
     "testExplicitRetryCreatesNewEventWithOriginalSnapshot",
     testExplicitRetryCreatesNewEventWithOriginalSnapshot

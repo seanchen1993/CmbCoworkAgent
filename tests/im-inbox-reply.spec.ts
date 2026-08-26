@@ -88,6 +88,24 @@ async function testManagedInboxCreationAndReuse(): Promise<void> {
     })
     assert.deepEqual(second, first)
     assert.equal(threads.size, 1)
+
+    threads.delete(first.threadId)
+    const repaired = await service.ensureInbox({
+      conversationKey: "conversation/private/value",
+      principalId: "principal-1"
+    })
+    assert.notEqual(repaired.targetId, first.targetId)
+    assert.notEqual(repaired.threadId, first.threadId)
+    assert.equal(threads.size, 1)
+    assert.deepEqual(conversations.getActiveTarget("conversation/private/value"), repaired)
+    const inboxStates = conversations
+      .listTargets("conversation/private/value")
+      .filter(({ snapshot }) => snapshot.kind === "inbox")
+      .map(({ state, suspendReason }) => ({ state, suspendReason }))
+    assert.deepEqual(inboxStates, [
+      { state: "suspended", suspendReason: "INBOX_THREAD_MISSING" },
+      { state: "active", suspendReason: null }
+    ])
   } finally {
     database.close()
     await rm(root, { recursive: true, force: true })

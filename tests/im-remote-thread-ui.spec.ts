@@ -61,6 +61,22 @@ function testRemoteInboxIsReadOnlyAtRendererAndMainBoundary(): void {
   )
 }
 
+function testThreadDeletionFencesDelayedRendererWork(): void {
+  const store = source("src/renderer/src/lib/store.ts")
+  const threadContext = source("src/renderer/src/lib/thread-context.tsx")
+  const harnessBoard = source("src/renderer/src/components/harness-board/HarnessBoardView.tsx")
+
+  assert(store.includes("rendererDeletingThreadIds.add(threadId)"))
+  assert(store.includes("rendererRetiredThreadIds.add(threadId)"))
+  assert(store.includes("if (isThreadDeletionPending(threadId)) return"))
+  assert(threadContext.includes("!isThreadRetired(threadId)"))
+  assert(
+    harnessBoard.indexOf("await deleteThread(sidebarThreadToDelete.thread_id)") <
+      harnessBoard.indexOf("cleanupThread(sidebarThreadToDelete.thread_id)"),
+    "harness deletion must preserve renderer state until backend deletion succeeds"
+  )
+}
+
 function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   const chat = source("src/renderer/src/components/chat/ChatContainer.tsx")
   const sidebar = source("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
@@ -222,6 +238,8 @@ function testRemoteControlReceiptsDoNotEnterConversationTranscript(): void {
 
 testRemoteInboxIsReadOnlyAtRendererAndMainBoundary()
 console.log("PASS testRemoteInboxIsReadOnlyAtRendererAndMainBoundary")
+testThreadDeletionFencesDelayedRendererWork()
+console.log("PASS testThreadDeletionFencesDelayedRendererWork")
 testRemoteThreadsHaveStableSourceAndModeLabels()
 console.log("PASS testRemoteThreadsHaveStableSourceAndModeLabels")
 testEnabledDesktopThreadsAreSortedFirst()

@@ -429,7 +429,8 @@ export class ImRemoteAccessService {
           await this.dependencies.conversations.updateTargetState(
             target.snapshot.targetId,
             "suspended",
-            reasonCode
+            reasonCode,
+            { fallbackToInboxIfSelected: true }
           )
         }
       }

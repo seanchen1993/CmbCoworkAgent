@@ -76,24 +76,46 @@ export class ImInboxService {
     }
   ) {}
 
+  hasThread(threadId: string): boolean {
+    return this.dependencies.getThread(threadId) !== null
+  }
+
   async ensureInbox(input: EnsureImInboxInput): Promise<ImTargetSnapshot & { kind: "inbox" }> {
     this.dependencies.conversationState.assertConversationOwner(
       input.conversationKey,
       input.principalId
     )
 
-    const existing = this.dependencies.conversationState
+    const existingInboxes = this.dependencies.conversationState
       .listTargets(input.conversationKey)
-      .find(({ snapshot, state }) => snapshot.kind === "inbox" && state === "active")
-    if (existing?.snapshot.kind === "inbox") {
-      if (!this.dependencies.getThread(existing.snapshot.threadId)) {
-        throw new Error("Managed IM inbox Thread is missing")
+      .filter(({ snapshot }) => snapshot.kind === "inbox")
+    for (const existing of existingInboxes) {
+      if (existing.snapshot.kind !== "inbox" || existing.state === "revoked") continue
+      if (this.dependencies.getThread(existing.snapshot.threadId)) {
+        if (existing.state !== "active") {
+          await this.dependencies.conversationState.updateTargetState(
+            existing.snapshot.targetId,
+            "active"
+          )
+        }
+        await this.dependencies.conversationState.setActiveTarget(
+          input.conversationKey,
+          existing.snapshot.targetId
+        )
+        return existing.snapshot
       }
-      await this.dependencies.conversationState.setActiveTarget(
-        input.conversationKey,
-        existing.snapshot.targetId
-      )
-      return existing.snapshot
+      if (existing.state === "active") {
+        console.warn("[IM] Managed inbox Thread is missing; recreating it", {
+          conversationKey: input.conversationKey,
+          targetId: existing.snapshot.targetId,
+          threadId: existing.snapshot.threadId
+        })
+        await this.dependencies.conversationState.updateTargetState(
+          existing.snapshot.targetId,
+          "suspended",
+          "INBOX_THREAD_MISSING"
+        )
+      }
     }
 
     const workspacePath = await ensureManagedImInboxDirectory(

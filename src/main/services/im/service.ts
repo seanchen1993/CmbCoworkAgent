@@ -14,6 +14,7 @@ import { buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
 import { registerImDesktopCompletionReplyDrainer } from "./desktop-completion"
 import { imRemoteApprovalService } from "./remote-approval-service"
 import { imRemoteUserInputService } from "./remote-user-input-service"
+import { imInboxService } from "./inbox-service"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -54,6 +55,7 @@ export class ImUnifiedBotService {
       ...(options.waitingDesktopTtlMs ? { waitingDesktopTtlMs: options.waitingDesktopTtlMs } : {})
     })
     this.ingress = new ImIngressSequencer({
+      inboxService: imInboxService,
       emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack),
       replyClient: this.replyClient
     })

@@ -526,9 +526,16 @@ export class ImConversationStateStore {
   async updateTargetState(
     targetId: string,
     state: ImTargetState,
-    suspendReason?: string
+    suspendReason?: string,
+    options: { fallbackToInboxIfSelected?: boolean } = {}
   ): Promise<void> {
     const database = this.dependencies.getDatabase()
+    const target = readOne<ImTargetRow>(database, "SELECT * FROM im_targets WHERE target_id = ?", [
+      targetId
+    ])
+    if (!target) {
+      throw new ImConversationStateError("TARGET_NOT_FOUND", "Target is unknown")
+    }
     const now = this.dependencies.now()
     withImTransaction(database, () => {
       database.run(
@@ -552,6 +559,23 @@ export class ImConversationStateStore {
           targetId
         ]
       )
+      if (state !== "active" && options.fallbackToInboxIfSelected === true) {
+        const fallback = readOne<Pick<ImTargetRow, "target_id">>(
+          database,
+          `SELECT target_id
+           FROM im_targets
+           WHERE conversation_key = ? AND kind = 'inbox' AND state = 'active'
+           ORDER BY created_at ASC, target_id ASC
+           LIMIT 1`,
+          [target.conversation_key]
+        )
+        database.run(
+          `UPDATE im_conversations
+           SET active_target_id = ?, updated_at = ?
+           WHERE conversation_key = ? AND active_target_id = ?`,
+          [fallback?.target_id ?? null, now, target.conversation_key, targetId]
+        )
+      }
     })
     this.dependencies.markDirty()
     await this.dependencies.flushStrict()

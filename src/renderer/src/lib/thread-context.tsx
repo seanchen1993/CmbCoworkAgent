@@ -61,7 +61,7 @@ import type {
   GoalEvent,
   QueuedMessage
 } from "@/types"
-import { useAppStore } from "@/lib/store"
+import { isThreadDeletionPending, isThreadRetired, useAppStore } from "@/lib/store"
 import type { DeepAgent } from "../../../main/agent/types"
 import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
@@ -2157,6 +2157,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   // Handle stream updates from ThreadStreamHolder
   const handleStreamUpdate = useCallback(
     (threadId: string, data: StreamData, options: StreamUpdateOptions = {}) => {
+      if (isThreadRetired(threadId)) return
       const previousStreamData = streamDataRef.current[threadId]
       const wasLoading = previousStreamData?.isLoading === true
       const accumulator = getOrCreateLiveStreamAccumulator(threadId)
@@ -2341,6 +2342,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const updateThreadState = useCallback(
     (threadId: string, updater: (prev: ThreadState) => Partial<ThreadState>) => {
+      if (isThreadRetired(threadId)) return
       setThreadStates((prev) => {
         const currentState = normalizeThreadState(prev[threadId] || createDefaultThreadState())
         const updates = updater(currentState)
@@ -2366,6 +2368,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       changedIds?: Set<string>,
       urgent = false
     ) => {
+      if (isThreadRetired(threadId)) return
       const ids = new Set(changedIds?.size ? changedIds : Object.keys(transcripts))
       if (ids.size === 0) return
       const markDirty = (pendingIds: Iterable<string>): void => {
@@ -4393,7 +4396,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, () => ({ currentModel: modelId }))
           // Only intentional model selection changes should touch metadata.model.
           // Hydration and no-op writes must not refresh updated_at or overwrite routing fallback state.
+          if (isThreadDeletionPending(threadId)) return
           window.api.threads.get(threadId).then((thread) => {
+            if (isThreadDeletionPending(threadId)) return
             if (thread) {
               const metadata = thread.metadata || {}
               if (metadata.model === modelId) return
@@ -4471,10 +4476,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
+      if (isThreadDeletionPending(threadId)) return
       const loadGeneration = (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
       threadHistoryLoadGenerationRef.current[threadId] = loadGeneration
       const isCurrentLoad = (): boolean =>
         threadProviderMountedRef.current &&
+        !isThreadRetired(threadId) &&
         initializedThreadsRef.current.has(threadId) &&
         threadHistoryLoadGenerationRef.current[threadId] === loadGeneration
       const actions = getThreadActions(threadId)
@@ -5366,6 +5373,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const initializeThread = useCallback(
     (threadId: string) => {
+      if (isThreadDeletionPending(threadId)) return
       if (initializedThreadsRef.current.has(threadId)) return
       initializedThreadsRef.current.add(threadId)
       const threadActions = getThreadActions(threadId)

@@ -72,20 +72,58 @@ export class ImIngressSequencer {
     this.conversationState = options.conversationState ?? imConversationStateStore
     this.eventStore = options.eventStore ?? imEventStore
     const inboxService = options.inboxService ?? imInboxService
+    const validateManagedInbox = options.inboxService !== undefined
     this.resolveTarget =
       options.resolveTarget ??
       (async (event) => {
-        // Keep the selected target in the immutable event snapshot even after its
-        // grant is revoked. Ordinary turns then fail closed in capability-guard,
-        // while control commands can still switch to inbox or another grant.
-        const target = this.conversationState.getSelectedTarget(event.conversationKey)?.snapshot
-        return (
-          target ??
-          inboxService.ensureInbox({
+        // A target snapshot becomes immutable only after receiveEvent persists it.
+        // For a brand-new delivery, repair a selection left pointing at a deleted
+        // or revoked desktop Thread before creating that snapshot. Explicit retry
+        // and replay paths still keep their original immutable targetSnapshot.
+        const selected = this.conversationState.getSelectedTarget(event.conversationKey)
+        if (selected?.state === "active") {
+          if (!validateManagedInbox) {
+            return selected.snapshot
+          }
+          if (!inboxService.hasThread(selected.snapshot.threadId)) {
+            console.warn("[IM] Selected remote target Thread is missing; falling back to inbox", {
+              conversationKey: event.conversationKey,
+              targetId: selected.snapshot.targetId,
+              targetKind: selected.snapshot.kind,
+              threadId: selected.snapshot.threadId
+            })
+            if (selected.snapshot.kind !== "inbox") {
+              await this.conversationState.updateTargetState(
+                selected.snapshot.targetId,
+                "suspended",
+                "TARGET_THREAD_MISSING",
+                { fallbackToInboxIfSelected: true }
+              )
+            }
+          } else if (selected.snapshot.kind !== "inbox") {
+            return selected.snapshot
+          }
+          // Production and integration callers pass the inbox service explicitly,
+          // allowing ensureInbox to validate the local Thread boundary and rebuild
+          // a missing inbox. Lightweight event-store tests may intentionally use
+          // synthetic targets and therefore omit that validation dependency.
+          return inboxService.ensureInbox({
             conversationKey: event.conversationKey,
             principalId: event.principalId
           })
-        )
+        }
+        if (selected) {
+          console.warn("[IM] Selected remote target is unavailable; falling back to inbox", {
+            conversationKey: event.conversationKey,
+            targetId: selected.snapshot.targetId,
+            targetState: selected.state,
+            suspendReason: selected.suspendReason
+          })
+        }
+        return inboxService.ensureInbox({
+          conversationKey: event.conversationKey,
+          principalId: event.principalId
+        })
       })
     this.emitAcknowledgement = options.emitAcknowledgement
     this.replyClient = options.replyClient ?? new ImReplyClient()
