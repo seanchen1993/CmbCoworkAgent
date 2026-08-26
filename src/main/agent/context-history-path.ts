@@ -1,6 +1,7 @@
+import { realpathSync } from "fs"
 import { realpath, rm } from "fs/promises"
-import { homedir } from "os"
 import { join, resolve } from "path"
+import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 
 // Match Claude Code's project-directory naming: preserve the readable absolute
 // path for normal projects, and only add a stable suffix when a single path
@@ -30,18 +31,51 @@ export async function canonicalizeWorkspacePath(workspacePath: string): Promise<
   }
 }
 
+/** Synchronous twin used by stores whose public API is intentionally synchronous. */
+export function canonicalizeWorkspacePathSync(workspacePath: string): string {
+  try {
+    return realpathSync(workspacePath).normalize("NFC")
+  } catch {
+    return resolve(workspacePath).normalize("NFC")
+  }
+}
+
+/**
+ * Resolve one app-managed project/thread directory from an already-resolved
+ * CmbCowork data root (normally `~/.cmbcoworkagent`). Keeping this small sync
+ * helper beside the async history resolver prevents workflow persistence from
+ * inventing a second project-key scheme.
+ */
+export function getProjectThreadDataDirectorySync(
+  workspacePath: string,
+  threadId: string,
+  appDataRoot = getCmbCoworkAgentDataRoot()
+): string {
+  if (!threadId.trim()) {
+    throw new Error("Thread ID is required to resolve app-managed thread data.")
+  }
+  const canonicalWorkspacePath = canonicalizeWorkspacePathSync(workspacePath)
+  return join(
+    appDataRoot,
+    "projects",
+    sanitizeHistoryPathComponent(canonicalWorkspacePath),
+    sanitizeHistoryPathComponent(threadId)
+  )
+}
+
 export async function getProjectThreadDataDirectory(
   workspacePath: string,
   threadId: string,
-  userHome = homedir()
+  userHome?: string
 ): Promise<string> {
   if (!threadId.trim()) {
     throw new Error("Thread ID is required to resolve app-managed thread data.")
   }
   const canonicalWorkspacePath = await canonicalizeWorkspacePath(workspacePath)
+  const appDataRoot =
+    userHome === undefined ? getCmbCoworkAgentDataRoot() : join(userHome, ".cmbcoworkagent")
   return join(
-    userHome,
-    ".cmbcoworkagent",
+    appDataRoot,
     "projects",
     sanitizeHistoryPathComponent(canonicalWorkspacePath),
     sanitizeHistoryPathComponent(threadId)
@@ -51,7 +85,7 @@ export async function getProjectThreadDataDirectory(
 export async function deleteProjectThreadDataDirectory(
   workspacePath: string,
   threadId: string,
-  userHome = homedir()
+  userHome?: string
 ): Promise<void> {
   const threadDataDirectory = await getProjectThreadDataDirectory(workspacePath, threadId, userHome)
   await rm(threadDataDirectory, { recursive: true, force: true })
@@ -60,7 +94,7 @@ export async function deleteProjectThreadDataDirectory(
 export async function getConversationHistoryDirectory(
   workspacePath: string,
   threadId: string,
-  userHome = homedir()
+  userHome?: string
 ): Promise<string> {
   return join(
     await getProjectThreadDataDirectory(workspacePath, threadId, userHome),

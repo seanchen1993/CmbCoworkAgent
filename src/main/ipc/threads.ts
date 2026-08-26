@@ -3156,6 +3156,12 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     coordinatorWorkerManager.forgetThread(threadId)
     forgetCoordinatorThreadState(threadId)
     if (workspacePath) {
+      // Fence and sweep workflow runs BEFORE deleting the parent app-managed
+      // thread directory. Managed workflow storage now lives under that parent;
+      // reversing this order would leave a window where a late final flush could
+      // recreate `<thread>/workflows` before its dir tombstone is registered.
+      // The compatibility sweep also removes pre-upgrade project-local runs.
+      deleteWorkflowRunsForThread(workspacePath, threadId)
       try {
         await deleteProjectThreadDataDirectory(workspacePath, threadId)
         console.log("[Threads] Deleted app-managed thread history and large results")
@@ -3168,9 +3174,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       } catch (e) {
         console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
       }
-      // Remove the thread's workflow run artifacts (the active run, if any, was
-      // already settled above) so they don't linger as disk litter.
-      deleteWorkflowRunsForThread(workspacePath, threadId)
     }
 
     try {

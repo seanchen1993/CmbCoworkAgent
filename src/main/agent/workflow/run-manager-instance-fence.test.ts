@@ -22,6 +22,8 @@ import {
 } from "./run-store"
 import type { PersistedWorkflowRun } from "./types"
 
+const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
+
 /**
  * recoverFlushFailedRun's instance fence — the sibling of setWorkflowRunNotified's.
  *
@@ -46,6 +48,7 @@ describe("recoverFlushFailedRun instance fence", () => {
   const RESUMED_STARTED_AT = "2026-07-08T14:53:16.267Z"
 
   let workspace: string
+  let workflowDataRoot: string
 
   // TS `private` is compile-time only; reach the maps to stage the exact race.
   const privates = workflowRunManager as unknown as {
@@ -96,12 +99,17 @@ describe("recoverFlushFailedRun instance fence", () => {
 
   beforeEach(() => {
     workspace = mkdtempSync(join(tmpdir(), "wf-fence-"))
+    workflowDataRoot = mkdtempSync(join(tmpdir(), "cmb-workflow-fence-data-"))
+    process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
   })
 
   afterEach(() => {
     privates.flushFailedRuns.clear()
     privates.flushFailedEpochs.clear()
+    if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+    else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
     rmSync(workspace, { recursive: true, force: true })
+    rmSync(workflowDataRoot, { recursive: true, force: true })
   })
 
   test("a stale ack persists the resumed snapshot but never marks it delivered", async () => {
@@ -184,31 +192,34 @@ describe("recoverFlushFailedRun instance fence", () => {
     // memory snapshot is perfectly reportable even while the disk is faulty. Gating the
     // kick on write-back success strands it until the next hydrate/reload.
     const runId = generateWorkflowRunId()
-    const fileAsWorkspace = join(workspace, "not-a-dir")
-    writeFileSync(fileAsWorkspace, "x") // run dir under a regular FILE → mkdir ENOTDIR
+    const fileAsDataRoot = join(workspace, "not-a-dir")
+    writeFileSync(fileAsDataRoot, "x") // managed run dir under a regular FILE → mkdir ENOTDIR
+    process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
     seedFlushFailedSnapshot(runId, RESUMED_STARTED_AT)
 
-    const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
-      fileAsWorkspace,
-      THREAD_ID,
-      runId,
-      FIRST_STARTED_AT
-    )
+    try {
+      const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
+        workspace,
+        THREAD_ID,
+        runId,
+        FIRST_STARTED_AT
+      )
 
-    expect(
-      shouldKickPendingDrain,
-      "REGRESSION: no kick while the drain has a reportable snapshot in memory — the " +
-        "resumed instance's notification waits for a hydrate"
-    ).toBe(true)
-    // And the kick would really find it: memory-first, undelivered, not in flight.
-    expect(workflowRunManager.findPendingNotification(fileAsWorkspace, THREAD_ID)?.runId).toBe(
-      runId
-    )
-    expect(privates.flushFailedRuns.has(runId), "snapshot retained for a later retry").toBe(true)
-    expect(
-      privates.flushFailedRuns.get(runId)?.notificationDelivered,
-      "and still never marked delivered — that flag belongs to its own ack"
-    ).toBeFalsy()
+      expect(
+        shouldKickPendingDrain,
+        "REGRESSION: no kick while the drain has a reportable snapshot in memory — the " +
+          "resumed instance's notification waits for a hydrate"
+      ).toBe(true)
+      // And the kick would really find it: memory-first, undelivered, not in flight.
+      expect(workflowRunManager.findPendingNotification(workspace, THREAD_ID)?.runId).toBe(runId)
+      expect(privates.flushFailedRuns.has(runId), "snapshot retained for a later retry").toBe(true)
+      expect(
+        privates.flushFailedRuns.get(runId)?.notificationDelivered,
+        "and still never marked delivered — that flag belongs to its own ack"
+      ).toBeFalsy()
+    } finally {
+      process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
+    }
   })
 
   test("a matching ack recovers the snapshot and marks it delivered", async () => {
@@ -237,27 +248,32 @@ describe("recoverFlushFailedRun instance fence", () => {
     // free — and the run behind it is drain-ready right now.
     const runId = generateWorkflowRunId()
     const backlogRunId = generateWorkflowRunId()
-    const fileAsWorkspace = join(workspace, "not-a-dir")
-    writeFileSync(fileAsWorkspace, "x")
+    const fileAsDataRoot = join(workspace, "not-a-dir")
+    writeFileSync(fileAsDataRoot, "x")
+    process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
     const acked = seedFlushFailedSnapshot(runId, RESUMED_STARTED_AT)
     seedFlushFailedSnapshot(backlogRunId, RESUMED_STARTED_AT) // a second completed run
 
-    const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
-      fileAsWorkspace,
-      THREAD_ID,
-      runId,
-      RESUMED_STARTED_AT
-    )
+    try {
+      const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
+        workspace,
+        THREAD_ID,
+        runId,
+        RESUMED_STARTED_AT
+      )
 
-    expect(
-      shouldKickPendingDrain,
-      "REGRESSION: a failed write-back suppressed the kick and stranded the backlog"
-    ).toBe(true)
-    expect(acked.notificationDelivered, "the acked run is settled in memory").toBe(true)
-    // The drain skips the (delivered) acked run and serves the one behind it.
-    expect(workflowRunManager.findPendingNotification(fileAsWorkspace, THREAD_ID)?.runId).toBe(
-      backlogRunId
-    )
+      expect(
+        shouldKickPendingDrain,
+        "REGRESSION: a failed write-back suppressed the kick and stranded the backlog"
+      ).toBe(true)
+      expect(acked.notificationDelivered, "the acked run is settled in memory").toBe(true)
+      // The drain skips the (delivered) acked run and serves the one behind it.
+      expect(workflowRunManager.findPendingNotification(workspace, THREAD_ID)?.runId).toBe(
+        backlogRunId
+      )
+    } finally {
+      process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
+    }
   })
 
   test("an unfenced ack (cancel path) still recovers and marks delivered", async () => {
