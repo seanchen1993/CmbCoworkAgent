@@ -144,6 +144,7 @@ import { uploadChatData } from "@/api"
 import { insertLog } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
+import { formatHookClockTime, HOOK_TIME_ZONE_LABEL } from "../../../../shared/hook-time"
 import {
   getBuiltinBrowserTitleSource,
   isBuiltinBrowserCommandSelection,
@@ -6700,7 +6701,9 @@ export function ChatContainer({
               <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
                 {hookInterruption.event}
               </span>
-              <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
+              <span title={HOOK_TIME_ZONE_LABEL}>
+                {formatHookClockTime(hookInterruption.timestamp) ?? "时间无效"}
+              </span>
             </div>
             <div className="mt-2 text-sm text-amber-900/90 break-words dark:text-amber-100/90">
               {hookInterruption.reason}

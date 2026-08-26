@@ -32,6 +32,7 @@ import {
   readCustomizeHookCatalog,
   type CustomizeDisplayHook
 } from "@/lib/customize-hook-catalog"
+import { formatHookDateTime, HOOK_TIME_ZONE_LABEL } from "../../../../shared/hook-time"
 
 type DisplayHook = CustomizeDisplayHook
 
@@ -1046,7 +1047,8 @@ function HookLoggingControls(): React.JSX.Element {
           config.enabled ? "text-muted-foreground/70" : "text-muted-foreground/40"
         )}
       >
-        额外展示 stdin payload、完整 command、cwd，以及被 scope 过滤掉的 hook；同时把日志按天落到
+        额外展示 stdin payload、完整 command、cwd，以及被 scope 过滤掉的
+        hook；同时按北京时间（UTC+8）分日写入
         <code className="mx-0.5 font-mono">hooks/log/hooks.&lt;日期&gt;.jsonl</code>（保留 7 天）。
         stdin 可能含敏感用户输入。
       </p>
@@ -1601,11 +1603,8 @@ function DetailRow(props: {
 }
 
 function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString()
-  } catch {
-    return iso
-  }
+  const formatted = formatHookDateTime(iso)
+  return formatted ? `${formatted} · ${HOOK_TIME_ZONE_LABEL}` : iso
 }
 
 /* ── Empty state ─────────────────────────────────────────────────── */

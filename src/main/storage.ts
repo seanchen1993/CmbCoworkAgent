@@ -76,6 +76,7 @@ import {
   calculateMaxCompatibleOutputTokens,
   calculateSummarizationTriggerTokens
 } from "../shared/model-token-budget"
+import { getHookDateKey } from "../shared/hook-time"
 
 const configuredOpenworkDir = process.env.CMB_COWORK_AGENT_HOME?.trim()
 const OPENWORK_DIR = configuredOpenworkDir
@@ -3001,12 +3002,9 @@ export function getHookLogDir(): string {
   return dir
 }
 
-/** Absolute path to the jsonl log file for a given local date. */
+/** Absolute path to the jsonl log file for a fixed Beijing calendar date. */
 export function getHookLogFilePath(date: Date = new Date()): string {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, "0")
-  const d = String(date.getDate()).padStart(2, "0")
-  return join(getHookLogDir(), `hooks.${y}-${m}-${d}.jsonl`)
+  return join(getHookLogDir(), `hooks.${getHookDateKey(date)}.jsonl`)
 }
 
 // ── Sandbox Settings ──────────────────────────────────────────────────────────
