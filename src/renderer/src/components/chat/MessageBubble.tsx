@@ -41,7 +41,7 @@ import {
 import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import { DurationShow } from "./DurationShow"
 import { isGoalClearAlias } from "../../../../shared/goal-slash"
-import { isImRemoteApprovalTranscriptMessageId } from "../../../../shared/im-remote-approval-transcript"
+import { isImRemoteControlTranscriptMessageId } from "../../../../shared/im-remote-transcript"
 import { isResultlessCompletedToolCall } from "@/lib/tool-call-display-state"
 import {
   normalizeVisibleReasoningText,
@@ -744,9 +744,9 @@ function MessageBubbleImpl({
     return null
   }
 
-  // Older App versions persisted remote approval receipts as system transcript
-  // messages. They are audit UI, not conversation content; keep legacy rows hidden.
-  if (isImRemoteApprovalTranscriptMessageId(message.id)) {
+  // Older App versions persisted remote approval and user-input receipts as system
+  // transcript messages. They are status UI, not conversation content; hide legacy rows.
+  if (isImRemoteControlTranscriptMessageId(message.id)) {
     return null
   }
 

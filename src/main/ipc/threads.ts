@@ -97,7 +97,7 @@ import {
   mergeCheckpointAuthorityTranscriptMessages,
   truncateCheckpointMessagesAfter
 } from "../../shared/checkpoint-transcript"
-import { isImRemoteApprovalTranscriptMessageId } from "../../shared/im-remote-approval-transcript"
+import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
 import {
   getMessageProviderOccurrenceIdentity,
   getMessageProviderTupleFromMetadata
@@ -507,7 +507,7 @@ function stringifyThreadMessageContent(content: Message["content"]): string {
 
 function isForkVisiblePersistedMessage(message: Message): boolean {
   return (
-    !isImRemoteApprovalTranscriptMessageId(message.id) &&
+    !isImRemoteControlTranscriptMessageId(message.id) &&
     !isWorkflowPlumbingTranscriptContent(stringifyThreadMessageContent(message.content))
   )
 }

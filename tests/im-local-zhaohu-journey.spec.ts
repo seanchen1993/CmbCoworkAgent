@@ -304,7 +304,6 @@ async function createJourney() {
     }) as never,
     now: () => clock.now,
     createCode: () => "D4E5F6",
-    persistDesktopNotice: async () => undefined,
     warn: (message, error) => {
       throw new Error(`${message}: ${String(error ?? "")}`)
     }

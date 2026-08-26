@@ -20,7 +20,7 @@ import {
   findMessagesAfterCheckpointVisibleIds,
   isWorkflowPlumbingTranscriptContent
 } from "../../shared/checkpoint-transcript"
-import { isImRemoteApprovalTranscriptMessageId } from "../../shared/im-remote-approval-transcript"
+import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
 
 export interface DurableRuntimeTail {
   messages: BaseMessage[]
@@ -42,7 +42,7 @@ function stringifyMessageContent(content: Message["content"]): string {
 
 function isRuntimeVisiblePersistedMessage(message: Message): boolean {
   return (
-    !isImRemoteApprovalTranscriptMessageId(message.id) &&
+    !isImRemoteControlTranscriptMessageId(message.id) &&
     !isWorkflowPlumbingTranscriptContent(stringifyMessageContent(message.content))
   )
 }

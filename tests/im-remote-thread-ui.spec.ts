@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { sortBuiltinRobotThreadsByRemoteAccess } from "../src/renderer/src/lib/builtin-robot-thread-sort"
-import { isImRemoteApprovalTranscriptMessageId } from "../src/shared/im-remote-approval-transcript"
+import { isImRemoteControlTranscriptMessageId } from "../src/shared/im-remote-transcript"
 import type { Thread } from "../src/renderer/src/types"
 
 function source(path: string): string {
@@ -199,19 +199,25 @@ function testRemoteApprovalResolutionClosesDesktopCard(): void {
   )
 }
 
-function testRemoteApprovalAuditDoesNotEnterConversationTranscript(): void {
+function testRemoteControlReceiptsDoNotEnterConversationTranscript(): void {
   const approvalService = source("src/main/services/im/remote-approval-service.ts")
+  const userInputService = source("src/main/services/im/remote-user-input-service.ts")
+  const robotIpc = source("src/main/ipc/builtin-robot.ts")
   const runtimeTail = source("src/main/ipc/thread-runtime-tail.ts")
   const threadsIpc = source("src/main/ipc/threads.ts")
   const messageBubble = source("src/renderer/src/components/chat/MessageBubble.tsx")
 
-  assert(isImRemoteApprovalTranscriptMessageId("im-remote-approval:audit-1"))
-  assert(!isImRemoteApprovalTranscriptMessageId("im-remote-user-input:request-1"))
+  assert(isImRemoteControlTranscriptMessageId("im-remote-approval:audit-1"))
+  assert(isImRemoteControlTranscriptMessageId("im-remote-user-input:request-1"))
+  assert(!isImRemoteControlTranscriptMessageId("im-scheduler:delivery-1:user"))
   assert(!approvalService.includes("persistRemoteApprovalDesktopNotice"))
   assert(!approvalService.includes("upsertThreadMessages"))
-  assert(runtimeTail.includes("!isImRemoteApprovalTranscriptMessageId(message.id)"))
-  assert(threadsIpc.includes("!isImRemoteApprovalTranscriptMessageId(message.id)"))
-  assert(messageBubble.includes("isImRemoteApprovalTranscriptMessageId(message.id)"))
+  assert(!userInputService.includes("persistRemoteUserInputDesktopNotice"))
+  assert(!userInputService.includes("upsertThreadMessages"))
+  assert(!robotIpc.includes("完整记录已写入对应会话"))
+  assert(runtimeTail.includes("!isImRemoteControlTranscriptMessageId(message.id)"))
+  assert(threadsIpc.includes("!isImRemoteControlTranscriptMessageId(message.id)"))
+  assert(messageBubble.includes("isImRemoteControlTranscriptMessageId(message.id)"))
 }
 
 testRemoteInboxIsReadOnlyAtRendererAndMainBoundary()
@@ -224,6 +230,6 @@ testRemoteTurnMirrorsCompleteRendererLifecycle()
 console.log("PASS testRemoteTurnMirrorsCompleteRendererLifecycle")
 testRemoteApprovalResolutionClosesDesktopCard()
 console.log("PASS testRemoteApprovalResolutionClosesDesktopCard")
-testRemoteApprovalAuditDoesNotEnterConversationTranscript()
-console.log("PASS testRemoteApprovalAuditDoesNotEnterConversationTranscript")
+testRemoteControlReceiptsDoNotEnterConversationTranscript()
+console.log("PASS testRemoteControlReceiptsDoNotEnterConversationTranscript")
 console.log("im-remote-thread-ui.spec.ts passed")

@@ -81,7 +81,6 @@ async function createContext(options: { enabled?: boolean } = {}) {
   let removedListener: ((requestId: string, threadId: string) => void) | null = null
   const responses: UserInputResponse[] = []
   const responseOptions: unknown[] = []
-  const notices: string[] = []
   const answerNotices: unknown[] = []
   const warnings: unknown[] = []
   let sendPendingCount = 0
@@ -124,9 +123,6 @@ async function createContext(options: { enabled?: boolean } = {}) {
     },
     now: () => clock.now,
     createCode: () => generatedCodes.shift() ?? "ABC123",
-    persistDesktopNotice: async (session) => {
-      notices.push(session.request.requestId)
-    },
     warn: (_message, error) => warnings.push(error)
   })
   service.registerReplyDrainer({
@@ -163,7 +159,6 @@ async function createContext(options: { enabled?: boolean } = {}) {
     service,
     responses,
     responseOptions,
-    notices,
     answerNotices,
     warnings,
     deliveryText,
@@ -227,7 +222,6 @@ async function testPromptAndSingleUseOptionAnswer(): Promise<void> {
     assert.deepEqual(context.responseOptions, [
       { notifyRenderer: true, reason: "已从招乎完成补充输入。" }
     ])
-    assert.deepEqual(context.notices, [request.requestId])
     assert.deepEqual(context.answerNotices, [
       {
         requestId: request.requestId,

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
-import { flushStrict, getThread, upsertThreadMessages } from "../../db"
+import { getThread } from "../../db"
 import { getBuiltinRobotSettings } from "../../storage"
 import type {
   UserInputAnswer,
@@ -65,29 +65,11 @@ interface RemoteUserInputDependencies {
   subscribeRemoved: typeof subscribeRemovedUserInput
   now: () => number
   createCode: () => string
-  persistDesktopNotice: (session: RemoteUserInputSession) => Promise<void>
   warn: (message: string, error?: unknown) => void
 }
 
 export function remoteUserInputDesktopNotice(): string {
   return "已从招乎回答 Agent 的补充问题。"
-}
-
-async function persistRemoteUserInputDesktopNotice(session: RemoteUserInputSession): Promise<void> {
-  const count = upsertThreadMessages(
-    session.route.threadId,
-    [
-      {
-        id: `im-remote-user-input:${session.request.requestId}`,
-        role: "system",
-        content: remoteUserInputDesktopNotice(),
-        created_at: new Date()
-      }
-    ],
-    { touchThreadUpdatedAt: false }
-  )
-  if (count !== 1) throw new Error("remote user-input desktop notice was not persisted")
-  await flushStrict()
 }
 
 function canonicalDirectory(path: string): string | null {
@@ -193,8 +175,6 @@ export class ImRemoteUserInputService {
       subscribeRemoved: dependencies.subscribeRemoved ?? subscribeRemovedUserInput,
       now: dependencies.now ?? Date.now,
       createCode: dependencies.createCode ?? (() => randomBytes(3).toString("hex").toUpperCase()),
-      persistDesktopNotice:
-        dependencies.persistDesktopNotice ?? persistRemoteUserInputDesktopNotice,
       warn: dependencies.warn ?? ((message, error) => console.warn(`[IM] ${message}`, error ?? ""))
     }
     this.unsubscribePending = this.dependencies.subscribePending((request) => {
@@ -288,14 +268,6 @@ export class ImRemoteUserInputService {
       return "这项补充输入已在桌面处理或不再有效。"
     }
 
-    try {
-      await this.dependencies.persistDesktopNotice(session)
-    } catch (error) {
-      this.dependencies.warn(
-        "Remote user-input answer could not be shown in the desktop thread.",
-        error
-      )
-    }
     const notice: ImRemoteUserInputAnswerNotice = {
       requestId: session.request.requestId,
       threadId: session.route.threadId,

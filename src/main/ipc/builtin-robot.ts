@@ -27,10 +27,7 @@ function broadcastRemoteApprovalAudit(
   record: Parameters<typeof remoteApprovalDesktopNotice>[0]
 ): void {
   const fullMessage = remoteApprovalDesktopNotice(record)
-  const message =
-    fullMessage.length <= 500
-      ? fullMessage
-      : `${fullMessage.slice(0, 500)}…（完整记录已写入对应会话）`
+  const message = fullMessage.length <= 500 ? fullMessage : `${fullMessage.slice(0, 500)}…`
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
       window.webContents.send(`approval:resolved:${record.threadId}`, {
