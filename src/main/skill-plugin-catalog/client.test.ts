@@ -1,8 +1,11 @@
+import { execFile } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { promisify } from "node:util"
 import type { Worker as WorkerType } from "node:worker_threads"
 import { Worker } from "node:worker_threads"
 import { build } from "esbuild"
@@ -21,6 +24,12 @@ import {
 
 const temporaryDirectories: string[] = []
 const clients: SkillPluginCatalogClient[] = []
+const require = createRequire(import.meta.url)
+const electronPath = require("electron") as string
+const { createPackage } = require("@electron/asar") as {
+  createPackage: (source: string, destination: string) => Promise<void>
+}
+const execFileAsync = promisify(execFile)
 let workerBuildDirectory = ""
 let workerBundlePath = ""
 
@@ -177,6 +186,90 @@ describe("SkillPluginCatalogClient", () => {
     await expect(retried).resolves.toMatchObject({ kind: "skills" })
     expect(factoryCalls).toBe(2)
   })
+
+  it("reads bundled skills from an ASAR directory in a real Electron Worker", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-asar-"))
+    temporaryDirectories.push(root)
+    const packageRoot = join(root, "package")
+    const asarPath = join(root, "app.asar")
+    const builtinSkillsDir = join(packageRoot, "out", "skills")
+    const customSkillsDir = join(root, "custom-skills")
+    const pluginsStorePath = join(root, "plugins.json")
+    const disabledSkillsPath = join(root, "disabled-skills.json")
+    mkdirSync(join(builtinSkillsDir, "bundled-example"), { recursive: true })
+    mkdirSync(customSkillsDir, { recursive: true })
+    writeFileSync(
+      join(builtinSkillsDir, "bundled-example", "SKILL.md"),
+      "---\nname: bundled-example\ndescription: ASAR fixture\n---\n"
+    )
+    writeFileSync(pluginsStorePath, "[]")
+    writeFileSync(disabledSkillsPath, "[]")
+    await createPackage(packageRoot, asarPath)
+
+    const runnerPath = join(root, "electron-worker-runner.cjs")
+    writeFileSync(
+      runnerPath,
+      `const { Worker } = require("node:worker_threads")
+const [workerPath, builtinSkillsDir, customSkillsDir, pluginsStorePath, disabledSkillsPath] = process.argv.slice(2)
+const worker = new Worker(workerPath, { name: "skill-plugin-catalog-asar-test" })
+const timeout = setTimeout(() => {
+  console.error("catalog worker timed out")
+  void worker.terminate()
+  process.exit(1)
+}, 20_000)
+worker.once("error", (error) => {
+  clearTimeout(timeout)
+  console.error(error)
+  process.exit(1)
+})
+worker.once("message", (message) => {
+  clearTimeout(timeout)
+  console.log(JSON.stringify(message))
+  void worker.terminate().finally(() => process.exit(message.ok ? 0 : 1))
+})
+worker.postMessage({
+  type: "read-page",
+  requestId: 1,
+  input: { kind: "skills", limit: 128, revision: "asar-regression" },
+  source: { builtinSkillsDir, customSkillsDir, pluginsStorePath, disabledSkillsPath },
+  cancelBuffer: new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+})
+`
+    )
+
+    const { stdout } = await execFileAsync(
+      electronPath,
+      [
+        runnerPath,
+        workerBundlePath,
+        join(asarPath, "out", "skills"),
+        customSkillsDir,
+        pluginsStorePath,
+        disabledSkillsPath
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        timeout: 30_000,
+        windowsHide: true
+      }
+    )
+    const response = JSON.parse(stdout.trim().split(/\r?\n/).at(-1) ?? "null") as {
+      ok: boolean
+      page?: SkillPluginCatalogPage
+    }
+
+    expect(response.ok).toBe(true)
+    expect(response.page?.skills).toEqual([
+      expect.objectContaining({
+        id: "bundled-example",
+        name: "bundled-example",
+        source: "project"
+      })
+    ])
+    expect(response.page?.total).toBe(1)
+    expect(response.page?.truncated).toBe(false)
+  }, 60_000)
 
   it("parses 20k skills plus a 2 MiB file off-main while pages stay bounded", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-large-"))

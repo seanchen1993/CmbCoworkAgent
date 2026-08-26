@@ -62,4 +62,21 @@ describe("right-panel skill projection", () => {
     expect(second.disabled.map((item) => item.id)).toEqual(["skill-2"])
     expect(getRightPanelSkillProjectionDiagnostics().buildCount).toBe(2)
   })
+
+  it("does not classify a same-name plugin skill as disabled", () => {
+    const standalone = skill(1)
+    const skillId = standalone.id ?? standalone.name
+    const plugin = {
+      ...standalone,
+      id: `plugin:plugin-a/${skillId}`,
+      path: `C:/plugins/plugin-a/skills/${skillId}/SKILL.md`,
+      pluginId: "plugin-a",
+      pluginName: "Plugin A"
+    }
+
+    const projection = getRightPanelSkillProjection([standalone, plugin], new Set([skillId]))
+
+    expect(projection.disabled).toEqual([standalone])
+    expect(projection.enabled).toEqual([plugin])
+  })
 })

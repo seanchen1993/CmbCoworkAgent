@@ -272,6 +272,32 @@ describe("HookCatalogClient", () => {
     expect(refreshed).toMatchObject({ totalEntries: 5, enabledEntries: 5 })
   }, 30_000)
 
+  it("keeps same-name plugin skill hooks when the standalone skill is disabled", async () => {
+    const fixture = makeFixture()
+    writeFileSync(fixture.source.disabledSkillsPath, '["review"]')
+    writeFileSync(
+      join(fixture.root, "plugin-one", "skills", "plugin-skill", "SKILL.md"),
+      "---\nname: review\n---\nbody"
+    )
+    const client = makeClient(fixture.source)
+    const { pages } = await readAll(
+      client,
+      { requestScope: "same-name-plugin", workspacePath: fixture.workspace, limit: 20 },
+      "renderer:same-name-plugin"
+    )
+    const skillHooks = pages.flatMap((page) => page.skillHooks)
+
+    expect(skillHooks.some((hook) => hook.pluginId === undefined)).toBe(false)
+    expect(skillHooks).toEqual([
+      expect.objectContaining({
+        id: "skill:review/owned",
+        pluginId: "plugin-one",
+        pluginName: "Plugin One",
+        skillName: "review"
+      })
+    ])
+  }, 30_000)
+
   it("scans 10k disabled skills and an oversized SKILL.md off-main with bounded pages", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmb-hook-catalog-large-"))
     temporaryDirectories.push(root)

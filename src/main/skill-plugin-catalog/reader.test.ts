@@ -50,14 +50,14 @@ describe("skill/plugin catalog reader", () => {
     const disabledPlugin = join(root, "disabled-plugin")
     mkdirSync(builtin, { recursive: true })
     mkdirSync(custom, { recursive: true })
-    mkdirSync(join(enabledPlugin, "skills", "plugin-skill"), { recursive: true })
+    mkdirSync(join(enabledPlugin, "skills", "review"), { recursive: true })
     mkdirSync(join(disabledPlugin, "skills", "hidden-skill"), { recursive: true })
-    writeFileSync(join(builtin, "SKILL.md"), "---\nname: Builtin review\n---\n")
-    writeFileSync(join(custom, "SKILL.md"), "---\nname: Custom review\n---\n")
+    writeFileSync(join(builtin, "SKILL.md"), "---\nname: review\n---\n")
+    writeFileSync(join(custom, "SKILL.md"), "---\nname: review\n---\n")
     writeFileSync(join(enabledPlugin, "plugin.json"), '{"name":"enabled","skills":"skills"}')
     writeFileSync(
-      join(enabledPlugin, "skills", "plugin-skill", "SKILL.md"),
-      "---\nname: Plugin skill\n---\n"
+      join(enabledPlugin, "skills", "review", "SKILL.md"),
+      "---\nname: review\n---\n"
     )
     writeFileSync(join(disabledPlugin, "plugin.json"), '{"name":"disabled","skills":"skills"}')
     writeFileSync(
@@ -104,11 +104,12 @@ describe("skill/plugin catalog reader", () => {
 
     expect(skills.skills).toHaveLength(2)
     expect(skills.skills.find((skill) => skill.id === "review")).toMatchObject({
-      name: "Custom review",
+      name: "review",
       source: "user"
     })
     expect(skills.skills.find((skill) => skill.pluginId === "enabled")).toMatchObject({
-      name: "Plugin skill",
+      id: "plugin:enabled/review",
+      name: "review",
       pluginName: "enabled"
     })
     expect(skills.skills.some((skill) => skill.pluginId === "disabled")).toBe(false)
@@ -125,14 +126,14 @@ describe("skill/plugin catalog reader", () => {
     expect(
       resolveSkillPreview(source, {
         id: "review",
-        name: "Builtin review",
+        name: "review",
         source: "project"
       })
     ).toBeNull()
     expect(
       resolveSkillPreview(source, {
         id: "review",
-        name: "Custom review",
+        name: "review",
         source: "user"
       })
     ).toEqual({ filePath: join(custom, "SKILL.md") })

@@ -86,6 +86,25 @@ describe("application catalog cache", () => {
     expect(readSkillCatalogCache()).toBe(first)
   })
 
+  it("keeps a same-name plugin skill in the enabled right-panel summary", async () => {
+    const snapshot = await revalidateSkillCatalog("same-name", async () => ({
+      localSkills: [skill("review")],
+      pluginSkills: [
+        skill("review", {
+          id: "plugin:plugin-a/review",
+          path: "C:/plugins/plugin-a/skills/review/SKILL.md",
+          pluginId: "plugin-a",
+          pluginName: "Plugin A"
+        })
+      ],
+      disabledSkillIds: ["review"]
+    }))
+
+    expect(snapshot.rightPanelSkills).toHaveLength(2)
+    expect(snapshot.rightPanelEnabledSkillCount).toBe(1)
+    expect(snapshot.disabledSkillIds).toEqual(new Set(["review"]))
+  })
+
   it("routes App and Chat callers through one configured page loader", async () => {
     const configuredLoader = vi.fn(async () => ({
       localSkills: [skill("shared")],

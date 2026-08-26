@@ -130,10 +130,16 @@ export function isDiscoveredSkillDisabled(
 ): boolean {
   const skillId = getDiscoveredSkillId(skill)
   if (!skillId) return false
-  for (const disabledId of disabledSkillIds) {
-    if (matchesSkillIdOrDescendant(skillId, normalizeSkillId(disabledId))) {
-      return true
-    }
+
+  // resolveDisabledSkillIds normalizes aliases once at the storage/catalog
+  // boundary. Walk this skill's ancestor chain with indexed Set lookups so a
+  // large disabled catalog stays O(path depth), not O(skills × disabled ids).
+  let candidate = skillId
+  while (candidate) {
+    if (disabledSkillIds.has(candidate)) return true
+    const separator = candidate.lastIndexOf("/")
+    if (separator < 0) break
+    candidate = candidate.slice(0, separator)
   }
   return false
 }

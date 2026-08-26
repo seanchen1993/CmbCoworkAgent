@@ -2,9 +2,11 @@ import {
   closeSync,
   opendirSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
-  statSync
+  statSync,
+  type Dirent
 } from "node:fs"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { getDiscoveredSkillAliases, getDiscoveredSkillId, normalizeSkillId } from "../skills/ids"
@@ -65,6 +67,7 @@ interface DiscoveredCatalogSkill {
 interface SkillSource {
   sourceDir: string
   source: "project" | "user"
+  kind: "builtin" | "custom" | "plugin"
   maxDepth?: number
   pluginId?: string
   pluginName?: string
@@ -341,6 +344,7 @@ function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): Skil
     sources.push({
       sourceDir,
       source: "user",
+      kind: "plugin",
       maxDepth,
       pluginId: plugin.id,
       pluginName: plugin.name
@@ -369,6 +373,86 @@ function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): Skil
   if (hasRootSkill) add(".", hasSkillsDir ? 0 : undefined)
   if (hasSkillsDir) add("skills")
   return sources
+}
+
+function isAsarPath(filePath: string): boolean {
+  return filePath
+    .replace(/\\/g, "/")
+    .split("/")
+    .some((segment) => segment.toLowerCase().endsWith(".asar"))
+}
+
+function readChildDirectories(
+  source: SkillSource,
+  currentPath: string,
+  stackLength: number,
+  context: BuildContext
+): string[] {
+  const directories: string[] = []
+  const acceptEntry = (entry: Dirent): boolean => {
+    checkCancelled(context)
+    if (!consumeFileBudget(context)) return false
+    if (!entry.isDirectory()) return true
+    if (
+      context.stats.scannedDirectories + stackLength + directories.length >=
+      SKILL_PLUGIN_CATALOG_MAX_DIRECTORIES
+    ) {
+      markTruncated(context, "directory-count")
+      return false
+    }
+    directories.push(entry.name)
+    return true
+  }
+
+  let directory: ReturnType<typeof opendirSync> | null = null
+  let readEntry = false
+  try {
+    directory = opendirSync(currentPath)
+    let entry = directory.readSync()
+    while (entry) {
+      readEntry = true
+      if (!acceptEntry(entry)) break
+      entry = directory.readSync()
+    }
+    return directories
+  } catch (error) {
+    if (error instanceof SkillPluginCatalogCancelledError) throw error
+
+    // Electron 39's ASAR wrapper supports readdirSync/readFileSync in a
+    // worker thread, but not opendirSync. Keep the streaming path for
+    // untrusted custom/plugin directories and only materialize a directory
+    // listing for the trusted bundled source inside an ASAR archive.
+    const canUseBundledAsarFallback =
+      !readEntry && source.kind === "builtin" && isAsarPath(currentPath)
+    if (!canUseBundledAsarFallback) {
+      if (source.kind === "builtin" && currentPath === source.sourceDir) {
+        throw new Error(`Unable to read bundled skills directory: ${currentPath}`, {
+          cause: error
+        })
+      }
+      return directories
+    }
+  } finally {
+    try {
+      directory?.closeSync()
+    } catch {
+      // Directory may already have been closed after an iteration failure.
+    }
+  }
+
+  try {
+    for (const entry of readdirSync(currentPath, { withFileTypes: true })) {
+      if (!acceptEntry(entry)) break
+    }
+  } catch (error) {
+    if (error instanceof SkillPluginCatalogCancelledError) throw error
+    if (currentPath === source.sourceDir) {
+      throw new Error(`Unable to read bundled skills directory: ${currentPath}`, {
+        cause: error
+      })
+    }
+  }
+  return directories
 }
 
 function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredCatalogSkill[] {
@@ -410,35 +494,7 @@ function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredC
       context.stats.discoveredSkills += 1
     }
     if (current.depth >= maxDepth) continue
-    const directories: string[] = []
-    let directory: ReturnType<typeof opendirSync> | null = null
-    try {
-      directory = opendirSync(current.path)
-      let entry = directory.readSync()
-      while (entry) {
-        checkCancelled(context)
-        if (!consumeFileBudget(context)) break
-        if (entry.isDirectory()) {
-          if (
-            context.stats.scannedDirectories + stack.length + directories.length >=
-            SKILL_PLUGIN_CATALOG_MAX_DIRECTORIES
-          ) {
-            markTruncated(context, "directory-count")
-            break
-          }
-          directories.push(entry.name)
-        }
-        entry = directory.readSync()
-      }
-    } catch {
-      continue
-    } finally {
-      try {
-        directory?.closeSync()
-      } catch {
-        // Directory may already have been closed after an iteration failure.
-      }
-    }
+    const directories = readChildDirectories(source, current.path, stack.length, context)
     directories.sort((a, b) => a.localeCompare(b))
     for (let index = directories.length - 1; index >= 0; index -= 1) {
       stack.push({ path: join(current.path, directories[index]), depth: current.depth + 1 })
@@ -571,6 +627,9 @@ function isSkillMetadataDisabled(
   skill: SkillMetadata,
   disabledSkillIds: ReadonlySet<string>
 ): boolean {
+  // Plugin-owned skills follow the plugin enable/disable lifecycle. A
+  // standalone disabled id or legacy same-name entry must never disable one.
+  if (skill.pluginId) return false
   const name = normalizeSkillId(skill.name)
   if (name && disabledSkillIds.has(name)) return true
   const id = normalizeSkillId(skill.id || skill.relativePath || skill.name)
@@ -621,8 +680,8 @@ function buildSnapshot(
     return snapshot
   }
   const localSources: SkillSource[] = [
-    { sourceDir: source.builtinSkillsDir, source: "project" },
-    { sourceDir: source.customSkillsDir, source: "user" }
+    { sourceDir: source.builtinSkillsDir, source: "project", kind: "builtin" },
+    { sourceDir: source.customSkillsDir, source: "user", kind: "custom" }
   ]
   const globalDiscovered: Array<{ skill: DiscoveredCatalogSkill; source: SkillSource }> = []
   for (const localSource of localSources) {
@@ -867,7 +926,7 @@ export function resolveSkillPreview(
   if (request.id.startsWith("plugin:")) return null
   if (request.source === "project") {
     const customShadow = resolvePreviewFromSource(
-      { sourceDir: config.customSkillsDir, source: "user" },
+      { sourceDir: config.customSkillsDir, source: "user", kind: "custom" },
       { ...request, source: "user" },
       request.id,
       context
@@ -876,7 +935,8 @@ export function resolveSkillPreview(
   }
   const source: SkillSource = {
     sourceDir: request.source === "project" ? config.builtinSkillsDir : config.customSkillsDir,
-    source: request.source
+    source: request.source,
+    kind: request.source === "project" ? "builtin" : "custom"
   }
   const matched = resolvePreviewFromSource(source, request, request.id, context)
   return matched?.name === request.name ? { filePath: matched.filePath } : null
