@@ -471,6 +471,7 @@ type ThreadWorkspaceStateMap = Record<
     pendingApproval?: unknown
     pendingUserInput?: unknown
     contextReminder?: { pending?: boolean }
+    workflowRun?: { status?: string } | null
   } | undefined
 >
 
@@ -6678,7 +6679,9 @@ function ProjectFeatureSidebar({
     onSelect: () => void
   ): React.JSX.Element => {
     const threadState = allThreadStates[thread.thread_id]
-    const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
+    const isLoading =
+      (allStreamLoadingStates[thread.thread_id] ?? false) ||
+      threadState?.workflowRun?.status === "running"
     const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
     const hasPendingApproval = Boolean(threadState?.pendingApproval)
     const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
