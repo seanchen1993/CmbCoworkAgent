@@ -2153,25 +2153,49 @@ function AdapterSelectGroups({
   installingPluginNames: Set<string>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
 }): React.JSX.Element {
-  const groups = groupAdaptersByUseScenario(registry)
+  const sections = [
+    {
+      key: "installed",
+      label: "已安装插件",
+      groups: groupAdaptersByUseScenario(
+        registry.filter((adapter) => adapter.boardCompatibility.status !== "missing-plugin")
+      )
+    },
+    {
+      key: "available",
+      label: "更多插件",
+      groups: groupAdaptersByUseScenario(
+        registry.filter((adapter) => adapter.boardCompatibility.status === "missing-plugin")
+      )
+    }
+  ].filter((section) => section.groups.length > 0)
+
   return (
     <>
-      {groups.map((group, index) => (
-        <Fragment key={group.useScenario}>
-          <SelectGroup>
-            <SelectLabel className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
-              {group.useScenario}
-            </SelectLabel>
-            {group.adapters.map((adapter) => (
-              <AdapterSelectItem
-                key={adapter.id}
-                adapter={adapter}
-                installingPluginNames={installingPluginNames}
-                onInstallPlugin={onInstallPlugin}
-              />
-            ))}
-          </SelectGroup>
-          {index < groups.length - 1 && <SelectSeparator />}
+      {sections.map((section, sectionIndex) => (
+        <Fragment key={section.key}>
+          <div className="px-2 pb-1 pt-2 text-xs font-semibold text-foreground">
+            {section.label}
+          </div>
+          {section.groups.map((group, groupIndex) => (
+            <Fragment key={group.useScenario}>
+              <SelectGroup>
+                <SelectLabel className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+                  {group.useScenario}
+                </SelectLabel>
+                {group.adapters.map((adapter) => (
+                  <AdapterSelectItem
+                    key={adapter.id}
+                    adapter={adapter}
+                    installingPluginNames={installingPluginNames}
+                    onInstallPlugin={onInstallPlugin}
+                  />
+                ))}
+              </SelectGroup>
+              {groupIndex < section.groups.length - 1 && <SelectSeparator />}
+            </Fragment>
+          ))}
+          {sectionIndex < sections.length - 1 && <SelectSeparator className="my-1" />}
         </Fragment>
       ))}
     </>
