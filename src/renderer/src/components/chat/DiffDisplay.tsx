@@ -2,7 +2,7 @@ import { GitCommit, Maximize2, Minimize2, Eye, Minus, Plus } from "lucide-react"
 import { memo, useEffect, useMemo, useState } from "react"
 import { VirtualList } from "@/components/ui/virtual-list"
 import { cn } from "@/lib/utils"
-import { parseUnifiedDiffRows, type DiffRow } from "@/lib/diff-utils"
+import { buildLineDiffRows, type DiffRow } from "@/lib/diff-utils"
 
 type DiffViewerModule = typeof import("react-diff-viewer-continued")
 
@@ -253,26 +253,6 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
     return parseUnifiedDiffFiles(diffToUse)
   }, [diffToUse, oldValue, newValue])
 
-  // Parse unified diff into rows for virtualized rendering (only needed for large diffs)
-  const virtualizedDiffRows = useMemo<DiffRow[]>(() => {
-    if (oldValue !== undefined || newValue !== undefined) return []
-    const totalLineCount = diffFiles.reduce((sum, f) => sum + f.totalLines, 0)
-    if (totalLineCount <= VIRTUALIZED_DIFF_LINE_THRESHOLD) return []
-    return parseUnifiedDiffRows(diffToUse)
-  }, [diffToUse, diffFiles, oldValue, newValue])
-
-  const shouldVirtualizeFullscreen =
-    virtualizedDiffRows.length > 0 && !(oldValue !== undefined || newValue !== undefined)
-
-  useEffect(() => {
-    setSelectedFileId((current) => {
-      if (current && diffFiles.some((file) => file.id === current)) {
-        return current
-      }
-      return diffFiles[0]?.id ?? null
-    })
-  }, [diffFiles])
-
   const selectedFile = diffFiles.find((file) => file.id === selectedFileId) ?? diffFiles[0]
   const totalAddedLines = diffFiles.reduce((sum, file) => sum + file.addedLines, 0)
   const totalRemovedLines = diffFiles.reduce((sum, file) => sum + file.removedLines, 0)
@@ -280,6 +260,21 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   const oldContent = selectedFile?.oldContent ?? ""
   const newContent = selectedFile?.newContent ?? ""
   const totalLines = selectedFile?.totalLines ?? 0
+
+  const isDirectDiff = oldValue !== undefined || newValue !== undefined
+  const shouldVirtualizeFullscreen =
+    isFullscreen && !isDirectDiff && totalLines > VIRTUALIZED_DIFF_LINE_THRESHOLD
+
+  // Keep the O(1) DOM behavior for large diffs, but derive rows from the same two
+  // text sides used by the preview. Defer the line diff until fullscreen is opened.
+  const virtualizedDiffRows = useMemo<DiffRow[]>(() => {
+    if (!shouldVirtualizeFullscreen || !selectedFile) return []
+    return buildLineDiffRows(
+      selectedFile.oldContent,
+      selectedFile.newContent,
+      selectedFile.displayPath
+    )
+  }, [selectedFile, shouldVirtualizeFullscreen])
 
   const sourceOldContent = oldValue ?? oldContent
   const sourceNewContent = newValue ?? newContent

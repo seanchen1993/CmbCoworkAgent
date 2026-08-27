@@ -43,6 +43,7 @@ import { toast, Toaster } from "sonner"
 import { useShallow } from "zustand/react/shallow"
 import { evolutionApi } from "@/api/evolution"
 import {
+  canPresentReviewCandidateNotification,
   cloudEvolutionUpdateSignature,
   getCloudEvolutionPromptSignature,
   hasUnreadCloudEvolutionUpdates,
@@ -790,26 +791,40 @@ function App(): React.JSX.Element {
     }
   }, [setCloudEvolutionUpdates, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
-  // 「待审批发布」提醒：本分支把进化审批权限放开给个人后，技能创建者需要被
-  // 提醒自己上传的技能跑出了优化候选、正等待其审批发布。仅面向个人，管理员不在此提醒范围内。
+  // 「待审批发布」提醒：按技能归属提醒创建者，不向管理员广播与其无关的候选。
   useEffect(() => {
     let cancelled = false
+    let checkInFlight = false
+
+    const notificationSurfaceIsActive = (): boolean =>
+      canPresentReviewCandidateNotification({
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus()
+      })
 
     const checkPendingReviewCandidates = async (): Promise<void> => {
+      // An in-renderer toast is not a delivery when the app is hidden or behind another
+      // application. Defer both the request and its receipt until focus returns.
+      if (!notificationSurfaceIsActive() || checkInFlight) return
+
       try {
         // 个人只有上传过技能才可能拥有可审批候选；无技能时直接跳过拉取。
         if (ownedSkillKeys.size === 0) return
+        checkInFlight = true
 
         const awaiting = await evolutionApi.listCandidates("awaiting_review", 50)
         if (cancelled) return
 
         const reviewable = reviewableCandidates(awaiting, ownedSkillKeys)
+        // The badge represents outstanding work, not merely a toast that has never fired.
+        if (reviewable.length > 0) setPendingEvolution(true)
+
         // 只对「从未通知过」的新候选提醒，保证每条候选只发一次。
         const fresh = unnotifiedReviewCandidates(reviewable)
         if (fresh.length === 0) return
-        markReviewCandidatesNotified(fresh)
-
-        setPendingEvolution(true)
+        // Focus may have changed while the request was in flight. Do not consume the
+        // notification if the user can no longer see it.
+        if (!notificationSurfaceIsActive()) return
 
         const first = fresh[0]
         const message =
@@ -826,16 +841,27 @@ function App(): React.JSX.Element {
             }
           }
         })
+        // Record delivery only after a visible toast has actually been scheduled.
+        markReviewCandidatesNotified(fresh)
       } catch (error) {
         console.warn("[SkillReviewPrompt] failed to check pending review candidates:", error)
+      } finally {
+        checkInFlight = false
       }
     }
 
     void checkPendingReviewCandidates()
-    const timer = window.setInterval(() => void checkPendingReviewCandidates(), 30 * 60 * 1000)
+    const checkWhenForeground = (): void => {
+      if (notificationSurfaceIsActive()) void checkPendingReviewCandidates()
+    }
+    window.addEventListener("focus", checkWhenForeground)
+    window.addEventListener("online", checkWhenForeground)
+    document.addEventListener("visibilitychange", checkWhenForeground)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      window.removeEventListener("focus", checkWhenForeground)
+      window.removeEventListener("online", checkWhenForeground)
+      document.removeEventListener("visibilitychange", checkWhenForeground)
     }
   }, [ownedSkillKeys, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
