@@ -119,7 +119,7 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(robotPanel.includes("联调信息"))
   assert(robotPanel.includes("复制联调信息"))
   assert(robotPanel.includes("VITE_BUILTIN_ROBOT_DEBUG_YST_IDS"))
-  assert(robotPanel.includes("window.api.models.getUserInfo()"))
+  assert(/window\.api\.models\s*\.getUserInfo\(\)/u.test(robotPanel))
   assert(robotPanel.includes("BUILTIN_ROBOT_DEBUG_YST_IDS.has(ystId)"))
   assert(robotPanel.includes("canViewDebugInfo &&"))
   assert(robotPanel.includes("status.diagnostics.gatewayUrl"))

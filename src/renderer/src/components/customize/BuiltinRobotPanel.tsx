@@ -74,36 +74,57 @@ export function BuiltinRobotPanel(): React.JSX.Element {
   const [remoteAccess, setRemoteAccess] = useState<BuiltinRobotRemoteAccessOverview | null>(null)
   const [grantableFeatures, setGrantableFeatures] = useState<BuiltinRobotGrantableFeature[]>([])
   const [threads, setThreads] = useState<Thread[]>([])
+  const [remoteAccessLoading, setRemoteAccessLoading] = useState(true)
+  const [grantableFeaturesLoading, setGrantableFeaturesLoading] = useState(true)
+  const [threadsLoading, setThreadsLoading] = useState(true)
   const [busyAction, setBusyAction] = useState<string | null>(null)
   const [gatewayUrlDraft, setGatewayUrlDraft] = useState("")
   const [canViewDebugInfo, setCanViewDebugInfo] = useState(false)
   const savedGatewayUrl = status?.settings.gatewayUrl
   const effectiveGatewayUrl = status?.diagnostics.gatewayUrl
 
-  const load = useCallback(async () => {
+  const loadStatus = useCallback(async () => {
     try {
-      const [nextStatus, nextAccess, nextFeatures, nextThreads, userInfo] = await Promise.all([
-        window.api.builtinRobot.getStatus(),
-        window.api.builtinRobot.getRemoteAccess(),
-        window.api.builtinRobot.listGrantableFeatures(),
-        window.api.threads.list(),
-        window.api.models.getUserInfo().catch(() => null)
-      ])
-      setStatus(nextStatus)
-      setRemoteAccess(nextAccess)
-      setGrantableFeatures(nextFeatures)
-      setThreads(nextThreads)
-      const ystId = String((userInfo as BuiltinRobotDebugUserInfo | null)?.ystId || "").trim()
-      setCanViewDebugInfo(Boolean(ystId && BUILTIN_ROBOT_DEBUG_YST_IDS.has(ystId)))
+      setStatus(await window.api.builtinRobot.getStatus())
     } catch (error) {
       toast.error(`读取统一机器人状态失败：${errorMessage(error)}`)
     }
   }, [])
 
+  const loadDetails = useCallback(() => {
+    void window.api.builtinRobot
+      .getRemoteAccess()
+      .then(setRemoteAccess)
+      .catch((error) => toast.error(`读取招乎接入状态失败：${errorMessage(error)}`))
+      .finally(() => setRemoteAccessLoading(false))
+
+    void window.api.builtinRobot
+      .listGrantableFeatures()
+      .then(setGrantableFeatures)
+      .catch((error) => toast.error(`读取可接入 Feature 失败：${errorMessage(error)}`))
+      .finally(() => setGrantableFeaturesLoading(false))
+
+    void window.api.threads
+      .list()
+      .then(setThreads)
+      .catch((error) => toast.error(`读取桌面会话失败：${errorMessage(error)}`))
+      .finally(() => setThreadsLoading(false))
+
+    void window.api.models
+      .getUserInfo()
+      .then((userInfo) => {
+        const ystId = String((userInfo as BuiltinRobotDebugUserInfo | null)?.ystId || "").trim()
+        setCanViewDebugInfo(Boolean(ystId && BUILTIN_ROBOT_DEBUG_YST_IDS.has(ystId)))
+      })
+      .catch(() => setCanViewDebugInfo(false))
+  }, [])
+
   useEffect(() => {
-    void load()
-    return window.api.builtinRobot.onStatus(setStatus)
-  }, [load])
+    const unsubscribe = window.api.builtinRobot.onStatus(setStatus)
+    void loadStatus()
+    loadDetails()
+    return unsubscribe
+  }, [loadDetails, loadStatus])
 
   useEffect(() => {
     setGatewayUrlDraft(savedGatewayUrl ?? effectiveGatewayUrl ?? "")
@@ -160,8 +181,38 @@ export function BuiltinRobotPanel(): React.JSX.Element {
 
   if (!status) {
     return (
-      <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
-        <Loader2 className="size-4 animate-spin" /> 正在读取统一机器人状态…
+      <div className="flex-1 overflow-auto">
+        <div className="mx-auto max-w-3xl space-y-5 p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <Bot className="size-5" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold">内置统一机器人</h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  登录后即可连接招乎，无需配置机器人凭据。
+                </p>
+              </div>
+            </div>
+            <Badge variant="info">读取中</Badge>
+          </div>
+          <Card>
+            <CardHeader>
+              <CardTitle>远程连接</CardTitle>
+              <CardDescription>页面已打开，连接状态正在后台刷新。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" /> 正在读取连接状态…
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>接入招乎</CardTitle>
+              <CardDescription>会话与 Feature 配置正在后台加载。</CardDescription>
+            </CardHeader>
+          </Card>
+        </div>
       </div>
     )
   }
@@ -457,12 +508,16 @@ export function BuiltinRobotPanel(): React.JSX.Element {
               <div className="flex items-center gap-2 text-sm font-medium">
                 <MessageSquareText className="size-4" /> 已有桌面会话
               </div>
-              {!remoteAccess?.routeAvailable && (
+              {!remoteAccessLoading && !remoteAccess?.routeAvailable && (
                 <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
                   {remoteAccess?.routeReason ?? "正在读取招乎路由…"}
                 </div>
               )}
-              {grantableThreads.length === 0 ? (
+              {threadsLoading || remoteAccessLoading ? (
+                <p className="flex items-center gap-2 rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" /> 正在读取桌面会话…
+                </p>
+              ) : grantableThreads.length === 0 ? (
                 <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
                   暂无带有效工作区的可接入会话。普通会话和 Project Mode 会话均支持；
                   Coordinator、Workflow 和远程收件箱会话暂不开放。
@@ -517,12 +572,16 @@ export function BuiltinRobotPanel(): React.JSX.Element {
               <div className="flex items-center gap-2 text-sm font-medium">
                 <FolderKanban className="size-4" /> Feature 远程新建会话
               </div>
-              {!remoteAccess?.principalAvailable && (
+              {!remoteAccessLoading && !remoteAccess?.principalAvailable && (
                 <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
                   {remoteAccess?.principalReason ?? "正在读取登录状态…"}
                 </div>
               )}
-              {grantableFeatures.length === 0 ? (
+              {grantableFeaturesLoading || remoteAccessLoading ? (
+                <p className="flex items-center gap-2 rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" /> 正在读取 Feature…
+                </p>
+              ) : grantableFeatures.length === 0 ? (
                 <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
                   暂无可开放远程新建会话的 Feature。
                 </p>
@@ -584,7 +643,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
               <div>
                 <p className="text-sm font-medium">允许从招乎批准工具调用</p>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  默认关闭。开启后仅支持工作区内文件写入和完整展示的命令，且每次只能批准一次； Git
+                  默认开启。仅支持工作区内文件写入和完整展示的命令，且每次只能批准一次； Git
                   提交、推送和永久授权仍必须回到桌面。Agent 的补充问题可直接使用招乎 `/回答`
                   指令处理，不受此开关影响。
                 </p>

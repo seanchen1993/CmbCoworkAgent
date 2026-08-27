@@ -37,6 +37,14 @@ for (const removedRuntimeToken of [
 const storage = read("src/main/storage.ts")
 assert(storage.includes('"chatx-config.json"'), "legacy credential existence can be detected")
 assert(
+  storage.includes("remoteApprovalEnabled: true"),
+  "remote tool approval must default to enabled for new settings"
+)
+assert(
+  storage.includes('typeof value.remoteApprovalEnabled === "boolean"'),
+  "an explicit remote approval preference must survive settings reload"
+)
+assert(
   !/readFileSync\(CHATX_CONFIG_FILE/.test(storage),
   "legacy credential content must never be read or migrated"
 )
@@ -55,6 +63,14 @@ for (const forbiddenField of ["clientSecret", "toUserList", "workDir", "modelId"
 }
 assert(panel.includes("内置统一机器人"))
 assert(panel.includes("接入招乎"))
+assert(panel.includes("页面已打开，连接状态正在后台刷新"))
+assert(panel.includes("loadStatus"))
+assert(panel.includes("loadDetails"))
+assert(
+  !/Promise\.all\([\s\S]*builtinRobot\.getStatus\(\)/u.test(panel),
+  "the first robot status paint must not wait for secondary data"
+)
+assert(panel.includes("默认开启。仅支持工作区内文件写入"))
 assert(panel.includes("setThreadRemoteAccess"))
 assert(panel.includes("setFeatureRemoteAccess"))
 assert(!allSource.includes("请先在招乎中向内置机器人发送一条消息"))
@@ -69,6 +85,11 @@ assert(!preload.includes("chatx:"))
 const main = read("src/main/index.ts")
 assert(main.includes("builtinRobotManager.start(app.getVersion())"))
 assert(main.includes("builtinRobotManager.stop()"))
+const robotManager = read("src/main/services/im/manager.ts")
+assert(
+  /listGrantableFeatures\(\)[\s\S]*Promise\.all\([\s\S]*listRemoteFeatures/u.test(robotManager),
+  "Feature details should load concurrently after the first robot paint"
+)
 
 const imContract = read("src/shared/im-gateway-contract.ts")
 const mainTypes = read("src/main/types.ts")

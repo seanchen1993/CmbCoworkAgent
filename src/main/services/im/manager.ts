@@ -321,9 +321,14 @@ export class BuiltinRobotManager {
     return this.enqueue(async () => {
       const principalId = this.gatewayStatus.principalId
       const projects = await imFeatureBindingService.listRemoteProjects()
+      const projectFeatures = await Promise.all(
+        projects.map(async (project) => ({
+          project,
+          features: await imFeatureBindingService.listRemoteFeatures(project.id)
+        }))
+      )
       const result: BuiltinRobotGrantableFeature[] = []
-      for (const project of projects) {
-        const features = await imFeatureBindingService.listRemoteFeatures(project.id)
+      for (const { project, features } of projectFeatures) {
         for (const feature of features) {
           const grant = imRemoteAccessService.getFeatureGrant(project.id, feature.slug)
           result.push({

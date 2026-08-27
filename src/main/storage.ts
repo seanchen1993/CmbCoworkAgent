@@ -2841,7 +2841,7 @@ const DEFAULT_BUILTIN_ROBOT_SETTINGS: import("./types").BuiltinRobotSettings = {
   enabled: true,
   gatewayUrl: null,
   remoteAccess: "inbox-only",
-  remoteApprovalEnabled: false,
+  remoteApprovalEnabled: true,
   waitingDesktopTtlMinutes: 10
 }
 
@@ -2861,7 +2861,10 @@ export function getBuiltinRobotSettings(): import("./types").BuiltinRobotSetting
           : null,
       remoteAccess:
         value.remoteAccess === "inbox-and-features" ? "inbox-and-features" : "inbox-only",
-      remoteApprovalEnabled: value.remoteApprovalEnabled === true,
+      remoteApprovalEnabled:
+        typeof value.remoteApprovalEnabled === "boolean"
+          ? value.remoteApprovalEnabled
+          : DEFAULT_BUILTIN_ROBOT_SETTINGS.remoteApprovalEnabled,
       waitingDesktopTtlMinutes:
         Number.isSafeInteger(value.waitingDesktopTtlMinutes) &&
         Number(value.waitingDesktopTtlMinutes) >= 1 &&
