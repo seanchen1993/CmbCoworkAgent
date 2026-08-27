@@ -1,3 +1,4 @@
+import { net } from "electron"
 import { getUserInfo, upsertUserInfoConfig, type UserInfoConfig } from "../storage"
 
 const ENTERPRISE_LOGIN_REFRESH_TIMEOUT_MS = 15_000
@@ -21,6 +22,20 @@ function httpsLoginInfoUrl(endpoint: string): URL {
   const url = new URL(endpoint)
   if (url.protocol !== "https:") throw new Error("登录凭据刷新接口必须使用 HTTPS")
   return url
+}
+
+function loginInfoFetch(
+  input: string,
+  init: RequestInit
+): Promise<Response> {
+  // Electron's net.fetch uses Chromium's network stack, matching the Personal
+  // Info page. That matters on the intranet where system proxy/PAC, DNS and
+  // enterprise certificate handling can differ from Node's built-in fetch.
+  if (process.versions.electron) {
+    return net.fetch(input, init)
+  }
+  // Keep the module testable in a plain Node process.
+  return globalThis.fetch(input, init)
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -70,7 +85,6 @@ async function requestEnterpriseLoginRefresh(
     return null
   }
 
-  const url = httpsLoginInfoUrl(loginInfoEndpoint())
   const headers: Record<string, string> = {}
   if (refreshToken) headers.ystRefreshToken = refreshToken
   if (ystCode) headers.ystCode = ystCode
@@ -78,13 +92,20 @@ async function requestEnterpriseLoginRefresh(
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), ENTERPRISE_LOGIN_REFRESH_TIMEOUT_MS)
   try {
-    const response = await fetch(url.toString(), {
+    const url = httpsLoginInfoUrl(loginInfoEndpoint())
+    const transport = process.versions.electron ? "electron-net" : "node-fetch"
+    console.info("[EnterpriseLogin] token-refresh:request", {
+      transport,
+      endpoint: `${url.origin}${url.pathname}`
+    })
+    const response = await loginInfoFetch(url.toString(), {
       method: "GET",
       headers,
       signal: controller.signal
     })
     if (!response.ok) {
       console.warn("[EnterpriseLogin] token-refresh:failed", {
+        transport,
         status: response.status,
         statusText: response.statusText
       })
@@ -96,6 +117,7 @@ async function requestEnterpriseLoginRefresh(
     const returnCode = readString(payload, "returnCode")
     if (returnCode !== "SUC0000") {
       console.warn("[EnterpriseLogin] token-refresh:business-failed", {
+        transport,
         returnCode,
         error: readString(payload, "errorMsg")
       })
@@ -106,11 +128,18 @@ async function requestEnterpriseLoginRefresh(
     if (!body) throw new Error("登录凭据刷新响应缺少 body")
     const nextUserInfo = mergeUserInfo(userInfo, body)
     upsertUserInfoConfig(nextUserInfo)
+    console.info("[EnterpriseLogin] token-refresh:succeeded", { transport })
     return nextUserInfo
   } catch (error) {
     console.warn("[EnterpriseLogin] token-refresh:error", {
+      transport: process.versions.electron ? "electron-net" : "node-fetch",
       aborted: error instanceof Error && error.name === "AbortError",
-      message: error instanceof Error ? error.message : String(error)
+      reasonType: error instanceof Error ? error.name : typeof error,
+      message: error instanceof Error ? error.message : String(error),
+      causeType:
+        error instanceof Error && error.cause instanceof Error ? error.cause.name : undefined,
+      causeMessage:
+        error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined
     })
     return null
   } finally {
