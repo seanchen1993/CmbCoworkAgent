@@ -11242,6 +11242,42 @@ function projectModeTraceFilters(
   ]
 }
 
+/**
+ * Project-list conversation count = user-initiated main-Agent turns only.
+ *
+ * Child traces inherit `triggerSource=chat` from their root turn, so the active-trigger
+ * filter alone would still count coordinator workers / workflow agents / task agents.
+ * Documents written before multi-Agent observability have no traceKind or parent fields;
+ * treat those legacy records as root turns for backwards-compatible time ranges.
+ */
+function projectModeMainAgentConversationFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      filter: [
+        buildChatTriggeredTraceFilter(),
+        {
+          bool: {
+            should: [
+              { term: { traceKind: "root" } },
+              { term: { "traceKind.keyword": "root" } },
+              {
+                bool: {
+                  must_not: [
+                    { exists: { field: "traceKind" } },
+                    { exists: { field: "parentTraceId" } },
+                    { exists: { field: "subagentKind" } }
+                  ]
+                }
+              }
+            ],
+            minimum_should_match: 1
+          }
+        }
+      ]
+    }
+  }
+}
+
 /** Build the `name@version` key used to merge adapter rows across snapshot + usage. */
 function adapterKey(name: string, version?: string): string {
   return `${name}@@${version ?? ""}`
@@ -12674,6 +12710,7 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
+          main_agent_conversations: { filter: projectModeMainAgentConversationFilter() },
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
           by_node: { terms: { field: "harnessNodeName", size: 100 } },
@@ -12709,7 +12746,7 @@ async function fetchProjectModePageUsage(
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
-    perProject.set(key, asNumber(b.doc_count))
+    perProject.set(key, asNumber(asRecord(b.main_agent_conversations).doc_count))
     perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
     perProjectDevAssociatedFeatures.set(
       key,

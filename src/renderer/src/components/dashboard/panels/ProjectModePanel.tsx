@@ -1703,7 +1703,8 @@ function SortableTh({
   order,
   enabled,
   onSort,
-  title
+  title,
+  hint
 }: {
   label: string
   sortKey: DashboardProjectModeProjectSortKey
@@ -1712,11 +1713,15 @@ function SortableTh({
   enabled: boolean
   onSort: (key: DashboardProjectModeProjectSortKey) => void
   title?: string
+  hint?: ReactNode
 }): React.JSX.Element {
   if (!enabled) {
     return (
       <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title={title}>
-        {label}
+        <span className="inline-flex items-center justify-end gap-1">
+          <span>{label}</span>
+          {hint ? <InfoHint hint={hint} /> : null}
+        </span>
       </th>
     )
   }
@@ -1724,18 +1729,21 @@ function SortableTh({
   const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
     <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
-      <button
-        type="button"
-        onClick={() => onSort(sortKey)}
-        title={title ?? `按${label}排序`}
-        className={cn(
-          "ml-auto inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
-          active ? "text-foreground" : "text-muted-foreground"
-        )}
-      >
-        <span>{label}</span>
-        <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
-      </button>
+      <div className="ml-auto flex w-fit items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onSort(sortKey)}
+          title={title ?? `按${label}排序`}
+          className={cn(
+            "inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
+            active ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          <span>{label}</span>
+          <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
+        </button>
+        {hint ? <InfoHint hint={hint} /> : null}
+      </div>
     </th>
   )
 }
@@ -2095,6 +2103,7 @@ function ProjectListSection({
                 order={sortOrder}
                 enabled={metricSortAllowed}
                 onSort={cycleSort}
+                hint="所选时间范围内，仅统计主动触发的主 Agent 会话；不包含定时任务、心跳等后台触发，也不包含子 Agent 会话。"
               />
               <SortableTh
                 label="原始生成行数"

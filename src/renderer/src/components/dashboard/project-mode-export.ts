@@ -25,7 +25,7 @@ export const PROJECT_MODE_PROJECT_EXPORT_HEADER = [
   "是否加载项目约束",
   "项目状态",
   "特性数",
-  "对话数",
+  "主 Agent 主动会话数",
   "原始生成行数",
   "提交口径·提交采纳率",
   "提交口径·提交采纳明细",
