@@ -189,6 +189,9 @@ export function resolveManagedRunDecision(input: {
   const nodeChanged = Boolean(
     run.decisionBaseline && run.decisionBaseline.nodeId !== feature.currentNodeId
   )
+  const nodeStatusChanged = Boolean(
+    run.decisionBaseline && run.decisionBaseline.nodeStatus !== feature.currentNodeStatus
+  )
   const nodeCompleted = isCompletedNodeStatus(feature.currentNodeStatus)
   if (terminal?.endReason.code === "provider_error" && !nodeChanged && !nodeCompleted) {
     return {
@@ -218,7 +221,9 @@ export function resolveManagedRunDecision(input: {
     }
   }
 
-  if (nodeChanged || nodeCompleted) {
+  const shouldAdvanceCompletedNode =
+    nodeCompleted && (terminal?.outcome !== "success" || nodeStatusChanged)
+  if (nodeChanged || shouldAdvanceCompletedNode) {
     const invalidAction = missingNextActionDecision(feature)
     if (invalidAction) return invalidAction
     return {
@@ -229,7 +234,7 @@ export function resolveManagedRunDecision(input: {
         : "当前阶段已经结束，创建新会话继续",
       rule: nodeChanged
         ? "currentNodeId 变化表示进入新的工作阶段，创建新会话并清零 Biz Retry。"
-        : "当前阶段状态为已完成、已归档或已跳过时，创建新会话推进并清零 Biz Retry。"
+        : "当前阶段状态变化为已完成、已归档或已跳过时，创建新会话推进并清零 Biz Retry。"
     }
   }
 

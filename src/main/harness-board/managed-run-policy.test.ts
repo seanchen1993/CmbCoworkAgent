@@ -93,7 +93,7 @@ describe("resolveManagedRunDecision", () => {
     })
   })
 
-  it("advances for a new node or a completed-like node status", () => {
+  it("advances for a new node or when the node enters a completed-like status", () => {
     expect(
       resolveManagedRunDecision({
         run: runWithBaseline(),
@@ -111,6 +111,29 @@ describe("resolveManagedRunDecision", () => {
         })
       ).toMatchObject({ decision: "advance", reasonCode: "current_node_completed" })
     }
+  })
+
+  it("uses Biz Retry when a successful session leaves the completed node state unchanged", () => {
+    const completedFeature = { ...feature, currentNodeStatus: "done" as const }
+    const baseline = runWithBaseline().decisionBaseline!
+
+    expect(
+      resolveManagedRunDecision({
+        run: runWithBaseline({
+          decisionBaseline: {
+            ...baseline,
+            nodeStatus: completedFeature.currentNodeStatus,
+            featureStateHash: completedFeature.featureStateHash,
+            nextActionHash: completedFeature.nextActionHash
+          }
+        }),
+        feature: completedFeature,
+        terminal: successTerminal
+      })
+    ).toMatchObject({
+      decision: "biz_retry_new_thread",
+      reasonCode: "biz_retry_no_progress"
+    })
   })
 
   it("forces a new Thread when context usage exceeds 90 percent", () => {

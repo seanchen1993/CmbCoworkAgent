@@ -430,21 +430,21 @@ Controller 优先使用插件 `feature_status` 返回的顶层 `featureStatus`�
 6. Agent success，currentNodeId 相对当前基线变化
    → advance，新建会话，bizRetryCount=0
 
-7. Agent success，currentNodeStatus=done/archived/skipped
+7. Agent success，currentNodeStatus 相对当前基线发生变化，且新状态=done/archived/skipped
    → advance，新建会话，bizRetryCount=0
 
-8. Agent success，当前阶段未结束，且 bizRetryCount 已完成三次
+8. Agent success，当前阶段未推进，且 bizRetryCount 已完成三次
    → fail，原因“当前任务重试超过限制次数”
 
-9. Agent success，当前阶段未结束，上下文占用 >90%
+9. Agent success，当前阶段未推进，上下文占用 >90%
    → biz_retry_new_thread
    → bizRetryCount+1
 
-10. Agent success，当前阶段未结束，上下文占用 <=90% 或无法计算，featureStateHash 不变
+10. Agent success，当前阶段未推进，上下文占用 <=90% 或无法计算，featureStateHash 不变
    → biz_retry_new_thread
    → bizRetryCount+1
 
-11. Agent success，当前阶段未结束，上下文占用 <=90% 或无法计算，featureStateHash 变化
+11. Agent success，当前阶段未推进，上下文占用 <=90% 或无法计算，featureStateHash 变化
    → biz_retry_reuse_thread
    → 原 Thread 发送“继续当前任务”
    → bizRetryCount+1
@@ -464,9 +464,9 @@ dev.code/Review → Session 4
 dev.review → Session 5
 ```
 
-Controller 对规范化 nextAction 生成 `nextActionHash`，再对 `currentNodeId + featureStatus + currentNodeStatus + nextActionHash` 生成 `featureStateHash`。两者均为带版本/域分隔的完整 SHA-256。Hash 不直接决定是否推进阶段，只在当前节点未变化且 nodeStatus 未结束时判断是否仍有业务进展：hash 变化表示仍有进展，优先复用当前 Thread；hash 不变表示没有识别到进展，使用新 Thread 重新执行当前阶段。
+Controller 对规范化 nextAction 生成 `nextActionHash`，再对 `currentNodeId + featureStatus + currentNodeStatus + nextActionHash` 生成 `featureStateHash`。两者均为带版本/域分隔的完整 SHA-256。Hash 不直接决定是否推进阶段；只有 currentNodeId 变化，或 currentNodeStatus 相对基线发生变化并进入 done/archived/skipped，才视为推进。其余情况使用 Hash 判断是否仍有业务进展：hash 变化表示仍有进展，优先复用当前 Thread；hash 不变表示没有识别到进展，使用新 Thread 重新执行当前阶段。
 
-两种行为是独立 Controller action：`biz_retry_reuse_thread` 和 `biz_retry_new_thread`，并共享当前阶段唯一的 `bizRetryCount`。每次 Biz Retry 均增加计数；currentNodeId 变化或 nodeStatus=done/archived/skipped 并创建推进会话时清零。完成三次 Biz Retry 后阶段仍未结束，则 ManagedRun failed，failureReason 为“当前任务重试超过限制次数”，reasonCode 为 `biz_retry_limit_exceeded`。
+两种行为是独立 Controller action：`biz_retry_reuse_thread` 和 `biz_retry_new_thread`，并共享当前阶段唯一的 `bizRetryCount`。每次 Biz Retry 均增加计数；currentNodeId 变化，或 currentNodeStatus 变化并进入 done/archived/skipped 且创建推进会话时清零。完成三次 Biz Retry 后阶段仍未推进，则 ManagedRun failed，failureReason 为“当前任务重试超过限制次数”，reasonCode 为 `biz_retry_limit_exceeded`。
 
 上下文占用比例使用 Agent Turn 上报的 `inputTokens / maxTokens`。严格 `>0.9` 时强制 `retryMode=new_thread`；等于 90% 仍允许复用。缺少 contextUsage、数值无效或 maxTokens<=0 时视为无法计算，回退到 `featureStateHash` 的自适应规则。该阈值只覆盖 Biz Retry，不影响 Provider Retry。
 
@@ -525,11 +525,11 @@ V2 只实现并使用默认 `adaptive`，暂不向插件或项目开放配置入
 | 情况 | V2 行为 |
 | --- | --- |
 | currentNodeId 变化 | `advance`，新建会话并清零 bizRetryCount |
-| nodeStatus=done/archived/skipped | `advance`，新建会话并清零 bizRetryCount |
-| 当前阶段未结束且上下文占用 >90% | `biz_retry_new_thread`，增加 bizRetryCount |
-| 当前阶段未结束、上下文可复用且 featureStateHash 不变 | `biz_retry_new_thread`，增加 bizRetryCount |
-| 当前阶段未结束、上下文可复用且 featureStateHash 变化 | `biz_retry_reuse_thread`，原 Thread 发送“继续当前任务”，增加 bizRetryCount |
-| 完成三次 Biz Retry 后阶段仍未结束 | ManagedRun failed，原因“当前任务重试超过限制次数” |
+| currentNodeStatus 变化并进入 done/archived/skipped | `advance`，新建会话并清零 bizRetryCount |
+| 当前阶段未推进且上下文占用 >90% | `biz_retry_new_thread`，增加 bizRetryCount |
+| 当前阶段未推进、上下文可复用且 featureStateHash 不变 | `biz_retry_new_thread`，增加 bizRetryCount |
+| 当前阶段未推进、上下文可复用且 featureStateHash 变化 | `biz_retry_reuse_thread`，原 Thread 发送“继续当前任务”，增加 bizRetryCount |
+| 完成三次 Biz Retry 后阶段仍未推进 | ManagedRun failed，原因“当前任务重试超过限制次数” |
 | `hook_halt` | ManagedRun failed |
 | `failure_fuse` | ManagedRun failed |
 | 用户停止 | `cancelled`，不取消已有会话 |
@@ -666,8 +666,8 @@ run_completed            → 托管完成
 | 分支 | 判断事实至少包含 | 判断规则 |
 | --- | --- | --- |
 | currentNodeId 变化 | 上次阶段、当前阶段、bizRetryCount | 当前节点变化表示进入新的工作阶段，创建新会话并清零 Biz Retry |
-| nodeStatus=done/archived/skipped | 当前阶段、nodeStatus、nextAction 是否合法 | 当前阶段已经结束，创建新会话推进并清零 Biz Retry |
-| Biz Retry 已完成三次 | 当前阶段、nodeStatus、bizRetryCount=3 | 三次业务重试后阶段仍未结束，Run failed |
+| currentNodeStatus 变化并进入 done/archived/skipped | 当前阶段、上次 nodeStatus、当前 nodeStatus、nextAction 是否合法 | 当前阶段状态变化并进入结束状态，创建新会话推进并清零 Biz Retry |
+| Biz Retry 已完成三次 | 当前阶段、nodeStatus、bizRetryCount=3 | 三次业务重试后阶段仍未推进，Run failed |
 | 上下文占用 >90% | inputTokens、maxTokens、占用百分比、90%阈值 | 上下文超过复用阈值，不复用当前会话，创建新会话重试 |
 | 上下文可复用且 featureStateHash 不变 | 上下文占用或“无法计算”、四项基线均未变化、bizRetryCount | 未识别到业务进展，创建新会话重新执行当前阶段 |
 | 上下文可复用且 featureStateHash 变化 | 上下文占用或“无法计算”、具体 changedFields、bizRetryCount | 仍有业务进展且上下文可复用，在原 Thread 输入“继续当前任务” |
@@ -913,11 +913,11 @@ V2 不合入或依赖 Harness Workflow MVP 的 Launcher、JS scheduler、Inspect
 - 启动 API 返回首轮后的 ManagedRun 状态；failed/completed 不显示“已开始托管”；
 - 最后 workflow 节点且有效 featureStatus/nodeStatus 为 done 或 archived → complete；
 - currentNodeId 变化 → advance，新建会话并清零 bizRetryCount；
-- nodeStatus=done/archived/skipped → advance，新建会话并清零 bizRetryCount；
-- 当前阶段未结束且上下文占用 >90% → biz_retry_new_thread；
-- 当前阶段未结束、上下文可复用且 featureStateHash 不变 → biz_retry_new_thread；
-- 当前阶段未结束、上下文可复用且 featureStateHash 变化 → biz_retry_reuse_thread，原 Thread 发送“继续当前任务”；
-- 第三次 Biz Retry 后阶段仍未结束 → fail，原因“当前任务重试超过限制次数”；
+- currentNodeStatus 变化并进入 done/archived/skipped → advance，新建会话并清零 bizRetryCount；
+- 当前阶段未推进且上下文占用 >90% → biz_retry_new_thread；
+- 当前阶段未推进、上下文可复用且 featureStateHash 不变 → biz_retry_new_thread；
+- 当前阶段未推进、上下文可复用且 featureStateHash 变化 → biz_retry_reuse_thread，原 Thread 发送“继续当前任务”；
+- 第三次 Biz Retry 后阶段仍未推进 → fail，原因“当前任务重试超过限制次数”；
 - 有效 featureStatus blocked/warning/error/unknown → fail；顶层状态缺失时由 currentNodeId + nodeStatus 回退判断；
 - hook_halt/failure_fuse → fail；
 - Provider Retry 和 Biz Retry 使用相互独立的三次预算；
@@ -1030,9 +1030,9 @@ V2 使用 feature_status、Agent outcome/endReason 和固定规则。V3 同期�
 
 V2 不保留旧命令、能力字段、动作数组、草稿和状态通知；`feature_status + nextAction + Controller Policy` 是唯一控制权来源。
 
-### ADR-010：当前阶段未结束时采用自适应 Biz Retry
+### ADR-010：当前阶段未推进时采用自适应 Biz Retry
 
-Stage Retry 和同 Thread Biz Retry 合并为共享单一 `bizRetryCount` 的两个独立 action：`biz_retry_reuse_thread` 与 `biz_retry_new_thread`。当前节点变化或 nodeStatus=done/archived/skipped 时推进并清零；阶段未结束时，上下文占用 >90% 强制新 Thread，否则 featureStateHash 不变使用新 Thread、变化时复用当前 Thread。两个 action 共享三次预算，避免叠加为六次。选择策略以 Controller 内部配置建模，V2 暂不开放插件或项目自定义。
+Stage Retry 和同 Thread Biz Retry 合并为共享单一 `bizRetryCount` 的两个独立 action：`biz_retry_reuse_thread` 与 `biz_retry_new_thread`。当前节点变化，或 currentNodeStatus 变化并进入 done/archived/skipped 时推进并清零；阶段未推进时，上下文占用 >90% 强制新 Thread，否则 featureStateHash 不变使用新 Thread、变化时复用当前 Thread。两个 action 共享三次预算，避免叠加为六次。选择策略以 Controller 内部配置建模，V2 暂不开放插件或项目自定义。
 
 ### ADR-011：上下文阈值不影响 Provider Retry
 
@@ -1047,8 +1047,8 @@ Stage Retry 和同 Thread Biz Retry 合并为共享单一 `bizRetryCount` 的两
 - 创建新 Thread 时，nextAction 只有 slashSkill 和 userMessage 同时存在且 Skill 属于当前绑定插件或已启用本地 Skill 时才允许执行；复用 Thread 的 Biz/Provider Retry 使用平台固定消息；
 - 初始工作单元、阶段推进和 `biz_retry_new_thread` 创建普通项目会话；`biz_retry_reuse_thread` 与 Provider Retry 复用当前会话；
 - Provider Error 在原 Thread 最多自动发送三次“继续当前任务”，且不受 90% 上下文阈值影响；
-- 当前阶段未结束时使用统一 Biz Retry预算：上下文超过90%或 featureStateHash 不变执行 `biz_retry_new_thread`，否则执行 `biz_retry_reuse_thread` 并发送“继续当前任务”；
-- 两种 Biz Retry模式共享最多三次预算，第三次后阶段仍未结束时结束托管，原因“当前任务重试超过限制次数”；
+- 当前阶段未推进时使用统一 Biz Retry预算：上下文超过90%或 featureStateHash 不变执行 `biz_retry_new_thread`，否则执行 `biz_retry_reuse_thread` 并发送“继续当前任务”；
+- 两种 Biz Retry模式共享最多三次预算，第三次后阶段仍未推进时结束托管，原因“当前任务重试超过限制次数”；
 - 点击停止时 expectedRunId 必须匹配当前活跃 Run；匹配后 Run 标记 cancelled，不取消已运行会话且不再自动推进；历史 Thread 取消不影响新 Run；
 - App 重启后 ManagedRun 历史和可视化恢复，未终态 Run 标记 failed；
 - 再次开始托管时创建新的 runId，重新 Inspect，不使用旧 action/Thread；
