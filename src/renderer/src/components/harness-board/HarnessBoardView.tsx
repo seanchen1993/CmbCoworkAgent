@@ -73,6 +73,10 @@ import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
 import {
+  buildHarnessPluginRunArtifactsContext,
+  type HarnessPluginRunArtifactsContext
+} from "@/lib/harness-plugin-run-artifacts"
+import {
   deleteThreadGroupSequentially,
   hasRunningThreadForDeletion
 } from "@/lib/thread-group-deletion"
@@ -187,6 +191,7 @@ const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
 const FEATURE_SESSION_INITIAL_VISIBLE_COUNT = 5
 const FEATURE_SESSION_VISIBLE_INCREMENT = 8
+const PLUGIN_RUN_ARTIFACTS_DEBOUNCE_MS = 3000
 const OTHER_ADAPTER_SCENARIO = "其他类别"
 const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
 const PROJECT_STATUS_POLL_INTERVAL_MS = 60 * 1000
@@ -7145,6 +7150,7 @@ interface HarnessBoardViewProps {
   onDismissGitChangeNotice?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
+  onPluginRunArtifactsChange?: (context: HarnessPluginRunArtifactsContext | null) => void
 }
 
 export function HarnessBoardView({
@@ -7152,7 +7158,8 @@ export function HarnessBoardView({
   onRequestOpenGitPanel,
   onDismissGitChangeNotice,
   onThreadGitStatusChange,
-  onActiveSessionThreadChange
+  onActiveSessionThreadChange,
+  onPluginRunArtifactsChange
 }: HarnessBoardViewProps = {}): React.JSX.Element {
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
@@ -7277,6 +7284,7 @@ export function HarnessBoardView({
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
   const loadProjectsRequestIdRef = useRef(0)
   const featureWorkflowRequestIdRef = useRef(0)
+  const publishedPluginRunArtifactsRef = useRef<HarnessPluginRunArtifactsContext | null>(null)
   projectsRef.current = projects
   enterpriseProjectDetailsByCodeRef.current = enterpriseProjectDetailsByCode
   selectedProjectIdRef.current = selectedProjectId
@@ -8518,6 +8526,53 @@ export function HarnessBoardView({
         : createUnboundRunDetail(selectedFeatureProjectDetail, selectedFeature.slug, selectedFeatureSessions)
     },
     [isViewingSession, runDetail, selectedFeature, selectedFeatureProjectDetail, selectedFeatureSessions]
+  )
+  const selectedFeatureSessionThreadIdsKey = selectedFeatureSessions
+    .map((session) => session.threadId)
+    .join("\u0000")
+  const pluginRunArtifactsContext = useMemo(
+    () =>
+      runDetail && !selectedFeature?.deleted
+        ? buildHarnessPluginRunArtifactsContext(
+            runDetail,
+            selectedFeatureSessionThreadIdsKey
+              ? selectedFeatureSessionThreadIdsKey.split("\u0000")
+              : []
+          )
+        : null,
+    [runDetail, selectedFeature?.deleted, selectedFeatureSessionThreadIdsKey]
+  )
+
+  useEffect(() => {
+    if (!onPluginRunArtifactsChange) return
+    if (!pluginRunArtifactsContext) {
+      publishedPluginRunArtifactsRef.current = null
+      onPluginRunArtifactsChange(null)
+      return
+    }
+
+    const publishedContext = publishedPluginRunArtifactsRef.current
+    const sameFeature =
+      publishedContext?.projectId === pluginRunArtifactsContext.projectId &&
+      publishedContext.slug === pluginRunArtifactsContext.slug
+    onPluginRunArtifactsChange({
+      ...pluginRunArtifactsContext,
+      files: sameFeature ? publishedContext.files : []
+    })
+
+    const timer = window.setTimeout(() => {
+      publishedPluginRunArtifactsRef.current = pluginRunArtifactsContext
+      onPluginRunArtifactsChange(pluginRunArtifactsContext)
+    }, PLUGIN_RUN_ARTIFACTS_DEBOUNCE_MS)
+
+    return () => window.clearTimeout(timer)
+  }, [onPluginRunArtifactsChange, pluginRunArtifactsContext])
+
+  useEffect(
+    () => () => {
+      onPluginRunArtifactsChange?.(null)
+    },
+    [onPluginRunArtifactsChange]
   )
   const showingUnboundRunDetail =
     runDetailWithSessions !== null &&
