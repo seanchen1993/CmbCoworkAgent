@@ -43,7 +43,8 @@ import {
   Copy,
   Check,
   ShieldCheck,
-  Eye
+  Eye,
+  PackageOpen
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -115,6 +116,15 @@ import {
   selectRightPanelWindow
 } from "@/components/panels/right-panel-render-window"
 import {
+  ensureHarnessPluginRunArtifactPreviewAuthorization,
+  getHarnessPluginRunArtifactsSnapshot,
+  isHarnessPluginRunArtifactGrantFresh,
+  subscribeHarnessPluginRunArtifacts,
+  resolveHarnessPluginRunArtifactPath,
+  type HarnessPluginRunArtifactPreviewAuthorization,
+  type HarnessPluginRunArtifactsContext
+} from "@/lib/harness-plugin-run-artifacts"
+import {
   getSystemConstraintsLoadCounts,
   SystemConstraintsPanel
 } from "@/components/panels/SystemConstraintsPanel"
@@ -181,6 +191,7 @@ interface HookDetailState {
 type PanelHeights = {
   tasks: number
   files: number
+  pluginRunArtifacts: number
   systemConstraints: number
   agents: number
   skills: number
@@ -328,6 +339,46 @@ interface RightPanelProps {
   onBrowserFullscreenChange?: (isFullscreen: boolean) => void
 }
 
+interface PreviewExternalAuthorization {
+  threadId: string
+  filePath: string
+  grant: string
+  expiresAt?: number
+  projectId?: string
+  slug?: string
+}
+
+function toHarnessArtifactPreviewAuthorization(
+  authorization: PreviewExternalAuthorization
+): HarnessPluginRunArtifactPreviewAuthorization | null {
+  if (
+    typeof authorization.expiresAt !== "number" ||
+    !Number.isFinite(authorization.expiresAt) ||
+    !authorization.projectId ||
+    !authorization.slug
+  ) {
+    return null
+  }
+  return {
+    grant: authorization.grant,
+    expiresAt: authorization.expiresAt,
+    projectId: authorization.projectId,
+    slug: authorization.slug,
+    filePath: authorization.filePath
+  }
+}
+
+function previewExternalAuthorizationIdentity(
+  authorization: PreviewExternalAuthorization
+): string {
+  return [
+    authorization.threadId,
+    authorization.projectId ?? "",
+    authorization.slug ?? "",
+    authorization.filePath
+  ].join("\u0000")
+}
+
 function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
   return (
     <div className="flex h-full min-h-0 items-center justify-center text-muted-foreground">
@@ -427,6 +478,18 @@ export function RightPanel({
     }))
   )
   const currentThreadId = threadId ?? storeCurrentThreadId
+  const pluginRunArtifacts = useSyncExternalStore(
+    subscribeHarnessPluginRunArtifacts,
+    getHarnessPluginRunArtifactsSnapshot,
+    getHarnessPluginRunArtifactsSnapshot
+  )
+  const activePluginRunArtifacts = useMemo(
+    () =>
+      currentThreadId && pluginRunArtifacts?.threadIds.includes(currentThreadId)
+        ? pluginRunArtifacts
+        : null,
+    [currentThreadId, pluginRunArtifacts]
+  )
   const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
   // Derive the current thread's card state from the per-thread map
   const skillGenerationAgent = selectSkillGenerationAgent(
@@ -454,11 +517,72 @@ export function RightPanel({
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
-  const [previewExternalGrant, setPreviewExternalGrant] = useState<string | null>(null)
+  const [previewExternalAuthorization, setPreviewExternalAuthorization] =
+    useState<PreviewExternalAuthorization | null>(null)
+  const previewExternalAuthorizationRef = useRef<PreviewExternalAuthorization | null>(null)
+  const previewExternalGrantRefreshPromiseRef = useRef<{
+    identity: string
+    marker: object
+    promise: Promise<PreviewExternalAuthorization>
+  } | null>(null)
+  const replacePreviewExternalAuthorization = useCallback(
+    (authorization: PreviewExternalAuthorization | null): void => {
+      previewExternalAuthorizationRef.current = authorization
+      setPreviewExternalAuthorization(authorization)
+    },
+    []
+  )
+  const resolveCurrentExternalPreviewGrant = useCallback(async (): Promise<string> => {
+    const current = previewExternalAuthorizationRef.current
+    if (!current) throw new Error("当前外部文件预览没有可信来源授权")
+    const renewable = toHarnessArtifactPreviewAuthorization(current)
+    if (!renewable) return current.grant
+    if (
+      isHarnessPluginRunArtifactGrantFresh(
+        renewable.grant,
+        renewable.expiresAt
+      )
+    ) {
+      return renewable.grant
+    }
+
+    const identity = previewExternalAuthorizationIdentity(current)
+    let pending = previewExternalGrantRefreshPromiseRef.current
+    if (!pending || pending.identity !== identity) {
+      const marker = {}
+      const promise = (async (): Promise<PreviewExternalAuthorization> => {
+        try {
+          const refreshed = await ensureHarnessPluginRunArtifactPreviewAuthorization(
+            renewable,
+            (input) => window.api.harnessBoard.refreshRunArtifactGrant(input)
+          )
+          const latest = previewExternalAuthorizationRef.current
+          if (!latest || previewExternalAuthorizationIdentity(latest) !== identity) {
+            throw new Error("产物预览已切换，已忽略过期授权续签")
+          }
+          const next = {
+            ...latest,
+            grant: refreshed.grant,
+            expiresAt: refreshed.expiresAt
+          }
+          replacePreviewExternalAuthorization(next)
+          return next
+        } finally {
+          if (previewExternalGrantRefreshPromiseRef.current?.marker === marker) {
+            previewExternalGrantRefreshPromiseRef.current = null
+          }
+        }
+      })()
+      pending = { identity, marker, promise }
+      previewExternalGrantRefreshPromiseRef.current = pending
+    }
+    return (await pending.promise).grant
+  }, [replacePreviewExternalAuthorization])
   const [previewReloadToken, setPreviewReloadToken] = useState(0)
   const lastThreadIdRef = useRef<string | null>(null)
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [pluginRunArtifactsOpen, setPluginRunArtifactsOpen] = useState(false)
   const [systemConstraintsOpen, setSystemConstraintsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
@@ -1066,7 +1190,8 @@ export function RightPanel({
   const applyStreamPreview = useCallback(
     (path: string, switchToPreview: boolean): void => {
       setPreviewPath(path)
-      setPreviewExternalGrant(null)
+      previewExternalGrantRefreshPromiseRef.current = null
+      replacePreviewExternalAuthorization(null)
       setPreviewReloadToken((version) => version + 1)
       if (!switchToPreview) return
       if (isHtmlPreviewPath(path)) {
@@ -1075,17 +1200,17 @@ export function RightPanel({
         onRequestPreviewMode?.()
       }
     },
-    [onRequestBrowserMode, onRequestPreviewMode]
+    [onRequestBrowserMode, onRequestPreviewMode, replacePreviewExternalAuthorization]
   )
 
   useEffect(() => {
-    if (!currentThreadId) return
     if (lastThreadIdRef.current !== currentThreadId) {
       lastThreadIdRef.current = currentThreadId
       setPreviewPath(null)
-      setPreviewExternalGrant(null)
+      previewExternalGrantRefreshPromiseRef.current = null
+      replacePreviewExternalAuthorization(null)
     }
-  }, [currentThreadId])
+  }, [currentThreadId, replacePreviewExternalAuthorization])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -1098,19 +1223,45 @@ export function RightPanel({
   }, [currentThreadId, previewPath])
 
   useEffect(() => {
-    const cleanup = onOpenResourcePreview(({ threadId, filePath, externalPreviewGrant }) => {
-      if (!currentThreadId || threadId !== currentThreadId) return
-      setPreviewPath(filePath)
-      setPreviewExternalGrant(externalPreviewGrant ?? null)
-      setPreviewReloadToken((v) => v + 1)
-      if (isHtmlPreviewPath(filePath) && !externalPreviewGrant) {
-        onRequestBrowserMode?.()
-      } else {
-        onRequestPreviewMode?.()
+    const cleanup = onOpenResourcePreview(
+      ({
+        threadId,
+        filePath,
+        externalPreviewGrant,
+        externalPreviewGrantExpiresAt,
+        externalPreviewProjectId,
+        externalPreviewSlug
+      }) => {
+        if (!currentThreadId || threadId !== currentThreadId) return
+        setPreviewPath(filePath)
+        previewExternalGrantRefreshPromiseRef.current = null
+        replacePreviewExternalAuthorization(
+          externalPreviewGrant
+            ? {
+                threadId,
+                filePath,
+                grant: externalPreviewGrant,
+                expiresAt: externalPreviewGrantExpiresAt,
+                projectId: externalPreviewProjectId,
+                slug: externalPreviewSlug
+              }
+            : null
+        )
+        setPreviewReloadToken((v) => v + 1)
+        if (isHtmlPreviewPath(filePath) && !externalPreviewGrant) {
+          onRequestBrowserMode?.()
+        } else {
+          onRequestPreviewMode?.()
+        }
       }
-    })
+    )
     return cleanup
-  }, [currentThreadId, onRequestBrowserMode, onRequestPreviewMode])
+  }, [
+    currentThreadId,
+    onRequestBrowserMode,
+    onRequestPreviewMode,
+    replacePreviewExternalAuthorization
+  ])
 
   useEffect(() => {
     if (moduleMode !== "preview" || !previewPath) onPreviewFullscreenChange?.(false)
@@ -1123,6 +1274,7 @@ export function RightPanel({
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
   const [filesHeight, setFilesHeight] = useState<number | null>(null)
+  const [pluginRunArtifactsHeight, setPluginRunArtifactsHeight] = useState<number | null>(null)
   const [systemConstraintsHeight, setSystemConstraintsHeight] = useState<number | null>(null)
   const [agentsHeight, setAgentsHeight] = useState<number | null>(null)
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
@@ -1134,6 +1286,7 @@ export function RightPanel({
   const dragStartHeights = useRef<{
     tasks: number
     files: number
+    pluginRunArtifacts: number
     systemConstraints: number
     agents: number
     skills: number
@@ -1151,6 +1304,7 @@ export function RightPanel({
     const openPanels = [
       tasksOpen,
       filesOpen,
+      Boolean(activePluginRunArtifacts && pluginRunArtifactsOpen),
       showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
@@ -1158,7 +1312,7 @@ export function RightPanel({
       hooksOpen,
       lspOpen
     ]
-    const sectionCount = showSystemConstraints ? 8 : 7
+    const sectionCount = (showSystemConstraints ? 8 : 7) + (activePluginRunArtifacts ? 1 : 0)
     let used = HEADER_HEIGHT * sectionCount
     // Fixed visual gaps between section blocks
     used += SECTION_GAP * (sectionCount - 1)
@@ -1177,6 +1331,8 @@ export function RightPanel({
     moduleMode,
     tasksOpen,
     filesOpen,
+    activePluginRunArtifacts,
+    pluginRunArtifactsOpen,
     showSystemConstraints,
     systemConstraintsOpen,
     agentsOpen,
@@ -1192,6 +1348,7 @@ export function RightPanel({
     const openCount = [
       tasksOpen,
       filesOpen,
+      Boolean(activePluginRunArtifacts && pluginRunArtifactsOpen),
       showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
@@ -1204,6 +1361,7 @@ export function RightPanel({
       return {
         tasks: 0,
         files: 0,
+        pluginRunArtifacts: 0,
         systemConstraints: 0,
         agents: 0,
         skills: 0,
@@ -1218,6 +1376,10 @@ export function RightPanel({
     return {
       tasks: tasksOpen ? (tasksHeight ?? defaultHeight) : 0,
       files: filesOpen ? (filesHeight ?? defaultHeight) : 0,
+      pluginRunArtifacts:
+        activePluginRunArtifacts && pluginRunArtifactsOpen
+          ? (pluginRunArtifactsHeight ?? defaultHeight)
+          : 0,
       systemConstraints:
         showSystemConstraints && systemConstraintsOpen
           ? (systemConstraintsHeight ?? defaultHeight)
@@ -1232,6 +1394,8 @@ export function RightPanel({
     getAvailableContentHeight,
     tasksOpen,
     filesOpen,
+    activePluginRunArtifacts,
+    pluginRunArtifactsOpen,
     showSystemConstraints,
     systemConstraintsOpen,
     agentsOpen,
@@ -1241,6 +1405,7 @@ export function RightPanel({
     lspOpen,
     tasksHeight,
     filesHeight,
+    pluginRunArtifactsHeight,
     systemConstraintsHeight,
     agentsHeight,
     skillsHeight,
@@ -1580,6 +1745,7 @@ export function RightPanel({
   useEffect(() => {
     setTasksHeight(null)
     setFilesHeight(null)
+    setPluginRunArtifactsHeight(null)
     setSystemConstraintsHeight(null)
     setAgentsHeight(null)
     setSkillsHeight(null)
@@ -1589,6 +1755,7 @@ export function RightPanel({
   }, [
     tasksOpen,
     filesOpen,
+    pluginRunArtifactsOpen,
     systemConstraintsOpen,
     agentsOpen,
     skillsOpen,
@@ -1601,6 +1768,7 @@ export function RightPanel({
   const [heights, setHeights] = useState<PanelHeights>({
     tasks: 0,
     files: 0,
+    pluginRunArtifacts: 0,
     systemConstraints: 0,
     agents: 0,
     skills: 0,
@@ -1616,6 +1784,7 @@ export function RightPanel({
     moduleMode === "work" &&
     !tasksOpen &&
     !filesOpen &&
+    !(activePluginRunArtifacts && pluginRunArtifactsOpen) &&
     !(showSystemConstraints && systemConstraintsOpen) &&
     !agentsOpen &&
     !skillsOpen &&
@@ -1669,6 +1838,7 @@ export function RightPanel({
     : workspaceFileBadge === null
       ? "待加载"
       : null
+  const previewExternalGrant = previewExternalAuthorization?.grant ?? null
 
   return (
     <aside
@@ -1710,6 +1880,11 @@ export function RightPanel({
                 workspacePath={workspacePath ?? null}
                 threadId={currentThreadId ?? ""}
                 externalPreviewGrant={previewExternalGrant ?? undefined}
+                resolveExternalPreviewGrant={
+                  previewExternalAuthorization
+                    ? resolveCurrentExternalPreviewGrant
+                    : undefined
+                }
                 reloadToken={previewReloadToken}
                 onReload={() => setPreviewReloadToken((v) => v + 1)}
                 onFullscreenChange={onPreviewFullscreenChange}
@@ -1847,6 +2022,41 @@ export function RightPanel({
               </div>
             )}
           </div>
+
+          {activePluginRunArtifacts && (
+            <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+              <SectionHeader
+                title="插件运行产物"
+                icon={PackageOpen}
+                badge={activePluginRunArtifacts.files.length}
+                badgeTitle={
+                  activePluginRunArtifacts.truncated
+                    ? `仅展示前 ${activePluginRunArtifacts.files.length} 项`
+                    : `共 ${activePluginRunArtifacts.files.length} 项`
+                }
+                badgeTruncated={activePluginRunArtifacts.truncated}
+                isOpen={pluginRunArtifactsOpen}
+                onToggle={() => setPluginRunArtifactsOpen((prev) => !prev)}
+              />
+              {pluginRunArtifactsOpen && (
+                <div
+                  className="overflow-auto right-panel-scroll"
+                  style={{ height: heights.pluginRunArtifacts }}
+                >
+                  <PluginRunArtifactsContent
+                    key={JSON.stringify([
+                      activePluginRunArtifacts.projectId,
+                      activePluginRunArtifacts.slug,
+                      activePluginRunArtifacts.projectRootPath,
+                      currentThreadId
+                    ])}
+                    context={activePluginRunArtifacts}
+                    threadId={currentThreadId}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Resize handle after FILES */}
           {!showSystemConstraints && filesOpen && agentsOpen && (
@@ -2402,11 +2612,206 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
   )
 }
 
+function PluginRunArtifactsContent({
+  context,
+  threadId
+}: {
+  context: HarnessPluginRunArtifactsContext
+  threadId: string | null
+}): React.JSX.Element {
+  const [visibleArtifactCount, setVisibleArtifactCount] = useState(
+    RIGHT_PANEL_INITIAL_RENDER_ITEMS
+  )
+  const previewGrantRef = useRef<{ grant: string; expiresAt: number } | null>(null)
+  const grantRefreshPromiseRef = useRef<Promise<{
+    grant: string
+    expiresAt: number
+  }> | null>(null)
+  const artifactActionGenerationRef = useRef(0)
+  useEffect(() => {
+    const mountedGeneration = artifactActionGenerationRef.current
+    return () => {
+      if (artifactActionGenerationRef.current === mountedGeneration) {
+        artifactActionGenerationRef.current += 1
+      }
+    }
+  }, [])
+  if (
+    context.previewGrant &&
+    typeof context.previewGrantExpiresAt === "number" &&
+    Number.isFinite(context.previewGrantExpiresAt) &&
+    (!previewGrantRef.current ||
+      context.previewGrant !== previewGrantRef.current.grant ||
+      context.previewGrantExpiresAt > previewGrantRef.current.expiresAt)
+  ) {
+    previewGrantRef.current = {
+      grant: context.previewGrant,
+      expiresAt: context.previewGrantExpiresAt
+    }
+  }
+  const visibleArtifacts = useMemo(
+    () => selectRightPanelWindow(context.files, visibleArtifactCount),
+    [context.files, visibleArtifactCount]
+  )
+
+  const getCurrentPreviewGrant = useCallback(
+    async (filePath: string): Promise<{ grant: string; expiresAt: number }> => {
+      const current = previewGrantRef.current
+      if (
+        current &&
+        isHarnessPluginRunArtifactGrantFresh(current.grant, current.expiresAt)
+      ) {
+        return current
+      }
+
+      if (!grantRefreshPromiseRef.current) {
+        const refresh = (async (): Promise<{ grant: string; expiresAt: number }> => {
+          try {
+            const result = await window.api.harnessBoard.refreshRunArtifactGrant({
+              projectId: context.projectId,
+              slug: context.slug,
+              filePath
+            })
+            if (!result.success) throw new Error(result.error)
+            const next = { grant: result.grant, expiresAt: result.expiresAt }
+            previewGrantRef.current = next
+            return next
+          } finally {
+            grantRefreshPromiseRef.current = null
+          }
+        })()
+        grantRefreshPromiseRef.current = refresh
+      }
+
+      return await grantRefreshPromiseRef.current
+    },
+    [context.projectId, context.slug]
+  )
+
+  const openArtifact = useCallback(
+    async (artifact: HarnessPluginRunArtifactsContext["files"][number]): Promise<void> => {
+      if (!threadId) return
+      const actionGeneration = artifactActionGenerationRef.current
+      const filePath = resolveHarnessPluginRunArtifactPath(
+        context.projectRootPath,
+        artifact.path
+      )
+      if (!filePath) {
+        toast.error("产物路径超出项目目录，已阻止打开")
+        return
+      }
+      let previewAuthorization: { grant: string; expiresAt: number }
+      try {
+        previewAuthorization = await getCurrentPreviewGrant(filePath)
+      } catch (error) {
+        if (artifactActionGenerationRef.current !== actionGeneration) return
+        toast.error(error instanceof Error ? error.message : "产物预览授权续签失败")
+        return
+      }
+      // A near-expiry renewal can outlive this project/feature/thread surface.
+      // The keyed remount plus generation fence prevents its continuation from
+      // revealing or reopening an artifact that belongs to the previous view.
+      if (artifactActionGenerationRef.current !== actionGeneration) return
+
+      if (artifact.artifactType === "directory") {
+        try {
+          const result = await window.api.harnessBoard.revealRunArtifact({
+            grant: previewAuthorization.grant,
+            filePath
+          })
+          if (
+            artifactActionGenerationRef.current === actionGeneration &&
+            !result.success
+          ) {
+            toast.error(result.error)
+          }
+        } catch (error) {
+          if (artifactActionGenerationRef.current !== actionGeneration) return
+          toast.error(error instanceof Error ? error.message : "无法打开产物位置")
+        }
+        return
+      }
+
+      emitOpenResourcePreview({
+        threadId,
+        filePath,
+        externalPreviewGrant: previewAuthorization.grant,
+        externalPreviewGrantExpiresAt: previewAuthorization.expiresAt,
+        externalPreviewProjectId: context.projectId,
+        externalPreviewSlug: context.slug
+      })
+    },
+    [context.projectRootPath, getCurrentPreviewGrant, threadId]
+  )
+
+  if (context.files.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
+        <PackageOpen className="mb-2 size-8 opacity-50" />
+        <span>暂无已生成的插件运行产物</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="select-none py-1">
+      {visibleArtifacts.map((artifact) => {
+        const fileName = artifact.path.split(/[\\/]/).pop() || artifact.path
+        const isDirectory = artifact.artifactType === "directory"
+        return (
+          <button
+            key={artifact.path}
+            type="button"
+            className="group flex w-full min-w-0 items-start gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-background-interactive focus-visible:bg-background-interactive focus-visible:outline-none"
+            title={artifact.path}
+            onClick={() => void openArtifact(artifact)}
+          >
+            <span className="mt-0.5 shrink-0">
+              <FileIcon name={fileName} isDir={isDirectory} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium text-foreground">{fileName}</span>
+              <span className="mt-0.5 block break-all font-mono text-[10px] leading-4 text-muted-foreground">
+                {artifact.path}
+              </span>
+            </span>
+            {isDirectory ? (
+              <FolderOpen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            ) : (
+              <Eye className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            )}
+          </button>
+        )
+      })}
+      {visibleArtifacts.length < context.files.length && (
+        <button
+          type="button"
+          className="mx-3 my-2 w-[calc(100%-1.5rem)] rounded-md border border-border px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
+          onClick={() =>
+            setVisibleArtifactCount((count) => count + RIGHT_PANEL_RENDER_PAGE_ITEMS)
+          }
+        >
+          再显示 {Math.min(
+            RIGHT_PANEL_RENDER_PAGE_ITEMS,
+            context.files.length - visibleArtifacts.length
+          )} 项
+        </button>
+      )}
+      {context.truncated && (
+        <div className="border-t border-border/50 px-3 py-2 text-xs text-muted-foreground">
+          产物较多，仅展示前 {context.files.length} 项
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ResourcePreview({
   filePath,
   workspacePath,
   threadId,
   externalPreviewGrant,
+  resolveExternalPreviewGrant,
   reloadToken,
   onReload,
   onFullscreenChange,
@@ -2416,6 +2821,7 @@ function ResourcePreview({
   workspacePath: string | null
   threadId: string
   externalPreviewGrant?: string
+  resolveExternalPreviewGrant?: () => Promise<string>
   reloadToken: number
   onReload?: () => void
   onFullscreenChange?: (isFullscreen: boolean) => void
@@ -2446,13 +2852,24 @@ function ResourcePreview({
 
   const openInFolder = useCallback(async () => {
     try {
+      if (externalPreviewGrant) {
+        const grant = resolveExternalPreviewGrant
+          ? await resolveExternalPreviewGrant()
+          : externalPreviewGrant
+        const result = await window.api.harnessBoard.revealRunArtifact({
+          grant,
+          filePath: fullPath
+        })
+        if (!result.success) throw new Error(result.error)
+        return
+      }
       const platform = await window.electron.ipcRenderer.invoke("get-platform")
       const normalizedPath = platform === "win32" ? fullPath.replace(/\//g, "\\") : fullPath
       await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
     } catch (error) {
       console.error("[ResourcePreview] Failed to show item in folder:", error)
     }
-  }, [fullPath])
+  }, [externalPreviewGrant, fullPath, resolveExternalPreviewGrant])
 
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
@@ -2479,7 +2896,12 @@ function ResourcePreview({
       const lane = `right-panel-copy:${threadId}`
       const source = resolved.inWorkspace
         ? { threadId, filePath: resolved.workspaceFilePath }
-        : { externalGrant: externalPreviewGrant!, filePath: resolved.fullPath }
+        : {
+            externalGrant: resolveExternalPreviewGrant
+              ? await resolveExternalPreviewGrant()
+              : externalPreviewGrant!,
+            filePath: resolved.fullPath
+          }
       const chunks: string[] = []
       let totalBytes = 0
       let offset = 0
@@ -2519,7 +2941,13 @@ function ResourcePreview({
       console.error("[ResourcePreview] Failed to copy file content:", error)
       toast.error("复制失败，请重试")
     }
-  }, [canCopyContent, externalPreviewGrant, resolved, threadId])
+  }, [
+    canCopyContent,
+    externalPreviewGrant,
+    resolveExternalPreviewGrant,
+    resolved,
+    threadId
+  ])
 
   useEffect(() => {
     if (!isFullscreen) return
@@ -2638,6 +3066,7 @@ function ResourcePreview({
             filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
             externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
             externalPreviewGrant={externalPreviewGrant}
+            resolveExternalPreviewGrant={resolveExternalPreviewGrant}
             htmlFillHeight
             reloadToken={reloadToken}
             previewMode={supportsSourceView ? previewMode : undefined}

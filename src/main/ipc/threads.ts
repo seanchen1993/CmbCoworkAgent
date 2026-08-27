@@ -96,6 +96,8 @@ import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
 import { getDefaultModel } from "./models"
 import { stopWatching } from "../services/workspace-watcher"
+import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
+import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
 import type {
   ForkableCheckpoint,
   Message,
@@ -103,6 +105,9 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadDeleteOptions,
+  ThreadGroupIdsOptions,
+  ThreadGroupSelector,
   SubagentTranscriptBlobField,
   ThreadMessageSearchOptions,
   ThreadHydrationOptions,
@@ -175,6 +180,7 @@ import {
 import {
   isThreadMetadataHydrationWorkerUnavailable,
   readThreadGoalEventsInWorker,
+  readThreadGroupIdsInWorker,
   readThreadHydrationInWorker,
   readThreadSummaryPageInWorker
 } from "../thread-metadata-hydration/client"
@@ -2745,6 +2751,88 @@ function serializeGoal(goal: ThreadGoal | null): ThreadGoal | null {
     : null
 }
 
+function normalizeThreadGroupIdsOptions(options: ThreadGroupIdsOptions): ThreadGroupIdsOptions {
+  if (!options || typeof options !== "object" || !options.selector) {
+    throw new Error("Invalid thread group selector")
+  }
+  const selector = options.selector
+  let normalizedSelector: ThreadGroupIdsOptions["selector"]
+  if (selector.type === "workspace") {
+    if (
+      selector.workspacePath !== null &&
+      (typeof selector.workspacePath !== "string" ||
+        !selector.workspacePath.trim() ||
+        selector.workspacePath.length > 32_768)
+    ) {
+      throw new Error("Invalid workspace thread group selector")
+    }
+    normalizedSelector = { type: "workspace", workspacePath: selector.workspacePath }
+  } else if (selector.type === "harness-project") {
+    const projectId = typeof selector.projectId === "string" ? selector.projectId.trim() : ""
+    if (!projectId || projectId.length > 512) {
+      throw new Error("Invalid harness project thread group selector")
+    }
+    normalizedSelector = { type: "harness-project", projectId }
+  } else if (selector.type === "harness-feature") {
+    const projectId = typeof selector.projectId === "string" ? selector.projectId.trim() : ""
+    const slug = typeof selector.slug === "string" ? selector.slug.trim() : ""
+    if (!projectId || !slug || projectId.length > 512 || slug.length > 512) {
+      throw new Error("Invalid harness feature thread group selector")
+    }
+    normalizedSelector = { type: "harness-feature", projectId, slug }
+  } else {
+    throw new Error("Unsupported thread group selector")
+  }
+
+  return { selector: normalizedSelector }
+}
+
+function normalizeThreadDeleteOptions(options: unknown): ThreadDeleteOptions | undefined {
+  if (options === undefined) return undefined
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new Error("Invalid thread delete options")
+  }
+  const source = options as Record<string, unknown>
+  if (source.requireIdle !== undefined && typeof source.requireIdle !== "boolean") {
+    throw new Error("Invalid thread delete idle guard")
+  }
+
+  let groupGuard: ThreadDeleteOptions["groupGuard"]
+  if (source.groupGuard !== undefined) {
+    if (!source.groupGuard || typeof source.groupGuard !== "object" || Array.isArray(source.groupGuard)) {
+      throw new Error("Invalid thread group delete guard")
+    }
+    const rawGuard = source.groupGuard as Record<string, unknown>
+    const selector = normalizeThreadGroupIdsOptions({
+      selector: rawGuard.selector as ThreadGroupSelector
+    }).selector
+    const rawIncarnation = rawGuard.incarnation
+    if (!rawIncarnation || typeof rawIncarnation !== "object" || Array.isArray(rawIncarnation)) {
+      throw new Error("Invalid thread group delete incarnation")
+    }
+    const incarnation = rawIncarnation as Record<string, unknown>
+    const token = incarnation.token
+    const legacyCreatedAt = incarnation.legacyCreatedAt
+    if (
+      (token !== null &&
+        (typeof token !== "string" || token.length === 0 || token.length > 4_096)) ||
+      typeof legacyCreatedAt !== "number" ||
+      !Number.isFinite(legacyCreatedAt)
+    ) {
+      throw new Error("Invalid thread group delete incarnation")
+    }
+    groupGuard = {
+      selector,
+      incarnation: { token, legacyCreatedAt }
+    }
+  }
+
+  return {
+    ...(source.requireIdle === undefined ? {} : { requireIdle: source.requireIdle }),
+    ...(groupGuard ? { groupGuard } : {})
+  }
+}
+
 export function registerThreadHandlers(ipcMain: IpcMain): void {
   // Read a bounded page of task summaries. The renderer incrementally builds the
   // directory so Electron never structured-clones an unbounded task table.
@@ -2760,6 +2848,26 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       return readThreadSummaryPageInWorker(options, event.sender.id)
     }
   })
+
+  // Destructive group actions must select against the full durable directory,
+  // not the renderer's bounded 128-row window. The selector is intentionally
+  // closed and validated here; arbitrary metadata predicates never cross IPC.
+  ipcMain.handle(
+    "threads:list-group-ids",
+    async (event, options: ThreadGroupIdsOptions) => {
+      const normalized = normalizeThreadGroupIdsOptions(options)
+      try {
+        return await readThreadGroupIdsInWorker(normalized, event.sender.id)
+      } catch (error) {
+        if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error
+        console.warn(
+          "[ThreadMetadataHydrationWorker] unavailable; retrying bounded group id selection",
+          error
+        )
+        return readThreadGroupIdsInWorker(normalized, event.sender.id)
+      }
+    }
+  )
 
   // Get a single thread
   ipcMain.handle(
@@ -3529,7 +3637,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   const performThreadDeletion = async (
     event: IpcMainInvokeEvent,
-    threadId: string
+    threadId: string,
+    groupGuard?: ThreadDeleteOptions["groupGuard"]
   ): Promise<void> => {
     console.log("[Threads] Deleting thread:", threadId)
 
@@ -3585,9 +3694,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // Fire SessionEnd before teardown so hooks can observe a valid thread
       // record. No-op if SessionStart never fired for this thread.
       const existingThread = getThreadCore(threadId)
+      let deletionMetadata: Record<string, unknown> = {}
       if (existingThread?.metadata) {
         try {
           const metadata = JSON.parse(existingThread.metadata) as Record<string, unknown>
+          deletionMetadata = metadata
           workspacePath =
             typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
         } catch {
@@ -3673,6 +3784,37 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
       await waitForCleanupBestEffort()
 
+      // Hooks and external services may not all use the renderer mutation IPC.
+      // Rebind the destructive intent at the final synchronous commit boundary.
+      if (groupGuard) {
+        const latestThread = getThreadCore(threadId)
+        let latestMetadata: Record<string, unknown> | null = null
+        try {
+          const parsed = latestThread?.metadata
+            ? (JSON.parse(latestThread.metadata) as unknown)
+            : {}
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            throw new Error("Thread metadata is not an object")
+          }
+          latestMetadata = parsed as Record<string, unknown>
+        } catch {
+          throw new Error("会话元数据异常，无法确认分组归属，请重新确认。")
+        }
+        if (
+          !matchesThreadIncarnation(latestThread, groupGuard.incarnation) ||
+          !threadMetadataMatchesGroupSelector(latestMetadata, groupGuard.selector)
+        ) {
+          throw new Error("会话已变更或已移出分组，请重新确认。")
+        }
+        deletionMetadata = latestMetadata
+      }
+
+      // External owners do not all acquire the thread mutation lock when they
+      // claim a run. Recheck at the final synchronous commit boundary: no event
+      // can register a new owner between this guard and dbDeleteThread below.
+      if (isExternallyManagedThreadRunBusy(threadId, deletionMetadata)) {
+        throw new Error("会话仍在运行或有待处理结果，已停止删除。")
+      }
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)
       forgetLegacySubagentTranscriptMigration(threadId)
@@ -3759,7 +3901,15 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // reversing this order would leave a window where a late final flush could
       // recreate `<thread>/workflows` before its dir tombstone is registered.
       // The compatibility sweep also removes pre-upgrade project-local runs.
-      await deleteWorkflowRunsForThread(workspacePath, threadId)
+      try {
+        await deleteWorkflowRunsForThread(workspacePath, threadId)
+        console.log("[Threads] Deleted workflow run artifacts")
+      } catch (e) {
+        // The metadata row is already gone. A best-effort artifact cleanup
+        // failure must not make the renderer treat this committed deletion as
+        // retryable; a retry can only fail with "Thread not found".
+        console.warn("[Threads] Failed to delete workflow run artifacts:", e)
+      }
       try {
         await deleteProjectThreadDataDirectory(workspacePath, threadId)
         console.log("[Threads] Deleted app-managed thread history and large results")
@@ -3773,7 +3923,13 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
       }
     } else {
-      await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(threadId)
+      try {
+        await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(threadId)
+      } catch (e) {
+        // As above, post-commit cleanup is best-effort. Keep the successful DB
+        // deletion as the IPC outcome even when artifact removal times out.
+        console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
+      }
     }
 
     try {
@@ -3789,26 +3945,62 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     scheduleTranscriptBlobGc()
   }
 
-  ipcMain.handle("threads:delete", async (event, threadId: string) => {
-    // Abort a parser before waiting for the same-thread mutation lock. Every
-    // completed batch is independently committed and therefore safe to leave
-    // behind until deletion or a later idempotent retry.
-    cancelLegacySubagentTranscriptMigration(threadId)
-    cancelSubagentTranscriptStartupRead(threadId)
-    cancelLegacyCheckpointTranscriptBootstrap(threadId)
-    return withThreadRunMutationLock(threadId, async () => {
-      while (deletingThreads.has(threadId)) {
-        await deletingThreads.get(threadId)?.catch(() => undefined)
-      }
-      const deletion = performThreadDeletion(event, threadId)
-      deletingThreads.set(threadId, deletion)
-      try {
-        await deletion
-      } finally {
-        if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
-      }
-    })
-  })
+  ipcMain.handle(
+    "threads:delete",
+    async (event, threadId: string, rawOptions?: ThreadDeleteOptions) => {
+      const options = normalizeThreadDeleteOptions(rawOptions)
+      const lease = requireThreadMutationLease(threadId)
+      // Abort a parser before waiting for the same-thread mutation lock. Every
+      // completed batch is independently committed and therefore safe to leave
+      // behind until deletion or a later idempotent retry.
+      cancelLegacySubagentTranscriptMigration(threadId)
+      cancelSubagentTranscriptStartupRead(threadId)
+      cancelLegacyCheckpointTranscriptBootstrap(threadId)
+      return withThreadMutationLeaseLock(lease, async (threadRow) => {
+        let metadata: Record<string, unknown> | null = null
+        if (options?.groupGuard || options?.requireIdle) {
+          try {
+            const parsed = threadRow.metadata ? (JSON.parse(threadRow.metadata) as unknown) : {}
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+              throw new Error("Thread metadata is not an object")
+            }
+            metadata = parsed as Record<string, unknown>
+          } catch {
+            // Malformed metadata is not safe to treat as idle for bulk deletion.
+            throw new Error("会话元数据异常，无法确认运行状态，请单独处理该会话。")
+          }
+        }
+        if (
+          options?.groupGuard &&
+          (!matchesThreadIncarnation(threadRow, options.groupGuard.incarnation) ||
+            !threadMetadataMatchesGroupSelector(metadata!, options.groupGuard.selector))
+        ) {
+          throw new Error("会话已变更或已移出分组，请重新确认。")
+        }
+        if (options?.requireIdle) {
+          const workspacePath =
+            typeof metadata!.workspacePath === "string" ? metadata!.workspacePath : null
+          const agentMode = getAgentModeFromMetadata(metadata!)
+          if (
+            isExternallyManagedThreadRunBusy(threadId, metadata!) ||
+            (await isThreadForkBusy({ threadId, workspacePath, agentMode }))
+          ) {
+            throw new Error("会话仍在运行或有待处理结果，已停止批量删除。")
+          }
+        }
+        while (deletingThreads.has(threadId)) {
+          await deletingThreads.get(threadId)?.catch(() => undefined)
+        }
+        const deletion = performThreadDeletion(event, threadId, options?.groupGuard)
+        deletingThreads.set(threadId, deletion)
+        try {
+          await deletion
+        } finally {
+          if (deletingThreads.get(threadId) === deletion) deletingThreads.delete(threadId)
+        }
+      })
+    }
+  )
 
   // Get thread history (checkpoints)
   ipcMain.handle("threads:history", async (_event, threadId: string) => {

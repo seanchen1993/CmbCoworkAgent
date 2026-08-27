@@ -41,6 +41,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
+import { ThreadGroupDeleteDialog } from "./ThreadGroupDeleteDialog"
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
@@ -49,6 +50,17 @@ import {
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
 import { useFeatureGate } from "@/lib/feature-gates"
+import {
+  cleanupDeletedThreadIfResident,
+  deleteThreadGroupSequentially,
+  hasRunningThreadForDeletion,
+  runBestEffortCommittedDeletionCleanups
+} from "@/lib/thread-group-deletion"
+import {
+  haveSameThreadGroupSelection,
+  listCompleteThreadGroupSelection,
+  type ThreadGroupSelectionEntry
+} from "@/lib/thread-group-selection"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
@@ -82,6 +94,13 @@ interface ThreadProject {
   isPinned: boolean
   hasCustomName: boolean
   sortIndex: number
+}
+
+interface ThreadProjectDeleteTarget {
+  key: string
+  name: string
+  selector: { type: "workspace"; workspacePath: string | null }
+  selection: ThreadGroupSelectionEntry[]
 }
 
 function getThreadWorkspacePath(thread: Thread, statePath?: string | null): string | null {
@@ -453,6 +472,7 @@ export function ThreadSidebar(): React.JSX.Element {
     forkThread,
     selectThread,
     deleteThread,
+    finalizeThreadDeletions,
     updateThread,
     threadDirectoryHasMore,
     threadDirectoryLoadingMore,
@@ -479,6 +499,7 @@ export function ThreadSidebar(): React.JSX.Element {
       listForkableCheckpoints: state.listForkableCheckpoints,
       selectThread: state.selectThread,
       deleteThread: state.deleteThread,
+      finalizeThreadDeletions: state.finalizeThreadDeletions,
       updateThread: state.updateThread,
       threadDirectoryHasMore: state.threadDirectoryHasMore,
       threadDirectoryLoadingMore: state.threadDirectoryLoadingMore,
@@ -566,10 +587,17 @@ export function ThreadSidebar(): React.JSX.Element {
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [forkingThreadId, setForkingThreadId] = useState<string | null>(null)
   const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
-  const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
+  const [projectToDelete, setProjectToDelete] = useState<ThreadProjectDeleteTarget | null>(null)
+  const [confirmingProjectDeletion, setConfirmingProjectDeletion] = useState(false)
   const [projectToRename, setProjectToRename] = useState<ThreadProject | null>(null)
   const exportingThreadIdRef = useRef<string | null>(null)
   const forkingThreadIdRef = useRef<string | null>(null)
+  const projectDeletionInFlightRef = useRef(false)
+  const projectDeletionSelectionInFlightRef = useRef(false)
+  const threadStateSummariesRef = useRef(threadStateSummaries)
+  const streamLoadingStatesRef = useRef(allStreamLoadingStates)
+  threadStateSummariesRef.current = threadStateSummaries
+  streamLoadingStatesRef.current = allStreamLoadingStates
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
   const {
@@ -665,6 +693,28 @@ export function ThreadSidebar(): React.JSX.Element {
         const next = new Set(prev)
         next.delete(threadId)
         persistUnread(next)
+        return next
+      })
+    },
+    [persistUnread]
+  )
+
+  const markReadMany = useCallback(
+    (threadIds: Iterable<string>) => {
+      const deletedIds = new Set(threadIds)
+      if (deletedIds.size === 0) return
+      setUnreadIds((prev) => {
+        let changed = false
+        const next = new Set(prev)
+        for (const threadId of deletedIds) {
+          if (next.delete(threadId)) changed = true
+        }
+        if (!changed) return prev
+        try {
+          persistUnread(next)
+        } catch (error) {
+          console.warn("[ThreadSidebar] Failed to persist grouped read state:", error)
+        }
         return next
       })
     },
@@ -985,9 +1035,17 @@ export function ThreadSidebar(): React.JSX.Element {
     if (!threadToDelete) return
 
     try {
-      await deleteThread(threadToDelete.thread_id)
-      cleanupThread(threadToDelete.thread_id)
-      markRead(threadToDelete.thread_id)
+      const result = await deleteThreadGroupSequentially([threadToDelete.thread_id], {
+        deleteThread,
+        cleanupThread: (threadId) =>
+          cleanupDeletedThreadIfResident(
+            threadId,
+            threadStateSummariesRef.current,
+            cleanupThread
+          ),
+        markRead
+      })
+      if (result.remainingIds.length > 0) throw result.error ?? new Error("删除会话失败")
       setThreadToDelete(null)
     } catch (error) {
       console.error("[ThreadSidebar] Failed to delete thread:", error)
@@ -1051,25 +1109,129 @@ export function ThreadSidebar(): React.JSX.Element {
     setForkingThreadId(threadId)
   }, [])
 
-  const confirmDeleteProject = useCallback(async () => {
-    if (!projectToDelete) return
-
-    for (const thread of projectToDelete.threads) {
-      await deleteThread(thread.thread_id)
-      cleanupThread(thread.thread_id)
-      markRead(thread.thread_id)
+  const openProjectDeleteDialog = useCallback(async (project: ThreadProject): Promise<void> => {
+    if (projectDeletionSelectionInFlightRef.current || projectDeletionInFlightRef.current) return
+    projectDeletionSelectionInFlightRef.current = true
+    const selector = { type: "workspace", workspacePath: project.path } as const
+    try {
+      const selection = await listCompleteThreadGroupSelection(selector)
+      if (selection.length === 0) {
+        toast.info("该工作区已没有可删除的会话")
+        return
+      }
+      setProjectToDelete({ key: project.key, name: project.name, selector, selection })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法读取完整工作区会话列表")
+    } finally {
+      projectDeletionSelectionInFlightRef.current = false
     }
+  }, [])
 
-    setCollapsedProjectKeys((prev) => {
-      if (!prev.has(projectToDelete.key)) return prev
-      const next = new Set(prev)
-      next.delete(projectToDelete.key)
-      persistCollapsedProjects(next)
-      return next
-    })
-    setProjectToDelete(null)
-    setHoveredProjectKey(null)
-  }, [cleanupThread, deleteThread, markRead, persistCollapsedProjects, projectToDelete])
+  const confirmDeleteProject = useCallback(async () => {
+    if (!projectToDelete || projectDeletionInFlightRef.current) return
+
+    projectDeletionInFlightRef.current = true
+    setConfirmingProjectDeletion(true)
+    try {
+      let latestSelection: ThreadGroupSelectionEntry[]
+      try {
+        latestSelection = await listCompleteThreadGroupSelection(projectToDelete.selector)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "无法复核完整工作区会话列表")
+        return
+      }
+      if (!haveSameThreadGroupSelection(projectToDelete.selection, latestSelection)) {
+        if (latestSelection.length === 0) {
+          setProjectToDelete(null)
+          toast.info("该工作区已没有可删除的会话")
+          return
+        }
+        setProjectToDelete({ ...projectToDelete, selection: latestSelection })
+        toast.info("工作区会话列表已变化，请核对数量后重新确认")
+        return
+      }
+      const latestIds = latestSelection.map((entry) => entry.threadId)
+      const incarnationById = new Map(
+        latestSelection.map((entry) => [entry.threadId, entry.incarnation] as const)
+      )
+      if (
+        hasRunningThreadForDeletion(
+          latestIds,
+          threadStateSummariesRef.current,
+          streamLoadingStatesRef.current
+        )
+      ) {
+        toast.error("工作区内有运行中的任务，已取消删除")
+        return
+      }
+
+      const result = await deleteThreadGroupSequentially(latestIds, {
+        deleteThread: (threadId) =>
+          deleteThread(threadId, {
+            requireIdle: true,
+            deferDirectoryUpdate: true,
+            groupGuard: {
+              selector: projectToDelete.selector,
+              incarnation: incarnationById.get(threadId)!
+            }
+          }),
+        cleanupThread: (threadId) =>
+          cleanupDeletedThreadIfResident(
+            threadId,
+            threadStateSummariesRef.current,
+            cleanupThread
+          ),
+        markRead: () => undefined
+      })
+      runBestEffortCommittedDeletionCleanups([
+        {
+          label: "Failed to finalize grouped thread directory state",
+          run: () => finalizeThreadDeletions(result.deletedIds)
+        },
+        {
+          label: "Failed to persist grouped read state",
+          run: () => markReadMany(result.deletedIds)
+        }
+      ])
+      if (result.remainingIds.length > 0) {
+        const remainingIds = new Set(result.remainingIds)
+        setProjectToDelete({
+          ...projectToDelete,
+          selection: projectToDelete.selection.filter((entry) => remainingIds.has(entry.threadId))
+        })
+        const reason = result.error instanceof Error ? result.error.message : "删除失败"
+        toast.error(
+          `已删除 ${result.deletedIds.length}/${latestIds.length} 个会话，剩余项可重试：${reason}`
+        )
+        return
+      }
+
+      setCollapsedProjectKeys((prev) => {
+        if (!prev.has(projectToDelete.key)) return prev
+        const next = new Set(prev)
+        next.delete(projectToDelete.key)
+        runBestEffortCommittedDeletionCleanups([
+          {
+            label: "Failed to persist grouped workspace collapse state",
+            run: () => persistCollapsedProjects(next)
+          }
+        ])
+        return next
+      })
+      setProjectToDelete(null)
+      setHoveredProjectKey(null)
+    } finally {
+      projectDeletionInFlightRef.current = false
+      setConfirmingProjectDeletion(false)
+    }
+  }, [
+    cleanupThread,
+    deleteThread,
+    finalizeThreadDeletions,
+    markReadMany,
+    persistCollapsedProjects,
+    projectToDelete
+  ])
 
   const [version, setVersion] = useState("")
 
@@ -1430,7 +1592,7 @@ export function ThreadSidebar(): React.JSX.Element {
                                       "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive",
                                       hasRunningThread && "cursor-not-allowed !opacity-30"
                                     )}
-                                    onClick={() => setProjectToDelete(project)}
+                                    onClick={() => void openProjectDeleteDialog(project)}
                                   />
                                 </span>
                               </span>
@@ -1477,7 +1639,7 @@ export function ThreadSidebar(): React.JSX.Element {
                         <ContextMenuSeparator />
                         <ContextMenuItem
                           variant="destructive"
-                          onClick={() => setProjectToDelete(project)}
+                          onClick={() => void openProjectDeleteDialog(project)}
                           disabled={hasRunningThread}
                         >
                           <Trash2 className="size-4 mr-2" />
@@ -1671,26 +1833,20 @@ export function ThreadSidebar(): React.JSX.Element {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={!!projectToDelete} onOpenChange={(open) => !open && setProjectToDelete(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>确认删除工作区会话</DialogTitle>
-            <DialogDescription>
-              {projectToDelete
-                ? `确定要删除「${projectToDelete.name}」工作区下的全部 ${projectToDelete.threads.length} 个会话吗？删除后不可恢复。`
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setProjectToDelete(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={confirmDeleteProject}>
-              删除全部
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ThreadGroupDeleteDialog
+        open={!!projectToDelete}
+        title="确认删除工作区会话"
+        description={
+          projectToDelete
+            ? `确定要删除「${projectToDelete.name}」工作区下的全部 ${projectToDelete.selection.length} 个会话吗？删除后不可恢复。`
+            : ""
+        }
+        confirming={confirmingProjectDeletion}
+        onOpenChange={(open) => {
+          if (!open && !projectDeletionInFlightRef.current) setProjectToDelete(null)
+        }}
+        onConfirm={() => void confirmDeleteProject()}
+      />
       <WorkspaceRenameDialog
         open={!!projectToRename}
         workspace={projectToRename}

@@ -7494,6 +7494,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       disableChatReportUploadForThread(threadId)
       delete hookLogsSubscribersRef.current[threadId]
       setActiveThreadIds((prev) => {
+        if (!prev.has(threadId)) return prev
         const next = new Set(prev)
         next.delete(threadId)
         return next

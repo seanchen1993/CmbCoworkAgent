@@ -279,6 +279,44 @@ export interface ThreadSummaryPage {
   hasMore: boolean
 }
 
+export type ThreadGroupSelector =
+  | { type: "workspace"; workspacePath: string | null }
+  | { type: "harness-project"; projectId: string }
+  | { type: "harness-feature"; projectId: string; slug: string }
+
+export interface ThreadGroupIdsOptions {
+  selector: ThreadGroupSelector
+}
+
+/** Stable identity captured with a destructive group-selection snapshot. */
+export interface ThreadIncarnationSnapshot {
+  token: string | null
+  legacyCreatedAt: number
+}
+
+export interface ThreadGroupSelectionEntry {
+  threadId: string
+  incarnation: ThreadIncarnationSnapshot
+}
+
+export interface ThreadGroupIdsResult {
+  entries: ThreadGroupSelectionEntry[]
+}
+
+export interface ThreadGroupDeleteGuard {
+  selector: ThreadGroupSelector
+  incarnation: ThreadIncarnationSnapshot
+}
+
+export interface ThreadDeleteOptions {
+  requireIdle?: boolean
+  /**
+   * Bind a bulk-delete request to the exact row and group membership the user
+   * confirmed. Main rechecks this inside the same-thread mutation lock.
+   */
+  groupGuard?: ThreadGroupDeleteGuard
+}
+
 export interface ThreadMessagesPage {
   /** Messages are always returned in durable ascending transcript order. */
   messages: Message[]

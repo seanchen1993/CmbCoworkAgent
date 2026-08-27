@@ -14,6 +14,9 @@ import {
 } from "fs"
 import {
   deleteSqliteDurableFileSync,
+  forgetRegisteredSqliteQuarantineArtifact,
+  listRegisteredSqliteQuarantineArtifacts,
+  subscribeSqliteQuarantineArtifacts,
   sqliteDurableVariantBase,
   sqliteQuarantineVariantBase
 } from "./utils/sqlite-durable-file"
@@ -136,12 +139,239 @@ export function getThreadCheckpointDir(): string {
 }
 
 const SAFE_ID_RE = /^[a-zA-Z0-9_-]+$/
+const COORDINATOR_WORKER_CHECKPOINT_DELIMITER = "__worker__"
+const WORKFLOW_CHECKPOINT_DELIMITER = "__wf_"
+
+interface ThreadCheckpointArtifactIndex {
+  directory: string
+  scanned: boolean
+  threadIds: Set<string>
+  durableThreadIds: Set<string>
+  quarantineFilenamesByThreadId: Map<string, Set<string>>
+  workerThreadIdsByParent: Map<string, Set<string>>
+  workflowThreadIdsByParent: Map<string, Set<string>>
+}
+
+let threadCheckpointArtifactIndex: ThreadCheckpointArtifactIndex | null = null
+let threadCheckpointArtifactDirectoryScanCount = 0
+
+function assertSafeThreadCheckpointId(threadId: string): void {
+  if (!SAFE_ID_RE.test(threadId)) throw new Error(`Invalid threadId: ${threadId}`)
+}
+
+function threadCheckpointPath(directory: string, threadId: string): string {
+  assertSafeThreadCheckpointId(threadId)
+  return join(directory, `${threadId}.sqlite`)
+}
+
+function addCheckpointFamilyMember(
+  membersByParent: Map<string, Set<string>>,
+  parentThreadId: string,
+  threadId: string
+): void {
+  const members = membersByParent.get(parentThreadId) ?? new Set<string>()
+  members.add(threadId)
+  membersByParent.set(parentThreadId, members)
+}
+
+function checkpointFamiliesOf(
+  threadId: string
+): Array<{ kind: "worker" | "workflow"; parentThreadId: string }> {
+  const families: Array<{ kind: "worker" | "workflow"; parentThreadId: string }> = []
+  const collect = (kind: "worker" | "workflow", delimiter: string): void => {
+    let delimiterIndex = threadId.indexOf(delimiter)
+    while (delimiterIndex >= 0) {
+      if (delimiterIndex > 0) {
+        families.push({ kind, parentThreadId: threadId.slice(0, delimiterIndex) })
+      }
+      delimiterIndex = threadId.indexOf(delimiter, delimiterIndex + delimiter.length)
+    }
+  }
+  // Preserve the old startsWith-prefix semantics exactly. A nested generated id
+  // can match more than one valid parent prefix; indexing every such owner lets
+  // whichever parent is deleted first reach it, while Set membership prevents
+  // duplicate work within one family.
+  collect("worker", COORDINATOR_WORKER_CHECKPOINT_DELIMITER)
+  collect("workflow", WORKFLOW_CHECKPOINT_DELIMITER)
+  return families
+}
+
+function registerCheckpointThreadId(
+  index: ThreadCheckpointArtifactIndex,
+  threadId: string
+): void {
+  if (!SAFE_ID_RE.test(threadId)) return
+  index.threadIds.add(threadId)
+
+  for (const family of checkpointFamiliesOf(threadId)) {
+    addCheckpointFamilyMember(
+      family.kind === "worker"
+        ? index.workerThreadIdsByParent
+        : index.workflowThreadIdsByParent,
+      family.parentThreadId,
+      threadId
+    )
+  }
+}
+
+function checkpointArtifactIndexForDirectory(directory: string): ThreadCheckpointArtifactIndex {
+  if (threadCheckpointArtifactIndex?.directory === directory) {
+    return threadCheckpointArtifactIndex
+  }
+  threadCheckpointArtifactIndex = {
+    directory,
+    scanned: false,
+    threadIds: new Set(),
+    durableThreadIds: new Set(),
+    quarantineFilenamesByThreadId: new Map(),
+    workerThreadIdsByParent: new Map(),
+    workflowThreadIdsByParent: new Map()
+  }
+  return threadCheckpointArtifactIndex
+}
+
+function ensureThreadCheckpointArtifactIndex(): ThreadCheckpointArtifactIndex {
+  const directory = getThreadCheckpointDir()
+  const index = checkpointArtifactIndexForDirectory(directory)
+  if (index.scanned) return index
+
+  // Preserve paths registered before the first scan (including an initializing
+  // saver whose file does not exist yet), then merge every crash leftover found
+  // on disk. From this point on, all production checkpoint paths are registered
+  // by getThreadCheckpointPath and new quarantine names are registered by the
+  // durable/native sqlite recovery layer.
+  const registeredThreadIds = Array.from(index.threadIds)
+  index.threadIds.clear()
+  index.durableThreadIds.clear()
+  index.quarantineFilenamesByThreadId.clear()
+  index.workerThreadIdsByParent.clear()
+  index.workflowThreadIdsByParent.clear()
+  for (const threadId of registeredThreadIds) registerCheckpointThreadId(index, threadId)
+
+  threadCheckpointArtifactDirectoryScanCount += 1
+  for (const filename of readdirSync(directory)) {
+    const durableBase = sqliteDurableVariantBase(filename)
+    const quarantineBase = durableBase === null ? sqliteQuarantineVariantBase(filename) : null
+    const threadId = durableBase ?? quarantineBase
+    if (!threadId || !SAFE_ID_RE.test(threadId)) continue
+    registerCheckpointThreadId(index, threadId)
+    if (durableBase !== null) {
+      index.durableThreadIds.add(threadId)
+    } else {
+      const filenames = index.quarantineFilenamesByThreadId.get(threadId) ?? new Set<string>()
+      filenames.add(filename)
+      index.quarantineFilenamesByThreadId.set(threadId, filenames)
+    }
+  }
+  index.scanned = true
+  return index
+}
+
+function removeCheckpointFamilyMember(
+  membersByParent: Map<string, Set<string>>,
+  parentThreadId: string,
+  threadId: string
+): void {
+  const members = membersByParent.get(parentThreadId)
+  if (!members) return
+  members.delete(threadId)
+  if (members.size === 0) membersByParent.delete(parentThreadId)
+}
+
+function forgetCheckpointThreadId(
+  index: ThreadCheckpointArtifactIndex,
+  threadId: string
+): void {
+  index.threadIds.delete(threadId)
+  index.durableThreadIds.delete(threadId)
+  index.quarantineFilenamesByThreadId.delete(threadId)
+
+  for (const family of checkpointFamiliesOf(threadId)) {
+    removeCheckpointFamilyMember(
+      family.kind === "worker"
+        ? index.workerThreadIdsByParent
+        : index.workflowThreadIdsByParent,
+      family.parentThreadId,
+      threadId
+    )
+  }
+}
+
+// A timestamped quarantine can be created after the one-time directory scan —
+// including by an old saver whose initialize() loses a deletion race. Re-add
+// its exact checkpoint/family synchronously at the recovery-layer registration
+// point. Merely keeping the generic registry is insufficient: parent cleanup
+// enumerates its family map before it can ask the registry about each member.
+subscribeSqliteQuarantineArtifacts((databasePath, artifactPath) => {
+  const index = threadCheckpointArtifactIndex
+  if (!index) return
+
+  const databaseRelativePath = relative(index.directory, databasePath)
+  const artifactRelativePath = relative(index.directory, artifactPath)
+  if (
+    isAbsolute(databaseRelativePath) ||
+    isAbsolute(artifactRelativePath) ||
+    databaseRelativePath.startsWith("..") ||
+    artifactRelativePath.startsWith("..") ||
+    databaseRelativePath !== basename(databaseRelativePath) ||
+    artifactRelativePath !== basename(artifactRelativePath)
+  ) {
+    return
+  }
+
+  const threadId = sqliteDurableVariantBase(databaseRelativePath)
+  if (
+    !threadId ||
+    databaseRelativePath !== `${threadId}.sqlite` ||
+    sqliteQuarantineVariantBase(artifactRelativePath) !== threadId ||
+    !SAFE_ID_RE.test(threadId)
+  ) {
+    return
+  }
+
+  registerCheckpointThreadId(index, threadId)
+  if (index.scanned) {
+    const filenames = index.quarantineFilenamesByThreadId.get(threadId) ?? new Set<string>()
+    filenames.add(artifactRelativePath)
+    index.quarantineFilenamesByThreadId.set(threadId, filenames)
+  }
+})
+
+function deleteIndexedCheckpointArtifacts(
+  index: ThreadCheckpointArtifactIndex,
+  threadId: string
+): boolean {
+  const databasePath = threadCheckpointPath(index.directory, threadId)
+  const registeredQuarantinePaths = listRegisteredSqliteQuarantineArtifacts(databasePath)
+  const hadIndexedArtifacts =
+    index.durableThreadIds.has(threadId) ||
+    (index.quarantineFilenamesByThreadId.get(threadId)?.size ?? 0) > 0 ||
+    registeredQuarantinePaths.length > 0
+  const removedLive = deleteSqliteDurableFileSync(databasePath)
+
+  const quarantinePaths = new Set<string>(registeredQuarantinePaths)
+  for (const filename of index.quarantineFilenamesByThreadId.get(threadId) ?? []) {
+    quarantinePaths.add(join(index.directory, filename))
+  }
+  for (const artifactPath of quarantinePaths) {
+    try {
+      unlinkSync(artifactPath)
+      forgetRegisteredSqliteQuarantineArtifact(databasePath, artifactPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      forgetRegisteredSqliteQuarantineArtifact(databasePath, artifactPath)
+    }
+  }
+
+  forgetCheckpointThreadId(index, threadId)
+  return hadIndexedArtifacts || removedLive
+}
 
 export function getThreadCheckpointPath(threadId: string): string {
-  if (!SAFE_ID_RE.test(threadId)) {
-    throw new Error(`Invalid threadId: ${threadId}`)
-  }
-  return join(getThreadCheckpointDir(), `${threadId}.sqlite`)
+  assertSafeThreadCheckpointId(threadId)
+  const directory = getThreadCheckpointDir()
+  registerCheckpointThreadId(checkpointArtifactIndexForDirectory(directory), threadId)
+  return threadCheckpointPath(directory, threadId)
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
@@ -155,75 +385,62 @@ export function deleteThreadCheckpoint(threadId: string): void {
   // known fixed-suffix variants only (no directory scan). Quarantine archives
   // never resurrect (not recovery candidates); their privacy cleanup belongs to
   // thread deletion — see purgeThreadCheckpointArtifacts.
-  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
+  assertSafeThreadCheckpointId(threadId)
+  const directory = getThreadCheckpointDir()
+  const databasePath = threadCheckpointPath(directory, threadId)
+  deleteSqliteDurableFileSync(databasePath)
+  if (threadCheckpointArtifactIndex?.directory === directory) {
+    threadCheckpointArtifactIndex.durableThreadIds.delete(threadId)
+    const hasIndexedQuarantine =
+      (threadCheckpointArtifactIndex.quarantineFilenamesByThreadId.get(threadId)?.size ?? 0) > 0
+    const hasRegisteredQuarantine =
+      listRegisteredSqliteQuarantineArtifacts(databasePath).length > 0
+    // Workflow subagents call this hot path after every completed run. Do not
+    // retain one family-index entry per historical subagent for the process
+    // lifetime; keep only ids that still own quarantine data for the parent's
+    // later privacy sweep. An unscanned index is safe too: its eventual one-time
+    // directory scan rediscovers any crash-era quarantine files.
+    if (!hasIndexedQuarantine && !hasRegisteredQuarantine) {
+      forgetCheckpointThreadId(threadCheckpointArtifactIndex, threadId)
+    }
+  }
 }
 
 /** Deep cleanup for the USER-FACING "delete thread" semantic: durable variants
  * plus quarantine archives (`.corrupt.<ts>` / `.bak.<ts>`), which are not
- * recovery candidates but still hold full transcripts (privacy residue). Does a
- * directory scan, so keep it on the cold thread-deletion path — subagent
- * self-clean uses the fast deleteThreadCheckpoint instead. */
+ * recovery candidates but still hold full transcripts (privacy residue). The
+ * first deep cleanup lazily indexes the shared directory once; later deletes
+ * use exact-id/family lookups. Subagent self-clean still uses the fixed-suffix
+ * deleteThreadCheckpoint hot path. */
 export function purgeThreadCheckpointArtifacts(threadId: string): void {
-  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
-  const dir = getThreadCheckpointDir()
-  for (const filename of readdirSync(dir)) {
-    if (sqliteQuarantineVariantBase(filename) !== threadId) continue
-    try {
-      unlinkSync(join(dir, filename))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-    }
-  }
+  assertSafeThreadCheckpointId(threadId)
+  deleteIndexedCheckpointArtifacts(ensureThreadCheckpointArtifactIndex(), threadId)
 }
 
-/** Shared sweep for prefix-scoped checkpoint cleanup: removes the live file,
+/** Indexed sweep for prefix-scoped checkpoint cleanup: removes the live file,
  * every durable sidecar (a `.bak` whose live file is already gone still counts
  * as a leftover checkpoint) AND quarantine archives (transcript-bearing
  * `.corrupt.<ts>` / `.bak.<ts>` files). Returns the number of distinct
  * checkpoint thread ids removed. */
-function sweepCheckpointVariants(prefix: string): number {
-  const dir = getThreadCheckpointDir()
-
-  // Group by checkpoint first, then delete each through the durable helper so
-  // every checkpoint gets the safe deletion order (sidecars first, live last)
-  // instead of readdir's arbitrary file order. The helper tolerates ENOENT, so
-  // a concurrent cleanup (subagent self-clean) racing this sweep is safe.
-  const checkpointThreadIds = new Set<string>()
-  const quarantineFiles: string[] = []
-  for (const filename of readdirSync(dir)) {
-    const durableBase = sqliteDurableVariantBase(filename)
-    const quarantineBase = durableBase === null ? sqliteQuarantineVariantBase(filename) : null
-    const checkpointThreadId = durableBase ?? quarantineBase
-    if (!checkpointThreadId || !checkpointThreadId.startsWith(prefix)) continue
-    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
-    if (quarantineBase !== null) quarantineFiles.push(filename)
-    checkpointThreadIds.add(checkpointThreadId)
+function sweepCheckpointVariants(threadIds: Iterable<string>): number {
+  const index = ensureThreadCheckpointArtifactIndex()
+  let deletedCount = 0
+  for (const threadId of Array.from(threadIds)) {
+    if (deleteIndexedCheckpointArtifacts(index, threadId)) deletedCount += 1
   }
-  for (const checkpointThreadId of checkpointThreadIds) {
-    deleteSqliteDurableFileSync(join(dir, `${checkpointThreadId}.sqlite`))
-  }
-  for (const filename of quarantineFiles) {
-    try {
-      unlinkSync(join(dir, filename))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-    }
-  }
-
-  return checkpointThreadIds.size
+  return deletedCount
 }
 
 export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
-  if (!SAFE_ID_RE.test(parentThreadId)) {
-    throw new Error(`Invalid threadId: ${parentThreadId}`)
-  }
-  if (parentThreadId.includes("__worker__")) {
+  assertSafeThreadCheckpointId(parentThreadId)
+  if (parentThreadId.includes(COORDINATOR_WORKER_CHECKPOINT_DELIMITER)) {
     throw new Error(
       `Invalid coordinator parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __worker__ delimiter.`
     )
   }
 
-  return sweepCheckpointVariants(`${parentThreadId}__worker__`)
+  const index = ensureThreadCheckpointArtifactIndex()
+  return sweepCheckpointVariants(index.workerThreadIdsByParent.get(parentThreadId) ?? [])
 }
 
 /** Delete leftover workflow-subagent checkpoints for a thread. Workflow subagents
@@ -233,16 +450,20 @@ export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
  * failed cleanup left behind — the symmetric counterpart to
  * deleteThreadWorkerCheckpoints, which only covers `__worker__`. (#3) */
 export function deleteThreadWorkflowCheckpoints(parentThreadId: string): number {
-  if (!SAFE_ID_RE.test(parentThreadId)) {
-    throw new Error(`Invalid threadId: ${parentThreadId}`)
-  }
-  if (parentThreadId.includes("__wf_")) {
+  assertSafeThreadCheckpointId(parentThreadId)
+  if (parentThreadId.includes(WORKFLOW_CHECKPOINT_DELIMITER)) {
     throw new Error(
       `Invalid workflow parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __wf_ delimiter.`
     )
   }
 
-  return sweepCheckpointVariants(`${parentThreadId}__wf_`)
+  const index = ensureThreadCheckpointArtifactIndex()
+  return sweepCheckpointVariants(index.workflowThreadIdsByParent.get(parentThreadId) ?? [])
+}
+
+/** Read-only diagnostic used by the checkpoint cleanup performance regression. */
+export function getThreadCheckpointArtifactDirectoryScanCount(): number {
+  return threadCheckpointArtifactDirectoryScanCount
 }
 
 export function getEnvFilePath(): string {

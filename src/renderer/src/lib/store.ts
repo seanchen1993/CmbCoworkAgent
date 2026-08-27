@@ -27,9 +27,10 @@ import {
 } from "../../../shared/message-role-collision"
 import { normalizeChatScrollSettings, type ChatScrollSettings } from "../../../shared/chat-scroll"
 import { revalidateModelCatalog } from "./model-catalog-cache"
-import type { ThreadMetadataPatch } from "../../../main/types"
+import type { ThreadDeleteOptions, ThreadMetadataPatch } from "../../../main/types"
 import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
 import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache"
+import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -981,7 +982,11 @@ interface AppState {
   forkThread: (params: ThreadForkParams, options?: ThreadNavigationOptions) => Promise<Thread>
   listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
   selectThread: (threadId: string, options?: ThreadNavigationOptions) => Promise<void>
-  deleteThread: (threadId: string) => Promise<void>
+  deleteThread: (
+    threadId: string,
+    options?: ThreadDeleteOptions & { deferDirectoryUpdate?: boolean }
+  ) => Promise<void>
+  finalizeThreadDeletions: (threadIds: Iterable<string>) => void
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
   patchThreadMetadata: (threadId: string, patch: ThreadMetadataPatch) => Promise<void>
   generateTitleForFirstMessage: (threadId: string, content: string) => Promise<void>
@@ -1344,59 +1349,109 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  deleteThread: async (threadId: string) => {
+  deleteThread: async (
+    threadId: string,
+    options?: ThreadDeleteOptions & { deferDirectoryUpdate?: boolean }
+  ) => {
     console.log("[Store] Deleting thread:", threadId)
     markThreadDirectoryMutation(threadId)
     try {
-      await window.api.threads.delete(threadId)
+      await window.api.threads.delete(
+        threadId,
+        options?.requireIdle === undefined && options?.groupGuard === undefined
+          ? undefined
+          : { requireIdle: options?.requireIdle, groupGuard: options?.groupGuard }
+      )
+      // A directory refresh may start after the optimistic fence but still read
+      // before the database commit becomes visible. Advance the epoch again at
+      // the commit acknowledgement so that stale page cannot resurrect the row.
+      markThreadDirectoryMutation(threadId)
       console.log("[Store] Thread deleted from backend")
       // The draft-message queue is persisted to localStorage independent of the
       // DB thread record (thread-context.tsx's persistQueuedMessages) so it
       // survives reloads; nothing else clears that key, so it would otherwise
       // sit there forever once the thread it belonged to is gone.
-      window.localStorage.removeItem(queueStorageKey(threadId))
       // Permanent deletion must evict message-bearing projection/scroll caches immediately.
       // Advancing the scroll lease also ignores a late React unmount save from the old row.
-      clearChatThreadProjectionRuntime(threadId)
-      chatScrollSessionStore.delete(threadId)
-
-      set((state) => {
-        const threads = state.threads.filter((t) => t.thread_id !== threadId)
-        const wasCurrentThread = state.currentThreadId === threadId
-        const newCurrentId = wasCurrentThread
-          ? state.mainView === "harness"
-            ? null
-            : findFirstChatThread(threads)?.thread_id || null
-          : state.currentThreadId
-
-        return {
-          threads: adoptThreadDirectorySnapshot(threads),
-          currentThreadId: newCurrentId,
-          // 如果被删除的线程是之前保存的，清掉避免恢复到无效 id
-          previousThreadId: state.previousThreadId === threadId ? null : state.previousThreadId,
-          ...(state.workerFocusView?.threadId === threadId
-            ? {
-                workerFocusView: null,
-                workerFocusMessagesThreadId: null,
-                workerFocusMessages: []
+      runBestEffortCommittedDeletionCleanups([
+        {
+          label: "Failed to remove deleted thread queue",
+          run: () => window.localStorage.removeItem(queueStorageKey(threadId))
+        },
+        {
+          label: "Failed to clear deleted thread projection",
+          run: () => clearChatThreadProjectionRuntime(threadId)
+        },
+        {
+          label: "Failed to clear deleted thread scroll state",
+          run: () => chatScrollSessionStore.delete(threadId)
+        },
+        ...(options?.deferDirectoryUpdate
+          ? []
+          : [
+              {
+                label: "Failed to finalize deleted thread directory state",
+                run: () => get().finalizeThreadDeletions([threadId])
               }
-            : {}),
-          ...(state.subagentFocusView?.threadId === threadId
-            ? {
-                subagentFocusView: null
-              }
-            : {}),
-          ...(state.workflowAgentFocusView?.threadId === threadId
-            ? {
-                workflowAgentFocusView: null
-              }
-            : {})
-        }
-      })
+            ])
+      ])
     } catch (error) {
       console.error("[Store] Failed to delete thread:", error)
       throw error
     }
+  },
+
+  finalizeThreadDeletions: (threadIds: Iterable<string>) => {
+    const deletedIds = new Set(threadIds)
+    if (deletedIds.size === 0) return
+    set((state) => {
+      const threads = state.threads.filter((thread) => !deletedIds.has(thread.thread_id))
+      const directoryChanged = threads.length !== state.threads.length
+      const currentThreadDeleted =
+        state.currentThreadId !== null && deletedIds.has(state.currentThreadId)
+      const previousThreadDeleted =
+        state.previousThreadId !== null && deletedIds.has(state.previousThreadId)
+      const workerFocusDeleted = Boolean(
+        state.workerFocusView && deletedIds.has(state.workerFocusView.threadId)
+      )
+      const subagentFocusDeleted = Boolean(
+        state.subagentFocusView && deletedIds.has(state.subagentFocusView.threadId)
+      )
+      const workflowAgentFocusDeleted = Boolean(
+        state.workflowAgentFocusView && deletedIds.has(state.workflowAgentFocusView.threadId)
+      )
+      if (
+        !directoryChanged &&
+        !currentThreadDeleted &&
+        !previousThreadDeleted &&
+        !workerFocusDeleted &&
+        !subagentFocusDeleted &&
+        !workflowAgentFocusDeleted
+      ) {
+        // Most ids in a large group are intentionally absent from the bounded
+        // directory. Returning the same state prevents a no-op full-app render.
+        return state
+      }
+
+      return {
+        ...(directoryChanged ? { threads: adoptThreadDirectorySnapshot(threads) } : {}),
+        currentThreadId: currentThreadDeleted
+          ? state.mainView === "harness"
+            ? null
+            : findFirstChatThread(threads)?.thread_id || null
+          : state.currentThreadId,
+        previousThreadId: previousThreadDeleted ? null : state.previousThreadId,
+        ...(workerFocusDeleted
+          ? {
+              workerFocusView: null,
+              workerFocusMessagesThreadId: null,
+              workerFocusMessages: []
+            }
+          : {}),
+        ...(subagentFocusDeleted ? { subagentFocusView: null } : {}),
+        ...(workflowAgentFocusDeleted ? { workflowAgentFocusView: null } : {})
+      }
+    })
   },
 
   updateThread: async (threadId: string, updates: Partial<Thread>) => {

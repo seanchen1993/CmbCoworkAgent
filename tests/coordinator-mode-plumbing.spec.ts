@@ -2783,7 +2783,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   assertSourceOrder(
     threadsIpcForRollback,
     "while (deletingThreads.has(threadId))",
-    "const deletion = performThreadDeletion(event, threadId)",
+    "const deletion = performThreadDeletion(event, threadId, options?.groupGuard)",
     "a new deletion WAITS OUT any in-flight deletion of the same thread before starting"
   )
   assertMatches(
@@ -2872,8 +2872,8 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   }
   assertMatches(
     chatxService,
-    /await closeCheckpointer\(threadId\)[^\n]*\n\s*runningChats\.delete\(chatKey\)/,
-    "chatx keeps its runningChats gate up until the checkpointer close settles — an inbound in the close window would pin, skip the pending-close wait, and dual-write the reused thread's sqlite (heartbeat's finally, same family)"
+    /await closeCheckpointer\(threadId\)[\s\S]{0,600}?threadIdToChatKey\.delete\(threadId\)\s*runningChats\.delete\(chatKey\)/,
+    "chatx keeps both its thread ownership mapping and runningChats gate until the checkpointer close settles — inbound re-entry and destructive deletion must not observe false-idle state while the old saver is still flushing"
   )
   {
     const stopSchedulerBody = schedulerService.slice(

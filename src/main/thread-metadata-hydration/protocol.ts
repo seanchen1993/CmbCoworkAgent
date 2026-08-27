@@ -1,4 +1,4 @@
-import type { Thread } from "../types"
+import type { Thread, ThreadGroupSelectionEntry, ThreadGroupSelector } from "../types"
 
 export const THREAD_METADATA_HYDRATION_CANCELLED = "THREAD_METADATA_HYDRATION_CANCELLED"
 export const THREAD_METADATA_HYDRATION_MAX_THREAD_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -43,6 +43,11 @@ export interface ThreadMetadataHydrationReadListPageRequest extends ThreadMetada
   byteBudget: number
 }
 
+export interface ThreadMetadataHydrationReadGroupIdsRequest extends ThreadMetadataHydrationRequestBase {
+  type: "read-group-ids"
+  selector: ThreadGroupSelector
+}
+
 export interface ThreadMetadataHydrationReadGoalEventsRequest extends ThreadMetadataHydrationRequestBase {
   type: "read-goal-events"
   threadId: string
@@ -69,6 +74,7 @@ export interface ThreadMetadataHydrationShutdownRequest {
 export type ThreadMetadataHydrationWorkerRequest =
   | ThreadMetadataHydrationReadThreadRequest
   | ThreadMetadataHydrationReadListPageRequest
+  | ThreadMetadataHydrationReadGroupIdsRequest
   | ThreadMetadataHydrationReadGoalEventsRequest
   | ThreadMetadataHydrationReadWorkspacePathRequest
   | ThreadMetadataHydrationReadGitContextRequest
@@ -90,6 +96,14 @@ export interface ThreadMetadataHydrationReadListPageSuccess {
   beforeUpdatedAt: number | null
   beforeThreadId: string | null
   hasMore: boolean
+  stats: ThreadMetadataHydrationStats
+}
+
+export interface ThreadMetadataHydrationReadGroupIdsSuccess {
+  type: "read-group-ids-result"
+  requestId: number
+  ok: true
+  entries: ThreadGroupSelectionEntry[]
   stats: ThreadMetadataHydrationStats
 }
 
@@ -122,6 +136,7 @@ export interface ThreadMetadataHydrationReadFailure {
   type:
     | "read-thread-result"
     | "read-list-page-result"
+    | "read-group-ids-result"
     | "read-goal-events-result"
     | "read-workspace-path-result"
     | "read-git-context-result"
@@ -137,6 +152,7 @@ export interface ThreadMetadataHydrationShutdownComplete {
 export type ThreadMetadataHydrationWorkerResponse =
   | ThreadMetadataHydrationReadThreadSuccess
   | ThreadMetadataHydrationReadListPageSuccess
+  | ThreadMetadataHydrationReadGroupIdsSuccess
   | ThreadMetadataHydrationReadGoalEventsSuccess
   | ThreadMetadataHydrationReadWorkspacePathSuccess
   | ThreadMetadataHydrationReadGitContextSuccess

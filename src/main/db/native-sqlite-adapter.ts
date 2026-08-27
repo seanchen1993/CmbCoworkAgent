@@ -11,6 +11,7 @@ import {
   unlinkSync
 } from "fs"
 import { dirname } from "path"
+import { registerSqliteQuarantineArtifact } from "../utils/sqlite-durable-file"
 
 export type NativeSqliteValue = string | number | bigint | null | Uint8Array
 export type NativeSqliteBindings = readonly unknown[] | Record<string, unknown>
@@ -322,9 +323,12 @@ function archiveInvalidLiveFile(dbPath: string, label: string): void {
   const archivePath = `${dbPath}.corrupt.${Date.now()}`
   try {
     renameSync(dbPath, archivePath)
+    registerSqliteQuarantineArtifact(dbPath, archivePath)
     for (const suffix of NATIVE_SIDECAR_SUFFIXES) {
       if (existsSync(`${dbPath}${suffix}`)) {
-        renameSync(`${dbPath}${suffix}`, `${archivePath}${suffix}`)
+        const archivedSidecarPath = `${archivePath}${suffix}`
+        renameSync(`${dbPath}${suffix}`, archivedSidecarPath)
+        registerSqliteQuarantineArtifact(dbPath, archivedSidecarPath)
       }
     }
     console.warn(`[${label}] Archived invalid database: ${archivePath}`)

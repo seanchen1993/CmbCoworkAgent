@@ -1,4 +1,6 @@
-import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron"
+import { shell, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
+import { createHash } from "node:crypto"
+import path from "node:path"
 import {
   archiveHarnessProject,
   cancelHarnessDetailRequestScope,
@@ -79,19 +81,75 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessKnowledgePreviewResult,
+  HarnessRunArtifactGrantRefreshInput,
+  HarnessRunArtifactGrantRefreshResult,
+  HarnessRunArtifactRevealInput,
+  HarnessRunArtifactRevealResult,
   HarnessFeatureDeployUnitBinding,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
 import {
+  EXTERNAL_FILE_READ_GRANT_TTL_MS,
   issueExternalFileReadGrant,
+  resolveExternalFileReadGrant,
   revokeExternalFileReadGrantsForOwner
 } from "../services/external-file-read-tokens"
+import { projectHarnessPluginRunArtifacts } from "../../shared/harness-plugin-run-artifacts"
 import type {
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
 } from "../../shared/harness-board-types"
+
+function isPathInside(parentPath: string, candidatePath: string): boolean {
+  const relativePath = path.relative(parentPath, candidatePath)
+  return (
+    relativePath === "" ||
+    (!!relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+  )
+}
+
+function issueHarnessRunArtifactPreviewGrant(
+  detail: HarnessRunDetailViewModel,
+  senderId: number
+): { grant: string; expiresAt: number } | undefined {
+  const rootPath = path.resolve(detail.project.projectRootPath)
+  const trustedRelativePaths: string[] = []
+  for (const artifact of projectHarnessPluginRunArtifacts(detail).files) {
+    const rawPath = artifact.path.trim()
+    if (!rawPath) continue
+    const candidatePath = path.isAbsolute(rawPath)
+      ? path.resolve(rawPath)
+      : path.resolve(rootPath, rawPath)
+    if (!isPathInside(rootPath, candidatePath) || candidatePath === rootPath) continue
+    trustedRelativePaths.push(path.relative(rootPath, candidatePath))
+  }
+  if (trustedRelativePaths.length === 0) return undefined
+
+  const identityHash = createHash("sha256")
+    .update(detail.project.projectId)
+    .update("\0")
+    .update(detail.run.slug)
+    .digest("hex")
+  // Capture before issuance so the advertised expiry is conservative even if
+  // hashing/allowlist work takes measurable time on a large bounded projection.
+  const issuedAt = Date.now()
+  const issued = issueExternalFileReadGrant(
+    rootPath,
+    senderId,
+    trustedRelativePaths,
+    `harness-run-artifacts:${identityHash}`
+  )
+  if ("error" in issued) {
+    console.warn("[HarnessBoard] Failed to authorize run artifacts:", issued.error)
+    return undefined
+  }
+  return {
+    grant: issued.grant,
+    expiresAt: issuedAt + EXTERNAL_FILE_READ_GRANT_TTL_MS
+  }
+}
 import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult
@@ -144,6 +202,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       cancelEnterpriseSenderScopes(senderId)
       cancelHarnessCatalogScope(`harness-dialog-tips:${senderId}`)
       cancelHarnessKnowledgePreviewOwner(senderId)
+      cancelHarnessDetailRequestScope(`harness-run-artifact-grant:${senderId}`)
       stopDesiredWatchScopesForSender(senderId)
       revokeExternalFileReadGrantsForOwner(senderId)
     })
@@ -519,6 +578,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
     cancelHarnessDetailRequestScope(`harness-project-detail:${event.sender.id}:single`)
     cancelHarnessDetailRequestScope(`harness-project-detail:${event.sender.id}:batch`)
     cancelHarnessDetailRequestScope(`harness-run-detail:${event.sender.id}`)
+    cancelHarnessDetailRequestScope(`harness-run-artifact-grant:${event.sender.id}`)
     cancelHarnessCatalogScope(`harness-dialog-tips:${event.sender.id}`)
     cancelEnterpriseSenderScopes(event.sender.id)
   })
@@ -552,7 +612,90 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
           { projectId: payload.projectId, featureSlug: payload.slug }
         )
       }
-      return detail
+      const artifactPreviewGrant = issueHarnessRunArtifactPreviewGrant(detail, event.sender.id)
+      return artifactPreviewGrant
+        ? {
+            ...detail,
+            artifactPreviewGrant: artifactPreviewGrant.grant,
+            artifactPreviewGrantExpiresAt: artifactPreviewGrant.expiresAt
+          }
+        : detail
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:refreshRunArtifactGrant",
+    async (
+      event,
+      input: HarnessRunArtifactGrantRefreshInput
+    ): Promise<HarnessRunArtifactGrantRefreshResult> => {
+      ensureEnterpriseSenderCleanup(event)
+      const projectId = typeof input?.projectId === "string" ? input.projectId.trim() : ""
+      const slug = typeof input?.slug === "string" ? input.slug.trim() : ""
+      const filePath = typeof input?.filePath === "string" ? input.filePath.trim() : ""
+      if (
+        !projectId ||
+        !slug ||
+        !filePath ||
+        projectId.length > 512 ||
+        slug.length > 512 ||
+        filePath.length > 32_768
+      ) {
+        return { success: false, error: "无效的产物授权续签请求" }
+      }
+
+      try {
+        // This path runs only after the renderer observes an expired/near-expiry
+        // capability. Re-read the authoritative run instead of extending a stale
+        // allowlist indefinitely; no periodic polling is added to the project UI.
+        const detail = await getHarnessRunDetail(projectId, slug, {
+          scope: `harness-run-artifact-grant:${event.sender.id}`
+        })
+        if (detail.project.projectId !== projectId || detail.run.slug !== slug) {
+          return { success: false, error: "产物所属项目或特性已变化，请刷新后重试" }
+        }
+        const refreshed = issueHarnessRunArtifactPreviewGrant(detail, event.sender.id)
+        if (!refreshed) {
+          return { success: false, error: "当前运行没有可预览的已生成产物" }
+        }
+
+        // The refreshed grant contains the full bounded current projection. An
+        // exact resolve proves this particular stale UI row is still present,
+        // exists on disk, and has not escaped through a symlink.
+        const resolved = await resolveExternalFileReadGrant(
+          refreshed.grant,
+          event.sender.id,
+          filePath
+        )
+        if ("error" in resolved) return { success: false, error: resolved.error }
+        return { success: true, grant: refreshed.grant, expiresAt: refreshed.expiresAt }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "产物授权续签失败"
+        }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:revealRunArtifact",
+    async (
+      event,
+      input: HarnessRunArtifactRevealInput
+    ): Promise<HarnessRunArtifactRevealResult> => {
+      ensureEnterpriseSenderCleanup(event)
+      if (!input || typeof input !== "object") {
+        return { success: false, error: "无效的产物打开请求" }
+      }
+      const resolved = await resolveExternalFileReadGrant(
+        input.grant,
+        event.sender.id,
+        input.filePath
+      )
+      if ("error" in resolved) return { success: false, error: resolved.error }
+      shell.showItemInFolder(resolved.filePath)
+      return { success: true }
     }
   )
 

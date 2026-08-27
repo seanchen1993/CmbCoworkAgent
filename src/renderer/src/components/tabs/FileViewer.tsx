@@ -25,6 +25,8 @@ interface FileViewerProps {
   externalFullPath?: string
   /** Opaque capability issued by a trusted main-process source. */
   externalPreviewGrant?: string
+  /** Resolve a fresh capability before every external file read. */
+  resolveExternalPreviewGrant?: () => Promise<string>
   htmlFillHeight?: boolean
   reloadToken?: number
   previewMode?: "preview" | "source"
@@ -90,6 +92,7 @@ export function FileViewer({
   threadId,
   externalFullPath,
   externalPreviewGrant,
+  resolveExternalPreviewGrant,
   htmlFillHeight = true,
   reloadToken,
   previewMode,
@@ -127,14 +130,17 @@ export function FileViewer({
   const previewSourceForPath = useCallback(
     async (resolvedPath: string): Promise<WorkspaceFilePreviewSource> => {
       if (externalFullPath) {
-        if (!externalPreviewGrant) {
+        const grant = resolveExternalPreviewGrant
+          ? await resolveExternalPreviewGrant()
+          : externalPreviewGrant
+        if (!grant) {
           throw new Error("Access denied: external file preview has no trusted source grant")
         }
-        return { externalGrant: externalPreviewGrant, filePath: resolvedPath }
+        return { externalGrant: grant, filePath: resolvedPath }
       }
       return { threadId: threadId ?? "", filePath: resolvedPath }
     },
-    [externalFullPath, externalPreviewGrant, threadId]
+    [externalFullPath, externalPreviewGrant, resolveExternalPreviewGrant, threadId]
   )
 
   const loadTextPage = useCallback(

@@ -11,6 +11,7 @@ import {
 import {
   readThreadGoalEventsProjection,
   readThreadGitMetadataProjection,
+  readThreadGroupIds,
   readThreadHydrationProjection,
   readThreadSummaryPage,
   readThreadWorkspacePathProjection,
@@ -48,6 +49,8 @@ function failure(
         ? "read-thread-result"
         : request.type === "read-list-page"
           ? "read-list-page-result"
+          : request.type === "read-group-ids"
+            ? "read-group-ids-result"
           : request.type === "read-goal-events"
             ? "read-goal-events-result"
             : request.type === "read-workspace-path"
@@ -108,6 +111,15 @@ workerPort.on("message", (request: ThreadMetadataHydrationWorkerRequest) => {
         requestId: request.requestId,
         ok: true,
         ...readThreadSummaryPage(db, request)
+      } satisfies ThreadMetadataHydrationWorkerResponse)
+      return
+    }
+    if (request.type === "read-group-ids") {
+      workerPort.postMessage({
+        type: "read-group-ids-result",
+        requestId: request.requestId,
+        ok: true,
+        ...readThreadGroupIds(db, request)
       } satisfies ThreadMetadataHydrationWorkerResponse)
       return
     }

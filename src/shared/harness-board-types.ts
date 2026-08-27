@@ -374,6 +374,25 @@ export interface HarnessSkipNodeInput {
   nodeId: string
 }
 
+export interface HarnessRunArtifactRevealInput {
+  grant: string
+  filePath: string
+}
+
+export type HarnessRunArtifactRevealResult =
+  | { success: true }
+  | { success: false; error: string }
+
+export interface HarnessRunArtifactGrantRefreshInput {
+  projectId: string
+  slug: string
+  filePath: string
+}
+
+export type HarnessRunArtifactGrantRefreshResult =
+  | { success: true; grant: string; expiresAt: number }
+  | { success: false; error: string }
+
 export interface HarnessSkipNodeResult {
   projectId: string
   slug: string
@@ -661,6 +680,10 @@ export interface HarnessRunNode {
 }
 
 export interface HarnessRunDetailViewModel {
+  /** Main-issued, sender-bound capability for generated run artifacts. */
+  artifactPreviewGrant?: string
+  /** Absolute epoch milliseconds; the renderer renews lazily near this boundary. */
+  artifactPreviewGrantExpiresAt?: number
   project: {
     projectId: string
     name: string

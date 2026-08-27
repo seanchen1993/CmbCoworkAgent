@@ -425,9 +425,9 @@ export interface LocalSandboxOptions {
 interface ExecuteRawOptions {
   background?: boolean
   cwd?: string
-  /** Worktree teardown waits for residual descendants before inspecting the checkout. */
+  /** Background teardown waits for residual descendants before releasing ownership. */
   waitForProcessTree?: boolean
-  /** Internal worktree lifecycle hook: receives the process-tree termination promise. */
+  /** Internal background lifecycle hook: receives the process-tree termination promise. */
   onTermination?: (termination: Promise<void>) => void
   /**
    * Live partial-output callback. Invoked per stdout/stderr chunk while the
@@ -6227,6 +6227,8 @@ export class LocalSandbox
       cwd: string
       startedAt: number
       completed: boolean
+      /** True only after executeRaw and any observed process-tree termination settle. */
+      settled: boolean
       outputChunks: string[]
       /** Live partial-output buffer, populated via onData while !completed. */
       partialOutput: string
@@ -6236,8 +6238,9 @@ export class LocalSandbox
       lastOutputAt: number
       abortController: AbortController
       result?: LocalExecuteResponse
-      /** Resolves only after executeRaw has observed process-tree termination. */
+      /** Lifecycle fence: resolves after execution and any observed termination settle. */
       completion?: Promise<void>
+      /** Physical process-tree termination reported by executeRaw after a kill. */
       termination?: Promise<void>
     }
   >()
@@ -6354,6 +6357,7 @@ export class LocalSandbox
       cwd: effectiveCwd,
       startedAt: Date.now(),
       completed: false as boolean,
+      settled: false,
       outputChunks: [] as string[],
       partialOutput: "",
       partialTruncated: false,
@@ -6397,14 +6401,16 @@ export class LocalSandbox
             task.partialOutput += text
           }
         },
-        ...(this.worktreeIsolation
-          ? {
-              waitForProcessTree: true,
-              onTermination: (termination: Promise<void>) => {
-                task.termination = termination
-              }
-            }
-          : {})
+        // Cancellation/timeout must settle the whole process tree before any
+        // thread-owned data can be deleted, regardless of worktree isolation.
+        waitForProcessTree: true,
+        // Capture the physical kill/descendant-drain promise for every background
+        // task, not only worktree-isolated ones. `completed` may become true as
+        // soon as cancellation publishes an exit-130 result, while the process
+        // tree is still unwinding.
+        onTermination: (termination: Promise<void>) => {
+          task.termination = termination
+        }
       }
     )
       .then(async (rawResult) => {
@@ -6443,15 +6449,6 @@ export class LocalSandbox
         console.log(
           `[LocalSandbox] background task ${taskId} completed: exitCode=${result.exitCode}`
         )
-        // Auto-cleanup completed tasks after 10 minutes to prevent memory leaks.
-        // The agent has plenty of time to poll for the result before it expires.
-        setTimeout(
-          () => {
-            LocalSandbox.backgroundTasks.delete(taskId)
-            console.log(`[LocalSandbox] background task ${taskId} expired, cleaned up`)
-          },
-          10 * 60 * 1000
-        )
       })
       .catch((err) => {
         // Guard: if already completed (e.g. cancelled via cancelBackgroundTasks), don't overwrite.
@@ -6466,14 +6463,30 @@ export class LocalSandbox
         }
         task.completed = true
         console.log(`[LocalSandbox] background task ${taskId} errored: ${err}`)
-        setTimeout(
+      })
+      .finally(async () => {
+        // executeRaw can resolve before a platform-specific process-tree kill
+        // promise settles. Keep destructive-operation guards closed until both
+        // ownership signals have reached a terminal state.
+        await task.termination?.catch(() => undefined)
+        task.settled = true
+
+        // Keep the result available for task_output, but never expire the only
+        // ownership record before the command is deletion-safe. Checking object
+        // identity also prevents a rare reused task id from deleting its successor.
+        const expiryTimer = setTimeout(
           () => {
+            if (LocalSandbox.backgroundTasks.get(taskId) !== task) return
             LocalSandbox.backgroundTasks.delete(taskId)
+            console.log(`[LocalSandbox] background task ${taskId} expired, cleaned up`)
           },
           10 * 60 * 1000
         )
+        expiryTimer.unref?.()
       })
-    if (this.worktreeIsolation) task.completion = completion
+    // Always retain completion. Ordinary (non-worktree) background commands
+    // also need a deletion-safe ownership fence after cancellation.
+    task.completion = completion
 
     const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
     try {
@@ -6546,6 +6559,18 @@ export class LocalSandbox
     LocalSandbox.cancelBackgroundTasksForThread(threadId)
   }
 
+  /**
+   * Read-only ownership check for detached commands that outlive their foreground
+   * agent turn. A completed result may already be visible through task_output while
+   * its physical process tree is still settling, so only `settled` makes it idle.
+   */
+  static hasActiveBackgroundTasks(threadId: string): boolean {
+    for (const task of LocalSandbox.backgroundTasks.values()) {
+      if (task.threadId === threadId && !task.settled) return true
+    }
+    return false
+  }
+
   /** Workflow worktree teardown must not inspect/delete a checkout while one of
    * its background commands is still unwinding. Ordinary callers may keep using
    * the void wrapper above; lifecycle cleanup awaits this stronger variant. */
@@ -6571,14 +6596,6 @@ export class LocalSandbox
           exitCode: 130,
           truncated: false
         }
-        // Schedule cleanup (mirrors the auto-cleanup in the normal completion path).
-        setTimeout(
-          () => {
-            LocalSandbox.backgroundTasks.delete(taskId)
-            console.log(`[LocalSandbox] cancelled background task ${taskId} expired, cleaned up`)
-          },
-          10 * 60 * 1000
-        )
       }
       if (task.termination) completions.push(task.termination)
       if (task.completion) completions.push(task.completion)

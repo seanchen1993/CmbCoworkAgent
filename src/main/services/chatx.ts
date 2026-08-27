@@ -98,6 +98,16 @@ const threadIdToChatKey = new Map<string, string>()
 const messageQueues = new Map<string, ChatXInboundMessage[]>()
 let shuttingDown = false
 
+/**
+ * Read-only per-thread run ownership check used by destructive-operation guards.
+ * Keep the chat key private: callers only need to know whether this exact durable
+ * thread still has a ChatX handler that owns its runtime/checkpointer cleanup.
+ */
+export function isChatXThreadRunning(threadId: string): boolean {
+  const chatKey = threadIdToChatKey.get(threadId)
+  return chatKey !== undefined && runningChats.has(chatKey)
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function notifyRenderer(channel: string): void {
@@ -523,7 +533,6 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     }
     activeAbortControllers.delete(chatKey)
     inFlightMsgIds.delete(chatKey)
-    threadIdToChatKey.delete(threadId)
     releaseCheckpointerPin()
     // Close BEFORE dropping the runningChats gate (mirrors heartbeat's finally):
     // ChatX reuses one threadId per (chatId, sender), and an inbound landing in
@@ -533,6 +542,10 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     // the newcomer queue instead; the queue drain below runs after the gate
     // clears, so queued messages are not starved.
     await closeCheckpointer(threadId).catch(() => {})
+    // Commit owner release only after physical checkpointer close settles. The
+    // delete guard resolves thread ownership through this mapping; clearing it
+    // earlier would expose a false-idle window while the old saver still flushes.
+    threadIdToChatKey.delete(threadId)
     runningChats.delete(chatKey)
     notifyRenderer("threads:changed")
 

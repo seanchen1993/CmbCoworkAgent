@@ -4,9 +4,10 @@ import {
   isStaleCheckpointBoundaryNoticeMessage
 } from "../../shared/goal-events"
 import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
-import type { Thread } from "../types"
+import type { Thread, ThreadGroupSelectionEntry } from "../types"
 import type {
   ThreadGoalHydrationEvent,
+  ThreadMetadataHydrationReadGroupIdsRequest,
   ThreadMetadataHydrationReadGoalEventsRequest,
   ThreadMetadataHydrationReadGitContextRequest,
   ThreadMetadataHydrationReadListPageRequest,
@@ -78,6 +79,8 @@ const THREAD_LIST_PRIORITY_KEYS = [
 const MAX_GOAL_EVENT_MESSAGE_BYTES = 128 * 1024
 const THREAD_LIST_PAGE_MAX_ROWS = 128
 const THREAD_LIST_PAGE_MAX_BYTES = 512 * 1024
+const THREAD_GROUP_ID_MAX_ROWS = 10_000
+const THREAD_GROUP_ID_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const GIT_CONTEXT_TRACKED_FILE_LIMIT = 512
 const GIT_CONTEXT_TRACKED_FILE_CHAR_BUDGET = 256 * 1024
 const GIT_CONTEXT_PATH_CHAR_LIMIT = 4_096
@@ -579,5 +582,121 @@ export function readThreadSummaryPage(
     beforeThreadId: hasMore && oldest ? oldest.thread_id : null,
     hasMore,
     stats: stats(startedAt, threads.length, sourceBytes)
+  }
+}
+
+interface ThreadGroupIdRow {
+  thread_id?: unknown
+  created_at?: unknown
+  incarnation_token?: unknown
+}
+
+/**
+ * Read only the durable ids needed by a destructive group action. Filtering in
+ * the metadata worker avoids hydrating an unbounded directory in the renderer.
+ */
+export function readThreadGroupIds(
+  database: DatabaseSync,
+  request: ThreadMetadataHydrationReadGroupIdsRequest
+): {
+  entries: ThreadGroupSelectionEntry[]
+  stats: ThreadMetadataHydrationStats
+} {
+  const startedAt = performance.now()
+  const cancellation = new Int32Array(request.cancellationBuffer)
+
+  // json_extract throws for malformed legacy metadata. Every selector goes
+  // through this valid-object expression so a bad row can never abort or widen
+  // a destructive selection.
+  const metadata = "CASE WHEN metadata IS NOT NULL AND json_valid(metadata) THEN metadata ELSE '{}' END"
+  const featureProject = `trim(CASE WHEN json_type(${metadata}, '$.harnessFeature.projectId') = 'text' THEN json_extract(${metadata}, '$.harnessFeature.projectId') ELSE '' END)`
+  const featureSlug = `trim(CASE WHEN json_type(${metadata}, '$.harnessFeature.slug') = 'text' THEN json_extract(${metadata}, '$.harnessFeature.slug') ELSE '' END)`
+  const projectSessionProject = `trim(CASE WHEN json_type(${metadata}, '$.harnessProjectSession.projectId') = 'text' THEN json_extract(${metadata}, '$.harnessProjectSession.projectId') ELSE '' END)`
+  const projectSessionKind = `trim(CASE WHEN json_type(${metadata}, '$.harnessProjectSession.kind') = 'text' THEN json_extract(${metadata}, '$.harnessProjectSession.kind') ELSE '' END)`
+  const isValidFeature = `${featureProject} <> '' AND ${featureSlug} <> ''`
+  const isValidProjectSession = `${projectSessionProject} <> '' AND ${projectSessionKind} <> ''`
+
+  let selectorSql: string
+  let selectorParams: Array<string> = []
+  if (request.selector.type === "workspace") {
+    const isFeatureThread = `COALESCE(json_type(${metadata}, '$.harnessFeature.projectId'), '') = 'text' AND COALESCE(json_type(${metadata}, '$.harnessFeature.slug'), '') = 'text'`
+    const isProjectSessionThread = `COALESCE(json_type(${metadata}, '$.harnessProjectSession.projectId'), '') = 'text' AND COALESCE(json_type(${metadata}, '$.harnessProjectSession.kind'), '') = 'text'`
+    const workspacePath = `json_extract(${metadata}, '$.workspacePath')`
+    const workspacePredicate =
+      request.selector.workspacePath === null
+        ? `(COALESCE(json_type(${metadata}, '$.workspacePath'), '') <> 'text' OR trim(${workspacePath}) = '')`
+        : `json_type(${metadata}, '$.workspacePath') = 'text' AND ${workspacePath} = ?`
+    selectorSql = `NOT (${isFeatureThread}) AND NOT (${isProjectSessionThread}) AND (${workspacePredicate})`
+    if (request.selector.workspacePath !== null) {
+      selectorParams = [request.selector.workspacePath]
+    }
+  } else if (request.selector.type === "harness-feature") {
+    // The renderer classifies a valid project-session first and never also
+    // exposes that row under its compatibility feature metadata.
+    selectorSql = `NOT (${isValidProjectSession}) AND ${featureProject} = ? AND ${featureSlug} = ?`
+    selectorParams = [request.selector.projectId, request.selector.slug]
+  } else if (request.selector.type === "harness-project") {
+    selectorSql = `((${isValidProjectSession}) AND ${projectSessionProject} = ?) OR (NOT (${isValidProjectSession}) AND (${isValidFeature}) AND ${featureProject} = ?)`
+    selectorParams = [request.selector.projectId, request.selector.projectId]
+  } else {
+    throw new Error("Unsupported thread group selector")
+  }
+
+  const statement = database.prepare(
+    `SELECT thread_id,
+            created_at,
+            CASE
+              WHEN json_type(${metadata}, '$.cmb_thread_incarnation') = 'text'
+              THEN json_extract(${metadata}, '$.cmb_thread_incarnation')
+              ELSE NULL
+            END AS incarnation_token
+     FROM threads
+     WHERE (${selectorSql})
+     ORDER BY thread_id
+     LIMIT ?`
+  )
+  // One statement gives the confirmation flow a coherent SQLite read snapshot.
+  // Pagination by updated_at could silently miss a row that moves between pages.
+  const rows = statement.all(...selectorParams, THREAD_GROUP_ID_MAX_ROWS + 1) as ThreadGroupIdRow[]
+  throwIfCancelled(cancellation)
+  if (rows.length > THREAD_GROUP_ID_MAX_ROWS) {
+    throw new Error(
+      `Thread group selection exceeds the ${THREAD_GROUP_ID_MAX_ROWS} row safety ceiling`
+    )
+  }
+
+  const entries: ThreadGroupSelectionEntry[] = []
+  let responseBytes = 2
+  for (const row of rows) {
+    throwIfCancelled(cancellation)
+    if (typeof row.thread_id !== "string" || !row.thread_id) {
+      throw new Error("Thread group selector returned an invalid thread id")
+    }
+    const legacyCreatedAt = Number(row.created_at)
+    if (!Number.isFinite(legacyCreatedAt)) {
+      throw new Error("Thread group selector returned an invalid creation timestamp")
+    }
+    const token = row.incarnation_token
+    if (token !== null && token !== undefined && typeof token !== "string") {
+      throw new Error("Thread group selector returned an invalid incarnation token")
+    }
+    if (typeof token === "string" && (token.length === 0 || token.length > 4_096)) {
+      throw new Error("Thread group selector returned an unsafe incarnation token")
+    }
+    responseBytes +=
+      Buffer.byteLength(row.thread_id, "utf8") +
+      (typeof token === "string" ? Buffer.byteLength(token, "utf8") : 0) +
+      32
+    if (responseBytes > THREAD_GROUP_ID_MAX_RESPONSE_BYTES) {
+      throw new Error("Thread group id selection exceeded its hard byte ceiling")
+    }
+    entries.push({
+      threadId: row.thread_id,
+      incarnation: { token: token ?? null, legacyCreatedAt }
+    })
+  }
+  return {
+    entries,
+    stats: stats(startedAt, entries.length, responseBytes)
   }
 }

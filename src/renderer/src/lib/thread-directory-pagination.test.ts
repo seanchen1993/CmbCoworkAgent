@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import type { Thread } from "@/types"
 import {
@@ -18,6 +19,21 @@ function thread(id: string, updatedAt: number): Thread {
 }
 
 describe("thread directory pagination", () => {
+  it("advances the mutation fence again after a backend delete commits", () => {
+    const storeSource = readFileSync(new URL("./store.ts", import.meta.url), "utf8")
+    const deleteStart = storeSource.indexOf("deleteThread: async (")
+    const deleteEnd = storeSource.indexOf("finalizeThreadDeletions:", deleteStart)
+    const deletion = storeSource.slice(deleteStart, deleteEnd)
+    const backendDelete = deletion.indexOf("await window.api.threads.delete(")
+
+    expect(deleteStart).toBeGreaterThanOrEqual(0)
+    expect(backendDelete).toBeGreaterThanOrEqual(0)
+    expect(deletion.indexOf("markThreadDirectoryMutation(threadId)")).toBeLessThan(backendDelete)
+    expect(deletion.indexOf("markThreadDirectoryMutation(threadId)", backendDelete)).toBeGreaterThan(
+      backendDelete
+    )
+  })
+
   it("keeps a 100k no-op first-page refresh O(page) and reference-stable", () => {
     const previous = Array.from({ length: 100_000 }, (_, index) =>
       thread(`thread-${index}`, 100_000 - index)

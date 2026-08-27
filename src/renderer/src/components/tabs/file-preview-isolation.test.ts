@@ -61,6 +61,7 @@ describe("persisted active file preview isolation", () => {
     expect(previewIpc).toContain("resolveExternalFileReadGrant")
     expect(previewIpc).not.toMatch(/record\.externalFullPath/)
     expect(fileViewer).toContain("externalPreviewGrant")
+    expect(fileViewer).toContain("await resolveExternalPreviewGrant()")
     expect(fileViewer).not.toContain("requestExternalFileRead")
     expect(harnessIpc).toContain("const previewablePaths = preview.files")
     expect(harnessIpc).toContain("issueExternalFileReadGrant(")

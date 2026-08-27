@@ -1,6 +1,12 @@
 import type { ResourceLimits, Worker } from "node:worker_threads"
 import { getDbPath } from "../storage"
-import type { Thread, ThreadSummaryPage, ThreadSummaryPageOptions } from "../types"
+import type {
+  Thread,
+  ThreadGroupIdsOptions,
+  ThreadGroupIdsResult,
+  ThreadSummaryPage,
+  ThreadSummaryPageOptions
+} from "../types"
 import type {
   ThreadGitMetadataProjection,
   ThreadGoalHydrationEvent,
@@ -9,7 +15,13 @@ import type {
 import { THREAD_METADATA_HYDRATION_CANCELLED } from "./protocol"
 
 type WorkerFactory = () => Promise<Worker>
-type RequestKind = "thread" | "list-page" | "goal-events" | "workspace-path" | "git-context"
+type RequestKind =
+  | "thread"
+  | "list-page"
+  | "group-ids"
+  | "goal-events"
+  | "workspace-path"
+  | "git-context"
 
 export const THREAD_METADATA_HYDRATION_WORKER_RESOURCE_LIMITS: ResourceLimits = {
   maxOldGenerationSizeMb: 256,
@@ -32,6 +44,7 @@ interface PendingRequest {
       | Thread
       | Thread[]
       | ThreadSummaryPage
+      | ThreadGroupIdsResult
       | ThreadGoalHydrationResult
       | ThreadGitMetadataProjection
       | string
@@ -120,6 +133,12 @@ export class ThreadMetadataHydrationClient {
       })
       return
     }
+    if (response.type === "read-group-ids-result" && pending.kind === "group-ids") {
+      pending.resolve({
+        entries: response.entries
+      })
+      return
+    }
     if (response.type === "read-goal-events-result" && pending.kind === "goal-events") {
       pending.resolve({ events: response.events, truncated: response.truncated })
       return
@@ -193,6 +212,10 @@ export class ThreadMetadataHydrationClient {
           byteBudget: number
         }
       | {
+          type: "read-group-ids"
+          selector: ThreadGroupIdsOptions["selector"]
+        }
+      | {
           type: "read-goal-events"
           threadId: string
           restore: boolean
@@ -207,6 +230,7 @@ export class ThreadMetadataHydrationClient {
     | Thread
     | Thread[]
     | ThreadSummaryPage
+    | ThreadGroupIdsResult
     | ThreadGoalHydrationResult
     | ThreadGitMetadataProjection
     | string
@@ -331,6 +355,21 @@ export class ThreadMetadataHydrationClient {
       },
       latestKey
     )) as ThreadSummaryPage
+  }
+
+  async readGroupIds(
+    options: ThreadGroupIdsOptions,
+    webContentsId?: number
+  ): Promise<ThreadGroupIdsResult> {
+    const latestKey = Number.isSafeInteger(webContentsId) ? `group-ids:${webContentsId}` : null
+    return (await this.request(
+      "group-ids",
+      {
+        type: "read-group-ids",
+        selector: options.selector
+      },
+      latestKey
+    )) as ThreadGroupIdsResult
   }
 
   async readGoalEvents(
@@ -479,6 +518,13 @@ export function readThreadSummaryPageInWorker(
   webContentsId?: number
 ): Promise<ThreadSummaryPage> {
   return getDefaultClient().readListPage(options, webContentsId)
+}
+
+export function readThreadGroupIdsInWorker(
+  options: ThreadGroupIdsOptions,
+  webContentsId?: number
+): Promise<ThreadGroupIdsResult> {
+  return getDefaultClient().readGroupIds(options, webContentsId)
 }
 
 export function readThreadGoalEventsInWorker(

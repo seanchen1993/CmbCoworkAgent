@@ -40,21 +40,94 @@ describe("threads:get hydration contract", () => {
   })
 
   it("cancels migration before deletion waits and forgets it only after DB removal", () => {
-    const start = source.indexOf('ipcMain.handle("threads:delete"')
+    const channel = source.indexOf('"threads:delete"')
+    const start = source.lastIndexOf("ipcMain.handle(", channel)
     const end = source.indexOf('// Get thread history', start)
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
+    expect(handler).toContain("const lease = requireThreadMutationLease(threadId)")
     expect(handler.indexOf("cancelLegacySubagentTranscriptMigration(threadId)")).toBeLessThan(
-      handler.indexOf("withThreadRunMutationLock(threadId")
+      handler.indexOf("withThreadMutationLeaseLock(lease")
     )
     expect(handler.indexOf("cancelLegacyCheckpointTranscriptBootstrap(threadId)")).toBeLessThan(
-      handler.indexOf("withThreadRunMutationLock(threadId")
+      handler.indexOf("withThreadMutationLeaseLock(lease")
     )
+    expect(handler).toContain("if (options?.requireIdle)")
+    expect(handler.indexOf("isThreadForkBusy(")).toBeLessThan(
+      handler.indexOf("performThreadDeletion(event, threadId, options?.groupGuard)")
+    )
+    expect(handler).toContain("isExternallyManagedThreadRunBusy(threadId, metadata!)")
     const deleteIndex = source.indexOf("dbDeleteThread(threadId)")
     const forgetIndex = source.indexOf("forgetLegacySubagentTranscriptMigration(threadId)")
     expect(deleteIndex).toBeGreaterThanOrEqual(0)
     expect(forgetIndex).toBeGreaterThan(deleteIndex)
+  })
+
+  it("binds grouped deletion to the confirmed incarnation and selector inside the mutation lock", () => {
+    const channel = source.indexOf('"threads:delete"')
+    const start = source.lastIndexOf("ipcMain.handle(", channel)
+    const end = source.indexOf("// Get thread history", start)
+    const handler = source.slice(start, end)
+    const lockIndex = handler.indexOf("withThreadMutationLeaseLock(lease")
+    const incarnationIndex = handler.indexOf("matchesThreadIncarnation(threadRow")
+    const membershipIndex = handler.indexOf("threadMetadataMatchesGroupSelector(")
+    const deletionIndex = handler.indexOf("performThreadDeletion(event, threadId, options?.groupGuard)")
+
+    expect(handler).toContain("normalizeThreadDeleteOptions(rawOptions)")
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    expect(incarnationIndex).toBeGreaterThan(lockIndex)
+    expect(membershipIndex).toBeGreaterThan(incarnationIndex)
+    expect(deletionIndex).toBeGreaterThan(membershipIndex)
+  })
+
+  it("revalidates a grouped selection again at the synchronous database commit boundary", () => {
+    const start = source.indexOf("const performThreadDeletion = async")
+    const end = source.indexOf('"threads:delete"', start)
+    const deletion = source.slice(start, end)
+    const finalIncarnationCheck = deletion.lastIndexOf("matchesThreadIncarnation(")
+    const finalMembershipCheck = deletion.lastIndexOf("threadMetadataMatchesGroupSelector(")
+    const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
+
+    expect(finalIncarnationCheck).toBeGreaterThanOrEqual(0)
+    expect(finalMembershipCheck).toBeGreaterThan(finalIncarnationCheck)
+    expect(finalMembershipCheck).toBeLessThan(databaseCommit)
+    expect(deletion.slice(finalMembershipCheck, databaseCommit)).not.toContain("await ")
+  })
+
+  it("rechecks owner-managed runs at the synchronous database commit boundary", () => {
+    const start = source.indexOf("const performThreadDeletion = async")
+    const end = source.indexOf('"threads:delete"', start)
+    const deletion = source.slice(start, end)
+    const finalBusyCheck = deletion.lastIndexOf("isExternallyManagedThreadRunBusy(")
+    const databaseCommit = deletion.indexOf("dbDeleteThread(threadId)")
+
+    expect(finalBusyCheck).toBeGreaterThanOrEqual(0)
+    expect(finalBusyCheck).toBeLessThan(databaseCommit)
+    expect(deletion.slice(finalBusyCheck, databaseCommit)).not.toContain("await ")
+  })
+
+  it("does not turn post-commit artifact cleanup failures into deletion failures", () => {
+    const start = source.indexOf("const performThreadDeletion = async")
+    const end = source.indexOf('"threads:delete"', start)
+    const deletion = source.slice(start, end)
+    const commitIndex = deletion.indexOf("dbDeleteThread(threadId)")
+    const workflowCleanupIndex = deletion.indexOf(
+      "await deleteWorkflowRunsForThread(workspacePath, threadId)"
+    )
+    const coordinatorCleanupIndex = deletion.indexOf(
+      "await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(threadId)"
+    )
+
+    expect(commitIndex).toBeGreaterThanOrEqual(0)
+    expect(workflowCleanupIndex).toBeGreaterThan(commitIndex)
+    expect(coordinatorCleanupIndex).toBeGreaterThan(commitIndex)
+    expect(deletion).toMatch(
+      /try\s*{\s*await deleteWorkflowRunsForThread\(workspacePath, threadId\)[\s\S]{0,400}catch \(e\)/
+    )
+    expect(deletion).toMatch(
+      /try\s*{\s*await coordinatorWorkerManager\.forgetThreadAndDeleteArtifacts\(threadId\)[\s\S]{0,400}catch \(e\)/
+    )
   })
 
   it("keeps background subagent refreshes out of the foreground latest-wins scope", () => {

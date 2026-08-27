@@ -2635,8 +2635,8 @@ test("deleting a thread sweeps leftover workflow-subagent (__wf_) checkpoints (#
   // the __wf_ ones — add a symmetric sweep.
   assert.match(
     storageSource,
-    /export function deleteThreadWorkflowCheckpoints\([\s\S]*?sweepCheckpointVariants\(`\$\{parentThreadId\}__wf_`\)/,
-    "storage exposes a __wf_ checkpoint sweep mirroring the __worker__ one"
+    /export function deleteThreadWorkflowCheckpoints\([\s\S]*?sweepCheckpointVariants\(index\.workflowThreadIdsByParent\.get\(parentThreadId\) \?\? \[\]\)/,
+    "storage exposes an indexed __wf_ checkpoint sweep mirroring the __worker__ one"
   )
   assert.match(
     threadsSource,

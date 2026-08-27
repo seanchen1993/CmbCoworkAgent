@@ -57,6 +57,9 @@ import type {
   ThreadMessageSearchPage,
   ThreadSummaryPage,
   ThreadSummaryPageOptions,
+  ThreadGroupIdsOptions,
+  ThreadGroupIdsResult,
+  ThreadDeleteOptions,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   ThreadLegacyCheckpointBootstrapResult,
@@ -100,6 +103,10 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessRunArtifactGrantRefreshInput,
+  HarnessRunArtifactGrantRefreshResult,
+  HarnessRunArtifactRevealInput,
+  HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
@@ -1002,6 +1009,7 @@ interface CustomAPI {
   threads: {
     list: () => Promise<Thread[]>
     listPage: (options?: ThreadSummaryPageOptions) => Promise<ThreadSummaryPage>
+    listGroupIds: (options: ThreadGroupIdsOptions) => Promise<ThreadGroupIdsResult>
     get: (
       threadId: string,
       options?: { requestScope?: "foreground-hydration" }
@@ -1035,7 +1043,7 @@ interface CustomAPI {
       threadId: string,
       transcripts: Record<string, unknown>
     ) => Promise<Record<string, unknown>>
-    delete: (threadId: string) => Promise<void>
+    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
     getMessagesPage: (
       threadId: string,
@@ -2758,6 +2766,12 @@ interface CustomAPI {
     ) => Promise<Record<string, HarnessProjectDetailViewModel>>
     stopWatchRefs: (scopeKey?: string) => Promise<void>
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    refreshRunArtifactGrant: (
+      input: HarnessRunArtifactGrantRefreshInput
+    ) => Promise<HarnessRunArtifactGrantRefreshResult>
+    revealRunArtifact: (
+      input: HarnessRunArtifactRevealInput
+    ) => Promise<HarnessRunArtifactRevealResult>
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     cancelDialogTips: () => Promise<void>

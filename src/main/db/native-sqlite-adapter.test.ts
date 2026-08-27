@@ -1,10 +1,14 @@
 import initSqlJs from "sql.js"
 import { DatabaseSync } from "node:sqlite"
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs"
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { afterEach, describe, expect, it } from "vitest"
 import { openNativeSqliteDatabase } from "./native-sqlite-adapter"
+import {
+  forgetRegisteredSqliteQuarantineArtifact,
+  listRegisteredSqliteQuarantineArtifacts
+} from "../utils/sqlite-durable-file"
 
 const temporaryDirectories: string[] = []
 
@@ -57,6 +61,12 @@ describe("NativeSqliteAdapter", () => {
       ["from backup"]
     ])
     opened.database.close()
+
+    const quarantineArtifacts = listRegisteredSqliteQuarantineArtifacts(databasePath)
+    expect(quarantineArtifacts).toHaveLength(1)
+    expect(quarantineArtifacts[0]).toMatch(/recover\.sqlite\.corrupt\.\d+$/)
+    expect(existsSync(quarantineArtifacts[0]!)).toBe(true)
+    forgetRegisteredSqliteQuarantineArtifact(databasePath, quarantineArtifacts[0]!)
   })
 
   it("materializes a recovery candidate's WAL before promoting its main file", () => {

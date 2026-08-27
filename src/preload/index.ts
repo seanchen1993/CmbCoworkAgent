@@ -63,6 +63,9 @@ import type {
   ThreadMessageSearchPage,
   ThreadSummaryPage,
   ThreadSummaryPageOptions,
+  ThreadGroupIdsOptions,
+  ThreadGroupIdsResult,
+  ThreadDeleteOptions,
   ThreadMessagesPage,
   ThreadMessagesPageOptions,
   ThreadLegacyCheckpointBootstrapResult,
@@ -135,6 +138,10 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessRunArtifactGrantRefreshInput,
+  HarnessRunArtifactGrantRefreshResult,
+  HarnessRunArtifactRevealInput,
+  HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
@@ -935,6 +942,9 @@ const api = {
     listPage: (options?: ThreadSummaryPageOptions): Promise<ThreadSummaryPage> => {
       return ipcRenderer.invoke("threads:list-page", options)
     },
+    listGroupIds: (options: ThreadGroupIdsOptions): Promise<ThreadGroupIdsResult> => {
+      return ipcRenderer.invoke("threads:list-group-ids", options)
+    },
     get: (
       threadId: string,
       options?: { requestScope?: "foreground-hydration" }
@@ -1001,8 +1011,8 @@ const api = {
         transcripts
       })
     },
-    delete: (threadId: string): Promise<void> => {
-      return ipcRenderer.invoke("threads:delete", threadId)
+    delete: (threadId: string, options?: ThreadDeleteOptions): Promise<void> => {
+      return ipcRenderer.invoke("threads:delete", threadId, options)
     },
     getMessages: (threadId: string): Promise<Message[]> => {
       return ipcRenderer.invoke("threads:messages", threadId)
@@ -4133,6 +4143,20 @@ const api = {
         projectId,
         slug
       }) as Promise<HarnessRunDetailViewModel>,
+    refreshRunArtifactGrant: (
+      input: HarnessRunArtifactGrantRefreshInput
+    ): Promise<HarnessRunArtifactGrantRefreshResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:refreshRunArtifactGrant",
+        input
+      ) as Promise<HarnessRunArtifactGrantRefreshResult>,
+    revealRunArtifact: (
+      input: HarnessRunArtifactRevealInput
+    ): Promise<HarnessRunArtifactRevealResult> =>
+      ipcRenderer.invoke(
+        "harnessBoard:revealRunArtifact",
+        input
+      ) as Promise<HarnessRunArtifactRevealResult>,
     skipNode: (input: HarnessSkipNodeInput): Promise<HarnessSkipNodeResult> =>
       ipcRenderer.invoke("harnessBoard:skipNode", input) as Promise<HarnessSkipNodeResult>,
     getDialogTips: (projectId: string, slug: string): Promise<string | null> =>
