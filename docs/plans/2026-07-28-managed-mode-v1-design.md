@@ -712,9 +712,9 @@ src/main/harness-board/managed-run-recovery.ts
 - `auto-mode-action-executor.ts`：执行 Controller 内部 ManagedAction，关联 runId；
 - `agent-run-service.ts`：保持普通会话执行入口，支持 ManagedRun 关联元数据；
 - `agent.ts`：上报稳定 Turn 终态和 Provider Error；
-- `service.ts`：提供 async feature_status snapshot 和共享 nextAction 解析；
+- `service.ts`：提供 async feature_status snapshot、共享 nextAction 解析，并允许 `session_context_inject.agentConfig.agentMode` 配置 `solo/multi/agent_team/workflow`；
 - `harness-board-types.ts`：增加 ManagedRun/Action/Event/View 类型；
-- `thread-service.ts`：创建 Thread 时写入 runId/node/sessionIndex/attempt metadata；
+- `thread-service.ts`：创建 Thread 时写入 runId/node/sessionIndex/attempt metadata；当 Thread 未显式指定 agentMode 时，将插件 `workflow` 默认值映射为 `metadata.agentMode="workflow"`；
 - preload/Renderer：查询 ManagedRun、订阅增量事件、开始/停止托管；
 - `HarnessBoardView.tsx`：ManagedRun 总览、Selected stage 增强和时间线详情。
 
@@ -1061,6 +1061,7 @@ Stage Retry 和同 Thread Biz Retry 合并为共享单一 `bizRetryCount` 的两
 - Managed Run 只展示存在可见事件的 Workflow 阶段，当前阶段默认展开，其他阶段默认收起，组内记录倒序；
 - 每次 Controller 决策都能通过中文 tooltip 解释结构化判断事实和命中的判断规则；
 - 自动 Thread 继续与普通会话同等展示；
+- 使用插件 session_context_inject 的 Feature 可通过 `agentConfig.agentMode="workflow"` 将新建 Thread 初始化为 Workflow Agent 模式；显式 Thread metadata 仍优先；
 - completed/failed/cancelled 后再次开始创建新 runId，历史保留；
 - V2 明确不承诺跨重启执行幂等、旧 Thread 恢复或通用会话计数；除当前阶段 Biz Retry 上限外，其他循环硬限制仍进入 V3；
 - 普通 Chat、非 Harness Thread、没有活跃 ManagedRun、Dynamic Workflow 均无行为变化。
