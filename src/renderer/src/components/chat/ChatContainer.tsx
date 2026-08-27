@@ -223,6 +223,27 @@ import { HookLogChip, HookLogModal } from "./HookLogViews"
 
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+const REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY = "chat:remote-thread-tip-dismissals"
+
+function loadRemoteThreadTipDismissals(): Set<string> {
+  try {
+    const raw = sessionStorage.getItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((threadId): threadId is string => typeof threadId === "string"))
+  } catch {
+    return new Set()
+  }
+}
+
+function persistRemoteThreadTipDismissals(threadIds: Set<string>): void {
+  try {
+    sessionStorage.setItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY, JSON.stringify([...threadIds]))
+  } catch {
+    // Tip dismissal is a best-effort, renderer-session-only preference.
+  }
+}
 
 function interruptionNoticeCopy(event: string, action: string): {
   title: string
@@ -1633,6 +1654,9 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  const [dismissedRemoteTipThreadIds, setDismissedRemoteTipThreadIds] = useState(
+    loadRemoteThreadTipDismissals
+  )
   const [searchOpen, setSearchOpen] = useState(false)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
@@ -5862,10 +5886,19 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "远程收件箱" : "远程会话"
+  const handleDismissRemoteThreadTip = useCallback(() => {
+    setDismissedRemoteTipThreadIds((current) => {
+      const next = new Set(current)
+      next.add(threadId)
+      persistRemoteThreadTipDismissals(next)
+      return next
+    })
+  }, [threadId])
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
-      {remoteThreadInfo ? (
+      {remoteThreadInfo && !dismissedRemoteTipThreadIds.has(threadId) ? (
         <div className="flex shrink-0 items-start gap-2 border-b border-blue-500/20 bg-blue-500/5 px-4 py-2 text-xs">
           <Info className="mt-0.5 size-3.5 shrink-0 text-blue-500" />
           <div className="min-w-0 flex-1 space-y-0.5">
@@ -5890,6 +5923,15 @@ export function ChatContainer({
                     : "可在桌面继续处理。"}
             </p>
           </div>
+          <button
+            type="button"
+            onClick={handleDismissRemoteThreadTip}
+            className="ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-blue-500/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
+            aria-label={`关闭${remoteThreadTipLabel}提示`}
+            title="关闭提示"
+          >
+            <X className="size-3.5" />
+          </button>
         </div>
       ) : null}
       {/* In-session keyword search (Ctrl/Cmd+F) */}
