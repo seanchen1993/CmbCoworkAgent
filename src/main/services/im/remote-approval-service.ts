@@ -24,8 +24,6 @@ import { buildImProactiveReplies, IM_REPLY_TRUNCATION_NOTICE } from "./reply-seg
 import type { ImReplyClient } from "./reply-client"
 
 const REMOTE_APPROVAL_CODE_TTL_MS = 10 * 60_000
-const REMOTE_EXECUTE_MAX_CHARACTERS = 12_000
-
 interface RemoteApprovalRoute {
   principalId: string
   conversationKey: string
@@ -121,14 +119,15 @@ function safeRelativePath(workspacePath: string, request: ApprovalRequest): stri
   return display && !display.startsWith("..") && !isAbsolute(display) ? display : null
 }
 
-function executeCwdAllowed(workspacePath: string, cwd: string): boolean {
-  const workspace = canonicalDirectory(workspacePath)
-  const commandCwd = canonicalDirectory(cwd)
-  return Boolean(workspace && commandCwd && isWithin(workspace, commandCwd))
+function approvalOperation(request: ApprovalRequest): string {
+  if (request.operation) return request.operation
+  if (request.command?.trim()) return "execute"
+  const toolName = request.tool_call?.name?.trim()
+  return toolName || "unknown"
 }
 
 function presentationFor(request: ApprovalRequest, workspacePath: string): ApprovalPresentation {
-  const operation = request.operation ?? "unknown"
+  const operation = approvalOperation(request)
   const allowedDecisions = (["approve", "reject"] as const).filter((decision) =>
     request.allowed_approval_types.includes(decision)
   )
@@ -155,17 +154,12 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
   }
   if (operation === "execute") {
     const command = request.command?.trim() ?? ""
-    if (
-      !command ||
-      command.length > REMOTE_EXECUTE_MAX_CHARACTERS ||
-      !executeCwdAllowed(workspacePath, request.cwd) ||
-      !oneShotDecisionAllowed
-    ) {
+    if (!command || !oneShotDecisionAllowed) {
       return {
         approvable: false,
         operation,
         summary: "执行命令（仅桌面确认）",
-        detail: "命令无法在招乎中完整、安全地展示，请回到桌面确认。",
+        detail: "该请求没有可展示的命令，或不接受一次性批准，请回到桌面确认。",
         allowedDecisions: []
       }
     }

@@ -108,6 +108,30 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).toHaveBeenCalledTimes(1)
   })
 
+  it("marks ordinary shell approval requests as execute operations", async () => {
+    const rawExecute = vi.fn<RawExecuteFn>()
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "test"
+    } satisfies ApprovalDecision)
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      false
+    )
+    const command = "custom-risky-command --inspect"
+
+    await orchestrator.execute(command, process.cwd(), "none")
+
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(requestApproval.mock.calls[0][0]).toMatchObject({
+      operation: "execute",
+      command
+    })
+    expect(rawExecute).not.toHaveBeenCalled()
+  })
+
   it("reports push-specific cwd validation errors for routed git push commands", async () => {
     const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
       output: "should not run",

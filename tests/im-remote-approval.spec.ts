@@ -24,6 +24,7 @@ const ROUTE = {
 function approvalRequest(input: {
   id: string
   operation?: ApprovalRequest["operation"]
+  toolName?: string
   cwd: string
   filePath?: string
   command?: string
@@ -33,7 +34,7 @@ function approvalRequest(input: {
     id: input.id,
     tool_call: {
       id: `tool-${input.id}`,
-      name: input.operation ?? "unknown",
+      name: input.toolName ?? input.operation ?? "unknown",
       args: {},
       metadata: null,
       status: "pending",
@@ -369,7 +370,7 @@ async function testDesktopDecisionWinsAuditFlushRace(): Promise<void> {
   }
 }
 
-async function testUnsupportedAndUnsafeOperationsNeverReceiveCodes(): Promise<void> {
+async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(): Promise<void> {
   const context = await createContext()
   try {
     const git = approvalRequest({
@@ -400,16 +401,25 @@ async function testUnsupportedAndUnsafeOperationsNeverReceiveCodes(): Promise<vo
     const command = `printf 'BEGIN-REMOTE-EXECUTE-${"x".repeat(6_000)}-END-REMOTE-EXECUTE'`
     const execute = approvalRequest({
       id: "request-execute",
-      operation: "execute",
+      toolName: "execute",
       cwd: context.root,
       command
     })
-    context.register(execute)
+    const executeDecisions = context.register(execute)
     await waitFor(() => context.deliveryText(execute.id).includes("A1B2C3"), "execute approval")
     const executeText = context.deliveryText(execute.id)
     assert(executeText.includes("BEGIN-REMOTE-EXECUTE"))
     assert(executeText.includes("END-REMOTE-EXECUTE"))
     assert(!executeText.includes(IM_REPLY_TRUNCATION_NOTICE))
+    const approvalResult = await context.service.resolveCode({
+      code: "A1B2C3",
+      decision: "approve",
+      ...ROUTE
+    })
+    assert(approvalResult.includes("一次性批准"))
+    assert.deepEqual(executeDecisions, [
+      { type: "approve", tool_call_id: execute.tool_call.id }
+    ])
   } finally {
     context.service.dispose()
     context.database.close()
@@ -525,7 +535,7 @@ async function main(): Promise<void> {
   await testAllowedDecisionAndExpiryRemainFailClosed()
   await testAuditFlushFailureNeverResumesRuntime()
   await testDesktopDecisionWinsAuditFlushRace()
-  await testUnsupportedAndUnsafeOperationsNeverReceiveCodes()
+  await testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly()
   await testConcurrentCodesPointToExactlyOneRequest()
   await testBrokerPreservesDesktopDecisionSurfaceAndCommandIsExplicit()
   console.log("IM remote approval tests passed")
