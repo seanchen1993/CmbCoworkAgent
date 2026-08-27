@@ -517,6 +517,7 @@ export function RightPanel({
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
+  const previewThreadIdRef = useRef<string | null>(null)
   const [previewExternalAuthorization, setPreviewExternalAuthorization] =
     useState<PreviewExternalAuthorization | null>(null)
   const previewExternalAuthorizationRef = useRef<PreviewExternalAuthorization | null>(null)
@@ -580,6 +581,17 @@ export function RightPanel({
   }, [replacePreviewExternalAuthorization])
   const [previewReloadToken, setPreviewReloadToken] = useState(0)
   const lastThreadIdRef = useRef<string | null>(null)
+  // A thread switch renders before its cleanup effect runs. Gate the preview
+  // synchronously so the new thread never receives the previous thread's path
+  // or external capability during that transition frame.
+  const previewPathForCurrentThread =
+    currentThreadId && previewThreadIdRef.current === currentThreadId ? previewPath : null
+  const previewExternalAuthorizationForCurrentThread =
+    previewPathForCurrentThread &&
+    previewExternalAuthorization?.threadId === currentThreadId &&
+    previewExternalAuthorization.filePath === previewPathForCurrentThread
+      ? previewExternalAuthorization
+      : null
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
   const [pluginRunArtifactsOpen, setPluginRunArtifactsOpen] = useState(false)
@@ -1189,6 +1201,8 @@ export function RightPanel({
 
   const applyStreamPreview = useCallback(
     (path: string, switchToPreview: boolean): void => {
+      if (!currentThreadId) return
+      previewThreadIdRef.current = currentThreadId
       setPreviewPath(path)
       previewExternalGrantRefreshPromiseRef.current = null
       replacePreviewExternalAuthorization(null)
@@ -1200,12 +1214,18 @@ export function RightPanel({
         onRequestPreviewMode?.()
       }
     },
-    [onRequestBrowserMode, onRequestPreviewMode, replacePreviewExternalAuthorization]
+    [
+      currentThreadId,
+      onRequestBrowserMode,
+      onRequestPreviewMode,
+      replacePreviewExternalAuthorization
+    ]
   )
 
   useEffect(() => {
     if (lastThreadIdRef.current !== currentThreadId) {
       lastThreadIdRef.current = currentThreadId
+      previewThreadIdRef.current = null
       setPreviewPath(null)
       previewExternalGrantRefreshPromiseRef.current = null
       replacePreviewExternalAuthorization(null)
@@ -1215,12 +1235,12 @@ export function RightPanel({
   useEffect(() => {
     if (!currentThreadId) return
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadIds.includes(currentThreadId) && previewPath) {
+      if (data.threadIds.includes(currentThreadId) && previewPathForCurrentThread) {
         setPreviewReloadToken((v) => v + 1)
       }
     })
     return cleanup
-  }, [currentThreadId, previewPath])
+  }, [currentThreadId, previewPathForCurrentThread])
 
   useEffect(() => {
     const cleanup = onOpenResourcePreview(
@@ -1233,6 +1253,7 @@ export function RightPanel({
         externalPreviewSlug
       }) => {
         if (!currentThreadId || threadId !== currentThreadId) return
+        previewThreadIdRef.current = threadId
         setPreviewPath(filePath)
         previewExternalGrantRefreshPromiseRef.current = null
         replacePreviewExternalAuthorization(
@@ -1264,8 +1285,10 @@ export function RightPanel({
   ])
 
   useEffect(() => {
-    if (moduleMode !== "preview" || !previewPath) onPreviewFullscreenChange?.(false)
-  }, [moduleMode, previewPath, onPreviewFullscreenChange])
+    if (moduleMode !== "preview" || !previewPathForCurrentThread) {
+      onPreviewFullscreenChange?.(false)
+    }
+  }, [moduleMode, previewPathForCurrentThread, onPreviewFullscreenChange])
 
   useEffect(() => {
     if (moduleMode !== "browser") onBrowserFullscreenChange?.(false)
@@ -1792,9 +1815,11 @@ export function RightPanel({
     !hooksOpen &&
     !lspOpen
   const browserPreviewUrl = useMemo(() => {
-    if (!previewPath || !isHtmlPreviewPath(previewPath)) return null
-    return previewPath
-  }, [previewPath])
+    if (!previewPathForCurrentThread || !isHtmlPreviewPath(previewPathForCurrentThread)) {
+      return null
+    }
+    return previewPathForCurrentThread
+  }, [previewPathForCurrentThread])
 
   const handleOpenGitFileFolder = useCallback(
     async (filePath: string): Promise<void> => {
@@ -1838,7 +1863,8 @@ export function RightPanel({
     : workspaceFileBadge === null
       ? "待加载"
       : null
-  const previewExternalGrant = previewExternalAuthorization?.grant ?? null
+  const previewExternalGrant =
+    previewExternalAuthorizationForCurrentThread?.grant ?? null
 
   return (
     <aside
@@ -1873,15 +1899,15 @@ export function RightPanel({
       {moduleMode === "preview" && (
         <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-background">
           <div className="bg-background h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
-            {previewPath ? (
+            {previewPathForCurrentThread ? (
               <ResourcePreview
-                key={`${previewPath}:${previewReloadToken}`}
-                filePath={previewPath}
+                key={`${currentThreadId}:${previewPathForCurrentThread}:${previewReloadToken}`}
+                filePath={previewPathForCurrentThread}
                 workspacePath={workspacePath ?? null}
                 threadId={currentThreadId ?? ""}
                 externalPreviewGrant={previewExternalGrant ?? undefined}
                 resolveExternalPreviewGrant={
-                  previewExternalAuthorization
+                  previewExternalAuthorizationForCurrentThread
                     ? resolveCurrentExternalPreviewGrant
                     : undefined
                 }

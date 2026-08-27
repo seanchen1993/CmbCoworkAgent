@@ -109,4 +109,22 @@ describe("plugin run artifact isolation", () => {
     expect(generationCheck).toBeLessThan(reveal)
     expect(generationCheck).toBeLessThan(emit)
   })
+
+  it("gates the rendered preview synchronously when the active thread changes", () => {
+    const previewStart = rightPanelSource.indexOf("const [previewPath, setPreviewPath]")
+    const previewEnd = rightPanelSource.indexOf("function PluginRunArtifactsContent(")
+    const previewSurface = rightPanelSource.slice(previewStart, previewEnd)
+
+    expect(previewStart).toBeGreaterThanOrEqual(0)
+    expect(previewSurface).toContain("const previewThreadIdRef = useRef<string | null>(null)")
+    expect(previewSurface).toContain(
+      "currentThreadId && previewThreadIdRef.current === currentThreadId ? previewPath : null"
+    )
+    expect(previewSurface).toContain("previewThreadIdRef.current = currentThreadId")
+    expect(previewSurface).toContain("previewThreadIdRef.current = threadId")
+    expect(previewSurface).toContain("previewThreadIdRef.current = null")
+    expect(previewSurface).toContain("{previewPathForCurrentThread ? (")
+    expect(previewSurface).toContain("filePath={previewPathForCurrentThread}")
+    expect(previewSurface).toContain("previewExternalAuthorizationForCurrentThread")
+  })
 })
