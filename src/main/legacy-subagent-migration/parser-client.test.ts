@@ -7,6 +7,9 @@ import { Worker } from "node:worker_threads"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import {
+  LEGACY_SUBAGENT_MIGRATION_MAX_WAITERS,
+  LEGACY_SUBAGENT_MIGRATION_MAX_WORKERS,
+  LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS,
   LegacySubagentMigrationCancelledError,
   LegacySubagentMigrationParserClient
 } from "./parser-client"
@@ -79,6 +82,53 @@ function largeLegacyValue(): string {
 }
 
 describe("legacy subagent migration parser worker", () => {
+  it("bounds worker heaps, concurrent workers, and retained migration waiters", async () => {
+    expect(LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(256)
+    const workers: FakeMigrationWorker[] = []
+    const parser = new LegacySubagentMigrationParserClient(async () => {
+      const worker = new FakeMigrationWorker()
+      workers.push(worker)
+      return worker as unknown as Worker
+    })
+    const controllers = Array.from(
+      { length: LEGACY_SUBAGENT_MIGRATION_MAX_WORKERS + LEGACY_SUBAGENT_MIGRATION_MAX_WAITERS },
+      () => new AbortController()
+    )
+    const retained = controllers.map((controller, index) =>
+      parser.parse(`thread-${index}`, async () => undefined, controller.signal).catch((error) => error)
+    )
+    await Promise.resolve()
+    expect(workers).toHaveLength(LEGACY_SUBAGENT_MIGRATION_MAX_WORKERS)
+    await expect(parser.parse("overflow", async () => undefined)).rejects.toThrow(
+      "capacity exceeded"
+    )
+    for (const controller of controllers) controller.abort()
+    await Promise.all(retained)
+    expect(workers.every((worker) => worker.terminated)).toBe(true)
+  }, 10_000)
+
+  it("terminates the Worker and releases admission after dispatch throws", async () => {
+    const failedWorker = new FakeMigrationWorker()
+    const retryWorker = new FakeMigrationWorker()
+    const workers = [failedWorker, retryWorker]
+    failedWorker.postError = new Error("dispatch failed")
+    const parser = new LegacySubagentMigrationParserClient(
+      async () => workers.shift() as unknown as Worker
+    )
+
+    await expect(parser.parse("dispatch-failure", async () => undefined)).rejects.toThrow(
+      "dispatch failed"
+    )
+    expect(failedWorker.terminated).toBe(true)
+    expect(workers).toHaveLength(1)
+
+    const controller = new AbortController()
+    const retry = parser.parse("dispatch-retry", async () => undefined, controller.signal)
+    await Promise.resolve()
+    controller.abort()
+    await expect(retry).rejects.toBeInstanceOf(LegacySubagentMigrationCancelledError)
+  })
+
   it("streams a 2MiB/300+ snapshot in bounded batches without parsing on main", async () => {
     const threadId = "large-parser-migration"
     const legacyValueJson = largeLegacyValue()
@@ -264,3 +314,23 @@ describe("legacy subagent migration parser worker", () => {
     expect(envelope.value).toBe(content)
   })
 })
+
+class FakeMigrationWorker extends EventEmitter {
+  terminated = false
+  postError: Error | null = null
+
+  postMessage(): void {
+    if (this.postError) throw this.postError
+    return undefined
+  }
+
+  unref(): this {
+    return this
+  }
+
+  terminate(): Promise<number> {
+    this.terminated = true
+    return Promise.resolve(0)
+  }
+}
+import { EventEmitter } from "node:events"

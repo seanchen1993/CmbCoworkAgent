@@ -11,6 +11,8 @@ export const HOOK_CATALOG_MAX_DIRECTORIES = 60_000
 export const HOOK_CATALOG_MAX_FILES = 80_000
 export const HOOK_CATALOG_MAX_SKILLS = 20_000
 export const HOOK_CATALOG_MAX_ENTRIES = 4_096
+export const HOOK_CATALOG_MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+export const HOOK_CATALOG_MAX_WORKSPACE_SNAPSHOT_BYTES = 2 * 1024 * 1024
 
 export interface HookCatalogSourceConfig {
   openworkDir: string
@@ -18,7 +20,11 @@ export interface HookCatalogSourceConfig {
   pluginsStorePath: string
   disabledSkillsPath: string
   skillSourceDirs: string[]
+  /** Main-process revision shared by every renderer window. */
+  globalRevision: number
   workspacePath?: string
+  /** Main-process revision for workspace-only hook files. */
+  workspaceRevision: number
 }
 
 export interface HookCatalogReadRequest {

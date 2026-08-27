@@ -58,6 +58,7 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMetadataPatch,
   ThreadMessageSearchOptions,
   ThreadMessageSearchPage,
   ThreadSummaryPage,
@@ -957,6 +958,9 @@ const api = {
     update: (threadId: string, updates: Partial<Thread>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:update", { threadId, updates })
     },
+    patchMetadata: (threadId: string, patch: ThreadMetadataPatch): Promise<Thread> => {
+      return ipcRenderer.invoke("threads:patchMetadata", { threadId, patch })
+    },
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>): Promise<Thread> => {
       return ipcRenderer.invoke("threads:mergeThreadValues", { threadId, patch })
     },
@@ -1555,11 +1559,17 @@ const api = {
     ): Promise<{ success: boolean }> => {
       return ipcRenderer.invoke("workspace:filePreviewRelease", request)
     },
-    clearWorktreeContext: (threadId: string): Promise<void> => {
-      return ipcRenderer.invoke("workspace:clearWorktreeContext", threadId) as Promise<void>
+    clearWorktreeContext: (expected: {
+      threadId: string
+      workspacePath: string
+      gitRoot: string
+      branch: string
+    }): Promise<void> => {
+      return ipcRenderer.invoke("workspace:clearWorktreeContext", expected) as Promise<void>
     },
     saveWorktreeContext: (
       threadId: string,
+      expectedWorkspacePath: string,
       gitRoot: string,
       branch: string,
       baseBranch?: string,
@@ -1567,6 +1577,7 @@ const api = {
     ): Promise<void> => {
       return ipcRenderer.invoke("workspace:saveWorktreeContext", {
         threadId,
+        expectedWorkspacePath,
         gitRoot,
         branch,
         baseBranch,
@@ -1866,6 +1877,7 @@ const api = {
       }) as Promise<{ success: boolean; error?: string }>
     },
     createWorktree: (
+      threadId: string,
       gitRoot: string,
       branch: string
     ): Promise<{
@@ -1876,7 +1888,11 @@ const api = {
       baseCommit?: string
       error?: string
     }> => {
-      return ipcRenderer.invoke("workspace:createWorktree", { gitRoot, branch }) as Promise<{
+      return ipcRenderer.invoke("workspace:createWorktree", {
+        threadId,
+        gitRoot,
+        branch
+      }) as Promise<{
         success: boolean
         path?: string
         branch?: string

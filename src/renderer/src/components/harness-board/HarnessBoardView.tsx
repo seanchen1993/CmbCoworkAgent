@@ -2215,14 +2215,17 @@ function EnterpriseProjectSearchInput({
   const [hasMore, setHasMore] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState("")
   const requestIdRef = useRef(0)
-  const keyword = searchKeyword.trim()
+  const keyword =
+    searchKeyword.trim() === value.trim() ? searchKeyword.trim() : ""
   const shouldShowPopover =
     open &&
+    keyword.length > 0 &&
     (loading ||
       projects.length > 0 ||
       (keyword.length > 0 && keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS))
 
   const clearSearchState = useCallback(() => {
+    requestIdRef.current += 1
     setSearchKeyword("")
     setLoading(false)
     setProjects([])
@@ -2231,24 +2234,13 @@ function EnterpriseProjectSearchInput({
   }, [])
 
   useEffect(() => {
-    if (!searchKeyword || value.trim() === searchKeyword.trim()) return
-    clearSearchState()
-  }, [clearSearchState, searchKeyword, value])
-
-  useEffect(() => {
-    const nextRequestId = requestIdRef.current + 1
-    requestIdRef.current = nextRequestId
-
-    if (!keyword || keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS) {
-      setLoading(false)
-      setProjects([])
-      setHasMore(false)
-      return
-    }
+    if (!keyword || keyword.length < ENTERPRISE_PROJECT_SEARCH_MIN_CHARS) return
 
     let canceled = false
-    setLoading(true)
     const timer = window.setTimeout(() => {
+      const nextRequestId = requestIdRef.current + 1
+      requestIdRef.current = nextRequestId
+      setLoading(true)
       window.api.harnessBoard
         .searchEnterpriseProjects({ keyword, field: searchField })
         .then((result) => {
@@ -2296,12 +2288,16 @@ function EnterpriseProjectSearchInput({
           value={value}
           onChange={(event) => {
             const nextValue = normalizeValue ? normalizeValue(event.target.value) : event.target.value
+            requestIdRef.current += 1
             setSearchKeyword(nextValue)
+            setLoading(false)
+            setProjects([])
+            setHasMore(false)
             onValueChange(nextValue)
-            setOpen(true)
+            setOpen(nextValue.trim().length > 0)
           }}
           onFocus={() => {
-            if (searchKeyword.trim()) setOpen(true)
+            if (keyword) setOpen(true)
           }}
           placeholder={`输入${searchLabel}搜索`}
           className={harnessProjectCreateInputClassName}
@@ -2380,14 +2376,17 @@ function DeployUnitSearchInput({
   const [hasMore, setHasMore] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState("")
   const requestIdRef = useRef(0)
-  const keyword = searchKeyword.trim()
+  const keyword =
+    searchKeyword.trim() === value.trim() ? searchKeyword.trim() : ""
   const shouldShowPopover =
     open &&
-      (loading ||
+    keyword.length > 0 &&
+    (loading ||
       deployUnits.length > 0 ||
       (keyword.length > 0 && keyword.length < DEPLOY_UNIT_SEARCH_MIN_CHARS))
 
   const clearSearchState = useCallback(() => {
+    requestIdRef.current += 1
     setSearchKeyword("")
     setLoading(false)
     setDeployUnits([])
@@ -2396,24 +2395,13 @@ function DeployUnitSearchInput({
   }, [])
 
   useEffect(() => {
-    if (!searchKeyword || value.trim() === searchKeyword.trim()) return
-    clearSearchState()
-  }, [clearSearchState, searchKeyword, value])
-
-  useEffect(() => {
-    const nextRequestId = requestIdRef.current + 1
-    requestIdRef.current = nextRequestId
-
-    if (!keyword || keyword.length < DEPLOY_UNIT_SEARCH_MIN_CHARS) {
-      setLoading(false)
-      setDeployUnits([])
-      setHasMore(false)
-      return
-    }
+    if (!keyword || keyword.length < DEPLOY_UNIT_SEARCH_MIN_CHARS) return
 
     let canceled = false
-    setLoading(true)
     const timer = window.setTimeout(() => {
+      const nextRequestId = requestIdRef.current + 1
+      requestIdRef.current = nextRequestId
+      setLoading(true)
       window.api.harnessBoard
         .searchDeployUnits({ keyword })
         .then((result) => {
@@ -2461,12 +2449,16 @@ function DeployUnitSearchInput({
           value={value}
           onChange={(event) => {
             const nextValue = event.target.value
+            requestIdRef.current += 1
             setSearchKeyword(nextValue)
+            setLoading(false)
+            setDeployUnits([])
+            setHasMore(false)
             onValueChange(nextValue)
-            setOpen(true)
+            setOpen(nextValue.trim().length > 0)
           }}
           onFocus={() => {
-            if (searchKeyword.trim()) setOpen(true)
+            if (keyword) setOpen(true)
           }}
           placeholder="输入发布单元 ID 搜索"
           className={harnessProjectCreateInputClassName}
@@ -3729,7 +3721,6 @@ function ProjectModeSettingsPanel({
   onOpenLeanToken: () => void
 }): React.JSX.Element {
   const [replacingLeanToken, setReplacingLeanToken] = useState(false)
-  const wasLeanTokenDirtyRef = useRef(leanTokenDirty)
   const hasStoredLeanToken = leanToken.length > 0
   const showStoredLeanTokenMask = hasStoredLeanToken && !leanTokenDirty && !replacingLeanToken
   const leanTokenInputValue = showStoredLeanTokenMask
@@ -3737,13 +3728,6 @@ function ProjectModeSettingsPanel({
     : replacingLeanToken && !leanTokenDirty
       ? ""
       : leanToken
-
-  useEffect(() => {
-    if (wasLeanTokenDirtyRef.current && !leanTokenDirty) {
-      setReplacingLeanToken(false)
-    }
-    wasLeanTokenDirtyRef.current = leanTokenDirty
-  }, [leanTokenDirty])
 
   return (
     <div className="space-y-4">
@@ -3885,7 +3869,10 @@ function ProjectModeSettingsPanel({
               type="button"
               size="sm"
               className="gap-2"
-              onClick={onSaveLeanToken}
+              onClick={() => {
+                setReplacingLeanToken(false)
+                onSaveLeanToken()
+              }}
               disabled={leanTokenLoading || leanTokenSaving || !leanTokenDirty}
             >
               {leanTokenSaving ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />}
@@ -6085,7 +6072,9 @@ function FeatureDetailPage({
     return [...threadIds]
   }, [detail?.sessions, selectedSessionThreadId])
   const hasRunningFeatureSession = featureSessionThreadIds.some(
-    (threadId) => allStreamLoadingStates[threadId] === true
+    (threadId) =>
+      allStreamLoadingStates[threadId] === true ||
+      allThreadStates[threadId]?.workflowRunning === true
   )
   const shouldAnimateStageNode = (node: HarnessRunNode | null): boolean => Boolean(
     detail &&

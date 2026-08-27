@@ -166,7 +166,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    'nextMetadata.subagentsEnabled = nextMode === "multi"',
+    'set.subagentsEnabled = nextMode === "multi"',
     "Solo/Multi persists only the synchronous-subagent capability flag"
   )
   assertIncludes(
@@ -323,7 +323,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   )
   assertIncludes(
     chat,
-    "delete nextMetadata.coordinatorMode",
+    'remove.push("coordinatorMode")',
     "ChatContainer clears legacy coordinatorMode when switching back to normal"
   )
   assertIncludes(
@@ -349,7 +349,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
   assertIncludes(chat, "agent_mode: submitAgentMode", "ChatContainer stream config")
   assertIncludes(
     chat,
-    "const canChangeAgentMode = !historyLoading && threadMessages.length === 0",
+    "const canChangeAgentMode = canChangeThreadAgentMode({",
     "ChatContainer locks mode switching while history is loading or after the thread has messages"
   )
   assertIncludes(
@@ -902,7 +902,49 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "!isCoordinatorNotificationTurn &&",
     "agent IPC does not persist mode changes from internal coordinator notification turns"
   )
-  assertIncludes(agentIpc, "metadata.agentMode = effectiveAgentMode", "agent IPC persists mode")
+  assertIncludes(
+    agentIpc,
+    "commitMetadata.agentMode = effectiveAgentMode",
+    "agent IPC persists mode from its final guarded metadata snapshot"
+  )
+  const invokeModeCommit = sliceBetween(
+    agentIpc,
+    "if (shouldPersistAgentMode) {",
+    'console.log("[CoordinatorMode] mode resolved"'
+  )
+  assertOccurrenceCount(
+    invokeModeCommit,
+    "matchesThreadIncarnation(",
+    2,
+    "invoke mode commit checks the original incarnation before guards and again after they yield"
+  )
+  const finalInvokeModeCommit = invokeModeCommit.slice(
+    invokeModeCommit.indexOf("const commitThread = getThreadCore(threadId)")
+  )
+  assertSourceOrder(
+    finalInvokeModeCommit,
+    "matchesThreadIncarnation(",
+    "matchesAgentPublicationContext(",
+    "same-ID recreation is rejected before the final invoke context comparison"
+  )
+  assertSourceOrder(
+    finalInvokeModeCommit,
+    "matchesAgentPublicationContext(",
+    "throwIfInvokeAborted()",
+    "invoke mode commit revalidates the original context before checking run ownership"
+  )
+  assertSourceOrder(
+    finalInvokeModeCommit,
+    "throwIfInvokeAborted()",
+    "commitMetadata.agentMode = effectiveAgentMode",
+    "an obsolete invoke cannot mutate mode after its run ownership was revoked"
+  )
+  assertSourceOrder(
+    finalInvokeModeCommit,
+    "commitMetadata.agentMode = effectiveAgentMode",
+    'persistAgentOwnedMetadataFields(threadId, commitMetadata, ["agentMode"])',
+    "invoke persists mode from the final incarnation-bound metadata snapshot"
+  )
   assertIncludes(agentIpc, 'type: "agent_mode"', "agent IPC emits active mode event")
   assertIncludes(
     agentIpc,
@@ -1751,7 +1793,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'if (!workspacePath) {\n            safeSendToWindow(window, channel, {\n              type: "error",\n              error: "WORKSPACE_REQUIRED"',
+    'if (!latestWorkspacePath) {\n                safeSendToWindow(window, channel, {\n                  type: "error",\n                  error: "WORKSPACE_REQUIRED"',
     "agent resume blocks explicit normal-mode fallback when workspace metadata is missing"
   )
   assertSourceOrder(
@@ -1931,6 +1973,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
 
   const threadsIpc = await readProjectFile("src/main/ipc/threads.ts")
+  const coordinatorWorkerManagerSource = await readProjectFile(
+    "src/main/agent/coordinator-worker-manager.ts"
+  )
   const harnessBoardService = await readProjectFile("src/main/harness-board/service.ts")
   const threadsListHandler = threadsIpc.slice(
     threadsIpc.indexOf('ipcMain.handle("threads:list"'),
@@ -1978,8 +2023,14 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     threadsIpc,
-    "coordinatorWorkerManager.forgetThread(threadId)",
-    "thread deletion clears in-memory worker state"
+    "await deleteCoordinatorWorkerArtifacts(threadId, workspacePath)",
+    "thread deletion atomically fences in-memory worker state and its on-disk artifacts"
+  )
+  assertSourceOrder(
+    coordinatorWorkerManagerSource,
+    "const cleanup = this.restoreIndexStore.deleteDirectoryIncarnation(incarnation",
+    "this.forgetThread(normalized)\n    let timeout",
+    "coordinator deletion registers the directory-generation barrier before forgetting state"
   )
   assertIncludes(
     threadsIpc,
@@ -2056,6 +2107,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
 
 async function testWorkspaceSwitchGuardsRunningCoordinatorWorkers(): Promise<void> {
   const modelsIpc = await readProjectFile("src/main/ipc/models.ts")
+  const coordinatorWorkerManagerSource = await readProjectFile(
+    "src/main/agent/coordinator-worker-manager.ts"
+  )
   assertIncludes(
     modelsIpc,
     'from "../agent/coordinator-worker-manager"',
@@ -2103,8 +2157,8 @@ async function testWorkspaceSwitchGuardsRunningCoordinatorWorkers(): Promise<voi
   )
   assertIncludes(
     modelsIpc,
-    "coordinatorWorkerManager.forgetThread(threadId)",
-    "workspace IPC clears terminal acknowledged coordinator worker state before switching workspace"
+    "await deleteCoordinatorWorkerArtifacts(threadId, currentPath)",
+    "workspace IPC atomically fences terminal coordinator state and old-workspace artifacts"
   )
   assertIncludes(
     modelsIpc,
@@ -2114,13 +2168,19 @@ async function testWorkspaceSwitchGuardsRunningCoordinatorWorkers(): Promise<voi
   assertSourceOrder(
     modelsIpc,
     "await coordinatorWorkerManager.waitForWorkerCleanup(threadId)",
-    "coordinatorWorkerManager.forgetThread(threadId)",
+    "await deleteCoordinatorWorkerArtifacts(threadId, currentPath)",
     "workspace IPC waits for pending worker persistence before deleting old-workspace artifacts"
   )
   assertIncludes(
     modelsIpc,
     "deleteCoordinatorWorkerArtifacts(threadId, currentPath)",
     "workspace IPC removes terminal acknowledged coordinator artifacts from the old workspace before switching"
+  )
+  assertSourceOrder(
+    coordinatorWorkerManagerSource,
+    "const cleanup = this.restoreIndexStore.deleteDirectoryIncarnation(incarnation",
+    "this.forgetThread(normalized)\n    let timeout",
+    "workspace deletion cannot expose a same-ID incarnation before the old barrier is installed"
   )
   assertOccurrenceCount(
     modelsIpc,
@@ -2682,7 +2742,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
   const workflowTool = await readProjectFile("src/main/agent/workflow/tool.ts")
   assertSourceOrder(
     workflowTool,
-    "isWorkflowRunDirDisposed(workspacePath, threadId)",
+    "await isWorkflowRunDirDisposedAsync(workspacePath, threadId)",
     "await ensureWorkflowApproved(",
     "workflow tool refuses a deleted thread BEFORE prompting for approval — the thread's UI is gone, so the prompt would hang the tool call"
   )

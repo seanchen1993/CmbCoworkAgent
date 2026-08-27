@@ -64,6 +64,8 @@ export function createDehydratedThreadStatePatch(retainedUi?: {
     historyPageLoading: false,
     historyHasMore: false,
     historyPageCursor: null,
+    historyPageWindows: [] as never[],
+    historyWindowGap: null,
     historyMessageTotal: 0,
     historyLoadedMessageCount: 0
   }

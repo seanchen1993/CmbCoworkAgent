@@ -732,13 +732,25 @@ export function registerSkillsHandlers(ipcMain: IpcMain): void {
       event,
       { input, scope }: { input: SkillPluginCatalogPageInput; scope: string }
     ) => {
-      const requestScope = `wc:${event.sender.id}:${String(scope || "skills")}`
-      return readSkillPluginCatalogPageInWorker(input, requestScope)
+      const normalizedScope = String(scope || "skills").trim().slice(0, 128) || "skills"
+      const requestScope = `wc:${event.sender.id}:${normalizedScope}`
+      const normalizedInput: SkillPluginCatalogPageInput = {
+        kind: input?.kind === "plugins" ? "plugins" : "skills",
+        ...(typeof input?.cursor === "string" && input.cursor
+          ? { cursor: input.cursor.slice(0, 256) }
+          : {}),
+        ...(typeof input?.revision === "string" && input.revision
+          ? { revision: input.revision.slice(0, 256) }
+          : {}),
+        ...(typeof input?.limit === "number" ? { limit: input.limit } : {})
+      }
+      return readSkillPluginCatalogPageInWorker(normalizedInput, requestScope)
     }
   )
 
   ipcMain.handle("skills:catalog:cancel", (event, scope: string): void => {
-    cancelSkillPluginCatalogScope(`wc:${event.sender.id}:${String(scope || "skills")}`)
+    const normalizedScope = String(scope || "skills").trim().slice(0, 128) || "skills"
+    cancelSkillPluginCatalogScope(`wc:${event.sender.id}:${normalizedScope}`)
   })
 
   const previewScope = (senderId: number): string => `skill-preview:wc:${senderId}`

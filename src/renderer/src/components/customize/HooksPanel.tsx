@@ -33,6 +33,7 @@ import {
   type CustomizeDisplayHook
 } from "@/lib/customize-hook-catalog"
 import { formatHookDateTime, HOOK_TIME_ZONE_LABEL } from "../../../../shared/hook-time"
+import { getHookCatalogIdentity } from "@/lib/hook-catalog-identity"
 
 type DisplayHook = CustomizeDisplayHook
 
@@ -611,7 +612,8 @@ export function HooksPanel(): React.JSX.Element {
       setCatalogTruncated(projection.truncated)
       setSelectedHook((prev) => {
         if (!prev) return null
-        return list.find((h) => h.id === prev.id && h.source === prev.source) ?? null
+        const selectedIdentity = getHookCatalogIdentity(prev)
+        return list.find((hook) => getHookCatalogIdentity(hook) === selectedIdentity) ?? null
       })
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -669,6 +671,10 @@ export function HooksPanel(): React.JSX.Element {
   const visibleHooks = useMemo(
     () => filteredHooks.slice(0, visibleHookCount),
     [filteredHooks, visibleHookCount]
+  )
+  const selectedCatalogIdentity = useMemo(
+    () => (selectedHook ? getHookCatalogIdentity(selectedHook) : null),
+    [selectedHook]
   )
 
   const handleToggleEnabled = useCallback(
@@ -794,12 +800,13 @@ export function HooksPanel(): React.JSX.Element {
                 const matcherInfo = getMatcherInfo(hook)
                 const ownerLabel = getHookOwnerLabel(hook)
                 const forcedLabel = getForcedOutcomeLabel(hook)
+                const catalogIdentity = getHookCatalogIdentity(hook)
                 return (
                   <button
-                    key={`${hook.source}:${hook.id}`}
+                    key={catalogIdentity}
                     className={cn(
                       "w-full rounded-md border border-border/70 px-2.5 py-2 text-left transition-colors",
-                      selectedHook?.id === hook.id && selectedHook.source === hook.source
+                      selectedCatalogIdentity === catalogIdentity
                         ? "bg-muted/70"
                         : "hover:bg-muted/50"
                     )}
@@ -1787,7 +1794,7 @@ function HooksGuide(): React.JSX.Element {
                 等字段决策。非 2xx、网络错误或超时则走
                 <code className="mx-1 font-mono text-foreground/85">fallback</code>
                 （默认放行，可设
-                <code className="mx-1 font-mono text-foreground/85">"block"</code>
+                <code className="mx-1 font-mono text-foreground/85">&quot;block&quot;</code>
                 ）。
               </p>
               <p>
@@ -1882,9 +1889,11 @@ function HooksGuide(): React.JSX.Element {
             <p className="mb-2 text-sm text-muted-foreground">
               <code className="font-mono text-foreground/85">forcedOutcome</code>
               {" 取值："}
-              <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+              <code className="mx-1 font-mono text-foreground/85">
+                &quot;always-revise&quot;
+              </code>
               （强制走修订流程）/
-              <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+              <code className="mx-1 font-mono text-foreground/85">&quot;always-halt&quot;</code>
               （强制终止本轮）；省略该字段时跟随 hook stdout 决定。
             </p>
             <div className="space-y-2">
@@ -2203,8 +2212,10 @@ function HooksGuide(): React.JSX.Element {
                 2xx 响应：返回纯文本则当普通输出，返回 JSON 则按 Hook 返回协议解析 （decision /
                 reason / continue / updatedInput 等）。非 2xx、网络错误或超时：按
                 <code className="mx-1 font-mono text-foreground/85">fallback</code>
-                处理（<code className="font-mono text-foreground/85">"allow"</code> 放行，
-                <code className="font-mono text-foreground/85">"block"</code> 阻断）。响应体上限
+                处理（<code className="font-mono text-foreground/85">&quot;allow&quot;</code>
+                放行，
+                <code className="font-mono text-foreground/85">&quot;block&quot;</code>
+                阻断）。响应体上限
                 1MB。
               </p>
               <p>

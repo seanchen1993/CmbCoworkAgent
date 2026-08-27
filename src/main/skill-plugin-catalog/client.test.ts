@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
 import { EventEmitter } from "node:events"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -9,9 +9,10 @@ import { promisify } from "node:util"
 import type { Worker as WorkerType } from "node:worker_threads"
 import { Worker } from "node:worker_threads"
 import { build } from "esbuild"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import type { SkillPluginCatalogPage } from "../types"
 import {
+  SKILL_PLUGIN_CATALOG_MAX_ACTIVE_SCOPES,
   SkillPluginCatalogClient,
   SkillPluginCatalogRequestCancelledError,
   SkillPluginCatalogWorkerUnavailableError
@@ -61,7 +62,8 @@ function makeSource(root: string): SkillPluginCatalogSourceConfig {
     builtinSkillsDir: join(root, "builtin-skills"),
     customSkillsDir: join(root, "custom-skills"),
     pluginsStorePath: join(root, "plugins.json"),
-    disabledSkillsPath: join(root, "disabled-skills.json")
+    disabledSkillsPath: join(root, "disabled-skills.json"),
+    globalRevision: 0
   }
 }
 
@@ -78,6 +80,16 @@ async function waitForRequests(worker: FakeCatalogWorker, count: number): Promis
 }
 
 describe("SkillPluginCatalogClient", () => {
+  it("routes plugin and skill catalog requests through isolated Worker lanes", () => {
+    const source = readFileSync(new URL("./client.ts", import.meta.url), "utf8")
+
+    expect(source).toContain("defaultSkillClient")
+    expect(source).toContain("defaultPluginClient")
+    expect(source).toContain('if (kind === "plugins")')
+    expect(source).toContain('createBundledWorker("plugin-catalog")')
+    expect(source).toContain('createBundledWorker("skill-catalog")')
+  })
+
   it("shares an identical in-flight key across scopes and keeps latest-wins per scope", async () => {
     const worker = new FakeCatalogWorker()
     const client = trackClient(
@@ -88,7 +100,7 @@ describe("SkillPluginCatalogClient", () => {
     )
 
     const sharedA = client.readPage({ kind: "skills", revision: "1" }, "renderer:a")
-    const sharedB = client.readPage({ kind: "skills", revision: "1" }, "renderer:b")
+    const sharedB = client.readPage({ kind: "skills", revision: "other-window" }, "renderer:b")
     await waitForRequests(worker, 1)
     const sharedRequest = worker.requests[0]
     worker.emit("message", successResponse(sharedRequest.requestId, emptyPage("skills")))
@@ -187,6 +199,63 @@ describe("SkillPluginCatalogClient", () => {
     expect(factoryCalls).toBe(2)
   })
 
+  it("bounds active scopes and cleans state after a synchronous dispatch failure", async () => {
+    const worker = new FakeCatalogWorker()
+    const client = trackClient(
+      new SkillPluginCatalogClient(
+        async () => worker as unknown as WorkerType,
+        () => makeSource("C:\\catalog-fixture")
+      )
+    )
+    const active = Array.from(
+      { length: SKILL_PLUGIN_CATALOG_MAX_ACTIVE_SCOPES },
+      (_, index) =>
+        client.readPage({ kind: "skills" }, `renderer:${index}`).catch((error) => error)
+    )
+    await waitForRequests(worker, 1)
+    await expect(
+      client.readPage({ kind: "skills" }, "renderer:overflow")
+    ).rejects.toThrow(/capacity exceeded/)
+    await client.close()
+    await Promise.all(active)
+
+    const retryWorker = new FakeCatalogWorker()
+    const retryClient = trackClient(
+      new SkillPluginCatalogClient(
+        async () => retryWorker as unknown as WorkerType,
+        () => makeSource("C:\\catalog-fixture")
+      )
+    )
+    retryWorker.postError = new Error("dispatch failed")
+    await expect(
+      retryClient.readPage({ kind: "skills" }, "renderer:same")
+    ).rejects.toThrow("dispatch failed")
+    retryWorker.postError = null
+    const retry = retryClient.readPage({ kind: "skills" }, "renderer:same")
+    await waitForRequests(retryWorker, 1)
+    retryWorker.emit(
+      "message",
+      successResponse(retryWorker.requests[0].requestId, emptyPage("skills"))
+    )
+    await expect(retry).resolves.toMatchObject({ kind: "skills" })
+  })
+
+  it("invalidates a read still resolving its source when closed", async () => {
+    let resolveSource: ((source: SkillPluginCatalogSourceConfig) => void) | undefined
+    const source = new Promise<SkillPluginCatalogSourceConfig>((resolve) => {
+      resolveSource = resolve
+    })
+    const factory = vi.fn(async () => new FakeCatalogWorker() as unknown as WorkerType)
+    const client = trackClient(new SkillPluginCatalogClient(factory, () => source))
+    const read = client.readPage({ kind: "skills" }, "renderer:closing")
+
+    await client.close()
+    resolveSource?.(makeSource("C:\\catalog-fixture"))
+
+    await expect(read).rejects.toBeInstanceOf(SkillPluginCatalogRequestCancelledError)
+    expect(factory).not.toHaveBeenCalled()
+  })
+
   it("reads bundled skills from an ASAR directory in a real Electron Worker", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-asar-"))
     temporaryDirectories.push(root)
@@ -231,7 +300,7 @@ worker.postMessage({
   type: "read-page",
   requestId: 1,
   input: { kind: "skills", limit: 128, revision: "asar-regression" },
-  source: { builtinSkillsDir, customSkillsDir, pluginsStorePath, disabledSkillsPath },
+  source: { builtinSkillsDir, customSkillsDir, pluginsStorePath, disabledSkillsPath, globalRevision: 0 },
   cancelBuffer: new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
 })
 `
@@ -270,6 +339,44 @@ worker.postMessage({
     expect(response.page?.total).toBe(1)
     expect(response.page?.truncated).toBe(false)
   }, 60_000)
+
+  it("invalidates shared detail snapshots only when the main epoch advances", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-epoch-"))
+    temporaryDirectories.push(root)
+    const source = makeSource(root)
+    const skillDirectory = join(source.builtinSkillsDir, "epoch-skill")
+    mkdirSync(skillDirectory, { recursive: true })
+    mkdirSync(source.customSkillsDir, { recursive: true })
+    writeFileSync(source.pluginsStorePath, "[]")
+    writeFileSync(source.disabledSkillsPath, "[]")
+    const skillPath = join(skillDirectory, "SKILL.md")
+    writeFileSync(skillPath, "---\nname: epoch-skill\ndescription: before\n---\n")
+    const client = trackClient(
+      new SkillPluginCatalogClient(
+        async () => new Worker(workerBundlePath, { name: "skill-plugin-catalog-epoch" }),
+        () => source
+      )
+    )
+
+    const first = await client.readPage(
+      { kind: "skills", revision: "renderer-a" },
+      "renderer:a"
+    )
+    writeFileSync(skillPath, "---\nname: epoch-skill\ndescription: after\n---\n")
+    const crossWindow = await client.readPage(
+      { kind: "skills", revision: "renderer-b" },
+      "renderer:b"
+    )
+    expect(crossWindow.skills[0]?.description).toBe("before")
+
+    source.globalRevision += 1
+    const invalidated = await client.readPage(
+      { kind: "skills", revision: "renderer-b-still-local" },
+      "renderer:b"
+    )
+    expect(first.skills[0]?.description).toBe("before")
+    expect(invalidated.skills[0]?.description).toBe("after")
+  }, 30_000)
 
   it("parses 20k skills plus a 2 MiB file off-main while pages stay bounded", async () => {
     const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-catalog-large-"))
@@ -320,6 +427,20 @@ worker.postMessage({
       SKILL_PLUGIN_CATALOG_MAX_RESPONSE_BYTES
     )
 
+    writeFileSync(
+      join(source.builtinSkillsDir, "SKILL.md"),
+      "---\nname: oversized-root\ndescription: changed-after-snapshot\n---\n"
+    )
+    const reusedByOtherWindow = await client.readPage(
+      { kind: "skills", limit: 128, revision: "different-renderer-nonce" },
+      "renderer:large-second-window"
+    )
+    expect(reusedByOtherWindow.skills[0]).toMatchObject({
+      name: "oversized-root",
+      description: "bounded"
+    })
+    expect(reusedByOtherWindow.stats).toEqual(page.stats)
+
     await expect(
       client.resolvePreview(
         { id: "skill-19998", name: "skill-19998", source: "project" },
@@ -344,8 +465,10 @@ interface FakeRequest {
 
 class FakeCatalogWorker extends EventEmitter {
   readonly requests: FakeRequest[] = []
+  postError: Error | null = null
 
   postMessage(message: FakeRequest): void {
+    if (this.postError) throw this.postError
     this.requests.push(message)
   }
 

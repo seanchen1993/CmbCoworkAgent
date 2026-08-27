@@ -1,4 +1,4 @@
-import type { Worker } from "node:worker_threads"
+import type { ResourceLimits, Worker } from "node:worker_threads"
 import { getDbPath } from "../storage"
 import type { Thread, ThreadSummaryPage, ThreadSummaryPageOptions } from "../types"
 import type {
@@ -10,6 +10,15 @@ import { THREAD_METADATA_HYDRATION_CANCELLED } from "./protocol"
 
 type WorkerFactory = () => Promise<Worker>
 type RequestKind = "thread" | "list-page" | "goal-events" | "workspace-path" | "git-context"
+
+export const THREAD_METADATA_HYDRATION_WORKER_RESOURCE_LIMITS: ResourceLimits = {
+  maxOldGenerationSizeMb: 256,
+  maxYoungGenerationSizeMb: 32,
+  stackSizeMb: 4
+}
+// A selected thread may legitimately project up to 16 MiB. Keep aggregate
+// response cloning bounded as well as the request count itself.
+export const THREAD_METADATA_HYDRATION_MAX_ACTIVE_REQUESTS = 8
 
 export interface ThreadGoalHydrationResult {
   events: ThreadGoalHydrationEvent[]
@@ -50,7 +59,10 @@ export function isThreadMetadataHydrationWorkerUnavailable(
 async function createBundledWorker(): Promise<Worker> {
   try {
     const module = await import("./thread-metadata-hydration-worker?nodeWorker")
-    return module.default({ name: "thread-metadata-hydration" })
+    return module.default({
+      name: "thread-metadata-hydration",
+      resourceLimits: THREAD_METADATA_HYDRATION_WORKER_RESOURCE_LIMITS
+    })
   } catch (error) {
     throw new ThreadMetadataHydrationWorkerUnavailableError(
       "Unable to start the bundled thread metadata hydration worker",
@@ -63,6 +75,7 @@ export class ThreadMetadataHydrationClient {
   private worker: Worker | null = null
   private workerPromise: Promise<Worker> | null = null
   private nextRequestId = 1
+  private activeRequestCount = 0
   private closing = false
   private shutdownResolve: (() => void) | null = null
   private readonly pending = new Map<number, PendingRequest>()
@@ -204,43 +217,71 @@ export class ThreadMetadataHydrationClient {
         "Thread metadata hydration client is closing"
       )
     }
-    const requestId = this.nextRequestId++
-    if (latestKey) {
-      const previousId = this.latestRequests.get(latestKey)
-      const previous = previousId === undefined ? undefined : this.pending.get(previousId)
-      if (previous) Atomics.store(previous.cancellation, 0, 1)
-      this.latestRequests.set(latestKey, requestId)
-    }
-    const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-    const cancellation = new Int32Array(cancellationBuffer)
-    const worker = await this.getWorker()
-    if (latestKey && this.latestRequests.get(latestKey) !== requestId) {
-      const error = new Error("Thread metadata hydration request was superseded")
-      error.name = THREAD_METADATA_HYDRATION_CANCELLED
-      throw error
-    }
-    return new Promise((resolve, reject) => {
-      this.pending.set(requestId, { kind, resolve, reject, cancellation, latestKey })
-      try {
-        worker.postMessage({
-          ...payload,
-          requestId,
-          databasePath: this.databasePath(),
-          cancellationBuffer
-        })
-      } catch (error) {
-        this.pending.delete(requestId)
-        if (latestKey && this.latestRequests.get(latestKey) === requestId) {
-          this.latestRequests.delete(latestKey)
-        }
-        reject(
-          new ThreadMetadataHydrationWorkerUnavailableError(
-            "Unable to dispatch the thread metadata hydration request",
-            { cause: error }
-          )
+    for (const value of Object.values(payload)) {
+      if (typeof value === "string" && value.length > 32_768) {
+        throw new ThreadMetadataHydrationWorkerUnavailableError(
+          "Thread metadata hydration request exceeds its string limit"
         )
       }
-    })
+    }
+    if (this.activeRequestCount >= THREAD_METADATA_HYDRATION_MAX_ACTIVE_REQUESTS) {
+      throw new ThreadMetadataHydrationWorkerUnavailableError(
+        "Thread metadata hydration request capacity exceeded"
+      )
+    }
+    this.activeRequestCount += 1
+    const requestId = this.nextRequestId++
+    try {
+      if (latestKey) {
+        const previousId = this.latestRequests.get(latestKey)
+        const previous = previousId === undefined ? undefined : this.pending.get(previousId)
+        if (previous) {
+          Atomics.store(previous.cancellation, 0, 1)
+          this.pending.delete(previousId as number)
+          const error = new Error("Thread metadata hydration request was superseded")
+          error.name = THREAD_METADATA_HYDRATION_CANCELLED
+          previous.reject(error)
+        }
+        this.latestRequests.set(latestKey, requestId)
+      }
+      const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+      const cancellation = new Int32Array(cancellationBuffer)
+      const worker = await this.getWorker()
+      if (this.closing) {
+        throw new ThreadMetadataHydrationWorkerUnavailableError(
+          "Thread metadata hydration client is closing"
+        )
+      }
+      if (latestKey && this.latestRequests.get(latestKey) !== requestId) {
+        const error = new Error("Thread metadata hydration request was superseded")
+        error.name = THREAD_METADATA_HYDRATION_CANCELLED
+        throw error
+      }
+      return await new Promise((resolve, reject) => {
+        this.pending.set(requestId, { kind, resolve, reject, cancellation, latestKey })
+        try {
+          worker.postMessage({
+            ...payload,
+            requestId,
+            databasePath: this.databasePath(),
+            cancellationBuffer
+          })
+        } catch (error) {
+          this.pending.delete(requestId)
+          reject(
+            new ThreadMetadataHydrationWorkerUnavailableError(
+              "Unable to dispatch the thread metadata hydration request",
+              { cause: error }
+            )
+          )
+        }
+      })
+    } finally {
+      this.activeRequestCount = Math.max(0, this.activeRequestCount - 1)
+      if (latestKey && this.latestRequests.get(latestKey) === requestId) {
+        this.latestRequests.delete(latestKey)
+      }
+    }
   }
 
   readThread(threadId: string, webContentsId?: number): Promise<Thread | null> {

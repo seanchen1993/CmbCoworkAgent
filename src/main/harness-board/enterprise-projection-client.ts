@@ -11,6 +11,7 @@ import {
   type HarnessEnterpriseProjectionStats,
   type HarnessEnterpriseProjectionWorkerResponse
 } from "./enterprise-projection-protocol"
+import { harnessWorkerOptions } from "./worker-limits"
 
 type EnterpriseProjectionWorkerFactory = () => Promise<Worker>
 
@@ -60,7 +61,7 @@ export class HarnessEnterpriseProjectionCancelledError extends Error {
 async function createBundledWorker(): Promise<Worker> {
   try {
     const module = await import("./enterprise-projection-worker?nodeWorker")
-    return module.default({ name: "harness-enterprise-projection" })
+    return module.default(harnessWorkerOptions("harness-enterprise-projection"))
   } catch (error) {
     throw new HarnessEnterpriseProjectionWorkerUnavailableError(
       "Unable to start the bundled Harness enterprise projection worker",

@@ -1,7 +1,8 @@
 import { join } from "node:path"
 import type { Worker } from "node:worker_threads"
-import { getCustomSkillsDir, getOpenworkDir, getSkillsDir } from "../storage"
 import type { SkillPluginCatalogPage, SkillPluginCatalogPageInput } from "../types"
+import { getCatalogSourcePaths } from "../catalog-source-paths"
+import { getHookCatalogGlobalRevision } from "../hook-catalog/revision"
 import type { SkillPreviewGrantRequest } from "../../shared/skill-preview"
 import {
   SKILL_PLUGIN_CATALOG_CANCELLED,
@@ -10,7 +11,10 @@ import {
 } from "./protocol"
 
 type SkillPluginCatalogWorkerFactory = () => Promise<Worker>
-type SkillPluginCatalogSourceFactory = () => SkillPluginCatalogSourceConfig
+type SkillPluginCatalogSourceFactory = () =>
+  | SkillPluginCatalogSourceConfig
+  | Promise<SkillPluginCatalogSourceConfig>
+export const SKILL_PLUGIN_CATALOG_MAX_ACTIVE_SCOPES = 32
 
 interface Consumer {
   scope: string
@@ -67,13 +71,14 @@ async function createBundledWorker(name = "skill-plugin-catalog"): Promise<Worke
   }
 }
 
-function defaultSource(): SkillPluginCatalogSourceConfig {
-  const openworkDir = getOpenworkDir()
+async function defaultSource(): Promise<SkillPluginCatalogSourceConfig> {
+  const { openworkDir, builtinSkillsDir, customSkillsDir } = await getCatalogSourcePaths()
   return {
-    builtinSkillsDir: getSkillsDir(),
-    customSkillsDir: getCustomSkillsDir(),
+    builtinSkillsDir,
+    customSkillsDir,
     pluginsStorePath: join(openworkDir, "plugins.json"),
-    disabledSkillsPath: join(openworkDir, "disabled-skills.json")
+    disabledSkillsPath: join(openworkDir, "disabled-skills.json"),
+    globalRevision: getHookCatalogGlobalRevision()
   }
 }
 
@@ -85,11 +90,11 @@ function requestKey(
     input.kind,
     input.cursor ?? null,
     input.limit ?? null,
-    input.revision ?? "0",
     source.builtinSkillsDir,
     source.customSkillsDir,
     source.pluginsStorePath,
-    source.disabledSkillsPath
+    source.disabledSkillsPath,
+    source.globalRevision
   ])
 }
 
@@ -106,7 +111,8 @@ function previewRequestKey(
     source.builtinSkillsDir,
     source.customSkillsDir,
     source.pluginsStorePath,
-    source.disabledSkillsPath
+    source.disabledSkillsPath,
+    source.globalRevision
   ])
 }
 
@@ -114,6 +120,7 @@ export class SkillPluginCatalogClient {
   private worker: Worker | null = null
   private workerPromise: Promise<Worker> | null = null
   private nextRequestId = 1
+  private nextGeneration = 1
   private closing = false
   private readonly pendingById = new Map<number, PendingRequest>()
   private readonly pendingByKey = new Map<string, PendingRequest>()
@@ -171,6 +178,11 @@ export class SkillPluginCatalogClient {
   }
 
   private async getWorker(): Promise<Worker> {
+    if (this.closing) {
+      throw new SkillPluginCatalogWorkerUnavailableError(
+        "Skill/plugin catalog client is closing"
+      )
+    }
     if (this.worker) return this.worker
     if (this.workerPromise) return this.workerPromise
     this.workerPromise = this.workerFactory()
@@ -226,7 +238,8 @@ export class SkillPluginCatalogClient {
   }
 
   cancelScope(scope: string): void {
-    this.scopeGenerations.set(scope, (this.scopeGenerations.get(scope) ?? 0) + 1)
+    if (!this.scopeGenerations.has(scope) && !this.latestByScope.has(scope)) return
+    this.scopeGenerations.delete(scope)
     this.detachScope(scope, new SkillPluginCatalogRequestCancelledError())
   }
 
@@ -248,52 +261,72 @@ export class SkillPluginCatalogClient {
     if (this.closing) {
       throw new SkillPluginCatalogWorkerUnavailableError("Skill/plugin catalog client is closing")
     }
-    this.detachScope(scope, new SkillPluginCatalogRequestCancelledError())
-    const generation = (this.scopeGenerations.get(scope) ?? 0) + 1
+    this.cancelScope(scope)
+    if (
+      !this.scopeGenerations.has(scope) &&
+      this.scopeGenerations.size >= SKILL_PLUGIN_CATALOG_MAX_ACTIVE_SCOPES
+    ) {
+      throw new SkillPluginCatalogWorkerUnavailableError(
+        "Skill/plugin catalog request capacity exceeded"
+      )
+    }
+    const generation = this.nextGeneration++
     this.scopeGenerations.set(scope, generation)
-    const source = this.sourceFactory()
-    const key = requestKey(input, source)
-    const existing = this.pendingByKey.get(key)
-    if (existing) {
-      const result = await this.attach(existing, scope, generation)
-      if (result.kind !== "page") throw new Error("Unexpected skill catalog worker response")
-      return result.page
-    }
-
-    const worker = await this.getWorker()
-    if (this.scopeGenerations.get(scope) !== generation) {
-      throw new SkillPluginCatalogRequestCancelledError()
-    }
-    const sharedAfterWorkerStart = this.pendingByKey.get(key)
-    if (sharedAfterWorkerStart) {
-      const result = await this.attach(sharedAfterWorkerStart, scope, generation)
-      if (result.kind !== "page") throw new Error("Unexpected skill catalog worker response")
-      return result.page
-    }
-
-    const requestId = this.nextRequestId++
-    const cancelBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-    const pending: PendingRequest = {
-      requestId,
-      key,
-      cancelFlag: new Int32Array(cancelBuffer),
-      consumers: new Map()
-    }
-    this.pendingById.set(requestId, pending)
-    this.pendingByKey.set(key, pending)
-    const result = this.attach(pending, scope, generation)
     try {
-      worker.postMessage({ type: "read-page", requestId, input, source, cancelBuffer })
-    } catch (error) {
-      this.pendingById.delete(requestId)
-      this.pendingByKey.delete(key)
-      pending.consumers.delete(scope)
-      this.latestByScope.delete(scope)
-      throw error
+      const source = await this.sourceFactory()
+      if (this.scopeGenerations.get(scope) !== generation) {
+        throw new SkillPluginCatalogRequestCancelledError()
+      }
+      const key = requestKey(input, source)
+      const existing = this.pendingByKey.get(key)
+      if (existing) {
+        const result = await this.attach(existing, scope, generation)
+        if (result.kind !== "page") throw new Error("Unexpected skill catalog worker response")
+        return result.page
+      }
+
+      const worker = await this.getWorker()
+      if (this.scopeGenerations.get(scope) !== generation) {
+        throw new SkillPluginCatalogRequestCancelledError()
+      }
+      const sharedAfterWorkerStart = this.pendingByKey.get(key)
+      if (sharedAfterWorkerStart) {
+        const result = await this.attach(sharedAfterWorkerStart, scope, generation)
+        if (result.kind !== "page") throw new Error("Unexpected skill catalog worker response")
+        return result.page
+      }
+
+      const requestId = this.nextRequestId++
+      const cancelBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+      const pending: PendingRequest = {
+        requestId,
+        key,
+        cancelFlag: new Int32Array(cancelBuffer),
+        consumers: new Map()
+      }
+      this.pendingById.set(requestId, pending)
+      this.pendingByKey.set(key, pending)
+      const result = this.attach(pending, scope, generation)
+      try {
+        worker.postMessage({ type: "read-page", requestId, input, source, cancelBuffer })
+      } catch (error) {
+        this.pendingById.delete(requestId)
+        this.pendingByKey.delete(key)
+        pending.consumers.delete(scope)
+        this.latestByScope.delete(scope)
+        throw error
+      }
+      const resolved = await result
+      if (resolved.kind !== "page") throw new Error("Unexpected skill catalog worker response")
+      return resolved.page
+    } finally {
+      if (
+        this.scopeGenerations.get(scope) === generation &&
+        !this.latestByScope.has(scope)
+      ) {
+        this.scopeGenerations.delete(scope)
+      }
     }
-    const resolved = await result
-    if (resolved.kind !== "page") throw new Error("Unexpected skill catalog worker response")
-    return resolved.page
   }
 
   async resolvePreview(
@@ -303,58 +336,86 @@ export class SkillPluginCatalogClient {
     if (this.closing) {
       throw new SkillPluginCatalogWorkerUnavailableError("Skill/plugin catalog client is closing")
     }
-    this.detachScope(scope, new SkillPluginCatalogRequestCancelledError())
-    const generation = (this.scopeGenerations.get(scope) ?? 0) + 1
+    this.cancelScope(scope)
+    if (
+      !this.scopeGenerations.has(scope) &&
+      this.scopeGenerations.size >= SKILL_PLUGIN_CATALOG_MAX_ACTIVE_SCOPES
+    ) {
+      throw new SkillPluginCatalogWorkerUnavailableError(
+        "Skill preview request capacity exceeded"
+      )
+    }
+    const generation = this.nextGeneration++
     this.scopeGenerations.set(scope, generation)
-    const source = this.sourceFactory()
-    const key = previewRequestKey(input, source)
-    const existing = this.pendingByKey.get(key)
-    if (existing) {
-      const result = await this.attach(existing, scope, generation)
-      if (result.kind !== "preview") throw new Error("Unexpected skill preview worker response")
-      return result.resolution
-    }
-
-    const worker = await this.getWorker()
-    if (this.scopeGenerations.get(scope) !== generation) {
-      throw new SkillPluginCatalogRequestCancelledError()
-    }
-    const sharedAfterWorkerStart = this.pendingByKey.get(key)
-    if (sharedAfterWorkerStart) {
-      const result = await this.attach(sharedAfterWorkerStart, scope, generation)
-      if (result.kind !== "preview") throw new Error("Unexpected skill preview worker response")
-      return result.resolution
-    }
-
-    const requestId = this.nextRequestId++
-    const cancelBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-    const pending: PendingRequest = {
-      requestId,
-      key,
-      cancelFlag: new Int32Array(cancelBuffer),
-      consumers: new Map()
-    }
-    this.pendingById.set(requestId, pending)
-    this.pendingByKey.set(key, pending)
-    const result = this.attach(pending, scope, generation)
     try {
-      worker.postMessage({ type: "resolve-preview", requestId, input, source, cancelBuffer })
-    } catch (error) {
-      this.pendingById.delete(requestId)
-      this.pendingByKey.delete(key)
-      pending.consumers.delete(scope)
-      this.latestByScope.delete(scope)
-      throw error
+      const source = await this.sourceFactory()
+      if (this.scopeGenerations.get(scope) !== generation) {
+        throw new SkillPluginCatalogRequestCancelledError()
+      }
+      const key = previewRequestKey(input, source)
+      const existing = this.pendingByKey.get(key)
+      if (existing) {
+        const result = await this.attach(existing, scope, generation)
+        if (result.kind !== "preview") {
+          throw new Error("Unexpected skill preview worker response")
+        }
+        return result.resolution
+      }
+
+      const worker = await this.getWorker()
+      if (this.scopeGenerations.get(scope) !== generation) {
+        throw new SkillPluginCatalogRequestCancelledError()
+      }
+      const sharedAfterWorkerStart = this.pendingByKey.get(key)
+      if (sharedAfterWorkerStart) {
+        const result = await this.attach(sharedAfterWorkerStart, scope, generation)
+        if (result.kind !== "preview") {
+          throw new Error("Unexpected skill preview worker response")
+        }
+        return result.resolution
+      }
+
+      const requestId = this.nextRequestId++
+      const cancelBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+      const pending: PendingRequest = {
+        requestId,
+        key,
+        cancelFlag: new Int32Array(cancelBuffer),
+        consumers: new Map()
+      }
+      this.pendingById.set(requestId, pending)
+      this.pendingByKey.set(key, pending)
+      const result = this.attach(pending, scope, generation)
+      try {
+        worker.postMessage({ type: "resolve-preview", requestId, input, source, cancelBuffer })
+      } catch (error) {
+        this.pendingById.delete(requestId)
+        this.pendingByKey.delete(key)
+        pending.consumers.delete(scope)
+        this.latestByScope.delete(scope)
+        throw error
+      }
+      const resolved = await result
+      if (resolved.kind !== "preview") {
+        throw new Error("Unexpected skill preview worker response")
+      }
+      return resolved.resolution
+    } finally {
+      if (
+        this.scopeGenerations.get(scope) === generation &&
+        !this.latestByScope.has(scope)
+      ) {
+        this.scopeGenerations.delete(scope)
+      }
     }
-    const resolved = await result
-    if (resolved.kind !== "preview") throw new Error("Unexpected skill preview worker response")
-    return resolved.resolution
   }
 
   async close(): Promise<void> {
     if (this.closing) return
     this.closing = true
     for (const scope of [...this.latestByScope.keys()]) this.cancelScope(scope)
+    // Also invalidate reads that are still resolving their source snapshot.
+    this.scopeGenerations.clear()
     const worker = this.worker
     this.worker = null
     this.workerPromise = null
@@ -362,12 +423,21 @@ export class SkillPluginCatalogClient {
   }
 }
 
-let defaultClient: SkillPluginCatalogClient | null = null
+let defaultSkillClient: SkillPluginCatalogClient | null = null
+let defaultPluginClient: SkillPluginCatalogClient | null = null
 let defaultPreviewClient: SkillPluginCatalogClient | null = null
 
-function getDefaultClient(): SkillPluginCatalogClient {
-  defaultClient ??= new SkillPluginCatalogClient()
-  return defaultClient
+function getDefaultClient(kind: SkillPluginCatalogPageInput["kind"]): SkillPluginCatalogClient {
+  if (kind === "plugins") {
+    defaultPluginClient ??= new SkillPluginCatalogClient(
+      () => createBundledWorker("plugin-catalog")
+    )
+    return defaultPluginClient
+  }
+  defaultSkillClient ??= new SkillPluginCatalogClient(
+    () => createBundledWorker("skill-catalog")
+  )
+  return defaultSkillClient
 }
 
 function getDefaultPreviewClient(): SkillPluginCatalogClient {
@@ -381,7 +451,7 @@ export function readSkillPluginCatalogPageInWorker(
   input: SkillPluginCatalogPageInput,
   scope: string
 ): Promise<SkillPluginCatalogPage> {
-  return getDefaultClient().readPage(input, scope)
+  return getDefaultClient(input.kind).readPage(input, scope)
 }
 
 export function resolveSkillPreviewInWorker(
@@ -392,14 +462,17 @@ export function resolveSkillPreviewInWorker(
 }
 
 export function cancelSkillPluginCatalogScope(scope: string): void {
-  defaultClient?.cancelScope(scope)
+  defaultSkillClient?.cancelScope(scope)
+  defaultPluginClient?.cancelScope(scope)
   defaultPreviewClient?.cancelScope(scope)
 }
 
 export async function closeSkillPluginCatalogWorker(): Promise<void> {
-  const client = defaultClient
+  const skillClient = defaultSkillClient
+  const pluginClient = defaultPluginClient
   const previewClient = defaultPreviewClient
-  defaultClient = null
+  defaultSkillClient = null
+  defaultPluginClient = null
   defaultPreviewClient = null
-  await Promise.all([client?.close(), previewClient?.close()])
+  await Promise.all([skillClient?.close(), pluginClient?.close(), previewClient?.close()])
 }

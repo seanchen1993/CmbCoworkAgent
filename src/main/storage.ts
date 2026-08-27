@@ -3499,20 +3499,32 @@ function expandCcHooksSettings(
 
 // ── end CC format compatibility ───────────────────────────────────────────────
 
+function getHookFileDates(filePath: string): Pick<HookConfig, "createdAt" | "updatedAt"> {
+  try {
+    const stats = statSync(filePath)
+    const birthtime = stats.birthtime.getTime() > 0 ? stats.birthtime : stats.ctime
+    return {
+      createdAt: Number.isFinite(birthtime.getTime()) ? birthtime.toISOString() : "",
+      updatedAt: Number.isFinite(stats.mtime.getTime()) ? stats.mtime.toISOString() : ""
+    }
+  } catch {
+    return { createdAt: "", updatedAt: "" }
+  }
+}
+
 export function getHooks(): HookConfig[] {
   getOpenworkDir()
   if (!existsSync(HOOKS_FILE)) return []
   try {
     const content = readFileSync(HOOKS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
-    const now = new Date().toISOString()
+    const dates = getHookFileDates(HOOKS_FILE)
     const fmt = detectHooksFileFormat(parsed)
 
     if (fmt === "cc_settings") {
       return expandCcHooksSettings(parsed as Record<string, unknown>, "global", {
         enabled: true,
-        createdAt: now,
-        updatedAt: now
+        ...dates
       })
     }
 
@@ -3568,8 +3580,8 @@ export function getHooks(): HookConfig[] {
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
-          createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
-          updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : now
+          createdAt: typeof h.createdAt === "string" ? h.createdAt : dates.createdAt,
+          updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : dates.updatedAt
         }
       ]
     })
@@ -3608,8 +3620,7 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
     const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
     const meta = {
       enabled: plugin.enabled,
-      createdAt: plugin.createdAt,
-      updatedAt: plugin.updatedAt
+      ...getHookFileDates(hooksFilePath)
     }
     const idPrefix = `plugin:${plugin.id}`
     const fmt = detectHooksFileFormat(parsed)
@@ -3669,8 +3680,8 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
             timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
             async: h.async === true ? true : undefined,
             enabled: h.enabled !== false,
-            createdAt: plugin.createdAt,
-            updatedAt: plugin.updatedAt
+            createdAt: meta.createdAt,
+            updatedAt: meta.updatedAt
           }
         ]
       })
@@ -3743,11 +3754,10 @@ export function parseSkillFrontmatterHooks(skillDir: string, skillName: string):
   const settingsObj = readSkillFrontmatterHooksSettings(skillMdPath)
   if (!settingsObj) return []
 
-  const now = new Date().toISOString()
   return expandCcHooksSettings(
     settingsObj,
     `skill:${skillName}/SKILL.md`,
-    { enabled: true, createdAt: now, updatedAt: now },
+    { enabled: true, ...getHookFileDates(skillMdPath) },
     skillName
   )
 }
@@ -3821,8 +3831,8 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
 
   try {
     const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
-    const now = new Date().toISOString()
-    const meta = { enabled: true, createdAt: now, updatedAt: now }
+    const dates = getHookFileDates(hooksFilePath)
+    const meta = { enabled: true, ...dates }
     const idPrefix =
       hooksRelPath === SKILL_HOOKS_FILE
         ? `skill:${skillName}`
@@ -3882,8 +3892,7 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
-          createdAt: now,
-          updatedAt: now
+          ...dates
         }
       ]
     })
@@ -4126,7 +4135,6 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
   const hooksDir = join(workspacePath, WORKSPACE_HOOKS_DIR)
   if (!existsSync(hooksDir)) return []
   const result: HookConfig[] = []
-  const now = new Date().toISOString()
   try {
     const files = readdirSync(hooksDir).filter((f) => f.endsWith(".json"))
     for (const file of files) {
@@ -4134,6 +4142,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
       const baseName = file.replace(/\.json$/, "")
       try {
         const parsed = JSON.parse(readFileSync(filePath, "utf-8"))
+        const dates = getHookFileDates(filePath)
         const fmt = detectHooksFileFormat(parsed)
 
         // ── CC multi-hook file (cc_plugin or cc_settings) ──
@@ -4144,8 +4153,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               : (parsed as Record<string, unknown>)
           const hooks = expandCcHooksSettings(settingsObj, `ws:${baseName}`, {
             enabled: true,
-            createdAt: now,
-            updatedAt: now
+            ...dates
           })
           result.push(
             ...hooks.map((hook) => withHookSource(hook, "workspace", workspacePath, filePath))
@@ -4195,8 +4203,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               timeout: parseNativeHookTimeout(raw.timeoutMs) ?? parseNativeHookTimeout(raw.timeout),
               async: raw.async === true ? true : undefined,
               enabled: true,
-              createdAt: now,
-              updatedAt: now
+              ...dates
             },
             "workspace",
             workspacePath,

@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite"
+import { existsSync } from "node:fs"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats
@@ -210,6 +211,54 @@ export function prepareLatestRuntimeProjectionMigration(
 ): PreparedRuntimeProjectionMigration | null {
   const row = readLatestCheckpointRow(database, threadId, checkpointNs, false)
   return row ? prepareRuntimeProjectionMigration(row) : null
+}
+
+/**
+ * Lightweight compatibility guard for pre-durable-message tasks. The checkpoint
+ * payload is inspected only inside the worker and only a boolean crosses back to
+ * Electron main. Incremental checkpoints use their embedded message count and do
+ * not hydrate message snapshots; legacy inline JSON is parsed off the main loop.
+ */
+export function hasCheckpointTranscript(
+  checkpointDatabasePath: string,
+  threadId: string,
+  checkpointNs = "",
+  cancellationBuffer?: SharedArrayBuffer
+): boolean {
+  const cancellation = cancellationBuffer ? new Int32Array(cancellationBuffer) : undefined
+  throwIfCancelled(cancellation)
+  if (!existsSync(checkpointDatabasePath)) return false
+  const database = new DatabaseSync(checkpointDatabasePath, { timeout: 5_000 })
+  try {
+    database.exec("PRAGMA busy_timeout = 5000")
+    throwIfCancelled(cancellation)
+    const row = readLatestCheckpointRow(database, threadId, checkpointNs, true)
+    if (!row || row.metadata === undefined) return false
+    throwIfCancelled(cancellation)
+    const parsed = parseTypedJson(row.type, row.checkpoint, "checkpoint")
+    throwIfCancelled(cancellation)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false
+    const channelValues = objectRecord((parsed as Record<string, unknown>).channel_values)
+    const messages = channelValues?.messages
+    if (Array.isArray(messages)) return messages.length > 0
+    const reference = objectRecord(messages)
+    if (reference?.[EXTERNAL_MESSAGES_MARKER] !== true) return false
+    const messageCount = Number(reference.messageCount)
+    if (Number.isSafeInteger(messageCount) && messageCount > 0) return true
+    const snapshot = database
+      .prepare(
+        `SELECT message_count
+         FROM checkpoint_message_snapshots
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+         LIMIT 1`
+      )
+      .get(row.threadId, row.checkpointNs, row.checkpointId) as
+      | { message_count?: unknown }
+      | undefined
+    return Number(snapshot?.message_count) > 0
+  } finally {
+    database.close()
+  }
 }
 
 function exactSourceIsStillLatest(

@@ -1,11 +1,17 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+import type { Message } from "@/types"
 import {
   resolveChatMessageVirtualInitialLocation,
   shouldVirtualizeChatMessageList,
   type ChatMessageVirtualInitialLocation
 } from "./ChatMessageVirtualList"
+import {
+  createChatScrollSessionStore,
+  restoreChatScrollSessionState,
+  type ChatScrollSession
+} from "./chat-scroll-session-store"
 import {
   createChatScrollState,
   transitionChatScroll,
@@ -13,6 +19,10 @@ import {
   type ChatScrollEvent,
   type ChatScrollState
 } from "../../../../shared/chat-scroll-controller"
+import {
+  chatScrollTailMessageIdentity,
+  classifyChatScrollTailChange
+} from "@/lib/chat-scroll-tail-change"
 
 function dispatch(
   state: ChatScrollState,
@@ -27,6 +37,31 @@ function attachedState(messageCount = 10): ChatScrollState {
     messageCount
   }).state
   return dispatch(ready, { type: "BOTTOM_CONFIRMED" }).state
+}
+
+function detachedSession(threadId: string, unreadCount = 0): ChatScrollSession {
+  let state = dispatch(createChatScrollState(threadId), {
+    type: "DATA_READY",
+    messageCount: 20
+  }).state
+  state = dispatch(state, { type: "BOTTOM_CONFIRMED" }).state
+  state = dispatch(state, { type: "USER_DETACH", source: "user-input" }).state
+  if (unreadCount > 0) {
+    state = dispatch(state, { type: "CONTENT_APPENDED", unreadMessages: unreadCount }).state
+  }
+  return {
+    state,
+    anchor: { messageId: `${threadId}-m-8`, offsetFromViewportTop: 17 },
+    contentSnapshot: {
+      threadId,
+      visibleCount: 20,
+      lastMessageId: `${threadId}-m-19`,
+      lastMessageIdentity: `assistant\u0000${threadId}-m-19\u00001`,
+      loadedMessageCount: 20,
+      contentVersion: 1,
+      structureVersion: 1
+    }
+  }
 }
 
 describe("chat scroll regression scenarios", () => {
@@ -164,6 +199,154 @@ describe("chat scroll regression scenarios", () => {
   })
 })
 
+describe("chat scroll session restoration", () => {
+  it("persists return-to-bottom intent before a delayed latest-page reload can finish", async () => {
+    const store = createChatScrollSessionStore(2)
+    const detached = detachedSession("thread-a", 3)
+    const following = dispatch(detached.state, { type: "RETURN_TO_BOTTOM" }).state
+    const view = store.open("thread-a")
+    let resolveLatest!: () => void
+    const delayedLatest = new Promise<void>((resolve) => {
+      resolveLatest = resolve
+    })
+
+    // Mirrors click -> file-tab unmount: the synchronous following intent is what cleanup saves.
+    store.save(view.lease, { ...detached, state: following, anchor: null })
+    resolveLatest()
+    await delayedLatest
+
+    expect(store.open("thread-a").session).toMatchObject({
+      state: { mode: "following", unreadCount: 3 },
+      anchor: null
+    })
+  })
+
+  it("retains a pending gap reveal through a file-tab remount", () => {
+    const store = createChatScrollSessionStore(2)
+    const firstView = store.open("thread-a")
+    store.save(firstView.lease, detachedSession("thread-a"))
+    store.setPendingRevealMessageId(firstView.lease, "thread-a-reloaded-gap-page")
+
+    const remountedView = store.open("thread-a")
+    expect(remountedView.session?.state.mode).toBe("detached")
+    expect(remountedView.pendingRevealMessageId).toBe(
+      "thread-a-reloaded-gap-page"
+    )
+
+    store.setPendingRevealMessageId(remountedView.lease, null)
+    expect(store.getPendingRevealMessageId(remountedView.lease)).toBeNull()
+  })
+
+  it("restores A after A -> B -> A without leaking B state", () => {
+    const store = createChatScrollSessionStore(4)
+    store.save(store.open("thread-a").lease, detachedSession("thread-a", 3))
+    store.save(store.open("thread-b").lease, detachedSession("thread-b", 1))
+
+    expect(store.open("thread-a").session).toMatchObject({
+      state: { threadId: "thread-a", mode: "detached", unreadCount: 3 },
+      anchor: { messageId: "thread-a-m-8", offsetFromViewportTop: 17 },
+      contentSnapshot: { lastMessageId: "thread-a-m-19", visibleCount: 20 }
+    })
+    expect(store.open("thread-b").session).toMatchObject({
+      state: { threadId: "thread-b", mode: "detached", unreadCount: 1 },
+      anchor: { messageId: "thread-b-m-8" }
+    })
+  })
+
+  it("normalizes an interrupted restore and advances its async generation", () => {
+    const detached = detachedSession("thread-a", 2)
+    const restoring = dispatch(detached.state, { type: "RESTORE_BEGIN" }).state
+
+    const resumed = restoreChatScrollSessionState({ ...detached, state: restoring }, "thread-a")
+
+    expect(resumed.state).toMatchObject({
+      threadId: "thread-a",
+      generation: restoring.generation + 1,
+      mode: "detached",
+      restoreDepth: 0,
+      restoreMode: null,
+      programmaticScrollGuard: false,
+      unreadCount: 2
+    })
+    expect(resumed.anchor).toEqual(detached.anchor)
+  })
+
+  it("bounds retained sessions and returns defensive snapshots", () => {
+    const store = createChatScrollSessionStore(2)
+    store.save(store.open("thread-a").lease, detachedSession("thread-a"))
+    store.save(store.open("thread-b").lease, detachedSession("thread-b"))
+    const firstRestore = store.open("thread-a").session
+    expect(firstRestore).not.toBeNull()
+    if (firstRestore) firstRestore.state.unreadCount = 99
+
+    store.save(store.open("thread-c").lease, detachedSession("thread-c"))
+
+    expect(store.open("thread-b").session).toBeNull()
+    expect(store.open("thread-a").session?.state.unreadCount).toBe(0)
+    expect(store.size()).toBe(2)
+  })
+
+  it("does not let an unmount save resurrect a deleted same-id session", () => {
+    const store = createChatScrollSessionStore(2)
+    const oldView = store.open("thread-a")
+    store.save(oldView.lease, detachedSession("thread-a", 4))
+    store.setPendingRevealMessageId(oldView.lease, "old-message")
+
+    store.delete("thread-a")
+    const replacementView = store.open("thread-a")
+    expect(replacementView.session).toBeNull()
+    expect(replacementView.pendingRevealMessageId).toBeNull()
+    // React cleanup can run after the backend deletion has already completed.
+    store.save(oldView.lease, detachedSession("thread-a", 9))
+    store.setPendingRevealMessageId(oldView.lease, "stale-reveal")
+
+    expect(store.getPendingRevealMessageId(replacementView.lease)).toBeNull()
+
+    // The recreated view can now establish an independent session.
+    store.save(replacementView.lease, detachedSession("thread-a", 1))
+    expect(store.open("thread-a").session?.state.unreadCount).toBe(1)
+  })
+
+  it("counts messages that arrived while a detached chat view was unmounted", () => {
+    const store = createChatScrollSessionStore(2)
+    store.save(store.open("thread-a").lease, detachedSession("thread-a", 2))
+    const restored = store.open("thread-a").session
+    expect(restored).not.toBeNull()
+    if (!restored?.contentSnapshot) return
+
+    const messages = Array.from({ length: 22 }, (_, index): Message => ({
+      id: `thread-a-m-${index}`,
+      role: "assistant",
+      content: `message ${index}`,
+      created_at: new Date(index)
+    }))
+    const visibleMessageIndexes = messages.map((_message, index) => index)
+    const visibleMessageIndexById = new Map(
+      messages.map((message, index) => [message.id, index])
+    )
+    const tail = messages.at(-1)
+    const change = classifyChatScrollTailChange({
+      previous: restored.contentSnapshot,
+      current: {
+        visibleCount: messages.length,
+        lastMessageId: tail?.id ?? null,
+        lastMessageIdentity: chatScrollTailMessageIdentity(tail),
+        loadedMessageCount: messages.length
+      },
+      displayMessages: messages,
+      visibleMessageIndexes,
+      visibleMessageIndexById
+    })
+    const updated = dispatch(restored.state, {
+      type: "CONTENT_APPENDED",
+      unreadMessages: change.unreadMessageCount
+    }).state
+
+    expect(change).toMatchObject({ appendedMessageCount: 2, unreadMessageCount: 2 })
+    expect(updated).toMatchObject({ mode: "detached", unreadCount: 4, hasUnread: true })
+  })
+})
+
 describe("chat scroll source contracts", () => {
   const containerSource = readFileSync(
     fileURLToPath(
@@ -197,5 +380,15 @@ describe("chat scroll source contracts", () => {
     expect(buttonSource).toMatch(/visible:\s*boolean/)
     expect(buttonSource).toMatch(/hasUnread:\s*boolean/)
     expect(buttonSource).toMatch(/unreadCount:\s*number/)
+  })
+
+  it("persists scroll intent and an anchor outside the keyed ChatContainer lifetime", () => {
+    expect(containerSource).toMatch(/chatScrollSessionStore\.open\(threadId\)/)
+    expect(containerSource).toMatch(/chatScrollSessionLeaseRef/)
+    expect(containerSource).toMatch(
+      /chatScrollSessionStore\.save\(sessionLease, \{[\s\S]*state,[\s\S]*anchor,[\s\S]*contentSnapshot:/
+    )
+    expect(containerSource).toMatch(/pendingChatSessionAnchorRef/)
+    expect(containerSource).not.toContain('type: "THREAD_RESET"')
   })
 })

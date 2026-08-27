@@ -37,7 +37,14 @@ export function isCheckpointRuntimeProjectionCancelled(error: unknown): boolean 
 async function createBundledWorker(): Promise<Worker> {
   try {
     const module = await import("./runtime-projection-worker?nodeWorker")
-    return module.default({ name: "checkpoint-runtime-projection" })
+    return module.default({
+      name: "checkpoint-runtime-projection",
+      resourceLimits: {
+        maxOldGenerationSizeMb: 256,
+        maxYoungGenerationSizeMb: 32,
+        stackSizeMb: 4
+      }
+    })
   } catch (error) {
     throw new CheckpointRuntimeProjectionWorkerUnavailableError(
       "Unable to start the bundled checkpoint runtime projection worker",
@@ -83,6 +90,8 @@ export class CheckpointRuntimeProjectionClient {
     }
     if (response.type === "read-latest-tuple-result") {
       pending.resolve(response.tuple)
+    } else if (response.type === "inspect-transcript-presence-result") {
+      pending.resolve(response.hasTranscript)
     } else if (response.type === "bootstrap-legacy-transcript-result") {
       pending.resolve({ runtimeTuple: response.runtimeTuple, stats: response.stats })
     } else {
@@ -162,6 +171,12 @@ export class CheckpointRuntimeProjectionClient {
           messageDatabasePath: string
           threadId: string
           checkpointNs: string
+        }
+      | {
+          type: "inspect-transcript-presence"
+          databasePath: string
+          threadId: string
+          checkpointNs: string
         },
     options: {
       cancellable?: boolean
@@ -175,6 +190,16 @@ export class CheckpointRuntimeProjectionClient {
       )
     }
     const worker = await this.getWorker()
+    // close() can start while getWorker() yields, even when the Worker was
+    // already available through Promise.resolve(). Re-check before retaining a
+    // pending request: close() has already drained the table by then and the
+    // closing Worker deliberately ignores exit events, so registering here
+    // would otherwise leave the caller unresolved forever.
+    if (this.closing) {
+      throw new CheckpointRuntimeProjectionWorkerUnavailableError(
+        "Checkpoint runtime projection client is closing"
+      )
+    }
     const requestId = this.nextRequestId++
     const cancellation = options.cancellable
       ? new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
@@ -182,7 +207,19 @@ export class CheckpointRuntimeProjectionClient {
     if (options.foregroundKey) {
       const previousId = this.foregroundRequests.get(options.foregroundKey)
       const previous = previousId === undefined ? undefined : this.pending.get(previousId)
-      if (previous?.cancellation) Atomics.store(previous.cancellation, 0, 1)
+      if (previous) {
+        if (previous.cancellation) Atomics.store(previous.cancellation, 0, 1)
+        // Latest-intent callers no longer need the superseded result. Reject and
+        // release its retained main-process bookkeeping immediately; the worker
+        // still observes the shared cancellation flag and its eventual response
+        // is safely ignored. This keeps rapid thread/workspace switching at one
+        // retained request per foreground scope instead of waiting behind legacy
+        // multi-megabyte scans.
+        this.pending.delete(previousId!)
+        const cancelled = new Error("Checkpoint runtime projection request cancelled")
+        cancelled.name = CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+        previous.reject(cancelled)
+      }
       this.foregroundRequests.set(options.foregroundKey, requestId)
     }
     return new Promise((resolve, reject) => {
@@ -195,11 +232,27 @@ export class CheckpointRuntimeProjectionClient {
           : {}),
         ...(options.foregroundKey ? { foregroundKey: options.foregroundKey } : {})
       })
-      worker.postMessage({
-        ...request,
-        requestId,
-        ...(cancellation ? { cancellationBuffer: cancellation.buffer } : {})
-      })
+      try {
+        worker.postMessage({
+          ...request,
+          requestId,
+          ...(cancellation ? { cancellationBuffer: cancellation.buffer } : {})
+        })
+      } catch (error) {
+        this.pending.delete(requestId)
+        if (
+          options.foregroundKey &&
+          this.foregroundRequests.get(options.foregroundKey) === requestId
+        ) {
+          this.foregroundRequests.delete(options.foregroundKey)
+        }
+        reject(
+          new CheckpointRuntimeProjectionWorkerUnavailableError(
+            "Unable to send a checkpoint runtime projection request",
+            { cause: error }
+          )
+        )
+      }
     })
   }
 
@@ -280,6 +333,25 @@ export class CheckpointRuntimeProjectionClient {
         ...(foregroundKey === undefined ? {} : { foregroundKey: String(foregroundKey) })
       }
     ).then((value) => value as LegacyCheckpointTranscriptBootstrapResult)
+  }
+
+  hasTranscript(
+    databasePath: string,
+    threadId: string,
+    checkpointNs = "",
+    foregroundKey?: string | number
+  ): Promise<boolean> {
+    return this.request(
+      {
+        type: "inspect-transcript-presence",
+        databasePath,
+        threadId,
+        checkpointNs
+      },
+      foregroundKey === undefined
+        ? {}
+        : { cancellable: true, foregroundKey: `transcript-presence:${foregroundKey}` }
+    ).then(Boolean)
   }
 
   cancelLegacyTranscriptBootstrap(threadId: string): void {
@@ -378,6 +450,15 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
     checkpointNs,
     foregroundKey
   )
+}
+
+export function hasCheckpointTranscriptInWorker(
+  databasePath: string,
+  threadId: string,
+  checkpointNs = "",
+  foregroundKey?: string | number
+): Promise<boolean> {
+  return getDefaultClient().hasTranscript(databasePath, threadId, checkpointNs, foregroundKey)
 }
 
 export function cancelLegacyCheckpointTranscriptBootstrap(threadId: string): void {

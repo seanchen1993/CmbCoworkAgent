@@ -7,6 +7,7 @@ import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "./runtime-projection-pr
 import {
   bootstrapLegacyCheckpointTranscript,
   ensureCheckpointRuntimeProjection,
+  hasCheckpointTranscript,
   readLatestCheckpointTuple
 } from "./runtime-projection-store"
 
@@ -24,6 +25,8 @@ function failureResponse(
         ? "read-latest-tuple-result"
         : request.type === "bootstrap-legacy-transcript"
           ? "bootstrap-legacy-transcript-result"
+          : request.type === "inspect-transcript-presence"
+            ? "inspect-transcript-presence-result"
         : "ensure-runtime-projection-result",
     requestId: request.requestId,
     ok: false,
@@ -46,6 +49,20 @@ workerPort.on("message", (request: CheckpointRuntimeProjectionWorkerRequest) => 
     return
   }
   try {
+    if (request.type === "inspect-transcript-presence") {
+      workerPort.postMessage({
+        type: "inspect-transcript-presence-result",
+        requestId: request.requestId,
+        ok: true,
+        hasTranscript: hasCheckpointTranscript(
+          request.databasePath,
+          request.threadId,
+          request.checkpointNs,
+          request.cancellationBuffer
+        )
+      } satisfies CheckpointRuntimeProjectionWorkerResponse)
+      return
+    }
     if (request.type === "bootstrap-legacy-transcript") {
       const result = bootstrapLegacyCheckpointTranscript(
         request.databasePath,

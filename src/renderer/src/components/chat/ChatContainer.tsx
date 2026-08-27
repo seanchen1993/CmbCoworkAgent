@@ -84,6 +84,7 @@ import {
   type ApiErrorDetailState
 } from "@/lib/thread-context"
 import { filterCoordinatorNoiseMessages } from "@/lib/message-display-helpers"
+import { canChangeThreadAgentMode } from "@/lib/agent-mode-switch-availability"
 import {
   getWorkerToolUiKey
 } from "@/lib/worker-tool-result-key"
@@ -133,8 +134,13 @@ import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import {
   ChatSearchOverlay,
   type DurableChatSearchOptions,
+  type DurableChatSearchMatch,
   type DurableChatSearchPage
 } from "./ChatSearchOverlay"
+import {
+  chatScrollSessionStore,
+  type ChatScrollSessionAnchor
+} from "./chat-scroll-session-store"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -262,6 +268,7 @@ const CHAT_BOTTOM_SETTLE_MAX_FRAMES = 60
 const CHAT_FOLLOW_SETTLE_MAX_FRAMES = 12
 const CHAT_HISTORY_ANCHOR_MAX_FRAMES = 120
 const CHAT_HISTORY_ANCHOR_STABLE_FRAMES = 12
+const CHAT_SESSION_ANCHOR_STABLE_FRAMES = 2
 const CHAT_LOCAL_SEARCH_HISTORY_LIMIT = 500
 const CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT = 4 * 1024 * 1024
 
@@ -272,6 +279,12 @@ interface PendingDurableHistoryAnchor {
   viewportTop: number
   previousMessageCount: number
   previousLoadedMessageCount: number
+  attempt: number
+  stableFrames: number
+}
+
+interface PendingChatSessionAnchor extends ChatScrollSessionAnchor {
+  threadId: string
   attempt: number
   stableFrames: number
 }
@@ -1602,6 +1615,10 @@ export function ChatContainer({
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
+  const [initialChatScrollView] = useState(() => chatScrollSessionStore.open(threadId))
+  const initialChatScrollSession = initialChatScrollView.session
+  const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
+  const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
   const readOnly = Boolean(readOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
@@ -1611,10 +1628,22 @@ export function ChatContainer({
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
-  const chatScrollStateRef = useRef<ChatScrollState | null>(null)
+  const chatScrollStateRef = useRef<ChatScrollState | null>(
+    initialChatScrollSession?.state ?? null
+  )
   if (chatScrollStateRef.current === null) {
     chatScrollStateRef.current = createChatScrollState(threadId)
   }
+  const pendingChatSessionAnchorRef = useRef<PendingChatSessionAnchor | null>(
+    initialChatScrollSession?.anchor
+      ? {
+          ...initialChatScrollSession.anchor,
+          threadId,
+          attempt: 0,
+          stableFrames: 0
+        }
+      : null
+  )
   const [chatScrollUiState, setChatScrollUiState] = useState(() => ({
     generation: chatScrollStateRef.current?.generation ?? 0,
     mode: chatScrollStateRef.current?.mode ?? "initializing",
@@ -1639,8 +1668,13 @@ export function ChatContainer({
     loadedMessageCount: number
     contentVersion: number
     structureVersion: number
-  } | null>(null)
+  } | null>(initialChatScrollSession?.contentSnapshot ?? null)
   const pendingDurableHistoryAnchorRef = useRef<PendingDurableHistoryAnchor | null>(null)
+  const pendingDurableSearchRevealIdRef = useRef<string | null>(
+    initialPendingDurableRevealMessageId
+  )
+  const durableMessageWindowGenerationRef = useRef(0)
+  const chatViewMountedRef = useRef(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -1759,7 +1793,7 @@ export function ChatContainer({
     models,
     createThread,
     forkThread,
-    updateThread,
+    patchThreadMetadata,
     generateTitleForFirstMessage,
     setShowCustomizeView,
     rightPanelCollapsed,
@@ -1771,7 +1805,7 @@ export function ChatContainer({
       models: state.models,
       createThread: state.createThread,
       forkThread: state.forkThread,
-      updateThread: state.updateThread,
+      patchThreadMetadata: state.patchThreadMetadata,
       generateTitleForFirstMessage: state.generateTitleForFirstMessage,
       setShowCustomizeView: state.setShowCustomizeView,
       rightPanelCollapsed: state.rightPanelCollapsed,
@@ -2022,6 +2056,7 @@ export function ChatContainer({
     historyLoading,
     historyPageLoading,
     historyHasMore,
+    historyWindowGap,
     historyMessageTotal,
     historyLoadedMessageCount,
     scheduledTaskId,
@@ -2039,6 +2074,10 @@ export function ChatContainer({
     appendMessage,
     syncDurableTranscript,
     loadEarlierMessages,
+    loadMessageWindowAround,
+    loadReleasedMessageWindow,
+    restoreLatestMessageWindow,
+    cancelMessageWindowLoad,
     removeLocalMessage,
     addQueuedMessage,
     prependQueuedMessage,
@@ -2172,7 +2211,11 @@ export function ChatContainer({
     setShowCustomizeView(true, "memory")
   }, [setShowCustomizeView])
 
-  const canChangeAgentMode = !historyLoading && threadMessages.length === 0
+  const canChangeAgentMode = canChangeThreadAgentMode({
+    historyLoading,
+    historyMessageTotal,
+    residentMessageCount: threadMessages.length
+  })
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
 
   useEffect(() => {
@@ -2215,7 +2258,7 @@ export function ChatContainer({
           toast.error("会话历史加载中，暂时不能切换执行模式。")
           return
         }
-        if (threadMessages.length > 0) {
+        if (historyMessageTotal > 0 || threadMessages.length > 0) {
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
@@ -2248,24 +2291,19 @@ export function ChatContainer({
         if (requestId !== agentModeChangeRequestRef.current) return
         agentModeHydratedRef.current = true
         setAgentMode(nextMode)
-        const thread = await window.api.threads.get(threadId)
-        if (requestId !== agentModeChangeRequestRef.current) return
-        const metadata = thread?.metadata ?? {}
-        const nextMetadata: Record<string, unknown> = {
-          ...metadata,
+        const set: Record<string, unknown> = {
           agentMode: nextMode === "multi" ? "normal" : nextMode
         }
+        const remove: string[] = []
         if (nextMode === "normal" || nextMode === "multi") {
-          nextMetadata.subagentsEnabled = nextMode === "multi"
+          set.subagentsEnabled = nextMode === "multi"
         } else {
-          delete nextMetadata.subagentsEnabled
+          remove.push("subagentsEnabled")
         }
         if (nextMode !== "coordinator") {
-          delete nextMetadata.coordinatorMode
+          remove.push("coordinatorMode")
         }
-        await updateThread(threadId, {
-          metadata: nextMetadata
-        })
+        await patchThreadMetadata(threadId, { set, remove })
         persistedAgentModeRef.current = nextMode
       })
       // Serialize writes so an older request can never finish after a newer one
@@ -2290,9 +2328,10 @@ export function ChatContainer({
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
       historyLoading,
+      historyMessageTotal,
       threadId,
       threadMessages,
-      updateThread
+      patchThreadMetadata
     ]
   )
   const userInputScrollPadding = pendingUserInput
@@ -3104,6 +3143,23 @@ export function ChatContainer({
     orderedDynamicIndexes: orderedDynamicVisibleMessageIndexes,
     dynamicVersion: dynamicVisibilityProjection.version
   })
+  const historyGapBeforeVisibleMessageId = useMemo(() => {
+    if (!historyWindowGap) return null
+    const boundaryIndex = displayMessageProjection.indexById.get(
+      historyWindowGap.beforeMessageId
+    )
+    if (boundaryIndex === undefined) return null
+    const visibleBoundaryIndex = visibleMessageIndexes.find((index) => index >= boundaryIndex)
+    return visibleBoundaryIndex === undefined
+      ? null
+      : displayMessages[visibleBoundaryIndex]?.id ?? null
+  }, [
+    displayMessageProjection.indexById,
+    displayMessages,
+    displayMessagesStructureVersion,
+    historyWindowGap,
+    visibleMessageIndexes
+  ])
   const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
   const lastContentMessageId =
     lastVisibleMessageIndex === undefined
@@ -3254,6 +3310,7 @@ export function ChatContainer({
     baseline: readonly Message[]
     indexById: ReadonlyMap<string, number>
     buildDocument: typeof buildSearchDocument
+    gapBeforeMessageId: string | null
     documents: readonly ChatSearchDocument[]
   } | null>(null)
   const dynamicSearchDocumentsRef = useRef<{
@@ -3271,14 +3328,27 @@ export function ChatContainer({
       !cached ||
       cached.baseline !== threadDisplayBaseline ||
       cached.indexById !== displayMessageProjection.indexById ||
-      cached.buildDocument !== buildSearchDocument
+      cached.buildDocument !== buildSearchDocument ||
+      cached.gapBeforeMessageId !== (historyWindowGap?.beforeMessageId ?? null)
     ) {
       // The durable search API covers the complete persisted transcript. Keep the renderer-side
       // corpus bounded to the already-visible recent page so opening search after paging through a
       // very long task cannot synchronously stringify and index the entire hydrated history.
       const documents: ChatSearchDocument[] = []
       let textUnits = 0
-      const startIndex = Math.max(0, threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+      const gapTailStartIndex = historyWindowGap
+        ? threadDisplayBaseline.findIndex(
+            (message) => message.id === historyWindowGap.beforeMessageId
+          )
+        : 0
+      // A resident gap makes the in-memory array non-contiguous. Index only the latest side of
+      // that gap locally; durable results provide the omitted prefix in database order. Otherwise
+      // merging "old resident prefix + durable gap + latest tail" could advertise a false order.
+      const contiguousTailStartIndex = gapTailStartIndex >= 0 ? gapTailStartIndex : 0
+      const startIndex = Math.max(
+        contiguousTailStartIndex,
+        threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT
+      )
       for (
         let messageIndex = threadDisplayBaseline.length - 1;
         messageIndex >= startIndex;
@@ -3306,6 +3376,7 @@ export function ChatContainer({
         baseline: threadDisplayBaseline,
         indexById: displayMessageProjection.indexById,
         buildDocument: buildSearchDocument,
+        gapBeforeMessageId: historyWindowGap?.beforeMessageId ?? null,
         documents: stableDocuments
       }
     }
@@ -3391,13 +3462,29 @@ export function ChatContainer({
     displayMessagesContentVersion,
     liveDisplayProjection,
     liveDisplayMessages,
+    historyWindowGap,
     threadDisplayBaseline
   ])
+  const setPendingDurableRevealMessageId = useCallback(
+    (messageId: string | null): void => {
+      pendingDurableSearchRevealIdRef.current = messageId
+      const lease = chatScrollSessionLeaseRef.current
+      if (lease.threadId !== threadId) return
+      chatScrollSessionStore.setPendingRevealMessageId(lease, messageId)
+    },
+    [threadId]
+  )
+  const invalidateDurableMessageReveal = useCallback((): void => {
+    durableMessageWindowGenerationRef.current += 1
+    setPendingDurableRevealMessageId(null)
+    cancelMessageWindowLoad()
+  }, [cancelMessageWindowLoad, setPendingDurableRevealMessageId])
   const closeSearch = useCallback((): void => {
+    invalidateDurableMessageReveal()
     stableSearchDocumentsRef.current = null
     dynamicSearchDocumentsRef.current = null
     setSearchOpen(false)
-  }, [])
+  }, [invalidateDurableMessageReveal])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
@@ -3438,7 +3525,24 @@ export function ChatContainer({
       window.cancelAnimationFrame(bottomScrollFrameRef.current)
       bottomScrollFrameRef.current = null
     }
-    applyChatScrollEvent({ type: "THREAD_RESET", threadId })
+    if (chatScrollStateRef.current?.threadId !== threadId) {
+      const opened = chatScrollSessionStore.open(threadId)
+      chatScrollSessionLeaseRef.current = opened.lease
+      const restored = opened.session
+      const nextState = restored?.state ?? createChatScrollState(threadId)
+      chatScrollStateRef.current = nextState
+      pendingChatSessionAnchorRef.current = restored?.anchor
+        ? { ...restored.anchor, threadId, attempt: 0, stableFrames: 0 }
+        : null
+      chatContentSnapshotRef.current = restored?.contentSnapshot ?? null
+      pendingDurableSearchRevealIdRef.current = opened.pendingRevealMessageId
+      setChatScrollUiState({
+        generation: nextState.generation,
+        mode: nextState.mode,
+        hasUnread: nextState.hasUnread,
+        unreadCount: nextState.unreadCount
+      })
+    }
     pendingBottomScrollEffectRef.current = null
     bottomSettleAttemptRef.current = 0
     bottomSettleEffectKeyRef.current = ""
@@ -3446,8 +3550,7 @@ export function ChatContainer({
     upwardUserScrollIntentUntilRef.current = 0
     downwardUserScrollIntentUntilRef.current = 0
     scrollbarUserIntentActiveRef.current = false
-    chatContentSnapshotRef.current = null
-  }, [applyChatScrollEvent, threadId])
+  }, [threadId])
 
   useEffect(() => {
     if (scrollParent || !scrollRef.current) return
@@ -3594,19 +3697,102 @@ export function ChatContainer({
     [applyChatScrollEvent, runChatScrollTransition]
   )
 
-  const scrollToConversationBottom = useCallback((): void => {
-    dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
-  }, [dispatchChatScrollEvent])
+  const waitForTranscriptCommit = useCallback(
+    (): Promise<void> =>
+      new Promise((resolve) => {
+        window.requestAnimationFrame(() => resolve())
+      }),
+    []
+  )
 
-  useEffect(() => {
+  const scrollToConversationBottom = useCallback((): void => {
+    const revealGeneration = durableMessageWindowGenerationRef.current + 1
+    durableMessageWindowGenerationRef.current = revealGeneration
+    setPendingDurableRevealMessageId(null)
+    cancelMessageWindowLoad()
+    pendingChatSessionAnchorRef.current = null
+    // Persist the user's intent before waiting for disk. If the chat unmounts while the latest
+    // page is loading (for example, a file tab opens), cleanup must save `following`, not the
+    // detached state that existed before the click.
+    dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+
+    void (async () => {
+      if (historyWindowGap || historyPageLoading) {
+        const restored = await restoreLatestMessageWindow()
+        if (
+          !chatViewMountedRef.current ||
+          durableMessageWindowGenerationRef.current !== revealGeneration
+        ) {
+          return
+        }
+        if (!restored) {
+          toast.error("恢复最新消息失败，请稍后重试")
+          return
+        }
+        await waitForTranscriptCommit()
+      }
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        return
+      }
+      dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+    })()
+  }, [
+    cancelMessageWindowLoad,
+    dispatchChatScrollEvent,
+    historyPageLoading,
+    historyWindowGap,
+    restoreLatestMessageWindow,
+    setPendingDurableRevealMessageId,
+    waitForTranscriptCommit
+  ])
+
+  useLayoutEffect(() => {
+    chatViewMountedRef.current = true
+    const sessionLease = chatScrollSessionLeaseRef.current
     return () => {
+      chatViewMountedRef.current = false
+      durableMessageWindowGenerationRef.current += 1
+      const state = chatScrollStateRef.current
+      if (state?.threadId === threadId) {
+        const viewport = getViewport()
+        let anchor: ChatScrollSessionAnchor | null = null
+        // A durable reveal that is still loading owns the remount destination. Saving the old
+        // viewport anchor here would race it and pull the reopened chat back to stale content.
+        if (
+          viewport &&
+          isChatScrollDetached(state) &&
+          !pendingDurableSearchRevealIdRef.current
+        ) {
+          const viewportTop = viewport.getBoundingClientRect().top
+          let closestDistance = Number.POSITIVE_INFINITY
+          for (const candidate of viewport.querySelectorAll<HTMLElement>(
+            "[data-chat-message-id]"
+          )) {
+            const messageId = candidate.dataset.chatMessageId
+            if (!messageId) continue
+            const offsetFromViewportTop = candidate.getBoundingClientRect().top - viewportTop
+            const distance = Math.abs(offsetFromViewportTop)
+            if (distance >= closestDistance) continue
+            closestDistance = distance
+            anchor = { messageId, offsetFromViewportTop }
+          }
+        }
+        chatScrollSessionStore.save(sessionLease, {
+          state,
+          anchor,
+          contentSnapshot: chatContentSnapshotRef.current
+        })
+      }
       pendingBottomScrollEffectRef.current = null
       if (bottomScrollFrameRef.current !== null) {
         window.cancelAnimationFrame(bottomScrollFrameRef.current)
         bottomScrollFrameRef.current = null
       }
     }
-  }, [])
+  }, [getViewport, threadId])
   const searchDurableMessages = useCallback(
     (
       query: string,
@@ -3615,6 +3801,33 @@ export function ChatContainer({
       return window.api.threads.searchMessages(threadId, query, options)
     },
     [threadId]
+  )
+  const revealDurableMessage = useCallback(
+    async (match: DurableChatSearchMatch): Promise<void> => {
+      const revealGeneration = durableMessageWindowGenerationRef.current + 1
+      durableMessageWindowGenerationRef.current = revealGeneration
+      pendingChatSessionAnchorRef.current = null
+      setPendingDurableRevealMessageId(match.messageId)
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      const loaded = await loadMessageWindowAround(match)
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        throw new Error("Durable chat reveal was superseded")
+      }
+      if (!loaded) {
+        setPendingDurableRevealMessageId(null)
+        throw new Error("Unable to hydrate durable chat search result")
+      }
+      await waitForTranscriptCommit()
+    },
+    [
+      dispatchChatScrollEvent,
+      loadMessageWindowAround,
+      setPendingDurableRevealMessageId,
+      waitForTranscriptCommit
+    ]
   )
 
   useEffect(() => {
@@ -3654,6 +3867,8 @@ export function ChatContainer({
       }
     }
     const cancelPendingHistoryAnchorFromUserGesture = (): void => {
+      pendingChatSessionAnchorRef.current = null
+      invalidateDurableMessageReveal()
       const anchor = pendingDurableHistoryAnchorRef.current
       if (!anchor) return
       dispatchChatScrollEvent({
@@ -3684,6 +3899,7 @@ export function ChatContainer({
         )
       ) {
         scrollbarUserIntentActiveRef.current = true
+        cancelPendingHistoryAnchorFromUserGesture()
         dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       }
     }
@@ -3769,12 +3985,13 @@ export function ChatContainer({
       window.removeEventListener("pointercancel", clearScrollbarPointerIntent, true)
       window.removeEventListener("blur", clearScrollbarPointerIntent)
     }
-  }, [dispatchChatScrollEvent, scrollParent])
+  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
 
   const scrollToMessageById = useCallback(
     (messageId: string): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
+      invalidateDurableMessageReveal()
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
       const viewport = getViewport()
@@ -3789,22 +4006,29 @@ export function ChatContainer({
       }
       virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
     },
-    [dispatchChatScrollEvent, getViewport, visibleMessageIndexById]
+    [
+      dispatchChatScrollEvent,
+      getViewport,
+      invalidateDurableMessageReveal,
+      visibleMessageIndexById
+    ]
   )
   const revealMessage = useCallback(
     (messageId: string): void => {
       const index = visibleMessageIndexById.get(messageId)
       if (index === undefined) return
+      invalidateDurableMessageReveal()
       dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       const targetElement = contentMessageRefs.current.get(messageId)
       if (targetElement) return
       virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
     },
-    [dispatchChatScrollEvent, visibleMessageIndexById]
+    [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
   )
   const handleScrollToQuestion = useCallback((): void => {
+    invalidateDurableMessageReveal()
     dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
-  }, [dispatchChatScrollEvent])
+  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal])
 
   const handleInitialVirtualItemsRendered = useCallback((): void => {
     if (historyLoading) return
@@ -3844,6 +4068,83 @@ export function ChatContainer({
       })
     }
   }, [chatScrollUiState.generation, dispatchChatScrollEvent])
+
+  useLayoutEffect(() => {
+    const messageId = pendingDurableSearchRevealIdRef.current
+    if (!messageId || historyPageLoading) return
+    const index = visibleMessageIndexById.get(messageId)
+    if (index === undefined) {
+      setPendingDurableRevealMessageId(null)
+      return
+    }
+    setPendingDurableRevealMessageId(null)
+    virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+  }, [historyPageLoading, setPendingDurableRevealMessageId, visibleMessageIndexById])
+
+  useLayoutEffect(() => {
+    const anchor = pendingChatSessionAnchorRef.current
+    if (
+      !anchor ||
+      anchor.threadId !== threadId ||
+      historyLoading ||
+      historyPageLoading ||
+      !scrollParent
+    ) {
+      return
+    }
+    const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+    if (visibleIndex === undefined) {
+      pendingChatSessionAnchorRef.current = null
+      return
+    }
+
+    let frame: number | null = null
+    const finish = (): void => {
+      if (pendingChatSessionAnchorRef.current === anchor) {
+        pendingChatSessionAnchorRef.current = null
+      }
+    }
+    const restore = (): void => {
+      if (pendingChatSessionAnchorRef.current !== anchor) return
+      const viewport = getViewport()
+      const target =
+        contentMessageRefs.current.get(anchor.messageId) ??
+        Array.from(
+          viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []
+        ).find((candidate) => candidate.dataset.chatMessageId === anchor.messageId)
+      if (viewport && target) {
+        const viewportTop = viewport.getBoundingClientRect().top
+        const currentOffset = target.getBoundingClientRect().top - viewportTop
+        const delta = currentOffset - anchor.offsetFromViewportTop
+        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        if (anchor.stableFrames >= CHAT_SESSION_ANCHOR_STABLE_FRAMES) {
+          finish()
+          return
+        }
+      } else if (anchor.attempt === 0) {
+        virtuosoRef.current?.scrollToIndex({ index: visibleIndex, align: "start", behavior: "auto" })
+      }
+
+      anchor.attempt += 1
+      if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
+        frame = window.requestAnimationFrame(restore)
+      } else {
+        finish()
+      }
+    }
+    frame = window.requestAnimationFrame(restore)
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame)
+    }
+  }, [
+    getViewport,
+    historyLoading,
+    historyPageLoading,
+    scrollParent,
+    threadId,
+    visibleMessageIndexById
+  ])
 
   useEffect(() => {
     if (historyLoading || !scrollParent) return
@@ -3917,6 +4218,45 @@ export function ChatContainer({
     loadEarlierMessages,
     threadId
   ])
+  const loadReleasedHistoryWindow = useCallback(async (): Promise<void> => {
+    const targetMessageId = historyWindowGap?.reloadTargetMessageId
+    if (!targetMessageId || historyPageLoading) return
+    const revealGeneration = durableMessageWindowGenerationRef.current + 1
+    durableMessageWindowGenerationRef.current = revealGeneration
+    pendingChatSessionAnchorRef.current = null
+    setPendingDurableRevealMessageId(targetMessageId)
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+    try {
+      const loaded = await loadReleasedMessageWindow()
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        return
+      }
+      if (!loaded) {
+        setPendingDurableRevealMessageId(null)
+        toast.error("继续加载中间消息失败，请稍后重试")
+        return
+      }
+      await waitForTranscriptCommit()
+    } catch (error) {
+      if (
+        chatViewMountedRef.current &&
+        durableMessageWindowGenerationRef.current === revealGeneration
+      ) {
+        setPendingDurableRevealMessageId(null)
+        toast.error(error instanceof Error ? error.message : "继续加载中间消息失败")
+      }
+    }
+  }, [
+    dispatchChatScrollEvent,
+    historyPageLoading,
+    historyWindowGap?.reloadTargetMessageId,
+    loadReleasedMessageWindow,
+    setPendingDurableRevealMessageId,
+    waitForTranscriptCommit
+  ])
   const historyRemainingCount = Math.max(
     0,
     historyMessageTotal - historyLoadedMessageCount
@@ -3925,10 +4265,10 @@ export function ChatContainer({
   useLayoutEffect(() => {
     const anchor = pendingDurableHistoryAnchorRef.current
     if (!anchor || anchor.threadId !== threadId || historyPageLoading) return
-    if (displayMessages.length <= anchor.previousMessageCount) {
-      if (historyLoadedMessageCount <= anchor.previousLoadedMessageCount) return
-      pendingDurableHistoryAnchorRef.current = null
-      dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+    if (
+      displayMessages.length <= anchor.previousMessageCount &&
+      historyLoadedMessageCount <= anchor.previousLoadedMessageCount
+    ) {
       return
     }
     let frame: number | null = null
@@ -3993,8 +4333,9 @@ export function ChatContainer({
       structureVersion: displayMessagesStructureVersion
     }
     const previous = chatContentSnapshotRef.current
+    if (historyLoading) return
     chatContentSnapshotRef.current = nextSnapshot
-    if (historyLoading || !previous || previous.threadId !== threadId) return
+    if (!previous || previous.threadId !== threadId) return
 
     const tailChange = classifyChatScrollTailChange({
       previous,
@@ -6742,6 +7083,8 @@ export function ChatContainer({
         getSearchCorpus={getSearchCorpus}
         onRevealMessage={revealMessage}
         searchDurableMessages={searchDurableMessages}
+        onRevealDurableMessage={revealDurableMessage}
+        onCancelDurableReveal={invalidateDurableMessageReveal}
         recomputeKey={searchRecomputeKey}
       />
 
@@ -6888,6 +7231,9 @@ export function ChatContainer({
       <ChatScrollNavigator
         messages={chatScrollNavigatorMessages}
         questionStructureRevision={chatScrollQuestionStructureRevision}
+        historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+        canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
+        onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
         onRevealMessage={revealMessage}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
@@ -6946,6 +7292,12 @@ export function ChatContainer({
                     historyHasMore={historyHasMore}
                     historyPageLoading={historyPageLoading}
                     historyRemainingCount={historyRemainingCount}
+                    historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+                    canLoadReleasedHistory={Boolean(
+                      historyWindowGap?.reloadTargetMessageId
+                    )}
+                    onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
+                    onRestoreLatestHistoryWindow={scrollToConversationBottom}
                     hookLoggingEnabled={hookLogConfig.enabled}
                     hookLogBucketByTurnId={hookLogBucketByTurnId}
                     detachedHookLogBuckets={detachedHookLogBuckets}

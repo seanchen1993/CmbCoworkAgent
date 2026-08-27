@@ -14,6 +14,7 @@ import {
   HARNESS_ADAPTER_RUN_MAX_HOOK_LOG_BYTES
 } from "./adapter-detail-protocol"
 import type { HarnessProjectMetadata } from "../../shared/harness-board-types"
+import { harnessWorkerOptions } from "./worker-limits"
 
 type AdapterDetailWorkerFactory = () => Promise<Worker>
 let adapterParseScopeSequence = 1
@@ -63,7 +64,7 @@ export class HarnessAdapterDetailCancelledError extends Error {
 async function createBundledWorker(): Promise<Worker> {
   try {
     const module = await import("./adapter-detail-worker?nodeWorker")
-    return module.default({ name: "harness-adapter-detail" })
+    return module.default(harnessWorkerOptions("harness-adapter-detail"))
   } catch (error) {
     throw new HarnessAdapterDetailWorkerUnavailableError(
       "Unable to start the bundled Harness adapter detail worker",

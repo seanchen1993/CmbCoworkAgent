@@ -132,7 +132,7 @@ try {
   ) as { entries?: unknown[] }
   assert.equal(index.entries?.length, 1, "new writes must maintain the compact run index")
 } finally {
-  deleteWorkflowRunsForThread(largeWorkspace, largeThreadId)
+  await deleteWorkflowRunsForThread(largeWorkspace, largeThreadId)
   await rm(largeWorkspace, { recursive: true, force: true })
 }
 
@@ -155,6 +155,7 @@ const trappedNames = [
   "existsSync",
   "readFileSync",
   "readdirSync",
+  "realpathSync",
   "statSync",
   "writeFileSync"
 ] as const
@@ -189,7 +190,7 @@ try {
 } finally {
   for (const [name, original] of originals) mutableFs[name] = original
   syncBuiltinESMExports()
-  deleteWorkflowRunsForThread(trapWorkspace, trapThreadId)
+  await deleteWorkflowRunsForThread(trapWorkspace, trapThreadId)
   await rm(trapWorkspace, { recursive: true, force: true })
 }
 
@@ -230,7 +231,36 @@ const workflowToolSource = readFileSync(
 assert.match(workflowToolSource, /await resolveResumeRun\(/)
 assert.match(workflowToolSource, /await loadWorkflowRunAsync\(/)
 assert.match(workflowToolSource, /await loadWorkflowRunForResumeAsync\(/)
+assert.match(workflowToolSource, /await isWorkflowRunDirDisposedAsync\(/)
+assert.match(workflowToolSource, /await resolveScriptSource\(/)
+assert.match(workflowToolSource, /openStableFileHandle\(/)
 assert.doesNotMatch(workflowToolSource, /\bloadWorkflowRunForResume\b/)
+assert.doesNotMatch(workflowToolSource, /\b(?:readFileSync|realpathSync|statSync)\b/)
+
+const threadsSource = readFileSync(join(repositoryRoot, "src/main/ipc/threads.ts"), "utf8")
+assert.match(threadsSource, /await workflowWorktreeDirectoryMayExist\(/)
+assert.doesNotMatch(
+  threadsSource,
+  /existsSync\(record\.directory\)/,
+  "thread deletion must not synchronously probe worktree paths on the Electron main thread"
+)
+
+const runStoreSource = readFileSync(
+  join(repositoryRoot, "src/main/agent/workflow/run-store.ts"),
+  "utf8"
+)
+assert.doesNotMatch(
+  runStoreSource,
+  /\b(?:rmSync|unlinkSync)\b/,
+  "workflow production persistence/deletion must not recursively delete or unlink synchronously"
+)
+const asyncRunPointRead = runStoreSource.slice(
+  runStoreSource.indexOf("async function loadWorkflowRunFromDirAsync"),
+  runStoreSource.indexOf("async function loadWorkflowRunWithLocationAsync")
+)
+assert.match(asyncRunPointRead, /openStableFileHandle\(/)
+assert.match(asyncRunPointRead, /readStableFileHandleBounded\(/)
+assert.doesNotMatch(asyncRunPointRead, /readFile\(candidate\)/)
 
 const dialogSource = readFileSync(
   join(repositoryRoot, "src/renderer/src/components/chat/WorkflowRunsDialog.tsx"),

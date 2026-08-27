@@ -7,10 +7,13 @@ import { DatabaseSync } from "node:sqlite"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import {
+  THREAD_MESSAGE_HYDRATION_MAX_ACTIVE_REQUESTS,
+  THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS,
   ThreadMessageHydrationClient,
   ThreadMessageHydrationRequestCancelledError,
   ThreadMessageHydrationWorkerUnavailableError
 } from "./client"
+import { isThreadMessagePageContinuousWithBoundary } from "../../renderer/src/lib/thread-message-pages"
 
 const temporaryDirectories: string[] = []
 const clients: ThreadMessageHydrationClient[] = []
@@ -94,7 +97,8 @@ function createWorkerClient(path: string): ThreadMessageHydrationClient {
   const client = new ThreadMessageHydrationClient(
     async () =>
       new Worker(workerBundlePath, {
-        name: "thread-message-hydration-test"
+        name: "thread-message-hydration-test",
+        resourceLimits: THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS
       }),
     () => path
   )
@@ -225,6 +229,160 @@ afterEach(async () => {
 })
 
 describe("thread message hydration worker", () => {
+  it("runs oversized-row parsing inside a bounded worker heap", () => {
+    expect(THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS).toEqual({
+      maxOldGenerationSizeMb: 256,
+      maxYoungGenerationSizeMb: 32,
+      stackSizeMb: 4
+    })
+  })
+
+  it("reads two explicit forward pages across dense, repeated, and sparse ordinals", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(`
+      INSERT INTO thread_messages (
+        thread_id, message_id, role, content_json, created_at, ordinal
+      ) VALUES (?, ?, 'assistant', ?, ?, ?)
+    `)
+    const insertFixture = (
+      threadId: string,
+      rows: ReadonlyArray<{ id: string; ordinal: number }>
+    ): void => {
+      for (const row of rows) {
+        insert.run(threadId, row.id, JSON.stringify(row.id), row.ordinal, row.ordinal)
+      }
+      const nextOrdinal = rows.reduce(
+        (maximum, row) => Math.max(maximum, row.ordinal + 1),
+        0
+      )
+      database
+        .prepare(
+          `INSERT INTO thread_message_buckets
+           (thread_id, message_count, next_ordinal, updated_at) VALUES (?, ?, ?, ?)`
+        )
+        .run(threadId, rows.length, nextOrdinal, Date.now())
+    }
+    database.exec("BEGIN")
+    insertFixture(
+      "forward-dense",
+      Array.from({ length: 1_200 }, (_, ordinal) => ({
+        id: `dense-${ordinal.toString().padStart(4, "0")}`,
+        ordinal
+      }))
+    )
+    insertFixture("forward-repeated", [
+      { id: "repeated-boundary", ordinal: 100 },
+      ...Array.from({ length: 501 }, (_, index) => ({
+        id: `repeated-top-${index.toString().padStart(4, "0")}`,
+        ordinal: 599
+      }))
+    ])
+    insertFixture("forward-sparse", [
+      { id: "sparse-boundary", ordinal: 100 },
+      { id: "sparse-0150", ordinal: 150 },
+      { id: "sparse-0300", ordinal: 300 },
+      { id: "sparse-0598", ordinal: 598 },
+      ...Array.from({ length: 499 }, (_, index) => {
+        const ordinal = 600 + index
+        return { id: `sparse-${ordinal.toString().padStart(4, "0")}`, ordinal }
+      })
+    ])
+    insertFixture("forward-oversized", [
+      { id: "oversized-anchor", ordinal: 0 },
+      { id: "oversized-newer-one", ordinal: 1 },
+      { id: "oversized-newer-two", ordinal: 2 }
+    ])
+    database
+      .prepare(
+        `UPDATE thread_messages
+         SET content_json = ?
+         WHERE thread_id = 'forward-oversized' AND message_id = 'oversized-anchor'`
+      )
+      .run(JSON.stringify("x".repeat(2_000_000)))
+    database.exec("COMMIT")
+    database.close()
+    const client = createWorkerClient(path)
+    const readForward = async (threadId: string, anchorMessageId: string) =>
+      client.readPage(threadId, {
+        anchorMessageId,
+        limit: 500
+      })
+
+    const denseFirst = await readForward("forward-dense", "dense-0100")
+    const denseSecond = await readForward(
+      "forward-dense",
+      denseFirst.messages.at(-1)?.id ?? "missing-dense-tail"
+    )
+    expect(denseFirst.verifiedAnchorMessageId).toBe("dense-0100")
+    expect(denseFirst.messages[0]?.id).toBe("dense-0101")
+    expect(denseFirst.messages.at(-1)?.id).toBe("dense-0600")
+    expect(denseSecond.verifiedAnchorMessageId).toBe("dense-0600")
+    expect(denseSecond.messages[0]?.id).toBe("dense-0601")
+    expect(denseSecond.messages.at(-1)?.id).toBe("dense-1100")
+
+    const repeatedFirst = await readForward("forward-repeated", "repeated-boundary")
+    const repeatedAnchor = repeatedFirst.messages.at(-1)?.id ?? "missing-repeated-tail"
+    const repeatedSecond = await readForward("forward-repeated", repeatedAnchor)
+    expect(repeatedFirst.verifiedAnchorMessageId).toBe("repeated-boundary")
+    expect(repeatedFirst.messages[0]?.id).toBe("repeated-top-0000")
+    expect(repeatedSecond.verifiedAnchorMessageId).toBe(repeatedAnchor)
+    expect(repeatedSecond.messages[0]?.id).toBe("repeated-top-0500")
+    expect(repeatedSecond.messages.at(-1)?.id).toBe("repeated-top-0500")
+    expect(
+      new Set(
+        [...repeatedFirst.messages, ...repeatedSecond.messages].map((message) => message.id)
+      ).size
+    ).toBe(501)
+    expect(
+      new Set([
+        "repeated-boundary",
+        ...repeatedFirst.messages.map((message) => message.id),
+        ...repeatedSecond.messages.map((message) => message.id)
+      ]).size
+    ).toBe(502)
+
+    const sparseFirst = await readForward("forward-sparse", "sparse-boundary")
+    const sparseAnchor = sparseFirst.messages.at(-1)?.id ?? "missing-sparse-tail"
+    const sparseSecond = await readForward("forward-sparse", sparseAnchor)
+    expect(sparseFirst.verifiedAnchorMessageId).toBe("sparse-boundary")
+    expect(sparseFirst.messages[0]?.id).toBe("sparse-0150")
+    expect(sparseFirst.messages.at(-1)?.id).toBe("sparse-1096")
+    expect(sparseSecond.verifiedAnchorMessageId).toBe("sparse-1096")
+    expect(sparseSecond.messages[0]?.id).toBe("sparse-1097")
+    expect(sparseSecond.messages.at(-1)?.id).toBe("sparse-1098")
+    expect(
+      isThreadMessagePageContinuousWithBoundary(sparseSecond.messages, sparseAnchor)
+    ).toBe(false)
+    expect(
+      new Set([
+        "sparse-boundary",
+        ...sparseFirst.messages.map((message) => message.id),
+        ...sparseSecond.messages.map((message) => message.id)
+      ]).size
+    ).toBe(503)
+
+    const oversized = await client.readPage("forward-oversized", {
+      anchorMessageId: "oversized-anchor",
+      limit: 2,
+      byteBudget: 4_096
+    })
+    expect(oversized.verifiedAnchorMessageId).toBe("oversized-anchor")
+    expect(oversized.messages.map((message) => message.id)).toEqual([
+      "oversized-newer-one",
+      "oversized-newer-two"
+    ])
+    const forwardEnd = await client.readPage("forward-oversized", {
+      anchorMessageId: "oversized-newer-two",
+      limit: 2,
+      byteBudget: 4_096
+    })
+    expect(forwardEnd).toMatchObject({
+      messages: [],
+      hasMore: false,
+      verifiedAnchorMessageId: "oversized-newer-two"
+    })
+  }, 30_000)
+
   it("preserves cursor, fragment, structured, date, and tool fields", async () => {
     const { database, path } = createDatabase()
     insertShapeFixture(database)
@@ -417,4 +575,66 @@ describe("thread message hydration worker", () => {
     expect(starts).toBe(2)
     expect(client.getDiagnostics().workerRestarts).toBe(1)
   }, 30_000)
+
+  it("treats exit(0) before a response as failure and starts a replacement", async () => {
+    const { database, path } = createDatabase()
+    insertShapeFixture(database)
+    database.close()
+    let starts = 0
+    const client = new ThreadMessageHydrationClient(
+      async () => {
+        starts += 1
+        return starts === 1
+          ? new Worker("", { eval: true })
+          : new Worker(workerBundlePath, { name: "thread-message-clean-exit-replacement" })
+      },
+      () => path
+    )
+    clients.push(client)
+
+    await expect(client.readPage("shape", { limit: 1 })).rejects.toBeInstanceOf(
+      ThreadMessageHydrationWorkerUnavailableError
+    )
+    await expect(client.readPage("shape", { limit: 1 })).resolves.toMatchObject({ total: 3 })
+    expect(starts).toBe(2)
+  }, 30_000)
+
+  it("cleans a failed dispatch and hard-bounds retained requests", async () => {
+    const worker = new FakeHydrationWorker()
+    const client = new ThreadMessageHydrationClient(
+      async () => worker as unknown as Worker,
+      () => "C:\\fixture.db"
+    )
+    clients.push(client)
+    worker.postError = new Error("dispatch failed")
+    await expect(client.readPage("thread", { limit: 1 })).rejects.toBeInstanceOf(
+      ThreadMessageHydrationWorkerUnavailableError
+    )
+
+    worker.postError = null
+    const retained = Array.from({ length: THREAD_MESSAGE_HYDRATION_MAX_ACTIVE_REQUESTS }, () =>
+      client.readPage("thread", { limit: 1 }).catch((error) => error)
+    )
+    await Promise.resolve()
+    await expect(client.readPage("overflow", { limit: 1 })).rejects.toThrow("capacity exceeded")
+    await client.close()
+    await Promise.all(retained)
+  })
 })
+
+class FakeHydrationWorker extends EventEmitter {
+  postError: Error | null = null
+
+  postMessage(): void {
+    if (this.postError) throw this.postError
+  }
+
+  unref(): this {
+    return this
+  }
+
+  terminate(): Promise<number> {
+    return Promise.resolve(0)
+  }
+}
+import { EventEmitter } from "node:events"

@@ -3,6 +3,7 @@ import type { Message } from "@/types"
 import {
   CHAT_THREAD_PROJECTION_CACHE_LIMIT,
   clearAllChatThreadProjectionRuntimesForTests,
+  clearChatThreadProjectionRuntime,
   getChatThreadProjectionRuntime
 } from "./chat-thread-projection-cache"
 
@@ -80,5 +81,11 @@ describe("chat thread projection cache", () => {
     }
 
     expect(getChatThreadProjectionRuntime("thread-0")).not.toBe(oldest)
+  })
+
+  it("drops message-bearing projections immediately when a thread is deleted", () => {
+    const deleted = getChatThreadProjectionRuntime("deleted-thread")
+    clearChatThreadProjectionRuntime("deleted-thread")
+    expect(getChatThreadProjectionRuntime("deleted-thread")).not.toBe(deleted)
   })
 })

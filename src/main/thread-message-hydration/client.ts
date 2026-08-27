@@ -1,4 +1,4 @@
-import type { Worker } from "node:worker_threads"
+import type { ResourceLimits, Worker } from "node:worker_threads"
 import { getDbPath } from "../storage"
 import type { ThreadMessagesPage, ThreadMessagesPageOptions } from "../types"
 import type {
@@ -8,6 +8,13 @@ import type {
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
 
 type HydrationWorkerFactory = () => Promise<Worker>
+
+export const THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS: ResourceLimits = {
+  maxOldGenerationSizeMb: 256,
+  maxYoungGenerationSizeMb: 32,
+  stackSizeMb: 4
+}
+export const THREAD_MESSAGE_HYDRATION_MAX_ACTIVE_REQUESTS = 32
 
 interface PendingRequest {
   resolve: (page: ThreadMessagesPage) => void
@@ -52,7 +59,13 @@ export function isThreadMessageHydrationWorkerUnavailable(
 async function createBundledWorker(): Promise<Worker> {
   try {
     const module = await import("./thread-message-hydration-worker?nodeWorker")
-    return module.default({ name: "thread-message-hydration" })
+    return module.default({
+      name: "thread-message-hydration",
+      // A corrupt or legacy row can be far larger than the bounded page sent to
+      // the renderer. Keep its JSON parse in a disposable, heap-limited isolate
+      // so an outlier can restart hydration without exhausting Electron main.
+      resourceLimits: THREAD_MESSAGE_HYDRATION_WORKER_RESOURCE_LIMITS
+    })
   } catch (error) {
     throw new ThreadMessageHydrationWorkerUnavailableError(
       "Unable to start the bundled thread message hydration worker",
@@ -65,6 +78,7 @@ export class ThreadMessageHydrationClient {
   private worker: Worker | null = null
   private workerPromise: Promise<Worker> | null = null
   private nextRequestId = 1
+  private activeRequestCount = 0
   private closing = false
   private shutdownResolve: (() => void) | null = null
   private readonly pending = new Map<number, PendingRequest>()
@@ -186,55 +200,90 @@ export class ThreadMessageHydrationClient {
         "Thread message hydration client is closing"
       )
     }
+    if (
+      threadId.length > 32_768 ||
+      [options.beforeMessageId, options.anchorMessageId].some(
+        (value) => typeof value === "string" && value.length > 32_768
+      )
+    ) {
+      throw new ThreadMessageHydrationWorkerUnavailableError(
+        "Thread message hydration request exceeds its string limit"
+      )
+    }
+    if (this.activeRequestCount >= THREAD_MESSAGE_HYDRATION_MAX_ACTIVE_REQUESTS) {
+      throw new ThreadMessageHydrationWorkerUnavailableError(
+        "Thread message hydration request capacity exceeded"
+      )
+    }
+    this.activeRequestCount += 1
     const requestId = this.nextRequestId++
     const foregroundKey =
       options.requestScope === "foreground-hydration" && Number.isSafeInteger(webContentsId)
         ? String(webContentsId)
         : null
-    if (foregroundKey) {
-      const previousId = this.foregroundRequests.get(foregroundKey)
-      const previous = previousId === undefined ? undefined : this.pending.get(previousId)
-      if (previous) Atomics.store(previous.cancellation, 0, 1)
-      this.foregroundRequests.set(foregroundKey, requestId)
-    }
-
-    const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-    const cancellation = new Int32Array(cancellationBuffer)
-    let worker: Worker
     try {
-      worker = await this.getWorker()
-    } catch (error) {
+      if (foregroundKey) {
+        const previousId = this.foregroundRequests.get(foregroundKey)
+        const previous = previousId === undefined ? undefined : this.pending.get(previousId)
+        if (previous) {
+          Atomics.store(previous.cancellation, 0, 1)
+          this.pending.delete(previousId as number)
+          this.diagnostics.cancelledRequests += 1
+          previous.reject(new ThreadMessageHydrationRequestCancelledError())
+        }
+        this.foregroundRequests.set(foregroundKey, requestId)
+      }
+      const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+      const cancellation = new Int32Array(cancellationBuffer)
+      const worker = await this.getWorker()
+      if (this.closing) {
+        throw new ThreadMessageHydrationWorkerUnavailableError(
+          "Thread message hydration client is closing"
+        )
+      }
+      if (foregroundKey && this.foregroundRequests.get(foregroundKey) !== requestId) {
+        throw new ThreadMessageHydrationRequestCancelledError()
+      }
+
+      return await new Promise<ThreadMessagesPage>((resolve, reject) => {
+        this.pending.set(requestId, {
+          resolve,
+          reject,
+          cancellation,
+          foregroundKey,
+          startedAt: performance.now()
+        })
+        try {
+          worker.postMessage({
+            type: "read-page",
+            requestId,
+            databasePath: this.databasePath(),
+            threadId,
+            options: {
+              beforeOrdinal: options.beforeOrdinal,
+              beforeMessageId: options.beforeMessageId,
+              anchorMessageId: options.anchorMessageId,
+              limit: options.limit,
+              byteBudget: options.byteBudget
+            },
+            cancellationBuffer
+          })
+        } catch (error) {
+          this.pending.delete(requestId)
+          reject(
+            new ThreadMessageHydrationWorkerUnavailableError(
+              "Unable to dispatch the thread message hydration request",
+              { cause: error }
+            )
+          )
+        }
+      })
+    } finally {
+      this.activeRequestCount = Math.max(0, this.activeRequestCount - 1)
       if (foregroundKey && this.foregroundRequests.get(foregroundKey) === requestId) {
         this.foregroundRequests.delete(foregroundKey)
       }
-      throw error
     }
-    if (foregroundKey && this.foregroundRequests.get(foregroundKey) !== requestId) {
-      throw new ThreadMessageHydrationRequestCancelledError()
-    }
-
-    return new Promise<ThreadMessagesPage>((resolve, reject) => {
-      this.pending.set(requestId, {
-        resolve,
-        reject,
-        cancellation,
-        foregroundKey,
-        startedAt: performance.now()
-      })
-      worker.postMessage({
-        type: "read-page",
-        requestId,
-        databasePath: this.databasePath(),
-        threadId,
-        options: {
-          beforeOrdinal: options.beforeOrdinal,
-          beforeMessageId: options.beforeMessageId,
-          limit: options.limit,
-          byteBudget: options.byteBudget
-        },
-        cancellationBuffer
-      })
-    })
   }
 
   getDiagnostics(): ThreadMessageHydrationDiagnostics {

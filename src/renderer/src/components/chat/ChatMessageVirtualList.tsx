@@ -97,6 +97,10 @@ export interface ChatMessageVirtualListProps {
   historyPageLoading: boolean
   historyRemainingCount: number
   onLoadEarlierHistoryPage: () => void
+  historyGapBeforeMessageId: string | null
+  canLoadReleasedHistory: boolean
+  onLoadReleasedHistoryWindow: () => void
+  onRestoreLatestHistoryWindow: () => void
   hookLoggingEnabled: boolean
   hookLogBucketByTurnId: Map<string, HookLogBucket>
   detachedHookLogBuckets: HookLogBucket[]
@@ -321,6 +325,10 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
   historyPageLoading,
   historyRemainingCount,
   onLoadEarlierHistoryPage,
+  historyGapBeforeMessageId,
+  canLoadReleasedHistory,
+  onLoadReleasedHistoryWindow,
+  onRestoreLatestHistoryWindow,
   hookLoggingEnabled,
   hookLogBucketByTurnId,
   detachedHookLogBuckets,
@@ -389,9 +397,12 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
     (visibleIndex: number, messageIndex: number): React.JSX.Element | null => {
       const message = messages[messageIndex]
       if (!message) return null
+      const startsAfterReleasedHistory = message.id === historyGapBeforeMessageId
       const previousMessageIndex = visibleMessageIndexes[visibleIndex - 1]
       const previousMessage =
-        previousMessageIndex === undefined ? null : (messages[previousMessageIndex] ?? null)
+        startsAfterReleasedHistory || previousMessageIndex === undefined
+          ? null
+          : (messages[previousMessageIndex] ?? null)
       const nextMessageIndex = visibleMessageIndexes[visibleIndex + 1]
       const nextMessage =
         nextMessageIndex === undefined ? null : (messages[nextMessageIndex] ?? null)
@@ -401,41 +412,78 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
           : undefined
 
       return (
-        <ChatMessageRow
-          message={message}
-          previousMessage={previousMessage}
-          isLastMessage={visibleIndex === visibleMessageIndexes.length - 1}
-          hasUserAfterHead={messageIndex < lastUserMessageIndex}
-          showAssistantMeta={
-            message.role !== "assistant" || nextMessage === null || nextMessage.role !== "assistant"
-          }
-          hookLogBucket={hookLogBucket}
-          contentMessageRefs={contentMessageRefs}
-          setMessageRef={setMessageRef}
-          isLoading={isLoading}
-          toolResults={toolResults}
-          toolCallStates={toolCallStates}
-          pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-          pendingApproval={pendingApproval}
-          autoApproveGitPush={autoApproveGitPush}
-          onApprovalDecision={onApprovalDecision}
-          onEditUserMessage={onEditUserMessage}
-          onSetGoalFromMessage={onSetGoalFromMessage}
-          onForkFromMessage={onForkFromMessage}
-          forkingMessageId={forkingMessageId}
-          onOpenHookLogBucket={onOpenHookLogBucket}
-          threadId={threadId}
-          assistantDurationMs={assistantDurationMsById.get(message.id)}
-          userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-        />
+        <>
+          {startsAfterReleasedHistory ? (
+            <div
+              data-chat-history-boundary="released-middle"
+              className="mb-4 flex flex-col items-center gap-1 rounded-md border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-center text-xs text-muted-foreground"
+            >
+              <span>为控制内存，中间消息当前未驻留</span>
+              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                {canLoadReleasedHistory ? (
+                  <button
+                    type="button"
+                    onClick={onLoadReleasedHistoryWindow}
+                    disabled={historyPageLoading}
+                    className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background px-2.5 py-0.5 text-foreground transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {historyPageLoading ? <Loader2 className="size-3 animate-spin" /> : null}
+                    {historyPageLoading ? "正在读取中间消息" : "继续读取中间消息"}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={onRestoreLatestHistoryWindow}
+                  disabled={historyPageLoading}
+                  className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background px-2.5 py-0.5 text-foreground transition-colors hover:bg-muted disabled:cursor-wait disabled:opacity-60"
+                >
+                  {historyPageLoading && !canLoadReleasedHistory ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : null}
+                  返回最新消息
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <ChatMessageRow
+            message={message}
+            previousMessage={previousMessage}
+            isLastMessage={visibleIndex === visibleMessageIndexes.length - 1}
+            hasUserAfterHead={messageIndex < lastUserMessageIndex}
+            showAssistantMeta={
+              message.role !== "assistant" || nextMessage === null || nextMessage.role !== "assistant"
+            }
+            hookLogBucket={hookLogBucket}
+            contentMessageRefs={contentMessageRefs}
+            setMessageRef={setMessageRef}
+            isLoading={isLoading}
+            toolResults={toolResults}
+            toolCallStates={toolCallStates}
+            pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
+            pendingApproval={pendingApproval}
+            autoApproveGitPush={autoApproveGitPush}
+            onApprovalDecision={onApprovalDecision}
+            onEditUserMessage={onEditUserMessage}
+            onSetGoalFromMessage={onSetGoalFromMessage}
+            onForkFromMessage={onForkFromMessage}
+            forkingMessageId={forkingMessageId}
+            onOpenHookLogBucket={onOpenHookLogBucket}
+            threadId={threadId}
+            assistantDurationMs={assistantDurationMsById.get(message.id)}
+            userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
+          />
+        </>
       )
     },
     [
       assistantDurationMsById,
       autoApproveGitPush,
+      canLoadReleasedHistory,
       contentMessageRefs,
       contentVersion,
       forkingMessageId,
+      historyGapBeforeMessageId,
+      historyPageLoading,
       hookLogBucketByTurnId,
       hookLoggingEnabled,
       isLoading,
@@ -444,7 +492,9 @@ export const ChatMessageVirtualList = React.memo(function ChatMessageVirtualList
       onApprovalDecision,
       onEditUserMessage,
       onForkFromMessage,
+      onLoadReleasedHistoryWindow,
       onOpenHookLogBucket,
+      onRestoreLatestHistoryWindow,
       onSetGoalFromMessage,
       pendingApproval,
       pendingApprovalToolCallKeys,

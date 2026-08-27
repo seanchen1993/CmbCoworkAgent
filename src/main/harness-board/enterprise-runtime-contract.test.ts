@@ -11,7 +11,10 @@ import {
 } from "./enterprise-projection-protocol"
 
 const enterpriseSource = readFileSync(new URL("./enterprise-projects.ts", import.meta.url), "utf8")
-const ipcSource = readFileSync(new URL("../ipc/harness-board.ts", import.meta.url), "utf8")
+const ipcSource = readFileSync(new URL("../ipc/harness-board.ts", import.meta.url), "utf8").replace(
+  /\r\n/g,
+  "\n"
+)
 const boardSource = readFileSync(
   new URL("../../renderer/src/components/harness-board/HarnessBoardView.tsx", import.meta.url),
   "utf8"

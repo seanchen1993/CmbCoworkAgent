@@ -52,6 +52,7 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMetadataPatch,
   ThreadMessageSearchOptions,
   ThreadMessageSearchPage,
   ThreadSummaryPage,
@@ -1012,6 +1013,7 @@ interface CustomAPI {
       params: ThreadForkCheckpointForMessageParams
     ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
+    patchMetadata: (threadId: string, patch: ThreadMetadataPatch) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
     getSubagentTranscripts: (
       threadId: string,
@@ -1328,9 +1330,15 @@ interface CustomAPI {
     releaseFilePreview: (
       request: WorkspaceFilePreviewReleaseRequest
     ) => Promise<{ success: boolean }>
-    clearWorktreeContext: (threadId: string) => Promise<void>
+    clearWorktreeContext: (expected: {
+      threadId: string
+      workspacePath: string
+      gitRoot: string
+      branch: string
+    }) => Promise<void>
     saveWorktreeContext: (
       threadId: string,
+      expectedWorkspacePath: string,
       gitRoot: string,
       branch: string,
       baseBranch?: string,
@@ -1488,6 +1496,7 @@ interface CustomAPI {
       error?: string
     }>
     createWorktree: (
+      threadId: string,
       gitRoot: string,
       branch: string
     ) => Promise<{

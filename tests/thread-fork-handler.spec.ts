@@ -1069,6 +1069,171 @@ async function testForkWaitsForQueuedRendererThreadMutations(): Promise<void> {
   }
 }
 
+async function testQueuedRendererPersistenceRejectsSameIdReplacement(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const { registerThreadHandlers } = await import("../src/main/ipc/threads.ts")
+  const { withThreadRunMutationLock } = await import(
+    "../src/main/ipc/thread-run-mutation-lock.ts"
+  )
+
+  const threadId = "queued-renderer-persistence-incarnation"
+  const originalNow = Date.now
+  let releaseLock!: () => void
+  Date.now = () => 777_777
+  await db.initializeDatabase()
+  try {
+    db.createThread(threadId, { workspacePath: "C:/same", agentMode: "normal" })
+    const handlers = registerTestThreadHandlers(registerThreadHandlers)
+    const appendMessages = handlers.get("threads:appendMessages")
+    const persistSubagentTranscripts = handlers.get("threads:persistSubagentTranscripts")
+    const replaceMessageId = handlers.get("threads:replaceMessageId")
+    const updateThread = handlers.get("threads:update")
+    const mergeThreadValues = handlers.get("threads:mergeThreadValues")
+    const listForkable = handlers.get("threads:list-forkable-checkpoints")
+    const resolveFork = handlers.get("threads:resolve-fork-checkpoint-for-message")
+    const fork = handlers.get("threads:fork")
+    assert(appendMessages, "appendMessages handler should be registered")
+    assert(
+      persistSubagentTranscripts,
+      "persistSubagentTranscripts handler should be registered"
+    )
+    assert(replaceMessageId, "replaceMessageId handler should be registered")
+    assert(updateThread, "update handler should be registered")
+    assert(mergeThreadValues, "mergeThreadValues handler should be registered")
+    assert(listForkable, "listForkable handler should be registered")
+    assert(resolveFork, "resolveFork handler should be registered")
+    assert(fork, "fork handler should be registered")
+
+    let lockAcquired!: () => void
+    const lockAcquiredPromise = new Promise<void>((resolve) => {
+      lockAcquired = resolve
+    })
+    const releaseLockPromise = new Promise<void>((resolve) => {
+      releaseLock = resolve
+    })
+    const lockHolder = withThreadRunMutationLock(threadId, async () => {
+      lockAcquired()
+      await releaseLockPromise
+    })
+    await lockAcquiredPromise
+
+    const appendPromise = appendMessages(null, {
+      threadId,
+      messages: [
+        {
+          id: "stale-main-row",
+          role: "assistant",
+          content: "must not reach replacement",
+          created_at: new Date("2026-07-08T01:00:04.000Z")
+        } as Message
+      ]
+    }) as Promise<{ count: number }>
+    const persistPromise = persistSubagentTranscripts(null, {
+      threadId,
+      transcripts: {
+        worker: [
+          {
+            id: "stale-subagent-row",
+            role: "assistant",
+            content: "must not reach replacement"
+          }
+        ]
+      }
+    }) as Promise<Record<string, unknown>>
+    const persistRejected = assert.rejects(
+      persistPromise,
+      /Thread changed while the request was queued/
+    )
+    const replaceRejected = assert.rejects(
+      replaceMessageId(null, {
+        threadId,
+        fromId: "replacement-message",
+        toId: "stale-renamed-message"
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const updateRejected = assert.rejects(
+      updateThread(null, {
+        threadId,
+        updates: { title: "stale-title" }
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const mergeRejected = assert.rejects(
+      mergeThreadValues(null, {
+        threadId,
+        patch: { staleValue: true }
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const listRejected = assert.rejects(
+      listForkable(null, threadId) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const resolveRejected = assert.rejects(
+      resolveFork(null, {
+        threadId,
+        messageId: "replacement-message",
+        message: { id: "replacement-message", role: "assistant", content: "replacement" }
+      }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+    const forkRejected = assert.rejects(
+      fork(null, { sourceThreadId: threadId, title: "stale fork" }) as Promise<unknown>,
+      /Thread changed while the request was queued/
+    )
+
+    // Both handlers captured the original row before queuing on the mutation lock.
+    // Recreate with the same id, timestamp and metadata before either can commit.
+    db.deleteThread(threadId)
+    db.createThread(threadId, { workspacePath: "C:/same", agentMode: "normal" })
+    db.updateThread(threadId, {
+      title: "replacement-title",
+      thread_values: JSON.stringify({ replacementValue: true })
+    })
+    db.upsertThreadMessages(threadId, [
+      {
+        id: "replacement-message",
+        role: "assistant",
+        content: "replacement",
+        created_at: new Date("2026-07-08T01:00:05.000Z")
+      } as Message
+    ])
+    releaseLock()
+    await lockHolder
+
+    assert.equal((await appendPromise).count, 0)
+    await Promise.all([
+      persistRejected,
+      replaceRejected,
+      updateRejected,
+      mergeRejected,
+      listRejected,
+      resolveRejected,
+      forkRejected
+    ])
+    assert.deepEqual(
+      db.getThreadMessages(threadId).map((message) => message.id),
+      ["replacement-message"]
+    )
+    const replacement = db.getThread(threadId)
+    assert.equal(replacement?.title, "replacement-title")
+    assert.deepEqual(JSON.parse(replacement?.thread_values ?? "{}"), {
+      replacementValue: true
+    })
+    assert.equal(
+      db.getThreadSubagentManifestPage(threadId, "worker", undefined, 100).total,
+      0,
+      "queued persistence from the deleted row must not contaminate its replacement"
+    )
+  } finally {
+    releaseLock?.()
+    Date.now = originalNow
+    db.deleteThread(threadId)
+    await db.closeDatabase()
+  }
+}
+
 async function testForkThreadCopiesCheckpointThreadRowAndTranscript(): Promise<void> {
   const db = await import("../src/main/db/index.ts")
   const { SqlJsSaver } = await import("../src/main/checkpointer/sqljs-saver.ts")
@@ -2571,31 +2736,51 @@ async function testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence():
 
 async function main(): Promise<void> {
   await withTempHome(async () => {
-    await testForkThreadCopiesCheckpointThreadRowAndTranscript()
-    await testForkCopiesOnlyReferencedLargeToolResults()
-    await testInterruptedDurableTailForkIsConsistentAndComplete()
-    await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
-    await testForkLatestAllowsUserInterruptedPendingWritesBoundary()
-    await testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra()
-    await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
-    await testForkOverrideValidationRejectsInconsistentTargetMetadata()
-    await testForkCopiesGoalStateAndEvents()
-    await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
-    await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
-    await testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision()
-    await testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence()
-    await testResolveMessageForkReturnsNewestStableCheckpoint()
-    await testResolveAndForkRoleCollisionAssistantBoundary()
-    await testResolveAndForkSameRoleDuplicateAssistantBoundary()
-    await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
-    await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
-    await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
-    await testResolveAndForkLegacyMessageBeforeFirstMarker()
-    await testUnmarkedCheckpointBetweenMarkersIsNotForkable()
-    await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
-    await testForkWaitsForQueuedRendererThreadMutations()
-    await testForkThreadCopiesHistoricalForkableCheckpoints()
-    await testForkedBranchesRemainIndependentWhenForkedAgain()
+    const { setLegacySubagentMigrationParserForTests } = await import(
+      "../src/main/legacy-subagent-migration/coordinator.ts"
+    )
+    const restoreMigrationParser = setLegacySubagentMigrationParserForTests({
+      async parse() {
+        return {
+          inputBytes: 0,
+          batchCount: 0,
+          rowCount: 0,
+          maxBatchBytes: 0,
+          maxResponseBytes: 0,
+          finalization: "absent"
+        }
+      }
+    })
+    try {
+      await testForkThreadCopiesCheckpointThreadRowAndTranscript()
+      await testForkCopiesOnlyReferencedLargeToolResults()
+      await testInterruptedDurableTailForkIsConsistentAndComplete()
+      await testUnsafeLatestDurableTailDoesNotHideHistoricalForks()
+      await testForkLatestAllowsUserInterruptedPendingWritesBoundary()
+      await testForkLatestRejectsUnmarkedCheckpointAfterMarkerEra()
+      await testForkLatestRejectsThreadMarkerEraWithoutCheckpointMarker()
+      await testForkOverrideValidationRejectsInconsistentTargetMetadata()
+      await testForkCopiesGoalStateAndEvents()
+      await testHistoricalForkDoesNotCopyFutureGoalStateAndEvents()
+      await testSessionTranscriptMergeKeepsDurableTailBeyondCheckpoint()
+      await testSessionTranscriptMergeExcludesHiddenCoordinatorIdCollision()
+      await testSessionTranscriptMergeRestoresCurrentRunProviderOccurrence()
+      await testResolveMessageForkReturnsNewestStableCheckpoint()
+      await testResolveAndForkRoleCollisionAssistantBoundary()
+      await testResolveAndForkSameRoleDuplicateAssistantBoundary()
+      await testResolveMessageForkMapsLiveSnapshotToCheckpointMessageId()
+      await testResolveMessageForkMatchesSparseToolAssistantSnapshot()
+      await testResolveMessageForkUsesCheckpointModeForInterruptedToolTail()
+      await testResolveAndForkLegacyMessageBeforeFirstMarker()
+      await testUnmarkedCheckpointBetweenMarkersIsNotForkable()
+      await testResolveMessageForkSkipsHiddenRawTailCheckpoint()
+      await testForkWaitsForQueuedRendererThreadMutations()
+      await testQueuedRendererPersistenceRejectsSameIdReplacement()
+      await testForkThreadCopiesHistoricalForkableCheckpoints()
+      await testForkedBranchesRemainIndependentWhenForkedAgain()
+    } finally {
+      restoreMigrationParser()
+    }
   })
   console.log("thread-fork-handler.spec.ts passed")
 }

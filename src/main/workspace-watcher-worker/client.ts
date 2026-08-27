@@ -1,4 +1,4 @@
-import type { Worker } from "node:worker_threads"
+import type { ResourceLimits, Worker } from "node:worker_threads"
 import type { WorkspaceWatcherWorkerResponse } from "./protocol"
 import { WORKSPACE_WATCHER_CANCELLED } from "./protocol"
 
@@ -9,9 +9,19 @@ export interface WorkspaceWatcherWorkerEvent {
 
 export type WorkspaceWatcherWorkerFactory = () => Promise<Worker>
 
+export const WORKSPACE_WATCHER_WORKER_RESOURCE_LIMITS: ResourceLimits = {
+  maxOldGenerationSizeMb: 64,
+  maxYoungGenerationSizeMb: 16,
+  stackSizeMb: 4
+}
+export const WORKSPACE_WATCHER_MAX_PATH_LENGTH = 32_768
+
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./workspace-watcher-worker?nodeWorker")
-  return module.default({ name: "workspace-watcher" })
+  return module.default({
+    name: "workspace-watcher",
+    resourceLimits: WORKSPACE_WATCHER_WORKER_RESOURCE_LIMITS
+  })
 }
 
 export class WorkspaceWatcherWorkerClient {
@@ -113,6 +123,12 @@ export class WorkspaceWatcherWorkerClient {
 
   start(): Promise<void> {
     if (this.startPromise) return this.startPromise
+    if (
+      this.workspacePath.length === 0 ||
+      this.workspacePath.length > WORKSPACE_WATCHER_MAX_PATH_LENGTH
+    ) {
+      return Promise.reject(new Error("Workspace watcher path exceeds its hard limit"))
+    }
     this.startPromise = (async () => {
       const worker = await this.getWorker()
       if (this.closed) throw this.cancelledError()

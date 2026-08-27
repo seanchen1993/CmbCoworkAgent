@@ -69,6 +69,8 @@ interface ChatSearchOverlayProps {
   searchDurableMessages?: SearchDurableMessages
   /** Loads an unloaded durable result before the overlay asks to paint it. */
   onRevealDurableMessage?: RevealDurableMessage
+  /** Invalidates an older durable reveal when query/open identity moves on. */
+  onCancelDurableReveal?: () => void
   /** Changes whenever the rendered transcript changes, to re-run the search. */
   recomputeKey: unknown
 }
@@ -501,6 +503,7 @@ export function ChatSearchOverlay({
   onRevealMessage,
   searchDurableMessages,
   onRevealDurableMessage,
+  onCancelDurableReveal,
   recomputeKey
 }: ChatSearchOverlayProps): React.JSX.Element | null {
   const [query, setQuery] = useState("")
@@ -521,6 +524,7 @@ export function ChatSearchOverlay({
   const searchGenerationRef = useRef(0)
   const searchMatcherRef = useRef(createChatSearchMatcher(CHAT_SEARCH_RESULT_LIMIT + 1))
   const autoRevealedQueryRef = useRef("")
+  const durableRevealIdentityRef = useRef("")
   const getSearchCorpusRef = useRef(getSearchCorpus)
   const localSearchThrottleRef = useRef<
     LeadingTrailingThrottle<{ generation: number; query: string }> | null
@@ -723,6 +727,16 @@ export function ChatSearchOverlay({
   // Query/open identity owns the durable scan generation. Streaming content
   // updates do not restart the database scan; they only schedule local work.
   useEffect(() => {
+    const nextRevealIdentity = open && normalizedQuery ? normalizedQuery : ""
+    const previousRevealIdentity = durableRevealIdentityRef.current
+    if (
+      previousRevealIdentity !== nextRevealIdentity &&
+      (previousRevealIdentity || nextRevealIdentity)
+    ) {
+      onCancelDurableReveal?.()
+    }
+    durableRevealIdentityRef.current = nextRevealIdentity
+
     const generation = searchGenerationRef.current + 1
     searchGenerationRef.current = generation
     localSearchThrottleRef.current?.cancel()
@@ -784,7 +798,7 @@ export function ChatSearchOverlay({
       active = false
       window.clearTimeout(timer)
     }
-  }, [normalizedQuery, open, searchDurableMessages])
+  }, [normalizedQuery, onCancelDurableReveal, open, searchDurableMessages])
 
   // Leading/trailing max-wait throttling guarantees progress during an
   // uninterrupted token stream while still coalescing the hot path.

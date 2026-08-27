@@ -7,6 +7,7 @@ import {
   type HarnessKnowledgePreviewSource,
   type HarnessKnowledgePreviewWorkerResponse
 } from "./knowledge-preview-protocol"
+import { harnessWorkerOptions } from "./worker-limits"
 
 type KnowledgePreviewWorkerFactory = () => Promise<Worker>
 
@@ -28,14 +29,7 @@ export class HarnessKnowledgePreviewCancelledError extends Error {
 
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./knowledge-preview-worker?nodeWorker")
-  return module.default({
-    name: "harness-knowledge-preview",
-    resourceLimits: {
-      maxOldGenerationSizeMb: 192,
-      maxYoungGenerationSizeMb: 32,
-      stackSizeMb: 4
-    }
-  })
+  return module.default(harnessWorkerOptions("harness-knowledge-preview"))
 }
 
 function defaultSource(): HarnessKnowledgePreviewSource {
@@ -114,16 +108,33 @@ export class HarnessKnowledgePreviewClient {
       worker.unref()
 
       const response = new Promise<HarnessKnowledgePreviewResult>((resolve, reject) => {
+        let settled = false
+        const settle = (
+          callback: (value?: HarnessKnowledgePreviewResult | Error) => void,
+          value?: HarnessKnowledgePreviewResult | Error
+        ): void => {
+          if (settled) return
+          settled = true
+          callback(value)
+        }
         const onMessage = (message: HarnessKnowledgePreviewWorkerResponse): void => {
           if (message.requestId !== requestId) return
-          if (message.ok) resolve(message.result)
-          else reject(Object.assign(new Error(message.error.message), { stack: message.error.stack }))
+          if (message.ok) settle((value) => resolve(value as HarnessKnowledgePreviewResult), message.result)
+          else {
+            settle(
+              (value) => reject(value as Error),
+              Object.assign(new Error(message.error.message), { stack: message.error.stack })
+            )
+          }
         }
         worker!.on("message", onMessage)
-        worker!.once("error", reject)
+        worker!.once("error", (error) => settle((value) => reject(value as Error), error))
         worker!.once("exit", (code) => {
-          if (code !== 0 && !active.cancelled) {
-            reject(new Error(`Harness knowledge preview worker exited: ${code}`))
+          if (!active.cancelled) {
+            settle(
+              (value) => reject(value as Error),
+              new Error(`Harness knowledge preview worker exited: ${code}`)
+            )
           }
         })
       })

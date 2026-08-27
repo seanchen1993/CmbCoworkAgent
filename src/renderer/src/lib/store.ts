@@ -27,6 +27,9 @@ import {
 } from "../../../shared/message-role-collision"
 import { normalizeChatScrollSettings, type ChatScrollSettings } from "../../../shared/chat-scroll"
 import { revalidateModelCatalog } from "./model-catalog-cache"
+import type { ThreadMetadataPatch } from "../../../main/types"
+import { chatScrollSessionStore } from "@/components/chat/chat-scroll-session-store"
+import { clearChatThreadProjectionRuntime } from "./chat-thread-projection-cache"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
@@ -980,6 +983,7 @@ interface AppState {
   selectThread: (threadId: string, options?: ThreadNavigationOptions) => Promise<void>
   deleteThread: (threadId: string) => Promise<void>
   updateThread: (threadId: string, updates: Partial<Thread>) => Promise<void>
+  patchThreadMetadata: (threadId: string, patch: ThreadMetadataPatch) => Promise<void>
   generateTitleForFirstMessage: (threadId: string, content: string) => Promise<void>
 
   // Model actions
@@ -1351,6 +1355,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       // survives reloads; nothing else clears that key, so it would otherwise
       // sit there forever once the thread it belonged to is gone.
       window.localStorage.removeItem(queueStorageKey(threadId))
+      // Permanent deletion must evict message-bearing projection/scroll caches immediately.
+      // Advancing the scroll lease also ignores a late React unmount save from the old row.
+      clearChatThreadProjectionRuntime(threadId)
+      chatScrollSessionStore.delete(threadId)
 
       set((state) => {
         const threads = state.threads.filter((t) => t.thread_id !== threadId)
@@ -1394,6 +1402,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateThread: async (threadId: string, updates: Partial<Thread>) => {
     markThreadDirectoryMutation(threadId)
     const updated = await window.api.threads.update(threadId, updates)
+    set((state) => {
+      const index = getThreadDirectoryIndex(state.threads).get(threadId)
+      if (index === undefined) return state
+      const threads = [...state.threads]
+      threads[index] = updated
+      return { threads: adoptThreadDirectorySnapshot(threads) }
+    })
+  },
+
+  patchThreadMetadata: async (threadId: string, patch: ThreadMetadataPatch) => {
+    markThreadDirectoryMutation(threadId)
+    const updated = await window.api.threads.patchMetadata(threadId, patch)
     set((state) => {
       const index = getThreadDirectoryIndex(state.threads).get(threadId)
       if (index === undefined) return state

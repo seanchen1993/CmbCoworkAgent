@@ -60,6 +60,21 @@ describe("chat scroll navigator virtualization bridge", () => {
 })
 
 describe("chat scroll question structural revision", () => {
+  it("publishes the released-history boundary instead of silently joining question segments", () => {
+    const projectQuestions = createChatScrollQuestionProjector()
+    const messages = [
+      message("u-old", "user", "old question"),
+      message("a-old", "assistant"),
+      message("u-latest", "user", "latest question"),
+      message("a-latest", "assistant")
+    ]
+
+    const projection = projectQuestions(messages, 1, "u-latest")
+
+    expect(projection.questions.map((question) => question.id)).toEqual(["u-old", "u-latest"])
+    expect(projection.gapBeforeQuestionIndex).toBe(1)
+  })
+
   it("refreshes a same-array tail when request_user_input appears but ignores text tokens", () => {
     const user = message("u-1", "user", "question")
     const assistant = message("a-1", "assistant", "")

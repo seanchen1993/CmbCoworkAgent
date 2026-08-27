@@ -4,6 +4,7 @@ import type {
   HarnessDeployUnitMapping,
   HarnessProjectMetadata
 } from "../../shared/harness-board-types"
+import type { HarnessSessionContextInjectionSource } from "../../shared/harness-board-types"
 import type { PluginMetadata } from "../types"
 
 export const HARNESS_CATALOG_DEFAULT_PAGE_SIZE = 24
@@ -24,6 +25,7 @@ export interface HarnessProjectContextItem {
   configSnapshot: HarnessProjectContextConfigSnapshot | null
   projectDirectoryExists: boolean
   selectedDeployUnits?: HarnessDeployUnitMapping[]
+  sessionContextInjectionSource?: HarnessSessionContextInjectionSource
   leanToken?: string
 }
 

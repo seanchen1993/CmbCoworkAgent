@@ -1,6 +1,7 @@
 import type { Thread } from "../types"
 
 export const THREAD_METADATA_HYDRATION_CANCELLED = "THREAD_METADATA_HYDRATION_CANCELLED"
+export const THREAD_METADATA_HYDRATION_MAX_THREAD_RESPONSE_BYTES = 16 * 1024 * 1024
 
 export interface ThreadMetadataHydrationStats {
   durationMs: number

@@ -18,6 +18,7 @@ import {
   WorkspaceWatcherWorkerClient,
   type WorkspaceWatcherWorkerEvent
 } from "../workspace-watcher-worker/client"
+import { bumpHookCatalogWorkspaceRevision } from "../hook-catalog/revision"
 
 /**
  * Files directly under .git/ that signal meta-relevant changes:
@@ -835,6 +836,14 @@ function notifyRenderer(
 
 function notifyWorkspaceHooksChanged(threadPaths: ReadonlyMap<string, string>): void {
   const windows = BrowserWindow.getAllWindows()
+  const revisedWorkspaceKeys = new Set<string>()
+
+  for (const workspacePath of threadPaths.values()) {
+    const workspaceKey = normalizeWorkspacePathKey(workspacePath)
+    if (revisedWorkspaceKeys.has(workspaceKey)) continue
+    revisedWorkspaceKeys.add(workspaceKey)
+    bumpHookCatalogWorkspaceRevision(workspacePath)
+  }
 
   for (const win of windows) {
     for (const [threadId, workspacePath] of threadPaths) {

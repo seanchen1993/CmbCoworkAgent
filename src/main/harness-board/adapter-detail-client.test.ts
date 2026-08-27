@@ -539,6 +539,32 @@ describe("Harness adapter detail worker", () => {
     })
   }, 30_000)
 
+  it("rejects pending parsing on a clean unexpected exit and restarts", async () => {
+    let starts = 0
+    const client = new HarnessAdapterDetailClient(async () => {
+      starts += 1
+      if (starts === 1) {
+        return new Worker(
+          `
+            const { parentPort } = require("node:worker_threads")
+            parentPort.on("message", () => process.exit(0))
+          `,
+          { eval: true }
+        )
+      }
+      return new Worker(workerBundlePath, { name: "harness-adapter-detail-clean-restart" })
+    })
+    clients.push(client)
+
+    await expect(
+      client.parse(toBuffer(makeSnapshot()), [makeProjectInput()], "renderer:clean-exit")
+    ).rejects.toBeInstanceOf(HarnessAdapterDetailWorkerUnavailableError)
+    await expect(
+      client.parse(toBuffer(makeSnapshot()), [makeProjectInput()], "renderer:clean-exit")
+    ).resolves.toMatchObject({ projects: { "project-a": { runs: expect.any(Array) } } })
+    expect(starts).toBe(2)
+  }, 30_000)
+
   it("rejects pending work and acknowledges shutdown", async () => {
     const client = new HarnessAdapterDetailClient(
       async () =>

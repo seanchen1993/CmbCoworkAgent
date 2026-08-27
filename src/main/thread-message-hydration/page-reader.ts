@@ -368,16 +368,60 @@ function readCandidates(
 ): CandidateRow[] {
   const beforeOrdinal = request.options.beforeOrdinal
   const beforeMessageId = request.options.beforeMessageId?.trim() ?? ""
+  const anchorMessageId = request.options.anchorMessageId?.trim() ?? ""
   const hasBeforeOrdinal = Number.isSafeInteger(beforeOrdinal) && (beforeOrdinal ?? -1) >= 0
   const hasBeforeMessageId = beforeMessageId.length > 0
+  const hasAnchorMessageId = anchorMessageId.length > 0
   if (hasBeforeOrdinal !== hasBeforeMessageId) {
     throw new Error(
       "Thread message page cursor requires beforeOrdinal and beforeMessageId together"
     )
   }
+  if (hasAnchorMessageId && hasBeforeOrdinal) {
+    throw new Error(
+      "Thread message page anchorMessageId is mutually exclusive with the backward cursor"
+    )
+  }
+
+  // Resolve the exact durable anchor separately, then exclude its body from the page. This
+  // prevents an oversized anchor preview from consuming every forward retry's byte budget.
+  const anchor = hasAnchorMessageId
+    ? database
+        .prepare(
+          `SELECT ordinal
+           FROM thread_messages
+           WHERE thread_id = ? AND message_id = ?`
+        )
+        .get(request.threadId, anchorMessageId)
+    : undefined
+  if (hasAnchorMessageId && !anchor) {
+    throw new Error("Thread message forward-page anchor was not found")
+  }
+  const anchorOrdinal = hasAnchorMessageId ? Number(anchor?.ordinal) : null
+  if (
+    hasAnchorMessageId &&
+    (!Number.isSafeInteger(anchorOrdinal) || (anchorOrdinal ?? -1) < 0)
+  ) {
+    throw new Error("Thread message forward-page anchor has an invalid ordinal")
+  }
 
   const statement = database.prepare(
-    hasBeforeOrdinal
+    hasAnchorMessageId
+      ? `SELECT m.message_id, m.ordinal,
+                1024 +
+                CASE
+                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
+                  ELSE length(CAST(m.content_json AS BLOB))
+                END +
+                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
+         FROM thread_messages AS m
+         LEFT JOIN thread_message_fragment_states AS fragments
+           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+         WHERE m.thread_id = ?
+           AND (m.ordinal > ? OR (m.ordinal = ? AND m.message_id > ?))
+         ORDER BY m.ordinal ASC, m.message_id ASC
+         LIMIT ?`
+      : hasBeforeOrdinal
       ? `SELECT m.message_id, m.ordinal,
                 1024 +
                 CASE
@@ -408,6 +452,8 @@ function readCandidates(
   )
   const bindings: Array<string | number> = hasBeforeOrdinal
     ? [request.threadId, beforeOrdinal as number, beforeOrdinal as number, beforeMessageId, limit + 1]
+    : hasAnchorMessageId
+      ? [request.threadId, anchorOrdinal as number, anchorOrdinal as number, anchorMessageId, limit + 1]
     : [request.threadId, limit + 1]
   const rows: CandidateRow[] = []
   for (const raw of statement.iterate(...bindings)) {
@@ -513,6 +559,7 @@ export function readThreadMessagesPage(
   const cancellation = new Int32Array(request.cancellationBuffer)
   const limit = normalizePageLimit(request.options.limit)
   const byteBudget = normalizeByteBudget(request.options.byteBudget)
+  const isForwardPage = Boolean(request.options.anchorMessageId?.trim())
   throwIfCancelled(cancellation)
 
   database.exec("BEGIN")
@@ -539,7 +586,7 @@ export function readThreadMessagesPage(
       selected.map((candidate) => candidate.message_id),
       cancellation
     )
-    const descendingMessages: Message[] = []
+    const orderedMessages: Message[] = []
     const returnedCandidates: CandidateRow[] = []
     const truncatedMessageIds: string[] = []
     let responseBytes = THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD
@@ -550,8 +597,8 @@ export function readThreadMessagesPage(
       const message = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
       const remaining = Math.max(1, byteBudget - responseBytes)
       const projected = projectMessageToByteBudget(message, remaining)
-      if (descendingMessages.length > 0 && projected.truncated) break
-      descendingMessages.push(projected.message)
+      if (orderedMessages.length > 0 && projected.truncated) break
+      orderedMessages.push(projected.message)
       returnedCandidates.push(candidate)
       responseBytes += projected.bytes + 1
       if (projected.truncated) truncatedMessageIds.push(candidate.message_id)
@@ -562,17 +609,21 @@ export function readThreadMessagesPage(
     const hasMore = returnedCandidates.length < candidates.length
     return {
       page: {
-        messages: descendingMessages.reverse(),
-        beforeOrdinal: hasMore && oldest ? oldest.ordinal : null,
-        beforeMessageId: hasMore && oldest ? oldest.message_id : null,
+        messages: isForwardPage ? orderedMessages : orderedMessages.reverse(),
+        beforeOrdinal: !isForwardPage && hasMore && oldest ? oldest.ordinal : null,
+        beforeMessageId:
+          !isForwardPage && hasMore && oldest ? oldest.message_id : null,
         hasMore,
         total,
+        ...(isForwardPage
+          ? { verifiedAnchorMessageId: request.options.anchorMessageId?.trim() }
+          : {}),
         ...(truncatedMessageIds.length > 0 ? { truncatedMessageIds } : {})
       },
       stats: {
         durationMs: performance.now() - startedAt,
         scannedCandidates: candidates.length,
-        selectedMessages: descendingMessages.length,
+        selectedMessages: orderedMessages.length,
         estimatedBytes
       }
     }

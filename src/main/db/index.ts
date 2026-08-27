@@ -39,6 +39,10 @@ import {
 } from "../../shared/subagent-transcript-storage"
 import { createHash } from "crypto"
 import {
+  attachFreshThreadIncarnation,
+  preserveThreadIncarnationMetadata
+} from "../services/thread-incarnation"
+import {
   legacySubagentMigrationBatchTransactionBytes,
   LEGACY_SUBAGENT_MIGRATION_BATCH_BYTES,
   LEGACY_SUBAGENT_MIGRATION_BATCH_ROWS,
@@ -1196,6 +1200,30 @@ function getOrRepairThreadMessageBucket(
   }
 }
 
+/** O(1) durable transcript cardinality on current databases; never reads message bodies/fragments. */
+export function getThreadMessageCount(threadId: string): number {
+  const database = getDb()
+  const repaired = getOrRepairThreadMessageBucket(database, threadId)
+  if (repaired.create) {
+    database.run(
+      `INSERT OR IGNORE INTO thread_message_buckets (
+         thread_id, message_count, next_ordinal, updated_at
+       ) VALUES (?, ?, ?, ?)`,
+      [
+        repaired.bucket.thread_id,
+        repaired.bucket.message_count,
+        repaired.bucket.next_ordinal,
+        repaired.bucket.updated_at
+      ]
+    )
+  }
+  return repaired.bucket.message_count
+}
+
+export function hasThreadMessages(threadId: string): boolean {
+  return getThreadMessageCount(threadId) > 0
+}
+
 export function getThreadMessages(threadId: string): Message[] {
   const database = getDb()
   const stmt = database.prepare(
@@ -1228,9 +1256,9 @@ function normalizeThreadMessagesPageByteBudget(byteBudget: number | undefined): 
 }
 
 /**
- * Read one durable transcript page without materializing or parsing the stable
- * prefix. The compound cursor is defensive: ordinals are intended to be
- * unique, but older/corrupt databases do not enforce that at the schema level.
+ * Read one durable transcript page without materializing or parsing the stable prefix. Backward
+ * reads use a compound cursor. Forward reads first resolve an exact durable id, then return
+ * strictly newer composite rows so sparse/repeated ordinals and oversized anchors cannot stall.
  */
 export function getThreadMessagesPage(
   threadId: string,
@@ -1243,17 +1271,64 @@ export function getThreadMessagesPage(
     Number.isSafeInteger(options.beforeOrdinal) && (options.beforeOrdinal ?? -1) >= 0
   const normalizedBeforeMessageId = options.beforeMessageId?.trim() ?? ""
   const hasBeforeMessageId = normalizedBeforeMessageId.length > 0
+  const normalizedAnchorMessageId = options.anchorMessageId?.trim() ?? ""
+  const hasAnchorMessageId = normalizedAnchorMessageId.length > 0
   if (hasBeforeOrdinal !== hasBeforeMessageId) {
     throw new Error(
       "Thread message page cursor requires beforeOrdinal and beforeMessageId together"
+    )
+  }
+  if (hasAnchorMessageId && hasBeforeOrdinal) {
+    throw new Error(
+      "Thread message page anchorMessageId is mutually exclusive with the backward cursor"
     )
   }
 
   const bucket = getThreadMessageBucketRow(database, threadId)
   const total = bucket ? Math.max(0, Number(bucket.message_count) || 0) : 0
 
-  const stmt = hasBeforeOrdinal
+  let anchorOrdinal: number | null = null
+  if (hasAnchorMessageId) {
+    const anchorStmt = database.prepare(
+      `SELECT ordinal
+       FROM thread_messages
+       WHERE thread_id = ? AND message_id = ?`
+    )
+    anchorStmt.bind([threadId, normalizedAnchorMessageId])
+    try {
+      if (!anchorStmt.step()) {
+        throw new Error("Thread message forward-page anchor was not found")
+      }
+      const row = anchorStmt.getAsObject() as { ordinal?: unknown }
+      anchorOrdinal = Number(row.ordinal)
+      if (!Number.isSafeInteger(anchorOrdinal) || (anchorOrdinal ?? -1) < 0) {
+        throw new Error("Thread message forward-page anchor has an invalid ordinal")
+      }
+    } finally {
+      anchorStmt.free()
+    }
+  }
+
+  const stmt = hasAnchorMessageId
     ? database.prepare(
+        `SELECT m.message_id, m.ordinal,
+                1024 +
+                CASE
+                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
+                  ELSE length(CAST(m.content_json AS BLOB))
+                END +
+                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
+                  AS estimated_bytes
+         FROM thread_messages AS m
+         LEFT JOIN thread_message_fragment_states AS fragments
+           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+         WHERE m.thread_id = ?
+           AND (m.ordinal > ? OR (m.ordinal = ? AND m.message_id > ?))
+         ORDER BY m.ordinal ASC, m.message_id ASC
+         LIMIT ?`
+      )
+    : hasBeforeOrdinal
+      ? database.prepare(
         `SELECT m.message_id, m.ordinal,
                 1024 +
                 CASE
@@ -1269,8 +1344,8 @@ export function getThreadMessagesPage(
            AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id < ?))
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
-      )
-    : database.prepare(
+        )
+      : database.prepare(
         `SELECT m.message_id, m.ordinal,
                 1024 +
                 CASE
@@ -1287,7 +1362,15 @@ export function getThreadMessagesPage(
          LIMIT ?`
       )
   stmt.bind(
-    hasBeforeOrdinal
+    hasAnchorMessageId
+      ? [
+          threadId,
+          anchorOrdinal,
+          anchorOrdinal,
+          normalizedAnchorMessageId,
+          limit + 1
+        ]
+      : hasBeforeOrdinal
       ? [
           threadId,
           options.beforeOrdinal,
@@ -1298,7 +1381,7 @@ export function getThreadMessagesPage(
       : [threadId, limit + 1]
   )
 
-  const descendingCandidates: Array<{
+  const orderedCandidates: Array<{
     message_id: string
     ordinal: number
     estimated_bytes: number
@@ -1311,7 +1394,7 @@ export function getThreadMessagesPage(
         estimated_bytes?: unknown
       }
       if (typeof row.message_id !== "string") continue
-      descendingCandidates.push({
+      orderedCandidates.push({
         message_id: row.message_id,
         ordinal: Number(row.ordinal) || 0,
         estimated_bytes: Math.max(0, Number(row.estimated_bytes) || 0)
@@ -1321,9 +1404,9 @@ export function getThreadMessagesPage(
     stmt.free()
   }
 
-  const selectedCandidates: typeof descendingCandidates = []
+  const selectedCandidates: typeof orderedCandidates = []
   let selectedBytes = 0
-  for (const candidate of descendingCandidates) {
+  for (const candidate of orderedCandidates) {
     if (selectedCandidates.length >= limit) break
     if (
       selectedCandidates.length > 0 &&
@@ -1334,7 +1417,7 @@ export function getThreadMessagesPage(
     selectedCandidates.push(candidate)
     selectedBytes += candidate.estimated_bytes
   }
-  const hasMore = selectedCandidates.length < descendingCandidates.length
+  const hasMore = selectedCandidates.length < orderedCandidates.length
   const oldestRow = selectedCandidates.at(-1)
   const rowsById = getThreadMessageRows(
     database,
@@ -1345,14 +1428,22 @@ export function getThreadMessagesPage(
     const row = rowsById.get(candidate.message_id)
     return row ? [row] : []
   })
-  const messages = threadMessageRowsToMessages(database, threadId, pageRows.reverse())
+  const messages = threadMessageRowsToMessages(
+    database,
+    threadId,
+    hasAnchorMessageId ? pageRows : pageRows.reverse()
+  )
 
   return {
     messages,
-    beforeOrdinal: hasMore && oldestRow ? oldestRow.ordinal : null,
-    beforeMessageId: hasMore && oldestRow ? oldestRow.message_id : null,
+    beforeOrdinal: !hasAnchorMessageId && hasMore && oldestRow ? oldestRow.ordinal : null,
+    beforeMessageId:
+      !hasAnchorMessageId && hasMore && oldestRow ? oldestRow.message_id : null,
     hasMore,
-    total
+    total,
+    ...(hasAnchorMessageId
+      ? { verifiedAnchorMessageId: normalizedAnchorMessageId }
+      : {})
   }
 }
 
@@ -5106,12 +5197,14 @@ export function getThread(threadId: string): ThreadRow | null {
 export function createThread(threadId: string, metadata?: Record<string, unknown>): ThreadRow {
   const database = getDb()
   const now = Date.now()
-  const title = (metadata?.title as string) || null
+  const storedMetadata = attachFreshThreadIncarnation(metadata)
+  const title = (storedMetadata.title as string) || null
+  const serializedMetadata = JSON.stringify(storedMetadata)
 
   database.run(
     `INSERT INTO threads (thread_id, created_at, updated_at, metadata, status, title)
      VALUES (?, ?, ?, ?, ?, ?)`,
-    [threadId, now, now, metadata ? JSON.stringify(metadata) : null, "idle", title]
+    [threadId, now, now, serializedMetadata, "idle", title]
   )
 
   saveToDisk()
@@ -5120,7 +5213,7 @@ export function createThread(threadId: string, metadata?: Record<string, unknown
     thread_id: threadId,
     created_at: now,
     updated_at: now,
-    metadata: metadata ? JSON.stringify(metadata) : null,
+    metadata: serializedMetadata,
     status: "idle",
     thread_values: null,
     title
@@ -5139,12 +5232,19 @@ export function updateThread(
   const now = Date.now()
   const setClauses: string[] = ["updated_at = ?"]
   const values: (string | number | null)[] = [now]
+  const serializedMetadata =
+    updates.metadata !== undefined
+      ? preserveThreadIncarnationMetadata(
+          existing.metadata,
+          typeof updates.metadata === "string"
+            ? updates.metadata
+            : JSON.stringify(updates.metadata)
+        )
+      : undefined
 
-  if (updates.metadata !== undefined) {
+  if (serializedMetadata !== undefined) {
     setClauses.push("metadata = ?")
-    values.push(
-      typeof updates.metadata === "string" ? updates.metadata : JSON.stringify(updates.metadata)
-    )
+    values.push(serializedMetadata)
   }
   if (updates.status !== undefined) {
     setClauses.push("status = ?")
@@ -5168,12 +5268,7 @@ export function updateThread(
   return {
     ...existing,
     updated_at: now,
-    metadata:
-      updates.metadata !== undefined
-        ? typeof updates.metadata === "string"
-          ? updates.metadata
-          : JSON.stringify(updates.metadata)
-        : existing.metadata,
+    metadata: serializedMetadata ?? existing.metadata,
     status: updates.status ?? existing.status,
     thread_values: updates.thread_values ?? null,
     title: updates.title !== undefined ? updates.title : existing.title

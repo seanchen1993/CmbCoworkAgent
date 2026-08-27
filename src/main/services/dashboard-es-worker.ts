@@ -12,6 +12,7 @@ let closing = false
 let shutdownCompleteSent = false
 let activeCount = 0
 const MAX_CONCURRENT_QUERIES = 4
+const MAX_QUEUED_QUERIES = 4
 const activeCancellations = new Set<Int32Array>()
 const queuedRequests: DashboardEsWorkerQueryRequest[] = []
 
@@ -77,6 +78,18 @@ parentPort.on("message", (request: DashboardEsWorkerRequest) => {
     return
   }
   if (closing) return
+  if (queuedRequests.length >= MAX_QUEUED_QUERIES) {
+    post({
+      type: "query-result",
+      requestId: request.requestId,
+      ok: false,
+      error: {
+        code: "DASHBOARD_ES_CAPACITY_EXCEEDED",
+        message: "Dashboard ES worker queue capacity exceeded"
+      }
+    })
+    return
+  }
   queuedRequests.push(request)
   pumpQueue()
 })

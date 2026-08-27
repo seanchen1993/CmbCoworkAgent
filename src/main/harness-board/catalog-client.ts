@@ -15,6 +15,7 @@ import {
   type HarnessProjectContextResult,
   type HarnessCatalogWorkerResponse
 } from "./catalog-protocol"
+import { harnessWorkerOptions } from "./worker-limits"
 
 type CatalogWorkerFactory = () => Promise<Worker>
 
@@ -34,7 +35,7 @@ export class HarnessCatalogCancelledError extends Error {
 
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./catalog-worker?nodeWorker")
-  return module.default({ name: "harness-catalog" })
+  return module.default(harnessWorkerOptions("harness-catalog"))
 }
 
 export class HarnessCatalogClient {
@@ -85,8 +86,9 @@ export class HarnessCatalogClient {
         worker.on("message", this.handleResponse)
         worker.on("error", (error) => this.failWorker(worker, error))
         worker.on("exit", (code) => {
-          if (code !== 0)
+          if (!this.closing) {
             this.failWorker(worker, new Error(`Harness catalog worker exited: ${code}`))
+          }
         })
         worker.unref()
         return worker

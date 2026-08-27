@@ -133,4 +133,32 @@ describe("Harness watch-ref worker client", () => {
     expect(new Int32Array(secondStart.cancelBuffer as SharedArrayBuffer)[0]).toBe(1)
     expect(worker.requests.at(-1)).toMatchObject({ type: "stop-all" })
   })
+
+  it("reinstalls desired scopes after a clean unexpected worker exit", async () => {
+    const firstWorker = new FakeWatchRefWorker()
+    const replacement = new FakeWatchRefWorker()
+    let starts = 0
+    const client = new HarnessWatchRefWorkerClient(
+      { onChanged: () => undefined, onDirty: () => undefined },
+      async () => {
+        starts += 1
+        return (starts === 1 ? firstWorker : replacement) as unknown as Worker
+      }
+    )
+    clients.push(client)
+
+    client.start("project:recover", "C:\\workspace", refs(2))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(firstWorker.requests).toHaveLength(1)
+    firstWorker.emit("exit", 0)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    expect(starts).toBe(2)
+    expect(replacement.requests).toHaveLength(1)
+    expect(replacement.requests[0]).toMatchObject({
+      type: "start",
+      scopeKey: "project:recover",
+      workspacePath: "C:\\workspace"
+    })
+  })
 })

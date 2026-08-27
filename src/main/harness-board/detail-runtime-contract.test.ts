@@ -55,7 +55,7 @@ describe("Harness detail runtime isolation contract", () => {
   it("loads dialog tips through a bounded catalog-worker lane and cancels on cleanup", () => {
     const section = functionSection(
       "export async function buildHarnessFeatureDialogTips(",
-      "export function listHarnessProjects("
+      "export async function listHarnessProjects("
     )
     expect(section).toContain("readHarnessDialogTipsInWorker")
     expect(section).not.toContain("requireProject(")

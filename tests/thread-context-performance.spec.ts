@@ -524,6 +524,21 @@ async function main(): Promise<void> {
     /foregroundHydrationGeneration\.capture\(threadId\)[\s\S]*foregroundHydrationGeneration\.isCurrent\(foregroundToken\)/,
     "A -> B -> C foreground navigation must fence stale renderer hydration generations"
   )
+  assert.match(
+    loadHistorySource,
+    /const transcriptHydrationIntent = messageWindowIntentCoordinator\.begin\([\s\S]*"hydrate"[\s\S]*const isCurrentTranscriptHydration = \(\): boolean =>[\s\S]*messageWindowIntentCoordinator\.isCurrent\(transcriptHydrationIntent\)/,
+    "initial-page and checkpoint transcript hydration must share one supersedable window intent"
+  )
+  assert.match(
+    loadHistorySource,
+    /if \(isCurrentTranscriptHydration\(\)\) \{\s*actions\.setMessages\(hydratedTranscriptMessages\)/,
+    "the final checkpoint mutation edge must recheck the hydration window token"
+  )
+  assert.match(
+    loadHistorySource,
+    /messagePageResult\.error[\s\S]*mainTranscriptPublished = false[\s\S]*actions\.setMessages\(hydratedTranscriptMessages\)[\s\S]*firstTranscriptPublishedThreadIdsRef\.current\.add\(threadId\)/,
+    "a rejected first DB page must leave checkpoint fallback authoritative until it publishes"
+  )
   const subagentHydrationSource = loadHistorySource.slice(subagentAwait)
   assert.doesNotMatch(
     subagentHydrationSource,
@@ -547,8 +562,41 @@ async function main(): Promise<void> {
   )
   assert.match(
     source,
-    /loadEarlierMessages: async \(\)[\s\S]*getMessagesPage\(threadId, \{[\s\S]*limit: 500[\s\S]*prependThreadMessagePage/,
-    "older durable pages must be reachable through a bounded prepend action"
+    /loadEarlierMessages: async \(\)[\s\S]*getMessagesPage\(threadId, \{[\s\S]*limit: 500[\s\S]*prependBoundedThreadMessagePage/,
+    "older durable pages must be reachable through a resident-bounded prepend action"
+  )
+  assert.match(
+    source,
+    /THREAD_MESSAGE_RESIDENT_LIMIT = 1_500[\s\S]*nextState\.messages\.length > THREAD_MESSAGE_RESIDENT_LIMIT[\s\S]*retainResidentToolCallStates/,
+    "all main transcript mutations must enforce the JS resident cap and release tool metadata"
+  )
+  assert.match(
+    source,
+    /loadMessageWindowAround: async[\s\S]*beforeOrdinal:[\s\S]*createTargetedThreadMessageWindow[\s\S]*restoreLatestMessageWindow: async/,
+    "durable search results and evicted latest pages must be rehydratable without a full transcript read"
+  )
+  assert.match(
+    source,
+    /createForwardThreadMessagePageWindow\(\s*target\.messageId\s*\)[\s\S]*loadReleasedMessageWindow: async[\s\S]*anchorMessageId:[\s\S]*verifiedAnchorMessageId/,
+    "targeted windows must recover the gap page-by-page instead of jumping directly to latest"
+  )
+  assert.match(
+    source,
+    /cancelMessageWindowLoad: \(\) => \{[\s\S]*messageWindowIntentCoordinator\.cancel\(threadId\)/,
+    "explicit UI intent must cancel whichever page-window request is current"
+  )
+  const cancelWindowIntentStart = source.indexOf("cancelMessageWindowLoad: () => {")
+  const cancelWindowIntentEnd = source.indexOf("addQueuedMessage:", cancelWindowIntentStart)
+  const cancelWindowIntentSource = source.slice(cancelWindowIntentStart, cancelWindowIntentEnd)
+  assert.match(
+    cancelWindowIntentSource,
+    /canCancelThreadMessageWindowIntent\([\s\S]*firstTranscriptPublishedThreadIdsRef\.current\.has\(threadId\)/,
+    "hydrate cancellation must depend on a successful transcript publication"
+  )
+  assert.doesNotMatch(
+    cancelWindowIntentSource,
+    /historyLoading/,
+    "historyLoading alone must not cancel checkpoint fallback after a rejected DB page"
   )
 
   const durableSyncStart = source.indexOf("const applyDurableTranscriptSnapshot")
@@ -571,6 +619,11 @@ async function main(): Promise<void> {
     durableSyncSource,
     /mergeLatestThreadMessagePage\(\s*state\.messages/,
     "latest durable rows must merge into the loaded page window without replacing older pages"
+  )
+  assert.match(
+    durableSyncSource,
+    /upsertLatestThreadMessagePageWindow\(\s*state\.historyPageWindows,[\s\S]*historyPageWindows: pageWindows/,
+    "every latest durable refresh must also refresh its reload descriptor"
   )
   assert.match(
     durableSyncSource,
@@ -738,6 +791,37 @@ async function main(): Promise<void> {
     source,
     /new CoordinatorWorkerRequestCache<CoordinatorWorkerView\[\]>\(\)/,
     "history restore and foreground binding must share coordinator worker requests"
+  )
+
+  const cleanupStart = source.indexOf("const cleanupThread = useCallback")
+  const cleanupEnd = source.indexOf("const handleStreamHolderDispose", cleanupStart)
+  assert.ok(cleanupStart >= 0 && cleanupEnd > cleanupStart, "permanent cleanup must exist")
+  const cleanupSource = source.slice(cleanupStart, cleanupEnd)
+  assert.doesNotMatch(
+    cleanupSource,
+    /saveSubagentTranscripts\(/,
+    "permanent deletion must cancel, not flush, the deleted row's transcript"
+  )
+  assert.match(
+    cleanupSource,
+    /threadHistoryLoadGenerationRef\.current\[threadId\][\s\S]*\+ 1/,
+    "permanent deletion must invalidate queued transcript persistence continuations"
+  )
+
+  const persistStart = source.indexOf("const saveSubagentTranscripts = useCallback")
+  const persistEnd = source.indexOf(
+    "const scheduleSubagentTranscriptsPersist = useCallback",
+    persistStart
+  )
+  const persistSource = source.slice(persistStart, persistEnd)
+  assert.match(
+    persistSource,
+    /const persistGeneration = threadHistoryLoadGenerationRef\.current\[threadId\][\s\S]*isCurrentPersistGeneration/,
+    "subagent persistence must capture the row generation before its async IPC"
+  )
+  assert.ok(
+    (persistSource.match(/if \(!isCurrentPersistGeneration\(\)\) return/g)?.length ?? 0) >= 4,
+    "subagent persistence must recheck its row generation before dispatch, merge, retry and follow-up"
   )
   assert.equal(
     dehydrationHelperSource.match(/historyLoading: true/g)?.length ?? 0,

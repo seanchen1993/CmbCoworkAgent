@@ -1,5 +1,5 @@
 import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electron"
-import { constants as fsConstants, existsSync } from "fs"
+import { constants as fsConstants } from "fs"
 import { copyFile, lstat, mkdir } from "fs/promises"
 import path from "path"
 import Store from "electron-store"
@@ -12,6 +12,7 @@ import {
   getThreadValuesJson,
   getThreadValuesJsonPage,
   getThreadMessages,
+  getThreadMessageCount,
   getThreadMessageIdentityContext,
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
@@ -70,7 +71,7 @@ import {
   commitWorkflowThreadDisposal,
   deleteWorkflowRunsForThread,
   isWorkflowThreadMarkedDisposed,
-  countUnresolvedWorkflowWorktrees,
+  countUnresolvedWorkflowWorktreesAsync,
   markWorkflowThreadDisposed,
   rollbackWorkflowThreadDisposal
 } from "../agent/workflow/run-store"
@@ -107,6 +108,7 @@ import type {
   ThreadHydrationOptions,
   ThreadSummaryPageOptions,
   ThreadMessagesPageOptions,
+  ThreadMetadataPatchParams,
   ThreadUpdateParams,
   ThreadValuesMergeParams
 } from "../types"
@@ -138,7 +140,26 @@ import {
   toForkabilityError
 } from "../../shared/checkpoint-forkability"
 import type { LegacyForkFallbackMode } from "../../shared/checkpoint-forkability"
-import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
+import {
+  captureThreadMutationLease,
+  requireThreadMutationLease,
+  ThreadMutationLeaseExpiredError,
+  withThreadMutationLeaseLock,
+  withThreadRunMutationLock
+} from "./thread-run-mutation-lock"
+import {
+  applyThreadMetadataPatch,
+  assertNoActiveAgentModeTransition,
+  assertNoTranscriptAgentModeTransition,
+  getThreadExecutionMode,
+  parseThreadMetadata,
+  patchLatestThreadMetadata,
+  validateRendererThreadMetadataPatch
+} from "../services/thread-metadata"
+import {
+  captureThreadIncarnation,
+  matchesThreadIncarnation
+} from "../services/thread-incarnation"
 import { resolveRecentWorkspacePath } from "./recent-workspace"
 import {
   copyCheckpoint,
@@ -161,6 +182,7 @@ import type { ThreadGoalHydrationEvent } from "../thread-metadata-hydration/prot
 import {
   bootstrapLegacyCheckpointTranscriptInWorker,
   cancelLegacyCheckpointTranscriptBootstrap,
+  hasCheckpointTranscriptInWorker,
   isCheckpointRuntimeProjectionCancelled,
   readLatestCheckpointTupleInWorker
 } from "../checkpointer/runtime-projection-client"
@@ -321,12 +343,10 @@ async function assertCanPersistExplicitNormalMode(
         : typeof nextMetadata.workspacePath === "string"
           ? nextMetadata.workspacePath
           : undefined
-    const active = workflowRunManager.isActive(threadId)
-    const pendingRun = wsp ? workflowRunManager.findPendingNotification(wsp, threadId) : null
     // Scan ALL pending runs, not just the first candidate: an exhausted newest
     // run must not unlock the exit while an older, still-deliverable run waits.
     const deliverablePending = wsp
-      ? workflowRunManager.hasDeliverablePendingNotification(wsp, threadId)
+      ? await workflowRunManager.hasDeliverablePendingNotificationAsync(wsp, threadId)
       : false
     // Escape hatch: don't block on a pending run whose auto-re-report has been
     // exhausted this process (wedged report turn / API outage) — else the user is
@@ -341,9 +361,14 @@ async function assertCanPersistExplicitNormalMode(
     // workflow mode there. (So this is "leave but you'll have to come back for it",
     // not "leave and it follows you".)
     const pending = deliverablePending
-    if (active || pending) {
+    if (workflowRunManager.isActive(threadId) || pending) {
       throw new Error("仍有动态工作流在运行或结果待汇报，请先等待其完成或取消后再切换模式。")
     }
+    // Only perform the broader unfiltered lookup after the deliverable guard
+    // passed; this branch exists solely to log the renotify-exhausted escape hatch.
+    const pendingRun = wsp
+      ? await workflowRunManager.findPendingNotificationAsync(wsp, threadId)
+      : null
     if (pendingRun) {
       console.warn(
         `[Workflow] Leaving workflow mode with a renotify-exhausted pending run ${pendingRun.runId}: its result stays under the original workspace and won't auto-report until you return to workflow mode there. (#5)`
@@ -1160,7 +1185,7 @@ async function isThreadForkBusy(input: ThreadForkBusyInput): Promise<boolean> {
 
   if (workflowRunManager.isActive(threadId)) return true
   if (workspacePath) {
-    if (workflowRunManager.isBusyForThread(threadId, workspacePath)) return true
+    if (await workflowRunManager.isBusyForThreadAsync(threadId, workspacePath)) return true
   } else if (agentMode === "workflow") {
     return true
   }
@@ -1184,8 +1209,11 @@ async function isThreadForkBusy(input: ThreadForkBusyInput): Promise<boolean> {
 
   const workers = coordinatorWorkerManager.readWorkers(threadId)
   if (coordinatorWorkerManager.hasNotifications(threadId)) return true
-  return workers.some(
-    (worker) => worker.status === "running" || worker.notification_acknowledged === false
+  return (
+    workflowRunManager.isActive(threadId) ||
+    workers.some(
+      (worker) => worker.status === "running" || worker.notification_acknowledged === false
+    )
   )
 }
 
@@ -1619,14 +1647,13 @@ async function verifyForkCheckpointPersisted(
 
 export async function forkThread(params: ThreadForkParams): Promise<ThreadForkResponse> {
   const sourceThreadId = assertValidCheckpointThreadId(params.sourceThreadId)
+  const sourceLease = requireThreadMutationLease(sourceThreadId, "源会话不存在。")
   const explicitCheckpointId = params.checkpointId?.trim()
   if (explicitCheckpointId) assertValidCheckpointThreadId(explicitCheckpointId)
   const explicitMessageId = params.messageId?.trim()
 
-  return withThreadRunMutationLock(sourceThreadId, async () => {
-    const sourceRow = getThreadCore(sourceThreadId)
-    if (!sourceRow) throw new Error("源会话不存在。")
-
+  return workflowRunManager.withThreadTransitionLease(sourceThreadId, () =>
+    withThreadMutationLeaseLock(sourceLease, async (sourceRow) => {
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
     const hasThreadForkBoundaryMarkerEra =
       sourceMetadata[FORK_BOUNDARY_THREAD_METADATA_KEY] === FORK_BOUNDARY_MARKER_VERSION
@@ -1832,15 +1859,25 @@ export async function forkThread(params: ThreadForkParams): Promise<ThreadForkRe
       await cleanupFailedFork(targetThreadId, { rowCreated, workspacePath: targetWorkspacePath })
       throw error
     }
-  })
+    })
+  )
+}
+
+/** Deletion guards fail closed on an unreadable worktree path, but never block
+ * Electron's main thread on a UNC/network filesystem probe. */
+async function workflowWorktreeDirectoryMayExist(directory: string): Promise<boolean> {
+  try {
+    await lstat(directory)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT"
+  }
 }
 
 async function listForkableCheckpoints(threadId: string): Promise<ForkableCheckpoint[]> {
   const sourceThreadId = assertValidCheckpointThreadId(threadId)
-  return withThreadRunMutationLock(sourceThreadId, async () => {
-    const sourceRow = getThreadCore(sourceThreadId)
-    if (!sourceRow) throw new Error("源会话不存在。")
-
+  const sourceLease = requireThreadMutationLease(sourceThreadId, "源会话不存在。")
+  return withThreadMutationLeaseLock(sourceLease, async (sourceRow) => {
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
     const workspacePath =
       typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
@@ -2237,11 +2274,9 @@ export async function resolveForkCheckpointForMessage(
   const sourceThreadId = assertValidCheckpointThreadId(params.threadId)
   const messageId = params.messageId.trim()
   if (!messageId) return null
+  const sourceLease = requireThreadMutationLease(sourceThreadId, "源会话不存在。")
 
-  return withThreadRunMutationLock(sourceThreadId, async () => {
-    const sourceRow = getThreadCore(sourceThreadId)
-    if (!sourceRow) throw new Error("源会话不存在。")
-
+  return withThreadMutationLeaseLock(sourceLease, async (sourceRow) => {
     const sourceMetadata = parseJsonObject(sourceRow.metadata) ?? {}
     const workspacePath =
       typeof sourceMetadata.workspacePath === "string" ? sourceMetadata.workspacePath : null
@@ -2804,15 +2839,22 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "threads:appendMessages",
     async (_event, { threadId, messages }: { threadId: string; messages: Message[] }) => {
-      return withThreadRunMutationLock(threadId, async () => {
-        if (!Array.isArray(messages)) return { count: 0 }
-        const count = upsertThreadMessages(
-          threadId,
-          messages.map(normalizeIpcThreadMessage),
-          { preserveExistingOrder: true }
-        )
-        return { count }
-      })
+      const lease = captureThreadMutationLease(threadId)
+      if (!lease) return { count: 0 }
+      try {
+        return await withThreadMutationLeaseLock(lease, () => {
+          if (!Array.isArray(messages)) return { count: 0 }
+          const count = upsertThreadMessages(
+            threadId,
+            messages.map(normalizeIpcThreadMessage),
+            { preserveExistingOrder: true }
+          )
+          return { count }
+        })
+      } catch (error) {
+        if (error instanceof ThreadMutationLeaseExpiredError) return { count: 0 }
+        throw error
+      }
     }
   )
 
@@ -2827,7 +2869,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         role
       }: { threadId: string; fromId: string; toId: string; role?: Message["role"] }
     ) => {
-      return withThreadRunMutationLock(threadId, async () => {
+      const lease = requireThreadMutationLease(threadId)
+      return withThreadMutationLeaseLock(lease, () => {
         // withThreadRunMutationLock 是应用层互斥锁，防止同一 thread 的多个 IPC
         // handler 并发执行；replaceThreadMessageId 内部使用 SQLite 事务保证数据库
         // 原子性。两层锁定层级不同（应用层互斥 + 数据库事务），不会导致死锁，
@@ -2957,33 +3000,15 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   // Update a thread
   ipcMain.handle("threads:update", async (_event, { threadId, updates }: ThreadUpdateParams) => {
-    return withThreadRunMutationLock(threadId, async () => {
+    if (updates.metadata !== undefined) {
+      throw new Error("Renderer metadata replacement is not allowed; use threads:patchMetadata")
+    }
+    const lease = requireThreadMutationLease(threadId)
+    const mutate = (): Promise<Thread> => withThreadMutationLeaseLock(lease, async () => {
       const updateData: Parameters<typeof dbUpdateThread>[1] = {}
-
-      if (updates.metadata !== undefined) {
-        const currentThread = getThreadCore(threadId)
-        const currentMetadata = currentThread?.metadata
-          ? (JSON.parse(currentThread.metadata) as Record<string, unknown>)
-          : {}
-        await assertCanPersistExplicitNormalMode(
-          threadId,
-          currentMetadata,
-          updates.metadata as Record<string, unknown>
-        )
-        const requestedMetadata = updates.metadata as Record<string, unknown>
-        for (const key of MAIN_ONLY_THREAD_METADATA_KEYS) {
-          if (
-            !Object.prototype.hasOwnProperty.call(requestedMetadata, key) &&
-            Object.prototype.hasOwnProperty.call(currentMetadata, key)
-          ) {
-            requestedMetadata[key] = currentMetadata[key]
-          }
-        }
-      }
 
       if (updates.title !== undefined) updateData.title = updates.title
       if (updates.status !== undefined) updateData.status = updates.status
-      if (updates.metadata !== undefined) updateData.metadata = JSON.stringify(updates.metadata)
       if (updates.thread_values !== undefined) {
         await ensureSubagentTranscriptRows(threadId)
         const safeValues = { ...updates.thread_values }
@@ -3000,12 +3025,103 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
       return serializeThreadRow(row)
     })
+    return mutate()
   })
+
+  ipcMain.handle(
+    "threads:patchMetadata",
+    async (_event, { threadId, patch }: ThreadMetadataPatchParams) => {
+      validateRendererThreadMetadataPatch(patch)
+      const entryThread = getThreadCore(threadId)
+      if (!entryThread) throw new Error("Thread not found")
+      const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
+      return workflowRunManager.withThreadTransitionLease(threadId, () =>
+        withThreadRunMutationLock(threadId, async () => {
+          const guardedRow = getThreadCore(threadId)
+          if (
+            !guardedRow ||
+            !matchesThreadIncarnation(guardedRow, expectedThreadIncarnation)
+          ) {
+            throw new Error("Thread changed while updating metadata")
+          }
+          let guardedMetadata = parseThreadMetadata(guardedRow.metadata)
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            const guardedCandidate = applyThreadMetadataPatch(guardedMetadata, patch)
+            let guardedHasCheckpointTranscript = false
+            if (
+              getThreadExecutionMode(guardedMetadata) !==
+              getThreadExecutionMode(guardedCandidate)
+            ) {
+              const hasDurableTranscript = getThreadMessageCount(threadId) > 0
+              guardedHasCheckpointTranscript =
+                !hasDurableTranscript &&
+                (await hasCheckpointTranscriptInWorker(
+                  getThreadCheckpointPath(threadId),
+                  threadId
+                ))
+              assertNoTranscriptAgentModeTransition(
+                guardedMetadata,
+                guardedCandidate,
+                hasDurableTranscript || guardedHasCheckpointTranscript
+              )
+            }
+            await assertCanPersistExplicitNormalMode(
+              threadId,
+              guardedMetadata,
+              guardedCandidate
+            )
+
+            // The async workflow guard may yield. Re-read the fields that define
+            // its contract and retry if a trusted main-process mutation changed
+            // them. Once stable, no await remains before the synchronous commit.
+            const latestRow = getThreadCore(threadId)
+            if (
+              !latestRow ||
+              !matchesThreadIncarnation(latestRow, expectedThreadIncarnation)
+            ) {
+              throw new Error("Thread changed while updating metadata")
+            }
+            const latestMetadata = parseThreadMetadata(latestRow.metadata)
+            if (
+              latestMetadata.workspacePath !== guardedMetadata.workspacePath ||
+              getThreadExecutionMode(latestMetadata) !==
+                getThreadExecutionMode(guardedMetadata)
+            ) {
+              guardedMetadata = latestMetadata
+              continue
+            }
+            const latestCandidate = applyThreadMetadataPatch(latestMetadata, patch)
+            assertNoTranscriptAgentModeTransition(
+              latestMetadata,
+              latestCandidate,
+              getThreadMessageCount(threadId) > 0 || guardedHasCheckpointTranscript
+            )
+            assertNoActiveAgentModeTransition(
+              latestMetadata,
+              latestCandidate,
+              hasActiveAgentRun(threadId)
+            )
+            if (
+              Object.prototype.hasOwnProperty.call(patch.set ?? {}, "agentMode") &&
+              latestCandidate.agentMode !== "workflow" &&
+              workflowRunManager.isActive(threadId)
+            ) {
+              throw new Error("仍有动态工作流在运行，请先等待其完成或取消后再切换模式。")
+            }
+            const { row } = patchLatestThreadMetadata(threadId, patch)
+            return serializeThreadRow(row)
+          }
+          throw new Error("会话模式状态持续变化，请稍后重试。")
+        })
+      )
+    }
+  )
 
   ipcMain.handle(
     "threads:mergeThreadValues",
     async (_event, { threadId, patch }: ThreadValuesMergeParams) => {
-      return withThreadRunMutationLock(threadId, async () => {
+      const lease = requireThreadMutationLease(threadId)
+      return withThreadMutationLeaseLock(lease, async () => {
         await ensureSubagentTranscriptRows(threadId)
         const safePatch = { ...patch }
         delete safePatch[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]
@@ -3245,8 +3361,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       _event,
       { threadId, transcripts }: { threadId: string; transcripts: Record<string, unknown> }
     ) => {
-      return withThreadRunMutationLock(threadId, async () => {
-        if (!getThreadCore(threadId)) throw new Error("Thread not found")
+      const lease = requireThreadMutationLease(threadId)
+      return withThreadMutationLeaseLock(lease, async () => {
         await ensureSubagentTranscriptRows(threadId)
         return withSubagentTranscriptContentMutationLock(async () => {
           const persistedRows: Record<string, unknown[]> = {}
@@ -3492,7 +3608,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           for (const record of manifestState.records) {
             if (record.threadId !== threadId) continue
             const terminal = record.status === "merged" || record.status === "discarded"
-            const alreadyCleaned = terminal && record.cleanupPending !== true && !existsSync(record.directory)
+            const directoryMayExist = await workflowWorktreeDirectoryMayExist(record.directory)
+            const alreadyCleaned =
+              terminal && record.cleanupPending !== true && !directoryMayExist
             if (!alreadyCleaned) {
               unresolvedManifestWorktree = true
               break
@@ -3508,21 +3626,24 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           }
         }
       }
+      const flushFailedWorktreeCounts = await Promise.all(
+        workflowRunManager.listFlushFailedRuns(threadId).flatMap((run) =>
+          (run.worktrees ?? []).map(async (record) => {
+            if (
+              (record.status !== "merged" && record.status !== "discarded") ||
+              record.cleanupPending === true
+            ) {
+              return 1
+            }
+            return (await workflowWorktreeDirectoryMayExist(record.directory)) ? 1 : 0
+          })
+        )
+      )
       const unresolvedWorktreeCount =
-        (workspacePath ? countUnresolvedWorkflowWorktrees(workspacePath, threadId) : 0) +
-        workflowRunManager
-          .listFlushFailedRuns(threadId)
-          .reduce(
-            (count, run) =>
-              count +
-              (run.worktrees ?? []).filter(
-                (record) =>
-                  (record.status !== "merged" && record.status !== "discarded") ||
-                  record.cleanupPending === true ||
-                  existsSync(record.directory)
-              ).length,
-            0
-          )
+        (workspacePath
+          ? await countUnresolvedWorkflowWorktreesAsync(workspacePath, threadId)
+          : 0) +
+        flushFailedWorktreeCounts.reduce<number>((count, value) => count + value, 0)
       if (unresolvedManifestWorktree || unresolvedWorktreeCount > 0) {
         throw new Error(
           "该任务仍有未处理或待清理的 workflow worktree；请先在运行历史中合并、丢弃或按错误提示完成手工清理，再删除任务。"
@@ -3631,7 +3752,6 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       console.warn("[Threads] Failed to delete workflow checkpoints:", e)
     }
 
-    coordinatorWorkerManager.forgetThread(threadId)
     forgetCoordinatorThreadState(threadId)
     if (workspacePath) {
       // Fence and sweep workflow runs BEFORE deleting the parent app-managed
@@ -3639,7 +3759,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // reversing this order would leave a window where a late final flush could
       // recreate `<thread>/workflows` before its dir tombstone is registered.
       // The compatibility sweep also removes pre-upgrade project-local runs.
-      deleteWorkflowRunsForThread(workspacePath, threadId)
+      await deleteWorkflowRunsForThread(workspacePath, threadId)
       try {
         await deleteProjectThreadDataDirectory(workspacePath, threadId)
         console.log("[Threads] Deleted app-managed thread history and large results")
@@ -3652,6 +3772,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       } catch (e) {
         console.warn("[Threads] Failed to delete coordinator worker artifacts:", e)
       }
+    } else {
+      await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(threadId)
     }
 
     try {

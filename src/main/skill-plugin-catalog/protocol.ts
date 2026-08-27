@@ -8,6 +8,12 @@ export const SKILL_PLUGIN_CATALOG_MAX_SKILL_MD_BYTES = 256 * 1024
 export const SKILL_PLUGIN_CATALOG_MAX_STORE_BYTES = 8 * 1024 * 1024
 export const SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES = 2 * 1024 * 1024
 export const SKILL_PLUGIN_CATALOG_MAX_TOTAL_READ_BYTES = 64 * 1024 * 1024
+/**
+ * Maximum serialized payload retained by one Worker snapshot. The actual V8
+ * representation has additional object overhead, so keep this well below the
+ * Worker's 192 MiB old-generation limit and the 64 MiB source-read budget.
+ */
+export const SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 export const SKILL_PLUGIN_CATALOG_MAX_DIRECTORIES = 60_000
 export const SKILL_PLUGIN_CATALOG_MAX_FILES = 80_000
 export const SKILL_PLUGIN_CATALOG_MAX_SKILLS = 20_000
@@ -19,6 +25,8 @@ export interface SkillPluginCatalogSourceConfig {
   customSkillsDir: string
   pluginsStorePath: string
   disabledSkillsPath: string
+  /** Main-process source epoch shared across renderer windows. */
+  globalRevision: number
 }
 
 export interface SkillPluginCatalogReadRequest {

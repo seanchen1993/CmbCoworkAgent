@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Worker } from "node:worker_threads"
+import { Worker, type Worker as WorkerType } from "node:worker_threads"
 import { build } from "esbuild"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
@@ -12,7 +12,12 @@ import {
   WORKSPACE_GITIGNORE_MAX_BYTES,
   type WorkspaceFileScanEntry
 } from "../../shared/workspace-file-scan"
-import { WorkspaceFileScanSession } from "./client"
+import {
+  WORKSPACE_FILE_SCAN_MAX_CONTINUATION_LENGTH,
+  WORKSPACE_FILE_SCAN_MAX_PATH_LENGTH,
+  WORKSPACE_FILE_SCAN_WORKER_RESOURCE_LIMITS,
+  WorkspaceFileScanSession
+} from "./client"
 
 let buildDirectory = ""
 let workerPath = ""
@@ -37,6 +42,47 @@ afterAll(() => {
 })
 
 describe("WorkspaceFileScanSession", () => {
+  it("bounds its heap, rejects clean early exit, and permits only one request per session", async () => {
+    expect(WORKSPACE_FILE_SCAN_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(128)
+    const worker = new FakeScanWorker()
+    const session = new WorkspaceFileScanSession(
+      "lifecycle",
+      "C:\\workspace",
+      async () => worker as unknown as WorkerType
+    )
+    const open = session.open()
+    await Promise.resolve()
+    await expect(session.next(1, 1024)).rejects.toThrow("already in progress")
+    worker.emit("exit", 0)
+    await expect(open).rejects.toThrow("exited with code 0")
+    await session.close()
+  })
+
+  it("rejects oversized paths and page requests before dispatch", async () => {
+    const worker = new FakeScanWorker()
+    const oversizedPath = new WorkspaceFileScanSession(
+      "oversized-path",
+      "x".repeat(WORKSPACE_FILE_SCAN_MAX_PATH_LENGTH + 1),
+      async () => worker as unknown as WorkerType
+    )
+    await expect(oversizedPath.open()).rejects.toThrow(/string limit/)
+    expect(worker.postCount).toBe(0)
+
+    const oversizedPage = new WorkspaceFileScanSession(
+      "oversized-page",
+      "C:\\workspace",
+      async () => worker as unknown as WorkerType
+    )
+    await expect(
+      oversizedPage.next(
+        WORKSPACE_FILE_SCAN_PAGE_MAX_ENTRIES,
+        WORKSPACE_FILE_SCAN_PAGE_MAX_BYTES,
+        "x".repeat(WORKSPACE_FILE_SCAN_MAX_CONTINUATION_LENGTH + 1)
+      )
+    ).rejects.toThrow(/hard request budget/)
+    expect(worker.postCount).toBe(0)
+  })
+
   it("returns a complete tree through hard-bounded pages", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "cmb-workspace-scan-"))
     temporaryDirectories.push(workspacePath)
@@ -176,3 +222,21 @@ describe("WorkspaceFileScanSession", () => {
     expect(ticks).toBeGreaterThan(10)
   }, 60_000)
 })
+
+class FakeScanWorker extends EventEmitter {
+  postCount = 0
+
+  postMessage(): void {
+    this.postCount += 1
+    return undefined
+  }
+
+  unref(): this {
+    return this
+  }
+
+  terminate(): Promise<number> {
+    return Promise.resolve(0)
+  }
+}
+import { EventEmitter } from "node:events"

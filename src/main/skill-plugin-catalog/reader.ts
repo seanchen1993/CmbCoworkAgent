@@ -33,6 +33,7 @@ import {
   SKILL_PLUGIN_CATALOG_MAX_RESPONSE_BYTES,
   SKILL_PLUGIN_CATALOG_MAX_SKILLS,
   SKILL_PLUGIN_CATALOG_MAX_SKILL_MD_BYTES,
+  SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES,
   SKILL_PLUGIN_CATALOG_MAX_STORE_BYTES,
   SKILL_PLUGIN_CATALOG_MAX_TOTAL_READ_BYTES,
   type SkillPluginCatalogSourceConfig
@@ -43,8 +44,16 @@ const MAX_PATH = 4_096
 const MAX_METADATA_FIELDS = 128
 const MAX_ALLOWED_TOOLS = 256
 const MAX_PLUGIN_SKILL_SOURCES = 64
+const MAX_SKILL_ID = 8_192
+// Keep room for disabled ids so retained skills can still be classified
+// correctly when adversarial metadata fills the detail snapshot.
+const DISABLED_SKILL_SNAPSHOT_RESERVE_BYTES = 2 * 1024 * 1024
+const SNAPSHOT_ENTRY_OVERHEAD_BYTES = 16
 const SNAPSHOT_TTL_MS = 2 * 60_000
-const MAX_SNAPSHOTS = 4
+// At most two stale cursor generations plus the current snapshot. Combined
+// with the 8 MiB serialized cap, this leaves ample headroom for V8 object
+// overhead and an in-progress scan inside the 192 MiB Worker.
+const MAX_SNAPSHOTS = 3
 
 interface MutableStats extends SkillPluginCatalogPageStats {}
 
@@ -52,6 +61,17 @@ interface BuildContext {
   cancelFlag?: Int32Array
   stats: MutableStats
   truncatedReasons: Set<string>
+}
+
+interface SnapshotBudget {
+  bytes: number
+  limit: number
+}
+
+interface DisabledSkillIdentity {
+  name: string
+  relativePath?: string
+  rootDir?: string
 }
 
 interface DiscoveredCatalogSkill {
@@ -121,6 +141,54 @@ function checkCancelled(context: Pick<BuildContext, "cancelFlag">): void {
 
 function markTruncated(context: BuildContext, reason: string): void {
   context.truncatedReasons.add(reason)
+}
+
+function snapshotEntryBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf-8") + SNAPSHOT_ENTRY_OVERHEAD_BYTES
+}
+
+function retainBoundedEntry<T>(
+  target: T[],
+  value: T,
+  budget: SnapshotBudget,
+  context: BuildContext
+): boolean {
+  const bytes = snapshotEntryBytes(value)
+  if (budget.bytes + bytes > budget.limit) {
+    markTruncated(context, "snapshot-bytes")
+    return false
+  }
+  target.push(value)
+  budget.bytes += bytes
+  return true
+}
+
+function setBoundedMetadata(
+  target: Map<string, SkillMetadata>,
+  retainedBytes: Map<string, number>,
+  key: string,
+  value: SkillMetadata,
+  budget: SnapshotBudget,
+  context: BuildContext
+): boolean {
+  const previousBytes = retainedBytes.get(key) ?? 0
+  const nextBytes = snapshotEntryBytes(value)
+  if (budget.bytes - previousBytes + nextBytes > budget.limit) {
+    markTruncated(context, "snapshot-bytes")
+    // A later source shadows an earlier source with the same identity. If the
+    // replacement cannot fit, omit the identity instead of exposing the stale
+    // lower-precedence row (for example, bundled instead of custom).
+    if (previousBytes > 0) {
+      target.delete(key)
+      retainedBytes.delete(key)
+      budget.bytes -= previousBytes
+    }
+    return false
+  }
+  target.set(key, value)
+  retainedBytes.set(key, nextBytes)
+  budget.bytes += nextBytes - previousBytes
+  return true
 }
 
 function consumeFileBudget(context: BuildContext): boolean {
@@ -455,8 +523,10 @@ function readChildDirectories(
   return directories
 }
 
-function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredCatalogSkill[] {
-  const result: DiscoveredCatalogSkill[] = []
+function* discoverSkills(
+  source: SkillSource,
+  context: BuildContext
+): Generator<DiscoveredCatalogSkill> {
   const maxDepth = source.maxDepth ?? 3
   const stack: Array<{ path: string; depth: number }> = [{ path: source.sourceDir, depth: 0 }]
   while (stack.length > 0) {
@@ -482,7 +552,7 @@ function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredC
     })
     if (content !== null) {
       const frontmatter = parseYamlFrontmatter(content)
-      result.push({
+      yield {
         name: frontmatter.name?.trim() || basename(current.path),
         sourceDir: source.sourceDir,
         rootDir: current.path,
@@ -490,7 +560,7 @@ function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredC
         relativePath: relative(source.sourceDir, current.path).replace(/\\/g, "/"),
         depth: current.depth,
         content
-      })
+      }
       context.stats.discoveredSkills += 1
     }
     if (current.depth >= maxDepth) continue
@@ -500,7 +570,6 @@ function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredC
       stack.push({ path: join(current.path, directories[index]), depth: current.depth + 1 })
     }
   }
-  return result
 }
 
 function toSkillMetadata(
@@ -509,13 +578,24 @@ function toSkillMetadata(
   context: BuildContext
 ): SkillMetadata {
   const frontmatter = normalizeMetadata(context, parseYamlFrontmatter(skill.content))
-  const id = getDiscoveredSkillId(skill)
+  const discoveredId =
+    boundedString(context, getDiscoveredSkillId(skill), MAX_SKILL_ID, "skill-id-bytes") ||
+    boundedString(context, skill.name, MAX_SKILL_ID, "skill-id-bytes") ||
+    "skill"
+  const id = source.pluginId
+    ? boundedString(
+        context,
+        `plugin:${source.pluginId}/${discoveredId}`,
+        MAX_SKILL_ID,
+        "skill-id-bytes"
+      ) || discoveredId
+    : discoveredId
   const allowedTools = frontmatter["allowed-tools"]
     ?.split(/\s+/)
     .filter(Boolean)
     .slice(0, MAX_ALLOWED_TOOLS)
   return {
-    id: source.pluginId ? `plugin:${source.pluginId}/${id}` : id,
+    id,
     relativePath: boundedString(context, skill.relativePath, MAX_PATH, "skill-relative-path-bytes"),
     name: boundedString(context, frontmatter.name || skill.name, 1_024, "skill-name-bytes") || skill.name,
     description: boundedString(context, frontmatter.description, MAX_TEXT, "skill-description-bytes") ?? "",
@@ -533,7 +613,7 @@ function toSkillMetadata(
 
 function resolveDisabledIds(
   source: SkillPluginCatalogSourceConfig,
-  globalSkills: DiscoveredCatalogSkill[],
+  globalSkills: DisabledSkillIdentity[],
   context: BuildContext
 ): string[] {
   const parsed = readJson(
@@ -583,11 +663,10 @@ function resolveDisabledIds(
 
 function sourceKey(
   source: SkillPluginCatalogSourceConfig,
-  revision: string | undefined,
   projection: "plugins-only" | "skills-and-disabled"
 ): string {
   return JSON.stringify([
-    revision ?? "0",
+    source.globalRevision,
     projection,
     source.builtinSkillsDir,
     source.customSkillsDir,
@@ -642,13 +721,31 @@ function isSkillMetadataDisabled(
   return disabledSkillIds.has(id)
 }
 
+function matchingDisabledIds(
+  skill: SkillMetadata,
+  disabledSkillIds: ReadonlySet<string>
+): string[] {
+  if (skill.pluginId) return []
+  const matches = new Set<string>()
+  const name = normalizeSkillId(skill.name)
+  if (name && disabledSkillIds.has(name)) matches.add(name)
+  let candidate = normalizeSkillId(skill.id || skill.relativePath || skill.name)
+  while (candidate) {
+    if (disabledSkillIds.has(candidate)) matches.add(candidate)
+    const separator = candidate.lastIndexOf("/")
+    if (separator < 0) break
+    candidate = candidate.slice(0, separator)
+  }
+  return [...matches]
+}
+
 function buildSnapshot(
   source: SkillPluginCatalogSourceConfig,
   input: SkillPluginCatalogPageInput,
   cancelFlag?: Int32Array
 ): CatalogSnapshot {
   const projection = input.kind === "plugins" ? "plugins-only" : "skills-and-disabled"
-  const key = sourceKey(source, input.revision, projection)
+  const key = sourceKey(source, projection)
   trimSnapshots()
   const cachedId = snapshotIdByKey.get(key)
   const cached = cachedId ? snapshotsById.get(cachedId) : undefined
@@ -663,11 +760,17 @@ function buildSnapshot(
   const plugins = parsePlugins(source, context)
   if (projection === "plugins-only") {
     checkCancelled(context)
+    const budget: SnapshotBudget = {
+      bytes: 0,
+      limit: SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES
+    }
+    const retainedPlugins: PluginMetadata[] = []
+    for (const plugin of plugins) retainBoundedEntry(retainedPlugins, plugin, budget, context)
     const snapshot: CatalogSnapshot = {
       id: `spc-${nextSnapshotId++}`,
       key,
       skills: [],
-      plugins,
+      plugins: retainedPlugins,
       disabledSkillIds: [],
       enabledSkillCount: 0,
       truncated: context.truncatedReasons.size > 0,
@@ -683,25 +786,50 @@ function buildSnapshot(
     { sourceDir: source.builtinSkillsDir, source: "project", kind: "builtin" },
     { sourceDir: source.customSkillsDir, source: "user", kind: "custom" }
   ]
-  const globalDiscovered: Array<{ skill: DiscoveredCatalogSkill; source: SkillSource }> = []
-  for (const localSource of localSources) {
-    for (const skill of discoverSkills(localSource, context)) {
-      globalDiscovered.push({ skill, source: localSource })
-    }
+  const skillBudget: SnapshotBudget = {
+    bytes: 0,
+    limit:
+      SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES - DISABLED_SKILL_SNAPSHOT_RESERVE_BYTES
   }
   const localById = new Map<string, SkillMetadata>()
-  for (const { skill, source: localSource } of globalDiscovered) {
-    const metadata = toSkillMetadata(skill, localSource, context)
-    localById.set(normalizeSkillId(metadata.id || metadata.name), metadata)
+  const localBytesById = new Map<string, number>()
+  const globalSkillIdentities = new Map<string, DisabledSkillIdentity>()
+  for (const localSource of localSources) {
+    for (const skill of discoverSkills(localSource, context)) {
+      const metadata = toSkillMetadata(skill, localSource, context)
+      const key = normalizeSkillId(metadata.id || metadata.name)
+      const retained = setBoundedMetadata(
+        localById,
+        localBytesById,
+        key,
+        metadata,
+        skillBudget,
+        context
+      )
+      if (retained) {
+        globalSkillIdentities.set(key, {
+          name: metadata.name,
+          ...(metadata.relativePath ? { relativePath: metadata.relativePath } : {}),
+          rootDir: skill.rootDir
+        })
+      } else {
+        globalSkillIdentities.delete(key)
+      }
+    }
   }
   const pluginSkills = new Map<string, SkillMetadata>()
+  const pluginBytesById = new Map<string, number>()
   for (const plugin of plugins) {
     for (const pluginSource of pluginSkillSources(plugin, context)) {
       for (const skill of discoverSkills(pluginSource, context)) {
         const metadata = toSkillMetadata(skill, pluginSource, context)
-        pluginSkills.set(
+        setBoundedMetadata(
+          pluginSkills,
+          pluginBytesById,
           `${plugin.id}:${normalizeSkillId(metadata.id || metadata.name)}`,
-          metadata
+          metadata,
+          skillBudget,
+          context
         )
       }
     }
@@ -713,12 +841,33 @@ function buildSnapshot(
   }
   const disabledSkillIds = resolveDisabledIds(
     source,
-    globalDiscovered.map(({ skill }) => skill),
+    [...globalSkillIdentities.values()],
     context
   )
   const disabled = new Set(disabledSkillIds.map(normalizeSkillId))
+  const relevantDisabledIds = new Set(
+    skills.flatMap((skill) => matchingDisabledIds(skill, disabled))
+  )
+  const orderedDisabledSkillIds = [
+    ...relevantDisabledIds,
+    ...disabledSkillIds.filter((id) => !relevantDisabledIds.has(normalizeSkillId(id)))
+  ]
+  const snapshotBudget: SnapshotBudget = {
+    bytes: skillBudget.bytes,
+    // The disabled projection has its own bounded share. Do not let an almost
+    // empty skills projection turn a 2 MiB identity store into an 8 MiB cache.
+    limit: Math.min(
+      SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES,
+      skillBudget.bytes + DISABLED_SKILL_SNAPSHOT_RESERVE_BYTES
+    )
+  }
+  const retainedDisabledSkillIds: string[] = []
+  for (const id of orderedDisabledSkillIds) {
+    retainBoundedEntry(retainedDisabledSkillIds, id, snapshotBudget, context)
+  }
+  const retainedDisabled = new Set(retainedDisabledSkillIds.map(normalizeSkillId))
   const enabledSkillCount = skills.reduce(
-    (count, skill) => count + Number(!isSkillMetadataDisabled(skill, disabled)),
+    (count, skill) => count + Number(!isSkillMetadataDisabled(skill, retainedDisabled)),
     0
   )
   checkCancelled(context)
@@ -726,8 +875,8 @@ function buildSnapshot(
     id: `spc-${nextSnapshotId++}`,
     key,
     skills,
-    plugins,
-    disabledSkillIds,
+    plugins: [],
+    disabledSkillIds: retainedDisabledSkillIds,
     enabledSkillCount,
     truncated: context.truncatedReasons.size > 0,
     truncatedReasons: [...context.truncatedReasons],

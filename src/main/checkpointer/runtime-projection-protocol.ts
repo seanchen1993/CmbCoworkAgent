@@ -46,6 +46,15 @@ export interface LegacyCheckpointTranscriptBootstrapRequest {
   cancellationBuffer: SharedArrayBuffer
 }
 
+export interface CheckpointTranscriptPresenceRequest {
+  type: "inspect-transcript-presence"
+  requestId: number
+  databasePath: string
+  threadId: string
+  checkpointNs: string
+  cancellationBuffer?: SharedArrayBuffer
+}
+
 export interface CheckpointRuntimeProjectionShutdownRequest {
   type: "shutdown"
 }
@@ -54,6 +63,7 @@ export type CheckpointRuntimeProjectionWorkerRequest =
   | CheckpointRuntimeProjectionEnsureRequest
   | CheckpointLatestTupleReadRequest
   | LegacyCheckpointTranscriptBootstrapRequest
+  | CheckpointTranscriptPresenceRequest
   | CheckpointRuntimeProjectionShutdownRequest
 
 export interface CheckpointRuntimeProjectionEnsureSuccess {
@@ -78,11 +88,19 @@ export interface LegacyCheckpointTranscriptBootstrapSuccess {
   stats: LegacyCheckpointTranscriptMigrationStats
 }
 
+export interface CheckpointTranscriptPresenceSuccess {
+  type: "inspect-transcript-presence-result"
+  requestId: number
+  ok: true
+  hasTranscript: boolean
+}
+
 export interface CheckpointRuntimeProjectionFailure {
   type:
     | "ensure-runtime-projection-result"
     | "read-latest-tuple-result"
     | "bootstrap-legacy-transcript-result"
+    | "inspect-transcript-presence-result"
   requestId: number
   ok: false
   error: {
@@ -100,5 +118,6 @@ export type CheckpointRuntimeProjectionWorkerResponse =
   | CheckpointRuntimeProjectionEnsureSuccess
   | CheckpointLatestTupleReadSuccess
   | LegacyCheckpointTranscriptBootstrapSuccess
+  | CheckpointTranscriptPresenceSuccess
   | CheckpointRuntimeProjectionFailure
   | CheckpointRuntimeProjectionShutdownComplete

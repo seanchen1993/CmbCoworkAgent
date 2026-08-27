@@ -40,17 +40,28 @@ describe("right panel render windows", () => {
     )
     expect(source).toContain("if (!skillsOpen) return undefined")
     expect(source).toContain("if (!pluginsOpen) return undefined")
-    expect(source).toContain("refreshSkillSummary")
-    expect(source).toContain("refreshPluginSummary")
-    expect(source).toContain("refreshHookSummary")
-    expect(source).toContain("await refreshPluginSummary()")
-    expect(source).toContain("await refreshSkillSummary()")
-    expect(source).toContain("catalogSummaryWarmupRef.current.then")
+    expect(source).toContain("refreshGlobalCatalogSummary")
+    expect(source).toContain("refreshWorkspaceHookSummary")
+    expect(source).toContain("const promise = refreshGlobalCatalogSummary()")
+    expect(source).toContain("void refreshWorkspaceHookSummary()")
+    expect(source).toContain("await globalSummaryPromiseRef.current")
+    expect(source).toContain("RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE")
+    expect(source).not.toContain("refreshSkillSummary")
+    expect(source).not.toContain("refreshPluginSummary")
+    expect(source).toContain("page.relatedSummary.skillEntries")
+    expect(source).toContain("page.relatedSummary.pluginEntries")
+    expect(source).not.toContain("loadSkillCatalogSummary")
+    expect(source).not.toContain("loadPluginCatalogSummary")
+    expect(source).not.toContain("catalogSummaryWarmupRef")
     expect(source).toContain("limit: 1")
     expect(source).toContain("badge !== undefined && badge !== null")
     expect(source).toContain("getSkillCatalogRevision(pluginVersion)")
+    expect(source).toContain("getPluginCatalogRevision(pluginVersion)")
     expect(source).toContain("getGlobalHookCatalogRevision()")
     expect(source).toContain("getWorkspaceHookCatalogRevision(workspacePath)")
+    expect(source).toContain("total: snapshot.total")
+    expect(source).toContain("truncated: snapshot.truncated")
+    expect(source).not.toContain("total: snapshot.plugins.length, truncated: false")
     expect(source).toContain(
       "normalizeWorkspaceFileKey(data.workspacePath) === workspaceKey"
     )
@@ -64,5 +75,13 @@ describe("right panel render windows", () => {
     expect(source).not.toContain("window.api.plugins.list()")
     expect(source).not.toContain("badge={hooks.filter((h) => h.enabled).length}")
     expect(source).not.toContain("<HooksContent onChange=")
+
+    const appSource = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8")
+    expect(appSource).toContain(
+      'loadSkillCatalogPages(key, "app-skill-catalog", isCurrent)'
+    )
+    expect(appSource).toContain(
+      'loadPluginCatalogPages(key, "app-plugin-catalog", isCurrent)'
+    )
   })
 })

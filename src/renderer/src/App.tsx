@@ -74,8 +74,10 @@ import { loadPluginCatalogPages, loadSkillCatalogPages } from "@/lib/skill-plugi
 import { invalidateModelCatalogCache } from "@/lib/model-catalog-cache"
 
 configureAppCatalogLoaders({
-  skills: (key) => loadSkillCatalogPages(key, "app-skill-catalog"),
-  plugins: (key) => loadPluginCatalogPages(key, "app-plugin-catalog")
+  skills: (key, isCurrent) =>
+    loadSkillCatalogPages(key, "app-skill-catalog", isCurrent),
+  plugins: (key, isCurrent) =>
+    loadPluginCatalogPages(key, "app-plugin-catalog", isCurrent)
 })
 interface UserInfoConfig {
   sapId: string

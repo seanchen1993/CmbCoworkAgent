@@ -1,7 +1,10 @@
 import assert from "node:assert/strict"
 import {
+  createTargetedThreadMessageWindow,
   mergeLatestThreadMessagePage,
-  prependThreadMessagePage
+  prependBoundedThreadMessagePage,
+  prependThreadMessagePage,
+  restoreLatestThreadMessageWindow
 } from "../src/renderer/src/lib/thread-message-pages"
 import type { Message } from "../src/renderer/src/types"
 
@@ -43,5 +46,75 @@ assert.equal(latestMerge.messages.length, 10_001)
 assert.equal(latestMerge.messages[0], poisonedPrefix[0])
 assert.equal(latestMerge.messages.at(-1)?.id, "m-10000")
 assert.equal(latestMerge.messages.at(-1)?.content, "durable completion")
+
+const residentTail = Array.from({ length: 300 }, (_, index) => message(`tail-${index}`))
+const firstOlderPage = Array.from({ length: 500 }, (_, index) => message(`older-${index}`))
+const bounded = prependBoundedThreadMessagePage(residentTail, firstOlderPage, {
+  maximumResidentMessages: 600,
+  protectedTailMessages: 100
+})
+assert.equal(bounded.messages.length, 600, "history pagination must have a hard resident cap")
+assert.deepEqual(
+  bounded.messages.slice(0, 3).map((item) => item.id),
+  ["older-0", "older-1", "older-2"]
+)
+assert.deepEqual(
+  bounded.messages.slice(-3).map((item) => item.id),
+  ["tail-297", "tail-298", "tail-299"],
+  "the latest tail must remain resident for streaming reconciliation"
+)
+assert.deepEqual(bounded.gap, {
+  afterMessageId: "older-499",
+  beforeMessageId: "tail-200",
+  evictedMessageCount: 200,
+  reloadBeforeOrdinal: null,
+  reloadBeforeMessageId: null,
+  reloadAnchorMessageId: null,
+  reloadTargetMessageId: null
+})
+
+const secondOlderPage = Array.from({ length: 500 }, (_, index) => message(`ancient-${index}`))
+const shifted = prependBoundedThreadMessagePage(bounded.messages, secondOlderPage, {
+  maximumResidentMessages: 600,
+  protectedTailMessages: 100,
+  existingGap: bounded.gap
+})
+assert.equal(shifted.messages.length, 600)
+assert.equal(shifted.messages[0].id, "ancient-0")
+assert.equal(shifted.messages[499].id, "ancient-499")
+assert.equal(shifted.messages[500].id, "tail-200")
+assert.equal(
+  shifted.gap?.evictedMessageCount,
+  700,
+  "subsequent pages must accumulate, rather than forget, the released middle"
+)
+
+const targetPage = Array.from({ length: 240 }, (_, index) => message(`target-${index}`))
+const targeted = createTargetedThreadMessageWindow(shifted.messages, targetPage, {
+  targetMessageId: "target-200",
+  protectedTailMessages: 100,
+  maximumResidentMessages: 600
+})
+assert(targeted.messages.some((item) => item.id === "target-200"))
+assert.deepEqual(
+  targeted.messages.slice(-3).map((item) => item.id),
+  ["tail-297", "tail-298", "tail-299"],
+  "search hydration must not discard the active tail"
+)
+assert(targeted.gap, "a non-contiguous targeted search page needs an explicit gap marker")
+
+const latestPage = Array.from({ length: 500 }, (_, index) => message(`latest-${index}`))
+const restoredLatest = restoreLatestThreadMessageWindow(targeted.messages, latestPage, {
+  maximumResidentMessages: 600,
+  protectedLocalTailMessages: 100,
+  existingGap: targeted.gap
+})
+assert.equal(restoredLatest.gap, null)
+assert(restoredLatest.messages.length <= 600)
+assert.equal(restoredLatest.messages.at(-1)?.id, "tail-299")
+assert(
+  restoredLatest.messages.some((item) => item.id === "latest-499"),
+  "return-to-bottom hydration must restore the newest durable page"
+)
 
 console.log("thread message page merge contracts passed")

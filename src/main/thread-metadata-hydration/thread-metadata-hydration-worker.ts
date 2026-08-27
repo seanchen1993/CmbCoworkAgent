@@ -4,7 +4,10 @@ import type {
   ThreadMetadataHydrationWorkerRequest,
   ThreadMetadataHydrationWorkerResponse
 } from "./protocol"
-import { THREAD_METADATA_HYDRATION_CANCELLED } from "./protocol"
+import {
+  THREAD_METADATA_HYDRATION_CANCELLED,
+  THREAD_METADATA_HYDRATION_MAX_THREAD_RESPONSE_BYTES
+} from "./protocol"
 import {
   readThreadGoalEventsProjection,
   readThreadGitMetadataProjection,
@@ -75,11 +78,18 @@ workerPort.on("message", (request: ThreadMetadataHydrationWorkerRequest) => {
   try {
     const db = getDatabase(request.databasePath)
     if (request.type === "read-thread") {
+      const result = readThreadHydrationProjection(db, request)
+      if (
+        Buffer.byteLength(JSON.stringify(result.thread), "utf8") >
+        THREAD_METADATA_HYDRATION_MAX_THREAD_RESPONSE_BYTES
+      ) {
+        throw new Error("Thread metadata hydration response exceeded its hard byte ceiling")
+      }
       workerPort.postMessage({
         type: "read-thread-result",
         requestId: request.requestId,
         ok: true,
-        ...readThreadHydrationProjection(db, request)
+        ...result
       } satisfies ThreadMetadataHydrationWorkerResponse)
       return
     }

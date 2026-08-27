@@ -8,15 +8,13 @@ import {
 } from "../services/subagent-transcript-content-store"
 import {
   LegacySubagentMigrationCancelledError,
-  LegacySubagentMigrationParserClient
-} from "./parser-client"
-import type {
-  LegacySubagentMigrationRow,
-  LegacySubagentMigrationStats
+  type LegacySubagentMigrationRow,
+  type LegacySubagentMigrationStats
 } from "./protocol"
 
 const CHECKED_THREAD_LIMIT = 256
 const MAX_SNAPSHOT_RETRIES = 3
+export const LEGACY_SUBAGENT_MIGRATION_MAX_IN_FLIGHT = 32
 
 export interface LegacySubagentMigrationDatabase {
   insertBatch: typeof insertLegacyThreadSubagentManifestBatch
@@ -38,6 +36,24 @@ function yieldMainProcess(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve))
 }
 
+/** Keep the Vite `?nodeWorker` module out of unrelated standalone Node import
+ * graphs. The real parser is still created once, on the first migration. */
+class LazyLegacySubagentMigrationParser implements LegacySubagentMigrationParser {
+  private parserPromise: Promise<LegacySubagentMigrationParser> | undefined
+
+  parse(
+    threadId: string,
+    onBatch: (rows: readonly LegacySubagentMigrationRow[]) => Promise<void>,
+    signal?: AbortSignal
+  ): Promise<LegacySubagentMigrationStats> {
+    this.parserPromise ??= import("./parser-client").then(
+      ({ LegacySubagentMigrationParserClient }) =>
+        new LegacySubagentMigrationParserClient()
+    )
+    return this.parserPromise.then((parser) => parser.parse(threadId, onBatch, signal))
+  }
+}
+
 export class LegacySubagentMigrationCoordinator {
   private readonly checkedThreads = new Set<string>()
   private readonly inFlight = new Map<string, Promise<void>>()
@@ -45,7 +61,7 @@ export class LegacySubagentMigrationCoordinator {
 
   constructor(
     private readonly parser: LegacySubagentMigrationParser =
-      new LegacySubagentMigrationParserClient(),
+      new LazyLegacySubagentMigrationParser(),
     private readonly database: LegacySubagentMigrationDatabase = defaultDatabase,
     private readonly onReferenceMutation = advanceSubagentTranscriptReferenceEpoch,
     private readonly beginExternalMutation = beginSubagentTranscriptExternalMutation
@@ -55,6 +71,9 @@ export class LegacySubagentMigrationCoordinator {
     if (this.checkedThreads.has(threadId)) return Promise.resolve()
     const existing = this.inFlight.get(threadId)
     if (existing) return existing
+    if (this.inFlight.size >= LEGACY_SUBAGENT_MIGRATION_MAX_IN_FLIGHT) {
+      return Promise.reject(new Error("Legacy subagent migration capacity exceeded"))
+    }
     const controller = new AbortController()
     this.cancellation.set(threadId, controller)
     const migration = this.migrateWithExternalMutationBarrier(
@@ -148,7 +167,22 @@ export class LegacySubagentMigrationCoordinator {
   }
 }
 
-const defaultCoordinator = new LegacySubagentMigrationCoordinator()
+let defaultCoordinator = new LegacySubagentMigrationCoordinator()
+
+/** Standalone source tests do not run through Vite's `?nodeWorker` transform.
+ * Let those tests replace only this coordinator dependency without weakening
+ * the production worker boundary or adding runtime environment heuristics. */
+export function setLegacySubagentMigrationParserForTests(
+  parser: LegacySubagentMigrationParser
+): () => void {
+  const previous = defaultCoordinator
+  const replacement = new LegacySubagentMigrationCoordinator(parser)
+  defaultCoordinator = replacement
+  return () => {
+    replacement.cancelAll()
+    if (defaultCoordinator === replacement) defaultCoordinator = previous
+  }
+}
 
 export function ensureLegacySubagentTranscriptRows(threadId: string): Promise<void> {
   return defaultCoordinator.ensure(threadId)

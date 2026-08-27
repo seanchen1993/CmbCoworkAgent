@@ -160,4 +160,35 @@ describe("Harness knowledge preview worker client", () => {
     expect(workers).toHaveLength(0)
     await client.close()
   })
+
+  it("rejects a pending request when a worker exits cleanly and recovers next request", async () => {
+    const firstWorker = new FakeKnowledgePreviewWorker()
+    const replacement = new FakeKnowledgePreviewWorker()
+    const workers = [firstWorker, replacement]
+    const client = new HarnessKnowledgePreviewClient(
+      async () => workers.shift()! as unknown as Worker
+    )
+
+    const exited = client.read("adapter-a", "harness-knowledge:10:adapter-a", source)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    firstWorker.emit("exit", 0)
+    await expect(exited).rejects.toThrow("exited: 0")
+
+    const retried = client.read("adapter-a", "harness-knowledge:10:adapter-a", source)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    replacement.emit("message", {
+      type: "read-result",
+      requestId: replacement.request?.requestId,
+      ok: true,
+      result: {
+        adapterId: "adapter-a",
+        adapterName: "Adapter A",
+        configured: false,
+        exists: false,
+        files: []
+      }
+    })
+    await expect(retried).resolves.toMatchObject({ adapterId: "adapter-a" })
+    await client.close()
+  })
 })

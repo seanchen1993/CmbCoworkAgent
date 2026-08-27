@@ -185,6 +185,28 @@ describe("Harness catalog worker client", () => {
     await client.close()
   })
 
+  it("rejects pending work on a clean unexpected exit and restarts", async () => {
+    const firstWorker = new FakeCatalogWorker()
+    const replacement = new FakeCatalogWorker()
+    let starts = 0
+    const client = new HarnessCatalogClient(async () => {
+      starts += 1
+      return (starts === 1 ? firstWorker : replacement) as unknown as Worker
+    })
+
+    const exited = client.readProjectContexts(["first"], "renderer:clean-exit")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    firstWorker.emit("exit", 0)
+    await expect(exited).rejects.toThrow("exited: 0")
+
+    const retried = client.readProjectContexts(["second"], "renderer:clean-exit")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    resolveProjectContexts(replacement, 0, "second")
+    await expect(retried).resolves.toMatchObject({ projects: { second: null } })
+    expect(starts).toBe(2)
+    await client.close()
+  })
+
   it("terminates a worker that finishes starting during shutdown", async () => {
     const worker = new FakeCatalogWorker()
     let resolveWorker!: (worker: Worker) => void

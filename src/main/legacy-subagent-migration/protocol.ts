@@ -1,6 +1,15 @@
 export const LEGACY_SUBAGENT_MIGRATION_CANCELLED =
   "LEGACY_SUBAGENT_MIGRATION_CANCELLED"
 
+export class LegacySubagentMigrationCancelledError extends Error {
+  readonly code = LEGACY_SUBAGENT_MIGRATION_CANCELLED
+
+  constructor() {
+    super("Legacy subagent transcript migration was cancelled")
+    this.name = "LegacySubagentMigrationCancelledError"
+  }
+}
+
 export const LEGACY_SUBAGENT_MIGRATION_BATCH_ROWS = 16
 /** Hard ceilings for both the worker response and the synchronous main DB transaction. */
 export const LEGACY_SUBAGENT_MIGRATION_BATCH_BYTES = 256 * 1024

@@ -1,9 +1,21 @@
-import type { Worker } from "node:worker_threads"
-import type { WorkspaceFileScanEntry } from "../../shared/workspace-file-scan"
+import type { ResourceLimits, Worker } from "node:worker_threads"
+import {
+  WORKSPACE_FILE_SCAN_PAGE_MAX_BYTES,
+  WORKSPACE_FILE_SCAN_PAGE_MAX_ENTRIES,
+  type WorkspaceFileScanEntry
+} from "../../shared/workspace-file-scan"
 import type { WorkspaceFileScanWorkerResponse } from "./protocol"
 import { WORKSPACE_FILE_SCAN_CANCELLED } from "./protocol"
 
 type WorkerFactory = () => Promise<Worker>
+
+export const WORKSPACE_FILE_SCAN_WORKER_RESOURCE_LIMITS: ResourceLimits = {
+  maxOldGenerationSizeMb: 128,
+  maxYoungGenerationSizeMb: 16,
+  stackSizeMb: 4
+}
+export const WORKSPACE_FILE_SCAN_MAX_PATH_LENGTH = 32_768
+export const WORKSPACE_FILE_SCAN_MAX_CONTINUATION_LENGTH = 4_096
 
 interface PendingRequest {
   resolve: (
@@ -21,7 +33,10 @@ interface PendingRequest {
 
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./workspace-file-scan-worker?nodeWorker")
-  return module.default({ name: "workspace-file-scan" })
+  return module.default({
+    name: "workspace-file-scan",
+    resourceLimits: WORKSPACE_FILE_SCAN_WORKER_RESOURCE_LIMITS
+  })
 }
 
 export class WorkspaceFileScanSession {
@@ -32,6 +47,7 @@ export class WorkspaceFileScanSession {
   private readonly cancellation = new Int32Array(
     new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
   )
+  private requestInFlight = false
   private closed = false
 
   constructor(
@@ -84,7 +100,7 @@ export class WorkspaceFileScanSession {
       worker.on("message", this.handleMessage)
       worker.on("error", (error) => this.failWorker(worker, error))
       worker.on("exit", (code) => {
-        if (!this.closed && code !== 0) {
+        if (!this.closed) {
           this.failWorker(worker, new Error(`Workspace scan worker exited with code ${code}`))
         }
       })
@@ -124,19 +140,21 @@ export class WorkspaceFileScanSession {
         continuation?: string
       }
   > {
-    const worker = await this.getWorker()
-    if (this.closed) throw this.cancelledError()
-    const requestId = this.nextRequestId++
-    return new Promise<
-      | void
-      | {
-          files: WorkspaceFileScanEntry[]
-          done: boolean
-          truncated: boolean
-          continuation?: string
-        }
-    >(
-      (resolve, reject) => {
+    if (this.requestInFlight) throw new Error("Workspace file scan request already in progress")
+    this.requestInFlight = true
+    try {
+      const worker = await this.getWorker()
+      if (this.closed) throw this.cancelledError()
+      const requestId = this.nextRequestId++
+      return await new Promise<
+        | void
+        | {
+            files: WorkspaceFileScanEntry[]
+            done: boolean
+            truncated: boolean
+            continuation?: string
+          }
+      >((resolve, reject) => {
         this.pending.set(requestId, { resolve, reject })
         try {
           worker.postMessage({ ...payload, requestId })
@@ -144,11 +162,21 @@ export class WorkspaceFileScanSession {
           this.pending.delete(requestId)
           reject(error instanceof Error ? error : new Error(String(error)))
         }
-      }
-    )
+      })
+    } finally {
+      this.requestInFlight = false
+    }
   }
 
   async open(): Promise<void> {
+    if (
+      this.scanId.length === 0 ||
+      this.scanId.length > 256 ||
+      this.workspacePath.length === 0 ||
+      this.workspacePath.length > WORKSPACE_FILE_SCAN_MAX_PATH_LENGTH
+    ) {
+      throw new Error("Workspace file scan request exceeds its string limit")
+    }
     await this.request({
       type: "open",
       scanId: this.scanId,
@@ -167,6 +195,17 @@ export class WorkspaceFileScanSession {
     truncated: boolean
     continuation?: string
   }> {
+    if (
+      !Number.isSafeInteger(maxEntries) ||
+      maxEntries < 1 ||
+      maxEntries > WORKSPACE_FILE_SCAN_PAGE_MAX_ENTRIES ||
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 2 ||
+      maxBytes > WORKSPACE_FILE_SCAN_PAGE_MAX_BYTES ||
+      (continuation?.length ?? 0) > WORKSPACE_FILE_SCAN_MAX_CONTINUATION_LENGTH
+    ) {
+      throw new Error("Workspace file scan page exceeds its hard request budget")
+    }
     return (await this.request({
       type: "next",
       scanId: this.scanId,

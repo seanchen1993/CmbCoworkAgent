@@ -405,7 +405,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       _event,
       payload: { projectId: string; input: HarnessProjectMetadataUpdateInput }
     ): Promise<HarnessProjectMetadata> => {
-      const updated = updateHarnessProjectMetadata(payload.projectId, payload.input)
+      const updated = await updateHarnessProjectMetadata(payload.projectId, payload.input)
       // 编辑元数据（如 projectFromLean 切换）后立即补一次快照上报，否则改动要等下一轮
       // 20 分钟定时扫描才刷到运营面板。尽力而为：内部已 try/catch，不抛错、不阻断返回。
       void reportProjectSnapshotNow(payload.projectId)
@@ -416,7 +416,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:archiveProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
-      const archived = archiveHarnessProject(projectId)
+      const archived = await archiveHarnessProject(projectId)
       // 归档后立即补一次快照上报，让面板尽快反映「已归档」状态变更，无需等定时扫描。
       void reportProjectSnapshotNow(projectId)
       return archived
@@ -426,7 +426,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:deleteProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
-      const deleted = deleteHarnessProject(projectId)
+      const deleted = await deleteHarnessProject(projectId)
       // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
       // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
       void purgeProjectAnalytics(projectId)

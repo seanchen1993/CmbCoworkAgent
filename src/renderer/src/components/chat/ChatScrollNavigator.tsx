@@ -44,6 +44,9 @@ export interface ChatScrollNavigatorRenderProps {
 interface ChatScrollNavigatorProps {
   messages: Message[]
   questionStructureRevision: number
+  historyGapBeforeMessageId: string | null
+  canLoadReleasedHistory: boolean
+  onLoadReleasedHistoryWindow: () => void
   onRevealMessage: (messageId: string) => void
   scrollContainerRef: React.RefObject<HTMLDivElement | null>
   rightPanelCollapsed: boolean
@@ -440,30 +443,51 @@ interface ChatScrollQuestionProjection {
   userMessageIds: string[]
   userMessageIndexes: number[]
   questionIndexByMessageId: Map<string, number>
+  gapBeforeQuestionIndex: number | null
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function createChatScrollQuestionProjector(): (
   messages: Message[],
-  revision: number
+  revision: number,
+  gapBeforeMessageId?: string | null
 ) => ChatScrollQuestionProjection {
   let previousRevision = -1
+  let previousGapBeforeMessageId: string | null = null
   let projection: ChatScrollQuestionProjection | null = null
 
-  return (messages, revision) => {
-    if (projection && previousRevision === revision) return projection
+  return (messages, revision, gapBeforeMessageId = null) => {
+    if (
+      projection &&
+      previousRevision === revision &&
+      previousGapBeforeMessageId === gapBeforeMessageId
+    ) {
+      return projection
+    }
     const { questions, userMessageIndexes } = getChatScrollQuestions(messages)
     const userMessageIds = questions.map((question) => question.id)
     const questionIndexByMessageId = new Map(
       userMessageIds.map((messageId, index) => [messageId, index])
     )
+    const gapMessageIndex = gapBeforeMessageId
+      ? messages.findIndex((message) => message.id === gapBeforeMessageId)
+      : -1
+    let gapBeforeQuestionIndex: number | null = null
+    if (gapMessageIndex >= 0) {
+      gapBeforeQuestionIndex = userMessageIndexes.findIndex(
+        (messageIndex) => messageIndex >= gapMessageIndex
+      )
+      if (gapBeforeQuestionIndex < 0) gapBeforeQuestionIndex = questions.length
+    }
     projection = {
       questions,
       userMessageIds,
       userMessageIndexes,
-      questionIndexByMessageId
+      questionIndexByMessageId,
+      gapBeforeQuestionIndex
     }
     previousRevision = revision
+    previousGapBeforeMessageId = gapBeforeMessageId
     return projection
   }
 }
@@ -505,6 +529,9 @@ interface ChatScrollMarkerRailProps {
   questions: ChatScrollQuestion[]
   activeQuestionIndex: number
   onScrollToQuestionIndex: (index: number) => void
+  gapBeforeQuestionIndex?: number | null
+  canLoadReleasedHistory?: boolean
+  onLoadReleasedHistoryWindow?: () => void
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -515,7 +542,10 @@ export function areChatScrollMarkerRailPropsEqual(
   return (
     previous.questions === next.questions &&
     previous.activeQuestionIndex === next.activeQuestionIndex &&
-    previous.onScrollToQuestionIndex === next.onScrollToQuestionIndex
+    previous.onScrollToQuestionIndex === next.onScrollToQuestionIndex &&
+    previous.gapBeforeQuestionIndex === next.gapBeforeQuestionIndex &&
+    previous.canLoadReleasedHistory === next.canLoadReleasedHistory &&
+    previous.onLoadReleasedHistoryWindow === next.onLoadReleasedHistoryWindow
   )
 }
 
@@ -527,7 +557,10 @@ const CHAT_SCROLL_MARKER_WINDOW_SIZE = 120
 const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
   questions,
   activeQuestionIndex,
-  onScrollToQuestionIndex
+  onScrollToQuestionIndex,
+  gapBeforeQuestionIndex = null,
+  canLoadReleasedHistory = false,
+  onLoadReleasedHistoryWindow
 }: ChatScrollMarkerRailProps): React.JSX.Element {
   const wrapperRef = useRef<HTMLDivElement | null>(null)
   const buttonRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
@@ -637,6 +670,28 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
   )
   const markerQuestions = questions.slice(markerWindowStart, markerWindowEnd)
 
+  const renderReleasedHistoryMarker = (): ReactNode => (
+    <button
+      type="button"
+      data-chat-scroll-marker="released-history"
+      aria-label={
+        canLoadReleasedHistory
+          ? "中间提问尚未加载，继续读取"
+          : "中间提问尚未加载"
+      }
+      title={
+        canLoadReleasedHistory
+          ? "中间提问尚未加载，点击继续读取"
+          : "中间提问尚未加载，可返回最新消息"
+      }
+      disabled={!canLoadReleasedHistory || !onLoadReleasedHistoryWindow}
+      onClick={onLoadReleasedHistoryWindow}
+      className="flex h-5 w-full items-center justify-start rounded-lg pl-1 text-[#D97757] transition-colors hover:bg-foreground/6 disabled:cursor-default disabled:opacity-70"
+    >
+      <span className="w-[18px] border-t-2 border-dashed border-current" />
+    </button>
+  )
+
   const getRidgeDistance = (index: number): number | null => {
     if (hoveredIndex === null) return null
     const distance = Math.abs(index - hoveredIndex)
@@ -744,6 +799,9 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
               ···
             </button>
           )}
+          {gapBeforeQuestionIndex !== null && gapBeforeQuestionIndex <= markerWindowStart
+            ? renderReleasedHistoryMarker()
+            : null}
           {markerQuestions.map((question, markerIndex) => {
             const index = markerWindowStart + markerIndex
             const isActive = index === activeQuestionIndex
@@ -752,41 +810,50 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
             const lineWidth = getLineWidth(ridgeDistance)
             const lineHeight = ridgeDistance === 0 ? 3 : 2
             return (
-              <button
-                key={question.id}
-                type="button"
-                data-chat-scroll-marker=""
-                ref={(node) => {
-                  if (node) buttonRefs.current.set(index, node)
-                  else buttonRefs.current.delete(index)
-                }}
-                aria-label={`滚动到第 ${index + 1} 次提问${
-                  hasRequestedUserInput ? "，已触发请求用户输入" : ""
-                }`}
-                onClick={() => onScrollToQuestionIndex(index)}
-                onMouseEnter={() => openPopoverFor(index)}
-                onFocus={() => handleButtonFocus(index)}
-                onBlur={handleClose}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") handleClose()
-                }}
-                style={{ height: keyHeight }}
-                className="group relative flex w-full items-center justify-start rounded-lg pl-1 transition-colors duration-200 hover:bg-foreground/6 focus-visible:bg-foreground/10 focus-visible:outline-none dark:hover:bg-white/8"
-              >
-                <span
-                  style={{ width: lineWidth, height: lineHeight }}
-                  className={cn(
-                    "relative z-10 rounded-full transition-all duration-200 ease-out",
-                    ridgeDistance !== null
-                      ? "bg-foreground/80 dark:bg-white/85"
-                      : "bg-foreground/20 dark:bg-white/25",
-                    hasRequestedUserInput && "bg-[#eb31ba] dark:bg-[#2DD4BF]",
-                    isActive && "bg-[#D97757] dark:bg-[#E58A68]"
-                  )}
-                />
-              </button>
+              <div key={question.id} className="contents">
+                {gapBeforeQuestionIndex === index && index > markerWindowStart
+                  ? renderReleasedHistoryMarker()
+                  : null}
+                <button
+                  type="button"
+                  data-chat-scroll-marker=""
+                  ref={(node) => {
+                    if (node) buttonRefs.current.set(index, node)
+                    else buttonRefs.current.delete(index)
+                  }}
+                  aria-label={`滚动到第 ${index + 1} 次提问${
+                    hasRequestedUserInput ? "，已触发请求用户输入" : ""
+                  }`}
+                  onClick={() => onScrollToQuestionIndex(index)}
+                  onMouseEnter={() => openPopoverFor(index)}
+                  onFocus={() => handleButtonFocus(index)}
+                  onBlur={handleClose}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") handleClose()
+                  }}
+                  style={{ height: keyHeight }}
+                  className="group relative flex w-full items-center justify-start rounded-lg pl-1 transition-colors duration-200 hover:bg-foreground/6 focus-visible:bg-foreground/10 focus-visible:outline-none dark:hover:bg-white/8"
+                >
+                  <span
+                    style={{ width: lineWidth, height: lineHeight }}
+                    className={cn(
+                      "relative z-10 rounded-full transition-all duration-200 ease-out",
+                      ridgeDistance !== null
+                        ? "bg-foreground/80 dark:bg-white/85"
+                        : "bg-foreground/20 dark:bg-white/25",
+                      hasRequestedUserInput && "bg-[#eb31ba] dark:bg-[#2DD4BF]",
+                      isActive && "bg-[#D97757] dark:bg-[#E58A68]"
+                    )}
+                  />
+                </button>
+              </div>
             )
           })}
+          {gapBeforeQuestionIndex !== null &&
+          gapBeforeQuestionIndex >= markerWindowEnd &&
+          gapBeforeQuestionIndex > markerWindowStart
+            ? renderReleasedHistoryMarker()
+            : null}
           {markerWindowEnd < questions.length && (
             <button
               type="button"
@@ -829,6 +896,9 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
 export function ChatScrollNavigator({
   messages,
   questionStructureRevision,
+  historyGapBeforeMessageId,
+  canLoadReleasedHistory,
+  onLoadReleasedHistoryWindow,
   onRevealMessage,
   scrollContainerRef,
   rightPanelCollapsed,
@@ -844,9 +914,18 @@ export function ChatScrollNavigator({
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(-1)
 
   const [projectChatScrollQuestions] = useState(createChatScrollQuestionProjector)
-  const questionProjection = projectChatScrollQuestions(messages, questionStructureRevision)
-  const { questions, questionIndexByMessageId, userMessageIds, userMessageIndexes } =
-    questionProjection
+  const questionProjection = projectChatScrollQuestions(
+    messages,
+    questionStructureRevision,
+    historyGapBeforeMessageId
+  )
+  const {
+    questions,
+    questionIndexByMessageId,
+    userMessageIds,
+    userMessageIndexes,
+    gapBeforeQuestionIndex
+  } = questionProjection
   const userMessageIdsRef = useRef(userMessageIds)
   const onRevealMessageRef = useRef(onRevealMessage)
   const onScrollToQuestionRef = useRef(onScrollToQuestion)
@@ -1035,16 +1114,20 @@ export function ChatScrollNavigator({
   }, [getCurrentUserQuestionIndex, userMessageIds.length])
 
   const hasQuestions = questions.length > 0
-  const reserveLeftSpace = hasQuestions && !rightPanelCollapsed
+  const hasNavigationMarkers = hasQuestions || gapBeforeQuestionIndex !== null
+  const reserveLeftSpace = hasNavigationMarkers && !rightPanelCollapsed
 
   return (
     <>
       {children({ hasQuestions, reserveLeftSpace, setMessageRef, virtualRangeRef })}
-      {hasQuestions && (
+      {hasNavigationMarkers && (
         <ChatScrollMarkerRail
           questions={questions}
           activeQuestionIndex={activeQuestionIndex}
           onScrollToQuestionIndex={scrollToUserQuestionByIndex}
+          gapBeforeQuestionIndex={gapBeforeQuestionIndex}
+          canLoadReleasedHistory={canLoadReleasedHistory}
+          onLoadReleasedHistoryWindow={onLoadReleasedHistoryWindow}
         />
       )}
     </>

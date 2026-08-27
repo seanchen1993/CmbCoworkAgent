@@ -8,6 +8,9 @@ import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { SUBAGENT_TRANSCRIPT_STARTUP_TOTAL_BYTES } from "../../shared/subagent-transcript-storage"
 import {
+  SUBAGENT_TRANSCRIPT_STARTUP_MAX_WAITERS,
+  SUBAGENT_TRANSCRIPT_STARTUP_MAX_WORKERS,
+  SUBAGENT_TRANSCRIPT_STARTUP_WORKER_RESOURCE_LIMITS,
   SubagentTranscriptStartupCancelledError,
   SubagentTranscriptStartupClient
 } from "./client"
@@ -122,6 +125,54 @@ function createClient(databasePath: string): SubagentTranscriptStartupClient {
 }
 
 describe("subagent transcript startup worker", () => {
+  it("bounds worker creation/waiters and rejects a clean exit with pending work", async () => {
+    expect(SUBAGENT_TRANSCRIPT_STARTUP_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(128)
+    const workers: FakeStartupWorker[] = []
+    const client = new SubagentTranscriptStartupClient(async () => {
+      const worker = new FakeStartupWorker()
+      workers.push(worker)
+      return worker as unknown as Worker
+    })
+    const retained = Array.from(
+      { length: SUBAGENT_TRANSCRIPT_STARTUP_MAX_WORKERS + SUBAGENT_TRANSCRIPT_STARTUP_MAX_WAITERS },
+      (_, index) => client.read(`thread-${index}`).catch((error) => error)
+    )
+    await Promise.resolve()
+    expect(workers).toHaveLength(SUBAGENT_TRANSCRIPT_STARTUP_MAX_WORKERS)
+    await expect(client.read("overflow")).rejects.toThrow("capacity exceeded")
+
+    workers[0].emit("exit", 0)
+    const cleanExit = await retained[0]
+    expect(cleanExit).toBeInstanceOf(Error)
+    expect((cleanExit as Error).message).toContain("exited with code 0")
+    await client.close()
+    await Promise.all(retained)
+    expect(workers.every((worker) => worker.terminated)).toBe(true)
+  })
+
+  it("terminates the Worker and releases admission after dispatch throws", async () => {
+    const failedWorker = new FakeStartupWorker()
+    const retryWorker = new FakeStartupWorker()
+    const workers = [failedWorker, retryWorker]
+    failedWorker.postError = new Error("dispatch failed")
+    const client = new SubagentTranscriptStartupClient(
+      async () => workers.shift() as unknown as Worker
+    )
+
+    await expect(client.read("dispatch-failure")).rejects.toThrow("dispatch failed")
+    expect(failedWorker.terminated).toBe(true)
+    expect(workers).toHaveLength(1)
+
+    const retry = client.read("dispatch-retry")
+    for (let attempt = 0; attempt < 10 && retryWorker.postCount === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    expect(retryWorker.postCount).toBe(1)
+    retryWorker.emit("exit", 0)
+    await expect(retry).rejects.toThrow("exited with code 0")
+    await client.close()
+  })
+
   it("parses/projects a 20MiB manifest off main and returns a hard-bounded response", async () => {
     const client = createClient(createDatabase())
     const originalJsonParse = JSON.parse
@@ -179,3 +230,25 @@ describe("subagent transcript startup worker", () => {
     await client.close()
   }, 30_000)
 })
+
+class FakeStartupWorker extends EventEmitter {
+  terminated = false
+  postError: Error | null = null
+  postCount = 0
+
+  postMessage(): void {
+    if (this.postError) throw this.postError
+    this.postCount += 1
+    return undefined
+  }
+
+  unref(): this {
+    return this
+  }
+
+  terminate(): Promise<number> {
+    this.terminated = true
+    return Promise.resolve(0)
+  }
+}
+import { EventEmitter } from "node:events"

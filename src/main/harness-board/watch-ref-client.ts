@@ -7,6 +7,7 @@ import {
   type HarnessWatchRefInstalledEvent,
   type HarnessWatchRefWorkerResponse
 } from "./watch-ref-protocol"
+import { harnessWorkerOptions } from "./worker-limits"
 
 type WatchRefWorkerFactory = () => Promise<Worker>
 
@@ -27,7 +28,7 @@ export interface HarnessWatchRefClientHandlers {
 
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./watch-ref-worker?nodeWorker")
-  return module.default({ name: "harness-watch-refs" })
+  return module.default(harnessWorkerOptions("harness-watch-refs"))
 }
 
 export class HarnessWatchRefWorkerClient {
@@ -35,6 +36,7 @@ export class HarnessWatchRefWorkerClient {
   private workerPromise: Promise<Worker> | null = null
   private nextGeneration = 1
   private closing = false
+  private restartTimer: ReturnType<typeof setTimeout> | null = null
   private readonly desiredScopes = new Map<string, DesiredScope>()
 
   constructor(
@@ -51,10 +53,38 @@ export class HarnessWatchRefWorkerClient {
     else this.handlers.onInstalled?.(response)
   }
 
+  private postDesiredScope(worker: Worker, desired: DesiredScope): void {
+    worker.postMessage({
+      type: "start",
+      scopeKey: desired.scopeKey,
+      generation: desired.generation,
+      workspacePath: desired.workspacePath,
+      refs: desired.refs,
+      ...(desired.attributionTarget ? { attributionTarget: desired.attributionTarget } : {}),
+      cancelBuffer: desired.cancelFlag.buffer
+    })
+  }
+
+  private scheduleRestart(): void {
+    if (this.closing || this.desiredScopes.size === 0 || this.restartTimer) return
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null
+      void this.getWorker()
+        .then((worker) => {
+          for (const desired of this.desiredScopes.values()) {
+            this.postDesiredScope(worker, desired)
+          }
+        })
+        .catch(() => this.scheduleRestart())
+    }, 100)
+    this.restartTimer.unref()
+  }
+
   private failWorker(worker: Worker): void {
     if (this.worker !== worker) return
     this.worker = null
     this.workerPromise = null
+    this.scheduleRestart()
   }
 
   private getWorker(): Promise<Worker> {
@@ -108,17 +138,9 @@ export class HarnessWatchRefWorkerClient {
     void this.getWorker()
       .then((worker) => {
         if (this.desiredScopes.get(scopeKey) !== desired || this.closing) return
-        worker.postMessage({
-          type: "start",
-          scopeKey,
-          generation,
-          workspacePath,
-          refs: desired.refs,
-          ...(attributionTarget ? { attributionTarget } : {}),
-          cancelBuffer
-        })
+        this.postDesiredScope(worker, desired)
       })
-      .catch(() => undefined)
+      .catch(() => this.scheduleRestart())
   }
 
   stop(scopeKey: string): void {
@@ -154,6 +176,8 @@ export class HarnessWatchRefWorkerClient {
   async close(): Promise<void> {
     if (this.closing) return
     this.closing = true
+    if (this.restartTimer) clearTimeout(this.restartTimer)
+    this.restartTimer = null
     this.stopAll()
     const startingWorker = this.workerPromise
     const worker = this.worker ?? (startingWorker ? await startingWorker.catch(() => null) : null)

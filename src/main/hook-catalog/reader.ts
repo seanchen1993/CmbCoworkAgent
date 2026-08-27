@@ -33,10 +33,12 @@ import {
   HOOK_CATALOG_MAX_FILES,
   HOOK_CATALOG_MAX_PAGE_SIZE,
   HOOK_CATALOG_MAX_RESPONSE_BYTES,
+  HOOK_CATALOG_MAX_SNAPSHOT_BYTES,
   HOOK_CATALOG_MAX_SKILLS,
   HOOK_CATALOG_MAX_SKILL_MD_BYTES,
   HOOK_CATALOG_MAX_STORE_BYTES,
   HOOK_CATALOG_MAX_TOTAL_READ_BYTES,
+  HOOK_CATALOG_MAX_WORKSPACE_SNAPSHOT_BYTES,
   type HookCatalogSourceConfig
 } from "./protocol"
 
@@ -48,8 +50,16 @@ const MAX_PATH_TEXT = 4_096
 const MAX_ID_TEXT = 4_096
 const MAX_HOOKS_PER_FILE = 512
 const MAX_PLUGINS = 10_000
+const MAX_PLUGIN_SKILL_SOURCES = 64
+const MAX_PLUGIN_SKILL_SOURCE_PROBES = 10_000
 const SNAPSHOT_TTL_MS = 2 * 60_000
-const MAX_SNAPSHOTS = 4
+// Production has one stable global source key. Three slots still tolerate
+// alternate/test roots while leaving headroom for V8 expansion and scans.
+const MAX_SNAPSHOTS = 3
+// Workspace overlays are smaller but can vary on every thread switch. Bound
+// their cross-workspace LRU to 3 (3 * 2 MiB) rather than retaining 4 roots.
+const MAX_WORKSPACE_SNAPSHOTS = 3
+const MAX_WORKSPACE_ENTRIES = 1_024
 
 type Entry =
   | { source: "global"; hook: HookConfig }
@@ -69,17 +79,47 @@ interface BuildContext {
   stats: MutableStats
   truncatedReasons: Set<string>
   entries: Entry[]
+  entryLimit: number
+  snapshotBytes: number
+  snapshotByteLimit: number
+  retentionExhausted: boolean
+  pluginSkillSourceProbes: number
 }
 
-interface CatalogSnapshot {
+interface GlobalCatalogSnapshot {
   id: string
-  key?: string
+  key: string
+  sourceKey: string
+  entries: Entry[]
+  globalHookEntries: number
+  enabledEntries: number
+  relatedSummary: HookCatalogPage["relatedSummary"]
+  truncated: boolean
+  truncatedReasons: string[]
+  stats: Omit<HookCatalogPageStats, "durationMs" | "responseBytes" | "globalScanReused" | "workspaceScanReused">
+  expiresAt: number
+}
+
+interface WorkspaceCatalogSnapshot {
+  id: string
+  key: string
+  sourceKey: string
   entries: Entry[]
   enabledEntries: number
   truncated: boolean
   truncatedReasons: string[]
-  stats: HookCatalogPageStats
+  stats: Omit<HookCatalogPageStats, "durationMs" | "responseBytes" | "globalScanReused" | "workspaceScanReused">
   expiresAt: number
+}
+
+interface CatalogSnapshotBuild<T> {
+  snapshot: T
+  reused: boolean
+  durationMs: number
+}
+
+interface CatalogDiscoveredSkill extends DiscoveredSkill {
+  content: string
 }
 
 interface SkillSource {
@@ -91,8 +131,12 @@ interface SkillSource {
   respectDisabled: boolean
 }
 
-const snapshots = new Map<string, CatalogSnapshot>()
-const snapshotIdByKey = new Map<string, string>()
+const globalSnapshots = new Map<string, GlobalCatalogSnapshot>()
+const globalSnapshotIdByKey = new Map<string, string>()
+const latestGlobalSnapshotIdBySource = new Map<string, string>()
+const workspaceSnapshots = new Map<string, WorkspaceCatalogSnapshot>()
+const workspaceSnapshotIdByKey = new Map<string, string>()
+const latestWorkspaceSnapshotIdBySource = new Map<string, string>()
 let nextSnapshotId = 1
 
 export class HookCatalogCancelledError extends Error {
@@ -123,31 +167,61 @@ function markTruncated(context: BuildContext, reason: string): void {
   context.truncatedReasons.add(reason)
 }
 
-function deleteSnapshot(id: string): void {
-  const snapshot = snapshots.get(id)
-  if (snapshot?.key && snapshotIdByKey.get(snapshot.key) === id) {
-    snapshotIdByKey.delete(snapshot.key)
+function deleteGlobalSnapshot(id: string): void {
+  const snapshot = globalSnapshots.get(id)
+  if (snapshot && globalSnapshotIdByKey.get(snapshot.key) === id) {
+    globalSnapshotIdByKey.delete(snapshot.key)
   }
-  snapshots.delete(id)
+  if (snapshot && latestGlobalSnapshotIdBySource.get(snapshot.sourceKey) === id) {
+    latestGlobalSnapshotIdBySource.delete(snapshot.sourceKey)
+  }
+  globalSnapshots.delete(id)
+}
+
+function deleteWorkspaceSnapshot(id: string): void {
+  const snapshot = workspaceSnapshots.get(id)
+  if (snapshot && workspaceSnapshotIdByKey.get(snapshot.key) === id) {
+    workspaceSnapshotIdByKey.delete(snapshot.key)
+  }
+  if (snapshot && latestWorkspaceSnapshotIdBySource.get(snapshot.sourceKey) === id) {
+    latestWorkspaceSnapshotIdBySource.delete(snapshot.sourceKey)
+  }
+  workspaceSnapshots.delete(id)
 }
 
 function trimExpiredSnapshots(): void {
   const now = Date.now()
-  for (const [id, snapshot] of snapshots) {
-    if (snapshot.expiresAt <= now) deleteSnapshot(id)
+  for (const [id, snapshot] of globalSnapshots) {
+    if (snapshot.expiresAt <= now) deleteGlobalSnapshot(id)
   }
-  while (snapshots.size > MAX_SNAPSHOTS) {
-    const oldest = snapshots.keys().next().value as string | undefined
+  for (const [id, snapshot] of workspaceSnapshots) {
+    if (snapshot.expiresAt <= now) deleteWorkspaceSnapshot(id)
+  }
+  while (globalSnapshots.size > MAX_SNAPSHOTS) {
+    const oldest = globalSnapshots.keys().next().value as string | undefined
     if (!oldest) break
-    deleteSnapshot(oldest)
+    deleteGlobalSnapshot(oldest)
+  }
+  while (workspaceSnapshots.size > MAX_WORKSPACE_SNAPSHOTS) {
+    const oldest = workspaceSnapshots.keys().next().value as string | undefined
+    if (!oldest) break
+    deleteWorkspaceSnapshot(oldest)
   }
 }
 
-function reserveSnapshotSlot(): void {
-  while (snapshots.size >= MAX_SNAPSHOTS) {
-    const oldest = snapshots.keys().next().value as string | undefined
+function reserveGlobalSnapshotSlot(): void {
+  while (globalSnapshots.size >= MAX_SNAPSHOTS) {
+    const oldest = globalSnapshots.keys().next().value as string | undefined
     if (!oldest) break
-    deleteSnapshot(oldest)
+    deleteGlobalSnapshot(oldest)
+  }
+}
+
+function reserveWorkspaceSnapshotSlot(): void {
+  while (workspaceSnapshots.size >= MAX_WORKSPACE_SNAPSHOTS) {
+    const oldest = workspaceSnapshots.keys().next().value as string | undefined
+    if (!oldest) break
+    deleteWorkspaceSnapshot(oldest)
   }
 }
 
@@ -157,6 +231,21 @@ function safeSlice(value: string, max: number): string {
   const code = value.charCodeAt(end - 1)
   if (code >= 0xd800 && code <= 0xdbff) end -= 1
   return value.slice(0, end)
+}
+
+function fileHookDates(path: string): Pick<HookConfig, "createdAt" | "updatedAt"> {
+  try {
+    const stats = statSync(path)
+    const birthtime = stats.birthtime.getTime() > 0 ? stats.birthtime : stats.ctime
+    return {
+      createdAt: Number.isFinite(birthtime.getTime()) ? birthtime.toISOString() : "",
+      updatedAt: Number.isFinite(stats.mtime.getTime()) ? stats.mtime.toISOString() : ""
+    }
+  } catch {
+    // The file may disappear between reading and stat. An empty value renders
+    // as unavailable instead of fabricating a fresh timestamp on every scan.
+    return { createdAt: "", updatedAt: "" }
+  }
 }
 
 function boundedString(
@@ -626,19 +715,23 @@ function projectHook(context: BuildContext, hook: HookConfig): HookConfig | null
 
 function pushEntry(context: BuildContext, entry: Entry): void {
   checkCancelled(context)
-  if (context.entries.length >= HOOK_CATALOG_MAX_ENTRIES) {
+  if (context.retentionExhausted) return
+  if (context.entries.length >= context.entryLimit) {
     markTruncated(context, "entry-count")
+    context.retentionExhausted = true
     return
   }
   const projected = projectHook(context, entry.hook)
   if (!projected) return
+  let projectedEntry: Entry
   if (entry.source === "global" || entry.source === "workspace") {
-    context.entries.push({ source: entry.source, hook: projected })
-    return
-  }
-  if (entry.source === "plugin") {
+    projectedEntry =
+      entry.source === "global"
+        ? { source: "global", hook: projected }
+        : { source: "workspace", hook: projected }
+  } else if (entry.source === "plugin") {
     const hook = entry.hook
-    context.entries.push({
+    projectedEntry = {
       source: "plugin",
       hook: {
         ...projected,
@@ -648,23 +741,31 @@ function pushEntry(context: BuildContext, entry: Entry): void {
         pluginEnabled: hook.pluginEnabled,
         hookPath: safeSlice(hook.hookPath, MAX_PATH_TEXT)
       }
-    })
+    }
+  } else {
+    const hook = entry.hook
+    projectedEntry = {
+      source: "skill",
+      hook: {
+        ...projected,
+        skillName: safeSlice(hook.skillName, 1_024),
+        skillPath: safeSlice(hook.skillPath, MAX_PATH_TEXT),
+        skillRoot: safeSlice(hook.skillRoot, MAX_PATH_TEXT),
+        hookPath: safeSlice(hook.hookPath, MAX_PATH_TEXT),
+        ...(hook.pluginId ? { pluginId: safeSlice(hook.pluginId, 1_024) } : {}),
+        ...(hook.pluginName ? { pluginName: safeSlice(hook.pluginName, 1_024) } : {}),
+        ...(hook.pluginRoot ? { pluginRoot: safeSlice(hook.pluginRoot, MAX_PATH_TEXT) } : {})
+      }
+    }
+  }
+  const projectedBytes = Buffer.byteLength(JSON.stringify(projectedEntry), "utf8") + 16
+  if (context.snapshotBytes + projectedBytes > context.snapshotByteLimit) {
+    markTruncated(context, "snapshot-bytes")
+    context.retentionExhausted = true
     return
   }
-  const hook = entry.hook
-  context.entries.push({
-    source: "skill",
-    hook: {
-      ...projected,
-      skillName: safeSlice(hook.skillName, 1_024),
-      skillPath: safeSlice(hook.skillPath, MAX_PATH_TEXT),
-      skillRoot: safeSlice(hook.skillRoot, MAX_PATH_TEXT),
-      hookPath: safeSlice(hook.hookPath, MAX_PATH_TEXT),
-      ...(hook.pluginId ? { pluginId: safeSlice(hook.pluginId, 1_024) } : {}),
-      ...(hook.pluginName ? { pluginName: safeSlice(hook.pluginName, 1_024) } : {}),
-      ...(hook.pluginRoot ? { pluginRoot: safeSlice(hook.pluginRoot, MAX_PATH_TEXT) } : {})
-    }
-  })
+  context.entries.push(projectedEntry)
+  context.snapshotBytes += projectedBytes
 }
 
 function parsePlugins(source: HookCatalogSourceConfig, context: BuildContext): PluginMetadata[] {
@@ -683,8 +784,10 @@ function parsePlugins(source: HookCatalogSourceConfig, context: BuildContext): P
 function parseGlobalHooks(source: HookCatalogSourceConfig, context: BuildContext): void {
   const parsed = readJson(source.globalHooksPath, HOOK_CATALOG_MAX_FILE_BYTES, context, "global-hook-file-bytes")
   if (parsed === null) return
-  const now = new Date().toISOString()
-  for (const hook of parseHookDocument(parsed, "global", { enabled: true, createdAt: now, updatedAt: now }, {
+  for (const hook of parseHookDocument(parsed, "global", {
+    enabled: true,
+    ...fileHookDates(source.globalHooksPath)
+  }, {
     requireNativeId: true
   })) {
     pushEntry(context, { source: "global", hook })
@@ -701,6 +804,7 @@ function safePluginPath(root: string, relativePath: string): string | null {
 function parsePluginHooks(plugins: PluginMetadata[], context: BuildContext): void {
   for (const plugin of plugins) {
     checkCancelled(context)
+    if (context.retentionExhausted) break
     if (!plugin.enabled || (plugin.hookCount ?? 0) <= 0) continue
     const relativePath = plugin.hookPath ?? DEFAULT_PLUGIN_HOOKS_PATH
     const path = safePluginPath(plugin.path, relativePath)
@@ -710,7 +814,7 @@ function parsePluginHooks(plugins: PluginMetadata[], context: BuildContext): voi
     }
     const parsed = readJson(path, HOOK_CATALOG_MAX_FILE_BYTES, context, "plugin-hook-file-bytes")
     if (parsed === null) continue
-    const meta = { enabled: plugin.enabled, createdAt: plugin.createdAt, updatedAt: plugin.updatedAt }
+    const meta = { enabled: plugin.enabled, ...fileHookDates(path) }
     for (const hook of parseHookDocument(parsed, `plugin:${plugin.id}`, meta, {
       nativeId: (raw, index) => `plugin:${plugin.id}/${typeof raw.id === "string" ? raw.id : index}`,
       nativeFallbackForCommand: true,
@@ -758,6 +862,15 @@ function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): Skil
   const result: SkillSource[] = []
   const seen = new Set<string>()
   const add = (relativePath: string, maxDepth?: number): void => {
+    if (context.pluginSkillSourceProbes >= MAX_PLUGIN_SKILL_SOURCE_PROBES) {
+      markTruncated(context, "plugin-skill-source-count")
+      return
+    }
+    context.pluginSkillSourceProbes += 1
+    if (result.length >= MAX_PLUGIN_SKILL_SOURCES) {
+      markTruncated(context, "plugin-skill-source-count")
+      return
+    }
     const normalized = normalizePluginRelativePath(relativePath)
     if (!normalized) return
     const path = safePluginPath(plugin.path, normalized)
@@ -777,7 +890,10 @@ function pluginSkillSources(plugin: PluginMetadata, context: BuildContext): Skil
   const manifest = readPluginManifest(plugin.path, context)
   const rawSkills = manifest?.skills
   const declared = typeof rawSkills === "string" ? [rawSkills] : Array.isArray(rawSkills) ? rawSkills : []
-  for (const value of declared) {
+  if (declared.length > MAX_PLUGIN_SKILL_SOURCES) {
+    markTruncated(context, "plugin-skill-source-count")
+  }
+  for (const value of declared.slice(0, MAX_PLUGIN_SKILL_SOURCES)) {
     if (typeof value === "string") add(value)
   }
   const hasRootSkill = existsSync(join(plugin.path, "SKILL.md"))
@@ -791,8 +907,8 @@ function sortedDirectories(entries: Dirent[]): Dirent[] {
   return entries.filter((entry) => entry.isDirectory()).sort((a, b) => a.name.localeCompare(b.name))
 }
 
-function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredSkill[] {
-  const result: DiscoveredSkill[] = []
+function discoverSkills(source: SkillSource, context: BuildContext): CatalogDiscoveredSkill[] {
+  const result: CatalogDiscoveredSkill[] = []
   const maxDepth = source.maxDepth ?? 3
   const stack: Array<{ path: string; depth: number }> = [{ path: source.sourceDir, depth: 0 }]
   while (stack.length > 0) {
@@ -820,7 +936,8 @@ function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredS
         rootDir: current.path,
         skillMdPath,
         relativePath,
-        depth: current.depth
+        depth: current.depth,
+        content
       })
       context.stats.discoveredSkills += 1
     }
@@ -840,7 +957,7 @@ function discoverSkills(source: SkillSource, context: BuildContext): DiscoveredS
 
 function disabledSkillIds(
   source: HookCatalogSourceConfig,
-  globalSkills: DiscoveredSkill[],
+  globalSkills: CatalogDiscoveredSkill[],
   context: BuildContext
 ): Set<string> {
   const parsed = readJson(source.disabledSkillsPath, HOOK_CATALOG_MAX_FILE_BYTES, context, "disabled-skills-bytes")
@@ -851,7 +968,7 @@ function disabledSkillIds(
 }
 
 function isDiscoveredSkillIdDisabled(
-  skill: DiscoveredSkill,
+  skill: CatalogDiscoveredSkill,
   disabledIds: ReadonlySet<string>
 ): boolean {
   const id = getDiscoveredSkillId(skill)
@@ -865,9 +982,9 @@ function isDiscoveredSkillIdDisabled(
 }
 
 function skillFrontmatterHooks(
-  skill: DiscoveredSkill,
+  skill: CatalogDiscoveredSkill,
   content: string,
-  now: string
+  dates: Pick<HookConfig, "createdAt" | "updatedAt">
 ): HookConfig[] {
   const hooksRaw = parseSkillFrontmatter(content).frontmatter.hooks
   if (!isRecord(hooksRaw)) return []
@@ -876,17 +993,16 @@ function skillFrontmatterHooks(
   return parseHookDocument(
     hooksRaw,
     `skill:${skill.name}/SKILL.md`,
-    { enabled: true, createdAt: now, updatedAt: now },
+    { enabled: true, ...dates },
     { defaultSkillMatcher: skill.name }
   )
 }
 
 function parseSkillHooks(
-  skill: DiscoveredSkill,
+  skill: CatalogDiscoveredSkill,
   source: SkillSource,
   context: BuildContext
 ): void {
-  const now = new Date().toISOString()
   const add = (hookPath: string, hooks: HookConfig[]): void => {
     for (const hook of hooks) {
       pushEntry(context, {
@@ -907,11 +1023,10 @@ function parseSkillHooks(
       })
     }
   }
-  const skillMd = readBoundedText(skill.skillMdPath, HOOK_CATALOG_MAX_SKILL_MD_BYTES, context, {
-    allowPrefix: true,
-    reason: "skill-md-bytes"
-  })
-  if (skillMd !== null) add(skill.skillMdPath, skillFrontmatterHooks(skill, skillMd, now))
+  add(
+    skill.skillMdPath,
+    skillFrontmatterHooks(skill, skill.content, fileHookDates(skill.skillMdPath))
+  )
 
   for (const relativePath of SKILL_HOOK_FILES) {
     const path = join(skill.rootDir, relativePath)
@@ -922,7 +1037,7 @@ function parseSkillHooks(
       : `skill:${skill.name}/${relativePath}`
     add(
       path,
-      parseHookDocument(parsed, idPrefix, { enabled: true, createdAt: now, updatedAt: now }, {
+      parseHookDocument(parsed, idPrefix, { enabled: true, ...fileHookDates(path) }, {
         defaultSkillMatcher: skill.name,
         nativeFallbackForCommand: true,
         preserveNativeDates: false,
@@ -940,7 +1055,7 @@ function parseAllSkillHooks(
   source: HookCatalogSourceConfig,
   plugins: PluginMetadata[],
   context: BuildContext
-): void {
+): Pick<HookCatalogPage["relatedSummary"], "skillEntries" | "enabledSkillEntries"> {
   const globalSources: SkillSource[] = source.skillSourceDirs.slice(0, 16).map((sourceDir) => ({
     sourceDir,
     respectDisabled: true
@@ -955,7 +1070,14 @@ function parseAllSkillHooks(
     globalDiscovered.flatMap((entry) => entry.skills),
     context
   )
-  const pluginSources = plugins.flatMap((plugin) => pluginSkillSources(plugin, context))
+  const localSkillsById = new Map<string, CatalogDiscoveredSkill>()
+  for (const { skills } of globalDiscovered) {
+    for (const skill of skills) {
+      const id = getDiscoveredSkillId(skill)
+      if (id) localSkillsById.set(id, skill)
+    }
+  }
+  const pluginSkillIds = new Set<string>()
   const seen = new Set<string>()
   for (const { source: skillSource, skills } of globalDiscovered) {
     for (const skill of skills) {
@@ -964,17 +1086,39 @@ function parseAllSkillHooks(
       const key = process.platform === "win32" ? skill.rootDir.toLowerCase() : skill.rootDir
       if (seen.has(key)) continue
       seen.add(key)
-      parseSkillHooks(skill, skillSource, context)
+      if (!context.retentionExhausted) parseSkillHooks(skill, skillSource, context)
     }
   }
-  for (const skillSource of pluginSources) {
-    for (const skill of discoverSkills(skillSource, context)) {
-      checkCancelled(context)
-      const key = process.platform === "win32" ? skill.rootDir.toLowerCase() : skill.rootDir
-      if (seen.has(key)) continue
-      seen.add(key)
-      parseSkillHooks(skill, skillSource, context)
+  // Process plugin sources one plugin at a time. Materializing every declared
+  // source first can create hundreds of thousands of objects before the
+  // directory/file limits have a chance to stop a hostile catalog.
+  for (const plugin of plugins) {
+    if (context.pluginSkillSourceProbes >= MAX_PLUGIN_SKILL_SOURCE_PROBES) {
+      markTruncated(context, "plugin-skill-source-count")
+      break
     }
+    for (const skillSource of pluginSkillSources(plugin, context)) {
+      for (const skill of discoverSkills(skillSource, context)) {
+        checkCancelled(context)
+        const id = getDiscoveredSkillId(skill)
+        if (id && skillSource.pluginId) {
+          pluginSkillIds.add(`${skillSource.pluginId}:${id}`)
+        }
+        const key = process.platform === "win32" ? skill.rootDir.toLowerCase() : skill.rootDir
+        if (seen.has(key)) continue
+        seen.add(key)
+        if (!context.retentionExhausted) parseSkillHooks(skill, skillSource, context)
+      }
+    }
+  }
+  const enabledLocalSkills = [...localSkillsById.values()].reduce(
+    (count, skill) => count + Number(!isDiscoveredSkillIdDisabled(skill, disabled)),
+    0
+  )
+  return {
+    skillEntries: localSkillsById.size + pluginSkillIds.size,
+    // Disabled standalone ids never suppress a plugin-owned same-name skill.
+    enabledSkillEntries: enabledLocalSkills + pluginSkillIds.size
   }
 }
 
@@ -987,20 +1131,20 @@ function parseWorkspaceHooks(source: HookCatalogSourceConfig, context: BuildCont
   } catch {
     return
   }
-  const now = new Date().toISOString()
   for (const file of files) {
     checkCancelled(context)
+    if (context.retentionExhausted) break
     const path = join(directory, file)
     const parsed = readJson(path, HOOK_CATALOG_MAX_FILE_BYTES, context, "workspace-hook-file-bytes")
     if (parsed === null) continue
     const base = file.replace(/\.json$/, "")
+    const dates = fileHookDates(path)
     const format = detectHooksFileFormat(parsed)
     let hooks: HookConfig[] = []
     if (format === "cc_plugin" || format === "cc_settings") {
       hooks = parseHookDocument(parsed, `ws:${base}`, {
         enabled: true,
-        createdAt: now,
-        updatedAt: now
+        ...dates
       })
     } else if (isRecord(parsed) && isSupportedHookEvent(parsed.event)) {
       const type =
@@ -1017,7 +1161,7 @@ function parseWorkspaceHooks(source: HookCatalogSourceConfig, context: BuildCont
         const hook = nativeHook(
           { ...parsed, type },
           `ws:${base}`,
-          { enabled: true, createdAt: now, updatedAt: now },
+          { enabled: true, ...dates },
           { fallbackForCommand: true, preserveRawDates: false }
         )
         if (hook) hooks = [hook]
@@ -1037,47 +1181,159 @@ function parseWorkspaceHooks(source: HookCatalogSourceConfig, context: BuildCont
   }
 }
 
-function snapshotKey(source: HookCatalogSourceConfig, revision: string): string {
+function normalizedCachePath(value: string): string {
+  const normalized = resolve(value).replace(/\\/g, "/")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function globalSnapshotSourceKey(source: HookCatalogSourceConfig): string {
   return JSON.stringify([
-    source.openworkDir,
-    source.globalHooksPath,
-    source.pluginsStorePath,
-    source.disabledSkillsPath,
-    source.skillSourceDirs,
-    source.workspacePath ?? "",
-    revision
+    normalizedCachePath(source.openworkDir),
+    normalizedCachePath(source.globalHooksPath),
+    normalizedCachePath(source.pluginsStorePath),
+    normalizedCachePath(source.disabledSkillsPath),
+    source.skillSourceDirs.map(normalizedCachePath)
   ])
 }
 
-function buildSnapshot(
+const SKILL_SUMMARY_TRUNCATION_REASONS = new Set([
+  "directory-count",
+  "disabled-skill-count",
+  "disabled-skills-bytes",
+  "file-count",
+  "plugin-count",
+  "plugin-manifest-bytes",
+  "plugin-skill-source-count",
+  "plugins-store-bytes",
+  "skill-count",
+  "skill-md-bytes",
+  "skill-source-count",
+  "total-read-bytes"
+])
+const PLUGIN_SUMMARY_TRUNCATION_REASONS = new Set([
+  "file-count",
+  "plugin-count",
+  "plugins-store-bytes",
+  "total-read-bytes"
+])
+
+function relatedTruncationReasons(
+  reasons: ReadonlySet<string>,
+  allowed: ReadonlySet<string>
+): string[] {
+  return [...reasons].filter((reason) => allowed.has(reason))
+}
+
+function buildGlobalSnapshot(
   source: HookCatalogSourceConfig,
-  input: HookCatalogPageInput,
   cancelFlag?: Int32Array
-): CatalogSnapshot {
+): CatalogSnapshotBuild<GlobalCatalogSnapshot> {
   trimExpiredSnapshots()
-  const key = input.revision ? snapshotKey(source, input.revision) : undefined
-  const cachedId = key ? snapshotIdByKey.get(key) : undefined
-  const cached = cachedId ? snapshots.get(cachedId) : undefined
-  if (cached && cached.expiresAt > Date.now()) return cached
-  reserveSnapshotSlot()
+  const sourceKey = globalSnapshotSourceKey(source)
+  const key = JSON.stringify([sourceKey, source.globalRevision])
+  const cachedId = globalSnapshotIdByKey.get(key)
+  const cached = cachedId ? globalSnapshots.get(cachedId) : undefined
+  if (cached && cached.expiresAt > Date.now()) {
+    return { snapshot: cached, reused: true, durationMs: 0 }
+  }
+  const previousId = latestGlobalSnapshotIdBySource.get(sourceKey)
+  if (previousId) deleteGlobalSnapshot(previousId)
+  reserveGlobalSnapshotSlot()
 
   const startedAt = performance.now()
   const context: BuildContext = {
     cancelFlag,
     stats: { scannedDirectories: 0, scannedFiles: 0, discoveredSkills: 0, readBytes: 0 },
     truncatedReasons: new Set<string>(),
-    entries: []
+    entries: [],
+    entryLimit: HOOK_CATALOG_MAX_ENTRIES,
+    snapshotBytes: 0,
+    snapshotByteLimit: HOOK_CATALOG_MAX_SNAPSHOT_BYTES,
+    retentionExhausted: false,
+    pluginSkillSourceProbes: 0
   }
   parseGlobalHooks(source, context)
-  parseWorkspaceHooks(source, context)
+  const globalHookEntries = context.entries.length
   const plugins = parsePlugins(source, context)
   parsePluginHooks(plugins, context)
-  parseAllSkillHooks(source, plugins, context)
+  const skillSummary = parseAllSkillHooks(source, plugins, context)
   checkCancelled(context)
-  const id = `${Date.now().toString(36)}-${nextSnapshotId++}`
-  const snapshot: CatalogSnapshot = {
-    id,
+  const skillTruncatedReasons = relatedTruncationReasons(
+    context.truncatedReasons,
+    SKILL_SUMMARY_TRUNCATION_REASONS
+  )
+  const pluginTruncatedReasons = relatedTruncationReasons(
+    context.truncatedReasons,
+    PLUGIN_SUMMARY_TRUNCATION_REASONS
+  )
+  const snapshot: GlobalCatalogSnapshot = {
+    id: `g-${nextSnapshotId++}`,
     key,
+    sourceKey,
+    entries: context.entries,
+    globalHookEntries,
+    enabledEntries: context.entries.reduce(
+      (count, entry) => count + Number(entry.hook.enabled),
+      0
+    ),
+    relatedSummary: {
+      ...skillSummary,
+      skillTruncated: skillTruncatedReasons.length > 0,
+      skillTruncatedReasons,
+      pluginEntries: plugins.length,
+      pluginTruncated: pluginTruncatedReasons.length > 0,
+      pluginTruncatedReasons
+    },
+    truncated: context.truncatedReasons.size > 0,
+    truncatedReasons: [...context.truncatedReasons],
+    stats: { ...context.stats },
+    expiresAt: Date.now() + SNAPSHOT_TTL_MS
+  }
+  globalSnapshots.set(snapshot.id, snapshot)
+  globalSnapshotIdByKey.set(key, snapshot.id)
+  latestGlobalSnapshotIdBySource.set(sourceKey, snapshot.id)
+  return { snapshot, reused: false, durationMs: performance.now() - startedAt }
+}
+
+function workspaceSnapshotSourceKey(source: HookCatalogSourceConfig): string | null {
+  return source.workspacePath ? normalizedCachePath(source.workspacePath) : null
+}
+
+function buildWorkspaceSnapshot(
+  source: HookCatalogSourceConfig,
+  cancelFlag?: Int32Array
+): CatalogSnapshotBuild<WorkspaceCatalogSnapshot | null> {
+  const sourceKey = workspaceSnapshotSourceKey(source)
+  if (!sourceKey) return { snapshot: null, reused: true, durationMs: 0 }
+  trimExpiredSnapshots()
+  const key = JSON.stringify([sourceKey, source.workspaceRevision])
+  const cachedId = workspaceSnapshotIdByKey.get(key)
+  const cached = cachedId ? workspaceSnapshots.get(cachedId) : undefined
+  if (cached && cached.expiresAt > Date.now()) {
+    return { snapshot: cached, reused: true, durationMs: 0 }
+  }
+  const previousId = latestWorkspaceSnapshotIdBySource.get(sourceKey)
+  if (previousId) deleteWorkspaceSnapshot(previousId)
+  reserveWorkspaceSnapshotSlot()
+
+  const startedAt = performance.now()
+  const context: BuildContext = {
+    cancelFlag,
+    stats: { scannedDirectories: 0, scannedFiles: 0, discoveredSkills: 0, readBytes: 0 },
+    truncatedReasons: new Set<string>(),
+    entries: [],
+    entryLimit: MAX_WORKSPACE_ENTRIES,
+    snapshotBytes: 0,
+    snapshotByteLimit: HOOK_CATALOG_MAX_WORKSPACE_SNAPSHOT_BYTES,
+    retentionExhausted: false,
+    pluginSkillSourceProbes: 0
+  }
+  parseWorkspaceHooks(source, context)
+  checkCancelled(context)
+  const snapshot: WorkspaceCatalogSnapshot = {
+    id: `w-${nextSnapshotId++}`,
+    key,
+    sourceKey,
     entries: context.entries,
     enabledEntries: context.entries.reduce(
       (count, entry) => count + Number(entry.hook.enabled),
@@ -1085,26 +1341,83 @@ function buildSnapshot(
     ),
     truncated: context.truncatedReasons.size > 0,
     truncatedReasons: [...context.truncatedReasons],
-    stats: {
-      durationMs: performance.now() - startedAt,
-      responseBytes: 0,
-      ...context.stats
-    },
+    stats: { ...context.stats },
     expiresAt: Date.now() + SNAPSHOT_TTL_MS
   }
-  snapshots.set(id, snapshot)
-  if (key) snapshotIdByKey.set(key, id)
-  return snapshot
+  workspaceSnapshots.set(snapshot.id, snapshot)
+  workspaceSnapshotIdByKey.set(key, snapshot.id)
+  latestWorkspaceSnapshotIdBySource.set(sourceKey, snapshot.id)
+  return { snapshot, reused: false, durationMs: performance.now() - startedAt }
 }
 
-function parseCursor(cursor: string | undefined): { snapshotId: string; offset: number } | null {
+interface ParsedCursor {
+  globalSnapshotId: string
+  workspaceSnapshotId: string | null
+  offset: number
+}
+
+function parseCursor(cursor: string | undefined): ParsedCursor | null {
   if (!cursor) return null
   const separator = cursor.lastIndexOf(":")
   if (separator <= 0) throw new HookCatalogCursorExpiredError()
-  const snapshotId = cursor.slice(0, separator)
+  const ids = cursor.slice(0, separator).split(".")
+  if (ids.length !== 2 || !ids[0].startsWith("g-")) {
+    throw new HookCatalogCursorExpiredError()
+  }
   const offset = Number(cursor.slice(separator + 1))
   if (!Number.isSafeInteger(offset) || offset < 0) throw new HookCatalogCursorExpiredError()
-  return { snapshotId, offset }
+  return {
+    globalSnapshotId: ids[0],
+    workspaceSnapshotId: ids[1] === "none" ? null : ids[1],
+    offset
+  }
+}
+
+function cursorValue(
+  globalSnapshot: GlobalCatalogSnapshot,
+  workspaceSnapshot: WorkspaceCatalogSnapshot | null,
+  offset: number
+): string {
+  return `${globalSnapshot.id}.${workspaceSnapshot?.id ?? "none"}:${offset}`
+}
+
+function virtualEntryAt(
+  globalSnapshot: GlobalCatalogSnapshot,
+  workspaceSnapshot: WorkspaceCatalogSnapshot | null,
+  index: number
+): Entry | undefined {
+  if (index < globalSnapshot.globalHookEntries) return globalSnapshot.entries[index]
+  const workspaceOffset = index - globalSnapshot.globalHookEntries
+  const workspaceEntries = workspaceSnapshot?.entries ?? []
+  if (workspaceOffset < workspaceEntries.length) return workspaceEntries[workspaceOffset]
+  return globalSnapshot.entries[index - workspaceEntries.length]
+}
+
+function retainedEntryCount(
+  globalSnapshot: GlobalCatalogSnapshot,
+  workspaceSnapshot: WorkspaceCatalogSnapshot | null
+): number {
+  return Math.min(
+    HOOK_CATALOG_MAX_ENTRIES,
+    globalSnapshot.entries.length + (workspaceSnapshot?.entries.length ?? 0)
+  )
+}
+
+function retainedEnabledEntryCount(
+  globalSnapshot: GlobalCatalogSnapshot,
+  workspaceSnapshot: WorkspaceCatalogSnapshot | null,
+  totalEntries: number
+): number {
+  const sourceEntryCount =
+    globalSnapshot.entries.length + (workspaceSnapshot?.entries.length ?? 0)
+  if (totalEntries === sourceEntryCount) {
+    return globalSnapshot.enabledEntries + (workspaceSnapshot?.enabledEntries ?? 0)
+  }
+  let enabled = 0
+  for (let index = 0; index < totalEntries; index += 1) {
+    enabled += Number(virtualEntryAt(globalSnapshot, workspaceSnapshot, index)?.hook.enabled)
+  }
+  return enabled
 }
 
 function appendEntry(page: HookCatalogPage, entry: Entry): void {
@@ -1125,10 +1438,27 @@ export function readHookCatalogPage(
 ): HookCatalogPage {
   const cursor = parseCursor(input.cursor)
   trimExpiredSnapshots()
-  const snapshot = cursor ? snapshots.get(cursor.snapshotId) : buildSnapshot(source, input, cancelFlag)
-  if (!snapshot) throw new HookCatalogCursorExpiredError()
+  let globalBuild: CatalogSnapshotBuild<GlobalCatalogSnapshot>
+  let workspaceBuild: CatalogSnapshotBuild<WorkspaceCatalogSnapshot | null>
+  if (cursor) {
+    const globalSnapshot = globalSnapshots.get(cursor.globalSnapshotId)
+    const workspaceSnapshot = cursor.workspaceSnapshotId
+      ? workspaceSnapshots.get(cursor.workspaceSnapshotId)
+      : null
+    if (!globalSnapshot || (cursor.workspaceSnapshotId && !workspaceSnapshot)) {
+      throw new HookCatalogCursorExpiredError()
+    }
+    globalBuild = { snapshot: globalSnapshot, reused: true, durationMs: 0 }
+    workspaceBuild = { snapshot: workspaceSnapshot ?? null, reused: true, durationMs: 0 }
+  } else {
+    globalBuild = buildGlobalSnapshot(source, cancelFlag)
+    workspaceBuild = buildWorkspaceSnapshot(source, cancelFlag)
+  }
+  const globalSnapshot = globalBuild.snapshot
+  const workspaceSnapshot = workspaceBuild.snapshot
   const offset = cursor?.offset ?? 0
-  if (offset > snapshot.entries.length) throw new HookCatalogCursorExpiredError()
+  const totalEntries = retainedEntryCount(globalSnapshot, workspaceSnapshot)
+  if (offset > totalEntries) throw new HookCatalogCursorExpiredError()
   const limit = Number.isFinite(input.limit)
     ? Math.min(HOOK_CATALOG_MAX_PAGE_SIZE, Math.max(1, Math.trunc(input.limit!)))
     : HOOK_CATALOG_DEFAULT_PAGE_SIZE
@@ -1137,41 +1467,75 @@ export function readHookCatalogPage(
     workspaceHooks: [],
     pluginHooks: [],
     skillHooks: [],
-    totalEntries: snapshot.entries.length,
-    enabledEntries: snapshot.enabledEntries,
-    truncated: snapshot.truncated,
-    truncatedReasons: [...snapshot.truncatedReasons],
-    stats: { ...snapshot.stats, responseBytes: 0 }
+    totalEntries,
+    enabledEntries: retainedEnabledEntryCount(globalSnapshot, workspaceSnapshot, totalEntries),
+    relatedSummary: { ...globalSnapshot.relatedSummary },
+    truncated:
+      globalSnapshot.truncated ||
+      Boolean(workspaceSnapshot?.truncated) ||
+      globalSnapshot.entries.length + (workspaceSnapshot?.entries.length ?? 0) > totalEntries,
+    truncatedReasons: [
+      ...new Set([
+        ...globalSnapshot.truncatedReasons,
+        ...(workspaceSnapshot?.truncatedReasons ?? []),
+        ...(globalSnapshot.entries.length + (workspaceSnapshot?.entries.length ?? 0) > totalEntries
+          ? ["entry-count"]
+          : [])
+      ])
+    ],
+    stats: {
+      durationMs: globalBuild.durationMs + workspaceBuild.durationMs,
+      responseBytes: 0,
+      globalScanReused: globalBuild.reused,
+      workspaceScanReused: workspaceBuild.reused,
+      scannedDirectories:
+        globalSnapshot.stats.scannedDirectories +
+        (workspaceSnapshot?.stats.scannedDirectories ?? 0),
+      scannedFiles:
+        globalSnapshot.stats.scannedFiles + (workspaceSnapshot?.stats.scannedFiles ?? 0),
+      discoveredSkills: globalSnapshot.stats.discoveredSkills,
+      readBytes: globalSnapshot.stats.readBytes + (workspaceSnapshot?.stats.readBytes ?? 0)
+    }
   }
   let consumed = 0
-  for (let index = offset; index < snapshot.entries.length && consumed < limit; index += 1) {
+  for (let index = offset; index < totalEntries && consumed < limit; index += 1) {
     if (cancelFlag && Atomics.load(cancelFlag, 0) !== 0) throw new HookCatalogCancelledError()
-    appendEntry(page, snapshot.entries[index])
+    const entry = virtualEntryAt(globalSnapshot, workspaceSnapshot, index)
+    if (!entry) throw new HookCatalogCursorExpiredError()
+    appendEntry(page, entry)
     consumed += 1
     const nextOffset = offset + consumed
-    page.nextCursor = nextOffset < snapshot.entries.length ? `${snapshot.id}:${nextOffset}` : undefined
+    page.nextCursor = nextOffset < totalEntries
+      ? cursorValue(globalSnapshot, workspaceSnapshot, nextOffset)
+      : undefined
     if (responseBytes(page) > HOOK_CATALOG_MAX_RESPONSE_BYTES - 1_024) {
-      const entry = snapshot.entries[index]
       if (entry.source === "global") page.globalHooks.pop()
       else if (entry.source === "workspace") page.workspaceHooks.pop()
       else if (entry.source === "plugin") page.pluginHooks.pop()
       else page.skillHooks.pop()
       consumed -= 1
-      page.nextCursor = `${snapshot.id}:${offset + consumed}`
+      page.nextCursor = cursorValue(globalSnapshot, workspaceSnapshot, offset + consumed)
       break
     }
   }
   const nextOffset = offset + consumed
-  page.nextCursor = nextOffset < snapshot.entries.length ? `${snapshot.id}:${nextOffset}` : undefined
+  page.nextCursor = nextOffset < totalEntries
+    ? cursorValue(globalSnapshot, workspaceSnapshot, nextOffset)
+    : undefined
   page.stats.responseBytes = responseBytes(page)
   page.stats.responseBytes = responseBytes(page)
-  if (page.stats.responseBytes > HOOK_CATALOG_MAX_RESPONSE_BYTES) {
+  if (responseBytes(page) > HOOK_CATALOG_MAX_RESPONSE_BYTES) {
     throw new Error("Hook catalog response exceeded its hard byte limit")
   }
   return page
 }
 
 export function clearHookCatalogSnapshotsForTests(): void {
-  snapshots.clear()
-  snapshotIdByKey.clear()
+  globalSnapshots.clear()
+  globalSnapshotIdByKey.clear()
+  latestGlobalSnapshotIdBySource.clear()
+  workspaceSnapshots.clear()
+  workspaceSnapshotIdByKey.clear()
+  latestWorkspaceSnapshotIdBySource.clear()
+  nextSnapshotId = 1
 }

@@ -2,6 +2,7 @@ import type { Worker } from "node:worker_threads"
 import { describe, expect, it, vi } from "vitest"
 import {
   isWorkspaceWatcherCancelled,
+  WORKSPACE_WATCHER_MAX_PATH_LENGTH,
   WorkspaceWatcherWorkerClient
 } from "./client"
 import type { WorkspaceWatcherWorkerResponse } from "./protocol"
@@ -41,6 +42,19 @@ class FakeWorker {
 }
 
 describe("WorkspaceWatcherWorkerClient", () => {
+  it("rejects an oversized path before creating a Worker", async () => {
+    const factory = vi.fn(async () => new FakeWorker() as unknown as Worker)
+    const client = new WorkspaceWatcherWorkerClient(
+      "x".repeat(WORKSPACE_WATCHER_MAX_PATH_LENGTH + 1),
+      vi.fn(),
+      vi.fn(),
+      factory
+    )
+
+    await expect(client.start()).rejects.toThrow(/hard limit/)
+    expect(factory).not.toHaveBeenCalled()
+  })
+
   it("starts, forwards events, and terminates the owning worker on close", async () => {
     const worker = new FakeWorker()
     const onEvent = vi.fn()

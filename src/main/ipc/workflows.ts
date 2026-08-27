@@ -552,11 +552,11 @@ export function registerWorkflowHandlers(ipc: IpcMain = ipcMain): void {
             summary.status !== "running" && summary.notificationDelivered !== true
         ) || (await hasUndeliveredWorkflowRunAsync(workspacePath, threadId))
       // Preserve the manager's exact in-flight/flush-failure semantics, but only
-      // invoke its legacy synchronous scan when the compact index proves a pending
+      // invoke its async point-read when the compact index proves a pending
       // candidate can exist. The normal all-delivered hydrate path stays async/O(1).
       const hasPendingNotification =
         mightHavePendingNotification &&
-        workflowRunManager.findPendingNotification(workspacePath, threadId) !== null
+        (await workflowRunManager.findPendingNotificationAsync(workspacePath, threadId)) !== null
       latestRun = await reconcileWorktreeRecordsForRenderer(workspacePath, threadId, latestRun)
       return {
         latestRun: stripJournalForRenderer(latestRun),

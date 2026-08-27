@@ -7,6 +7,7 @@ import {
   ensureSkillsChangedInvalidationSource,
   ensureWorkspaceHooksChangedInvalidationSource,
   getGlobalHookCatalogRevision,
+  getPluginCatalogRevision,
   getSkillCatalogRevision,
   getWorkspaceHookCatalogRevision,
   invalidateSkillCatalog,
@@ -19,6 +20,7 @@ import {
   revalidatePluginCatalog,
   revalidateSkillCatalog,
   subscribeGlobalHookCatalogInvalidation,
+  subscribePluginCatalogInvalidation,
   subscribeSkillCatalogInvalidation,
   subscribeWorkspaceHookCatalogInvalidation
 } from "./app-catalog-cache"
@@ -64,6 +66,14 @@ function marketSkill(name: string): MarketItem {
   }
 }
 
+function expectCatalogRevision(
+  value: string,
+  version: string | number,
+  revision: number
+): void {
+  expect(value).toMatch(new RegExp(`^${String(version)}:[^:]+:${revision}$`))
+}
+
 describe("application catalog cache", () => {
   beforeEach(() => resetAppCatalogCacheForTests())
 
@@ -97,10 +107,15 @@ describe("application catalog cache", () => {
           pluginName: "Plugin A"
         })
       ],
-      disabledSkillIds: ["review"]
+      disabledSkillIds: ["review"],
+      total: 2,
+      enabledSkillCount: 1,
+      truncated: false,
+      truncatedReasons: []
     }))
 
     expect(snapshot.rightPanelSkills).toHaveLength(2)
+    expect(snapshot.total).toBe(snapshot.rightPanelSkills.length)
     expect(snapshot.rightPanelEnabledSkillCount).toBe(1)
     expect(snapshot.disabledSkillIds).toEqual(new Set(["review"]))
   })
@@ -129,6 +144,41 @@ describe("application catalog cache", () => {
     expect(configuredLoader).toHaveBeenCalledTimes(1)
     expect(legacyLoader).not.toHaveBeenCalled()
     expect(chatSnapshot).toBe(appSnapshot)
+  })
+
+  it("marks an invalidated configured pagination load stale before it can supersede refresh", async () => {
+    let releaseStaleLoad = (): void => undefined
+    const generationChecks: Array<() => boolean> = []
+    const staleGate = new Promise<void>((resolve) => {
+      releaseStaleLoad = resolve
+    })
+    const configuredLoader = vi.fn(
+      async (_key: string, isCurrent: () => boolean) => {
+        if (configuredLoader.mock.calls.length === 1) {
+          generationChecks.push(isCurrent)
+          await staleGate
+          if (!isCurrent()) throw new Error("Catalog request superseded")
+          return { localSkills: [skill("stale")], pluginSkills: [], disabledSkillIds: [] }
+        }
+        return { localSkills: [skill("fresh")], pluginSkills: [], disabledSkillIds: [] }
+      }
+    )
+    configureAppCatalogLoaders({ skills: configuredLoader, plugins: async () => [] })
+
+    const stale = revalidateSkillCatalog("race").catch((error) => error)
+    await vi.waitFor(() => expect(generationChecks).toHaveLength(1))
+    invalidateSkillCatalog()
+    expect(generationChecks[0]()).toBe(false)
+    const fresh = revalidateSkillCatalog("race")
+    releaseStaleLoad()
+
+    await expect(stale).resolves.toEqual(expect.objectContaining({
+      message: "Catalog request superseded"
+    }))
+    await expect(fresh).resolves.toMatchObject({
+      rightPanelSkills: [expect.objectContaining({ name: "fresh" })]
+    })
+    expect(readSkillCatalogCache()?.rightPanelSkills[0]?.name).toBe("fresh")
   })
 
   it("installs one skills:changed source and shares the invalidated refresh", async () => {
@@ -168,7 +218,7 @@ describe("application catalog cache", () => {
     }))
     const hooksInitial = await revalidateGlobalHookCatalog(1, hookLoader)
     expect(await revalidateGlobalHookCatalog(1, hookLoader)).toBe(hooksInitial)
-    expect(getSkillCatalogRevision(1)).toBe("1:0")
+    expectCatalogRevision(getSkillCatalogRevision(1), 1, 0)
     expect(getGlobalHookCatalogRevision()).toBe(0)
     emitChanged()
     const [left, right] = await Promise.all([
@@ -182,7 +232,7 @@ describe("application catalog cache", () => {
     expect(loader).toHaveBeenCalledTimes(2)
     expect(left).toBe(right)
     expect(left).not.toBe(initial)
-    expect(getSkillCatalogRevision(1)).toBe("1:1")
+    expectCatalogRevision(getSkillCatalogRevision(1), 1, 1)
 
     emitHooksChanged({ reason: "ordinary-hook-edit" })
     expect(observed).toHaveBeenCalledTimes(1)
@@ -199,6 +249,40 @@ describe("application catalog cache", () => {
     expect(getGlobalHookCatalogRevision()).toBe(2)
     unsubscribe()
     unsubscribeHooks()
+  })
+
+  it("advances skill and plugin revisions for external and cross-window catalog changes", async () => {
+    let emitHooksChanged = (payload: { reason?: string }): void => {
+      throw new Error(`hooks source was not installed: ${payload.reason ?? "unknown"}`)
+    }
+    ensureDisabledSkillsChangedInvalidationSource((listener) => {
+      emitHooksChanged = listener
+      return vi.fn()
+    })
+    const skillsObserved = vi.fn()
+    const pluginsObserved = vi.fn()
+    const unsubscribeSkills = subscribeSkillCatalogInvalidation(skillsObserved)
+    const unsubscribePlugins = subscribePluginCatalogInvalidation(pluginsObserved)
+
+    expectCatalogRevision(getSkillCatalogRevision(4), 4, 0)
+    expectCatalogRevision(getPluginCatalogRevision(4), 4, 0)
+
+    emitHooksChanged({ reason: "skill-hook-file-changed" })
+    expectCatalogRevision(getSkillCatalogRevision(4), 4, 1)
+    expectCatalogRevision(getPluginCatalogRevision(4), 4, 0)
+
+    emitHooksChanged({ reason: "plugin-hook-file-changed" })
+    expectCatalogRevision(getSkillCatalogRevision(4), 4, 2)
+    expectCatalogRevision(getPluginCatalogRevision(4), 4, 1)
+
+    emitHooksChanged({ reason: "config-file-changed" })
+    expectCatalogRevision(getSkillCatalogRevision(4), 4, 3)
+    expectCatalogRevision(getPluginCatalogRevision(4), 4, 2)
+    expect(skillsObserved).toHaveBeenCalledTimes(3)
+    expect(pluginsObserved).toHaveBeenCalledTimes(2)
+
+    unsubscribeSkills()
+    unsubscribePlugins()
   })
 
   it("keeps one workspace-hook source and revisions equivalent workspace paths", () => {
@@ -352,5 +436,43 @@ describe("application catalog cache", () => {
     expect(marketB).toBe(marketA)
     expect(readPluginCatalogCache()).toBe(pluginsA)
     expect(marketA.skillMap.one?.chinese_name).toBe("中文-one")
+  })
+
+  it("keeps catalog totals and truncation metadata across detail loads and remounts", async () => {
+    const skills = await revalidateSkillCatalog("limited", async () => ({
+      localSkills: [skill("one")],
+      pluginSkills: [],
+      disabledSkillIds: [],
+      total: 12,
+      enabledSkillCount: 8,
+      truncated: true,
+      truncatedReasons: ["skill-count"]
+    }))
+    const remountedSkills = await revalidateSkillCatalog("limited", async () => {
+      throw new Error("cached skill catalog should be reused")
+    })
+    expect(remountedSkills).toBe(skills)
+    expect(remountedSkills).toMatchObject({
+      total: 12,
+      rightPanelEnabledSkillCount: 8,
+      truncated: true,
+      truncatedReasons: ["skill-count"]
+    })
+
+    const plugins = await revalidatePluginCatalog("limited", async () => ({
+      plugins: [plugin("one")],
+      total: 9,
+      truncated: true,
+      truncatedReasons: ["plugin-count"]
+    }))
+    const remountedPlugins = await revalidatePluginCatalog("limited", async () => {
+      throw new Error("cached plugin catalog should be reused")
+    })
+    expect(remountedPlugins).toBe(plugins)
+    expect(remountedPlugins).toMatchObject({
+      total: 9,
+      truncated: true,
+      truncatedReasons: ["plugin-count"]
+    })
   })
 })

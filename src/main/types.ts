@@ -69,6 +69,16 @@ export interface ThreadUpdateParams {
   updates: Partial<Thread>
 }
 
+export interface ThreadMetadataPatch {
+  set?: Record<string, unknown>
+  remove?: string[]
+}
+
+export interface ThreadMetadataPatchParams {
+  threadId: string
+  patch: ThreadMetadataPatch
+}
+
 export interface ThreadValuesMergeParams {
   threadId: string
   patch: Record<string, unknown>
@@ -230,6 +240,12 @@ export interface ThreadMessagesPageOptions {
    */
   beforeOrdinal?: number
   beforeMessageId?: string
+  /**
+   * Read forward from this exact durable message (inclusive). This is mutually
+   * exclusive with the backward compound cursor and is used to close a released
+   * renderer window without guessing ordinals.
+   */
+  anchorMessageId?: string
   limit?: number
   /**
    * Optional response budget. Values above the process-wide 4 MiB ceiling are
@@ -266,10 +282,13 @@ export interface ThreadSummaryPage {
 export interface ThreadMessagesPage {
   /** Messages are always returned in durable ascending transcript order. */
   messages: Message[]
-  /** Cursor for the next older page, or null when the beginning was reached. */
+  /** Cursor for the next older page; explicit forward reads always return null here. */
   beforeOrdinal: number | null
   beforeMessageId: string | null
+  /** Whether more rows remain in the requested direction. */
   hasMore: boolean
+  /** Echoed only for a successful explicit forward read after the durable anchor is verified. */
+  verifiedAnchorMessageId?: string
   /** Total durable messages for the thread, independent of the cursor. */
   total: number
   /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
@@ -651,7 +670,7 @@ export interface HookCatalogPageInput {
   /** Latest-wins namespace scoped by the main process to the calling renderer. */
   requestScope: string
   workspacePath?: string
-  /** Optional caller revision used to reuse a worker snapshot across summary and detail reads. */
+  /** Optional renderer token used only to fence stale UI results; main epochs own cache identity. */
   revision?: string
   /** Opaque continuation returned by the previous page. */
   cursor?: string
@@ -662,10 +681,29 @@ export interface HookCatalogPageInput {
 export interface HookCatalogPageStats {
   durationMs: number
   responseBytes: number
+  /** True when this request reused the process-wide global skill/plugin snapshot. */
+  globalScanReused: boolean
+  /** True when this request reused its workspace-only hook overlay. */
+  workspaceScanReused: boolean
   scannedDirectories: number
   scannedFiles: number
   discoveredSkills: number
   readBytes: number
+}
+
+/**
+ * Counts produced while the hook worker is already discovering plugins and
+ * skills. Keeping these beside the hook totals lets collapsed consumers render
+ * all three badges without starting two more filesystem scans.
+ */
+export interface HookCatalogRelatedSummary {
+  skillEntries: number
+  enabledSkillEntries: number
+  skillTruncated: boolean
+  skillTruncatedReasons: string[]
+  pluginEntries: number
+  pluginTruncated: boolean
+  pluginTruncatedReasons: string[]
 }
 
 export interface HookCatalogPage {
@@ -679,6 +717,8 @@ export interface HookCatalogPage {
   totalEntries: number
   /** Enabled entries in the whole snapshot, independent of the current page. */
   enabledEntries: number
+  /** Skill/plugin totals discovered by the same bounded filesystem pass. */
+  relatedSummary: HookCatalogRelatedSummary
   /** True only when source data was omitted by a hard safety cap. */
   truncated: boolean
   truncatedReasons: string[]
@@ -1043,9 +1083,9 @@ export interface SkillPluginCatalogPageInput {
   cursor?: string | null
   limit?: number
   /**
-   * Application cache revision. Filesystem mutations bump this value so a
-   * worker snapshot can be reused across Chat/App/Customize without serving a
-   * stale catalog after an explicit invalidation.
+   * Renderer cache token used for latest-wins UI state. Worker snapshot
+   * identity comes from the main-process source epoch so different windows can
+   * safely share one scan even though their renderer tokens differ.
    */
   revision?: string
 }

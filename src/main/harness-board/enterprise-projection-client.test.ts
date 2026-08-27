@@ -233,6 +233,32 @@ describe("Harness enterprise projection worker", () => {
     })
   }, 30_000)
 
+  it("rejects pending projection on a clean unexpected exit and restarts", async () => {
+    let starts = 0
+    const client = new HarnessEnterpriseProjectionClient(async () => {
+      starts += 1
+      if (starts === 1) {
+        return new Worker(
+          `
+            const { parentPort } = require("node:worker_threads")
+            parentPort.on("message", () => process.exit(0))
+          `,
+          { eval: true }
+        )
+      }
+      return new Worker(workerBundlePath, { name: "harness-enterprise-clean-restart" })
+    })
+    clients.push(client)
+
+    await expect(
+      client.projectDetails(detailResponse(), "renderer:clean-exit")
+    ).rejects.toBeInstanceOf(HarnessEnterpriseProjectionWorkerUnavailableError)
+    await expect(
+      client.projectDetails(detailResponse(), "renderer:clean-exit")
+    ).resolves.toMatchObject({ projects: [{ projectCode: "PROJECT-0" }] })
+    expect(starts).toBe(2)
+  }, 30_000)
+
   it("rejects normalized output before it can exceed the IPC budget", () => {
     expect(() =>
       projectEnterpriseProjectReviews(reviewSummary(2), reviewTypes(), {

@@ -16,11 +16,22 @@ function page(overrides: Partial<HookCatalogPage> = {}): HookCatalogPage {
     skillHooks: [],
     totalEntries: 0,
     enabledEntries: 0,
+    relatedSummary: {
+      skillEntries: 0,
+      enabledSkillEntries: 0,
+      skillTruncated: false,
+      skillTruncatedReasons: [],
+      pluginEntries: 0,
+      pluginTruncated: false,
+      pluginTruncatedReasons: []
+    },
     truncated: false,
     truncatedReasons: [],
     stats: {
       durationMs: 0,
       responseBytes: 0,
+      globalScanReused: false,
+      workspaceScanReused: false,
       scannedDirectories: 0,
       scannedFiles: 0,
       discoveredSkills: 0,

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { SkillMetadata, SkillPluginCatalogPage } from "../../../main/types"
 import {
+  loadPluginCatalogPages,
   loadPluginCatalogSummary,
   loadSkillCatalogPages,
   loadSkillCatalogSummary,
@@ -50,11 +51,13 @@ describe("renderer skill/plugin catalog pagination", () => {
     await expect(loadSkillCatalogSummary("revision", "summary")).resolves.toEqual({
       total: 7,
       enabled: 5,
-      truncated: false
+      truncated: false,
+      truncatedReasons: []
     })
     await expect(loadPluginCatalogSummary("revision", "summary")).resolves.toEqual({
       total: 3,
-      truncated: false
+      truncated: false,
+      truncatedReasons: []
     })
     expect(read.mock.calls.map(([input, scope]) => [input.kind, input.limit, scope])).toEqual([
       ["skills", 1, "summary:skills"],
@@ -116,6 +119,74 @@ describe("renderer skill/plugin catalog pagination", () => {
     expect(read.mock.calls.every(([input]) => input.limit === 128)).toBe(true)
     expect(Math.max(...responseBytes)).toBeLessThanOrEqual(512 * 1024)
     expect(responseBytes).toHaveLength(Math.ceil(20_000 / 128) + 1)
+  })
+
+  it("preserves protocol totals and truncation metadata after draining detail pages", async () => {
+    const read = vi.fn(
+      async (
+        input: { kind: "skills" | "plugins" | "disabled" }
+      ): Promise<SkillPluginCatalogPage> => ({
+        kind: input.kind,
+        skills:
+          input.kind === "skills"
+            ? [
+                {
+                  id: "skill-one",
+                  name: "skill-one",
+                  description: "skill-one",
+                  path: "C:/skills/skill-one/SKILL.md",
+                  source: "user",
+                  version: "1.0.0"
+                }
+              ]
+            : [],
+        plugins:
+          input.kind === "plugins"
+            ? [
+                {
+                  id: "plugin-one",
+                  name: "plugin-one",
+                  version: "1.0.0",
+                  description: "plugin-one",
+                  author: "test",
+                  path: "C:/plugins/plugin-one",
+                  enabled: true,
+                  skillCount: 0,
+                  mcpServerCount: 0,
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                  updatedAt: "2026-01-01T00:00:00.000Z"
+                }
+              ]
+            : [],
+        disabledSkillIds: input.kind === "disabled" ? ["skill-one"] : [],
+        cursor: null,
+        total: input.kind === "skills" ? 9 : input.kind === "plugins" ? 7 : 1,
+        enabledSkillCount: input.kind === "skills" ? 6 : 0,
+        truncated: true,
+        truncatedReasons: [`${input.kind}-limit`],
+        stats: {
+          scannedDirectories: 1,
+          scannedFiles: 1,
+          discoveredSkills: 1,
+          readBytes: 1
+        }
+      })
+    )
+    vi.stubGlobal("window", {
+      api: { skills: { catalog: { read, cancel: vi.fn(async () => undefined) } } }
+    })
+
+    await expect(loadSkillCatalogPages("revision", "detail")).resolves.toMatchObject({
+      total: 9,
+      enabledSkillCount: 6,
+      truncated: true,
+      truncatedReasons: ["skills-limit", "disabled-limit"]
+    })
+    await expect(loadPluginCatalogPages("revision", "detail")).resolves.toMatchObject({
+      total: 7,
+      truncated: true,
+      truncatedReasons: ["plugins-limit"]
+    })
   })
 
   it("surfaces Worker failures without falling back to main-process directory scans", async () => {

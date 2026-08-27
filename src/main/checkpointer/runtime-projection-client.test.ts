@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs"
+import { EventEmitter } from "node:events"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -12,7 +13,10 @@ import type {
 import { DatabaseSync } from "node:sqlite"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
-import { CheckpointRuntimeProjectionClient } from "./runtime-projection-client"
+import {
+  CheckpointRuntimeProjectionClient,
+  CheckpointRuntimeProjectionWorkerUnavailableError
+} from "./runtime-projection-client"
 import {
   commitPreparedRuntimeProjection,
   prepareLatestRuntimeProjectionMigration
@@ -302,6 +306,154 @@ describe("checkpoint runtime projection worker", () => {
       stats: { totalMessages: 1, migratedMessages: 1 }
     })
   }, 30_000)
+
+  it("cancels queued transcript checks superseded by a newer workspace intent", async () => {
+    const posted: Array<Record<string, unknown>> = []
+    const emitter = new EventEmitter()
+    const fakeWorker = Object.assign(emitter, {
+      postMessage(message: Record<string, unknown>): void {
+        if (message.type === "shutdown") {
+          queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
+          return
+        }
+        posted.push(message)
+      },
+      unref(): Worker {
+        return fakeWorker
+      },
+      terminate: async (): Promise<number> => 0
+    }) as unknown as Worker
+    const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
+    clients.push(client)
+
+    const stale = client.hasTranscript("first.sqlite", "thread-1", "", "thread-1")
+    const staleResult = expect(stale).rejects.toMatchObject({
+      name: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+    })
+    const current = client.hasTranscript("second.sqlite", "thread-1", "", "thread-1")
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(posted).toHaveLength(2)
+    const staleRequest = posted[0] as {
+      requestId: number
+      cancellationBuffer: SharedArrayBuffer
+    }
+    const currentRequest = posted[1] as {
+      requestId: number
+      cancellationBuffer: SharedArrayBuffer
+    }
+    expect(Atomics.load(new Int32Array(staleRequest.cancellationBuffer), 0)).toBe(1)
+    expect(Atomics.load(new Int32Array(currentRequest.cancellationBuffer), 0)).toBe(0)
+    expect(
+      (client as unknown as { pending: Map<number, unknown> }).pending.size
+    ).toBe(1)
+
+    emitter.emit("message", {
+      type: "inspect-transcript-presence-result",
+      requestId: staleRequest.requestId,
+      ok: false,
+      error: {
+        code: CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+        message: "Checkpoint runtime projection request cancelled"
+      }
+    })
+    emitter.emit("message", {
+      type: "inspect-transcript-presence-result",
+      requestId: currentRequest.requestId,
+      ok: true,
+      hasTranscript: true
+    })
+
+    await staleResult
+    await expect(current).resolves.toBe(true)
+  })
+
+  it("releases pending and foreground bookkeeping when postMessage throws", async () => {
+    const emitter = new EventEmitter()
+    let requestAttempts = 0
+    const fakeWorker = Object.assign(emitter, {
+      postMessage(message: Record<string, unknown>): void {
+        if (message.type === "shutdown") {
+          queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
+          return
+        }
+        requestAttempts += 1
+        if (requestAttempts === 1) throw new Error("worker port closed")
+        queueMicrotask(() =>
+          emitter.emit("message", {
+            type: "inspect-transcript-presence-result",
+            requestId: message.requestId,
+            ok: true,
+            hasTranscript: true
+          })
+        )
+      },
+      unref(): Worker {
+        return fakeWorker
+      },
+      terminate: async (): Promise<number> => 0
+    }) as unknown as Worker
+    const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
+    clients.push(client)
+
+    await expect(
+      client.hasTranscript("first.sqlite", "thread-1", "", "renderer-1")
+    ).rejects.toThrow("Unable to send")
+    const state = client as unknown as {
+      pending: Map<number, unknown>
+      foregroundRequests: Map<string, number>
+    }
+    expect(state.pending.size).toBe(0)
+    expect(state.foregroundRequests.size).toBe(0)
+
+    await expect(
+      client.hasTranscript("second.sqlite", "thread-1", "", "renderer-1")
+    ).resolves.toBe(true)
+  })
+
+  it("rejects a request that resumes after shutdown has drained pending work", async () => {
+    const emitter = new EventEmitter()
+    const posted: Array<Record<string, unknown>> = []
+    const fakeWorker = Object.assign(emitter, {
+      postMessage(message: Record<string, unknown>): void {
+        if (message.type === "shutdown") {
+          queueMicrotask(() => emitter.emit("message", { type: "shutdown-complete" }))
+          return
+        }
+        posted.push(message)
+        if (posted.length === 1) {
+          queueMicrotask(() =>
+            emitter.emit("message", {
+              type: "inspect-transcript-presence-result",
+              requestId: message.requestId,
+              ok: true,
+              hasTranscript: true
+            })
+          )
+        }
+      },
+      unref(): Worker {
+        return fakeWorker
+      },
+      terminate: async (): Promise<number> => 0
+    }) as unknown as Worker
+    const client = new CheckpointRuntimeProjectionClient(async () => fakeWorker)
+    clients.push(client)
+
+    await expect(client.hasTranscript("prime.sqlite", "thread-prime")).resolves.toBe(true)
+
+    // request() now yields through the already-resolved Worker promise. close()
+    // drains pending work synchronously before that continuation resumes.
+    const racedRequest = client.hasTranscript("closing.sqlite", "thread-closing")
+    const closing = client.close()
+
+    await expect(racedRequest).rejects.toBeInstanceOf(
+      CheckpointRuntimeProjectionWorkerUnavailableError
+    )
+    await closing
+    expect(posted).toHaveLength(1)
+    expect((client as unknown as { pending: Map<number, unknown> }).pending.size).toBe(0)
+  })
 
   it("imports a large empty-transcript fallback without cloning the full tuple", async () => {
     const threadId = "legacy-empty-transcript"

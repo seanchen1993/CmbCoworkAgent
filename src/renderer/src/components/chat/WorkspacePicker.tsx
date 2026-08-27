@@ -19,6 +19,7 @@ import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
 import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
+import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 
 interface WorkspacePickerProps {
   threadId: string
@@ -101,8 +102,8 @@ function WorkspacePickerImpl({
   const canChangeWorkspace =
     useThreadStateSelector(
       threadId,
-      useCallback((state) => state.messages.length === 0, [])
-    ) ?? true
+      useCallback((state) => canChangeThreadWorkspace(state), [])
+    ) ?? false
   const threadActions = useThreadActions(threadId)
   const setWorkspacePath = threadActions?.setWorkspacePath
   const setWorkspaceFiles = threadActions?.setWorkspaceFiles
@@ -263,19 +264,15 @@ function WorkspacePickerImpl({
     setLoading(true)
     setWorktreeError(null)
     try {
-      const result = await window.api.workspace.createWorktree(gitRoot, branchName.trim())
+      const result = await window.api.workspace.createWorktree(
+        threadId,
+        gitRoot,
+        branchName.trim()
+      )
       if (!result.success || !result.path || !result.branch) {
         setWorktreeError(result.error ?? "创建失败")
         return
       }
-      await window.api.workspace.set(threadId, result.path)
-      await window.api.workspace.saveWorktreeContext(
-        threadId,
-        gitRoot,
-        result.branch,
-        result.baseBranch,
-        result.baseCommit
-      )
       setWorkspacePath?.(result.path)
       setIsWorktree(true)
       setWorktreeBranch(result.branch)

@@ -30,12 +30,14 @@ import { v4 as uuid } from "uuid"
 import type { SkillProposalWindowContext } from "../skill-evolution/proposal-window"
 import { discoverSkillsSync } from "../../skills/discovery"
 import { getDiscoveredSkillId, normalizeSkillId } from "../../skills/ids"
+import { bumpHookCatalogGlobalRevision } from "../../hook-catalog/revision"
 
 // ─────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────
 
 function notifyRenderer(channel: string, payload?: unknown): void {
+  if (channel === "skills:changed") bumpHookCatalogGlobalRevision()
   let sentCount = 0
   for (const win of BrowserWindow.getAllWindows()) {
     try {

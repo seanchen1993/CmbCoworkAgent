@@ -8,11 +8,12 @@ import {
 } from "electron"
 import Store from "electron-store"
 import { randomUUID } from "crypto"
+import { getThreadCore as getThreadCoreSync } from "../db"
 import * as fs from "fs/promises"
 import * as path from "path"
 import { execFile, spawn } from "child_process"
 import { promisify } from "util"
-import { getWindowsSandboxMode } from "../storage"
+import { getThreadCheckpointPath, getWindowsSandboxMode } from "../storage"
 import { workflowRunManager } from "../agent/workflow/run-manager"
 import type {
   ModelConfig,
@@ -81,10 +82,48 @@ import {
   revokeExternalFileReadGrantsForOwner
 } from "../services/external-file-read-tokens"
 import { openStableFileHandle } from "../services/stable-file-handle"
+import {
+  mutateLatestThreadMetadata,
+  parseThreadMetadata
+} from "../services/thread-metadata"
+import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
+import { LatestRequestGate } from "../services/latest-request-gate"
+import { mergeRecordedLlmFileMetadata } from "../services/llm-file-metadata-merge"
+import {
+  bindThreadWorkspace,
+  bindThreadWorktree,
+  clearThreadWorktreeBinding,
+  matchesExpectedWorktreeIdentity,
+  workspaceIdentityEquals
+} from "../services/workspace-metadata"
+import {
+  hasCheckpointTranscriptInWorker,
+  isCheckpointRuntimeProjectionCancelled
+} from "../checkpointer/runtime-projection-client"
+import {
+  captureThreadIncarnation,
+  matchesThreadIncarnation,
+  type ThreadIncarnation,
+  type ThreadIncarnationRow
+} from "../services/thread-incarnation"
 
 const execFileAsync = promisify(execFile)
 
 const MAX_WORKTREES = 10
+const GLOBAL_WORKSPACE_MUTATION_KEY = "\0global-workspace"
+const workspaceMutationGate = new LatestRequestGate()
+const WORKSPACE_SWITCH_LOCKED_ERROR =
+  "当前线程已有对话消息，不能切换文件夹或创建 Worktree。"
+const THREAD_INCARNATION_CHANGED_ERROR = "线程已被替换，忽略过期的工作区请求。"
+
+function assertThreadIncarnationCurrent(
+  row: ThreadIncarnationRow | null | undefined,
+  expected: ThreadIncarnation
+): void {
+  if (!matchesThreadIncarnation(row, expected)) {
+    throw new Error(THREAD_INCARNATION_CHANGED_ERROR)
+  }
+}
 
 async function readThreadWorkspacePath(threadId: string): Promise<string | null> {
   try {
@@ -100,6 +139,38 @@ async function readThreadWorkspacePath(threadId: string): Promise<string | null>
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     return typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
   }
+}
+
+async function assertNoThreadTranscriptBeforeWorkspaceChange(
+  threadId: string,
+  currentWorkspacePath: unknown,
+  nextWorkspacePath: unknown,
+  isCurrentMutation: () => boolean
+): Promise<boolean> {
+  if (workspaceIdentityEquals(currentWorkspacePath, nextWorkspacePath)) return true
+  const { getThreadMessageCount } = await import("../db")
+  if (getThreadMessageCount(threadId) > 0) throw new Error(WORKSPACE_SWITCH_LOCKED_ERROR)
+  // Upgrade compatibility: old tasks may still have their only transcript in a
+  // checkpoint. The worker returns one boolean; no checkpoint message body is
+  // materialized on Electron's main thread.
+  try {
+    if (
+      await hasCheckpointTranscriptInWorker(
+        getThreadCheckpointPath(threadId),
+        threadId,
+        "",
+        threadId
+      )
+    ) {
+      throw new Error(WORKSPACE_SWITCH_LOCKED_ERROR)
+    }
+  } catch (error) {
+    // A newer picker intent cancels the stale compatibility scan. Returning here
+    // prevents that stale IPC call from surfacing a false error or doing more work.
+    if (isCheckpointRuntimeProjectionCancelled(error) && !isCurrentMutation()) return false
+    throw error
+  }
+  return isCurrentMutation()
 }
 
 export interface WorktreeInfo {
@@ -351,10 +422,6 @@ async function assertWorkspaceSwitchAllowed(
   // switching orphans the run. This is the REAL workspace-picker entry (workspace:set
   // / workspace:select, incl. the "创建 Worktree 并切换" path which calls workspace:set);
   // threads:update has its own guard reusing the same check. (#2)
-  const pendingRun =
-    typeof currentPath === "string"
-      ? workflowRunManager.findPendingNotification(currentPath, threadId)
-      : null
   if (
     await workflowRunManager.isWorkspacePinnedForThread(
       threadId,
@@ -365,6 +432,10 @@ async function assertWorkspaceSwitchAllowed(
       "仍有动态工作流、待汇报结果或尚未处理的 worktree，请先完成 Merge/Discard/Cleanup 后再切换工作区。"
     )
   }
+  const pendingRun =
+    typeof currentPath === "string"
+      ? await workflowRunManager.findPendingNotificationAsync(currentPath, threadId)
+      : null
   if (hasActiveAgentRun(threadId)) {
     throw new Error("当前线程仍有前台请求在执行，请等待该轮完成后再切换工作区。")
   }
@@ -396,10 +467,11 @@ async function assertWorkspaceSwitchAllowed(
   )
   if (blockingWorkers.length === 0) {
     await coordinatorWorkerManager.waitForWorkerCleanup(threadId)
-    coordinatorWorkerManager.forgetThread(threadId)
     forgetCoordinatorThreadState(threadId)
     if (typeof currentPath === "string" && currentPath.trim()) {
       await deleteCoordinatorWorkerArtifacts(threadId, currentPath)
+    } else {
+      await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(threadId)
     }
     return
   }
@@ -1051,46 +1123,6 @@ type ThreadGitContextCache = {
  * `cachedIsGitRepo` / `cachedIsWorktreePath` / `cachedGitRoot` 等多个顶层字段。
  * 这里同时删除新旧字段，确保工作区切换、worktree context 清理等场景不会留下过期状态。
  */
-function clearThreadGitContextCache(metadata: Record<string, unknown>): void {
-  delete metadata.gitContext
-  delete metadata.cachedIsGitRepo
-  delete metadata.cachedIsWorktreePath
-  delete metadata.cachedGitRoot
-  delete metadata.cachedGitContextWorkspacePath
-  delete metadata.cachedGitContextAt
-}
-
-/**
- * 写入线程级 Git context 缓存。
- *
- * 该缓存记录“某个 workspacePath 最近一次 Git 探测的结果”，包括：
- * - 当前路径是否是 Git 仓库；
- * - 当前路径是否是 worktree；
- * - 对应的 git root。
- *
- * GitPanel、WorkspacePicker 等入口会频繁需要这些信息。把它们写入 metadata 后，进入同一
- * thread 时可以先用缓存渲染 UI，再由后台刷新补齐实时状态。
- */
-function writeThreadGitContextCache(
-  metadata: Record<string, unknown>,
-  payload: {
-    workspacePath: string
-    isGitRepo: boolean
-    isWorktreePath: boolean
-    gitRoot: string | null
-  }
-): void {
-  // 写入前先清掉新旧缓存字段，避免 metadata 同时存在两套 Git context 表达。
-  clearThreadGitContextCache(metadata)
-  metadata.gitContext = {
-    workspacePath: payload.workspacePath,
-    checkedAt: new Date().toISOString(),
-    isGitRepo: payload.isGitRepo,
-    isWorktreePath: payload.isWorktreePath,
-    gitRoot: payload.gitRoot
-  }
-}
-
 /**
  * 读取线程级 Git context 缓存。
  *
@@ -2181,17 +2213,6 @@ async function readFileSnapshot(
   } catch {
     return { exists: false, content: null, ts: new Date().toISOString() }
   }
-}
-
-function shouldAppendSnapshot(history: FileHistorySnapshot[], next: FileHistorySnapshot): boolean {
-  const last = history[history.length - 1]
-  if (!last) return true
-  if (last.exists !== next.exists) return true
-  if (!last.exists && !next.exists) return false
-  if (last.omitted || next.omitted) {
-    return last.omitted !== next.omitted || last.sizeBytes !== next.sizeBytes
-  }
-  return last.content !== next.content
 }
 
 function trimFileHistory(history: FileHistorySnapshot[]): FileHistorySnapshot[] {
@@ -4133,12 +4154,21 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:set",
     async (event, { threadId, path: newPath }: WorkspaceSetParams) => {
+      const mutationKey = threadId ?? GLOBAL_WORKSPACE_MUTATION_KEY
+      const mutationGeneration = workspaceMutationGate.begin(mutationKey)
+      let expectedThreadIncarnation: ThreadIncarnation | null = null
+      try {
+      const entryThread = threadId ? getThreadCoreSync(threadId) : null
+      expectedThreadIncarnation = entryThread ? captureThreadIncarnation(entryThread) : null
       const parentWindow = BrowserWindow.fromWebContents(event.sender)
       if (!threadId) {
         // Fallback to global setting
         if (newPath) {
           const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
           if (!ready) return null
+          if (!workspaceMutationGate.isCurrent(mutationKey, mutationGeneration)) {
+            return store.get("workspacePath", null) as string | null
+          }
           store.set("workspacePath", newPath)
         } else {
           store.delete("workspacePath")
@@ -4146,35 +4176,121 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         return newPath
       }
 
-      const { getThreadCore, updateThread } = await import("../db")
+      const { getThreadCore } = await import("../db")
+      const readCurrentPath = (): string | null => {
+        const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
+        return typeof currentMetadata.workspacePath === "string"
+          ? currentMetadata.workspacePath
+          : null
+      }
+      const isCurrentMutation = (): boolean =>
+        workspaceMutationGate.isCurrent(threadId, mutationGeneration)
       const thread = getThreadCore(threadId)
-      if (!thread) return null
+      if (!thread || !expectedThreadIncarnation) return null
+      const workspaceSetIncarnation = expectedThreadIncarnation
+      assertThreadIncarnationCurrent(thread, workspaceSetIncarnation)
 
       const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
       await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, newPath)
+      if (!isCurrentMutation()) return readCurrentPath()
       if (newPath) {
         const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)
         if (!ready) return null
-        metadata.workspacePath = newPath
-        clearThreadGitContextCache(metadata)
-        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+        if (!isCurrentMutation()) return readCurrentPath()
+        let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
+        let committed = false
+        await workflowRunManager.withThreadTransitionLease(threadId, () =>
+          withThreadRunMutationLock(threadId, async () => {
+            if (!isCurrentMutation()) return
+            const latest = getThreadCore(threadId)
+            if (!latest) throw new Error("Thread not found")
+            assertThreadIncarnationCurrent(latest, workspaceSetIncarnation)
+            const latestMetadata = parseThreadMetadata(latest.metadata)
+            if (
+              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                threadId,
+                latestMetadata.workspacePath,
+                newPath,
+                isCurrentMutation
+              ))
+            ) {
+              return
+            }
+            await assertWorkspaceSwitchAllowed(
+              threadId,
+              latestMetadata.workspacePath,
+              newPath
+            )
+            if (!isCurrentMutation()) return
+            mutateLatestThreadMetadata(threadId, (current) => {
+              bindThreadWorkspace(current, newPath)
+            })
+            // Calling startWatching here advances its generation before releasing the lease. The
+            // potentially slow worker startup is awaited outside so workspace B can supersede A.
+            watcherStart = startWatching(threadId, newPath)
+            committed = true
+          })
+        )
 
-        await startWatching(threadId, newPath)
-        // 同步刷新“最近工作区”，供新建线程默认复用。
-        store.set("workspacePath", newPath)
+        if (!committed) return readCurrentPath()
+        await watcherStart
+        const current = getThreadCore(threadId)
+        assertThreadIncarnationCurrent(current, workspaceSetIncarnation)
+        const currentMetadata = parseThreadMetadata(current?.metadata)
+        if (isCurrentMutation() && currentMetadata.workspacePath === newPath) {
+          // Only the still-current selection may become the default for a newly created thread.
+          store.set("workspacePath", newPath)
+        }
       } else {
-        metadata.workspacePath = newPath
-        clearThreadGitContextCache(metadata)
-        updateThread(threadId, { metadata: JSON.stringify(metadata) })
-        stopWatching(threadId)
+        let committed = false
+        await workflowRunManager.withThreadTransitionLease(threadId, () =>
+          withThreadRunMutationLock(threadId, async () => {
+            if (!isCurrentMutation()) return
+            const latest = getThreadCore(threadId)
+            if (!latest) throw new Error("Thread not found")
+            assertThreadIncarnationCurrent(latest, workspaceSetIncarnation)
+            const latestMetadata = parseThreadMetadata(latest.metadata)
+            if (
+              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                threadId,
+                latestMetadata.workspacePath,
+                newPath,
+                isCurrentMutation
+              ))
+            ) {
+              return
+            }
+            await assertWorkspaceSwitchAllowed(
+              threadId,
+              latestMetadata.workspacePath,
+              newPath
+            )
+            if (!isCurrentMutation()) return
+            mutateLatestThreadMetadata(threadId, (current) => {
+              bindThreadWorkspace(current, newPath)
+            })
+            stopWatching(threadId)
+            committed = true
+          })
+        )
+        if (!committed) return readCurrentPath()
       }
 
       return newPath
+      } finally {
+        workspaceMutationGate.finish(mutationKey, mutationGeneration)
+      }
     }
   )
 
   // Select workspace folder via dialog (for a specific thread)
   ipcMain.handle("workspace:select", async (event, threadId?: string) => {
+    const mutationKey = threadId ?? GLOBAL_WORKSPACE_MUTATION_KEY
+    const mutationGeneration = workspaceMutationGate.begin(mutationKey)
+    let expectedThreadIncarnation: ThreadIncarnation | null = null
+    try {
+    const entryThread = threadId ? getThreadCoreSync(threadId) : null
+    expectedThreadIncarnation = entryThread ? captureThreadIncarnation(entryThread) : null
     const parentWindow = BrowserWindow.fromWebContents(event.sender)
     // 选择器默认路径优先级：
     // 1) 当前线程已绑定的 workspacePath
@@ -4184,7 +4300,18 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
 
     if (threadId) {
       const { getThreadCore } = await import("../db")
+      if (
+        !workspaceMutationGate.isCurrent(threadId, mutationGeneration)
+      ) {
+        const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
+        return typeof currentMetadata.workspacePath === "string"
+          ? currentMetadata.workspacePath
+          : null
+      }
       const thread = getThreadCore(threadId)
+      if (!thread) return null
+      if (!expectedThreadIncarnation) return null
+      assertThreadIncarnationCurrent(thread, expectedThreadIncarnation)
       if (thread?.metadata) {
         try {
           const metadata = JSON.parse(thread.metadata) as Record<string, unknown>
@@ -4225,30 +4352,94 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     const selectedPath = result.filePaths[0]
 
     if (threadId) {
-      const { getThreadCore, updateThread } = await import("../db")
+      const { getThreadCore } = await import("../db")
+      const readCurrentPath = (): string | null => {
+        const currentMetadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
+        return typeof currentMetadata.workspacePath === "string"
+          ? currentMetadata.workspacePath
+          : null
+      }
+      const isCurrentMutation = (): boolean =>
+        workspaceMutationGate.isCurrent(threadId, mutationGeneration)
+      if (!isCurrentMutation()) return readCurrentPath()
       const thread = getThreadCore(threadId)
+      if (!expectedThreadIncarnation) throw new Error("Thread not found")
+      const workspaceSelectIncarnation = expectedThreadIncarnation
+      assertThreadIncarnationCurrent(thread, workspaceSelectIncarnation)
       if (thread) {
         const metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
         await assertWorkspaceSwitchAllowed(threadId, metadata.workspacePath, selectedPath)
+        if (!isCurrentMutation()) return readCurrentPath()
         const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
         if (!ready) return null
-        metadata.workspacePath = selectedPath
-        clearThreadGitContextCache(metadata)
-        updateThread(threadId, { metadata: JSON.stringify(metadata) })
+        if (!isCurrentMutation()) return readCurrentPath()
+        let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
+        let committed = false
+        await workflowRunManager.withThreadTransitionLease(threadId, () =>
+          withThreadRunMutationLock(threadId, async () => {
+            if (!isCurrentMutation()) return
+            const latest = getThreadCore(threadId)
+            if (!latest) throw new Error("Thread not found")
+            assertThreadIncarnationCurrent(latest, workspaceSelectIncarnation)
+            const latestMetadata = parseThreadMetadata(latest.metadata)
+            if (
+              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                threadId,
+                latestMetadata.workspacePath,
+                selectedPath,
+                isCurrentMutation
+              ))
+            ) {
+              return
+            }
+            await assertWorkspaceSwitchAllowed(
+              threadId,
+              latestMetadata.workspacePath,
+              selectedPath
+            )
+            if (!isCurrentMutation()) return
+            mutateLatestThreadMetadata(threadId, (current) => {
+              bindThreadWorkspace(current, selectedPath)
+            })
+            watcherStart = startWatching(threadId, selectedPath)
+            committed = true
+          })
+        )
 
-        // Start watching the new workspace
-        await startWatching(threadId, selectedPath)
+        if (!committed) return readCurrentPath()
+        await watcherStart
+        assertThreadIncarnationCurrent(getThreadCore(threadId), workspaceSelectIncarnation)
+        if (!isCurrentMutation()) return readCurrentPath()
       }
     } else {
       const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)
       if (!ready) return null
+      if (!workspaceMutationGate.isCurrent(mutationKey, mutationGeneration)) {
+        return store.get("workspacePath", null) as string | null
+      }
     }
 
     // 无论是线程模式还是全局模式，都更新“最近工作区”。
     // 这样新建会话与下次打开选择框都能默认到这个目录。
-    store.set("workspacePath", selectedPath)
+    if (!threadId) {
+      store.set("workspacePath", selectedPath)
+    } else {
+      const { getThreadCore } = await import("../db")
+      const current = getThreadCore(threadId)
+      assertThreadIncarnationCurrent(current, expectedThreadIncarnation!)
+      const currentMetadata = parseThreadMetadata(current?.metadata)
+      if (
+        workspaceMutationGate.isCurrent(threadId, mutationGeneration) &&
+        currentMetadata.workspacePath === selectedPath
+      ) {
+        store.set("workspacePath", selectedPath)
+      }
+    }
 
     return selectedPath
+    } finally {
+      workspaceMutationGate.finish(mutationKey, mutationGeneration)
+    }
   })
 
   // File scans use a pull-based worker protocol. Every IPC response is capped
@@ -4498,66 +4689,230 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  // Create a new worktree; enforces MAX_WORKTREES limit
+  // Create and bind a new worktree as one latest-intent operation. Git creation
+  // is necessarily outside the metadata lock, so a failed final revalidation
+  // removes only the exact worktree/branch created by this request.
   ipcMain.handle(
     "workspace:createWorktree",
-    async (_event, { gitRoot, branch }: { gitRoot: string; branch: string }) => {
-      const worktrees = await listWorktrees(gitRoot)
-      const nonMain = worktrees.filter((w) => !w.isMain)
-
-      if (nonMain.length >= MAX_WORKTREES) {
-        return {
-          success: false,
-          error: `已达到 Worktree 数量上限（${MAX_WORKTREES} 个），请先删除不用的 Worktree 后再创建。`
-        }
-      }
-
-      const safeBranch = branch.replace(/[^a-zA-Z0-9\-_./]/g, "-")
-
-      // Check if branch is already checked out in an existing worktree
-      const branchConflict = worktrees.find((w) => w.branch === safeBranch)
-      if (branchConflict) {
-        return {
-          success: false,
-          error: `分支 "${safeBranch}" 已在 Worktree 中使用（${branchConflict.path}），同一分支不能同时被两个 Worktree 检出。`
-        }
-      }
-
-      const repoName = path.basename(gitRoot)
-      const baseDir = path.join(gitRoot, "..")
-      const baseName = `${repoName}-wt-${safeBranch.replace(/\//g, "-")}`
-
-      // Resolve unique path by appending -2, -3... if directory already exists
-      let worktreePath = path.join(baseDir, baseName)
-      let suffix = 2
-      while (true) {
+    async (
+      event,
+      {
+        threadId,
+        gitRoot,
+        branch
+      }: { threadId: string; gitRoot: string; branch: string }
+    ) => {
+      const mutationGeneration = workspaceMutationGate.begin(threadId)
+      const entryThread =
+        typeof threadId === "string" && threadId ? getThreadCoreSync(threadId) : null
+      const expectedThreadIncarnation = entryThread
+        ? captureThreadIncarnation(entryThread)
+        : null
+      const parentWindow = BrowserWindow.fromWebContents(event.sender)
+      let created = false
+      let bound = false
+      let worktreePath = ""
+      let safeBranch = ""
+      let watcherStart: Promise<"existing" | "started" | "failed" | "superseded"> | undefined
+      const isCurrentMutation = (): boolean =>
+        workspaceMutationGate.isCurrent(threadId, mutationGeneration)
+      const rollbackCreatedWorktree = async (): Promise<string | null> => {
+        if (!created || bound || !worktreePath || !safeBranch) return null
         try {
-          await fs.access(worktreePath)
-          worktreePath = path.join(baseDir, `${baseName}-${suffix}`)
-          suffix++
-        } catch {
-          break
+          await runGit(gitRoot, ["worktree", "remove", "--force", worktreePath])
+          await runGit(gitRoot, ["worktree", "prune"]).catch(() => "")
+          await runGit(gitRoot, ["branch", "-D", safeBranch])
+          created = false
+          return null
+        } catch (error) {
+          return `自动清理未绑定 Worktree 失败，请手动检查 ${worktreePath}：${
+            error instanceof Error ? error.message : String(error)
+          }`
         }
       }
 
       try {
-        // Get the current branch of the main repo as the base branch
+        if (
+          typeof threadId !== "string" ||
+          !threadId ||
+          typeof gitRoot !== "string" ||
+          !gitRoot.trim() ||
+          typeof branch !== "string" ||
+          !branch.trim() ||
+          branch.length > 200
+        ) {
+          return { success: false, error: "Worktree 参数无效" }
+        }
+        const { getThreadCore } = await import("../db")
+        const initialThread = getThreadCore(threadId)
+        if (!initialThread || !expectedThreadIncarnation) {
+          return { success: false, error: "线程不存在" }
+        }
+        assertThreadIncarnationCurrent(initialThread, expectedThreadIncarnation)
+        const initialMetadata = parseThreadMetadata(initialThread.metadata)
+        const initialWorkspacePath =
+          typeof initialMetadata.workspacePath === "string" ? initialMetadata.workspacePath : null
+        if (!initialWorkspacePath) return { success: false, error: "当前线程尚未绑定工作区" }
+
+        const actualGitRoot = await getGitRoot(initialWorkspacePath)
+        if (!actualGitRoot || !workspaceIdentityEquals(actualGitRoot, gitRoot)) {
+          return { success: false, error: "请求的 Git 仓库与当前线程工作区不匹配" }
+        }
+        if (!isCurrentMutation()) {
+          return { success: false, error: "工作区请求已被更新的操作取代" }
+        }
+
+        const worktrees = await listWorktrees(gitRoot)
+        if (worktrees.filter((item) => !item.isMain).length >= MAX_WORKTREES) {
+          return {
+            success: false,
+            error: `已达到 Worktree 数量上限（${MAX_WORKTREES} 个），请先删除不用的 Worktree 后再创建。`
+          }
+        }
+        safeBranch = branch.replace(/[^a-zA-Z0-9\-_./]/g, "-")
+        if (!safeBranch || safeBranch === "." || safeBranch.endsWith("/")) {
+          return { success: false, error: "分支名称无效" }
+        }
+        const branchConflict = worktrees.find((item) => item.branch === safeBranch)
+        if (branchConflict) {
+          return {
+            success: false,
+            error: `分支 "${safeBranch}" 已在 Worktree 中使用（${branchConflict.path}），同一分支不能同时被两个 Worktree 检出。`
+          }
+        }
+
+        const repoName = path.basename(gitRoot)
+        const baseDir = path.join(gitRoot, "..")
+        const baseName = `${repoName}-wt-${safeBranch.replace(/\//g, "-")}`
+        worktreePath = path.join(baseDir, baseName)
+        for (let suffix = 2; ; suffix += 1) {
+          try {
+            await fs.access(worktreePath)
+            worktreePath = path.join(baseDir, `${baseName}-${suffix}`)
+          } catch {
+            break
+          }
+        }
+        if (!isCurrentMutation()) {
+          return { success: false, error: "工作区请求已被更新的操作取代" }
+        }
+
+        // Preflight under the same lock order used by invoke publication. No Git
+        // side effect begins unless the current thread is switchable right now.
+        let preflightPassed = false
+        await workflowRunManager.withThreadTransitionLease(threadId, () =>
+          withThreadRunMutationLock(threadId, async () => {
+            if (!isCurrentMutation()) return
+            const latest = getThreadCore(threadId)
+            if (!latest) throw new Error("线程不存在")
+            assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
+            const latestMetadata = parseThreadMetadata(latest.metadata)
+            if (!workspaceIdentityEquals(latestMetadata.workspacePath, initialWorkspacePath)) {
+              return
+            }
+            if (
+              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                threadId,
+                latestMetadata.workspacePath,
+                worktreePath,
+                isCurrentMutation
+              ))
+            ) {
+              return
+            }
+            await assertWorkspaceSwitchAllowed(
+              threadId,
+              latestMetadata.workspacePath,
+              worktreePath
+            )
+            if (isCurrentMutation()) preflightPassed = true
+          })
+        )
+        if (!preflightPassed) {
+          return { success: false, error: "工作区请求已被更新的操作取代" }
+        }
+
         const [baseBranchResult, baseCommitResult] = await Promise.allSettled([
           runGit(gitRoot, ["rev-parse", "--abbrev-ref", "HEAD"]),
           runGit(gitRoot, ["rev-parse", "HEAD"])
         ])
         const baseBranch =
-          baseBranchResult.status === "fulfilled" ? baseBranchResult.value.trim() || "main" : "main"
+          baseBranchResult.status === "fulfilled"
+            ? baseBranchResult.value.trim() || "main"
+            : "main"
         const baseCommit =
           baseCommitResult.status === "fulfilled" ? baseCommitResult.value.trim() : ""
+        if (!isCurrentMutation()) {
+          return { success: false, error: "工作区请求已被更新的操作取代" }
+        }
 
         await runGit(gitRoot, ["worktree", "add", "-b", safeBranch, worktreePath])
-        return { success: true, path: worktreePath, branch: safeBranch, baseBranch, baseCommit }
-      } catch (e) {
+        created = true
+        const sandboxReady = await prepareWorkspaceSelectionSandbox(worktreePath, parentWindow)
+        if (!sandboxReady) throw new Error("Worktree 已创建，但沙箱准备失败")
+
+        await workflowRunManager.withThreadTransitionLease(threadId, () =>
+          withThreadRunMutationLock(threadId, async () => {
+            if (!isCurrentMutation()) return
+            const latest = getThreadCore(threadId)
+            if (!latest) throw new Error("线程不存在")
+            assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
+            const latestMetadata = parseThreadMetadata(latest.metadata)
+            if (!workspaceIdentityEquals(latestMetadata.workspacePath, initialWorkspacePath)) return
+            if (
+              !(await assertNoThreadTranscriptBeforeWorkspaceChange(
+                threadId,
+                latestMetadata.workspacePath,
+                worktreePath,
+                isCurrentMutation
+              ))
+            ) {
+              return
+            }
+            await assertWorkspaceSwitchAllowed(
+              threadId,
+              latestMetadata.workspacePath,
+              worktreePath
+            )
+            if (!isCurrentMutation()) return
+            mutateLatestThreadMetadata(threadId, (metadata) => {
+              bindThreadWorktree(metadata, {
+                workspacePath: worktreePath,
+                gitRoot,
+                branch: safeBranch,
+                baseBranch,
+                baseCommit
+              })
+            })
+            watcherStart = startWatching(threadId, worktreePath)
+            bound = true
+          })
+        )
+        if (!bound) throw new Error("工作区请求已被更新的操作取代")
+        await watcherStart
+        const currentThread = getThreadCore(threadId)
+        assertThreadIncarnationCurrent(currentThread, expectedThreadIncarnation)
+        const currentMetadata = parseThreadMetadata(currentThread?.metadata)
+        if (isCurrentMutation() && workspaceIdentityEquals(currentMetadata.workspacePath, worktreePath)) {
+          store.set("workspacePath", worktreePath)
+        }
+        return {
+          success: true,
+          path: worktreePath,
+          branch: safeBranch,
+          baseBranch,
+          baseCommit
+        }
+      } catch (error) {
+        const cleanupError = await rollbackCreatedWorktree()
         return {
           success: false,
-          error: e instanceof Error ? e.message : "创建 Worktree 失败"
+          error: [error instanceof Error ? error.message : "创建 Worktree 失败", cleanupError]
+            .filter(Boolean)
+            .join("；")
         }
+      } finally {
+        workspaceMutationGate.finish(threadId, mutationGeneration)
       }
     }
   )
@@ -4572,113 +4927,137 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
         gitRoot,
         branch,
         baseBranch,
-        baseCommit
+        baseCommit,
+        expectedWorkspacePath
       }: {
         threadId: string
         gitRoot: string
         branch: string
         baseBranch?: string
         baseCommit?: string
+        expectedWorkspacePath: string
       }
     ) => {
-      const { getThreadCore, updateThread } = await import("../db")
-      const thread = getThreadCore(threadId)
-      if (!thread) return
-      let metadata: Record<string, unknown> = {}
-      try {
-        metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-      } catch {
-        /* corrupted, reset */
-      }
-      metadata.gitRoot = gitRoot
-      metadata.isWorktree = true
-      metadata.worktreeBranch = branch
-      if (baseBranch) metadata.worktreeBaseBranch = baseBranch
-      if (baseCommit) metadata.worktreeBaseCommit = baseCommit
-      const workspacePath =
-        typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
-      if (workspacePath) {
-        writeThreadGitContextCache(metadata, {
-          workspacePath,
-          isGitRepo: true,
-          isWorktreePath: true,
-          gitRoot
+      if (!expectedWorkspacePath) throw new Error("缺少预期工作区，拒绝写入 Worktree context")
+      const entryThread = getThreadCoreSync(threadId)
+      if (!entryThread) throw new Error("线程不存在")
+      const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
+      await workflowRunManager.withThreadTransitionLease(threadId, () =>
+        withThreadRunMutationLock(threadId, async () => {
+          const { getThreadCore } = await import("../db")
+          const latest = getThreadCore(threadId)
+          if (!latest) throw new Error("线程不存在")
+          assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
+          const metadata = parseThreadMetadata(latest.metadata)
+          if (!workspaceIdentityEquals(metadata.workspacePath, expectedWorkspacePath)) {
+            throw new Error("工作区已变化，忽略过期的 Worktree context")
+          }
+          mutateLatestThreadMetadata(threadId, (current) => {
+            bindThreadWorktree(current, {
+              workspacePath: expectedWorkspacePath,
+              gitRoot,
+              branch,
+              baseBranch,
+              baseCommit
+            })
+          })
         })
-      }
-      metadata.llmModifiedFiles = []
-      metadata.llmFileHistory = {}
-      metadata.llmRecentlyRevertedFiles = []
-      updateThread(threadId, { metadata: JSON.stringify(metadata) })
+      )
     }
   )
 
   // Clear worktree context from thread metadata
-  ipcMain.handle("workspace:clearWorktreeContext", async (_event, threadId: string) => {
-    const { getThreadCore, updateThread } = await import("../db")
-    const thread = getThreadCore(threadId)
-    if (!thread) return
-    let metadata: Record<string, unknown> = {}
-    try {
-      metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-    } catch {
-      /* corrupted, reset */
+  ipcMain.handle(
+    "workspace:clearWorktreeContext",
+    async (
+      _event,
+      expected: { threadId: string; workspacePath: string; gitRoot: string; branch: string }
+    ) => {
+      const entryThread = getThreadCoreSync(expected.threadId)
+      if (!entryThread) throw new Error("线程不存在")
+      const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
+      await workflowRunManager.withThreadTransitionLease(expected.threadId, () =>
+        withThreadRunMutationLock(expected.threadId, async () => {
+          const { getThreadCore } = await import("../db")
+          const latest = getThreadCore(expected.threadId)
+          if (!latest) throw new Error("线程不存在")
+          assertThreadIncarnationCurrent(latest, expectedThreadIncarnation)
+          const metadata = parseThreadMetadata(latest.metadata)
+          if (!matchesExpectedWorktreeIdentity(metadata, expected)) {
+            throw new Error("Worktree context 已变化，忽略过期清理")
+          }
+          mutateLatestThreadMetadata(expected.threadId, (current) => {
+            if (matchesExpectedWorktreeIdentity(current, expected)) {
+              clearThreadWorktreeBinding(current)
+            }
+          })
+        })
+      )
     }
-    delete metadata.isWorktree
-    delete metadata.gitRoot
-    delete metadata.worktreeBranch
-    delete metadata.worktreeBaseBranch
-    delete metadata.worktreeBaseCommit
-    clearThreadGitContextCache(metadata)
-    delete metadata.llmModifiedFiles
-    delete metadata.llmFileHistory
-    delete metadata.llmRecentlyRevertedFiles
-    updateThread(threadId, { metadata: JSON.stringify(metadata) })
-  })
+  )
 
   ipcMain.handle(
     "workspace:recordLlmModifiedFiles",
     async (_event, { threadId, files }: { threadId: string; files: string[] }) => {
-      const { getThreadCore, updateThread } = await import("../db")
+      const entryThread = getThreadCoreSync(threadId)
+      if (!entryThread) return { success: false, error: "Thread not found" }
+      const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
+      const { getThreadCore } = await import("../db")
       const thread = getThreadCore(threadId)
-      if (!thread) return { success: false, error: "Thread not found" }
-      let metadata: Record<string, unknown> = {}
-      try {
-        metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-      } catch {
-        metadata = {}
+      if (!thread || !matchesThreadIncarnation(thread, expectedThreadIncarnation)) {
+        return { success: false, error: THREAD_INCARNATION_CHANGED_ERROR }
       }
+      const metadata = parseThreadMetadata(thread.metadata)
       const workspacePath =
         typeof metadata.workspacePath === "string" ? metadata.workspacePath : null
-      const existing = new Set(getTrackedLlmFiles(metadata))
-      const revertedSet = new Set(getRecentlyRevertedFiles(metadata))
-      const fileHistory = getFileHistoryMap(metadata)
+      const normalizedFiles = new Set<string>()
+      const relativePathsByFile = new Map<string, string[]>()
+      const snapshots: Array<{ relPath: string; snapshot: FileHistorySnapshot }> = []
       for (const file of files || []) {
         const normalized = normalizeTrackedPath(file)
-        if (normalized) {
-          existing.add(normalized)
-          if (workspacePath) {
-            for (const rel of toWorktreeRelativePath(workspacePath, normalized)) {
-              revertedSet.delete(rel)
-            }
-          }
-          revertedSet.delete(normalized)
-        }
+        if (normalized) normalizedFiles.add(normalized)
         if (!workspacePath) continue
         const relCandidates = toWorktreeRelativePath(workspacePath, normalized)
+        relativePathsByFile.set(normalized, relCandidates)
         for (const relPath of relCandidates) {
           const snapshot = await readFileSnapshot(workspacePath, relPath)
-          const history = fileHistory[relPath] || []
-          if (shouldAppendSnapshot(history, snapshot)) {
-            history.push(snapshot)
-          }
-          fileHistory[relPath] = trimFileHistory(history)
+          snapshots.push({ relPath, snapshot })
         }
       }
-      metadata.llmModifiedFiles = Array.from(existing)
-      metadata.llmFileHistory = fileHistory
-      metadata.llmRecentlyRevertedFiles = Array.from(revertedSet)
-      updateThread(threadId, { metadata: JSON.stringify(metadata) })
-      return { success: true, files: Array.from(existing) }
+
+      // Disk snapshots can take seconds. A workspace switch invalidates every path above, so check
+      // identity again immediately before the non-yielding metadata merge and discard stale work.
+      const latestThread = getThreadCore(threadId)
+      if (!latestThread) return { success: false, error: "Thread not found" }
+      const latestBeforeCommit = parseThreadMetadata(latestThread.metadata)
+      if (!matchesThreadIncarnation(latestThread, expectedThreadIncarnation)) {
+        return { success: true, files: getTrackedLlmFiles(latestBeforeCommit) }
+      }
+      const latestWorkspacePath =
+        typeof latestBeforeCommit.workspacePath === "string"
+          ? latestBeforeCommit.workspacePath
+          : null
+      if (latestWorkspacePath !== workspacePath) {
+        return { success: true, files: getTrackedLlmFiles(latestBeforeCommit) }
+      }
+
+      let mergedFiles: string[] = []
+      mutateLatestThreadMetadata(threadId, (latest) => {
+        const merged = mergeRecordedLlmFileMetadata({
+          existingFiles: getTrackedLlmFiles(latest),
+          recentlyRevertedFiles: getRecentlyRevertedFiles(latest),
+          fileHistory: getFileHistoryMap(latest),
+          incomingFiles: normalizedFiles,
+          relativePathsByFile,
+          snapshots,
+          maxSnapshotsPerFile: LLM_FILE_HISTORY_MAX_SNAPSHOTS_PER_FILE
+        })
+        mergedFiles = merged.files
+        latest.llmModifiedFiles = mergedFiles
+        latest.llmFileHistory = merged.fileHistory
+        latest.llmRecentlyRevertedFiles = merged.recentlyRevertedFiles
+      })
+      return { success: true, files: mergedFiles }
     }
   )
 
@@ -4991,7 +5370,15 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     ) => {
       try {
         logGitStep(threadId, "commit", "开始提交")
+        const commitEntryThread = getThreadCoreSync(threadId)
+        if (!commitEntryThread) {
+          return { success: false, error: "当前任务不存在" }
+        }
+        const commitThreadIncarnation = captureThreadIncarnation(commitEntryThread)
         const context = await resolveThreadWorkspaceContext(threadId)
+        if (!matchesThreadIncarnation(getThreadCoreSync(threadId), commitThreadIncarnation)) {
+          return { success: false, error: THREAD_INCARNATION_CHANGED_ERROR }
+        }
         if (!context.workspacePath || !context.isGitRepo) {
           logGitStep(threadId, "commit", "失败：当前任务不在 Git 仓库中")
           return { success: false, error: "当前任务不在 Git 仓库中" }
@@ -5084,21 +5471,24 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
           worktreePath,
           tracked
         ).catch(() => [])
-        const { getThreadCore, updateThread } = await import("../db")
+        const { getThreadCore } = await import("../db")
         const thread = getThreadCore(threadId)
-        if (thread) {
-          let metadata: Record<string, unknown> = {}
-          try {
-            metadata = thread.metadata ? JSON.parse(thread.metadata) : {}
-          } catch {
-            metadata = {}
+        if (thread && matchesThreadIncarnation(thread, commitThreadIncarnation)) {
+          const latestMetadata = parseThreadMetadata(thread.metadata)
+          const latestWorkspacePath =
+            typeof latestMetadata.workspacePath === "string"
+              ? latestMetadata.workspacePath
+              : null
+          const commitWorkspacePath = context.workspacePath
+          if (commitWorkspacePath && latestWorkspacePath === commitWorkspacePath) {
+            mutateLatestThreadMetadata(threadId, (current) => {
+              replaceWorktreeLlmMetadata(current, commitWorkspacePath, worktreePath, {
+                changedFiles: postChangedFiles,
+                fileHistory: {},
+                recentlyRevertedFiles: []
+              })
+            })
           }
-          replaceWorktreeLlmMetadata(metadata, context.workspacePath, worktreePath, {
-            changedFiles: postChangedFiles,
-            fileHistory: {},
-            recentlyRevertedFiles: []
-          })
-          updateThread(threadId, { metadata: JSON.stringify(metadata) })
         }
         notifyWorkspaceFilesChanged(threadId, worktreePath, "meta")
         if (

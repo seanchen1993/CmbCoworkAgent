@@ -2,14 +2,19 @@ import { EventEmitter } from "node:events"
 import type { Worker } from "node:worker_threads"
 import { describe, expect, it } from "vitest"
 import { WORKSPACE_FILE_PREVIEW_CANCELLED } from "../../shared/workspace-file-preview"
-import { WorkspaceFilePreviewClient } from "./client"
+import {
+  WORKSPACE_FILE_PREVIEW_WORKER_RESOURCE_LIMITS,
+  WorkspaceFilePreviewClient
+} from "./client"
 
 class FakeWorker extends EventEmitter {
   readonly messages: Array<Record<string, unknown>> = []
   terminated = false
   onPost?: (message: Record<string, unknown>) => void
+  postError: Error | null = null
 
   postMessage(message: Record<string, unknown>): void {
+    if (this.postError) throw this.postError
     this.messages.push(message)
     this.onPost?.(message)
   }
@@ -52,6 +57,47 @@ function successResponse(requestId: number, content: string) {
 }
 
 describe("workspace file preview client", () => {
+  it("bounds its heap, rejects clean early exit, and recovers on a replacement", async () => {
+    expect(WORKSPACE_FILE_PREVIEW_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(128)
+    const workers = [new FakeWorker(), new FakeWorker()]
+    let starts = 0
+    const client = new WorkspaceFilePreviewClient(
+      async () => workers[starts++] as unknown as Worker
+    )
+    const pending = client.readText(source, undefined, 0, "clean-exit")
+    for (let attempt = 0; attempt < 20 && workers[0].messages.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    expect(workers[0].messages).toHaveLength(1)
+    workers[0].emit("exit", 0)
+    await expect(pending).rejects.toThrow("exited with code 0")
+
+    const replacement = client.readText(source, undefined, 0, "replacement")
+    for (let attempt = 0; attempt < 20 && workers[1].messages.length === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    const message = workers[1].messages.at(-1)
+    workers[1].emit("message", successResponse(message?.requestId as number, "recovered"))
+    await expect(replacement).resolves.toMatchObject({ result: { content: "recovered" } })
+    await client.close()
+  })
+
+  it("does not retain a lane when postMessage throws synchronously", async () => {
+    const worker = new FakeWorker()
+    const client = new WorkspaceFilePreviewClient(async () => worker as unknown as Worker)
+    worker.postError = new Error("dispatch failed")
+    await expect(client.readText(source, undefined, 0, "same-lane")).rejects.toThrow(
+      "dispatch failed"
+    )
+    worker.postError = null
+    const retry = client.readText(source, undefined, 0, "same-lane")
+    await Promise.resolve()
+    const message = worker.messages.at(-1)
+    worker.emit("message", successResponse(message?.requestId as number, "retry"))
+    await expect(retry).resolves.toMatchObject({ result: { content: "retry" } })
+    await client.close()
+  })
+
   it("makes rapid A → B → C requests latest-wins on one sender lane", async () => {
     const worker = new FakeWorker()
     const client = new WorkspaceFilePreviewClient(async () => worker as unknown as Worker)

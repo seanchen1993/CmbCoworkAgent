@@ -86,6 +86,7 @@ import {
   ensureSkillsChangedInvalidationSource,
   ensureWorkspaceHooksChangedInvalidationSource,
   getGlobalHookCatalogRevision,
+  getPluginCatalogRevision,
   getSkillCatalogRevision,
   getWorkspaceHookCatalogRevision,
   readMarketSkillCatalogCache,
@@ -95,14 +96,11 @@ import {
   revalidatePluginCatalog,
   revalidateSkillCatalog,
   subscribeGlobalHookCatalogInvalidation,
+  subscribePluginCatalogInvalidation,
   subscribeSkillCatalogInvalidation,
   subscribeWorkspaceHookCatalogInvalidation
 } from "@/lib/app-catalog-cache"
-import {
-  cancelSkillPluginCatalog,
-  loadPluginCatalogSummary,
-  loadSkillCatalogSummary
-} from "@/lib/skill-plugin-catalog"
+import { getHookCatalogIdentity } from "@/lib/hook-catalog-identity"
 import {
   getRightPanelSkillProjection,
   getRightPanelSkillProjectionAsync,
@@ -156,8 +154,8 @@ const MIN_CONTENT_HEIGHT = 60 // px
 const COLLAPSE_THRESHOLD = 55 // px - auto-collapse when below this
 const PREVIEW_MAX_HEIGHT = "100vh"
 const RIGHT_PANEL_SYNC_SKILL_PROJECTION_LIMIT = 256
-const RIGHT_PANEL_SUMMARY_SCOPE = "right-panel-summary"
 const RIGHT_PANEL_HOOK_SCOPE = "right-panel"
+const RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE = "right-panel-global-summary"
 const RIGHT_PANEL_HOOK_SUMMARY_SCOPE = "right-panel-hook-summary"
 const RIGHT_PANEL_HOOK_REFRESH_DEBOUNCE_MS = 50
 
@@ -165,6 +163,7 @@ interface CatalogHeaderValue {
   total: number
   enabled?: number
   truncated: boolean
+  truncatedReasons: string[]
 }
 
 interface HeaderSummaryState {
@@ -482,9 +481,10 @@ export function RightPanel({
     return {
       value: snapshot
         ? {
-            total: snapshot.rightPanelSkills.length,
+            total: snapshot.total,
             enabled: snapshot.rightPanelEnabledSkillCount,
-            truncated: false
+            truncated: snapshot.truncated,
+            truncatedReasons: snapshot.truncatedReasons
           }
         : null,
       loading: false,
@@ -498,16 +498,22 @@ export function RightPanel({
     const snapshot = readPluginCatalogCache()
     return {
       value: snapshot
-        ? { total: snapshot.plugins.length, truncated: false }
+        ? {
+            total: snapshot.total,
+            truncated: snapshot.truncated,
+            truncatedReasons: snapshot.truncatedReasons
+          }
         : null,
       loading: false,
       error: false
     }
   })
   const [, setHookCatalogRevision] = useState(0)
+  const currentGlobalHookWorkerRevision =
+    `${getSkillCatalogRevision(pluginVersion)}:${getPluginCatalogRevision(pluginVersion)}:` +
+    `${getGlobalHookCatalogRevision()}`
   const currentHookWorkerRevision =
-    `${getSkillCatalogRevision(pluginVersion)}:${getGlobalHookCatalogRevision()}:` +
-    `${getWorkspaceHookCatalogRevision(workspacePath)}`
+    `${currentGlobalHookWorkerRevision}:${getWorkspaceHookCatalogRevision(workspacePath)}`
   const currentHookCatalogKey = useMemo(
     () =>
       JSON.stringify([
@@ -522,6 +528,11 @@ export function RightPanel({
     loading: false,
     error: false
   })
+  const [globalHookSummary, setGlobalHookSummary] = useState<HeaderSummaryState>({
+    value: null,
+    loading: false,
+    error: false
+  })
   const [hookDetail, setHookDetail] = useState<HookDetailState>({
     key: "",
     hooks: [],
@@ -532,11 +543,10 @@ export function RightPanel({
   const skillsCatalogRequestIdRef = useRef(0)
   const pluginCatalogRequestIdRef = useRef(0)
   const hooksCatalogRequestIdRef = useRef(0)
-  const skillSummaryRequestIdRef = useRef(0)
-  const pluginSummaryRequestIdRef = useRef(0)
+  const globalSummaryRequestIdRef = useRef(0)
   const hookSummaryRequestIdRef = useRef(0)
+  const globalSummaryPromiseRef = useRef<Promise<void>>(Promise.resolve())
   const lspConfigRequestIdRef = useRef(0)
-  const catalogSummaryWarmupRef = useRef<Promise<void>>(Promise.resolve())
 
   useEffect(() => {
     setHookDetail({ key: currentHookCatalogKey, hooks: [], truncated: false })
@@ -555,9 +565,10 @@ export function RightPanel({
       setDisabledSkills(snapshot.disabledSkillIds)
       setSkillSummary({
         value: {
-          total: snapshot.rightPanelSkills.length,
+          total: snapshot.total,
           enabled: snapshot.rightPanelEnabledSkillCount,
-          truncated: false
+          truncated: snapshot.truncated,
+          truncatedReasons: snapshot.truncatedReasons
         },
         loading: false,
         error: false
@@ -566,74 +577,6 @@ export function RightPanel({
       console.error("[RightPanel] Failed to load skills:", error)
     }
   }, [pluginVersion])
-
-  const refreshSkillSummary = useCallback(async (): Promise<void> => {
-    const requestId = ++skillSummaryRequestIdRef.current
-    setSkillSummary((previous) => ({ ...previous, loading: true, error: false }))
-    try {
-      const summary = await loadSkillCatalogSummary(
-        getSkillCatalogRevision(pluginVersion),
-        RIGHT_PANEL_SUMMARY_SCOPE,
-        () => requestId === skillSummaryRequestIdRef.current
-      )
-      if (requestId !== skillSummaryRequestIdRef.current) return
-      setSkillSummary({
-        value: {
-          total: summary.total,
-          enabled: summary.enabled,
-          truncated: summary.truncated
-        },
-        loading: false,
-        error: false
-      })
-    } catch (error) {
-      if (requestId !== skillSummaryRequestIdRef.current) return
-      const message = error instanceof Error ? error.message : String(error)
-      if (/cancel|supersed|SKILL_PLUGIN_CATALOG_CANCELLED/i.test(message)) return
-      console.error("[RightPanel] Failed to load skill summary:", error)
-      setSkillSummary((previous) => ({ ...previous, loading: false, error: true }))
-    }
-  }, [pluginVersion])
-
-  const refreshPluginSummary = useCallback(async (): Promise<void> => {
-    const requestId = ++pluginSummaryRequestIdRef.current
-    setPluginSummary((previous) => ({ ...previous, loading: true, error: false }))
-    try {
-      const summary = await loadPluginCatalogSummary(
-        String(pluginVersion),
-        RIGHT_PANEL_SUMMARY_SCOPE,
-        () => requestId === pluginSummaryRequestIdRef.current
-      )
-      if (requestId !== pluginSummaryRequestIdRef.current) return
-      setPluginSummary({
-        value: { total: summary.total, truncated: summary.truncated },
-        loading: false,
-        error: false
-      })
-    } catch (error) {
-      if (requestId !== pluginSummaryRequestIdRef.current) return
-      const message = error instanceof Error ? error.message : String(error)
-      if (/cancel|supersed|SKILL_PLUGIN_CATALOG_CANCELLED/i.test(message)) return
-      console.error("[RightPanel] Failed to load plugin summary:", error)
-      setPluginSummary((previous) => ({ ...previous, loading: false, error: true }))
-    }
-  }, [pluginVersion])
-
-  useEffect(() => {
-    if (moduleMode !== "work") return undefined
-    let cancelled = false
-    catalogSummaryWarmupRef.current = (async () => {
-      await refreshPluginSummary()
-      if (cancelled) return
-      await refreshSkillSummary()
-    })()
-    return () => {
-      cancelled = true
-      skillSummaryRequestIdRef.current += 1
-      pluginSummaryRequestIdRef.current += 1
-      cancelSkillPluginCatalog(RIGHT_PANEL_SUMMARY_SCOPE)
-    }
-  }, [moduleMode, refreshPluginSummary, refreshSkillSummary])
 
   useEffect(() => {
     if (!skillsOpen) return undefined
@@ -655,13 +598,6 @@ export function RightPanel({
   }, [])
 
   useEffect(() => {
-    if (moduleMode !== "work") return undefined
-    return subscribeSkillCatalogInvalidation(() => {
-      catalogSummaryWarmupRef.current = refreshSkillSummary()
-    })
-  }, [moduleMode, refreshSkillSummary])
-
-  useEffect(() => {
     if (!skillsOpen) return undefined
     if (moduleMode !== "work") return undefined
     const unsubscribe = subscribeSkillCatalogInvalidation(() => {
@@ -670,27 +606,42 @@ export function RightPanel({
     return unsubscribe
   }, [loadSkillCatalog, moduleMode, skillsOpen])
 
+  const loadPluginCatalog = useCallback(async (): Promise<void> => {
+    const requestId = ++pluginCatalogRequestIdRef.current
+    try {
+      const snapshot = await revalidatePluginCatalog(pluginVersion)
+      if (requestId !== pluginCatalogRequestIdRef.current) return
+      setPlugins(snapshot.plugins)
+      setPluginSummary({
+        value: {
+          total: snapshot.total,
+          truncated: snapshot.truncated,
+          truncatedReasons: snapshot.truncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      console.error("[RightPanel] Failed to load plugins:", error)
+    }
+  }, [pluginVersion])
+
   useEffect(() => {
     if (!pluginsOpen) return undefined
     if (moduleMode !== "work") return undefined
-    const requestId = ++pluginCatalogRequestIdRef.current
-    void revalidatePluginCatalog(pluginVersion)
-      .then((snapshot) => {
-        if (requestId !== pluginCatalogRequestIdRef.current) return
-        setPlugins(snapshot.plugins)
-        setPluginSummary({
-          value: { total: snapshot.plugins.length, truncated: false },
-          loading: false,
-          error: false
-        })
-      })
-      .catch((error) => {
-        console.error("[RightPanel] Failed to load plugins:", error)
-      })
+    void loadPluginCatalog()
     return () => {
       pluginCatalogRequestIdRef.current += 1
     }
-  }, [moduleMode, pluginVersion, pluginsOpen])
+  }, [loadPluginCatalog, moduleMode, pluginsOpen])
+
+  useEffect(() => {
+    if (!pluginsOpen) return undefined
+    if (moduleMode !== "work") return undefined
+    return subscribePluginCatalogInvalidation(() => {
+      void loadPluginCatalog()
+    })
+  }, [loadPluginCatalog, moduleMode, pluginsOpen])
 
   useEffect(() => {
     if (!skillsOpen) return undefined
@@ -875,7 +826,70 @@ export function RightPanel({
     }
   }, [skillGenerationAgent.phase, skillGenerationAgent.errorText])
 
-  const refreshHookSummary = useCallback(async (): Promise<void> => {
+  const refreshGlobalCatalogSummary = useCallback(async (): Promise<void> => {
+    const requestId = ++globalSummaryRequestIdRef.current
+    setSkillSummary((previous) => ({ ...previous, loading: true, error: false }))
+    setPluginSummary((previous) => ({ ...previous, loading: true, error: false }))
+    setGlobalHookSummary((previous) => ({ ...previous, loading: true, error: false }))
+    try {
+      const page = await window.api.hooks.catalog.read({
+        requestScope: RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE,
+        revision: currentGlobalHookWorkerRevision,
+        limit: 1
+      })
+      if (requestId !== globalSummaryRequestIdRef.current) return
+      setSkillSummary({
+        value: {
+          total: page.relatedSummary.skillEntries,
+          enabled: page.relatedSummary.enabledSkillEntries,
+          truncated: page.relatedSummary.skillTruncated,
+          truncatedReasons: page.relatedSummary.skillTruncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+      setPluginSummary({
+        value: {
+          total: page.relatedSummary.pluginEntries,
+          truncated: page.relatedSummary.pluginTruncated,
+          truncatedReasons: page.relatedSummary.pluginTruncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+      setGlobalHookSummary({
+        value: {
+          total: page.totalEntries,
+          enabled: page.enabledEntries,
+          truncated: page.truncated,
+          truncatedReasons: page.truncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      if (requestId !== globalSummaryRequestIdRef.current) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
+      console.error("[RightPanel] Failed to load global catalog summary:", error)
+      setSkillSummary((previous) => ({ ...previous, loading: false, error: true }))
+      setPluginSummary((previous) => ({ ...previous, loading: false, error: true }))
+      setGlobalHookSummary((previous) => ({ ...previous, loading: false, error: true }))
+    }
+  }, [currentGlobalHookWorkerRevision])
+
+  useEffect(() => {
+    if (moduleMode !== "work") return undefined
+    const promise = refreshGlobalCatalogSummary()
+    globalSummaryPromiseRef.current = promise
+    return () => {
+      globalSummaryRequestIdRef.current += 1
+      void window.api.hooks.catalog.cancel(RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE).catch(() => undefined)
+    }
+  }, [moduleMode, refreshGlobalCatalogSummary])
+
+  const refreshWorkspaceHookSummary = useCallback(async (): Promise<void> => {
+    if (!workspacePath) return
     const requestId = ++hookSummaryRequestIdRef.current
     const key = currentHookCatalogKey
     setHookSummary((previous) => ({
@@ -884,10 +898,12 @@ export function RightPanel({
       loading: true,
       error: false
     }))
+    await globalSummaryPromiseRef.current
+    if (requestId !== hookSummaryRequestIdRef.current) return
     try {
       const page = await window.api.hooks.catalog.read({
         requestScope: RIGHT_PANEL_HOOK_SUMMARY_SCOPE,
-        ...(workspacePath ? { workspacePath } : {}),
+        workspacePath,
         revision: currentHookWorkerRevision,
         limit: 1
       })
@@ -897,7 +913,8 @@ export function RightPanel({
         value: {
           total: page.totalEntries,
           enabled: page.enabledEntries,
-          truncated: page.truncated
+          truncated: page.truncated,
+          truncatedReasons: page.truncatedReasons
         },
         loading: false,
         error: false
@@ -906,27 +923,21 @@ export function RightPanel({
       if (requestId !== hookSummaryRequestIdRef.current) return
       const message = error instanceof Error ? error.message : String(error)
       if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
-      console.error("[RightPanel] Failed to load hook summary:", error)
+      console.error("[RightPanel] Failed to load workspace hook summary:", error)
       setHookSummary((previous) =>
-        previous.key === key
-          ? { ...previous, loading: false, error: true }
-          : previous
+        previous.key === key ? { ...previous, loading: false, error: true } : previous
       )
     }
   }, [currentHookCatalogKey, currentHookWorkerRevision, workspacePath])
 
   useEffect(() => {
-    if (moduleMode !== "work") return undefined
-    let cancelled = false
-    void catalogSummaryWarmupRef.current.then(() => {
-      if (!cancelled) void refreshHookSummary()
-    })
+    if (moduleMode !== "work" || !workspacePath) return undefined
+    void refreshWorkspaceHookSummary()
     return () => {
-      cancelled = true
       hookSummaryRequestIdRef.current += 1
       void window.api.hooks.catalog.cancel(RIGHT_PANEL_HOOK_SUMMARY_SCOPE).catch(() => undefined)
     }
-  }, [moduleMode, refreshHookSummary])
+  }, [moduleMode, refreshWorkspaceHookSummary, workspacePath])
 
   const loadHooks = useCallback(async (): Promise<void> => {
     const requestId = ++hooksCatalogRequestIdRef.current
@@ -935,12 +946,15 @@ export function RightPanel({
       previous.key === key ? previous : { key, hooks: [], truncated: false }
     )
     try {
+      await globalSummaryPromiseRef.current
+      if (requestId !== hooksCatalogRequestIdRef.current) return
       const globalHooks: HookConfig[] = []
       const workspaceHooks: HookConfig[] = []
       const pluginHooks: PluginHookMetadata[] = []
       const skillHooks: SkillHookMetadata[] = []
       let cursor: string | undefined
       let truncated = false
+      const truncatedReasons = new Set<string>()
       let totalEntries = 0
       let enabledEntries = 0
       do {
@@ -958,11 +972,13 @@ export function RightPanel({
         pluginHooks.push(...page.pluginHooks)
         skillHooks.push(...page.skillHooks)
         truncated ||= page.truncated
+        for (const reason of page.truncatedReasons) truncatedReasons.add(reason)
         totalEntries = page.totalEntries
         enabledEntries = page.enabledEntries
         cursor = page.nextCursor
         if (cursor && cursor === previousCursor) {
           truncated = true
+          truncatedReasons.add("cursor-no-progress")
           console.warn("[RightPanel] Hook catalog cursor made no progress")
           break
         }
@@ -993,7 +1009,12 @@ export function RightPanel({
       setHookDetail({ key, hooks: nextHooks, truncated })
       setHookSummary({
         key,
-        value: { total: totalEntries, enabled: enabledEntries, truncated },
+        value: {
+          total: totalEntries,
+          enabled: enabledEntries,
+          truncated,
+          truncatedReasons: [...truncatedReasons]
+        },
         loading: false,
         error: false
       })
@@ -1019,9 +1040,17 @@ export function RightPanel({
   }, [hooksOpen, loadHooks, moduleMode])
 
   useEffect(() => {
-    return subscribeGlobalHookCatalogInvalidation(() => {
+    const advanceRevision = (): void => {
       setHookCatalogRevision((revision) => revision + 1)
-    })
+    }
+    const unsubscribes = [
+      subscribeGlobalHookCatalogInvalidation(advanceRevision),
+      subscribeSkillCatalogInvalidation(advanceRevision),
+      subscribePluginCatalogInvalidation(advanceRevision)
+    ]
+    return () => {
+      for (const unsubscribe of unsubscribes) unsubscribe()
+    }
   }, [])
 
   useEffect(() => {
@@ -1613,12 +1642,17 @@ export function RightPanel({
     [workspacePath]
   )
 
-  const hookSummaryValue =
-    hookSummary.key === currentHookCatalogKey ? hookSummary.value : null
-  const hookSummaryLoading =
-    hookSummary.key !== currentHookCatalogKey || hookSummary.loading
-  const hookSummaryError =
-    hookSummary.key === currentHookCatalogKey && hookSummary.error
+  const hookSummaryValue = workspacePath
+    ? hookSummary.key === currentHookCatalogKey
+      ? hookSummary.value
+      : null
+    : globalHookSummary.value
+  const hookSummaryLoading = workspacePath
+    ? hookSummary.key !== currentHookCatalogKey || hookSummary.loading
+    : globalHookSummary.loading
+  const hookSummaryError = workspacePath
+    ? hookSummary.key === currentHookCatalogKey && hookSummary.error
+    : globalHookSummary.error
   const currentHookDetail =
     hookDetail.key === currentHookCatalogKey
       ? hookDetail
@@ -4218,7 +4252,7 @@ function HooksContent({
           : ""
     return (
       <div
-        key={hook.id}
+        key={getHookCatalogIdentity(hook)}
         className={cn(
           "min-w-0 overflow-hidden p-3 rounded-sm border border-border",
           !hook.enabled && "opacity-60"

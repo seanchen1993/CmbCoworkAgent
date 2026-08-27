@@ -54,7 +54,10 @@ import {
   isReadOnlyShellCommand,
   type CommandShellSyntax
 } from "./exec-policy"
-import type { WorkflowWorktreeIsolationBoundary } from "./workflow/types"
+import {
+  WORKFLOW_RUN_ID_PATTERN,
+  type WorkflowWorktreeIsolationBoundary
+} from "./workflow/types"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import {
   areElevatedRootsPreparedAsync,
@@ -98,6 +101,10 @@ import {
   recordShellFileOps as recordAdoptionShellFileOps
 } from "../services/adoption-tracker"
 import {
+  openStableWritableFileHandle,
+  type StableWritableFileHandle
+} from "../services/stable-file-handle"
+import {
   getHarnessStageAttributionForCodeGeneration,
   markHarnessStageAttributionDirty,
   type HarnessStageAttribution
@@ -109,6 +116,25 @@ import {
 } from "./read-file-output"
 
 const execFileP = promisify(execFile)
+
+// DeepAgents keeps these helpers private even though LocalSandbox must wrap
+// them to preserve its virtual-path and ripgrep behavior. Keep the compatibility
+// cast isolated and structurally typed instead of spreading `any` through the
+// security-sensitive path code.
+interface FilesystemBackendRuntimeInternals {
+  resolvePath: (key: string) => string
+  ripgrepSearch?: (
+    pattern: string,
+    basePath: string,
+    includeGlob: string | null
+  ) => Promise<Record<string, Array<[number, string]>> | null>
+}
+
+function getFilesystemBackendInternals(
+  backend: FilesystemBackend
+): FilesystemBackendRuntimeInternals {
+  return backend as unknown as FilesystemBackendRuntimeInternals
+}
 
 async function pathExists(filePath: string): Promise<boolean> {
   try {
@@ -270,7 +296,7 @@ function tomlBasicString(value: string): string {
   return `"${value
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
-    .replace(/\u0008/g, "\\b")
+    .replaceAll(String.fromCharCode(8), "\\b")
     .replace(/\t/g, "\\t")
     .replace(/\n/g, "\\n")
     .replace(/\f/g, "\\f")
@@ -343,6 +369,13 @@ export interface LocalSandboxOptions {
   runId?: string
   /** Absolute app-managed directory backing DeepAgents' logical /large_tool_results path. */
   largeToolResultsDir?: string
+  /**
+   * Exact app-managed directory containing workflow scripts issued for this
+   * thread. Existing `<runId>.workflow.js` files remain editable through the
+   * normal tool approval/Hook path even when Windows readonly or worktree guards
+   * reject arbitrary paths outside the workspace.
+   */
+  workflowScriptsDir?: string
   /**
    * App-managed roots for automatic artifacts such as compaction history. Writes
    * through the dedicated internal API are constrained to these roots and do
@@ -515,6 +548,8 @@ export class LocalSandbox
   private readonly _hookTurnId?: string
   /** Physical directory backing DeepAgents' logical /large_tool_results files. */
   private readonly _largeToolResultsDir: string
+  /** Thread-scoped directory containing host-issued editable workflow scripts. */
+  private readonly _workflowScriptsDir?: string
   /** Canonical app-owned roots accepted by the internal artifact writer. */
   private readonly _internalArtifactRoots: readonly string[]
   /** App-owned persistent cache root granted as a Codex writable root per workspace. */
@@ -698,6 +733,7 @@ export class LocalSandbox
     const name =
       path.win32
         .basename(canonicalWorkingDir)
+        // eslint-disable-next-line no-control-regex -- Windows forbids this exact control range.
         .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
         .slice(0, 40) || "workspace"
     return path.win32.join(LocalSandbox.buildSandboxCacheBase(env), `${name}-${hash}`)
@@ -1844,6 +1880,9 @@ export class LocalSandbox
     this._largeToolResultsDir = options.largeToolResultsDir
       ? path.resolve(options.largeToolResultsDir)
       : path.join(this.workingDir, ".cmbdevclaw", "large_tool_results")
+    this._workflowScriptsDir = options.workflowScriptsDir
+      ? path.resolve(options.workflowScriptsDir)
+      : undefined
     this._internalArtifactRoots = (options.internalArtifactRoots ?? [this._largeToolResultsDir])
       .map((root) => path.resolve(root))
       .filter((root, index, roots) => roots.indexOf(root) === index)
@@ -1897,17 +1936,12 @@ export class LocalSandbox
     // MUST run before caching _resolvePath below, so the cache captures the patched version.
     this.patchResolvePath()
 
-    // Cache parent's private fields once to avoid scattered (this as any) casts
-    this._resolvePath = ((this as any).resolvePath as (key: string) => string).bind(this)
-    this._virtualMode = ((this as any).virtualMode as boolean) ?? false
-    this._cwd = ((this as any).cwd as string) ?? this.workingDir
-    this._maxFileSizeBytes = ((this as any).maxFileSizeBytes as number) ?? 10 * 1024 * 1024
-    if ((this as any).virtualMode === undefined) {
-      console.warn("[LocalSandbox] parent virtualMode not found, defaulting to false")
-    }
-    if ((this as any).cwd === undefined) {
-      console.warn("[LocalSandbox] parent cwd not found, falling back to workingDir")
-    }
+    // Cache the upstream wrapper once; protected options are mirrored from the
+    // same constructor input so this code does not depend on private fields.
+    this._resolvePath = getFilesystemBackendInternals(this).resolvePath.bind(this)
+    this._virtualMode = this.virtualMode
+    this._cwd = this.cwd
+    this._maxFileSizeBytes = (options.maxFileSizeMb ?? 10) * 1024 * 1024
   }
 
   /**
@@ -2830,15 +2864,16 @@ export class LocalSandbox
   }
 
   private patchResolvePath(): void {
-    if (typeof (this as any).resolvePath !== "function") {
+    const backend = getFilesystemBackendInternals(this)
+    if (typeof backend.resolvePath !== "function") {
       console.warn(
         "[LocalSandbox] resolvePath not found on FilesystemBackend — skipping path patch"
       )
       return
     }
-    const original = (this as any).resolvePath.bind(this)
+    const original = backend.resolvePath.bind(this)
     const workingDir = this.workingDir
-    ;(this as any).resolvePath = (key: string): string => {
+    backend.resolvePath = (key: string): string => {
       const prefix = "/large_tool_results/"
       if (key.startsWith(prefix)) {
         const suffix = key.slice(prefix.length)
@@ -2960,13 +2995,7 @@ export class LocalSandbox
 
     // Call parent's private ripgrepSearch directly to distinguish
     // "rg found nothing" ({}) from "rg unavailable" (null)
-    const ripgrepSearch = (this as any).ripgrepSearch as
-      | ((
-          p: string,
-          b: string,
-          g: string | null
-        ) => Promise<Record<string, Array<[number, string]>> | null>)
-      | undefined
+    const ripgrepSearch = getFilesystemBackendInternals(this).ripgrepSearch
 
     const t0 = Date.now()
     let rgResult: Record<string, Array<[number, string]>> | null | undefined
@@ -4119,28 +4148,42 @@ export class LocalSandbox
    * Different file paths run in parallel; same path is FIFO-queued.
    */
   private async withFileLock<T>(resolvedPath: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this._fileLocks.get(resolvedPath) ?? Promise.resolve()
+    const lockKey = this.fileIdentityKey(resolvedPath)
+    const prev = this._fileLocks.get(lockKey) ?? Promise.resolve()
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => {
       release = r
     })
     const tail = prev.then(() => gate)
-    this._fileLocks.set(resolvedPath, tail)
+    this._fileLocks.set(lockKey, tail)
     try {
       await prev
       return await fn()
     } finally {
       release()
-      if (this._fileLocks.get(resolvedPath) === tail) {
-        this._fileLocks.delete(resolvedPath)
+      if (this._fileLocks.get(lockKey) === tail) {
+        this._fileLocks.delete(lockKey)
       }
+    }
+  }
+
+  private fileIdentityKey(resolvedPath: string): string {
+    const absolutePath = path.resolve(resolvedPath)
+    return process.platform === "win32" ? normalizeDirKey(absolutePath) : absolutePath
+  }
+
+  private async existingFileIdentityKey(resolvedPath: string): Promise<string> {
+    try {
+      return this.fileIdentityKey(await fs.realpath(resolvedPath))
+    } catch {
+      return this.fileIdentityKey(resolvedPath)
     }
   }
 
   /** Record the file's mtime after a successful read or write. */
   private async recordReadTime(resolvedPath: string): Promise<void> {
     const stat = await fs.stat(resolvedPath)
-    this._fileReadTimes.set(resolvedPath, stat.mtimeMs)
+    this._fileReadTimes.set(await this.existingFileIdentityKey(resolvedPath), stat.mtimeMs)
   }
 
   /**
@@ -4148,7 +4191,9 @@ export class LocalSandbox
    * Compares file mtime against the recorded mtime — same clock source, no drift.
    */
   private async assertNotModifiedSinceRead(resolvedPath: string): Promise<void> {
-    const recordedMtime = this._fileReadTimes.get(resolvedPath)
+    const recordedMtime = this._fileReadTimes.get(
+      await this.existingFileIdentityKey(resolvedPath)
+    )
     if (recordedMtime === undefined) return // first edit without a prior read() — allow it
     const stat = await fs.stat(resolvedPath)
     // 50ms tolerance for filesystem timestamp granularity (NTFS async flush, HFS+ 1s resolution)
@@ -4182,6 +4227,63 @@ export class LocalSandbox
     }
   }
 
+  private isManagedWorkflowScriptCapability(
+    capability: StableWritableFileHandle
+  ): boolean {
+    const suffix = ".workflow.js"
+    const fileName = path.basename(capability.filePath)
+    const runId = fileName.endsWith(suffix)
+      ? fileName.slice(0, -suffix.length)
+      : ""
+    return (
+      WORKFLOW_RUN_ID_PATTERN.test(runId) &&
+      this.fileIdentityKey(path.dirname(capability.filePath)) ===
+        this.fileIdentityKey(capability.rootPath)
+    )
+  }
+
+  private async assertNotModifiedSinceStableRead(
+    capability: StableWritableFileHandle
+  ): Promise<void> {
+    const recordedMtime = this._fileReadTimes.get(
+      this.fileIdentityKey(capability.filePath)
+    )
+    if (recordedMtime === undefined) return
+    const stat = await capability.handle.stat()
+    if (stat.mtimeMs > recordedMtime + 50) {
+      throw new Error(
+        `File has been modified externally since last read. Please read the file again before editing.`
+      )
+    }
+  }
+
+  private async recordStableReadTime(capability: StableWritableFileHandle): Promise<void> {
+    const stat = await capability.handle.stat()
+    this._fileReadTimes.set(this.fileIdentityKey(capability.filePath), stat.mtimeMs)
+  }
+
+  private async writeStableFileHandleEncoded(
+    capability: StableWritableFileHandle,
+    content: string,
+    encoding: string
+  ): Promise<void> {
+    const encoded = iconv.encode(content, encoding)
+    await capability.assertPathIdentity()
+    await capability.handle.truncate(0)
+    let offset = 0
+    while (offset < encoded.length) {
+      const { bytesWritten } = await capability.handle.write(
+        encoded,
+        offset,
+        encoded.length - offset,
+        offset
+      )
+      if (bytesWritten <= 0) throw new Error("Unable to write managed workflow script")
+      offset += bytesWritten
+    }
+    await capability.assertPathIdentity()
+  }
+
   /**
    * Check if a file write should be blocked by the sandbox.
    * - readonly + non-admin: block all writes
@@ -4194,6 +4296,7 @@ export class LocalSandbox
   private async isWriteBlocked(filePath: string): Promise<boolean> {
     if (this.windowsSandbox !== "readonly") return false
     if (!(await LocalSandbox.getElevationState())) return true
+    if (await this.resolveEditableWorkflowScriptPath(filePath)) return false
     // Admin readonly: restrict to working directory only (matches disk-write-cwd)
     try {
       const resolved = path.resolve(this.workingDir, filePath)
@@ -4224,6 +4327,7 @@ export class LocalSandbox
    * the source checkout or another worktree. Uncertainty fails closed. */
   private async isWorktreeFileWriteBlocked(filePath: string): Promise<boolean> {
     if (!this.worktreeIsolation) return false
+    if (await this.resolveEditableWorkflowScriptPath(filePath)) return false
     try {
       const resolved = this._resolvePath(filePath)
       if (path.resolve(resolved) === path.join(this.worktreeIsolation.worktreeRoot, ".git")) {
@@ -4244,6 +4348,42 @@ export class LocalSandbox
       return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
     } catch {
       return true
+    }
+  }
+
+  /**
+   * Recognize only an existing, regular, direct-child workflow script from the
+   * directory the host derived for this thread. Requiring the file to pre-exist
+   * prevents the exception from becoming a general app-data write capability;
+   * canonical parent and no-symlink checks prevent traversal or link escapes.
+   */
+  private async resolveEditableWorkflowScriptPath(filePath: string): Promise<string | null> {
+    if (!this._workflowScriptsDir) return null
+    let resolved: string
+    try {
+      resolved = this._resolvePath(filePath)
+    } catch {
+      return null
+    }
+
+    try {
+      const entry = await fs.lstat(resolved)
+      if (!entry.isFile() || entry.isSymbolicLink()) return null
+      const [realRoot, realFile] = await Promise.all([
+        fs.realpath(this._workflowScriptsDir),
+        fs.realpath(resolved)
+      ])
+      const suffix = ".workflow.js"
+      const realFileName = path.basename(realFile)
+      const runId = realFileName.endsWith(suffix)
+        ? realFileName.slice(0, -suffix.length)
+        : ""
+      if (!WORKFLOW_RUN_ID_PATTERN.test(runId)) return null
+      return this.fileIdentityKey(path.dirname(realFile)) === this.fileIdentityKey(realRoot)
+        ? realFile
+        : null
+    } catch {
+      return null
     }
   }
 
@@ -4663,78 +4803,157 @@ export class LocalSandbox
       return { error: "文件编辑已取消。" }
     }
     try {
-      const resolvedPath = this._resolvePath(effectiveFilePath)
+      const lexicalResolvedPath = this._resolvePath(effectiveFilePath)
+      const managedWorkflowScriptPath =
+        await this.resolveEditableWorkflowScriptPath(effectiveFilePath)
+      const resolvedPath = managedWorkflowScriptPath ?? lexicalResolvedPath
+      const hasStableManagedWorkflowScriptIdentity = async (): Promise<boolean> => {
+        const currentPath = await this.resolveEditableWorkflowScriptPath(effectiveFilePath)
+        return currentPath === null
+      }
       let harnessStage: HarnessStageAttribution | undefined
+      const managedWorkflowScriptEdit = managedWorkflowScriptPath !== null
       const result = await this.withFileLock(resolvedPath, async () => {
         if (this.isAborted) {
           return { error: "文件编辑已取消。" }
         }
-        if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+        if (
+          (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) ||
+          (await this.isWriteBlocked(effectiveFilePath))
+        ) {
           return {
             error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
           }
         }
-        harnessStage = await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
-        if (this.isAborted) {
-          return { error: "文件编辑已取消。" }
-        }
-        const { buffer } = await this.readFileBuffer(effectiveFilePath)
-        const ext = path.extname(resolvedPath).toLowerCase()
-        const encoding = this.detectEncoding(buffer, ext)
-        const content = iconv.decode(buffer, encoding)
-
-        // Check file hasn't been modified externally since last read
-        await this.assertNotModifiedSinceRead(resolvedPath)
-
-        let expectedContent: string
-        let occurrences: number
-
-        if (content === "" && effectiveOldString === "") {
-          expectedContent = effectiveNewString
-          occurrences = 0
-        } else {
-          const r = replace(content, effectiveOldString, effectiveNewString, effectiveReplaceAll)
-          expectedContent = r.newContent
-          occurrences = r.occurrences
-        }
-
-        if (this.isAborted) {
-          return { error: "文件编辑已取消。" }
-        }
-        if (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) {
+        if (
+          !managedWorkflowScriptEdit &&
+          !(await hasStableManagedWorkflowScriptIdentity())
+        ) {
           return {
             error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
           }
         }
-        await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
-        await this.recordReadTime(resolvedPath)
-        return { path: effectiveFilePath, filesUpdate: null, occurrences }
+        let managedCapability: StableWritableFileHandle | null = null
+        try {
+          if (managedWorkflowScriptEdit) {
+            if (!this._workflowScriptsDir) {
+              return {
+                error: `Access denied — '${effectiveFilePath}' is not an editable workflow script.`
+              }
+            }
+            managedCapability = await openStableWritableFileHandle(
+              this._workflowScriptsDir,
+              lexicalResolvedPath
+            )
+            if (!this.isManagedWorkflowScriptCapability(managedCapability)) {
+              return {
+                error: `Access denied — '${effectiveFilePath}' is not an editable workflow script.`
+              }
+            }
+          }
+
+          harnessStage = managedWorkflowScriptEdit
+            ? undefined
+            : await this.captureHarnessStageForCodeGeneration(effectiveFilePath)
+          if (this.isAborted) {
+            return { error: "文件编辑已取消。" }
+          }
+          const buffer = managedCapability
+            ? await LocalSandbox.readFileHandleBuffer(
+                managedCapability.handle,
+                effectiveFilePath
+              )
+            : (await this.readResolvedFileBuffer(resolvedPath, effectiveFilePath)).buffer
+          const ext = path.extname(
+            managedCapability?.filePath ?? resolvedPath
+          ).toLowerCase()
+          const encoding = this.detectEncoding(buffer, ext)
+          const content = iconv.decode(buffer, encoding)
+
+          // Check file hasn't been modified externally since last read.
+          if (managedCapability) {
+            await this.assertNotModifiedSinceStableRead(managedCapability)
+          } else {
+            await this.assertNotModifiedSinceRead(resolvedPath)
+          }
+
+          let expectedContent: string
+          let occurrences: number
+
+          if (content === "" && effectiveOldString === "") {
+            expectedContent = effectiveNewString
+            occurrences = 0
+          } else {
+            const r = replace(content, effectiveOldString, effectiveNewString, effectiveReplaceAll)
+            expectedContent = r.newContent
+            occurrences = r.occurrences
+          }
+
+          if (this.isAborted) {
+            return { error: "文件编辑已取消。" }
+          }
+          if (
+            (await this.isWorktreeFileWriteBlocked(effectiveFilePath)) ||
+            (await this.isWriteBlocked(effectiveFilePath))
+          ) {
+            return {
+              error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+            }
+          }
+          if (
+            !managedWorkflowScriptEdit &&
+            !(await hasStableManagedWorkflowScriptIdentity())
+          ) {
+            return {
+              error: `Access denied — '${effectiveFilePath}' changed or resolves outside the isolated workspace.`
+            }
+          }
+          if (managedCapability) {
+            await this.writeStableFileHandleEncoded(
+              managedCapability,
+              expectedContent,
+              encoding
+            )
+            await this.recordStableReadTime(managedCapability)
+          } else {
+            await this.writeFileEncoded(resolvedPath, expectedContent, encoding)
+            await this.recordReadTime(resolvedPath)
+          }
+          return { path: effectiveFilePath, filesUpdate: null, occurrences }
+        } finally {
+          await managedCapability?.handle.close().catch(() => undefined)
+        }
       })
       if (!result.error) {
-        this._onFileMutation?.(effectiveFilePath, "edit")
-        if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
-        // Adoption tracking (side-effect only, never throws).
-        // Only successful edits should be counted as generated code adoption.
-        try {
-          recordAdoptionGen({
-            threadId: this.runId,
-            tool: "edit_file",
-            filePath: effectiveFilePath,
-            // For edits, the local generated fragment is new_string; the tracker
-            // expands its line hashes by occurrences for replaceAll.
-            generatedContent: effectiveNewString,
-            workspacePath: this.workingDir,
-            // Pass the edit fragments only — no full-file references. Tracker
-            // derives deletedLineCount in a microtask via
-            // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
-            // avoiding any full-file scan or retention of editor buffers.
-            oldString: effectiveOldString,
-            newString: effectiveNewString,
-            occurrences: result.occurrences,
-            ...(harnessStage ? { harnessStage } : {})
-          })
-        } catch {
-          // tracker must not affect tool result
+        // The host-issued workflow script is orchestration state, not a project
+        // deliverable: keep normal approval/Hooks, but do not enqueue it for Git
+        // auto-commit, Harness attribution, or generated-code adoption.
+        if (!managedWorkflowScriptEdit) {
+          this._onFileMutation?.(effectiveFilePath, "edit")
+          if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
+          // Adoption tracking (side-effect only, never throws).
+          // Only successful edits should be counted as generated code adoption.
+          try {
+            recordAdoptionGen({
+              threadId: this.runId,
+              tool: "edit_file",
+              filePath: effectiveFilePath,
+              // For edits, the local generated fragment is new_string; the tracker
+              // expands its line hashes by occurrences for replaceAll.
+              generatedContent: effectiveNewString,
+              workspacePath: this.workingDir,
+              // Pass the edit fragments only — no full-file references. Tracker
+              // derives deletedLineCount in a microtask via
+              // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
+              // avoiding any full-file scan or retention of editor buffers.
+              oldString: effectiveOldString,
+              newString: effectiveNewString,
+              occurrences: result.occurrences,
+              ...(harnessStage ? { harnessStage } : {})
+            })
+          } catch {
+            // tracker must not affect tool result
+          }
         }
       }
       // PostToolUse hook

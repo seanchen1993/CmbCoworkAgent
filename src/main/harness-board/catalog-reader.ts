@@ -24,13 +24,25 @@ import {
   type HarnessDialogTipsResult,
   type HarnessLeanTokenResult
 } from "./catalog-protocol"
+import {
+  assertHarnessProjectFieldBudgets,
+  HARNESS_PROJECT_DESCRIPTION_MAX_CHARS,
+  HARNESS_PROJECT_PATH_MAX_CHARS,
+  HARNESS_PROJECT_STORE_MAX_BYTES,
+  HARNESS_PROJECT_STORE_MAX_PROJECTS,
+  HARNESS_PROJECT_TEXT_MAX_CHARS
+} from "./store-limits"
 
 const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
 const APP_BOARD_API_VERSION = 1
 const MAX_PROJECT_TEXT = 2_048
 const MAX_REGISTRY_TEXT = 4_096
-const MAX_CATALOG_STORE_BYTES = 128 * 1024 * 1024
-const MAX_BOARD_CONFIG_BYTES = 1024 * 1024
+export { HARNESS_PROJECT_STORE_MAX_BYTES, HARNESS_PROJECT_STORE_MAX_PROJECTS }
+const MAX_PLUGIN_STORE_BYTES = 32 * 1024 * 1024
+const MAX_PLUGIN_ROWS = 4_096
+export const HARNESS_BOARD_CONFIG_MAX_BYTES = 1024 * 1024
+export const HARNESS_CONFIG_CACHE_MAX_ENTRIES = 128
+export const HARNESS_CONFIG_CACHE_MAX_BYTES = 8 * 1024 * 1024
 const MAX_LEAN_TOKEN_STORE_BYTES = 64 * 1024
 const MAX_LEAN_TOKEN_CHARS = 8 * 1024
 const MAX_FEATURE_BINDING_STORE_BYTES = 2 * 1024 * 1024
@@ -42,7 +54,10 @@ const PROJECT_CONTEXT_COMMAND_KEYS = [
   "project_status",
   "feature_status",
   "skip_node",
-  "knowledge_path"
+  "knowledge_path",
+  "session_context_inject",
+  "system_prompt_inject",
+  "plugin_dir_hook"
 ] as const
 
 interface FileCache<T> {
@@ -58,7 +73,12 @@ let pluginIndexCache: {
   byId: Map<string, PluginMetadata>
   byName: Map<string, PluginMetadata>
 } | null = null
-const configCache = new Map<string, FileCache<BoardConfigSnapshot>>()
+interface ConfigCacheEntry extends FileCache<BoardConfigSnapshot> {
+  bytes: number
+}
+
+const configCache = new Map<string, ConfigCacheEntry>()
+let configCacheBytes = 0
 let featureBindingCache: FileCache<unknown[]> | null = null
 let deployUnitMappingCache: FileCache<HarnessDeployUnitMapping[]> | null = null
 let leanTokenCache: FileCache<string> | null = null
@@ -77,6 +97,12 @@ function boundedConfigText(value: unknown, max: number, label: string): string {
   return value
 }
 
+function boundedStoredText(value: unknown, max: number, label: string): string {
+  if (typeof value !== "string") return ""
+  if (value.length > max) throw new Error(`${label} exceeded ${max} characters`)
+  return value
+}
+
 function fileSignature(path: string): string {
   if (!existsSync(path)) return "missing"
   const stats = statSync(path)
@@ -89,9 +115,9 @@ function assertFileWithin(path: string, maxBytes: number, label: string): void {
   if (size > maxBytes) throw new Error(`${label} exceeded ${maxBytes} bytes`)
 }
 
-function readJsonArray(path: string): unknown[] {
+function readJsonArray(path: string, maxBytes: number, label: string): unknown[] {
   if (!existsSync(path)) return []
-  assertFileWithin(path, MAX_CATALOG_STORE_BYTES, "Harness plugin store")
+  assertFileWithin(path, maxBytes, label)
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
     return Array.isArray(parsed) ? parsed : []
@@ -103,7 +129,7 @@ function readJsonArray(path: string): unknown[] {
 function readProjects(path: string): unknown[] {
   const signature = fileSignature(path)
   if (projectCache?.signature === signature) return projectCache.value
-  assertFileWithin(path, MAX_CATALOG_STORE_BYTES, "Harness project store")
+  assertFileWithin(path, HARNESS_PROJECT_STORE_MAX_BYTES, "Harness project store")
   let rows: unknown[] = []
   if (existsSync(path)) {
     try {
@@ -112,6 +138,11 @@ function readProjects(path: string): unknown[] {
     } catch {
       rows = []
     }
+  }
+  if (rows.length > HARNESS_PROJECT_STORE_MAX_PROJECTS) {
+    throw new Error(
+      `Harness project store exceeded ${HARNESS_PROJECT_STORE_MAX_PROJECTS} projects`
+    )
   }
   projectCache = { signature, value: rows }
   projectIndexCache = null
@@ -132,13 +163,24 @@ function indexProjects(rows: unknown[]): ReadonlyMap<string, unknown> {
 function readPlugins(path: string): PluginMetadata[] {
   const signature = fileSignature(path)
   if (pluginCache?.signature === signature) return pluginCache.value
-  const plugins = readJsonArray(path).filter(
-    (row): row is PluginMetadata =>
-      isRecord(row) &&
-      typeof row.id === "string" &&
-      typeof row.name === "string" &&
-      typeof row.path === "string"
-  )
+  const rows = readJsonArray(path, MAX_PLUGIN_STORE_BYTES, "Harness plugin store")
+  if (rows.length > MAX_PLUGIN_ROWS) {
+    throw new Error(`Harness plugin store exceeded ${MAX_PLUGIN_ROWS} plugins`)
+  }
+  const plugins = rows
+    .filter(
+      (row): row is PluginMetadata =>
+        isRecord(row) &&
+        typeof row.id === "string" &&
+        typeof row.name === "string" &&
+        typeof row.path === "string"
+    )
+    .map((plugin) => {
+      boundedStoredText(plugin.id, 512, "Harness plugin id")
+      boundedStoredText(plugin.name, 1_024, "Harness plugin name")
+      boundedStoredText(plugin.path, 8_192, "Harness plugin path")
+      return plugin
+    })
   pluginCache = { signature, value: plugins }
   pluginIndexCache = null
   return plugins
@@ -213,7 +255,12 @@ function projectBoardConfigForDetails(
   const projectedPlatform: Record<string, string> = {}
   if (platform) {
     for (const key of PROJECT_CONTEXT_COMMAND_KEYS) {
-      const command = boundedConfigText(platform[key], 8_192, `Harness board config ${key}`).trim()
+      const maxChars = key === "system_prompt_inject" ? 60_000 : 8_192
+      const command = boundedConfigText(
+        platform[key],
+        maxChars,
+        `Harness board config ${key}`
+      ).trim()
       if (command) projectedPlatform[key] = command
     }
   }
@@ -226,6 +273,12 @@ function projectBoardConfigForDetails(
   return {
     ...(apiVersion !== undefined ? { apiVersion } : {}),
     inspectCommands: { [process.platform]: projectedPlatform },
+    supported_deploy_units: Array.isArray(config.supported_deploy_units)
+      ? config.supported_deploy_units
+          .map((value) => text(value, 2_048).trim())
+          .filter(Boolean)
+          .slice(0, 64)
+      : [],
     ...(knowledgeConfig
       ? {
           knowledge_config: {
@@ -243,32 +296,58 @@ interface BoardConfigSnapshot {
   exists: boolean
 }
 
+function setConfigCache(path: string, signature: string, value: BoardConfigSnapshot): void {
+  const previous = configCache.get(path)
+  if (previous) configCacheBytes -= previous.bytes
+  const bytes = Math.max(
+    64,
+    Buffer.byteLength(path, "utf8") + Buffer.byteLength(JSON.stringify(value), "utf8")
+  )
+  configCache.delete(path)
+  configCache.set(path, { signature, value, bytes })
+  configCacheBytes += bytes
+  while (
+    configCache.size > HARNESS_CONFIG_CACHE_MAX_ENTRIES ||
+    configCacheBytes > HARNESS_CONFIG_CACHE_MAX_BYTES
+  ) {
+    const oldestPath = configCache.keys().next().value as string | undefined
+    if (!oldestPath) break
+    const oldest = configCache.get(oldestPath)
+    configCache.delete(oldestPath)
+    configCacheBytes -= oldest?.bytes ?? 0
+  }
+}
+
 function readBoardConfig(pluginPath: string): BoardConfigSnapshot {
   const path = join(pluginPath, BOARD_CONFIG_REL_PATH)
   const signature = fileSignature(path)
   const cached = configCache.get(path)
-  if (cached?.signature === signature) return cached.value
+  if (cached?.signature === signature) {
+    configCache.delete(path)
+    configCache.set(path, cached)
+    return cached.value
+  }
   if (signature === "missing") {
     const snapshot = { value: null, error: null, exists: false }
-    configCache.set(path, { signature, value: snapshot })
+    setConfigCache(path, signature, snapshot)
     return snapshot
   }
   try {
-    assertFileWithin(path, MAX_BOARD_CONFIG_BYTES, "Harness board config")
+    assertFileWithin(path, HARNESS_BOARD_CONFIG_MAX_BYTES, "Harness board config")
   } catch (error) {
     const snapshot = {
       value: null,
       error: error instanceof Error ? error.message : String(error),
       exists: true
     }
-    configCache.set(path, { signature, value: snapshot })
+    setConfigCache(path, signature, snapshot)
     return snapshot
   }
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
     const value = isRecord(parsed) ? parsed : null
     const snapshot = { value, error: null, exists: true }
-    configCache.set(path, { signature, value: snapshot })
+    setConfigCache(path, signature, snapshot)
     return snapshot
   } catch (error) {
     const snapshot = {
@@ -276,7 +355,7 @@ function readBoardConfig(pluginPath: string): BoardConfigSnapshot {
       error: error instanceof Error ? error.message.slice(0, 512) : "invalid json",
       exists: true
     }
-    configCache.set(path, { signature, value: snapshot })
+    setConfigCache(path, signature, snapshot)
     return snapshot
   }
 }
@@ -361,13 +440,33 @@ function supportsSessionContext(plugin: PluginMetadata | null): boolean {
 function creator(value: unknown): HarnessProjectCreatorMetadata | undefined {
   if (!isRecord(value)) return undefined
   const result: HarnessProjectCreatorMetadata = {
-    sapId: text(value.sapId, 256),
-    ystId: text(value.ystId, 256),
-    userName: text(value.userName, 256),
-    orgName: text(value.orgName, 512),
-    pathName: text(value.pathName, 1_024),
-    upperOrgLv0: text(value.upperOrgLv0, 512),
-    upperOrgLv1: text(value.upperOrgLv1, 512)
+    sapId: boundedStoredText(value.sapId, HARNESS_PROJECT_TEXT_MAX_CHARS, "Harness creator sapId"),
+    ystId: boundedStoredText(value.ystId, HARNESS_PROJECT_TEXT_MAX_CHARS, "Harness creator ystId"),
+    userName: boundedStoredText(
+      value.userName,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness creator userName"
+    ),
+    orgName: boundedStoredText(
+      value.orgName,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness creator orgName"
+    ),
+    pathName: boundedStoredText(
+      value.pathName,
+      HARNESS_PROJECT_PATH_MAX_CHARS,
+      "Harness creator pathName"
+    ),
+    upperOrgLv0: boundedStoredText(
+      value.upperOrgLv0,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness creator upperOrgLv0"
+    ),
+    upperOrgLv1: boundedStoredText(
+      value.upperOrgLv1,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness creator upperOrgLv1"
+    )
   }
   return Object.values(result).some(Boolean) ? result : undefined
 }
@@ -376,42 +475,107 @@ function toProjectMetadata(value: unknown): HarnessProjectMetadata | null {
   if (!isRecord(value) || typeof value.projectId !== "string" || typeof value.name !== "string") {
     return null
   }
+  assertHarnessProjectFieldBudgets(value)
   const stored = isRecord(value["harness-adapter"]) ? value["harness-adapter"] : null
   if (!stored || stored.type !== "plugin") return null
-  const adapterId = text(stored.id, 512).trim()
-  const adapterName = text(stored.name, 512).trim()
+  const adapterId = boundedStoredText(
+    stored.id,
+    HARNESS_PROJECT_TEXT_MAX_CHARS,
+    "Harness project adapter id"
+  ).trim()
+  const adapterName = boundedStoredText(
+    stored.name,
+    HARNESS_PROJECT_TEXT_MAX_CHARS,
+    "Harness project adapter name"
+  ).trim()
   if (!adapterId || !adapterName) return null
   const oldWorkspace = isRecord(value.workspace) ? value.workspace : {}
   const lifecycle = isRecord(value.lifecycle) ? value.lifecycle : {}
-  const projectCode = text(value.projectCode, 1_024)
+  const projectCode = boundedStoredText(
+    value.projectCode,
+    HARNESS_PROJECT_TEXT_MAX_CHARS,
+    "Harness project code"
+  )
+  const sessionWorkspacePath = boundedStoredText(
+    value.sessionWorkspacePath,
+    HARNESS_PROJECT_PATH_MAX_CHARS,
+    "Harness project session workspace path"
+  )
+  const systemConstraintFirstLoadedAt = boundedStoredText(
+    value.systemConstraintFirstLoadedAt,
+    128,
+    "Harness project system constraint timestamp"
+  )
+  const updatedAt = boundedStoredText(
+    lifecycle.updateAt,
+    128,
+    "Harness project update timestamp"
+  )
   const projectCreator = creator(value.creator)
   return {
-    projectId: text(value.projectId, 512),
-    name: text(value.name, 2_048),
-    description: text(value.description, 4_096),
+    projectId: boundedStoredText(
+      value.projectId,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness project id"
+    ),
+    name: boundedStoredText(
+      value.name,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness project name"
+    ),
+    description: boundedStoredText(
+      value.description,
+      HARNESS_PROJECT_DESCRIPTION_MAX_CHARS,
+      "Harness project description"
+    ),
     projectCode,
     projectFromLean: value.projectFromLean === true,
-    projectDir: text(value.projectDir, 2_048) || projectCode,
-    systemId: text(value.systemId, 2_048),
-    systemName: text(value.systemName, 2_048),
-    workspacePath: text(value.workspacePath, 4_096) || text(oldWorkspace.path, 4_096),
-    ...(text(value.sessionWorkspacePath, 4_096)
-      ? { sessionWorkspacePath: text(value.sessionWorkspacePath, 4_096) }
-      : {}),
-    ...(text(value.systemConstraintFirstLoadedAt, 128)
-      ? { systemConstraintFirstLoadedAt: text(value.systemConstraintFirstLoadedAt, 128) }
-      : {}),
+    projectDir:
+      boundedStoredText(
+        value.projectDir,
+        HARNESS_PROJECT_TEXT_MAX_CHARS,
+        "Harness project directory"
+      ) || projectCode,
+    systemId: boundedStoredText(
+      value.systemId,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness project system id"
+    ),
+    systemName: boundedStoredText(
+      value.systemName,
+      HARNESS_PROJECT_TEXT_MAX_CHARS,
+      "Harness project system name"
+    ),
+    workspacePath:
+      boundedStoredText(
+        value.workspacePath,
+        HARNESS_PROJECT_PATH_MAX_CHARS,
+        "Harness project workspace path"
+      ) ||
+      boundedStoredText(
+        oldWorkspace.path,
+        HARNESS_PROJECT_PATH_MAX_CHARS,
+        "Harness legacy project workspace path"
+      ),
+    ...(sessionWorkspacePath ? { sessionWorkspacePath } : {}),
+    ...(systemConstraintFirstLoadedAt ? { systemConstraintFirstLoadedAt } : {}),
     "harness-adapter": {
       id: adapterId,
       name: adapterName,
-      version: text(stored.version, 512),
+      version: boundedStoredText(
+        stored.version,
+        HARNESS_PROJECT_TEXT_MAX_CHARS,
+        "Harness project adapter version"
+      ),
       type: "plugin"
     },
     ...(projectCreator ? { creator: projectCreator } : {}),
     lifecycle: {
       status: lifecycle.status === "archived" ? "archived" : "active",
-      createAt: text(lifecycle.createAt, 128) || new Date().toISOString(),
-      ...(text(lifecycle.updateAt, 128) ? { updateAt: text(lifecycle.updateAt, 128) } : {})
+      createAt:
+        boundedStoredText(lifecycle.createAt, 128, "Harness project create timestamp") ||
+        new Date().toISOString(),
+      ...(updatedAt ? { updateAt: updatedAt } : {})
     }
   }
 }
@@ -570,13 +734,19 @@ interface FeatureDeployUnitProjection {
   deployUnitMappingStorePath: string
 }
 
-function selectedFeatureDeployUnits(
+function selectedFeatureProjection(
   projectId: string,
   projection: FeatureDeployUnitProjection
-): HarnessDeployUnitMapping[] {
+): {
+  selectedDeployUnits: HarnessDeployUnitMapping[]
+  sessionContextInjectionSource: "cmbdevclaw" | "plugin"
+} {
   const featureSlug = text(projection.featureSlug, 2_048).trim()
-  if (!featureSlug) return []
+  if (!featureSlug) {
+    return { selectedDeployUnits: [], sessionContextInjectionSource: "cmbdevclaw" }
+  }
   let snapshots: HarnessDeployUnitMapping[] = []
+  let sessionContextInjectionSource: "cmbdevclaw" | "plugin" = "cmbdevclaw"
   for (const row of readFeatureBindingRows(projection.featureBindingStorePath)) {
     if (!isRecord(row)) continue
     if (
@@ -589,18 +759,25 @@ function selectedFeatureDeployUnits(
       row.selectedDeployUnitMappings,
       MAX_SELECTED_DEPLOY_UNIT_MAPPINGS
     )
+    sessionContextInjectionSource =
+      row.sessionContextInjectionSource === "plugin" ? "plugin" : "cmbdevclaw"
     break
   }
-  if (snapshots.length === 0) return []
+  if (snapshots.length === 0) {
+    return { selectedDeployUnits: [], sessionContextInjectionSource }
+  }
   const configuredById = new Map(
     readDeployUnitMappings(projection.deployUnitMappingStorePath).map((mapping) => [
       mapping.deployUnitIdMapping,
       mapping
     ])
   )
-  return snapshots.map(
-    (snapshot) => configuredById.get(snapshot.deployUnitIdMapping) ?? snapshot
-  )
+  return {
+    selectedDeployUnits: snapshots.map(
+      (snapshot) => configuredById.get(snapshot.deployUnitIdMapping) ?? snapshot
+    ),
+    sessionContextInjectionSource
+  }
 }
 
 export function readHarnessDialogTips(
@@ -741,6 +918,9 @@ export function readHarnessProjectContexts(
     const rawPlugin = pluginById.get(adapter.id) ?? pluginByName.get(adapter.name) ?? null
     const boardConfig = rawPlugin ? readBoardConfig(rawPlugin.path) : null
     const plugin = rawPlugin && boardConfig?.exists ? projectPluginMetadata(rawPlugin) : null
+    const feature = featureProjection
+      ? selectedFeatureProjection(project.projectId, featureProjection)
+      : null
     projects[id] = {
       project,
       plugin,
@@ -754,8 +934,11 @@ export function readHarnessProjectContexts(
       projectDirectoryExists:
         project.lifecycle.status === "archived" || projectDirectoryExists(project),
       leanToken,
-      ...(featureProjection
-        ? { selectedDeployUnits: selectedFeatureDeployUnits(project.projectId, featureProjection) }
+      ...(feature
+        ? {
+            selectedDeployUnits: feature.selectedDeployUnits,
+            sessionContextInjectionSource: feature.sessionContextInjectionSource
+          }
         : {})
     }
   }
@@ -812,51 +995,40 @@ function toProjectListItem(
   pluginById: ReadonlyMap<string, PluginMetadata>,
   pluginByName: ReadonlyMap<string, PluginMetadata>
 ): HarnessProjectListItem | null {
-  if (!isRecord(value) || typeof value.projectId !== "string" || typeof value.name !== "string") {
-    return null
-  }
-  const stored = isRecord(value["harness-adapter"]) ? value["harness-adapter"] : null
-  if (!stored || stored.type !== "plugin") return null
-  const adapterId = text(stored.id, 512).trim()
-  const adapterName = text(stored.name, 512).trim()
-  if (!adapterId || !adapterName) return null
+  const project = toProjectMetadata(value)
+  if (!project) return null
+  const stored = project["harness-adapter"]
+  const adapterId = stored.id.trim()
+  const adapterName = stored.name.trim()
   const plugin = pluginById.get(adapterId) ?? pluginByName.get(adapterName) ?? null
   const boardCompatibility = compatibility(plugin, adapterName)
-  const oldWorkspace = isRecord(value.workspace) ? value.workspace : {}
-  const lifecycle = isRecord(value.lifecycle) ? value.lifecycle : {}
-  const projectCreator = creator(value.creator)
-  const projectCode = text(value.projectCode, 512)
   return {
-    projectId: text(value.projectId, 512),
-    name: text(value.name, 1_024),
-    description: text(value.description),
-    projectCode,
-    projectFromLean: value.projectFromLean === true,
-    projectDir: text(value.projectDir, 1_024) || projectCode,
-    systemId: text(value.systemId, 1_024),
-    systemName: text(value.systemName, 1_024),
-    workspacePath: text(value.workspacePath) || text(oldWorkspace.path),
-    ...(text(value.sessionWorkspacePath)
-      ? { sessionWorkspacePath: text(value.sessionWorkspacePath) }
+    projectId: project.projectId,
+    name: project.name,
+    description: project.description,
+    projectCode: project.projectCode,
+    projectFromLean: project.projectFromLean,
+    projectDir: project.projectDir,
+    systemId: project.systemId,
+    systemName: project.systemName,
+    workspacePath: project.workspacePath,
+    ...(project.sessionWorkspacePath
+      ? { sessionWorkspacePath: project.sessionWorkspacePath }
       : {}),
-    ...(text(value.systemConstraintFirstLoadedAt, 128)
-      ? { systemConstraintFirstLoadedAt: text(value.systemConstraintFirstLoadedAt, 128) }
+    ...(project.systemConstraintFirstLoadedAt
+      ? { systemConstraintFirstLoadedAt: project.systemConstraintFirstLoadedAt }
       : {}),
     harnessAdapter: {
       id: plugin?.id ?? adapterId,
       name: plugin?.name ?? adapterName,
       type: "plugin"
     },
-    ...(projectCreator ? { creator: projectCreator } : {}),
+    ...(project.creator ? { creator: project.creator } : {}),
     boardCompatibility,
     supportsDeployUnits: boardCompatibility.compatible,
     supportsSessionContextInjection:
       boardCompatibility.compatible && supportsSessionContext(plugin),
-    lifecycle: {
-      status: projectLifecycle(value),
-      createAt: text(lifecycle.createAt, 128) || new Date(0).toISOString(),
-      ...(text(lifecycle.updateAt, 128) ? { updateAt: text(lifecycle.updateAt, 128) } : {})
-    }
+    lifecycle: project.lifecycle
   }
 }
 
@@ -1012,7 +1184,15 @@ export function resetHarnessCatalogReaderCacheForTests(): void {
   pluginCache = null
   pluginIndexCache = null
   configCache.clear()
+  configCacheBytes = 0
   featureBindingCache = null
   deployUnitMappingCache = null
   leanTokenCache = null
+}
+
+export function getHarnessCatalogReaderCacheDiagnosticsForTests(): {
+  configEntries: number
+  configBytes: number
+} {
+  return { configEntries: configCache.size, configBytes: configCacheBytes }
 }

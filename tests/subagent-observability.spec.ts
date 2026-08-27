@@ -796,6 +796,11 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
     /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*threadState\?\.workflowRunning\s*===\s*true/u,
     "project-mode sidebar keeps spinner active while a dynamic workflow is running"
   )
+  assertMatches(
+    harnessBoard,
+    /const\s+hasRunningFeatureSession\s*=\s*featureSessionThreadIds\.some\([\s\S]*?allStreamLoadingStates\[threadId\]\s*===\s*true[\s\S]*?allThreadStates\[threadId\]\?\.workflowRunning\s*===\s*true/u,
+    "project-mode stage animation remains active while a dynamic workflow is running"
+  )
   assertSourceOrder(
     sidebar,
     "await deleteThread(thread.thread_id)",

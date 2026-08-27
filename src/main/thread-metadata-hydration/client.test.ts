@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -6,7 +7,11 @@ import { Worker } from "node:worker_threads"
 import { DatabaseSync } from "node:sqlite"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
-import { ThreadMetadataHydrationClient } from "./client"
+import {
+  THREAD_METADATA_HYDRATION_MAX_ACTIVE_REQUESTS,
+  THREAD_METADATA_HYDRATION_WORKER_RESOURCE_LIMITS,
+  ThreadMetadataHydrationClient
+} from "./client"
 import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../shared/goal-events"
 import type { Thread } from "../types"
 
@@ -79,6 +84,49 @@ function clientFor(path: string): ThreadMetadataHydrationClient {
 }
 
 describe("ThreadMetadataHydrationClient", () => {
+  it("bounds its heap and rejects a clean early exit before replacing the worker", async () => {
+    expect(THREAD_METADATA_HYDRATION_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(256)
+    const { database, path } = fixture()
+    database.close()
+    let starts = 0
+    const client = new ThreadMetadataHydrationClient(
+      async () => {
+        starts += 1
+        return starts === 1
+          ? new Worker("", { eval: true })
+          : new Worker(workerPath, { name: "thread-metadata-clean-exit-replacement" })
+      },
+      () => path
+    )
+    clients.push(client)
+    await expect(client.readWorkspacePath("missing")).rejects.toThrow(
+      "Thread metadata hydration worker stopped unexpectedly"
+    )
+    await expect(client.readWorkspacePath("missing")).resolves.toBeNull()
+    expect(starts).toBe(2)
+  })
+
+  it("cleans failed dispatch state and hard-bounds retained requests", async () => {
+    const worker = new FakeMetadataWorker()
+    const client = new ThreadMetadataHydrationClient(
+      async () => worker as unknown as Worker,
+      () => "C:\\fixture.db"
+    )
+    clients.push(client)
+    worker.postError = new Error("dispatch failed")
+    await expect(client.readWorkspacePath("first")).rejects.toThrow("Unable to dispatch")
+    worker.postError = null
+
+    const retained = Array.from(
+      { length: THREAD_METADATA_HYDRATION_MAX_ACTIVE_REQUESTS },
+      (_, index) => client.readWorkspacePath(`thread-${index}`).catch((error) => error)
+    )
+    await Promise.resolve()
+    await expect(client.readWorkspacePath("overflow")).rejects.toThrow("capacity exceeded")
+    await client.close()
+    await Promise.all(retained)
+  })
+
   it("parses a large thread list without blocking the caller event loop", async () => {
     const { database, path } = fixture()
     const insert = database.prepare(
@@ -294,3 +342,19 @@ describe("ThreadMetadataHydrationClient", () => {
     ).toBeLessThanOrEqual(128 * 1024)
   })
 })
+
+class FakeMetadataWorker extends EventEmitter {
+  postError: Error | null = null
+
+  postMessage(): void {
+    if (this.postError) throw this.postError
+  }
+
+  unref(): this {
+    return this
+  }
+
+  terminate(): Promise<number> {
+    return Promise.resolve(0)
+  }
+}

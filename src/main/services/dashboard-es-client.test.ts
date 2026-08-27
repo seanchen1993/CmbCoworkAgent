@@ -8,6 +8,9 @@ import type { AddressInfo } from "node:net"
 import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import {
+  DASHBOARD_ES_MAX_ACTIVE_REQUESTS,
+  DASHBOARD_ES_MAX_REQUEST_BODY_BYTES,
+  DASHBOARD_ES_WORKER_RESOURCE_LIMITS,
   DashboardEsRequestCancelledError,
   DashboardEsWorkerClient,
   DashboardEsWorkerUnavailableError
@@ -264,6 +267,59 @@ describe("Dashboard ES worker", () => {
       index: "replacement"
     })
     expect(starts).toBe(2)
+  })
+
+  it("treats exit(0) with pending work as failure and starts a replacement", async () => {
+    expect(DASHBOARD_ES_WORKER_RESOURCE_LIMITS.maxOldGenerationSizeMb).toBe(256)
+    let starts = 0
+    const client = new DashboardEsWorkerClient(async () => {
+      starts += 1
+      return starts === 1
+        ? new Worker("", { eval: true })
+        : new Worker(workerBundlePath, { name: "dashboard-es-clean-exit-replacement" })
+    })
+    clients.push(client)
+    await expect(query(client, "clean-exit")).rejects.toBeInstanceOf(
+      DashboardEsWorkerUnavailableError
+    )
+    await expect(query(client, "replacement")).resolves.toMatchObject({ index: "replacement" })
+    expect(starts).toBe(2)
+  })
+
+  it("hard-bounds retained requests and rejects oversized input before worker dispatch", async () => {
+    let starts = 0
+    const client = new DashboardEsWorkerClient(async () => {
+      starts += 1
+      return new Worker(
+        `
+          const { parentPort } = require("node:worker_threads")
+          parentPort.on("message", () => undefined)
+        `,
+        { eval: true }
+      )
+    })
+    clients.push(client)
+    await expect(
+      client.query({
+        nodes: [serverUrl],
+        method: "POST",
+        path: "/oversized/_search",
+        headers: {},
+        bodyText: "x".repeat(DASHBOARD_ES_MAX_REQUEST_BODY_BYTES + 1),
+        timeoutMs: 1_000
+      })
+    ).rejects.toThrow("hard byte ceiling")
+    expect(starts).toBe(0)
+    const retained = Array.from({ length: DASHBOARD_ES_MAX_ACTIVE_REQUESTS }, (_, index) =>
+      query(client, `retained-${index}`).catch((error) => error)
+    )
+    await Promise.resolve()
+    await expect(query(client, "overflow")).rejects.toMatchObject({
+      name: "DASHBOARD_ES_CAPACITY_EXCEEDED"
+    })
+    expect(starts).toBe(1)
+    await client.close()
+    await Promise.all(retained)
   })
 
   it("rejects pending work and acknowledges bounded shutdown", async () => {

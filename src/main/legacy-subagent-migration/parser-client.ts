@@ -1,32 +1,42 @@
-import type { Worker } from "node:worker_threads"
+import type { ResourceLimits, Worker } from "node:worker_threads"
 import { getDbPath, getSubagentTranscriptContentDir } from "../storage"
+import { BoundedWorkerAdmission } from "../services/bounded-worker-admission"
 import {
   LEGACY_SUBAGENT_MIGRATION_CANCELLED,
+  LegacySubagentMigrationCancelledError,
   type LegacySubagentMigrationBatchResponse,
   type LegacySubagentMigrationRow,
   type LegacySubagentMigrationStats,
   type LegacySubagentMigrationWorkerResponse
 } from "./protocol"
 
+export { LegacySubagentMigrationCancelledError } from "./protocol"
+
 type LegacySubagentMigrationWorkerFactory = () => Promise<Worker>
 const LEGACY_SUBAGENT_MIGRATION_ABORT_GRACE_MS = 2_000
-
-export class LegacySubagentMigrationCancelledError extends Error {
-  readonly code = LEGACY_SUBAGENT_MIGRATION_CANCELLED
-
-  constructor() {
-    super("Legacy subagent transcript migration was cancelled")
-    this.name = "LegacySubagentMigrationCancelledError"
-  }
+export const LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS: ResourceLimits = {
+  maxOldGenerationSizeMb: 256,
+  maxYoungGenerationSizeMb: 32,
+  stackSizeMb: 4
 }
+export const LEGACY_SUBAGENT_MIGRATION_MAX_WORKERS = 2
+export const LEGACY_SUBAGENT_MIGRATION_MAX_WAITERS = 30
 
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./legacy-subagent-migration-worker?nodeWorker")
-  return module.default({ name: "legacy-subagent-migration" })
+  return module.default({
+    name: "legacy-subagent-migration",
+    resourceLimits: LEGACY_SUBAGENT_MIGRATION_WORKER_RESOURCE_LIMITS
+  })
 }
 
 export class LegacySubagentMigrationParserClient {
   private nextRequestId = 1
+  private readonly workerAdmission = new BoundedWorkerAdmission(
+    LEGACY_SUBAGENT_MIGRATION_MAX_WORKERS,
+    LEGACY_SUBAGENT_MIGRATION_MAX_WAITERS,
+    "Legacy subagent migration"
+  )
 
   constructor(
     private readonly workerFactory: LegacySubagentMigrationWorkerFactory = createBundledWorker,
@@ -39,21 +49,29 @@ export class LegacySubagentMigrationParserClient {
     onBatch: (rows: readonly LegacySubagentMigrationRow[]) => Promise<void>,
     signal?: AbortSignal
   ): Promise<LegacySubagentMigrationStats> {
-    if (signal?.aborted) throw new LegacySubagentMigrationCancelledError()
-    const worker = await this.workerFactory()
-    if (signal?.aborted) {
-      await worker.terminate().catch(() => undefined)
-      throw new LegacySubagentMigrationCancelledError()
+    if (threadId.length > 32_768) {
+      throw new Error("Legacy subagent migration request exceeds its string limit")
     }
-    worker.unref()
-    const requestId = this.nextRequestId++
-    const cancellation = new Int32Array(
-      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+    if (signal?.aborted) throw new LegacySubagentMigrationCancelledError()
+    const release = await this.workerAdmission.acquire(
+      signal,
+      () => new LegacySubagentMigrationCancelledError()
     )
-    let settled = false
-    let processingBatch = false
+    try {
+      const worker = await this.workerFactory()
+      if (signal?.aborted) {
+        await worker.terminate().catch(() => undefined)
+        throw new LegacySubagentMigrationCancelledError()
+      }
+      worker.unref()
+      const requestId = this.nextRequestId++
+      const cancellation = new Int32Array(
+        new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+      )
+      let settled = false
+      let processingBatch = false
 
-    const result = new Promise<LegacySubagentMigrationStats>((resolve, reject) => {
+      const result = new Promise<LegacySubagentMigrationStats>((resolve, reject) => {
       let abortDeadline: NodeJS.Timeout | undefined
       const cleanup = (): void => {
         if (abortDeadline) clearTimeout(abortDeadline)
@@ -128,21 +146,28 @@ export class LegacySubagentMigrationParserClient {
       worker.once("exit", (code) => {
         if (!settled) fail(new Error(`Legacy migration worker exited with code ${code}`))
       })
-      worker.postMessage({
-        type: "start",
-        requestId,
-        databasePath: this.databasePath(),
-        contentDirectory: this.contentDirectory(),
-        threadId,
-        cancellationBuffer: cancellation.buffer
+      try {
+        worker.postMessage({
+          type: "start",
+          requestId,
+          databasePath: this.databasePath(),
+          contentDirectory: this.contentDirectory(),
+          threadId,
+          cancellationBuffer: cancellation.buffer
+        })
+      } catch (error) {
+        fail(error)
+      }
       })
-    })
 
-    try {
-      return await result
+      try {
+        return await result
+      } finally {
+        Atomics.store(cancellation, 0, 1)
+        await worker.terminate().catch(() => undefined)
+      }
     } finally {
-      Atomics.store(cancellation, 0, 1)
-      await worker.terminate().catch(() => undefined)
+      release()
     }
   }
 }

@@ -30,6 +30,7 @@ import {
   SUBAGENT_TRANSCRIPT_STARTUP_TOTAL_BYTES
 } from "../../shared/subagent-transcript-storage"
 import {
+  LEGACY_SUBAGENT_MIGRATION_MAX_IN_FLIGHT,
   LegacySubagentMigrationCoordinator,
   type LegacySubagentMigrationDatabase
 } from "./coordinator"
@@ -95,6 +96,46 @@ afterEach(async () => {
 })
 
 describe("legacy subagent migration coordinator", () => {
+  it("bounds distinct in-flight migrations and releases capacity after cancellation", async () => {
+    const parser = {
+      parse: vi.fn(
+        async (
+          _threadId: string,
+          _onBatch: Parameters<LegacySubagentMigrationParserClient["parse"]>[1],
+          signal?: AbortSignal
+        ) =>
+          await new Promise<never>((_resolve, reject) => {
+            const cancel = (): void => reject(new LegacySubagentMigrationCancelledError())
+            if (signal?.aborted) cancel()
+            else signal?.addEventListener("abort", cancel, { once: true })
+          })
+      )
+    }
+    const coordinator = new LegacySubagentMigrationCoordinator(
+      parser,
+      undefined,
+      undefined,
+      async () => async () => undefined
+    )
+    const active = Array.from(
+      { length: LEGACY_SUBAGENT_MIGRATION_MAX_IN_FLIGHT },
+      (_, index) => coordinator.ensure(`capacity-${index}`)
+    )
+    const settling = Promise.allSettled(active)
+
+    await expect(coordinator.ensure("capacity-overflow")).rejects.toThrow(/capacity exceeded/)
+    expect(parser.parse).toHaveBeenCalledTimes(LEGACY_SUBAGENT_MIGRATION_MAX_IN_FLIGHT)
+
+    await coordinator.cancelAllAndWait()
+    const results = await settling
+    expect(results.every((result) => result.status === "rejected")).toBe(true)
+
+    const retry = coordinator.ensure("capacity-retry")
+    const retrySettling = retry.catch(() => undefined)
+    coordinator.cancel("capacity-retry")
+    await retrySettling
+  })
+
   it("does not hold the global content lock while the parser worker is running", async () => {
     let markStarted: (() => void) | undefined
     let finishParsing: (() => void) | undefined

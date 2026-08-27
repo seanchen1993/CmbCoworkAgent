@@ -313,6 +313,7 @@ import { closeHarnessAdapterDetailWorker } from "./harness-board/adapter-detail-
 import { closeHarnessCatalogWorker } from "./harness-board/catalog-client"
 import { closeHarnessKnowledgePreviewWorker } from "./harness-board/knowledge-preview-client"
 import { closeHarnessEnterpriseProjectionWorker } from "./harness-board/enterprise-projection-client"
+import { closeHarnessJsonCodecWorker } from "./harness-board/json-codec-client"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { registerBuiltinBrowserIpc } from "./ipc/browser"
 import {
@@ -320,7 +321,11 @@ import {
   disposeBuiltinBrowserForMainWindowEvent,
 } from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
-import { initializeTraceStorageSecurity, setTraceReporter } from "./agent/trace/collector"
+import {
+  flushTraceWriteQueue,
+  initializeTraceStorageSecurity,
+  setTraceReporter
+} from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
@@ -861,52 +866,58 @@ if (browserNativeMessagingHostLaunch) {
       applyMacDockIcon
     })
 
-    try {
-      await flushLogs()
-      const logRedaction = initializeLogRedaction()
-      if (logRedaction.failedFiles > 0) {
+    // Historical migration is background maintenance. New writes are already
+    // redacted and the logging layer serializes migration against per-file flush,
+    // so window creation never waits for old log discovery or rewriting.
+    void initializeLogRedaction()
+      .then((logRedaction) => {
+        if (logRedaction.failedFiles > 0) {
+          console.warn(
+            `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+          )
+        } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
+          console.log(
+            `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
+          )
+        }
+      })
+      .catch((error) => {
         console.warn(
-          `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+          `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
         )
-      } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
-        console.log(
-          `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
-        )
-      }
-    } catch (error) {
-      console.warn(
-        `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+      })
 
-    try {
-      const traceStorage = initializeTraceStorageSecurity()
-      if (!traceStorage.ready) {
+    // New encrypted writes are safe immediately; legacy inventory/migration is
+    // resumable background maintenance and must not delay first-window startup.
+    void initializeTraceStorageSecurity()
+      .then((traceStorage) => {
+        if (!traceStorage.ready) {
+          console.warn(
+            `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+          )
+        } else if (traceStorage.mode === "plaintext") {
+          console.warn(
+            "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
+          )
+        } else if (traceStorage.migrationSkipped) {
+          console.log(
+            `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
+          )
+        } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
+          console.warn(
+            `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
+          )
+        } else {
+          console.log(
+            `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
+          )
+        }
+      })
+      .catch((error) => {
         console.warn(
-          `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+          `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
         )
-      } else if (traceStorage.mode === "plaintext") {
-        console.warn(
-          "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
-        )
-      } else if (traceStorage.migrationSkipped) {
-        console.log(
-          `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
-        )
-      } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
-        console.warn(
-          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
-        )
-      } else {
-        console.log(
-          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
-        )
-      }
-    } catch (error) {
-      console.warn(
-        `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+      })
 
     // Default open or close DevTools by F12 in development
     if (isDev) {
@@ -1503,6 +1514,9 @@ if (browserNativeMessagingHostLaunch) {
       closeHarnessEnterpriseProjectionWorker().catch((err) =>
         console.warn("[Main] closeHarnessEnterpriseProjectionWorker error:", err)
       ),
+      closeHarnessJsonCodecWorker().catch((err) =>
+        console.warn("[Main] closeHarnessJsonCodecWorker error:", err)
+      ),
       closeHarnessWatchRefWorker().catch((err) =>
         console.warn("[Main] closeHarnessWatchRefWorker error:", err)
       ),
@@ -1517,6 +1531,9 @@ if (browserNativeMessagingHostLaunch) {
       ),
       closeMemoryCatalogWorker().catch((err) =>
         console.warn("[Main] closeMemoryCatalogWorker error:", err)
+      ),
+      flushTraceWriteQueue().catch((err) =>
+        console.warn("[Main] flushTraceWriteQueue error:", err)
       ),
       Promise.resolve().then(() => closeWorkspaceFilePreviewProtocol()),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
@@ -1568,11 +1585,13 @@ if (browserNativeMessagingHostLaunch) {
         // grace period, but never let a stalled disk keep the process alive.
         await Promise.all([
           waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
+          waitBestEffort(flushTraceWriteQueue(), FORCE_FLUSH_GRACE_MS),
           waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
         ])
         hardExit()
       } else {
         await flush()
+        await flushTraceWriteQueue()
         await flushLogs()
         gracefulExit()
       }

@@ -27,6 +27,7 @@ import {
   type ContextCompactionLifecycleEvent
 } from "../../../shared/context-compaction-events"
 import { resolveHydratedThreadModel } from "../../../shared/thread-model-selection"
+import { LatestRequestGate } from "../../../shared/latest-request-gate"
 import {
   isCoordinatorModeMetadata,
   isExplicitNormalModeMetadata,
@@ -171,11 +172,29 @@ import {
   type ThreadHistoryHydrationAttempt
 } from "./thread-hydration"
 import {
+  advanceThreadMessageWindowAcrossGap,
+  attachThreadMessageGapReload,
+  createForwardThreadMessagePageWindow,
+  createThreadMessagePageWindow,
+  createTargetedThreadMessageWindow,
   mergeLatestThreadMessagePage,
-  prependThreadMessagePage,
+  prependBoundedThreadMessagePage,
+  prependThreadMessagePageWindow,
+  restoreLatestThreadMessageWindow,
+  isForwardThreadMessagePageCursor,
+  isThreadMessageForwardPageProgress,
+  isThreadMessagePageContinuousWithBoundary,
+  threadMessagePageIdentity,
   threadMessagePageIdentitySet,
-  type ThreadMessagePageCursor
+  upsertLatestThreadMessagePageWindow,
+  type ThreadMessagePageWindow,
+  type ThreadMessagePageCursor,
+  type ThreadMessageWindowGap
 } from "./thread-message-pages"
+import {
+  canCancelThreadMessageWindowIntent,
+  createThreadMessageWindowIntentCoordinator
+} from "./thread-message-window-intent"
 import {
   indexDurableTranscriptRequirements,
   liveStreamMessageToStoreMessage,
@@ -636,6 +655,10 @@ export interface ThreadState {
   historyPageLoading: boolean
   historyHasMore: boolean
   historyPageCursor: ThreadMessagePageCursor | null
+  /** Lightweight page descriptors make a released middle reloadable without retaining bodies. */
+  historyPageWindows: ThreadMessagePageWindow[]
+  /** Explicit discontinuity between a paged historical window and the protected live tail. */
+  historyWindowGap: ThreadMessageWindowGap | null
   historyMessageTotal: number
   historyLoadedMessageCount: number
   scheduledTaskId: string | null
@@ -802,6 +825,10 @@ export interface ThreadActions {
   removeLocalMessage: (messageId: string) => void
   setMessages: (messages: Message[]) => void
   loadEarlierMessages: () => Promise<number>
+  loadMessageWindowAround: (target: { messageId: string; ordinal: number }) => Promise<boolean>
+  loadReleasedMessageWindow: () => Promise<boolean>
+  restoreLatestMessageWindow: () => Promise<boolean>
+  cancelMessageWindowLoad: () => void
   addQueuedMessage: (message: QueuedMessage) => void
   prependQueuedMessage: (message: QueuedMessage) => void
   getQueuedMessage: (messageId: string) => QueuedMessage | undefined
@@ -989,6 +1016,8 @@ const createDefaultThreadState = (): ThreadState => ({
   historyPageLoading: false,
   historyHasMore: false,
   historyPageCursor: null,
+  historyPageWindows: [],
+  historyWindowGap: null,
   historyMessageTotal: 0,
   historyLoadedMessageCount: 0,
   scheduledTaskId: null,
@@ -1096,6 +1125,11 @@ const COORDINATOR_NOTIFICATION_MAX_RETRIES = 30
 const COORDINATOR_NOTIFICATION_SUPPRESS_MS = 15_000
 const INITIAL_THREAD_MESSAGES_PAGE_LIMIT = 128
 const INITIAL_THREAD_MESSAGES_PAGE_BYTE_BUDGET = 1024 * 1024
+/** Hard cap for the active main transcript's resident JS message objects. */
+export const THREAD_MESSAGE_RESIDENT_LIMIT = 1_500
+/** Recent rows are never evicted so streaming/retry/approval reconciliation keeps a stable tail. */
+export const THREAD_MESSAGE_PROTECTED_TAIL = 320
+const TARGETED_THREAD_MESSAGE_PAGE_LIMIT = 500
 
 function isTerminalCoordinatorWorker(worker: CoordinatorWorkerView): boolean {
   return (
@@ -1192,6 +1226,8 @@ function normalizeThreadState(state: ThreadState): ThreadState {
     historyPageLoading: state.historyPageLoading ?? false,
     historyHasMore: state.historyHasMore ?? false,
     historyPageCursor: state.historyPageCursor ?? null,
+    historyPageWindows: state.historyPageWindows ?? [],
+    historyWindowGap: state.historyWindowGap ?? null,
     historyMessageTotal: state.historyMessageTotal ?? state.messages.length,
     historyLoadedMessageCount: state.historyLoadedMessageCount ?? state.messages.length,
     draftBuiltinBrowser: state.draftBuiltinBrowser ?? false,
@@ -1336,6 +1372,63 @@ function upsertToolCallStatesFromMessages(
     }
   }
   return nextStates ?? states
+}
+
+const collectKnownDurableMessageIds = (
+  pageWindows: readonly ThreadMessagePageWindow[],
+  rememberedDurableMessageIds?: ReadonlySet<string>,
+  additionalDurableMessages: readonly Message[] = []
+): ReadonlySet<string> => {
+  const durableIds = new Set<string>()
+  for (const window of pageWindows) {
+    if (window.firstMessageId) durableIds.add(window.firstMessageId)
+    if (window.lastMessageId) durableIds.add(window.lastMessageId)
+  }
+  if (rememberedDurableMessageIds) {
+    for (const messageId of rememberedDurableMessageIds) durableIds.add(messageId)
+  }
+  for (const message of additionalDurableMessages) durableIds.add(message.id)
+  return durableIds
+}
+
+function retainResidentToolCallStates(
+  states: Record<string, ToolCallState>,
+  messages: readonly Message[]
+): Record<string, ToolCallState> {
+  const maximumNonresidentActiveStates = 128
+  const residentIds = new Set<string>()
+  for (const message of messages) {
+    for (const toolCall of message.tool_calls ?? []) {
+      if (toolCall.id) residentIds.add(toolCall.id)
+    }
+    if (message.tool_call_id) residentIds.add(message.tool_call_id)
+  }
+
+  const protectedNonresidentIds = new Set(
+    Object.entries(states)
+      .filter(
+        ([toolCallId, state]) =>
+          !residentIds.has(toolCallId) &&
+          state.status !== "completed" &&
+          state.status !== "failed" &&
+          state.status !== "interrupted" &&
+          state.status !== "rejected"
+      )
+      .sort((left, right) => right[1].updatedAt.getTime() - left[1].updatedAt.getTime())
+      .slice(0, maximumNonresidentActiveStates)
+      .map(([toolCallId]) => toolCallId)
+  )
+
+  let changed = false
+  const retained: Record<string, ToolCallState> = {}
+  for (const [toolCallId, state] of Object.entries(states)) {
+    if (residentIds.has(toolCallId) || protectedNonresidentIds.has(toolCallId)) {
+      retained[toolCallId] = state
+    } else {
+      changed = true
+    }
+  }
+  return changed ? retained : states
 }
 
 const ThreadContext = createContext<ThreadContextValue | null>(null)
@@ -1579,6 +1672,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const previousCurrentThreadIdRef = useRef<string | null>(null)
   const actionsCache = useRef<Record<string, ThreadActions>>({})
   const threadStatesRef = useRef<Record<string, ThreadState>>({})
+  const modelSelectionGateRef = useRef(new LatestRequestGate())
   const threadRegistryRevisionRef = useRef(0)
   const allThreadStatesSnapshotRef = useRef<{
     revision: number
@@ -1636,6 +1730,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const subagentTranscriptPersistRetryCountRef = useRef<Record<string, number>>({})
   const subagentTranscriptHydrationRetryTimersRef = useRef<Record<string, number>>({})
   const threadHistoryLoadGenerationRef = useRef<Record<string, number>>({})
+  const [messageWindowIntentCoordinator] = useState(
+    createThreadMessageWindowIntentCoordinator
+  )
+  const firstTranscriptPublishedThreadIdsRef = useRef<Set<string>>(new Set())
   const threadHistoryHydrationAttemptsRef = useRef<
     Record<string, ThreadHistoryHydrationAttempt>
   >({})
@@ -1663,12 +1761,40 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const rendererOnlyMessageIdAliasesRef = useRef<
     Record<string, Map<string, LiveStreamMessageIdAlias>>
   >({})
-  const durableTranscriptSyncSeqRef = useRef<Record<string, number>>({})
+  // A process-wide monotonic gate avoids per-thread ABA when an id is deleted,
+  // recreated, and begins another durable sync before the old read resolves.
+  const durableTranscriptSyncGateRef = useRef(new LatestRequestGate())
   const latestDurableMessagePageIdentitiesRef = useRef<
     Record<string, ReadonlySet<string>>
   >({})
+  const knownDurableMessageIdsRef = useRef<Record<string, Set<string>>>({})
   const checkpointFallbackIndexBaselinesRef = useRef<Record<string, StreamFallbackIndexBaselines>>(
     {}
+  )
+  const rememberDurableMessageIds = useCallback(
+    (threadId: string, messages: readonly Message[]): void => {
+      const known = knownDurableMessageIdsRef.current[threadId] ?? new Set<string>()
+      for (const message of messages) known.add(message.id)
+      if (known.size <= 8_192) {
+        knownDurableMessageIdsRef.current[threadId] = known
+        return
+      }
+
+      // Bound cursor metadata as strictly as the transcript itself. Resident durable rows and
+      // page endpoints are sufficient to select the next verifiable cap boundary.
+      const retained = new Set<string>()
+      const state = threadStatesRef.current[threadId]
+      for (const message of state?.messages ?? []) {
+        if (known.has(message.id)) retained.add(message.id)
+      }
+      for (const window of state?.historyPageWindows ?? []) {
+        if (window.firstMessageId) retained.add(window.firstMessageId)
+        if (window.lastMessageId) retained.add(window.lastMessageId)
+      }
+      for (const message of messages) retained.add(message.id)
+      knownDurableMessageIdsRef.current[threadId] = retained
+    },
+    []
   )
 
   // Hook logs store (not React state — avoids re-rendering chat on every hook fire).
@@ -1840,7 +1966,38 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       ) {
         return
       }
-      commitThreadStateChanges([{ threadId, state: { ...current, ...updates } }])
+      let nextState = { ...current, ...updates }
+      if (nextState.messages.length > THREAD_MESSAGE_RESIDENT_LIMIT) {
+        const pageBoundaryIds = new Set(
+          nextState.historyPageWindows.map((window) => window.lastMessageId)
+        )
+        const durableBoundaryIds = collectKnownDurableMessageIds(
+          nextState.historyPageWindows,
+          knownDurableMessageIdsRef.current[threadId]
+        )
+        const boundedWindow = prependBoundedThreadMessagePage(nextState.messages, [], {
+          maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
+          protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
+          existingGap: nextState.historyWindowGap,
+          preferredPrefixBoundaryMessageIds: pageBoundaryIds,
+          fallbackReloadBoundaryMessageIds: durableBoundaryIds,
+          requireReloadableGap: true
+        })
+        nextState = {
+          ...nextState,
+          messages: boundedWindow.messages,
+          historyWindowGap: attachThreadMessageGapReload(
+            boundedWindow.gap,
+            nextState.historyPageWindows,
+            durableBoundaryIds
+          ),
+          toolCallStates: retainResidentToolCallStates(
+            nextState.toolCallStates,
+            boundedWindow.messages
+          )
+        }
+      }
+      commitThreadStateChanges([{ threadId, state: nextState }])
     },
     [commitThreadStateChanges]
   )
@@ -2501,10 +2658,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       requiredMessageIdentities: readonly string[] = []
     ): Promise<boolean> => {
       const isCurrentIdleSync = (): boolean =>
-        durableTranscriptSyncSeqRef.current[threadId] === seq &&
+        durableTranscriptSyncGateRef.current.isCurrent(threadId, seq) &&
         initializedThreadsRef.current.has(threadId) &&
         !threadStatesRef.current[threadId]?.historyLoading &&
-        !streamDataRef.current[threadId]?.isLoading
+        !streamDataRef.current[threadId]?.isLoading &&
+        messageWindowIntentCoordinator.activeKind(threadId) === null
       if (!isCurrentIdleSync()) return false
 
       let persistedMessages: Message[]
@@ -2533,6 +2691,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         return false
       }
       if (!isCurrentIdleSync()) return false
+      rememberDurableMessageIds(threadId, persistedMessages)
       const durableRequirements = indexDurableTranscriptRequirements(
         persistedMessages,
         requiredMessageIds,
@@ -2555,7 +2714,32 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           persistedMessages,
           liveOrderHint
         )
-        const ordered = latestPageMerge.messages
+        const pageWindows = upsertLatestThreadMessagePageWindow(
+          state.historyPageWindows,
+          createThreadMessagePageWindow(persistedMessages, null)
+        )
+        const pageBoundaryIds = new Set(
+          pageWindows.map((window) => window.lastMessageId)
+        )
+        const durableBoundaryIds = collectKnownDurableMessageIds(
+          pageWindows,
+          knownDurableMessageIdsRef.current[threadId],
+          persistedMessages
+        )
+        const boundedWindow = prependBoundedThreadMessagePage(
+          latestPageMerge.messages,
+          [],
+          {
+            maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
+            protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
+            existingGap: state.historyWindowGap,
+            accumulateEvictedMessageCount: false,
+            preferredPrefixBoundaryMessageIds: pageBoundaryIds,
+            fallbackReloadBoundaryMessageIds: durableBoundaryIds,
+            requireReloadableGap: true
+          }
+        )
+        const ordered = boundedWindow.messages
         const queuedMessages = removeQueuedMessagesById(
           state.queuedMessages,
           requiredMessageIdSet
@@ -2567,9 +2751,15 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           ...state,
           messages: ordered,
           queuedMessages,
-          toolCallStates: upsertToolCallStatesFromMessages(
-            state.toolCallStates,
-            persistedMessages
+          toolCallStates: retainResidentToolCallStates(
+            upsertToolCallStatesFromMessages(state.toolCallStates, persistedMessages),
+            ordered
+          ),
+          historyPageWindows: pageWindows,
+          historyWindowGap: attachThreadMessageGapReload(
+            boundedWindow.gap,
+            pageWindows,
+            durableBoundaryIds
           ),
           historyMessageTotal: persistedPageTotal,
           historyLoadedMessageCount: Math.min(
@@ -2583,7 +2773,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       // snapshot cannot overwrite a replacement run or recreate a cleaned task.
       let snapshotApplied = false
       updateThreadState(threadId, (state) => {
-        if (durableTranscriptSyncSeqRef.current[threadId] !== seq) return {}
+        if (!durableTranscriptSyncGateRef.current.isCurrent(threadId, seq)) return {}
         if (!initializedThreadsRef.current.has(threadId)) return {}
         if (state.historyLoading || streamDataRef.current[threadId]?.isLoading) return {}
         snapshotApplied = true
@@ -2594,7 +2784,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       releaseDurableTransitionalLiveMessages(threadId, syncedMessageIdentities)
       return true
     },
-    [releaseDurableTransitionalLiveMessages, updateThreadState]
+    [
+      messageWindowIntentCoordinator,
+      releaseDurableTransitionalLiveMessages,
+      rememberDurableMessageIds,
+      updateThreadState
+    ]
   )
 
   const syncPersistedThreadMessagesAfterStreamStop = useCallback(
@@ -2602,8 +2797,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       threadId: string,
       orderHintMessages: ReadonlyArray<{ id?: string }> | undefined
     ): void => {
-      const seq = (durableTranscriptSyncSeqRef.current[threadId] ?? 0) + 1
-      durableTranscriptSyncSeqRef.current[threadId] = seq
+      const seq = durableTranscriptSyncGateRef.current.begin(threadId)
       const requiredMessageIdentities = Array.from(
         new Set(
           (transitionalLiveMessagesRef.current[threadId] ?? []).flatMap((message) =>
@@ -2623,7 +2817,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       void (async () => {
         for (const delayMs of [50, 350, 1_000, 2_500]) {
           await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs))
-          if (durableTranscriptSyncSeqRef.current[threadId] !== seq) return
+          if (!durableTranscriptSyncGateRef.current.isCurrent(threadId, seq)) return
           if (!initializedThreadsRef.current.has(threadId)) return
           if (threadStatesRef.current[threadId]?.historyLoading) return
           if (streamDataRef.current[threadId]?.isLoading) return
@@ -2680,8 +2874,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       const accumulator = getOrCreateLiveStreamAccumulator(threadId)
       if (data.isLoading && !wasLoading) {
         delete rendererOnlyMessageIdAliasesRef.current[threadId]
-        durableTranscriptSyncSeqRef.current[threadId] =
-          (durableTranscriptSyncSeqRef.current[threadId] ?? 0) + 1
+        const invalidation = durableTranscriptSyncGateRef.current.begin(threadId)
+        durableTranscriptSyncGateRef.current.finish(threadId, invalidation)
       }
       if (!options.ignoreHistoryLoading && threadStatesRef.current[threadId]?.historyLoading) {
         streamDataRef.current[threadId] = { ...data, liveMessages: [] }
@@ -2878,6 +3072,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       changedIds?: Set<string>,
       urgent = false
     ) => {
+      const persistGeneration = threadHistoryLoadGenerationRef.current[threadId] ?? 0
+      const isCurrentPersistGeneration = (): boolean =>
+        threadProviderMountedRef.current &&
+        initializedThreadsRef.current.has(threadId) &&
+        threadHistoryLoadGenerationRef.current[threadId] === persistGeneration
+      if (!isCurrentPersistGeneration()) return
+
       const ids = new Set(changedIds?.size ? changedIds : Object.keys(transcripts))
       if (ids.size === 0) return
       const markDirty = (pendingIds: Iterable<string>): void => {
@@ -2932,6 +3133,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       let attemptFailed = false
       const persist = (async () => {
+        if (!isCurrentPersistGeneration()) return
         if (Object.keys(subset).length === 0) return
         let manifests: Record<string, unknown>
         try {
@@ -2940,6 +3142,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             serializeSubagentTranscripts(subset)
           )
         } catch (error) {
+          // The row may have been deleted and recreated while the IPC was queued.
+          // Never requeue the old row's transcript into the replacement generation.
+          if (!isCurrentPersistGeneration()) return
           const requeued =
             subagentTranscriptPendingMessagesRef.current[threadId] ?? {}
           for (const [id, failedMessages] of Object.entries(subset)) {
@@ -2959,13 +3164,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           }
           throw error
         }
+        if (!isCurrentPersistGeneration()) return
         delete subagentTranscriptPersistRetryCountRef.current[threadId]
-        if (
-          !threadProviderMountedRef.current ||
-          !initializedThreadsRef.current.has(threadId)
-        ) {
-          return
-        }
         const pendingAfterDispatch =
           subagentTranscriptPendingMessagesRef.current[threadId]
         if (pendingAfterDispatch) {
@@ -2984,14 +3184,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         updateThreadState(threadId, () => ({ subagentTranscripts: withRefs }))
       })()
         .catch((error) => {
+          if (!isCurrentPersistGeneration()) return
           attemptFailed = true
           console.warn("[ThreadContext] Failed to save subagent transcripts:", error)
-          if (
-            !threadProviderMountedRef.current ||
-            !initializedThreadsRef.current.has(threadId)
-          ) {
-            return
-          }
           const retryCount =
             (subagentTranscriptPersistRetryCountRef.current[threadId] ?? 0) + 1
           subagentTranscriptPersistRetryCountRef.current[threadId] = retryCount
@@ -3008,8 +3203,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           subagentTranscriptPersistRetryTimersRef.current[threadId] = window.setTimeout(() => {
             delete subagentTranscriptPersistRetryTimersRef.current[threadId]
             if (
-              !threadProviderMountedRef.current ||
-              !initializedThreadsRef.current.has(threadId) ||
+              !isCurrentPersistGeneration() ||
               !threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady
             ) {
               return
@@ -3025,6 +3219,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (subagentTranscriptPersistChainsRef.current[threadId] === persist) {
           delete subagentTranscriptPersistChainsRef.current[threadId]
         }
+        if (!isCurrentPersistGeneration()) return
         const pendingIds = subagentTranscriptDirtyIdsRef.current[threadId]
         const latest = subagentTranscriptsRef.current[threadId]
         const hasUrgent = Array.from(pendingIds ?? []).some((id) =>
@@ -3034,8 +3229,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           attemptFailed,
           hasPending: !!pendingIds?.size && !!latest,
           canPersist:
-            threadProviderMountedRef.current &&
-            initializedThreadsRef.current.has(threadId) &&
+            isCurrentPersistGeneration() &&
             threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady === true,
           timerScheduled:
             subagentTranscriptPersistTimersRef.current[threadId] !== undefined ||
@@ -4763,8 +4957,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
       const actions: ThreadActions = {
         syncDurableTranscript: async (requiredMessageIds: string[] = []) => {
-          const seq = (durableTranscriptSyncSeqRef.current[threadId] ?? 0) + 1
-          durableTranscriptSyncSeqRef.current[threadId] = seq
+          const seq = durableTranscriptSyncGateRef.current.begin(threadId)
           return applyDurableTranscriptSnapshot(threadId, seq, requiredMessageIds)
         },
         appendMessage: (message: Message) => {
@@ -4867,9 +5060,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const cursor = state?.historyPageCursor
           if (!state?.historyHasMore || state.historyPageLoading || !cursor) return 0
           const loadGeneration = threadHistoryLoadGenerationRef.current[threadId] ?? 0
+          const intent = messageWindowIntentCoordinator.begin(threadId, "older")
           const isCurrentLoad = (): boolean =>
             initializedThreadsRef.current.has(threadId) &&
-            threadHistoryLoadGenerationRef.current[threadId] === loadGeneration
+            threadHistoryLoadGenerationRef.current[threadId] === loadGeneration &&
+            messageWindowIntentCoordinator.isCurrent(intent)
           updateThreadState(threadId, () => ({ historyPageLoading: true }))
           try {
             const page = await window.api.threads.getMessagesPage(threadId, {
@@ -4881,6 +5076,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             const olderMessages = normalizePersistedThreadMessages(page.messages).filter(
               isVisibleCheckpointTranscriptMessage
             )
+            rememberDurableMessageIds(threadId, olderMessages)
+            const pageWindow = createThreadMessagePageWindow(olderMessages, cursor)
             let prependedMessageCount = 0
             updateThreadState(threadId, (latest) => {
               if (
@@ -4889,13 +5086,373 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ) {
                 return { historyPageLoading: false }
               }
-              const nextMessages = prependThreadMessagePage(latest.messages, olderMessages)
-              prependedMessageCount = nextMessages.length - latest.messages.length
+              const pageWindows = prependThreadMessagePageWindow(
+                latest.historyPageWindows,
+                pageWindow
+              )
+              const pageBoundaryIds = new Set(
+                pageWindows.map((window) => window.lastMessageId)
+              )
+              const durableBoundaryIds = collectKnownDurableMessageIds(
+                pageWindows,
+                knownDurableMessageIdsRef.current[threadId],
+                olderMessages
+              )
+              const windowResult = prependBoundedThreadMessagePage(
+                latest.messages,
+                olderMessages,
+                {
+                  maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
+                  protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
+                  existingGap: latest.historyWindowGap,
+                  preferredPrefixBoundaryMessageIds: pageBoundaryIds,
+                  fallbackReloadBoundaryMessageIds: durableBoundaryIds,
+                  requireReloadableGap: true
+                }
+              )
+              const residentIdentities = new Set(
+                latest.messages.map(threadMessagePageIdentity)
+              )
+              prependedMessageCount = olderMessages.reduce(
+                (count, message) =>
+                  count + (residentIdentities.has(threadMessagePageIdentity(message)) ? 0 : 1),
+                0
+              )
+              const nextToolCallStates = retainResidentToolCallStates(
+                upsertToolCallStatesFromMessages(latest.toolCallStates, olderMessages),
+                windowResult.messages
+              )
               return {
-                messages: nextMessages,
-                toolCallStates: upsertToolCallStatesFromMessages(
-                  latest.toolCallStates,
-                  olderMessages
+                messages: windowResult.messages,
+                toolCallStates: nextToolCallStates,
+                historyPageLoading: false,
+                historyHasMore: page.hasMore,
+                historyPageCursor:
+                  page.hasMore &&
+                  page.beforeOrdinal !== null &&
+                  page.beforeMessageId !== null
+                    ? {
+                        beforeOrdinal: page.beforeOrdinal,
+                        beforeMessageId: page.beforeMessageId
+                      }
+                    : null,
+                historyPageWindows: pageWindows,
+                historyWindowGap: attachThreadMessageGapReload(
+                  windowResult.gap,
+                  pageWindows,
+                  durableBoundaryIds
+                ),
+                historyMessageTotal: page.total,
+                historyLoadedMessageCount: Math.min(
+                  page.total,
+                  latest.historyLoadedMessageCount + page.messages.length
+                )
+              }
+            })
+            messageWindowIntentCoordinator.finish(intent)
+            return prependedMessageCount
+          } catch (error) {
+            if (!isCurrentLoad()) return 0
+            console.warn("[ThreadContext] Failed to load earlier messages:", error)
+            updateThreadState(threadId, () => ({ historyPageLoading: false }))
+            messageWindowIntentCoordinator.finish(intent)
+            return 0
+          }
+        },
+        loadMessageWindowAround: async (target) => {
+          const state = threadStatesRef.current[threadId]
+          if (!state) return false
+          if (!target.messageId || !Number.isSafeInteger(target.ordinal) || target.ordinal < 0) {
+            return false
+          }
+          const loadGeneration = threadHistoryLoadGenerationRef.current[threadId] ?? 0
+          const intent = messageWindowIntentCoordinator.begin(threadId, "target")
+          const isCurrentLoad = (): boolean =>
+            initializedThreadsRef.current.has(threadId) &&
+            threadHistoryLoadGenerationRef.current[threadId] === loadGeneration &&
+            messageWindowIntentCoordinator.isCurrent(intent)
+          updateThreadState(threadId, () => ({ historyPageLoading: true }))
+          try {
+            const canAdvanceOrdinal = target.ordinal < Number.MAX_SAFE_INTEGER
+            const requestCursor = {
+              beforeOrdinal: canAdvanceOrdinal ? target.ordinal + 1 : target.ordinal,
+              beforeMessageId: canAdvanceOrdinal ? target.messageId : `${target.messageId}\uffff`
+            }
+            const page = await window.api.threads.getMessagesPage(threadId, {
+              ...requestCursor,
+              limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT
+            })
+            if (!isCurrentLoad()) return false
+            const targetMessages = normalizePersistedThreadMessages(page.messages).filter(
+              isVisibleCheckpointTranscriptMessage
+            )
+            rememberDurableMessageIds(threadId, targetMessages)
+            if (!targetMessages.some((message) => message.id === target.messageId)) {
+              updateThreadState(threadId, () => ({ historyPageLoading: false }))
+              messageWindowIntentCoordinator.finish(intent)
+              return false
+            }
+
+            let loaded = false
+            updateThreadState(threadId, (latest) => {
+              const windowResult = createTargetedThreadMessageWindow(
+                latest.messages,
+                targetMessages,
+                {
+                  targetMessageId: target.messageId,
+                  maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
+                  protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
+                  existingGap: latest.historyWindowGap
+                }
+              )
+              loaded = windowResult.messages.some((message) => message.id === target.messageId)
+              const nextToolCallStates = retainResidentToolCallStates(
+                upsertToolCallStatesFromMessages(latest.toolCallStates, targetMessages),
+                windowResult.messages
+              )
+              const targetPageWindow = createThreadMessagePageWindow(
+                targetMessages,
+                requestCursor
+              )
+              const forwardPageWindow = createForwardThreadMessagePageWindow(
+                target.messageId
+              )
+              const pageWindows = [
+                targetPageWindow,
+                ...(forwardPageWindow ? [forwardPageWindow] : []),
+                ...latest.historyPageWindows.filter(
+                  (window) => window.reloadCursor === null
+                )
+              ]
+              return {
+                messages: windowResult.messages,
+                toolCallStates: nextToolCallStates,
+                historyPageLoading: false,
+                historyHasMore: page.hasMore,
+                historyPageCursor:
+                  page.hasMore &&
+                  page.beforeOrdinal !== null &&
+                  page.beforeMessageId !== null
+                    ? {
+                        beforeOrdinal: page.beforeOrdinal,
+                        beforeMessageId: page.beforeMessageId
+                      }
+                    : null,
+                historyPageWindows: pageWindows,
+                historyWindowGap: attachThreadMessageGapReload(
+                  windowResult.gap,
+                  pageWindows
+                ),
+                historyMessageTotal: page.total,
+                historyLoadedMessageCount: Math.min(
+                  page.total,
+                  latest.historyLoadedMessageCount + page.messages.length
+                )
+              }
+            })
+            messageWindowIntentCoordinator.finish(intent)
+            return loaded
+          } catch (error) {
+            if (!isCurrentLoad()) return false
+            console.warn("[ThreadContext] Failed to load targeted message window:", error)
+            updateThreadState(threadId, () => ({ historyPageLoading: false }))
+            messageWindowIntentCoordinator.finish(intent)
+            return false
+          }
+        },
+        loadReleasedMessageWindow: async () => {
+          const state = threadStatesRef.current[threadId]
+          const gap = state?.historyWindowGap
+          if (
+            !state ||
+            !gap ||
+            !gap.reloadTargetMessageId
+          ) {
+            return false
+          }
+          const reloadCursor =
+            gap.reloadAnchorMessageId
+              ? { anchorMessageId: gap.reloadAnchorMessageId }
+              : gap.reloadBeforeOrdinal !== null && gap.reloadBeforeMessageId !== null
+              ? {
+                  beforeOrdinal: gap.reloadBeforeOrdinal,
+                  beforeMessageId: gap.reloadBeforeMessageId
+                }
+              : null
+          const isForwardReload = isForwardThreadMessagePageCursor(reloadCursor)
+          const loadGeneration = threadHistoryLoadGenerationRef.current[threadId] ?? 0
+          const intent = messageWindowIntentCoordinator.begin(threadId, "gap")
+          const isCurrentLoad = (): boolean =>
+            initializedThreadsRef.current.has(threadId) &&
+            threadHistoryLoadGenerationRef.current[threadId] === loadGeneration &&
+            messageWindowIntentCoordinator.isCurrent(intent)
+          updateThreadState(threadId, () => ({ historyPageLoading: true }))
+          try {
+            const page = await window.api.threads.getMessagesPage(threadId, {
+              ...(reloadCursor ?? {}),
+              limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT
+            })
+            if (!isCurrentLoad()) return false
+            const reloadedMessages = normalizePersistedThreadMessages(page.messages).filter(
+              isVisibleCheckpointTranscriptMessage
+            )
+            rememberDurableMessageIds(threadId, reloadedMessages)
+            if (
+              isForwardReload
+                ? page.verifiedAnchorMessageId !== gap.reloadTargetMessageId
+                : !isThreadMessagePageContinuousWithBoundary(
+                    reloadedMessages,
+                    gap.reloadTargetMessageId
+                  )
+            ) {
+              updateThreadState(threadId, () => ({ historyPageLoading: false }))
+              messageWindowIntentCoordinator.finish(intent)
+              return false
+            }
+            // A verified anchor with no newer durable row is not progress. Keep the gap intact so
+            // a later durable sync/retry can continue instead of repeatedly closing on the anchor.
+            if (
+              isForwardReload &&
+              !isThreadMessageForwardPageProgress(
+                reloadedMessages,
+                page.verifiedAnchorMessageId,
+                gap.reloadTargetMessageId
+              )
+            ) {
+              updateThreadState(threadId, () => ({ historyPageLoading: false }))
+              messageWindowIntentCoordinator.finish(intent)
+              return false
+            }
+
+            let loaded = false
+            updateThreadState(threadId, (latest) => {
+              const currentGap = latest.historyWindowGap
+              if (
+                !currentGap ||
+                currentGap.afterMessageId !== gap.afterMessageId ||
+                currentGap.reloadBeforeOrdinal !==
+                  (reloadCursor && "beforeOrdinal" in reloadCursor
+                    ? reloadCursor.beforeOrdinal
+                    : null) ||
+                currentGap.reloadBeforeMessageId !==
+                  (reloadCursor && "beforeMessageId" in reloadCursor
+                    ? reloadCursor.beforeMessageId
+                    : null) ||
+                currentGap.reloadAnchorMessageId !==
+                  (reloadCursor && "anchorMessageId" in reloadCursor
+                    ? reloadCursor.anchorMessageId
+                    : null)
+              ) {
+                return { historyPageLoading: false }
+              }
+              const windowResult = advanceThreadMessageWindowAcrossGap(
+                latest.messages,
+                reloadedMessages,
+                {
+                  gap: currentGap,
+                  maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
+                  protectedTailMessages: THREAD_MESSAGE_PROTECTED_TAIL
+                }
+              )
+              let pageWindows = latest.historyPageWindows
+              if (isForwardReload && reloadCursor) {
+                const currentPageWindow = createThreadMessagePageWindow(
+                  reloadedMessages,
+                  reloadCursor
+                )
+                const pageTail = reloadedMessages.at(-1)
+                const forwardPageWindow = pageTail
+                  ? createForwardThreadMessagePageWindow(pageTail.id)
+                  : null
+                pageWindows = [
+                  currentPageWindow,
+                  ...(windowResult.gap && forwardPageWindow
+                    ? [forwardPageWindow]
+                    : []),
+                  ...latest.historyPageWindows.filter(
+                    (window) => window.reloadCursor === null
+                  )
+                ]
+              }
+              loaded = isForwardReload
+                ? reloadedMessages.length > 0
+                : windowResult.messages.some(
+                    (message) => message.id === gap.reloadTargetMessageId
+                  )
+              return {
+                messages: windowResult.messages,
+                toolCallStates: retainResidentToolCallStates(
+                  upsertToolCallStatesFromMessages(latest.toolCallStates, reloadedMessages),
+                  windowResult.messages
+                ),
+                historyPageLoading: false,
+                historyHasMore: isForwardReload ? latest.historyHasMore : page.hasMore,
+                historyPageCursor:
+                  isForwardReload
+                    ? latest.historyPageCursor
+                    : page.hasMore &&
+                        page.beforeOrdinal !== null &&
+                        page.beforeMessageId !== null
+                      ? {
+                          beforeOrdinal: page.beforeOrdinal,
+                          beforeMessageId: page.beforeMessageId
+                        }
+                      : null,
+                historyPageWindows: pageWindows,
+                historyWindowGap: attachThreadMessageGapReload(
+                  windowResult.gap,
+                  pageWindows
+                ),
+                historyMessageTotal: page.total
+              }
+            })
+            messageWindowIntentCoordinator.finish(intent)
+            return loaded
+          } catch (error) {
+            if (!isCurrentLoad()) return false
+            console.warn("[ThreadContext] Failed to reload released message window:", error)
+            updateThreadState(threadId, () => ({ historyPageLoading: false }))
+            messageWindowIntentCoordinator.finish(intent)
+            return false
+          }
+        },
+        restoreLatestMessageWindow: async () => {
+          const state = threadStatesRef.current[threadId]
+          if (!state) return false
+          const loadGeneration = threadHistoryLoadGenerationRef.current[threadId] ?? 0
+          const intent = messageWindowIntentCoordinator.begin(threadId, "latest")
+          const isCurrentLoad = (): boolean =>
+            initializedThreadsRef.current.has(threadId) &&
+            threadHistoryLoadGenerationRef.current[threadId] === loadGeneration &&
+            messageWindowIntentCoordinator.isCurrent(intent)
+          updateThreadState(threadId, () => ({ historyPageLoading: true }))
+          try {
+            const page = await window.api.threads.getMessagesPage(threadId, {
+              limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT
+            })
+            if (!isCurrentLoad()) return false
+            const latestMessages = normalizePersistedThreadMessages(page.messages).filter(
+              isVisibleCheckpointTranscriptMessage
+            )
+            rememberDurableMessageIds(threadId, latestMessages)
+            latestDurableMessagePageIdentitiesRef.current[threadId] =
+              threadMessagePageIdentitySet(page.messages)
+            updateThreadState(threadId, (latest) => {
+              const windowResult = restoreLatestThreadMessageWindow(
+                latest.messages,
+                latestMessages,
+                {
+                  maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
+                  protectedLocalTailMessages: THREAD_MESSAGE_PROTECTED_TAIL,
+                  existingGap: latest.historyWindowGap
+                }
+              )
+              const pageWindows = [createThreadMessagePageWindow(latestMessages, null)]
+              return {
+                messages: windowResult.messages,
+                toolCallStates: retainResidentToolCallStates(
+                  upsertToolCallStatesFromMessages(latest.toolCallStates, latestMessages),
+                  windowResult.messages
                 ),
                 historyPageLoading: false,
                 historyHasMore: page.hasMore,
@@ -4908,20 +5465,32 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                         beforeMessageId: page.beforeMessageId
                       }
                     : null,
+                historyPageWindows: pageWindows,
+                historyWindowGap: null,
                 historyMessageTotal: page.total,
-                historyLoadedMessageCount: Math.min(
-                  page.total,
-                  latest.historyLoadedMessageCount + page.messages.length
-                )
+                historyLoadedMessageCount: page.messages.length
               }
             })
-            return prependedMessageCount
+            messageWindowIntentCoordinator.finish(intent)
+            return true
           } catch (error) {
-            if (!isCurrentLoad()) return 0
-            console.warn("[ThreadContext] Failed to load earlier messages:", error)
+            if (!isCurrentLoad()) return false
+            console.warn("[ThreadContext] Failed to restore latest message window:", error)
             updateThreadState(threadId, () => ({ historyPageLoading: false }))
-            return 0
+            messageWindowIntentCoordinator.finish(intent)
+            return false
           }
+        },
+        cancelMessageWindowLoad: () => {
+          const activeKind = messageWindowIntentCoordinator.activeKind(threadId)
+          if (
+            !canCancelThreadMessageWindowIntent(
+              activeKind,
+              firstTranscriptPublishedThreadIdsRef.current.has(threadId)
+            )
+          ) return
+          if (!messageWindowIntentCoordinator.cancel(threadId)) return
+          updateThreadState(threadId, () => ({ historyPageLoading: false }))
         },
         addQueuedMessage: (message: QueuedMessage) => {
           updateThreadState(threadId, (state) => {
@@ -5080,15 +5649,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           updateThreadState(threadId, () => ({ currentModel: modelId }))
           // Only intentional model selection changes should touch metadata.model.
           // Hydration and no-op writes must not refresh updated_at or overwrite routing fallback state.
-          window.api.threads.get(threadId).then((thread) => {
-            if (thread) {
+          const gate = modelSelectionGateRef.current
+          const generation = gate.begin(threadId)
+          void window.api.threads
+            .get(threadId)
+            .then(async (thread) => {
+              if (!gate.isCurrent(threadId, generation) || !thread) return
               const metadata = thread.metadata || {}
               if (metadata.model === modelId) return
-              window.api.threads.update(threadId, {
-                metadata: { ...metadata, model: modelId }
-              })
-            }
-          })
+              await useAppStore
+                .getState()
+                .patchThreadMetadata(threadId, { set: { model: modelId } })
+            })
+            .catch((error) => {
+              if (!gate.isCurrent(threadId, generation)) return
+              console.warn("[ThreadContext] Failed to persist selected model:", error)
+            })
+            .finally(() => {
+              gate.finish(threadId, generation)
+            })
         },
         openFile: (path: string, name: string) => {
           updateThreadState(threadId, (state) => {
@@ -5155,11 +5734,23 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       actionsCache.current[threadId] = actions
       return actions
     },
-    [applyDurableTranscriptSnapshot, openHookLogBucket, refreshGoalUi, updateThreadState]
+    [
+      applyDurableTranscriptSnapshot,
+      messageWindowIntentCoordinator,
+      openHookLogBucket,
+      rememberDurableMessageIds,
+      refreshGoalUi,
+      updateThreadState
+    ]
   )
 
   const loadThreadHistory = useCallback(
     async (threadId: string) => {
+      const transcriptHydrationIntent = messageWindowIntentCoordinator.begin(
+        threadId,
+        "hydrate"
+      )
+      firstTranscriptPublishedThreadIdsRef.current.delete(threadId)
       const loadGeneration = (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
       threadHistoryLoadGenerationRef.current[threadId] = loadGeneration
       foregroundHydrationGeneration.transition(useAppStore.getState().currentThreadId)
@@ -5175,6 +5766,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         (foregroundToken === null ||
           (useAppStore.getState().currentThreadId === threadId &&
             foregroundHydrationGeneration.isCurrent(foregroundToken)))
+      const isCurrentTranscriptHydration = (): boolean =>
+        isCurrentLoad() &&
+        messageWindowIntentCoordinator.isCurrent(transcriptHydrationIntent)
       const actions = getThreadActions(threadId)
       let persistedMessageTimes: MessageTimeMap = {}
       let persistedInternalGoalMessageTimes: MessageTimeMap = {}
@@ -5232,6 +5826,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       )
       if (messagePageResult.succeeded) {
         const messagePage = messagePageResult.page
+        rememberDurableMessageIds(threadId, messagePage.messages)
         latestDurableMessagePageIdentitiesRef.current[threadId] =
           threadMessagePageIdentitySet(messagePage.messages)
         durableMessageTotal = messagePage.total
@@ -5250,25 +5845,37 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           isVisibleCheckpointTranscriptMessage
         )
         mainTranscriptPublished = !keepMainTranscriptLoading
-        if (mainTranscriptPublished) actions.setMessages(visiblePersistedThreadMessages)
-        updateThreadState(threadId, () => ({
-          historyLoading: keepMainTranscriptLoading,
-          historyPageLoading: false,
-          historyHasMore: durableMessageHasMore,
-          historyPageCursor: durableMessagePageCursor,
-          historyMessageTotal: durableMessageTotal,
-          historyLoadedMessageCount: messagePage.messages.length
-        }))
+        if (isCurrentTranscriptHydration()) {
+          if (mainTranscriptPublished) {
+            actions.setMessages(visiblePersistedThreadMessages)
+            firstTranscriptPublishedThreadIdsRef.current.add(threadId)
+          }
+          updateThreadState(threadId, () => ({
+            historyLoading: keepMainTranscriptLoading,
+            historyPageLoading: false,
+            historyHasMore: durableMessageHasMore,
+            historyPageCursor: durableMessagePageCursor,
+            historyPageWindows:
+              visiblePersistedThreadMessages.length > 0
+                ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
+                : [],
+            historyWindowGap: null,
+            historyMessageTotal: durableMessageTotal,
+            historyLoadedMessageCount: messagePage.messages.length
+          }))
+        }
       } else {
         console.error(
           "[ThreadContext] Failed to load persisted thread messages:",
           messagePageResult.error
         )
-        mainTranscriptPublished = !keepMainTranscriptLoading
-        updateThreadState(threadId, () => ({
-          historyLoading: keepMainTranscriptLoading,
-          historyPageLoading: false
-        }))
+        mainTranscriptPublished = false
+        if (isCurrentTranscriptHydration()) {
+          updateThreadState(threadId, () => ({
+            historyLoading: keepMainTranscriptLoading,
+            historyPageLoading: false
+          }))
+        }
       }
       if (!isCurrentLoad()) return
 
@@ -5435,6 +6042,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           messagePageResult.succeeded &&
           messagePageResult.page.total === 0
         ) {
+          rememberDurableMessageIds(threadId, legacyMessagePage.messages)
           latestDurableMessagePageIdentitiesRef.current[threadId] =
             threadMessagePageIdentitySet(legacyMessagePage.messages)
           durableMessageTotal = legacyMessagePage.total
@@ -5452,16 +6060,24 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           visiblePersistedThreadMessages = persistedThreadMessages.filter(
             isVisibleCheckpointTranscriptMessage
           )
-          actions.setMessages(visiblePersistedThreadMessages)
-          mainTranscriptPublished = true
-          updateThreadState(threadId, () => ({
-            historyLoading: false,
-            historyPageLoading: false,
-            historyHasMore: durableMessageHasMore,
-            historyPageCursor: durableMessagePageCursor,
-            historyMessageTotal: durableMessageTotal,
-            historyLoadedMessageCount: legacyMessagePage.messages.length
-          }))
+          if (isCurrentTranscriptHydration()) {
+            actions.setMessages(visiblePersistedThreadMessages)
+            firstTranscriptPublishedThreadIdsRef.current.add(threadId)
+            mainTranscriptPublished = true
+            updateThreadState(threadId, () => ({
+              historyLoading: false,
+              historyPageLoading: false,
+              historyHasMore: durableMessageHasMore,
+              historyPageCursor: durableMessagePageCursor,
+              historyPageWindows:
+                visiblePersistedThreadMessages.length > 0
+                  ? [createThreadMessagePageWindow(visiblePersistedThreadMessages, null)]
+                  : [],
+              historyWindowGap: null,
+              historyMessageTotal: durableMessageTotal,
+              historyLoadedMessageCount: legacyMessagePage.messages.length
+            }))
+          }
         }
         const latestCheckpoint = checkpointRuntimeResult.checkpoint as {
           checkpoint?: {
@@ -5506,7 +6122,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         if (latestCheckpoint) {
           const channelValues = latestCheckpoint.checkpoint?.channel_values
 
-          if (channelValues?.messages && Array.isArray(channelValues.messages)) {
+          if (
+            isCurrentTranscriptHydration() &&
+            channelValues?.messages &&
+            Array.isArray(channelValues.messages)
+          ) {
             checkpointMessagesLoaded = true
             let internalGoalPromptIndex = 0
             const checkpointRawRestoredMessages = channelValues.messages.flatMap(
@@ -5792,14 +6412,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         restoredTranscriptMessages,
         threadStatesRef.current[threadId]?.messages ?? []
       )
-      actions.setMessages(hydratedTranscriptMessages)
-      if (!mainTranscriptPublished) {
-        mainTranscriptPublished = true
-        updateThreadState(threadId, () => ({
-          historyLoading: false,
-          historyPageLoading: false
-        }))
+      if (isCurrentTranscriptHydration()) {
+        actions.setMessages(hydratedTranscriptMessages)
+        firstTranscriptPublishedThreadIdsRef.current.add(threadId)
+        if (!mainTranscriptPublished) {
+          mainTranscriptPublished = true
+          updateThreadState(threadId, () => ({
+            historyLoading: false,
+            historyPageLoading: false
+          }))
+        }
       }
+      messageWindowIntentCoordinator.finish(transcriptHydrationIntent)
       // A renderer can reload after main has injected a steered draft but before
       // it receives the IPC acknowledgement. The checkpoint is then the durable
       // source of truth: remove any matching local draft so auto-drain cannot
@@ -5907,7 +6531,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       foregroundHydrationGeneration,
       getThreadActions,
       handleStreamUpdate,
+      messageWindowIntentCoordinator,
       mergeHydratedSubagentTranscripts,
+      rememberDurableMessageIds,
       requestCoordinatorWorkers,
       scheduleCoordinatorNotificationTurn,
       scheduleSubagentTranscriptHydrationRetry,
@@ -6774,11 +7400,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   const cleanupThread = useCallback(
     (threadId: string) => {
+      // Invalidate a model read started by the deleted row. Reusing the same id
+      // later must not let that old continuation patch the replacement row.
+      const modelGateGeneration = modelSelectionGateRef.current.begin(threadId)
+      modelSelectionGateRef.current.finish(threadId, modelGateGeneration)
       // Invalidate every in-flight history/transcript hydration request before
       // any cleanup can yield back to the event loop. Keep the counter instead
       // of deleting it so a later reinitialization cannot reuse a stale token.
       threadHistoryLoadGenerationRef.current[threadId] =
         (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
+      messageWindowIntentCoordinator.cancel(threadId)
+      firstTranscriptPublishedThreadIdsRef.current.delete(threadId)
+      delete knownDurableMessageIdsRef.current[threadId]
       delete threadHistoryHydrationAttemptsRef.current[threadId]
       coordinatorWorkerRequestCache.invalidate(threadId)
       void window.api.agent.unbindCoordinatorWorkers(threadId).catch((error: unknown) => {
@@ -6804,12 +7437,6 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       if (subagentTranscriptPersistTimer !== undefined) {
         window.clearTimeout(subagentTranscriptPersistTimer)
         delete subagentTranscriptPersistTimersRef.current[threadId]
-        const transcripts =
-          subagentTranscriptsRef.current[threadId] ??
-          threadStatesRef.current[threadId]?.subagentTranscripts
-        if (transcripts && Object.keys(transcripts).length > 0) {
-          saveSubagentTranscripts(threadId, transcripts, subagentTranscriptDirtyIdsRef.current[threadId])
-        }
       }
       delete subagentTranscriptDirtyIdsRef.current[threadId]
       delete subagentTranscriptPendingMessagesRef.current[threadId]
@@ -6859,7 +7486,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       delete liveStreamAccumulatorsRef.current[threadId]
       delete transitionalLiveMessagesRef.current[threadId]
       delete rendererOnlyMessageIdAliasesRef.current[threadId]
-      delete durableTranscriptSyncSeqRef.current[threadId]
+      const durableSyncInvalidation = durableTranscriptSyncGateRef.current.begin(threadId)
+      durableTranscriptSyncGateRef.current.finish(threadId, durableSyncInvalidation)
       delete latestDurableMessagePageIdentitiesRef.current[threadId]
       delete checkpointFallbackIndexBaselinesRef.current[threadId]
       delete subagentTranscriptsRef.current[threadId]
@@ -6876,9 +7504,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       clearSchedulerStreamingForThread,
       clearSchedulerMainStreamingForThread,
       coordinatorWorkerRequestCache,
-      releaseThreadListeners,
-      saveSubagentTranscripts,
-      deleteThreadState
+      deleteThreadState,
+      messageWindowIntentCoordinator,
+      releaseThreadListeners
     ]
   )
 
@@ -6983,10 +7611,13 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       initializedThreadsRef.current.delete(threadId)
       threadHistoryLoadGenerationRef.current[threadId] =
         (threadHistoryLoadGenerationRef.current[threadId] ?? 0) + 1
+      messageWindowIntentCoordinator.cancel(threadId)
+      firstTranscriptPublishedThreadIdsRef.current.delete(threadId)
+      delete knownDurableMessageIdsRef.current[threadId]
       delete threadHistoryHydrationAttemptsRef.current[threadId]
       coordinatorWorkerRequestCache.invalidate(threadId)
-      durableTranscriptSyncSeqRef.current[threadId] =
-        (durableTranscriptSyncSeqRef.current[threadId] ?? 0) + 1
+      const durableSyncInvalidation = durableTranscriptSyncGateRef.current.begin(threadId)
+      durableTranscriptSyncGateRef.current.finish(threadId, durableSyncInvalidation)
       void window.api.agent.unbindCoordinatorWorkers(threadId).catch((error: unknown) => {
         console.warn("[ThreadProvider] Failed to unbind dehydrated coordinator updates:", error)
       })
@@ -7043,6 +7674,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       canDehydrateThread,
       clearSchedulerStreamingForThread,
       coordinatorWorkerRequestCache,
+      messageWindowIntentCoordinator,
       releaseThreadListeners,
       updateThreadState
     ]

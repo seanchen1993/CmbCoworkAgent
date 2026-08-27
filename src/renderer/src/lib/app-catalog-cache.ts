@@ -8,6 +8,10 @@ export interface SkillCatalogLoadResult {
   localSkills: SkillMetadata[]
   pluginSkills: SkillMetadata[]
   disabledSkillIds: string[]
+  total?: number
+  enabledSkillCount?: number
+  truncated?: boolean
+  truncatedReasons?: string[]
 }
 
 export interface SkillCatalogSnapshot {
@@ -16,7 +20,10 @@ export interface SkillCatalogSnapshot {
   pluginSkills: SkillMetadata[]
   disabledSkillIds: Set<string>
   rightPanelSkills: SkillMetadata[]
+  total: number
   rightPanelEnabledSkillCount: number
+  truncated: boolean
+  truncatedReasons: string[]
   updatedAt: number
 }
 
@@ -28,7 +35,17 @@ export interface ChatSkillCatalogProjection {
 export interface PluginCatalogSnapshot {
   key: string
   plugins: PluginMetadata[]
+  total: number
+  truncated: boolean
+  truncatedReasons: string[]
   updatedAt: number
+}
+
+export interface PluginCatalogLoadResult {
+  plugins: PluginMetadata[]
+  total?: number
+  truncated?: boolean
+  truncatedReasons?: string[]
 }
 
 export type CatalogMarketSkillInfo = Pick<MarketItem, "name" | "chinese_name">
@@ -70,10 +87,17 @@ const chatProjectionCache = new WeakMap<
   SkillCatalogSnapshot,
   Map<string, ChatSkillCatalogProjection>
 >()
+// Keep renderer-local cache generations unambiguous in diagnostics. Worker
+// sharing does not depend on this nonce: the main-process source epoch is the
+// authoritative cross-window snapshot identity.
+const catalogRendererSessionId = globalThis.crypto?.randomUUID?.() ??
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
 let pluginSnapshot: PluginCatalogSnapshot | null = null
 let pluginRequest: CatalogRequest<PluginCatalogSnapshot> | null = null
 let pluginGeneration = 0
+let pluginInvalidationRevision = 0
+const pluginInvalidationListeners = new Set<() => void>()
 
 let marketSkillSnapshot: MarketSkillCatalogSnapshot | null = null
 let marketSkillRequest: Promise<MarketSkillCatalogSnapshot> | null = null
@@ -91,19 +115,31 @@ const workspaceHookInvalidationListeners = new Set<
   (payload: { threadId: string; workspacePath: string }) => void
 >()
 
-let configuredSkillLoader: ((key: string) => Promise<SkillCatalogLoadResult>) | null = null
-let configuredPluginLoader: ((key: string) => Promise<PluginMetadata[]>) | null = null
+type CatalogGenerationCheck = () => boolean
+
+let configuredSkillLoader:
+  | ((key: string, isCurrent: CatalogGenerationCheck) => Promise<SkillCatalogLoadResult>)
+  | null = null
+let configuredPluginLoader:
+  | ((
+      key: string,
+      isCurrent: CatalogGenerationCheck
+    ) => Promise<PluginCatalogLoadResult | PluginMetadata[]>)
+  | null = null
 
 export function configureAppCatalogLoaders(loaders: {
-  skills: (key: string) => Promise<SkillCatalogLoadResult>
-  plugins: (key: string) => Promise<PluginMetadata[]>
+  skills: (key: string, isCurrent: CatalogGenerationCheck) => Promise<SkillCatalogLoadResult>
+  plugins: (
+    key: string,
+    isCurrent: CatalogGenerationCheck
+  ) => Promise<PluginCatalogLoadResult | PluginMetadata[]>
 }): void {
   configuredSkillLoader = loaders.skills
   configuredPluginLoader = loaders.plugins
 }
 
 function skillCatalogKey(pluginVersion: string | number): string {
-  return `${String(pluginVersion)}:${skillInvalidationRevision}`
+  return `${String(pluginVersion)}:${catalogRendererSessionId}:${skillInvalidationRevision}`
 }
 
 export function getSkillCatalogRevision(pluginVersion: string | number): string {
@@ -138,7 +174,10 @@ function createSkillCatalogSnapshot(
     pluginSkills: result.pluginSkills,
     disabledSkillIds,
     rightPanelSkills,
-    rightPanelEnabledSkillCount,
+    total: result.total ?? rightPanelSkills.length,
+    rightPanelEnabledSkillCount: result.enabledSkillCount ?? rightPanelEnabledSkillCount,
+    truncated: result.truncated === true,
+    truncatedReasons: [...new Set(result.truncatedReasons ?? [])],
     updatedAt: Date.now()
   }
 }
@@ -168,8 +207,10 @@ export function revalidateSkillCatalog(
   if (skillRequest?.key === key) return skillRequest.promise
 
   const generation = ++skillGeneration
+  const isCurrent = (): boolean =>
+    generation === skillGeneration && key === skillCatalogKey(pluginVersion)
   const load = configuredSkillLoader
-    ? () => configuredSkillLoader!(key)
+    ? () => configuredSkillLoader!(key, isCurrent)
     : loader
   if (!load) return Promise.reject(new Error("Skill catalog loader is not configured"))
   const promise = load()
@@ -214,9 +255,9 @@ export function ensureSkillsChangedInvalidationSource(
 }
 
 /**
- * Disabled-skill writes currently travel on hooks:changed because they also
- * affect skill hook activation. Filter that shared channel precisely instead
- * of invalidating the catalog for unrelated hook edits.
+ * Filesystem watcher and cross-window skill/plugin writes currently travel on
+ * hooks:changed because they also affect hook activation. Advance the relevant
+ * catalog revisions while leaving unrelated global/workspace hook edits alone.
  */
 export function ensureDisabledSkillsChangedInvalidationSource(
   subscribe: (listener: (payload: { reason?: string }) => void) => () => void
@@ -225,7 +266,25 @@ export function ensureDisabledSkillsChangedInvalidationSource(
   disabledSkillsChangedSourceInstalled = true
   try {
     disabledSkillsChangedSourceCleanup = subscribe((payload) => {
-      if (payload.reason === "skills-disabled-changed") invalidateSkillCatalog()
+      const reason = payload.reason
+      const skillsChanged =
+        !reason ||
+        reason === "config-file-changed" ||
+        reason.startsWith("skill-") ||
+        reason.startsWith("skills-") ||
+        reason === "plugin-installed" ||
+        reason === "plugin-deleted" ||
+        reason === "plugin-enabled-changed" ||
+        reason === "plugin-hook-file-changed"
+      const pluginsChanged =
+        !reason ||
+        reason === "config-file-changed" ||
+        reason === "plugin-installed" ||
+        reason === "plugin-deleted" ||
+        reason === "plugin-enabled-changed" ||
+        reason === "plugin-hook-file-changed"
+      if (skillsChanged) invalidateSkillCatalog()
+      if (pluginsChanged) invalidatePluginCatalog()
       globalHookInvalidationRevision += 1
       globalHookGeneration += 1
       for (const listener of globalHookInvalidationListeners) listener()
@@ -370,23 +429,49 @@ export function readPluginCatalogCache(): PluginCatalogSnapshot | null {
   return pluginSnapshot
 }
 
+function pluginCatalogKey(pluginVersion: string | number): string {
+  return `${String(pluginVersion)}:${catalogRendererSessionId}:${pluginInvalidationRevision}`
+}
+
+export function getPluginCatalogRevision(pluginVersion: string | number): string {
+  return pluginCatalogKey(pluginVersion)
+}
+
+function normalizePluginCatalogLoadResult(
+  result: PluginCatalogLoadResult | PluginMetadata[]
+): PluginCatalogLoadResult {
+  return Array.isArray(result) ? { plugins: result } : result
+}
+
 export function revalidatePluginCatalog(
   pluginVersion: string | number,
-  loader?: () => Promise<PluginMetadata[]>
+  loader?: () => Promise<PluginCatalogLoadResult | PluginMetadata[]>
 ): Promise<PluginCatalogSnapshot> {
-  const key = String(pluginVersion)
+  const key = pluginCatalogKey(pluginVersion)
   if (pluginSnapshot?.key === key) return Promise.resolve(pluginSnapshot)
   if (pluginRequest?.key === key) return pluginRequest.promise
 
   const generation = ++pluginGeneration
+  const isCurrent = (): boolean =>
+    generation === pluginGeneration && key === pluginCatalogKey(pluginVersion)
   const load = configuredPluginLoader
-    ? () => configuredPluginLoader!(key)
+    ? () => configuredPluginLoader!(key, isCurrent)
     : loader
   if (!load) return Promise.reject(new Error("Plugin catalog loader is not configured"))
   const promise = load()
-    .then((plugins) => {
-      const next = { key, plugins, updatedAt: Date.now() }
-      if (generation === pluginGeneration) pluginSnapshot = next
+    .then((rawResult) => {
+      const result = normalizePluginCatalogLoadResult(rawResult)
+      const next = {
+        key,
+        plugins: result.plugins,
+        total: result.total ?? result.plugins.length,
+        truncated: result.truncated === true,
+        truncatedReasons: [...new Set(result.truncatedReasons ?? [])],
+        updatedAt: Date.now()
+      }
+      if (generation === pluginGeneration && key === pluginCatalogKey(pluginVersion)) {
+        pluginSnapshot = next
+      }
       return generation === pluginGeneration ? next : (pluginSnapshot ?? next)
     })
     .finally(() => {
@@ -395,6 +480,17 @@ export function revalidatePluginCatalog(
 
   pluginRequest = { key, generation, promise }
   return promise
+}
+
+export function invalidatePluginCatalog(): void {
+  pluginInvalidationRevision += 1
+  pluginGeneration += 1
+  for (const listener of pluginInvalidationListeners) listener()
+}
+
+export function subscribePluginCatalogInvalidation(listener: () => void): () => void {
+  pluginInvalidationListeners.add(listener)
+  return () => pluginInvalidationListeners.delete(listener)
 }
 
 export function readMarketSkillCatalogCache(): MarketSkillCatalogSnapshot | null {
@@ -454,6 +550,8 @@ export function resetAppCatalogCacheForTests(): void {
   pluginSnapshot = null
   pluginRequest = null
   pluginGeneration = 0
+  pluginInvalidationRevision = 0
+  pluginInvalidationListeners.clear()
   marketSkillSnapshot = null
   marketSkillRequest = null
   marketSkillGeneration = 0

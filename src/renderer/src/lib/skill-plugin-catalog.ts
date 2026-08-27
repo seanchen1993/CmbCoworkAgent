@@ -17,11 +17,20 @@ export interface SkillCatalogSummary {
   total: number
   enabled: number
   truncated: boolean
+  truncatedReasons: string[]
 }
 
 export interface PluginCatalogSummary {
   total: number
   truncated: boolean
+  truncatedReasons: string[]
+}
+
+export interface PluginCatalogLoadResult {
+  plugins: PluginMetadata[]
+  total: number
+  truncated: boolean
+  truncatedReasons: string[]
 }
 
 export async function loadSkillCatalogSummary(
@@ -38,7 +47,8 @@ export async function loadSkillCatalogSummary(
   return {
     total: page.total,
     enabled: page.enabledSkillCount,
-    truncated: page.truncated
+    truncated: page.truncated,
+    truncatedReasons: page.truncatedReasons
   }
 }
 
@@ -53,7 +63,11 @@ export async function loadPluginCatalogSummary(
     `${scope}:plugins`
   )
   if (isCurrent && !isCurrent()) throw new Error("Catalog request superseded")
-  return { total: page.total, truncated: page.truncated }
+  return {
+    total: page.total,
+    truncated: page.truncated,
+    truncatedReasons: page.truncatedReasons
+  }
 }
 
 async function drainCatalogKind(
@@ -63,13 +77,19 @@ async function drainCatalogKind(
   skills: SkillMetadata[]
   plugins: PluginMetadata[]
   disabledSkillIds: string[]
+  total: number
+  enabledSkillCount: number
   truncated: boolean
+  truncatedReasons: string[]
 }> {
   const skills: SkillMetadata[] = []
   const plugins: PluginMetadata[] = []
   const disabledSkillIds: string[] = []
   let cursor: string | null = null
+  let total = 0
+  let enabledSkillCount = 0
   let truncated = false
+  const truncatedReasons = new Set<string>()
   const seenCursors = new Set<string>()
   for (let pageIndex = 0; pageIndex < MAX_CATALOG_PAGES; pageIndex += 1) {
     if (options.isCurrent && !options.isCurrent()) throw new Error("Catalog request superseded")
@@ -81,15 +101,46 @@ async function drainCatalogKind(
     skills.push(...page.skills)
     plugins.push(...page.plugins)
     disabledSkillIds.push(...page.disabledSkillIds)
+    total = page.total
+    enabledSkillCount = page.enabledSkillCount
     truncated ||= page.truncated
-    if (!page.cursor) return { skills, plugins, disabledSkillIds, truncated }
+    for (const reason of page.truncatedReasons) truncatedReasons.add(reason)
+    if (!page.cursor) {
+      return {
+        skills,
+        plugins,
+        disabledSkillIds,
+        total,
+        enabledSkillCount,
+        truncated,
+        truncatedReasons: [...truncatedReasons]
+      }
+    }
     if (page.cursor === cursor || seenCursors.has(page.cursor)) {
-      return { skills, plugins, disabledSkillIds, truncated: true }
+      truncatedReasons.add("cursor-no-progress")
+      return {
+        skills,
+        plugins,
+        disabledSkillIds,
+        total,
+        enabledSkillCount,
+        truncated: true,
+        truncatedReasons: [...truncatedReasons]
+      }
     }
     seenCursors.add(page.cursor)
     cursor = page.cursor
   }
-  return { skills, plugins, disabledSkillIds, truncated: true }
+  truncatedReasons.add("renderer-page-limit")
+  return {
+    skills,
+    plugins,
+    disabledSkillIds,
+    total,
+    enabledSkillCount,
+    truncated: true,
+    truncatedReasons: [...truncatedReasons]
+  }
 }
 
 export async function loadSkillCatalogPages(
@@ -100,6 +151,10 @@ export async function loadSkillCatalogPages(
   localSkills: SkillMetadata[]
   pluginSkills: SkillMetadata[]
   disabledSkillIds: string[]
+  total: number
+  enabledSkillCount: number
+  truncated: boolean
+  truncatedReasons: string[]
 }> {
   const [skillResult, disabledResult] = await Promise.all([
     drainCatalogKind("skills", { revision, scope, isCurrent }),
@@ -108,7 +163,13 @@ export async function loadSkillCatalogPages(
   return {
     localSkills: skillResult.skills.filter((skill) => !skill.pluginId),
     pluginSkills: skillResult.skills.filter((skill) => Boolean(skill.pluginId)),
-    disabledSkillIds: disabledResult.disabledSkillIds
+    disabledSkillIds: disabledResult.disabledSkillIds,
+    total: skillResult.total,
+    enabledSkillCount: skillResult.enabledSkillCount,
+    truncated: skillResult.truncated || disabledResult.truncated,
+    truncatedReasons: [
+      ...new Set([...skillResult.truncatedReasons, ...disabledResult.truncatedReasons])
+    ]
   }
 }
 
@@ -116,8 +177,14 @@ export async function loadPluginCatalogPages(
   revision: string,
   scope = "app-plugin-catalog",
   isCurrent?: () => boolean
-): Promise<PluginMetadata[]> {
-  return (await drainCatalogKind("plugins", { revision, scope, isCurrent })).plugins
+): Promise<PluginCatalogLoadResult> {
+  const result = await drainCatalogKind("plugins", { revision, scope, isCurrent })
+  return {
+    plugins: result.plugins,
+    total: result.total,
+    truncated: result.truncated,
+    truncatedReasons: result.truncatedReasons
+  }
 }
 
 export function cancelSkillPluginCatalog(scope: string): void {

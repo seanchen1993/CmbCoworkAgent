@@ -1,4 +1,4 @@
-import type { Worker } from "node:worker_threads"
+import type { ResourceLimits, Worker } from "node:worker_threads"
 import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   type WorkspaceFilePreviewTextResult
@@ -10,6 +10,13 @@ import type {
 
 type WorkerFactory = () => Promise<Worker>
 type RequestKind = "read-text" | "inspect"
+
+export const WORKSPACE_FILE_PREVIEW_WORKER_RESOURCE_LIMITS: ResourceLimits = {
+  maxOldGenerationSizeMb: 128,
+  maxYoungGenerationSizeMb: 16,
+  stackSizeMb: 4
+}
+export const WORKSPACE_FILE_PREVIEW_MAX_ACTIVE_REQUESTS = 32
 
 export interface WorkspaceFilePreviewInspection {
   resolvedPath: string
@@ -31,7 +38,10 @@ interface PendingRequest {
 
 async function createBundledWorker(): Promise<Worker> {
   const module = await import("./workspace-file-preview-worker?nodeWorker")
-  return module.default({ name: "workspace-file-preview" })
+  return module.default({
+    name: "workspace-file-preview",
+    resourceLimits: WORKSPACE_FILE_PREVIEW_WORKER_RESOURCE_LIMITS
+  })
 }
 
 function cancelledError(message = "Workspace file preview was cancelled"): Error {
@@ -103,7 +113,7 @@ export class WorkspaceFilePreviewClient {
         worker.on("message", this.handleMessage)
         worker.on("error", (error) => this.failWorker(worker, error))
         worker.on("exit", (code) => {
-          if (!this.closing && code !== 0) {
+          if (!this.closing) {
             this.failWorker(worker, new Error(`Workspace preview worker exited with code ${code}`))
           }
         })
@@ -128,6 +138,12 @@ export class WorkspaceFilePreviewClient {
     | WorkspaceFilePreviewInspection
   > {
     if (this.closing) throw cancelledError("Workspace file preview client is closing")
+    if (
+      !this.latestRequests.has(latestKey) &&
+      this.latestRequests.size >= WORKSPACE_FILE_PREVIEW_MAX_ACTIVE_REQUESTS
+    ) {
+      throw new Error("Workspace file preview request capacity exceeded")
+    }
     const requestId = this.nextRequestId++
     const previousId = this.latestRequests.get(latestKey)
     const previous = previousId === undefined ? undefined : this.pending.get(previousId)
@@ -138,7 +154,15 @@ export class WorkspaceFilePreviewClient {
     }
     this.latestRequests.set(latestKey, requestId)
 
-    const worker = await this.getWorker()
+    let worker: Worker
+    try {
+      worker = await this.getWorker()
+    } catch (error) {
+      if (this.latestRequests.get(latestKey) === requestId) {
+        this.latestRequests.delete(latestKey)
+      }
+      throw error
+    }
     if (this.latestRequests.get(latestKey) !== requestId) {
       throw cancelledError("Workspace file preview was superseded")
     }
@@ -153,23 +177,31 @@ export class WorkspaceFilePreviewClient {
         cancellation,
         latestKey
       })
-      if (kind === "read-text") {
-        worker.postMessage({
-          type: "read-text",
-          requestId,
-          source,
-          workspacePath,
-          offset,
-          cancellationBuffer
-        })
-      } else {
-        worker.postMessage({
-          type: "inspect",
-          requestId,
-          source,
-          workspacePath,
-          cancellationBuffer
-        })
+      try {
+        if (kind === "read-text") {
+          worker.postMessage({
+            type: "read-text",
+            requestId,
+            source,
+            workspacePath,
+            offset,
+            cancellationBuffer
+          })
+        } else {
+          worker.postMessage({
+            type: "inspect",
+            requestId,
+            source,
+            workspacePath,
+            cancellationBuffer
+          })
+        }
+      } catch (error) {
+        this.pending.delete(requestId)
+        if (this.latestRequests.get(latestKey) === requestId) {
+          this.latestRequests.delete(latestKey)
+        }
+        reject(error instanceof Error ? error : new Error(String(error)))
       }
     })
   }
@@ -216,7 +248,11 @@ export class WorkspaceFilePreviewClient {
     this.worker = null
     this.workerPromise = null
     if (!worker) return
-    worker.postMessage({ type: "shutdown" })
+    try {
+      worker.postMessage({ type: "shutdown" })
+    } catch {
+      // A failed worker may already have stopped accepting messages.
+    }
     await worker.terminate()
   }
 }

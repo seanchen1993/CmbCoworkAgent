@@ -1,4 +1,4 @@
-import type { Worker } from "node:worker_threads"
+import type { ResourceLimits, Worker } from "node:worker_threads"
 import {
   DASHBOARD_ES_INPUT_BYTE_LIMIT,
   DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
@@ -8,6 +8,14 @@ import {
 } from "./dashboard-es-protocol"
 
 type WorkerFactory = () => Promise<Worker>
+
+export const DASHBOARD_ES_WORKER_RESOURCE_LIMITS: ResourceLimits = {
+  maxOldGenerationSizeMb: 256,
+  maxYoungGenerationSizeMb: 32,
+  stackSizeMb: 4
+}
+export const DASHBOARD_ES_MAX_ACTIVE_REQUESTS = 8
+export const DASHBOARD_ES_MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 
 interface PendingRequest {
   resolve: (value: DashboardEsWorkerResult) => void
@@ -53,7 +61,10 @@ export function isDashboardEsRequestCancelled(error: unknown): boolean {
 async function createBundledWorker(): Promise<Worker> {
   try {
     const module = await import("./dashboard-es-worker?nodeWorker")
-    return module.default({ name: "dashboard-es" })
+    return module.default({
+      name: "dashboard-es",
+      resourceLimits: DASHBOARD_ES_WORKER_RESOURCE_LIMITS
+    })
   } catch (error) {
     throw new DashboardEsWorkerUnavailableError("Unable to start the bundled Dashboard ES worker", {
       cause: error
@@ -98,6 +109,7 @@ export class DashboardEsWorkerClient {
   private worker: Worker | null = null
   private workerPromise: Promise<Worker> | null = null
   private nextRequestId = 1
+  private activeRequestCount = 0
   private closing = false
   private shutdownResolve: (() => void) | null = null
   private readonly pending = new Map<number, PendingRequest>()
@@ -192,54 +204,92 @@ export class DashboardEsWorkerClient {
       throw new DashboardEsWorkerUnavailableError("Dashboard ES client is closing")
     }
     if (request.signal?.aborted) throw new DashboardEsRequestCancelledError()
-    const worker = await this.getWorker()
-    if (request.signal?.aborted) throw new DashboardEsRequestCancelledError()
-    const requestId = this.nextRequestId++
-    const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-    const cancellation = new Int32Array(cancellationBuffer)
+    if (this.activeRequestCount >= DASHBOARD_ES_MAX_ACTIVE_REQUESTS) {
+      throw Object.assign(new Error("Dashboard ES request capacity exceeded"), {
+        name: "DASHBOARD_ES_CAPACITY_EXCEEDED"
+      })
+    }
+    if (
+      request.bodyText !== undefined &&
+      Buffer.byteLength(request.bodyText, "utf8") > DASHBOARD_ES_MAX_REQUEST_BODY_BYTES
+    ) {
+      throw new Error("Dashboard ES request body exceeds its hard byte ceiling")
+    }
+    if (
+      request.nodes.length > 16 ||
+      request.nodes.some((node) => Buffer.byteLength(node, "utf8") > 8 * 1024) ||
+      Buffer.byteLength(request.path, "utf8") > 8 * 1024 ||
+      Object.keys(request.headers).length > 64 ||
+      Object.entries(request.headers).reduce(
+        (bytes, [key, value]) =>
+          bytes + Buffer.byteLength(key, "utf8") + Buffer.byteLength(value, "utf8"),
+        0
+      ) > 64 * 1024
+    ) {
+      throw new Error("Dashboard ES request metadata exceeds its hard limit")
+    }
+    this.activeRequestCount += 1
+    try {
+      const worker = await this.getWorker()
+      if (this.closing) {
+        throw new DashboardEsWorkerUnavailableError("Dashboard ES client is closing")
+      }
+      if (request.signal?.aborted) throw new DashboardEsRequestCancelledError()
+      const requestId = this.nextRequestId++
+      const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+      const cancellation = new Int32Array(cancellationBuffer)
 
-    return new Promise((resolve, reject) => {
-      const pending: PendingRequest = {
-        resolve,
-        reject,
-        cancellation,
-        signal: request.signal
-      }
-      if (request.signal) {
-        pending.abortListener = () => {
-          if (!this.pending.delete(requestId)) return
-          Atomics.store(cancellation, 0, 1)
-          this.cleanupPending(pending)
-          reject(new DashboardEsRequestCancelledError())
+      return await new Promise((resolve, reject) => {
+        const pending: PendingRequest = {
+          resolve,
+          reject,
+          cancellation,
+          signal: request.signal
         }
-        request.signal.addEventListener("abort", pending.abortListener, { once: true })
-      }
-      this.pending.set(requestId, pending)
-      try {
-        worker.postMessage({
-          type: "query",
-          requestId,
-          nodes: request.nodes,
-          method: request.method,
-          path: request.path,
-          headers: request.headers,
-          bodyText: request.bodyText,
-          projection: request.projection,
-          timeoutMs: request.timeoutMs,
-          inputByteLimit: request.inputByteLimit ?? DASHBOARD_ES_INPUT_BYTE_LIMIT,
-          outputByteLimit: request.outputByteLimit ?? DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
-          cancellationBuffer
-        })
-      } catch (error) {
-        this.pending.delete(requestId)
-        this.cleanupPending(pending)
-        reject(
-          new DashboardEsWorkerUnavailableError("Unable to dispatch the Dashboard ES request", {
-            cause: error
+        if (request.signal) {
+          pending.abortListener = () => {
+            if (!this.pending.delete(requestId)) return
+            Atomics.store(cancellation, 0, 1)
+            this.cleanupPending(pending)
+            reject(new DashboardEsRequestCancelledError())
+          }
+          request.signal.addEventListener("abort", pending.abortListener, { once: true })
+        }
+        this.pending.set(requestId, pending)
+        try {
+          worker.postMessage({
+            type: "query",
+            requestId,
+            nodes: request.nodes,
+            method: request.method,
+            path: request.path,
+            headers: request.headers,
+            bodyText: request.bodyText,
+            projection: request.projection,
+            timeoutMs: request.timeoutMs,
+            inputByteLimit: Math.min(
+              request.inputByteLimit ?? DASHBOARD_ES_INPUT_BYTE_LIMIT,
+              DASHBOARD_ES_INPUT_BYTE_LIMIT
+            ),
+            outputByteLimit: Math.min(
+              request.outputByteLimit ?? DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
+              DASHBOARD_ES_OUTPUT_BYTE_LIMIT
+            ),
+            cancellationBuffer
           })
-        )
-      }
-    })
+        } catch (error) {
+          this.pending.delete(requestId)
+          this.cleanupPending(pending)
+          reject(
+            new DashboardEsWorkerUnavailableError("Unable to dispatch the Dashboard ES request", {
+              cause: error
+            })
+          )
+        }
+      })
+    } finally {
+      this.activeRequestCount = Math.max(0, this.activeRequestCount - 1)
+    }
   }
 
   getDiagnostics(): DashboardEsWorkerDiagnostics {

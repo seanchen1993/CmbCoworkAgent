@@ -6,18 +6,30 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 const dbMock = vi.hoisted(() => {
   let metadata = "{}"
+  let getCount = 0
+  let beforeGet: ((count: number) => void) | null = null
   return {
-    getThreadCore: vi.fn(() => ({ thread_id: "thread-test", metadata })),
+    getThreadCore: vi.fn(() => {
+      getCount += 1
+      beforeGet?.(getCount)
+      return { thread_id: "thread-test", created_at: 1, metadata }
+    }),
     updateThread: vi.fn((_threadId: string, updates: { metadata?: string }) => {
       if (typeof updates.metadata === "string") metadata = updates.metadata
       return { thread_id: "thread-test", metadata }
     }),
     setMetadata: (next: Record<string, unknown>) => {
-      metadata = JSON.stringify(next)
+      metadata = JSON.stringify({ ...next, cmb_thread_incarnation: "test-incarnation" })
     },
     getMetadata: () => JSON.parse(metadata) as Record<string, unknown>,
+    setBeforeGet: (callback: ((count: number) => void) | null) => {
+      beforeGet = callback
+      getCount = 0
+    },
     reset: () => {
       metadata = "{}"
+      getCount = 0
+      beforeGet = null
     }
   }
 })
@@ -63,6 +75,7 @@ function createRepo(prefix: string): string {
   gitIn(repo, ["init", "-q"])
   gitIn(repo, ["config", "user.email", "t@t"])
   gitIn(repo, ["config", "user.name", "t"])
+  gitIn(repo, ["config", "core.autocrlf", "false"])
   return repo
 }
 
@@ -74,6 +87,7 @@ function createNestedRepo(workspacePrefix: string, repoName: string): { workspac
   gitIn(repo, ["init", "-q"])
   gitIn(repo, ["config", "user.email", "t@t"])
   gitIn(repo, ["config", "user.name", "t"])
+  gitIn(repo, ["config", "core.autocrlf", "false"])
   return { workspace, repo }
 }
 
@@ -138,6 +152,47 @@ afterEach(() => {
 })
 
 describe("git panel reject handlers", () => {
+  it("does not clean new worktree metadata when Git context changes during reject", async () => {
+    const repo = createRepo("gitpanel-reject-context-race-")
+    commitFile(repo, "tracked.txt", "base\n")
+    writeFileSync(join(repo, "tracked.txt"), "changed\n")
+    dbMock.setMetadata({
+      workspacePath: repo,
+      gitRoot: repo,
+      isWorktree: true,
+      worktreeBranch: "old-branch",
+      llmModifiedFiles: ["tracked.txt"],
+      llmFileHistory: { "tracked.txt": [{ exists: true, content: "old" }] },
+      llmRecentlyRevertedFiles: []
+    })
+    dbMock.setBeforeGet((count) => {
+      if (count !== 2) return
+      dbMock.setMetadata({
+        workspacePath: repo,
+        gitRoot: join(repo, "new-context"),
+        isWorktree: true,
+        worktreeBranch: "new-branch",
+        llmModifiedFiles: ["new-context.txt"],
+        llmFileHistory: { "new-context.txt": [{ exists: true, content: "new" }] },
+        llmRecentlyRevertedFiles: []
+      })
+    })
+
+    const handler = createRejectHandler()
+    const result = await handler(null, {
+      threadId: "thread-test",
+      filePaths: ["tracked.txt"],
+      options: { worktreePath: repo }
+    }) as { success: boolean }
+
+    expect(result.success).toBe(true)
+    expect(dbMock.getMetadata()).toMatchObject({
+      gitRoot: join(repo, "new-context"),
+      worktreeBranch: "new-branch",
+      llmModifiedFiles: ["new-context.txt"]
+    })
+  })
+
   it("restores tracked changes and removes added or untracked files", async () => {
     const repo = createRepo("gitpanel-reject-basic-")
     commitFile(repo, "tracked.txt", "base\n")
