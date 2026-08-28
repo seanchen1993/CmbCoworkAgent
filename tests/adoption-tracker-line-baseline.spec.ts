@@ -8,9 +8,11 @@
 import {
   buildAdoptionLineBaseline,
   countNetGeneratedLines,
+  countNetLineChanges,
   isCodeFile,
   evaluateAdoptionLineBaselines
 } from "../src/main/services/adoption-tracker.ts"
+import { attributeChangeKind } from "../src/main/services/change-kind-classifier.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -108,6 +110,22 @@ function testEditReplacementProducesNewAndSupersededLines(): void {
   )
 }
 
+function testReplacementIsClassifiedAsLegacy(): void {
+  const rewrite = editBaseline(
+    ["const oldName = 1", "return oldName"].join("\n"),
+    ["const newName = 1", "return newName"].join("\n")
+  )
+  const attribution = attributeChangeKind(
+    rewrite.generatedLineHashes.length,
+    rewrite.supersededLineHashes.length
+  )
+
+  assert(rewrite.generatedLineHashes.length === 2, "rewrite should contain two new-only lines")
+  assert(rewrite.supersededLineHashes.length === 2, "rewrite should contain two old-only lines")
+  assert(attribution.newRatio === 0.5, "equal-size rewrite should have a 0.5 new ratio")
+  assert(attribution.changeKind === "legacy", "equal-size rewrite should be classified as legacy")
+}
+
 function testReplaceAllOccurrencesAreExpanded(): void {
   const baseline = editBaseline("status = OLD;", "status = NEW;", 3)
 
@@ -203,6 +221,15 @@ function testOversizeCountUsesNetGeneratedLines(): void {
     }) === 25_000,
     "replaceAll net count should scale without expanding the baseline"
   )
+
+  const rewrite = countNetLineChanges({
+    tool: "edit_file",
+    generatedContent: "status = NEW;",
+    oldString: "status = OLD;",
+    occurrences: 25_000
+  })
+  assert(rewrite.generatedLineCount === 25_000, "replaceAll should count new-only lines")
+  assert(rewrite.deletedLineCount === 25_000, "replaceAll should count replaced old-only lines")
 }
 
 function testInternalWorkflowScriptsAreNotCode(): void {
@@ -227,6 +254,8 @@ function run(): void {
   console.log("PASS edit context is not generated")
   testEditReplacementProducesNewAndSupersededLines()
   console.log("PASS edit replacement produces new and superseded lines")
+  testReplacementIsClassifiedAsLegacy()
+  console.log("PASS edit replacement is classified as legacy")
   testReplaceAllOccurrencesAreExpanded()
   console.log("PASS replaceAll occurrence expansion")
   testAgentAppendDoesNotSupersedePreviousGeneration()

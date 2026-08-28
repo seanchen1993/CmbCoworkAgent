@@ -12,8 +12,8 @@
  *   1. 系统可扩展性  — 交付周期变化量 ÷ 系统规模变化量. Needs the Lean 需求特性 import
  *      and repo-scale collection, so it is a declared gap here rather than a
  *      silent zero.
- *   2. AI 编码有效性 — 入库采纳率, split 新增 / 存量 by the generation's added-line
- *      share (see `change-kind-classifier`).
+ *   2. AI 编码有效性 — 入库采纳率, split 新增 / 存量 by the generation's new-only
+ *      share of its line-level diff (see `change-kind-classifier`).
  *   3. 算力产出效能 — tokens per pushed adopted line.
  *
  * This module holds only pure functions (ES body fragments in, plain objects

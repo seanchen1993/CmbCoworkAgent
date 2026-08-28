@@ -4326,12 +4326,10 @@ export class LocalSandbox
             // expands its line hashes by occurrences for replaceAll.
             generatedContent: effectiveNewString,
             workspacePath: this.workingDir,
-            // Pass the edit fragments only — no full-file references. Tracker
-            // derives deletedLineCount in a microtask via
-            // max(0, countNonBlankLines(oldString) - countNonBlankLines(newString)) * occurrences,
-            // avoiding any full-file scan or retention of editor buffers.
+            // Pass the edit fragment only — no full-file references. The tracker
+            // compares oldString with generatedContent as line multisets, so
+            // replacements count as old-only lines even when line totals match.
             oldString: effectiveOldString,
-            newString: effectiveNewString,
             occurrences: result.occurrences
           })
         } catch {

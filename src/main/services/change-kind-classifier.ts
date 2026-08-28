@@ -6,14 +6,15 @@
  * when it has to understand surrounding existing code, so the two buckets get
  * separate targets and must not be averaged together.
  *
- * The signal is the *net deletion* carried by the generation:
+ * The signal is the line-level multiset diff carried by the generation:
  *
  *     newRatio = generatedLines / (generatedLines + deletedLines)
  *
- * `deletedLineCount` is already a net count upstream (`deriveDeletedLineCount`
- * subtracts the lines that survive into `newString`), so a pure insertion — the
- * common `edit_file` idiom of anchoring on existing code and appending after it
- * — correctly yields 0 deletions and a ratio of 1.
+ * `generatedLines` contains normalised, non-blank lines found only in the new
+ * fragment; `deletedLines` contains lines found only in the old fragment. The
+ * latter therefore includes replaced lines, not just a reduction in total line
+ * count. A pure insertion still has 0 deleted lines, while an equal-size rewrite
+ * has matching generated/deleted counts and is correctly treated as legacy work.
  *
  * Both the raw ratio and the derived label are persisted. Keeping the raw value
  * means the threshold can be re-tuned later and historical data re-bucketed
