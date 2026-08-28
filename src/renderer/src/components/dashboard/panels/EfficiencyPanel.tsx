@@ -1,12 +1,12 @@
 /**
  * 研发效能面板
  *
- * 三个指标各一张卡：系统可扩展性、AI 编码有效性、算力产出效能。
+ * 展示 AI 编码有效性与算力产出效能。
  * 范围在后端固定为「项目模式 + 已绑定精益项目」，前端不提供口径开关——
  * 关掉开关会让同一个标题下的数字换一个含义。
  */
 import React, { useMemo } from "react"
-import { AlertCircle, Info, Loader2, TrendingUp } from "lucide-react"
+import { AlertCircle, Info, Loader2 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type {
@@ -99,15 +99,6 @@ function MetricCard({
       </div>
       <div className="mt-3">{children}</div>
     </section>
-  )
-}
-
-function EmptyValue({ reason }: { reason: string }): React.JSX.Element {
-  return (
-    <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-6">
-      <div className="text-2xl font-semibold tabular-nums text-muted-foreground">—</div>
-      <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
-    </div>
   )
 }
 
@@ -448,20 +439,6 @@ export function EfficiencyPanel({
               </>
             ) : null}
           </div>
-
-          <MetricCard
-            title="系统可扩展性"
-            hint="交付周期变化量 ÷ 系统规模变化量。目标是斜率 ≈ 0，即系统规模增长不拖慢单位交付。"
-          >
-            <EmptyValue reason={data.scalability.pendingReason} />
-            <div className="mt-3 flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-              <TrendingUp className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                待接入两项数据：内网项目管理平台的需求特性（提出时间 / 交付时间，先走手工导入），
-                以及仓库规模的客户端采集。两项齐备后此处出两点差分斜率，并在样本足够时附回归斜率与置信区间。
-              </span>
-            </div>
-          </MetricCard>
 
           <AdoptionCard adoption={data.adoption} />
           <ComputeCard compute={data.compute} />
