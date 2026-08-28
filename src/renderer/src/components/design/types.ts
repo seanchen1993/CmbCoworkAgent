@@ -44,7 +44,13 @@ export interface QuestionDef {
 }
 
 export type RightPanelTab = "design" | "questions"
-export type GenerationState = "idle" | "asking" | "questions_ready" | "generating" | "done" | "error"
+export type GenerationState =
+  | "idle"
+  | "asking"
+  | "questions_ready"
+  | "generating"
+  | "done"
+  | "error"
 export type DesignSessionKind = "prompt" | "import_url" | "import_html" | "prototype_zip"
 export type AnswerValue = string | string[]
 
@@ -294,7 +300,12 @@ export interface TabState {
   zoom: number
   inputValue: string
   comments: CommentItem[]
-  draftComment: { pageX: number; pageY: number; elementDesc: string; anchor?: DesignElementAnchor } | null
+  draftComment: {
+    pageX: number
+    pageY: number
+    elementDesc: string
+    anchor?: DesignElementAnchor
+  } | null
   activeCommentId: string | null
   drawStrokes: DrawStroke[]
   drawElementHints: DrawElementHint[]

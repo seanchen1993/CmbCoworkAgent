@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, shell, webUtils } from "electron"
 import { randomUUID } from "node:crypto"
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
+import type { RequirementRuntimeItem } from "../main/ipc/requirements"
 import {
   isWindowCloseBehavior,
   type CloseToTrayPromptAction,
@@ -343,8 +344,8 @@ const api = {
       const ambientChannel = command
         ? `agent:stream:${threadId}`
         : coordinatorInternalNotification
-        ? `agent:stream:${threadId}:coordinator-internal`
-        : `agent:stream:${threadId}`
+          ? `agent:stream:${threadId}:coordinator-internal`
+          : `agent:stream:${threadId}`
       const streamRequestId = randomUUID()
       const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       const cleanup = listenForAgentStreamRequest(
@@ -1621,9 +1622,16 @@ const api = {
     },
     // Listen for file changes in the workspace
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
+      callback: (data: {
+        threadId: string
+        workspacePath: string
+        changeType?: "file" | "meta"
+      }) => void
     ): (() => void) => {
-      const handler = (_: unknown, data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }): void => {
+      const handler = (
+        _: unknown,
+        data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }
+      ): void => {
         callback(data)
       }
       ipcRenderer.on("workspace:files-changed", handler)
@@ -1718,10 +1726,19 @@ const api = {
       ipcRenderer.invoke("file:select-code"),
     selectPrototypeZip: (): Promise<{ canceled: boolean; filePaths: string[] }> =>
       ipcRenderer.invoke("file:select-prototype-zip"),
-    readText: (filePath: string): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> =>
+    readText: (
+      filePath: string
+    ): Promise<{ success: boolean; filename?: string; content?: string; error?: string }> =>
       ipcRenderer.invoke("file:read-text", filePath),
-    readDataUrl: (filePath: string): Promise<{ success: boolean; filename?: string; dataUrl?: string; size?: number; error?: string }> =>
-      ipcRenderer.invoke("file:read-data-url", filePath),
+    readDataUrl: (
+      filePath: string
+    ): Promise<{
+      success: boolean
+      filename?: string
+      dataUrl?: string
+      size?: number
+      error?: string
+    }> => ipcRenderer.invoke("file:read-data-url", filePath)
   },
   skills: {
     list: (): Promise<SkillMetadata[]> => {
@@ -3654,13 +3671,32 @@ const api = {
     generate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }) => void,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
       modelId?: string,
       history?: Array<{ role: "user" | "assistant"; content: string }>,
       tabId?: string
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
-      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }): void => {
+      const handler = (
+        _: unknown,
+        data: {
+          type: string
+          token?: string
+          html?: string
+          error?: string
+          event?: unknown
+          artifactPath?: string
+          metadata?: unknown
+        }
+      ): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
           if (data.type === "error") {
@@ -3681,7 +3717,12 @@ const api = {
       workspacePath?: string,
       metadata?: Record<string, unknown>
     ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("design:save-artifact", { tabId, html, workspacePath, metadata }) as Promise<{
+      ipcRenderer.invoke("design:save-artifact", {
+        tabId,
+        html,
+        workspacePath,
+        metadata
+      }) as Promise<{
         success: boolean
         filePath?: string
         error?: string
@@ -3692,14 +3733,25 @@ const api = {
       workspacePath?: string,
       metadata?: Record<string, unknown>
     ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
-      ipcRenderer.invoke("design:save-artifact-file", { filePath, html, workspacePath, metadata }) as Promise<{
+      ipcRenderer.invoke("design:save-artifact-file", {
+        filePath,
+        html,
+        workspacePath,
+        metadata
+      }) as Promise<{
         success: boolean
         filePath?: string
         error?: string
       }>,
     importFromUrl: (
       url: string
-    ): Promise<{ success: boolean; html?: string; finalUrl?: string; title?: string; error?: string }> =>
+    ): Promise<{
+      success: boolean
+      html?: string
+      finalUrl?: string
+      title?: string
+      error?: string
+    }> =>
       ipcRenderer.invoke("design:import-url", { url }) as Promise<{
         success: boolean
         html?: string
@@ -3709,7 +3761,14 @@ const api = {
       }>,
     importPrototypeZip: (
       filePath: string
-    ): Promise<{ success: boolean; html?: string; title?: string; imageCount?: number; metadataCount?: number; error?: string }> =>
+    ): Promise<{
+      success: boolean
+      html?: string
+      title?: string
+      imageCount?: number
+      metadataCount?: number
+      error?: string
+    }> =>
       ipcRenderer.invoke("design:import-prototype-zip", { filePath }) as Promise<{
         success: boolean
         html?: string
@@ -3758,8 +3817,17 @@ const api = {
     getArtifactPackageInfo: (
       filePath: string,
       workspacePath?: string
-    ): Promise<{ success: boolean; filePath?: string; dirPath?: string; relatedFileCount?: number; error?: string }> =>
-      ipcRenderer.invoke("design:get-artifact-package-info", { filePath, workspacePath }) as Promise<{
+    ): Promise<{
+      success: boolean
+      filePath?: string
+      dirPath?: string
+      relatedFileCount?: number
+      error?: string
+    }> =>
+      ipcRenderer.invoke("design:get-artifact-package-info", {
+        filePath,
+        workspacePath
+      }) as Promise<{
         success: boolean
         filePath?: string
         dirPath?: string
@@ -3769,7 +3837,13 @@ const api = {
     exportArtifactPackage: (
       filePath: string,
       workspacePath?: string
-    ): Promise<{ success: boolean; fileName?: string; buffer?: ArrayBuffer; relatedFileCount?: number; error?: string }> =>
+    ): Promise<{
+      success: boolean
+      fileName?: string
+      buffer?: ArrayBuffer
+      relatedFileCount?: number
+      error?: string
+    }> =>
       ipcRenderer.invoke("design:export-artifact-package", { filePath, workspacePath }) as Promise<{
         success: boolean
         fileName?: string
@@ -3777,25 +3851,36 @@ const api = {
         relatedFileCount?: number
         error?: string
       }>,
-    listSystems: (): Promise<Array<{
-      id: string
-      name: string
-      description: string
-      category?: string
-      source?: string
-      origin?: string
-      license?: string
-      path: string
-      tokens?: { bg: string; surface: string; fg: string; muted: string; border: string; accent: string }
-    }>> => ipcRenderer.invoke("design:list-systems"),
-    listTemplates: (): Promise<Array<{
-      name: string
-      description: string
-      path: string
-      mode: string
-      platform: string | null
-      scenario: string
-    }>> => ipcRenderer.invoke("design:list-templates"),
+    listSystems: (): Promise<
+      Array<{
+        id: string
+        name: string
+        description: string
+        category?: string
+        source?: string
+        origin?: string
+        license?: string
+        path: string
+        tokens?: {
+          bg: string
+          surface: string
+          fg: string
+          muted: string
+          border: string
+          accent: string
+        }
+      }>
+    > => ipcRenderer.invoke("design:list-systems"),
+    listTemplates: (): Promise<
+      Array<{
+        name: string
+        description: string
+        path: string
+        mode: string
+        platform: string | null
+        scenario: string
+      }>
+    > => ipcRenderer.invoke("design:list-templates"),
     /**
      * Full Agent Runtime path — gives Design access to Skills, MCP tools,
      * Hooks, Approvals and context summarisation.
@@ -3805,7 +3890,15 @@ const api = {
     agentGenerate: (
       sessionId: string,
       prompt: string,
-      onEvent: (event: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }) => void,
+      onEvent: (event: {
+        type: string
+        token?: string
+        html?: string
+        error?: string
+        event?: unknown
+        artifactPath?: string
+        metadata?: unknown
+      }) => void,
       tabId: string,
       modelId?: string,
       imageData?: string,
@@ -3816,10 +3909,21 @@ const api = {
       artifactId?: string,
       sourceArtifactPath?: string,
       designSessionId?: string,
-      designSystemId?: string,
+      designSystemId?: string
     ): (() => void) => {
       const channel = `design:stream:${sessionId}`
-      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string; event?: unknown; artifactPath?: string; metadata?: unknown }): void => {
+      const handler = (
+        _: unknown,
+        data: {
+          type: string
+          token?: string
+          html?: string
+          error?: string
+          event?: unknown
+          artifactPath?: string
+          metadata?: unknown
+        }
+      ): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
           if (data.type === "error") {
@@ -3829,7 +3933,21 @@ const api = {
         }
       }
       ipcRenderer.on(channel, handler)
-      ipcRenderer.send("design:agent-generate", { sessionId, prompt, modelId, tabId, imageData, mimeType, currentHtml, skill, workspacePath, artifactId, sourceArtifactPath, designSessionId, designSystemId })
+      ipcRenderer.send("design:agent-generate", {
+        sessionId,
+        prompt,
+        modelId,
+        tabId,
+        imageData,
+        mimeType,
+        currentHtml,
+        skill,
+        workspacePath,
+        artifactId,
+        sourceArtifactPath,
+        designSessionId,
+        designSystemId
+      })
       return () => ipcRenderer.removeListener(channel, handler)
     },
     askQuestions: (
@@ -3840,7 +3958,10 @@ const api = {
       designSystemId?: string
     ): (() => void) => {
       const channel = `design:questions:${sessionId}`
-      const handler = (_: unknown, data: { type: string; questions?: unknown[]; error?: string }): void => {
+      const handler = (
+        _: unknown,
+        data: { type: string; questions?: unknown[]; error?: string }
+      ): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
           if (data.type === "error") {
@@ -3863,7 +3984,10 @@ const api = {
       designSystemId?: string
     ): (() => void) => {
       const channel = `design:image-stream:${sessionId}`
-      const handler = (_: unknown, data: { type: string; token?: string; html?: string; error?: string }): void => {
+      const handler = (
+        _: unknown,
+        data: { type: string; token?: string; html?: string; error?: string }
+      ): void => {
         onEvent(data)
         if (data.type === "done" || data.type === "error" || data.type === "cancelled") {
           if (data.type === "error") {
@@ -3885,7 +4009,90 @@ const api = {
     },
     cancel: (sessionId: string): Promise<void> => ipcRenderer.invoke("design:cancel", sessionId),
     saveVariant: (variantId: string, html: string): Promise<{ filePath: string }> =>
-      ipcRenderer.invoke("design:save-variant", variantId, html),
+      ipcRenderer.invoke("design:save-variant", variantId, html)
+  },
+  requirements: {
+    list: (): Promise<RequirementRuntimeItem[]> => ipcRenderer.invoke("requirements:list"),
+    create: (payload: {
+      systemId: string
+      title: string
+      workDir: string
+      source: {
+        type: "file" | "link"
+        fileName: string
+        sourcePath?: string
+        url?: string
+        content?: string
+      }
+    }) =>
+      ipcRenderer.invoke("requirements:create", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    getWorkDir: (): Promise<string | null> => ipcRenderer.invoke("requirements:get-work-dir"),
+    selectWorkDir: (): Promise<{ success: boolean; workDir?: string | null; error?: string }> =>
+      ipcRenderer.invoke("requirements:select-work-dir"),
+    delete: (reqId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("requirements:delete", reqId),
+    openWorkDir: (reqId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke("requirements:open-work-dir", reqId),
+    getPrdPreview: (reqId: string) =>
+      ipcRenderer.invoke("requirements:get-prd-preview", reqId) as Promise<{
+        success: boolean
+        preview?: {
+          generated: boolean
+          filePath: string | null
+          fileName: string | null
+          content: string
+        }
+        error?: string
+      }>,
+    getSourcePreview: (reqId: string) =>
+      ipcRenderer.invoke("requirements:get-source-preview", reqId) as Promise<{
+        success: boolean
+        content?: string
+        error?: string
+      }>,
+    attachThread: (payload: { reqId: string; threadId: string }) =>
+      ipcRenderer.invoke("requirements:attach-thread", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    savePrd: (payload: {
+      reqId: string
+      version: string
+      modules: Array<{
+        moduleId: string
+        name: string
+        content: string
+        description?: string
+        keywords?: string[]
+      }>
+    }) =>
+      ipcRenderer.invoke("requirements:save-prd", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    syncManifest: (payload: { reqId: string; manifest: unknown }) =>
+      ipcRenderer.invoke("requirements:sync-manifest", payload) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    saveFiles: (payload: {
+      workspacePath: string
+      requirementId: string
+      source?: { filename: string; sourcePath?: string; content?: string }
+      prd?: { filename: string; content: string }
+    }): Promise<{ success: boolean; sourcePath?: string; prdPath?: string; error?: string }> =>
+      ipcRenderer.invoke("requirements:save-files", payload) as Promise<{
+        success: boolean
+        sourcePath?: string
+        prdPath?: string
+        error?: string
+      }>
   },
   update: {
     check: (): Promise<

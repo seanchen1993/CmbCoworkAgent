@@ -39,11 +39,7 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
-import {
-  useThreadState,
-  useThreadStream,
-  type CoordinatorWorkerView
-} from "@/lib/thread-context"
+import { useThreadState, useThreadStream, type CoordinatorWorkerView } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import {
   hasLoadedWorkspaceFiles,
@@ -207,6 +203,7 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git"
+  previewOnly?: boolean
   showSystemConstraints?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
@@ -225,6 +222,7 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 export function RightPanel({
   threadId,
   moduleMode,
+  previewOnly = false,
   showSystemConstraints = false,
   onRequestPreviewMode,
   onRequestWorkMode,
@@ -236,17 +234,16 @@ export function RightPanel({
     rightPanelWorkRequest,
     skillGenerationByThread,
     setSkillGenerationPhase
-  } =
-    useAppStore(
-      useShallow((s) => ({
-        currentThreadId: s.currentThreadId,
-        pluginVersion: s.pluginVersion,
-        rightPanelWorkRequest: s.rightPanelWorkRequest,
-        // Subscribe to the whole map so we re-render when any thread's card changes
-        skillGenerationByThread: s.skillGenerationByThread,
-        setSkillGenerationPhase: s.setSkillGenerationPhase
-      }))
-    )
+  } = useAppStore(
+    useShallow((s) => ({
+      currentThreadId: s.currentThreadId,
+      pluginVersion: s.pluginVersion,
+      rightPanelWorkRequest: s.rightPanelWorkRequest,
+      // Subscribe to the whole map so we re-render when any thread's card changes
+      skillGenerationByThread: s.skillGenerationByThread,
+      setSkillGenerationPhase: s.setSkillGenerationPhase
+    }))
+  )
   const currentThreadId = threadId ?? storeCurrentThreadId
   const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
   // Derive the current thread's card state from the per-thread map
@@ -1248,7 +1245,7 @@ export function RightPanel({
                 reloadToken={previewReloadToken}
                 onReload={() => setPreviewReloadToken((v) => v + 1)}
                 onFullscreenChange={onPreviewFullscreenChange}
-                onHidePreview={onRequestWorkMode}
+                onHidePreview={previewOnly ? undefined : onRequestWorkMode}
               />
             ) : (
               <div className="h-full min-h-0 flex items-center justify-center p-4">
@@ -1260,15 +1257,17 @@ export function RightPanel({
                   <p className="mt-2 text-xs leading-5 text-muted-foreground">
                     生成或编辑文件后会自动在这里展示预览。 也可以在工具调用里点击预览图标快速打开。
                   </p>
-                  <div className="mt-4 flex items-center justify-center gap-2">
-                    <button
-                      type="button"
-                      onClick={onRequestWorkMode}
-                      className="inline-flex items-center justify-center rounded-md border border-border/80 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-                    >
-                      返回工作目录
-                    </button>
-                  </div>
+                  {!previewOnly && (
+                    <div className="mt-4 flex items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={onRequestWorkMode}
+                        className="inline-flex items-center justify-center rounded-md border border-border/80 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                      >
+                        返回工作目录
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1878,7 +1877,7 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
   )
 }
 
-function ResourcePreview({
+export function ResourcePreview({
   filePath,
   workspacePath,
   threadId,
@@ -2062,14 +2061,16 @@ function ResourcePreview({
           >
             {isFullscreen ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
           </button>
-          <button
-            onClick={handleHidePreview}
-            className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
-            title="隐藏预览并切换到工作目录"
-            aria-label="隐藏预览并切换到工作目录"
-          >
-            <EyeOff className="size-3.5" />
-          </button>
+          {onHidePreview ? (
+            <button
+              onClick={handleHidePreview}
+              className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+              title="隐藏预览并切换到工作目录"
+              aria-label="隐藏预览并切换到工作目录"
+            >
+              <EyeOff className="size-3.5" />
+            </button>
+          ) : null}
           <button
             onClick={openInFolder}
             className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
@@ -2188,11 +2189,23 @@ function buildFileTree(files: FileInfo[]): TreeNode[] {
   return root
 }
 
-function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | null }): React.JSX.Element {
+export function FileTree({
+  files,
+  threadId,
+  selectedPath,
+  onFileSelect,
+  initialExpandedPaths = []
+}: {
+  files: FileInfo[]
+  threadId: string | null
+  selectedPath?: string | null
+  onFileSelect?: (filePath: string) => void
+  initialExpandedPaths?: string[]
+}): React.JSX.Element {
   const threadState = useThreadState(threadId)
   const openFile = threadState?.openFile
   const tree = useMemo(() => buildFileTree(files), [files])
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(initialExpandedPaths))
 
   const toggleExpand = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -2216,6 +2229,8 @@ function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | n
           expanded={expanded}
           onToggle={toggleExpand}
           openFile={openFile}
+          selectedPath={selectedPath}
+          onFileSelect={onFileSelect}
         />
       ))}
     </div>
@@ -2228,13 +2243,17 @@ const FileTreeNode = memo(
     depth,
     expanded,
     onToggle,
-    openFile
+    openFile,
+    selectedPath,
+    onFileSelect
   }: {
     node: TreeNode
     depth: number
     expanded: Set<string>
     onToggle: (path: string) => void
     openFile?: (path: string, name: string) => void
+    selectedPath?: string | null
+    onFileSelect?: (filePath: string) => void
   }): React.JSX.Element {
     const isExpanded = expanded.has(node.path)
     const hasChildren = node.children.length > 0
@@ -2243,6 +2262,8 @@ const FileTreeNode = memo(
     const handleClick = (): void => {
       if (node.is_dir) {
         onToggle(node.path)
+      } else if (onFileSelect) {
+        onFileSelect(node.path)
       } else if (openFile) {
         // Open file in a new tab
         openFile(node.path, node.name)
@@ -2254,7 +2275,8 @@ const FileTreeNode = memo(
         <div
           onClick={handleClick}
           className={cn(
-            "flex items-center gap-1.5 py-1 pr-3 text-xs hover:bg-background-interactive cursor-pointer"
+            "flex items-center gap-1.5 py-1 pr-3 text-xs hover:bg-background-interactive cursor-pointer",
+            selectedPath === node.path && "bg-background-interactive text-foreground"
           )}
           style={{ paddingLeft }}
         >
@@ -2297,6 +2319,8 @@ const FileTreeNode = memo(
               expanded={expanded}
               onToggle={onToggle}
               openFile={openFile}
+              selectedPath={selectedPath}
+              onFileSelect={onFileSelect}
             />
           ))}
       </>
@@ -2311,6 +2335,8 @@ const FileTreeNode = memo(
       // Expanded nodes render children that need the latest Set reference
       (!isExpanded || prevProps.expanded === nextProps.expanded) &&
       prevProps.openFile === nextProps.openFile &&
+      prevProps.selectedPath === nextProps.selectedPath &&
+      prevProps.onFileSelect === nextProps.onFileSelect &&
       prevProps.onToggle === nextProps.onToggle &&
       prevProps.depth === nextProps.depth
     )
@@ -2552,11 +2578,7 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
     return () => window.clearInterval(timer)
   }, [hasRunningCoordinatorWorker])
 
-  if (
-    subagents.length === 0 &&
-    coordinatorWorkers.length === 0 &&
-    !hasSkillGen
-  ) {
+  if (subagents.length === 0 && coordinatorWorkers.length === 0 && !hasSkillGen) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <GitBranch className="size-8 mb-2 opacity-50" />
@@ -2774,7 +2796,9 @@ function CoordinatorWorkerCard({
             {(worker.summary || worker.error || worker.result_path || worker.report_path) && (
               <div className="truncate">
                 <span className="text-foreground/70">
-                  {worker.status === "failed" || worker.status === "cancelled" ? "结果：" : "摘要："}
+                  {worker.status === "failed" || worker.status === "cancelled"
+                    ? "结果："
+                    : "摘要："}
                 </span>
                 {compactInline(
                   worker.error || worker.summary || worker.result_path || worker.report_path || ""
@@ -2986,9 +3010,7 @@ function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeN
   for (const skill of skills) {
     const segments = getRightPanelSkillPathSegments(skill)
     const fallbackSegments =
-      segments.length > 0
-        ? segments
-        : [{ key: skill.name, label: skill.name }]
+      segments.length > 0 ? segments : [{ key: skill.name, label: skill.name }]
     let current = root
 
     for (const segment of fallbackSegments) {
@@ -3204,9 +3226,7 @@ function SkillsContent({
                           className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
                           title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
                         >
-                        <span className="truncate">
-                          插件
-                        </span>
+                          <span className="truncate">插件</span>
                         </Badge>
                       </div>
                     )}

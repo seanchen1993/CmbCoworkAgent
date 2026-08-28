@@ -230,6 +230,7 @@ import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
 import { registerDesignHandlers } from "./ipc/design"
+import { registerRequirementHandlers } from "./ipc/requirements"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
@@ -540,8 +541,7 @@ function createWindow(): void {
   // mid-turn reload/reconnect contract, so block browser refresh shortcuts.
   mainWindow.webContents.on("before-input-event", (event, input) => {
     const isRefreshShortcut =
-      input.key === "F5" ||
-      ((input.meta || input.control) && input.key.toLowerCase() === "r")
+      input.key === "F5" || ((input.meta || input.control) && input.key.toLowerCase() === "r")
     if (isRefreshShortcut) event.preventDefault()
   })
 
@@ -773,6 +773,7 @@ if (!gotTheLock) {
     registerRoutingHandlers(ipcMain)
     registerDashboardHandlers(ipcMain)
     registerDesignHandlers()
+    registerRequirementHandlers(ipcMain)
     registerAdoptionTraceHandlers(ipcMain)
     registerFeatureGateHandlers(ipcMain)
     registerHarnessBoardHandlers(ipcMain)

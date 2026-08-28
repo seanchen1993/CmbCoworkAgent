@@ -236,12 +236,7 @@ function ensureUniqueWorkerMessageId(messages: readonly Message[], message: Mess
   const occurrence = getMessageProviderOccurrence(message) ?? 1
   return {
     ...message,
-    id: buildAvailableProviderOccurrenceId(
-      sourceId,
-      message.role,
-      occurrence,
-      occupiedIds
-    ),
+    id: buildAvailableProviderOccurrenceId(sourceId, message.role, occurrence, occupiedIds),
     provider_source_id: sourceId,
     provider_occurrence: occurrence
   }
@@ -353,8 +348,7 @@ function findWorkerToolCallMatch(
 ): { call: WorkerToolCall; index: number } | undefined {
   if (target.id) {
     const index = toolCalls.findIndex(
-      (toolCall, candidateIndex) =>
-        !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
+      (toolCall, candidateIndex) => !usedIndexes?.has(candidateIndex) && toolCall.id === target.id
     )
     return index >= 0 ? { call: toolCalls[index], index } : undefined
   }
@@ -370,9 +364,7 @@ function findWorkerToolCallMatch(
 
   const index = toolCalls.findIndex(
     (toolCall, candidateIndex) =>
-      !usedIndexes?.has(candidateIndex) &&
-      !toolCall.id &&
-      toolCall.name === target.name
+      !usedIndexes?.has(candidateIndex) && !toolCall.id && toolCall.name === target.name
   )
   return index >= 0 ? { call: toolCalls[index], index } : undefined
 }
@@ -504,13 +496,14 @@ function relativeWorkerTurnKeys(messages: readonly Message[], turnOffset: number
   let currentTurn = turnOffset
   return messages.map((message) => {
     if (message.role === "user") currentTurn += 1
-    return currentTurn > 0
-      ? `__cmb-worker-turn-${currentTurn}__`
-      : WORKER_PRE_USER_TURN_KEY
+    return currentTurn > 0 ? `__cmb-worker-turn-${currentTurn}__` : WORKER_PRE_USER_TURN_KEY
   })
 }
 
-function workerTurnSignatureKey(turnKey: string, signature: string | undefined): string | undefined {
+function workerTurnSignatureKey(
+  turnKey: string,
+  signature: string | undefined
+): string | undefined {
   return signature ? `${turnKey}\u0000${signature}` : undefined
 }
 
@@ -616,8 +609,7 @@ function mergeWorkerToolCalls(
   if (!incoming?.length) return existing
   if (!existing?.length) return incoming
   const incomingIsSparseSubset =
-    existing.length > incoming.length &&
-    areIncomingWorkerToolCallsSubset(existing, incoming)
+    existing.length > incoming.length && areIncomingWorkerToolCallsSubset(existing, incoming)
   if (!areWorkerToolCallsCompatible(existing, incoming) && !incomingIsSparseSubset) {
     return incoming
   }
@@ -764,6 +756,8 @@ interface AppState {
   // Threads
   threads: Thread[]
   currentThreadId: string | null
+  isLoadingByThread: Record<string, boolean>
+  setThreadLoading: (threadId: string, isLoading: boolean) => void
 
   // Models and Providers (global, not per-thread)
   models: ModelConfig[]
@@ -956,6 +950,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
   threads: [],
   currentThreadId: null,
+  isLoadingByThread: {},
   models: [],
   providers: [],
   rightPanelTab: "todos",
@@ -1094,6 +1089,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
+  setThreadLoading: (threadId: string, isLoading: boolean) => {
+    set((state) => {
+      if (state.isLoadingByThread[threadId] === isLoading) return state
+      return {
+        isLoadingByThread: {
+          ...state.isLoadingByThread,
+          [threadId]: isLoading
+        }
+      }
+    })
+  },
+
   deleteThread: async (threadId: string) => {
     console.log("[Store] Deleting thread:", threadId)
     try {
@@ -1114,10 +1121,13 @@ export const useAppStore = create<AppState>((set, get) => ({
             ? null
             : findFirstChatThread(threads)?.thread_id || null
           : state.currentThreadId
+        const isLoadingByThread = { ...state.isLoadingByThread }
+        delete isLoadingByThread[threadId]
 
         return {
           threads,
           currentThreadId: newCurrentId,
+          isLoadingByThread,
           // 如果被删除的线程是之前保存的，清掉避免恢复到无效 id
           previousThreadId: state.previousThreadId === threadId ? null : state.previousThreadId,
           ...(state.workerFocusView?.threadId === threadId
@@ -1339,9 +1349,9 @@ export const useAppStore = create<AppState>((set, get) => ({
               ? `__cmb-worker-turn-${scopedTurn}__`
               : explicitOccurrenceExistingUserIndex !== undefined
                 ? existingAlignedTurnKeys[explicitOccurrenceExistingUserIndex]
-              : exactExistingUserIndex >= 0
-                ? existingAlignedTurnKeys[exactExistingUserIndex]
-                : undefined
+                : exactExistingUserIndex >= 0
+                  ? existingAlignedTurnKeys[exactExistingUserIndex]
+                  : undefined
         }
         return alignedExistingUserTurnKey ?? turnKey
       })
@@ -1462,9 +1472,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         const explicitOccurrenceReservationOwner =
           rawExplicitOccurrenceExistingIndex === undefined
             ? undefined
-            : reservedIncomingIndexByExistingIndex.get(
-                rawExplicitOccurrenceExistingIndex
-              )
+            : reservedIncomingIndexByExistingIndex.get(rawExplicitOccurrenceExistingIndex)
         const explicitOccurrenceExistingIndex =
           explicitOccurrenceReservationOwner === undefined ||
           explicitOccurrenceReservationOwner === messageIndex
@@ -1479,14 +1487,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           !exactIndexIsReservedForAnotherIncoming &&
           next[exactExistingIndex].role === message.role &&
           (getMessageProviderOccurrence(next[exactExistingIndex]) === undefined ||
-            getMessageProviderOccurrence(next[exactExistingIndex]) ===
-              incomingProviderOccurrence)
+            getMessageProviderOccurrence(next[exactExistingIndex]) === incomingProviderOccurrence)
             ? exactExistingIndex
             : undefined
-        const signature = workerTurnSignatureKey(
-          turnKey,
-          workerFocusMessageSignature(message)
-        )
+        const signature = workerTurnSignatureKey(turnKey, workerFocusMessageSignature(message))
         const existingIndex =
           incomingProviderOccurrence !== undefined
             ? (explicitOccurrenceExistingIndex ??
@@ -1538,13 +1542,10 @@ export const useAppStore = create<AppState>((set, get) => ({
             candidateIndex !== existingIndex && candidate.id === message.id
         )
         const id =
-          useRepeatedOccurrenceReservation && !incomingIdIsOccupied
-            ? message.id
-            : existing.id
+          useRepeatedOccurrenceReservation && !incomingIdIsOccupied ? message.id : existing.id
         const incomingDefinesRepeatedOccurrence =
-          repeatedIncomingTransportIdentities.has(
-            workerTransportIdentityKey(message, turnKey)
-          ) && !useRepeatedOccurrenceReservation
+          repeatedIncomingTransportIdentities.has(workerTransportIdentityKey(message, turnKey)) &&
+          !useRepeatedOccurrenceReservation
         next[existingIndex] = {
           ...existing,
           ...message,
@@ -1566,9 +1567,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           tool_call_id: incomingDefinesRepeatedOccurrence
             ? message.tool_call_id
             : (message.tool_call_id ?? existing.tool_call_id),
-          name: incomingDefinesRepeatedOccurrence
-            ? message.name
-            : (message.name ?? existing.name),
+          name: incomingDefinesRepeatedOccurrence ? message.name : (message.name ?? existing.name),
           status: incomingDefinesRepeatedOccurrence
             ? message.status
             : (message.status ?? existing.status),
@@ -1581,11 +1580,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         incomingResolvedIndexes.push(existingIndex)
       })
       const orderedMessages = options?.orderedSnapshot
-        ? reorderWorkerFocusMessagesByIncomingOrder(
-            next,
-            incomingResolvedIndexes,
-            nextTurnKeys
-          )
+        ? reorderWorkerFocusMessagesByIncomingOrder(next, incomingResolvedIndexes, nextTurnKeys)
         : next
       const prunedMessages = pruneWorkerFocusMessages(
         orderWorkerFocusMessagesByScopedTurn(orderedMessages)
@@ -1725,6 +1720,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showHarnessBoardView: false,
         showClaudeCodeView: false,
         showDashboardView: false,
+        rightPanelCollapsed: true,
         previousThreadId: prev,
         currentThreadId: null,
         workerFocusView: null,

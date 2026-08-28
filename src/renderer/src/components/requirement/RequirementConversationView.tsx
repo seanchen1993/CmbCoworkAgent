@@ -1,0 +1,942 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { AlertTriangle, Bot, CheckCircle2, Eye, ListTodo, Loader2, Send } from "lucide-react"
+import { toast } from "sonner"
+import { ChatContainer } from "@/components/chat/ChatContainer"
+import { FileTree, ResourcePreview } from "@/components/panels/RightPanel"
+import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
+import { Button } from "@/components/ui/button"
+import { IconPopoverButton } from "@/components/ui/icon-popover-button"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { useAppStore } from "@/lib/store"
+import { useThreadState, useThreadStream } from "@/lib/thread-context"
+import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
+import { cn } from "@/lib/utils"
+import { RequirementBreadcrumbHeader } from "./RequirementBreadcrumbHeader"
+import {
+  isRequirementPublished,
+  sortRequirementsByUpdatedAt,
+  type RequirementPrdManifest,
+  type RequirementRecord
+} from "./requirement-data"
+
+const PRD_GENERATION_MESSAGE = "使用prd-generate技能把source文件夹下的原需求文件生成规范化PRD"
+const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
+const PRD_COMPLETION_CHECK_MAX_ATTEMPTS = 4
+const PRD_COMPLETION_CHECK_RETRY_DELAY_MS = 500
+
+type PreviewTab = "source" | "prd" | "requirement-space"
+
+function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
+  if (isRequirementPublished(requirement) || requirement.prdGenerated) return "requirement-space"
+  return "source"
+}
+
+function hasGeneratedPrdFile(files: Array<{ path: string; is_dir?: boolean }>): boolean {
+  return files.some((file) => !file.is_dir && file.path === "/prd/full-prd.md")
+}
+
+function normalizePrdFilePath(filePath: string): string {
+  const normalized = filePath.trim().replace(/\\/g, "/").replace(/^\/+/, "")
+  return normalized === "prd" || normalized.startsWith("prd/")
+    ? `/${normalized}`
+    : `/prd/${normalized}`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function asText(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManifest {
+  const parsed = asRecord(value) ?? {}
+  const prd = asRecord(parsed.prd) ?? {}
+  const functions = Array.isArray(parsed.functions) ? parsed.functions : []
+  return {
+    prd: {
+      name: asText(prd.name),
+      status: asText(prd.status),
+      description: asText(prd.description),
+      file: asText(prd.file)
+    },
+    functions: functions.map((item) => {
+      const functionInfo = asRecord(item) ?? {}
+      return {
+        fr: asText(functionInfo.fr),
+        name: asText(functionInfo.name),
+        description: asText(functionInfo.description),
+        file: asText(functionInfo.file),
+        keywords:
+          Array.isArray(functionInfo.keywords) &&
+          functionInfo.keywords.every((keyword) => typeof keyword === "string")
+            ? [...functionInfo.keywords]
+            : []
+      }
+    })
+  }
+}
+
+function isRequirementSpacePublished(manifest: RequirementPrdManifest | null): boolean {
+  return manifest?.prd.status.toLowerCase() === "published"
+}
+
+function hasRequirementSpaceManifestData(manifest: RequirementPrdManifest): boolean {
+  return (
+    manifest.prd.name !== "" ||
+    manifest.prd.status !== "" ||
+    manifest.prd.description !== "" ||
+    manifest.prd.file !== "" ||
+    manifest.functions.length > 0
+  )
+}
+
+function buildRequirementMarkdown(requirement: RequirementRecord, sourcePreview: string): string {
+  const preview = sourcePreview.trim()
+  return `# ${requirement.title}
+> 原始需求草稿 · ${requirement.id} · ${requirement.updatedAt}${requirement.sourceName ? ` · ${requirement.sourceName}` : ""}
+
+${preview || "> 暂无可预览的原始需求内容。"}
+`
+}
+
+function RequirementConversationSession({
+  requirement,
+  requirements,
+  onSelectRequirement,
+  onBack,
+  autoGeneratePrd
+}: {
+  requirement: RequirementRecord
+  requirements: RequirementRecord[]
+  onSelectRequirement: (requirement: RequirementRecord) => Promise<void>
+  onBack: () => void
+  autoGeneratePrd: boolean
+}): React.JSX.Element {
+  const selectThread = useAppStore((state) => state.selectThread)
+  const threadId = requirement.threadId ?? null
+  const threadState = useThreadState(threadId)
+  // ChatContainer treats this stream state as the source of truth for an active turn.
+  const streamLoading = useThreadStream(threadId ?? "").isLoading
+  const autoQueuedPrdGenerationRef = useRef(false)
+  const historyLoadingObservedRef = useRef(false)
+  const conversationLoadingObservedRef = useRef(false)
+  const publishRequestQueuedRef = useRef(false)
+  const workspaceFilesRef = useRef(threadState?.workspaceFiles ?? [])
+  const [previewTab, setPreviewTab] = useState<PreviewTab>(() => getInitialPreviewTab(requirement))
+  const [selectedPrdPath, setSelectedPrdPath] = useState<string | null>(null)
+  const [prdPreviewReloadToken, setPrdPreviewReloadToken] = useState(0)
+  const [sourcePreview, setSourcePreview] = useState("")
+  const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false)
+  const [sourcePreviewError, setSourcePreviewError] = useState<string | null>(null)
+  const [switchingRequirementId, setSwitchingRequirementId] = useState<string | null>(null)
+  const [requirementSpaceManifest, setRequirementSpaceManifest] =
+    useState<RequirementPrdManifest | null>(() => requirement.prdManifest)
+  const [manifestLoading, setManifestLoading] = useState(false)
+  const [manifestError, setManifestError] = useState<string | null>(null)
+  const [publishRequestQueued, setPublishRequestQueued] = useState(false)
+  const orderedRequirements = useMemo(
+    () => sortRequirementsByUpdatedAt(requirements),
+    [requirements]
+  )
+  const prdFiles = useMemo(
+    () =>
+      (threadState?.workspaceFiles ?? []).filter(
+        (file) => file.path === "/prd" || file.path.startsWith("/prd/")
+      ),
+    [threadState?.workspaceFiles]
+  )
+  const defaultPrdPath = useMemo(
+    () =>
+      prdFiles.find((file) => !file.is_dir && file.path === "/prd/full-prd.md")?.path ??
+      prdFiles.find((file) => !file.is_dir)?.path ??
+      null,
+    [prdFiles]
+  )
+  const effectiveSelectedPrdPath =
+    selectedPrdPath && prdFiles.some((file) => !file.is_dir && file.path === selectedPrdPath)
+      ? selectedPrdPath
+      : defaultPrdPath
+  const selectedPrdFile = prdFiles.find(
+    (file) => !file.is_dir && file.path === effectiveSelectedPrdPath
+  )
+  const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
+  const prdGenerationCompleted = requirement.prdGenerated || hasGeneratedPrdFile(prdFiles)
+  const requirementSpacePublished =
+    requirementSpaceManifest !== null
+      ? isRequirementSpacePublished(requirementSpaceManifest)
+      : isRequirementPublished(requirement)
+  const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
+  const setWorkspaceFiles = threadState?.setWorkspaceFiles
+  const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
+  const hasThreadState = threadState !== null
+
+  const loadSourcePreview = useCallback(async (): Promise<void> => {
+    setSourcePreviewLoading(true)
+    setSourcePreviewError(null)
+    try {
+      const result = await window.api.requirements.getSourcePreview(requirement.id)
+      if (!result.success) {
+        throw new Error(result.error || "读取原始需求预览失败")
+      }
+      setSourcePreview(result.content ?? "")
+    } catch (error) {
+      setSourcePreview("")
+      setSourcePreviewError(error instanceof Error ? error.message : "读取原始需求预览失败")
+    } finally {
+      setSourcePreviewLoading(false)
+    }
+  }, [requirement.id])
+
+  useEffect(() => {
+    workspaceFilesRef.current = threadState?.workspaceFiles ?? []
+  }, [threadState?.workspaceFiles])
+
+  useEffect(() => {
+    void loadSourcePreview()
+  }, [loadSourcePreview])
+
+  const refreshPrdFiles = useCallback(async (): Promise<boolean> => {
+    if (!threadId || !setWorkspaceFiles || !workspacePath) return false
+
+    markWorkspaceFilesStale(threadId, workspacePath)
+    const result = await loadWorkspaceFilesDeduped(threadId, workspacePath)
+    if (result.success && result.files && result.workspacePath === workspacePath) {
+      workspaceFilesRef.current = result.files
+      setWorkspaceFiles(result.files)
+      return requirement.prdGenerated || hasGeneratedPrdFile(result.files)
+    }
+    return requirement.prdGenerated || hasGeneratedPrdFile(workspaceFilesRef.current)
+  }, [requirement.prdGenerated, setWorkspaceFiles, threadId, workspacePath])
+
+  const loadRequirementSpaceManifest = useCallback(async (): Promise<void> => {
+    setManifestLoading(true)
+    setManifestError(null)
+    try {
+      if (hasRequirementSpaceManifestData(requirement.prdManifest)) {
+        const manifest = requirement.prdManifest
+        setRequirementSpaceManifest(manifest)
+        if (isRequirementSpacePublished(manifest)) {
+          publishRequestQueuedRef.current = false
+          setPublishRequestQueued(false)
+        }
+        return
+      }
+      if (!threadId) throw new Error("该需求尚未关联沟通会话")
+
+      const result = await window.api.workspace.readFile(threadId, "/prd/prd-manifest.json")
+      if (!result.success || result.content === undefined) {
+        throw new Error(result.error || "读取 prd-manifest.json 失败")
+      }
+
+      let rawManifest: unknown = {}
+      try {
+        rawManifest = JSON.parse(result.content)
+      } catch {
+        // Invalid JSON is stored as the empty manifest shape.
+      }
+      const syncResult = await window.api.requirements.syncManifest({
+        reqId: requirement.id,
+        manifest: rawManifest
+      })
+      if (!syncResult.success) {
+        throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
+      }
+      const manifest = normalizeRequirementSpaceManifest(rawManifest)
+      setRequirementSpaceManifest(manifest)
+      if (isRequirementSpacePublished(manifest)) {
+        publishRequestQueuedRef.current = false
+        setPublishRequestQueued(false)
+      }
+    } catch (error) {
+      setRequirementSpaceManifest(null)
+      setManifestError(error instanceof Error ? error.message : "读取需求空间数据失败")
+    } finally {
+      setManifestLoading(false)
+    }
+  }, [requirement.id, requirement.prdManifest, threadId])
+
+  const handlePublishToRequirementSpace = useCallback((): void => {
+    if (
+      !threadState ||
+      isRequirementSpacePublished(requirementSpaceManifest) ||
+      publishRequestQueuedRef.current
+    ) {
+      return
+    }
+
+    publishRequestQueuedRef.current = true
+    setPublishRequestQueued(true)
+    threadState.addQueuedMessage({
+      id: crypto.randomUUID(),
+      text: REQUIREMENT_SPACE_PUBLISH_MESSAGE,
+      created_at: new Date(),
+      updated_at: new Date()
+    })
+    toast.success("已向对话发送发布到需求空间请求")
+  }, [requirementSpaceManifest, threadState])
+
+  const handleFunctionFilePreview = useCallback(
+    (filePath: string): void => {
+      const targetPath = normalizePrdFilePath(filePath)
+      const matchingFile = prdFiles.find(
+        (file) => !file.is_dir && file.path.replace(/\\/g, "/") === targetPath
+      )
+
+      setPreviewTab("prd")
+      setSelectedPrdPath(matchingFile?.path ?? targetPath)
+      if (!matchingFile) {
+        void refreshPrdFiles().catch((error) => {
+          console.warn(
+            "[RequirementConversationView] Failed to refresh PRD files for function preview:",
+            error
+          )
+        })
+      }
+    },
+    [prdFiles, refreshPrdFiles]
+  )
+
+  useEffect(() => {
+    if (threadId) {
+      void selectThread(threadId, { preserveView: true })
+    }
+  }, [selectThread, threadId])
+
+  useEffect(() => {
+    if (threadState?.historyLoading) {
+      historyLoadingObservedRef.current = true
+      return
+    }
+    if (
+      !autoGeneratePrd ||
+      autoQueuedPrdGenerationRef.current ||
+      requirement.prdGenerated ||
+      !threadState ||
+      !historyLoadingObservedRef.current ||
+      threadState.messages.length > 0 ||
+      threadState.queuedMessages.length > 0
+    ) {
+      return
+    }
+
+    autoQueuedPrdGenerationRef.current = true
+    threadState.addQueuedMessage({
+      id: crypto.randomUUID(),
+      text: PRD_GENERATION_MESSAGE,
+      created_at: new Date(),
+      updated_at: new Date()
+    })
+  }, [
+    autoGeneratePrd,
+    requirement.prdGenerated,
+    threadState,
+    threadState?.historyLoading,
+    threadState?.messages.length,
+    threadState?.queuedMessages.length
+  ])
+
+  useEffect(() => {
+    if (conversationLoading) {
+      conversationLoadingObservedRef.current = true
+      return
+    }
+    if (
+      !conversationLoadingObservedRef.current ||
+      !threadId ||
+      !hasThreadState ||
+      requirement.workspaceMissing ||
+      requirement.coreFilesMissing
+    ) {
+      return
+    }
+
+    conversationLoadingObservedRef.current = false
+    let cancelled = false
+
+    const checkPrdCompletion = async (): Promise<void> => {
+      for (let attempt = 0; attempt < PRD_COMPLETION_CHECK_MAX_ATTEMPTS; attempt += 1) {
+        const completed = await refreshPrdFiles()
+        if (cancelled) return
+        if (completed) {
+          setPreviewTab("prd")
+          void loadRequirementSpaceManifest()
+          return
+        }
+        if (attempt < PRD_COMPLETION_CHECK_MAX_ATTEMPTS - 1) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, PRD_COMPLETION_CHECK_RETRY_DELAY_MS)
+          )
+        }
+      }
+    }
+
+    void checkPrdCompletion().catch((error) => {
+      console.warn("[RequirementConversationView] Failed to check PRD completion:", error)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    conversationLoading,
+    hasThreadState,
+    loadRequirementSpaceManifest,
+    refreshPrdFiles,
+    requirement.coreFilesMissing,
+    requirement.workspaceMissing,
+    threadId
+  ])
+
+  useEffect(() => {
+    if (previewTab !== "requirement-space" || !prdGenerationCompleted) return
+    void refreshPrdFiles()
+      .then((completed) => {
+        if (completed) return loadRequirementSpaceManifest()
+        return undefined
+      })
+      .catch((error) => {
+        console.warn("[RequirementConversationView] Failed to load requirement space data:", error)
+      })
+  }, [
+    conversationLoading,
+    loadRequirementSpaceManifest,
+    prdGenerationCompleted,
+    previewTab,
+    refreshPrdFiles
+  ])
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#f6f1ea]">
+      <RequirementBreadcrumbHeader
+        items={[
+          { label: "需求模式", onClick: onBack },
+          { label: "需求历史", onClick: onBack },
+          { label: "需求沟通", onClick: onBack },
+          { label: requirement.title }
+        ]}
+        ariaLabel="需求沟通路径"
+      />
+
+      <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-[#ebe4db]">
+        <div className="grid h-full min-h-0 min-w-[1242px] grid-cols-[minmax(240px,0.5fr)_minmax(380px,1fr)_minmax(620px,1.5fr)] gap-x-[0.5px]">
+          <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[#f7f4ef]">
+            <div className="flex h-[37px] shrink-0 items-center justify-between border-b border-border/80 bg-[#fffdf9] px-4">
+              <div className="flex min-w-0 items-center gap-2.5 text-xs font-semibold text-foreground">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <ListTodo className="size-3.5" />
+                </span>
+                <span>需求列表</span>
+              </div>
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-[#eee7df] text-[10px] font-semibold tabular-nums text-[#74695f]">
+                {requirements.length}
+              </span>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-2.5 bg-white">
+              {requirements.length > 0 ? (
+                <div className="flex flex-col gap-1.5">
+                  {orderedRequirements.map((item) => {
+                    const isActive = item.id === requirement.id
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        disabled={switchingRequirementId !== null}
+                        aria-current={isActive ? "page" : undefined}
+                        onClick={() => {
+                          if (isActive || switchingRequirementId !== null) return
+                          setSwitchingRequirementId(item.id)
+                          void onSelectRequirement(item).finally(() => {
+                            setSwitchingRequirementId(null)
+                          })
+                        }}
+                        title={`${item.title} · ${item.system}`}
+                        className={cn(
+                          "group relative flex min-h-[80px]  w-full min-w-0 gap-3 rounded border p-2 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-wait disabled:opacity-70",
+                          isActive
+                            ? "bg-white text-foreground border-[#c4956af7]"
+                            : "bg-white text-muted-foreground "
+                        )}
+                      >
+                        <span className="flex min-w-0 flex-1 flex-col justify-between gap-1">
+                          <span className="flex min-w-0 items-center gap-2 ">
+                            <span className="min-w-0 flex-1 truncate text-xs font-semibold leading-5">
+                              {item.title}
+                            </span>
+                            <span
+                              className={cn(
+                                "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-medium leading-none",
+                                item.coreFilesMissing || item.workspaceMissing
+                                  ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
+                                  : item.prdGenerated
+                                    ? "border-status-nominal/20 bg-status-nominal/10 text-status-nominal"
+                                    : "border-status-info/20 bg-status-info/10 text-status-info",
+                                item.coreFilesMissing || item.workspaceMissing
+                                  ? "font-semibold"
+                                  : ""
+                              )}
+                              title={
+                                item.coreFilesMissingReason ||
+                                (item.workspaceMissing ? "需求归档目录已被删除或不可用" : undefined)
+                              }
+                            >
+                              {item.coreFilesMissing || item.workspaceMissing ? (
+                                <AlertTriangle className="size-2.5" aria-hidden="true" />
+                              ) : item.prdGenerated ? (
+                                <CheckCircle2 className="size-2.5" aria-hidden="true" />
+                              ) : (
+                                <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
+                              )}
+                              {item.coreFilesMissing || item.workspaceMissing
+                                ? "异常"
+                                : item.prdGenerated
+                                  ? "已生成"
+                                  : "沟通中"}
+                            </span>
+                          </span>
+                          <span className="flex min-w-0 items-center justify-between gap-2 text-[10px] leading-4">
+                            <span className="min-w-0 truncate text-[#81766b]">{item.system}</span>
+                            <span className="shrink-0 tabular-nums text-[#a0958a]">
+                              {item.updatedAt}
+                            </span>
+                          </span>
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="px-2 py-8 text-center text-[11px] text-muted-foreground">
+                  暂无需求
+                </div>
+              )}
+            </div>
+          </aside>
+
+          <main className="flex min-h-0 min-w-0 flex-col bg-white">
+            <div className="flex h-[37px] shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-[#fffdf9] px-4">
+              <div className="flex min-w-0 items-center gap-2.5 text-xs font-semibold text-foreground">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <Bot className="size-3.5" />
+                </span>
+                <span>需求澄清会话</span>
+              </div>
+              <span className="truncate text-[10px] text-muted-foreground">
+                结合原始需求持续完善 PRD
+              </span>
+            </div>
+            {threadId ? (
+              <ChatContainer key={threadId} threadId={threadId} surface="harness-feature-session" />
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+                <span>该需求尚未关联沟通会话</span>
+                <Button type="button" variant="outline" size="sm" onClick={onBack}>
+                  返回需求历史
+                </Button>
+              </div>
+            )}
+          </main>
+
+          <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-white">
+            {requirement.workspaceMissing ? (
+              <div
+                role="alert"
+                className="flex shrink-0 items-center gap-2 border-b border-[#ead3a1] bg-[#fff9e9] px-4 py-2 text-xs leading-5 text-[#8f6a2a]"
+              >
+                <AlertTriangle className="size-3.5 shrink-0" />
+                <span>该需求的工作目录已被删除，当前内容可能不可用。</span>
+              </div>
+            ) : null}
+            {requirement.coreFilesMissing && !requirement.workspaceMissing ? (
+              <div
+                role="alert"
+                className="flex shrink-0 items-center gap-2 border-b border-status-critical/20 bg-status-critical/5 px-4 py-2 text-xs leading-5 text-status-critical"
+              >
+                <AlertTriangle className="size-3.5 shrink-0" />
+                <span>
+                  {requirement.coreFilesMissingReason || "需求核心文件缺失，当前内容可能不可用。"}
+                </span>
+              </div>
+            ) : null}
+            <Tabs
+              value={previewTab}
+              onValueChange={(value) => {
+                const nextTab: PreviewTab =
+                  value === "prd"
+                    ? "prd"
+                    : value === "requirement-space"
+                      ? "requirement-space"
+                      : "source"
+                setPreviewTab(nextTab)
+                if (nextTab === "prd") {
+                  void refreshPrdFiles().catch((error) => {
+                    console.warn(
+                      "[RequirementConversationView] Failed to refresh PRD files:",
+                      error
+                    )
+                  })
+                }
+              }}
+              className="flex min-h-0 flex-1 flex-col"
+            >
+              <div className="shrink-0 border-b border-border/80 bg-[#fffdf9] px-3">
+                <TabsList className="h-9 rounded-none bg-transparent p-0">
+                  <TabsTrigger
+                    value="source"
+                    className="h-9 rounded-none border-b-2 border-transparent px-3 text-[11px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
+                  >
+                    旧需求文件
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="prd"
+                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[11px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
+                  >
+                    新PRD文件
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium leading-none ${
+                        requirement.coreFilesMissing || requirement.workspaceMissing
+                          ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
+                          : prdGenerationCompleted
+                            ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
+                            : "border-status-info/30 bg-status-info/15 text-status-info"
+                      }`}
+                    >
+                      {requirement.coreFilesMissing || requirement.workspaceMissing ? (
+                        <AlertTriangle className="size-2.5" />
+                      ) : prdGenerationCompleted ? (
+                        <CheckCircle2 className="size-2.5" />
+                      ) : (
+                        <Loader2 className="size-2.5 animate-spin" />
+                      )}
+                      {requirement.coreFilesMissing || requirement.workspaceMissing
+                        ? "异常"
+                        : prdGenerationCompleted
+                          ? "生成完成"
+                          : "生成中"}
+                    </span>
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="requirement-space"
+                    disabled={!prdGenerationCompleted}
+                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[11px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    需求空间3.0
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium leading-none ${
+                        requirementSpacePublished
+                          ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
+                          : "border-status-info/30 bg-status-info/15 text-status-info"
+                      }`}
+                    >
+                      {requirementSpacePublished ? (
+                        <CheckCircle2 className="size-2.5" />
+                      ) : (
+                        <Loader2 className="size-2.5" />
+                      )}
+                      {requirementSpacePublished ? "已发布" : "未发布"}
+                    </span>
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+
+              <TabsContent value="source" className="m-0 min-h-0 flex-1 overflow-y-auto">
+                {sourcePreviewLoading ? (
+                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin text-primary" />
+                    正在读取原始需求
+                  </div>
+                ) : sourcePreviewError ? (
+                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center">
+                    <div className="flex max-w-[340px] flex-col items-center gap-3">
+                      <AlertTriangle className="size-5 text-status-critical" />
+                      <p className="text-xs leading-5 text-status-critical">{sourcePreviewError}</p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 text-xs"
+                        onClick={() => void loadSourcePreview()}
+                      >
+                        重新读取
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <MarkdownPreview
+                    content={buildRequirementMarkdown(requirement, sourcePreview)}
+                    showHeader={false}
+                    showModeToggle={false}
+                    whiteBackground
+                    className="min-h-full -mt-7"
+                  />
+                )}
+              </TabsContent>
+
+              <TabsContent value="prd" className="m-0 flex min-h-0 flex-1 flex-col">
+                {prdFileCount > 0 ? (
+                  <div className="grid min-h-0 flex-1 grid-cols-[minmax(168px,25%)_minmax(0,1fr)] overflow-hidden">
+                    <aside className="flex min-w-0 flex-col overflow-hidden border-r border-border/80 bg-white">
+                      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+                        <FileTree
+                          files={prdFiles}
+                          threadId={threadId}
+                          selectedPath={effectiveSelectedPrdPath}
+                          onFileSelect={setSelectedPrdPath}
+                          initialExpandedPaths={prdFiles
+                            .filter((file) => file.is_dir)
+                            .map((file) => file.path)}
+                        />
+                      </div>
+                    </aside>
+                    <section className="flex min-w-0 flex-col overflow-hidden bg-white">
+                      <div className="min-h-0 flex-1 p-2">
+                        {selectedPrdFile && threadId ? (
+                          <ResourcePreview
+                            key={`${selectedPrdFile.path}:${prdPreviewReloadToken}`}
+                            filePath={selectedPrdFile.path.replace(/^\/+/, "")}
+                            workspacePath={
+                              threadState?.workspacePath ?? requirement.requirementPath
+                            }
+                            threadId={threadId}
+                            reloadToken={prdPreviewReloadToken}
+                            onReload={() => setPrdPreviewReloadToken((value) => value + 1)}
+                          />
+                        ) : (
+                          <div className="flex h-full items-center justify-center px-6 text-center text-xs leading-5 text-muted-foreground">
+                            请选择文件预览
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                  </div>
+                ) : (
+                  <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center">
+                    <div className="flex max-w-[260px] flex-col items-center gap-3">
+                      <span className="flex size-10 items-center justify-center rounded-full bg-primary/10 text-primary">
+                        <Loader2 className="size-5 animate-spin" />
+                      </span>
+                      <div className="text-sm font-semibold text-foreground">等待生成中</div>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        继续在中间会话中补充需求，PRD 文件生成后会自动显示。
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="requirement-space" className="m-0 min-h-0 flex-1 overflow-y-auto">
+                {manifestLoading ? (
+                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin text-primary" />
+                    正在读取需求空间数据
+                  </div>
+                ) : manifestError ? (
+                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center">
+                    <div className="flex max-w-[340px] flex-col items-center gap-3">
+                      <AlertTriangle className="size-5 text-status-critical" />
+                      <p className="text-xs leading-5 text-status-critical">{manifestError}</p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8 text-xs"
+                        onClick={() => void loadRequirementSpaceManifest()}
+                      >
+                        重新读取
+                      </Button>
+                    </div>
+                  </div>
+                ) : requirementSpaceManifest ? (
+                  <div className="space-y-4 p-4">
+                    <section className="border-b border-border/70 pb-4">
+                      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">
+                            PRD
+                          </p>
+                          <div className="flex items-center gap-1.5">
+                            <h3 className="text-base font-semibold leading-6 text-foreground">
+                              {requirementSpaceManifest.prd.name || requirement.title}
+                            </h3>
+                            <IconPopoverButton
+                              aria-label={
+                                requirementSpaceManifest.prd.file
+                                  ? "查看 PRD 总览详情"
+                                  : "暂无关联 PRD 文件"
+                              }
+                              icon={<Eye className="size-3.5" />}
+                              disabled={!requirementSpaceManifest.prd.file}
+                              popoverContent={
+                                requirementSpaceManifest.prd.file
+                                  ? "点击查看详情"
+                                  : "暂无关联 PRD 文件"
+                              }
+                              onClick={() =>
+                                handleFunctionFilePreview(requirementSpaceManifest.prd.file)
+                              }
+                            />
+                          </div>
+                        </div>
+                        <span
+                          className={cn(
+                            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-semibold",
+                            isRequirementSpacePublished(requirementSpaceManifest)
+                              ? "border-status-nominal/30 bg-status-nominal/10 text-status-nominal"
+                              : "border-status-info/30 bg-status-info/10 text-status-info"
+                          )}
+                        >
+                          {isRequirementSpacePublished(requirementSpaceManifest) ? (
+                            <CheckCircle2 className="size-3" />
+                          ) : (
+                            <Loader2 className="size-3" />
+                          )}
+                          {requirementSpaceManifest.prd.status || "未发布"}
+                        </span>
+                      </div>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        {requirementSpaceManifest.prd.description || "暂无 PRD 描述"}
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] text-muted-foreground">
+                        {requirementSpaceManifest.prd.file ? (
+                          <span>
+                            文档文件{" "}
+                            <strong className="font-medium text-foreground">
+                              {requirementSpaceManifest.prd.file}
+                            </strong>
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="mt-4">
+                        {isRequirementSpacePublished(requirementSpaceManifest) ? (
+                          <div className="inline-flex items-center gap-2 text-xs font-semibold text-status-nominal">
+                            <CheckCircle2 className="size-3.5" />
+                            已发布到需求空间3.0
+                          </div>
+                        ) : (
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={publishRequestQueued}
+                            className="h-8 gap-1.5 rounded-[7px] px-3 text-xs"
+                            onClick={handlePublishToRequirementSpace}
+                          >
+                            {publishRequestQueued ? (
+                              <Loader2 className="size-3.5 animate-spin" />
+                            ) : (
+                              <Send className="size-3.5" />
+                            )}
+                            {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
+                          </Button>
+                        )}
+                      </div>
+                    </section>
+
+                    <section>
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <h4 className="text-xs font-semibold text-foreground">功能清单</h4>
+                        <span className="text-[10px] tabular-nums text-muted-foreground">
+                          {requirementSpaceManifest.functions.length} 项
+                        </span>
+                      </div>
+                      {requirementSpaceManifest.functions.length > 0 ? (
+                        <div className="divide-y divide-border/70 border-y border-border/70">
+                          {requirementSpaceManifest.functions.map((functionInfo) => (
+                            <article
+                              key={`${functionInfo.fr}-${functionInfo.file}`}
+                              className="py-3"
+                            >
+                              <div className="flex items-start gap-2">
+                                <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                                  {functionInfo.fr}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <h5 className="min-w-0 flex-1 text-xs font-semibold text-foreground">
+                                      {functionInfo.name || "未命名功能"}
+                                    </h5>
+                                    <IconPopoverButton
+                                      aria-label={
+                                        functionInfo.file
+                                          ? `查看${functionInfo.name || functionInfo.fr}详情`
+                                          : "暂无关联 PRD 文件"
+                                      }
+                                      icon={<Eye className="size-3.5" />}
+                                      disabled={!functionInfo.file}
+                                      popoverContent={
+                                        functionInfo.file ? "点击查看详情" : "暂无关联 PRD 文件"
+                                      }
+                                      onClick={() => handleFunctionFilePreview(functionInfo.file)}
+                                    />
+                                  </div>
+                                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                    {functionInfo.description || "暂无功能描述"}
+                                  </p>
+                                  <div className="mt-2 flex flex-wrap gap-1.5">
+                                    {functionInfo.keywords.map((keyword, keywordIndex) => (
+                                      <span
+                                        key={`${functionInfo.fr}-${keyword}-${keywordIndex}`}
+                                        className="rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                                      >
+                                        {keyword}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  {functionInfo.file ? (
+                                    <p className="mt-2 text-[10px] text-muted-foreground">
+                                      文档文件 {functionInfo.file}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="border-y border-border/70 py-4 text-xs text-muted-foreground">
+                          暂无功能数据
+                        </p>
+                      )}
+                    </section>
+                  </div>
+                ) : (
+                  <div className="flex h-full min-h-[260px] items-center justify-center text-xs text-muted-foreground">
+                    暂无需求空间数据
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
+          </aside>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function RequirementConversationView({
+  requirement,
+  requirements,
+  onSelectRequirement,
+  onBack,
+  autoGeneratePrd = false
+}: {
+  requirement: RequirementRecord
+  requirements: RequirementRecord[]
+  onSelectRequirement: (requirement: RequirementRecord) => Promise<void>
+  onBack: () => void
+  autoGeneratePrd?: boolean
+}): React.JSX.Element {
+  return (
+    <RequirementConversationSession
+      key={requirement.id}
+      requirement={requirement}
+      requirements={requirements}
+      onSelectRequirement={onSelectRequirement}
+      onBack={onBack}
+      autoGeneratePrd={autoGeneratePrd}
+    />
+  )
+}

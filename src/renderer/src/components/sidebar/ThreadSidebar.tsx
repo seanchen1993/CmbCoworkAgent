@@ -9,10 +9,8 @@ import {
   AlertCircle,
   Briefcase,
   LayoutDashboard,
-  Workflow,
   Cpu,
   BarChart3,
-  Palette,
   ChevronDown,
   ChevronRight,
   FolderOpen,
@@ -21,7 +19,6 @@ import {
   FolderPlus,
   Download,
   GitFork,
-  MessageSquare,
   HeartPulse
 } from "lucide-react"
 import { toast } from "sonner"
@@ -30,7 +27,6 @@ import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
 import {
   Dialog,
@@ -47,9 +43,7 @@ import {
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
-import { useFeatureGate } from "@/lib/feature-gates"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
-import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -67,7 +61,6 @@ const PROJECT_NAME_OVERRIDES_STORAGE_KEY = "threads:projectNameOverrides"
 /** 工作区展开时默认可见的 thread 条数;点"展开显示"每次追加的条数。 */
 const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
-type SidebarTab = "chat" | "project" | "design"
 type ForkDestinationMode = "local" | "workspace"
 
 interface ThreadProject {
@@ -482,16 +475,11 @@ export function ThreadSidebar(): React.JSX.Element {
     deleteThread,
     updateThread,
     mainView,
-    previousThreadId,
     pendingEvolution,
     showCustomizeView,
     setShowCustomizeView,
     showKanbanView,
     setShowKanbanView,
-    showDesignView,
-    setShowDesignView,
-    showHarnessBoardView,
-    setShowHarnessBoardView,
     showDashboardView,
     setShowDashboardView,
     dashboardAllowed
@@ -528,10 +516,7 @@ export function ThreadSidebar(): React.JSX.Element {
     }
     if (changed) {
       // 收集所有受影响的 thread ID（当前 + 之前但已移除的）
-      const affectedIds = new Set([
-        ...Object.keys(allStreamLoadingStates),
-        ...Object.keys(prev)
-      ])
+      const affectedIds = new Set([...Object.keys(allStreamLoadingStates), ...Object.keys(prev)])
       useAppStore.setState((state) => ({
         threads: state.threads.map((t) =>
           affectedIds.has(t.thread_id) ? { ...t, updated_at: now } : t
@@ -579,10 +564,10 @@ export function ThreadSidebar(): React.JSX.Element {
   const [forkingThreadId, setForkingThreadId] = useState<string | null>(null)
   const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
   const [forkCheckpoints, setForkCheckpoints] = useState<ForkableCheckpoint[]>([])
-  const [selectedForkCheckpoint, setSelectedForkCheckpoint] =
-    useState<ForkableCheckpoint | null>(null)
-  const [forkDestinationMode, setForkDestinationMode] =
-    useState<ForkDestinationMode>("local")
+  const [selectedForkCheckpoint, setSelectedForkCheckpoint] = useState<ForkableCheckpoint | null>(
+    null
+  )
+  const [forkDestinationMode, setForkDestinationMode] = useState<ForkDestinationMode>("local")
   const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
   const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
   const [loadingForkCheckpoints, setLoadingForkCheckpoints] = useState(false)
@@ -591,74 +576,6 @@ export function ThreadSidebar(): React.JSX.Element {
   const exportingThreadIdRef = useRef<string | null>(null)
   const forkingThreadIdRef = useRef<string | null>(null)
   const forkCheckpointRequestRef = useRef(0)
-  const activeSidebarTab: SidebarTab =
-    mainView === "design" || showDesignView
-      ? "design"
-      : showHarnessBoardView || mainView === "harness"
-        ? "project"
-        : "chat"
-  const {
-    enabled: projectModeEnabled,
-    loading: projectModeLoading,
-    refresh: refreshProjectModeGate
-  } = useFeatureGate(FEATURE_GATES.projectMode)
-  const projectModeForceRefreshRef = useRef<Promise<unknown> | null>(null)
-
-  const handleSelectChatTab = useCallback(async (): Promise<void> => {
-    if (mainView === "design" || showDesignView) {
-      setShowDesignView(false)
-      return
-    }
-    if (mainView === "harness" || showHarnessBoardView) {
-      const previousThread = previousThreadId
-        ? threads.find((thread) => thread.thread_id === previousThreadId)
-        : null
-      if (previousThread && !isHarnessProjectModeThread(previousThread)) {
-        setShowHarnessBoardView(false)
-        return
-      }
-
-      const firstThread = threads.find((thread) => !isHarnessProjectModeThread(thread))
-      if (firstThread) {
-        await selectThread(firstThread.thread_id)
-        return
-      }
-
-      setShowHarnessBoardView(false)
-    }
-  }, [
-    mainView,
-    previousThreadId,
-    selectThread,
-    setShowDesignView,
-    setShowHarnessBoardView,
-    showDesignView,
-    showHarnessBoardView,
-    threads
-  ])
-
-  const handleSelectDesignTab = useCallback((): void => {
-    if (mainView !== "design" && !showDesignView) {
-      setShowDesignView(true)
-    }
-  }, [mainView, setShowDesignView, showDesignView])
-
-  const handleSelectProjectTab = useCallback(async (): Promise<void> => {
-    if (projectModeEnabled) {
-      setShowHarnessBoardView(true)
-      return
-    }
-
-    toast.info("敬请期待")
-    if (!projectModeForceRefreshRef.current) {
-      const refreshPromise = refreshProjectModeGate({ refresh: true }).finally(() => {
-        if (projectModeForceRefreshRef.current === refreshPromise) {
-          projectModeForceRefreshRef.current = null
-        }
-      })
-      projectModeForceRefreshRef.current = refreshPromise
-    }
-  }, [projectModeEnabled, refreshProjectModeGate, setShowHarnessBoardView])
 
   const persistUnread = useCallback((ids: Set<string>) => {
     localStorage.setItem("threads:unreadIds", JSON.stringify([...ids]))
@@ -763,8 +680,9 @@ export function ThreadSidebar(): React.JSX.Element {
           // 折叠即丢弃展开进度,下次展开回到默认 5 条。
           setVisibleThreadCounts((counts) => {
             if (!(projectKey in counts)) return counts
-            const { [projectKey]: _dropped, ...rest } = counts
-            return rest
+            const nextCounts = { ...counts }
+            delete nextCounts[projectKey]
+            return nextCounts
           })
         }
         persistCollapsedProjects(next)
@@ -1071,60 +989,55 @@ export function ThreadSidebar(): React.JSX.Element {
     setLoadingForkCheckpoints(false)
   }, [])
 
-  const handleForkCheckpoint = useCallback(
-    async (): Promise<void> => {
-      if (
-        !forkDialogThread ||
-        !selectedForkCheckpoint ||
-        forkingThreadIdRef.current ||
-        !selectedForkCheckpoint.isStableTurnBoundary
-      ) {
-        return
-      }
+  const handleForkCheckpoint = useCallback(async (): Promise<void> => {
+    if (
+      !forkDialogThread ||
+      !selectedForkCheckpoint ||
+      forkingThreadIdRef.current ||
+      !selectedForkCheckpoint.isStableTurnBoundary
+    ) {
+      return
+    }
 
-      let selectedWorkspacePath = forkWorkspacePath
-      if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
-        selectedWorkspacePath = await handleSelectForkWorkspace()
-        if (!selectedWorkspacePath) return
-      }
+    let selectedWorkspacePath = forkWorkspacePath
+    if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
+      selectedWorkspacePath = await handleSelectForkWorkspace()
+      if (!selectedWorkspacePath) return
+    }
 
-      const overrides: ThreadForkOverrides | undefined =
-        forkDestinationMode === "workspace"
-          ? { workspacePath: selectedWorkspacePath }
-          : undefined
+    const overrides: ThreadForkOverrides | undefined =
+      forkDestinationMode === "workspace" ? { workspacePath: selectedWorkspacePath } : undefined
 
-      const sourceThreadId = forkDialogThread.thread_id
-      forkingThreadIdRef.current = sourceThreadId
-      setForkingThreadId(sourceThreadId)
-      try {
-        const forked = await forkThread({
-          sourceThreadId,
-          checkpointId: selectedForkCheckpoint.checkpointId,
-          overrides
-        })
-        markRead(forked.thread_id)
-        resetForkCheckpointDialog()
-        toast.success("已从历史 checkpoint 创建新会话")
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Fork 会话失败")
-      } finally {
-        if (forkingThreadIdRef.current === sourceThreadId) {
-          forkingThreadIdRef.current = null
-          setForkingThreadId(null)
-        }
+    const sourceThreadId = forkDialogThread.thread_id
+    forkingThreadIdRef.current = sourceThreadId
+    setForkingThreadId(sourceThreadId)
+    try {
+      const forked = await forkThread({
+        sourceThreadId,
+        checkpointId: selectedForkCheckpoint.checkpointId,
+        overrides
+      })
+      markRead(forked.thread_id)
+      resetForkCheckpointDialog()
+      toast.success("已从历史 checkpoint 创建新会话")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Fork 会话失败")
+    } finally {
+      if (forkingThreadIdRef.current === sourceThreadId) {
+        forkingThreadIdRef.current = null
+        setForkingThreadId(null)
       }
-    },
-    [
-      forkDestinationMode,
-      forkThread,
-      forkWorkspacePath,
-      forkDialogThread,
-      handleSelectForkWorkspace,
-      markRead,
-      resetForkCheckpointDialog,
-      selectedForkCheckpoint
-    ]
-  )
+    }
+  }, [
+    forkDestinationMode,
+    forkThread,
+    forkWorkspacePath,
+    forkDialogThread,
+    handleSelectForkWorkspace,
+    markRead,
+    resetForkCheckpointDialog,
+    selectedForkCheckpoint
+  ])
 
   const confirmDeleteProject = useCallback(async () => {
     if (!projectToDelete) return
@@ -1176,513 +1089,437 @@ export function ThreadSidebar(): React.JSX.Element {
         className="p-1 space-y-1.5"
         style={{ paddingTop: "calc(8px + var(--sidebar-safe-padding, 0px))" }}
       >
-        <div
-          role="tablist"
-          aria-label="侧边栏模式"
-          className="mb-2 grid h-8 grid-cols-3 rounded bg-sidebar-accent p-1"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSidebarTab === "chat"}
-            className={cn(
-              "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeSidebarTab === "chat"
-                ? "shadow border border-border/70 bg-background text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            onClick={() => void handleSelectChatTab()}
+        <>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full justify-start gap-2 text-sm font-semibold"
+            onClick={handleNewThread}
           >
-            <MessageSquare className="size-3 shrink-0" />
-            <span className="min-w-0 truncate">对话模式</span>
-          </button>
-          <TooltipProvider delayDuration={120}>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={activeSidebarTab === "project"}
-                  aria-disabled={!projectModeEnabled}
-                  className={cn(
-                    "flex min-w-0  items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    projectModeEnabled
-                      ? activeSidebarTab === "project"
-                        ? "shadow border border-border/70 bg-background text-foreground"
-                        : "text-muted-foreground hover:text-foreground"
-                      : "cursor-not-allowed text-muted-foreground/50 opacity-60 hover:text-muted-foreground/60",
-                    projectModeLoading && !projectModeEnabled && "opacity-55"
-                  )}
-                  onClick={() => void handleSelectProjectTab()}
-                >
-                  <Workflow className="size-3 shrink-0" />
-                  <span className="min-w-0 truncate">项目模式</span>
-                </button>
-              </TooltipTrigger>
-              {!projectModeEnabled && (
-                <TooltipContent side="bottom" sideOffset={6}>
-                  敬请期待
-                </TooltipContent>
+            <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+              <Plus className="size-3" />
+            </div>
+            <span className="text-muted-foreground">新任务</span>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "w-full justify-start gap-2 text-sm font-semibold",
+              mainView === "customize" && "bg-muted"
+            )}
+            onClick={() => {
+              setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
+            }}
+          >
+            <div
+              className={cn(
+                "flex size-5 items-center justify-center rounded-full ring-1 transition-colors",
+                mainView === "customize"
+                  ? "bg-amber-500/20 ring-amber-500/25 text-amber-700 dark:bg-amber-400/20 dark:ring-amber-400/30 dark:text-amber-200"
+                  : "bg-amber-500/12 ring-amber-500/20 text-amber-700 dark:bg-amber-400/15 dark:ring-amber-400/20 dark:text-amber-300"
               )}
-            </Tooltip>
-          </TooltipProvider>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSidebarTab === "design"}
-            className={cn(
-              "flex min-w-0 items-center justify-center gap-1.5 rounded px-2 text-sm font-semibold transition-all focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-              activeSidebarTab === "design"
-                ? "shadow border border-border/70 bg-background text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            onClick={handleSelectDesignTab}
-          >
-            <Palette className="size-3 shrink-0" />
-            <span className="min-w-0 truncate">设计模式</span>
-          </button>
-        </div>
-
-        {activeSidebarTab !== "project" ? (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="w-full justify-start gap-2 text-sm font-semibold"
-              onClick={handleNewThread}
             >
-              <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                <Plus className="size-3" />
-              </div>
-              <span className="text-muted-foreground">新任务</span>
-            </Button>
+              <Briefcase className="size-3" />
+            </div>
+            <span
+              className={cn(
+                "flex-1 text-left",
+                mainView === "customize" ? "text-foreground" : "text-muted-foreground"
+              )}
+            >
+              自定义
+            </span>
+            {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className={cn(
+              "w-full justify-start gap-2 text-sm font-semibold",
+              showKanbanView && "bg-muted"
+            )}
+            onClick={() => {
+              setShowKanbanView(!showKanbanView)
+            }}
+          >
+            <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
+              <LayoutDashboard className="size-3" />
+            </div>
+            <span className="text-muted-foreground">看板视图</span>
+          </Button>
+          {dashboardAllowed && (
             <Button
               variant="ghost"
               size="sm"
               className={cn(
                 "w-full justify-start gap-2 text-sm font-semibold",
-                mainView === "customize" && "bg-muted"
+                showDashboardView && "bg-muted"
               )}
               onClick={() => {
-                setShowCustomizeView(true, pendingEvolution ? "evolution" : undefined)
-              }}
-            >
-              <div
-                className={cn(
-                  "flex size-5 items-center justify-center rounded-full ring-1 transition-colors",
-                  mainView === "customize"
-                    ? "bg-amber-500/20 ring-amber-500/25 text-amber-700 dark:bg-amber-400/20 dark:ring-amber-400/30 dark:text-amber-200"
-                    : "bg-amber-500/12 ring-amber-500/20 text-amber-700 dark:bg-amber-400/15 dark:ring-amber-400/20 dark:text-amber-300"
-                )}
-              >
-                <Briefcase className="size-3" />
-              </div>
-              <span
-                className={cn(
-                  "flex-1 text-left",
-                  mainView === "customize" ? "text-foreground" : "text-muted-foreground"
-                )}
-              >
-                自定义
-              </span>
-              {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className={cn(
-                "w-full justify-start gap-2 text-sm font-semibold",
-                showKanbanView && "bg-muted"
-              )}
-              onClick={() => {
-                setShowKanbanView(!showKanbanView)
+                setShowDashboardView(!showDashboardView)
               }}
             >
               <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                <LayoutDashboard className="size-3" />
+                <BarChart3 className="size-3" />
               </div>
-              <span className="text-muted-foreground">看板视图</span>
+              <span className="text-muted-foreground">运营面板</span>
             </Button>
-            {dashboardAllowed && (
+          )}
+          {robots.length > 0 && (
+            <div className="relative" ref={robotPickerRef}>
               <Button
                 variant="ghost"
                 size="sm"
-                className={cn(
-                  "w-full justify-start gap-2 text-sm font-semibold",
-                  showDashboardView && "bg-muted"
-                )}
-                onClick={() => {
-                  setShowDashboardView(!showDashboardView)
-                }}
+                className="w-full justify-start gap-2 text-sm font-semibold"
+                onClick={() => setShowRobotPicker(!showRobotPicker)}
               >
                 <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                  <BarChart3 className="size-3" />
+                  <Cpu className="size-3" />
                 </div>
-                <span className="text-muted-foreground">运营面板</span>
+                <span className="text-muted-foreground">机器人</span>
               </Button>
-            )}
-            {robots.length > 0 && (
-              <div className="relative" ref={robotPickerRef}>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full justify-start gap-2 text-sm font-semibold"
-                  onClick={() => setShowRobotPicker(!showRobotPicker)}
-                >
-                  <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                    <Cpu className="size-3" />
-                  </div>
-                  <span className="text-muted-foreground">机器人</span>
-                </Button>
-                {showRobotPicker && (
-                  <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-border bg-popover p-1 shadow-md">
-                    {robots.map((robot, i) => (
-                      <button
-                        key={i}
-                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted transition-colors"
-                        onClick={() => handleNewRobotThread(robot)}
-                      >
-                        <Cpu className="size-3 shrink-0 text-blue-400" />
-                        <span className="truncate">{robot.chatId || `机器人 ${i + 1}`}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        ) : null}
-      </div>
-
-      {activeSidebarTab === "project" ? (
-        <div id="harness-sidebar-portal" className="flex min-h-0 flex-1 flex-col" />
-      ) : (
-        <>
-          <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-            <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
-            <IconPopoverButton
-              icon={
-                allProjectsCollapsed ? (
-                  <Maximize2 className="size-3.5" />
-                ) : (
-                  <Minimize2 className="size-3.5" />
-                )
-              }
-              popoverContent={
-                threadProjects.length === 0
-                  ? "暂无工作区"
-                  : allProjectsCollapsed
-                    ? "全部展开工作区"
-                    : "全部收起工作区"
-              }
-              disabled={threadProjects.length === 0}
-              className="size-6 shrink-0 rounded-sm p-0"
-              onClick={toggleAllProjects}
-            />
-            <IconPopoverButton
-              icon={
-                selectingProjectFolder ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
-                  <FolderPlus className="size-3.5" />
-                )
-              }
-              popoverContent={selectingProjectFolder ? "正在选择工作区" : "新增工作区"}
-              disabled={selectingProjectFolder}
-              className="size-6 shrink-0 rounded-sm p-0"
-              onClick={handleAddProject}
-            />
-          </div>
-
-          {/* Thread List */}
-          <ScrollArea className="flex-1 min-h-0">
-            <div className="px-2 pb-2 space-y-1 overflow-hidden">
-              {threadProjects.map((project) => {
-                const isCollapsed = collapsedProjectKeys.has(project.key)
-                const canCustomizeProject = Boolean(project.path)
-                const hasSelectedThread = project.threads.some(
-                  (thread) => thread.thread_id === currentThreadId
-                )
-                // 折叠切片的有效条数:默认 5 / 用户点"展开显示"追加。但当前选中的
-                // thread 必须始终可见——若它排在可见范围之外(如重启恢复上次会话时
-                // 排到第 6+ 位),把切片扩展到刚好包含它,避免选中项被截断藏掉。
-                const requestedVisibleThreads =
-                  visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
-                const selectedThreadIndex = currentThreadId
-                  ? project.threads.findIndex((thread) => thread.thread_id === currentThreadId)
-                  : -1
-                const visibleThreadCount =
-                  selectedThreadIndex >= 0
-                    ? Math.max(requestedVisibleThreads, selectedThreadIndex + 1)
-                    : requestedVisibleThreads
-                const unreadCount = project.threads.filter((thread) =>
-                  unreadIds.has(thread.thread_id)
-                ).length
-                const hasContextReminderThread = project.threads.some((thread) =>
-                  Boolean(allThreadStates[thread.thread_id]?.contextReminder?.pending)
-                )
-                const hasRunningThread = project.threads.some((thread) => {
-                  const threadState = allThreadStates[thread.thread_id]
-                  return (
-                    (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                    Boolean(
-                      threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
-                    ) ||
-                    Boolean(threadState?.scheduledTaskLoading) ||
-                    threadState?.workflowRun?.status === "running"
-                  )
-                })
-
-                return (
-                  <div key={project.key} className="space-y-1">
-                    <ContextMenu>
-                      <Popover open={hoveredProjectKey === project.key}>
-                        <PopoverTrigger asChild>
-                          <ContextMenuTrigger asChild>
-                            <div
-                              className={cn(
-                                "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
-                                hasSelectedThread
-                                  ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
-                                  : "hover:bg-sidebar-accent/40"
-                              )}
-                              onMouseEnter={() => setHoveredProjectKey(project.key)}
-                              onMouseLeave={() => setHoveredProjectKey(null)}
-                              onFocus={() => setHoveredProjectKey(project.key)}
-                              onBlur={(e) => {
-                                if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-                                  setHoveredProjectKey(null)
-                                }
-                              }}
-                            >
-                              <button
-                                type="button"
-                                className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-                                onClick={() => toggleProject(project.key)}
-                              >
-                                {isCollapsed ? (
-                                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                                ) : (
-                                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                                )}
-                                {project.isPinned ? (
-                                  <Pin
-                                    className="size-4 shrink-0 text-primary"
-                                    aria-hidden="true"
-                                  />
-                                ) : (
-                                  <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
-                                )}
-                                <span className="min-w-0 flex-1 truncate text-xs font-medium duration-150">
-                                  {project.name}
-                                </span>
-                              </button>
-                              {hasContextReminderThread ? (
-                                <span className="size-2 rounded-full bg-status-warning shrink-0" />
-                              ) : (
-                                unreadCount > 0 && (
-                                  <span className="size-2 rounded-full bg-blue-500 shrink-0" />
-                                )
-                              )}
-                              <span className="relative flex h-6 w-4 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-28 group-focus-within:w-28">
-                                <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                                  {project.threads.length}
-                                </span>
-                                <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-                                  <IconPopoverButton
-                                    icon={
-                                      project.isPinned ? (
-                                        <PinOff className="size-3" />
-                                      ) : (
-                                        <Pin className="size-3" />
-                                      )
-                                    }
-                                    popoverContent={
-                                      project.isPinned ? "取消置顶工作区" : "置顶工作区"
-                                    }
-                                    disabled={!canCustomizeProject}
-                                    stopPropagation
-                                    className={cn(
-                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
-                                      project.isPinned && "text-primary opacity-100",
-                                      !canCustomizeProject && "cursor-not-allowed !opacity-30"
-                                    )}
-                                    onClick={() => toggleProjectPin(project.key)}
-                                  />
-                                  <IconPopoverButton
-                                    icon={<Pencil className="size-3" />}
-                                    popoverContent={
-                                      canCustomizeProject
-                                        ? "修改工作区名称"
-                                        : "未关联工作区无法重命名"
-                                    }
-                                    disabled={!canCustomizeProject}
-                                    stopPropagation
-                                    className={cn(
-                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
-                                      !canCustomizeProject && "cursor-not-allowed !opacity-30"
-                                    )}
-                                    onClick={() => openProjectRenameDialog(project)}
-                                  />
-                                  <IconPopoverButton
-                                    icon={<Plus className="size-3" />}
-                                    popoverContent="新增任务"
-                                    stopPropagation
-                                    className="size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20"
-                                    onClick={() => void handleNewProjectThread(project)}
-                                  />
-                                  <IconPopoverButton
-                                    icon={<Trash2 className="size-3" />}
-                                    popoverContent={
-                                      hasRunningThread
-                                        ? "工作区内有运行中的任务，无法删除"
-                                        : "删除工作区会话"
-                                    }
-                                    disabled={hasRunningThread}
-                                    stopPropagation
-                                    className={cn(
-                                      "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive",
-                                      hasRunningThread && "cursor-not-allowed !opacity-30"
-                                    )}
-                                    onClick={() => setProjectToDelete(project)}
-                                  />
-                                </span>
-                              </span>
-                            </div>
-                          </ContextMenuTrigger>
-                        </PopoverTrigger>
-                        <PopoverContent
-                          side="right"
-                          align="start"
-                          className="w-72 p-2 text-xs"
-                          onOpenAutoFocus={(e) => e.preventDefault()}
-                          onMouseEnter={() => setHoveredProjectKey(project.key)}
-                          onMouseLeave={() => setHoveredProjectKey(null)}
-                        >
-                          <div className="mb-1 font-medium text-muted-foreground">工作区路径</div>
-                          <div className="break-all text-foreground">
-                            {project.path || "未关联工作区"}
-                          </div>
-                        </PopoverContent>
-                      </Popover>
-                      <ContextMenuContent>
-                        <ContextMenuItem
-                          disabled={!canCustomizeProject}
-                          onClick={() => toggleProjectPin(project.key)}
-                        >
-                          {project.isPinned ? (
-                            <PinOff className="size-4 mr-2" />
-                          ) : (
-                            <Pin className="size-4 mr-2" />
-                          )}
-                          {project.isPinned ? "取消置顶工作区" : "置顶工作区"}
-                        </ContextMenuItem>
-                        <ContextMenuItem
-                          disabled={!canCustomizeProject}
-                          onClick={() => openProjectRenameDialog(project)}
-                        >
-                          <Pencil className="size-4 mr-2" />
-                          修改工作区名称
-                        </ContextMenuItem>
-                        <ContextMenuItem onClick={() => void handleNewProjectThread(project)}>
-                          <Plus className="size-4 mr-2" />
-                          新增任务
-                        </ContextMenuItem>
-                        <ContextMenuSeparator />
-                        <ContextMenuItem
-                          variant="destructive"
-                          onClick={() => setProjectToDelete(project)}
-                          disabled={hasRunningThread}
-                        >
-                          <Trash2 className="size-4 mr-2" />
-                          {hasRunningThread ? "运行中，无法删除工作区" : "删除工作区会话"}
-                        </ContextMenuItem>
-                      </ContextMenuContent>
-                    </ContextMenu>
-
-                    {!isCollapsed && (
-                      <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                        {project.threads.slice(0, visibleThreadCount).map((thread) => {
-                          const threadState = allThreadStates[thread.thread_id]
-                          const hasRunningCoordinatorWorker = Boolean(
-                            threadState?.coordinatorWorkers.some(
-                              (worker) => worker.status === "running"
-                            )
-                          )
-                          const isLoading =
-                            (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                            hasRunningCoordinatorWorker ||
-                            threadState?.workflowRun?.status === "running"
-                          const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
-                          const hasPendingApproval = Boolean(threadState?.pendingApproval)
-                          const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
-                          const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
-
-                          return (
-                            <ThreadListItem
-                              key={thread.thread_id}
-                              thread={thread}
-                              isLoading={isLoading}
-                              hasPendingApproval={hasPendingApproval}
-                              hasPendingUserInput={hasPendingUserInput}
-                              hasContextReminder={hasContextReminder}
-                              scheduledTaskLoading={scheduledTaskLoading}
-                              isExporting={exportingThreadId === thread.thread_id}
-                              isForking={forkingThreadId === thread.thread_id}
-                              isSelected={currentThreadId === thread.thread_id}
-                              isEditing={editingThreadId === thread.thread_id}
-                              isUnread={unreadIds.has(thread.thread_id)}
-                              editingTitle={editingTitle}
-                              onSelect={() => {
-                                selectThread(thread.thread_id)
-                                markRead(thread.thread_id)
-                              }}
-                              onRunFinished={() => handleRunFinished(thread.thread_id)}
-                              onDelete={() => setThreadToDelete(thread)}
-                              onExport={() => handleExportThread(thread)}
-                              onFork={() => handleForkThread(thread)}
-                              onForkFromCheckpoint={() => void openForkCheckpointDialog(thread)}
-                              onStartEditing={() =>
-                                startEditing(thread.thread_id, thread.title || "")
-                              }
-                              onSaveTitle={saveTitle}
-                              onCancelEditing={cancelEditing}
-                              onEditingTitleChange={setEditingTitle}
-                            />
-                          )
-                        })}
-                        {project.threads.length > visibleThreadCount && (
-                          <button
-                            type="button"
-                            className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
-                            onClick={() =>
-                              setVisibleThreadCounts((counts) => ({
-                                ...counts,
-                                // 基于当前实际可见条数追加,确保"选中项撑开切片"时点击仍能继续展开。
-                                [project.key]: visibleThreadCount + VISIBLE_THREADS_STEP
-                              }))
-                            }
-                          >
-                            <ChevronDown className="size-3 shrink-0" />
-                            展开显示
-                            <span className="text-[10px] text-muted-foreground/60">
-                              还有 {project.threads.length - visibleThreadCount} 条
-                            </span>
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-
-              {threadProjects.length === 0 && (
-                <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>
+              {showRobotPicker && (
+                <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-border bg-popover p-1 shadow-md">
+                  {robots.map((robot, i) => (
+                    <button
+                      key={i}
+                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted transition-colors"
+                      onClick={() => handleNewRobotThread(robot)}
+                    >
+                      <Cpu className="size-3 shrink-0 text-blue-400" />
+                      <span className="truncate">{robot.chatId || `机器人 ${i + 1}`}</span>
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
-          </ScrollArea>
+          )}
         </>
-      )}
+      </div>
+
+      <>
+        <div className="flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+          <span className="min-w-0 flex-1 truncate">工作区 {threadProjects.length}</span>
+          <IconPopoverButton
+            icon={
+              allProjectsCollapsed ? (
+                <Maximize2 className="size-3.5" />
+              ) : (
+                <Minimize2 className="size-3.5" />
+              )
+            }
+            popoverContent={
+              threadProjects.length === 0
+                ? "暂无工作区"
+                : allProjectsCollapsed
+                  ? "全部展开工作区"
+                  : "全部收起工作区"
+            }
+            disabled={threadProjects.length === 0}
+            className="size-6 shrink-0 rounded-sm p-0"
+            onClick={toggleAllProjects}
+          />
+          <IconPopoverButton
+            icon={
+              selectingProjectFolder ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <FolderPlus className="size-3.5" />
+              )
+            }
+            popoverContent={selectingProjectFolder ? "正在选择工作区" : "新增工作区"}
+            disabled={selectingProjectFolder}
+            className="size-6 shrink-0 rounded-sm p-0"
+            onClick={handleAddProject}
+          />
+        </div>
+
+        {/* Thread List */}
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="px-2 pb-2 space-y-1 overflow-hidden">
+            {threadProjects.map((project) => {
+              const isCollapsed = collapsedProjectKeys.has(project.key)
+              const canCustomizeProject = Boolean(project.path)
+              const hasSelectedThread = project.threads.some(
+                (thread) => thread.thread_id === currentThreadId
+              )
+              // 折叠切片的有效条数:默认 5 / 用户点"展开显示"追加。但当前选中的
+              // thread 必须始终可见——若它排在可见范围之外(如重启恢复上次会话时
+              // 排到第 6+ 位),把切片扩展到刚好包含它,避免选中项被截断藏掉。
+              const requestedVisibleThreads =
+                visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
+              const selectedThreadIndex = currentThreadId
+                ? project.threads.findIndex((thread) => thread.thread_id === currentThreadId)
+                : -1
+              const visibleThreadCount =
+                selectedThreadIndex >= 0
+                  ? Math.max(requestedVisibleThreads, selectedThreadIndex + 1)
+                  : requestedVisibleThreads
+              const unreadCount = project.threads.filter((thread) =>
+                unreadIds.has(thread.thread_id)
+              ).length
+              const hasContextReminderThread = project.threads.some((thread) =>
+                Boolean(allThreadStates[thread.thread_id]?.contextReminder?.pending)
+              )
+              const hasRunningThread = project.threads.some((thread) => {
+                const threadState = allThreadStates[thread.thread_id]
+                return (
+                  (allStreamLoadingStates[thread.thread_id] ?? false) ||
+                  Boolean(
+                    threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
+                  ) ||
+                  Boolean(threadState?.scheduledTaskLoading) ||
+                  threadState?.workflowRun?.status === "running"
+                )
+              })
+
+              return (
+                <div key={project.key} className="space-y-1">
+                  <ContextMenu>
+                    <Popover open={hoveredProjectKey === project.key}>
+                      <PopoverTrigger asChild>
+                        <ContextMenuTrigger asChild>
+                          <div
+                            className={cn(
+                              "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
+                              hasSelectedThread
+                                ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
+                                : "hover:bg-sidebar-accent/40"
+                            )}
+                            onMouseEnter={() => setHoveredProjectKey(project.key)}
+                            onMouseLeave={() => setHoveredProjectKey(null)}
+                            onFocus={() => setHoveredProjectKey(project.key)}
+                            onBlur={(e) => {
+                              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                                setHoveredProjectKey(null)
+                              }
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                              onClick={() => toggleProject(project.key)}
+                            >
+                              {isCollapsed ? (
+                                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                              ) : (
+                                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                              )}
+                              {project.isPinned ? (
+                                <Pin className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                              ) : (
+                                <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
+                              )}
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium duration-150">
+                                {project.name}
+                              </span>
+                            </button>
+                            {hasContextReminderThread ? (
+                              <span className="size-2 rounded-full bg-status-warning shrink-0" />
+                            ) : (
+                              unreadCount > 0 && (
+                                <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                              )
+                            )}
+                            <span className="relative flex h-6 w-4 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-28 group-focus-within:w-28">
+                              <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                                {project.threads.length}
+                              </span>
+                              <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                                <IconPopoverButton
+                                  icon={
+                                    project.isPinned ? (
+                                      <PinOff className="size-3" />
+                                    ) : (
+                                      <Pin className="size-3" />
+                                    )
+                                  }
+                                  popoverContent={
+                                    project.isPinned ? "取消置顶工作区" : "置顶工作区"
+                                  }
+                                  disabled={!canCustomizeProject}
+                                  stopPropagation
+                                  className={cn(
+                                    "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
+                                    project.isPinned && "text-primary opacity-100",
+                                    !canCustomizeProject && "cursor-not-allowed !opacity-30"
+                                  )}
+                                  onClick={() => toggleProjectPin(project.key)}
+                                />
+                                <IconPopoverButton
+                                  icon={<Pencil className="size-3" />}
+                                  popoverContent={
+                                    canCustomizeProject
+                                      ? "修改工作区名称"
+                                      : "未关联工作区无法重命名"
+                                  }
+                                  disabled={!canCustomizeProject}
+                                  stopPropagation
+                                  className={cn(
+                                    "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
+                                    !canCustomizeProject && "cursor-not-allowed !opacity-30"
+                                  )}
+                                  onClick={() => openProjectRenameDialog(project)}
+                                />
+                                <IconPopoverButton
+                                  icon={<Plus className="size-3" />}
+                                  popoverContent="新增任务"
+                                  stopPropagation
+                                  className="size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20"
+                                  onClick={() => void handleNewProjectThread(project)}
+                                />
+                                <IconPopoverButton
+                                  icon={<Trash2 className="size-3" />}
+                                  popoverContent={
+                                    hasRunningThread
+                                      ? "工作区内有运行中的任务，无法删除"
+                                      : "删除工作区会话"
+                                  }
+                                  disabled={hasRunningThread}
+                                  stopPropagation
+                                  className={cn(
+                                    "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive",
+                                    hasRunningThread && "cursor-not-allowed !opacity-30"
+                                  )}
+                                  onClick={() => setProjectToDelete(project)}
+                                />
+                              </span>
+                            </span>
+                          </div>
+                        </ContextMenuTrigger>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        side="right"
+                        align="start"
+                        className="w-72 p-2 text-xs"
+                        onOpenAutoFocus={(e) => e.preventDefault()}
+                        onMouseEnter={() => setHoveredProjectKey(project.key)}
+                        onMouseLeave={() => setHoveredProjectKey(null)}
+                      >
+                        <div className="mb-1 font-medium text-muted-foreground">工作区路径</div>
+                        <div className="break-all text-foreground">
+                          {project.path || "未关联工作区"}
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                    <ContextMenuContent>
+                      <ContextMenuItem
+                        disabled={!canCustomizeProject}
+                        onClick={() => toggleProjectPin(project.key)}
+                      >
+                        {project.isPinned ? (
+                          <PinOff className="size-4 mr-2" />
+                        ) : (
+                          <Pin className="size-4 mr-2" />
+                        )}
+                        {project.isPinned ? "取消置顶工作区" : "置顶工作区"}
+                      </ContextMenuItem>
+                      <ContextMenuItem
+                        disabled={!canCustomizeProject}
+                        onClick={() => openProjectRenameDialog(project)}
+                      >
+                        <Pencil className="size-4 mr-2" />
+                        修改工作区名称
+                      </ContextMenuItem>
+                      <ContextMenuItem onClick={() => void handleNewProjectThread(project)}>
+                        <Plus className="size-4 mr-2" />
+                        新增任务
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        variant="destructive"
+                        onClick={() => setProjectToDelete(project)}
+                        disabled={hasRunningThread}
+                      >
+                        <Trash2 className="size-4 mr-2" />
+                        {hasRunningThread ? "运行中，无法删除工作区" : "删除工作区会话"}
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+
+                  {!isCollapsed && (
+                    <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
+                      {project.threads.slice(0, visibleThreadCount).map((thread) => {
+                        const threadState = allThreadStates[thread.thread_id]
+                        const hasRunningCoordinatorWorker = Boolean(
+                          threadState?.coordinatorWorkers.some(
+                            (worker) => worker.status === "running"
+                          )
+                        )
+                        const isLoading =
+                          (allStreamLoadingStates[thread.thread_id] ?? false) ||
+                          hasRunningCoordinatorWorker ||
+                          threadState?.workflowRun?.status === "running"
+                        const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
+                        const hasPendingApproval = Boolean(threadState?.pendingApproval)
+                        const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
+                        const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
+
+                        return (
+                          <ThreadListItem
+                            key={thread.thread_id}
+                            thread={thread}
+                            isLoading={isLoading}
+                            hasPendingApproval={hasPendingApproval}
+                            hasPendingUserInput={hasPendingUserInput}
+                            hasContextReminder={hasContextReminder}
+                            scheduledTaskLoading={scheduledTaskLoading}
+                            isExporting={exportingThreadId === thread.thread_id}
+                            isForking={forkingThreadId === thread.thread_id}
+                            isSelected={currentThreadId === thread.thread_id}
+                            isEditing={editingThreadId === thread.thread_id}
+                            isUnread={unreadIds.has(thread.thread_id)}
+                            editingTitle={editingTitle}
+                            onSelect={() => {
+                              selectThread(thread.thread_id)
+                              markRead(thread.thread_id)
+                            }}
+                            onRunFinished={() => handleRunFinished(thread.thread_id)}
+                            onDelete={() => setThreadToDelete(thread)}
+                            onExport={() => handleExportThread(thread)}
+                            onFork={() => handleForkThread(thread)}
+                            onForkFromCheckpoint={() => void openForkCheckpointDialog(thread)}
+                            onStartEditing={() =>
+                              startEditing(thread.thread_id, thread.title || "")
+                            }
+                            onSaveTitle={saveTitle}
+                            onCancelEditing={cancelEditing}
+                            onEditingTitleChange={setEditingTitle}
+                          />
+                        )
+                      })}
+                      {project.threads.length > visibleThreadCount && (
+                        <button
+                          type="button"
+                          className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
+                          onClick={() =>
+                            setVisibleThreadCounts((counts) => ({
+                              ...counts,
+                              // 基于当前实际可见条数追加,确保"选中项撑开切片"时点击仍能继续展开。
+                              [project.key]: visibleThreadCount + VISIBLE_THREADS_STEP
+                            }))
+                          }
+                        >
+                          <ChevronDown className="size-3 shrink-0" />
+                          展开显示
+                          <span className="text-[10px] text-muted-foreground/60">
+                            还有 {project.threads.length - visibleThreadCount} 条
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+
+            {threadProjects.length === 0 && (
+              <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>
+            )}
+          </div>
+        </ScrollArea>
+      </>
 
       <div className="px-3 py-2.5 flex items-center justify-center gap-1.5 select-none">
         <svg className="size-5 shrink-0" viewBox="0 0 120 120" fill="none">
@@ -1752,8 +1589,7 @@ export function ThreadSidebar(): React.JSX.Element {
               </div>
             ) : (
               forkCheckpoints.map((checkpoint) => {
-                const selected =
-                  selectedForkCheckpoint?.checkpointId === checkpoint.checkpointId
+                const selected = selectedForkCheckpoint?.checkpointId === checkpoint.checkpointId
                 const disabled = !checkpoint.isStableTurnBoundary || forkDialogBusy
                 return (
                   <button
@@ -1834,7 +1670,9 @@ export function ThreadSidebar(): React.JSX.Element {
               >
                 <div className="text-sm font-medium">派生到其他工作区</div>
                 <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {forkWorkspacePath ? getWorkspaceName(forkWorkspacePath) : "选择一个本地工作区路径"}
+                  {forkWorkspacePath
+                    ? getWorkspaceName(forkWorkspacePath)
+                    : "选择一个本地工作区路径"}
                 </div>
               </button>
             </div>

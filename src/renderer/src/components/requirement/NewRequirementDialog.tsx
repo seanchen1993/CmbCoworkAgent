@@ -1,0 +1,341 @@
+import { useEffect, useRef, useState } from "react"
+import { ArrowRight, FileText, FolderOpen, Link, Loader2, Upload } from "lucide-react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { cn } from "@/lib/utils"
+import { fromPersistedRequirement, type RequirementRecord } from "./requirement-data"
+import type { DesignSystemInfo } from "../design/types"
+
+type UploadSource = "file" | "link"
+
+function getRequirementTitleFromFileName(fileName: string): string {
+  return fileName.replace(/\.[^.]+$/, "").trim() || "新需求草稿"
+}
+
+function getLinkSnapshot(value: string, systemName: string): string {
+  return `# 原始需求链接
+
+- 业务系统：${systemName}
+- 需求链接：${value}
+- 保存时间：${new Date().toLocaleString("zh-CN", { hour12: false })}
+
+> 该文件保存了原始需求链接，后续可在同目录中与规范 PRD 一起查看。
+`
+}
+
+export function NewRequirementDialog({
+  open,
+  onOpenChange,
+  system,
+  onStartConversation
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  system: DesignSystemInfo
+  onStartConversation: (requirement: RequirementRecord) => void | Promise<void>
+}): React.JSX.Element {
+  const [source, setSource] = useState<UploadSource>("file")
+  const [file, setFile] = useState<File | null>(null)
+  const [title, setTitle] = useState("")
+  const [url, setUrl] = useState("")
+  const [workDir, setWorkDir] = useState<string | null>(null)
+  const [workDirLoading, setWorkDirLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const lastAutoFilledTitleRef = useRef("")
+
+  useEffect(() => {
+    let cancelled = false
+    void window.api.requirements
+      .getWorkDir()
+      .then((lastWorkDir) => {
+        if (!cancelled) setWorkDir(lastWorkDir)
+      })
+      .catch(() => {
+        if (!cancelled) setWorkDir(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const updateFile = (nextFile: File | null): void => {
+    if (nextFile && !nextFile.name.toLocaleLowerCase().endsWith(".docx")) {
+      toast.error("仅支持 .docx 格式的需求草稿")
+      return
+    }
+    setFile(nextFile)
+    const nextAutoFilledTitle = nextFile ? getRequirementTitleFromFileName(nextFile.name) : ""
+    setTitle((currentTitle) => {
+      const trimmedTitle = currentTitle.trim()
+      if (!trimmedTitle || trimmedTitle === lastAutoFilledTitleRef.current) {
+        return nextAutoFilledTitle
+      }
+      return currentTitle
+    })
+    lastAutoFilledTitleRef.current = nextAutoFilledTitle
+  }
+
+  const handleConfirm = async (): Promise<void> => {
+    if (source === "file" && !file) {
+      toast.error("请先选择需求草稿文件")
+      return
+    }
+    if (source === "link" && !url.trim()) {
+      toast.error("请填写需求链接")
+      return
+    }
+    if (!workDir) {
+      toast.error("请先选择需求工作目录")
+      return
+    }
+    const normalizedTitle = title.trim()
+    if (!normalizedTitle) {
+      toast.error("请填写需求名称")
+      return
+    }
+    const normalizedUrl = url.trim()
+    const sourceName = source === "file" ? file?.name || "新需求草稿.docx" : null
+
+    setSaving(true)
+    try {
+      const sourcePayload =
+        source === "file"
+          ? {
+              fileName: sourceName || "新需求草稿.docx",
+              sourcePath: file ? window.api.file.getFilePath(file) : undefined
+            }
+          : {
+              fileName: "原始需求链接.md",
+              url: normalizedUrl,
+              content: getLinkSnapshot(normalizedUrl, system.name)
+            }
+      const result = await window.api.requirements.create({
+        systemId: system.id,
+        title: normalizedTitle,
+        workDir,
+        source: {
+          type: source,
+          ...sourcePayload
+        }
+      })
+      if (!result.success || !result.requirement) {
+        throw new Error(result.error || "保存需求草稿失败")
+      }
+
+      const requirement = fromPersistedRequirement(result.requirement, system.name)
+      onOpenChange(false)
+      toast.success("需求草稿已归档")
+      await onStartConversation(requirement)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存需求草稿失败")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const selectWorkDir = async (): Promise<void> => {
+    setWorkDirLoading(true)
+    try {
+      const result = await window.api.requirements.selectWorkDir()
+      if (!result.success) {
+        throw new Error(result.error || "选择需求工作目录失败")
+      }
+      if (result.workDir) setWorkDir(result.workDir)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "选择需求工作目录失败")
+    } finally {
+      setWorkDirLoading(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-[680px]">
+        <DialogHeader>
+          <div className="px-6 pt-5">
+            <DialogTitle>新增需求 · 上传草稿</DialogTitle>
+            <DialogDescription className="mt-1.5">
+              已选择「{system.name}」；先选择归档工作目录，再上传草稿文件或填写需求链接。
+            </DialogDescription>
+          </div>
+        </DialogHeader>
+        <div className="space-y-4 px-6 pb-5 pt-4">
+          <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
+            <div className="mb-2 flex items-center gap-2">
+              <FolderOpen className="size-4 text-primary" />
+              <span className="text-sm font-semibold text-foreground">需求工作目录</span>
+              <span className="text-xs text-muted-foreground">
+                默认使用上次选择的目录（多个需求可共用同一个根目录，无需分别设置）
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="min-w-0 flex-1 truncate rounded-lg border border-border bg-white px-3 py-2 text-xs text-foreground">
+                {workDir || "尚未选择需求工作目录"}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={workDirLoading || saving}
+                onClick={() => void selectWorkDir()}
+              >
+                <FolderOpen className="size-3.5" />
+                {workDirLoading ? "选择中..." : workDir ? "更换目录" : "选择目录"}
+              </Button>
+            </div>
+            <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+              系统会在目录下为各需求创建独立子文件夹，规范 PRD
+              文件将存放于对应需求的独立文件夹下。
+            </p>
+          </div>
+
+          <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
+            {[
+              { id: "file" as const, label: "上传文件", icon: Upload },
+              { id: "link" as const, label: "填写链接", icon: Link }
+            ].map((item) => {
+              const Icon = item.icon
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setSource(item.id)}
+                  className={cn(
+                    "flex h-8 items-center gap-1.5 rounded px-3 text-xs font-semibold transition-colors",
+                    source === item.id
+                      ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <Icon className="size-3.5" />
+                  {item.label}
+                </button>
+              )
+            })}
+          </div>
+
+          {source === "file" ? (
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault()
+                updateFile(event.dataTransfer.files.item(0))
+              }}
+              className="flex min-h-44 w-full flex-col items-center justify-center rounded-xl border-[1.5px] border-dashed border-[#d8cbbb] bg-[#fdfbf7] px-6 text-center transition-colors hover:border-primary/60 hover:bg-primary/5 focus-visible:border-primary focus-visible:outline-none"
+            >
+              <Upload className="mb-3 size-7 text-primary" />
+              <span className="text-sm font-semibold text-foreground">
+                {file ? file.name : "拖拽文件到此处，或点击上传"}
+              </span>
+              <span className="mt-1 text-xs text-muted-foreground">
+                仅支持 .docx 格式 · 请将旧版 .doc 文件另存为 .docx 后上传
+              </span>
+              {file ? (
+                <span className="mt-3 flex w-full items-center gap-2 rounded-lg border border-border bg-[#fbf8f4] px-3 py-2 text-left">
+                  <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-[#f8f0df] text-[#8f6a2a]">
+                    <FileText className="size-3.5" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[11px] font-semibold text-foreground">
+                      {file.name}
+                    </span>
+                    <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                      {Math.ceil(file.size / 1024)} KB · 草稿已就绪
+                    </span>
+                  </span>
+                </span>
+              ) : null}
+              <input
+                ref={inputRef}
+                type="file"
+                accept=".docx"
+                className="hidden"
+                onChange={(event) => {
+                  updateFile(event.target.files?.item(0) ?? null)
+                  event.target.value = ""
+                }}
+              />
+            </button>
+          ) : (
+            <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
+              <label
+                className="mb-2 block text-sm font-semibold text-foreground"
+                htmlFor="requirement-link"
+              >
+                粘贴需求链接
+              </label>
+              <div className="relative">
+                <Link className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-primary" />
+                <Input
+                  id="requirement-link"
+                  value={url}
+                  onChange={(event) => setUrl(event.target.value)}
+                  placeholder="https://docs.example.com/prd/..."
+                  className="h-10 bg-white pl-9"
+                />
+              </div>
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                支持飞书文档、腾讯文档、语雀、Confluence 和普通网页链接，链接信息会一起归档。
+              </p>
+            </div>
+          )}
+          <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
+            <label
+              className="mb-2 block text-sm font-semibold text-foreground"
+              htmlFor="requirement-title"
+            >
+              需求名称
+            </label>
+            <Input
+              id="requirement-title"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder={
+                source === "file" ? "上传文件后会自动回填，也可手动输入" : "例如：支付流程优化需求"
+              }
+              className="h-10 bg-white"
+              disabled={saving}
+            />
+            <p className="mt-3 text-xs leading-5 text-muted-foreground">
+              {source === "file"
+                ? "上传需求文件后会默认带出文件名，支持继续编辑。"
+                : "建议填写一个便于检索和沟通的需求名称。"}
+            </p>
+          </div>
+        </div>
+        <DialogFooter className="border-t border-border bg-[#fbf8f4] px-6 py-3">
+          <span className="mr-auto text-[11px] text-muted-foreground">
+            {source === "file"
+              ? "草稿与后续 PRD 会归档到已选需求工作目录"
+              : "链接快照与后续 PRD 会归档到已选需求工作目录"}
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            disabled={saving}
+          >
+            取消
+          </Button>
+          <Button type="button" onClick={() => void handleConfirm()} disabled={saving}>
+            {saving ? <Loader2 className="size-4 animate-spin" /> : null}
+            {source === "file" ? "上传并开始沟通" : "保存并开始沟通"}
+            {!saving ? <ArrowRight className="size-4" /> : null}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}

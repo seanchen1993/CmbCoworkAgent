@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, useLayoutEffect, lazy, Suspense } from "react"
 import {
   Briefcase,
+  ClipboardList,
   Eye,
   GitBranch,
   GripVertical,
@@ -38,6 +39,11 @@ const DashboardView = lazy(() =>
 )
 const DesignView = lazy(() =>
   import("@/components/design/DesignView").then((m) => ({ default: m.DesignView }))
+)
+const RequirementEntryView = lazy(() =>
+  import("@/components/requirement/RequirementEntryView").then((m) => ({
+    default: m.RequirementEntryView
+  }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
@@ -186,6 +192,7 @@ function App(): React.JSX.Element {
     setShowCustomizeView,
     setShowDesignView,
     setShowHarnessBoardView,
+    setMainView,
     setEvolutionTab,
     setCloudEvolutionUpdates
   } = useAppStore(
@@ -208,6 +215,7 @@ function App(): React.JSX.Element {
       setShowCustomizeView: state.setShowCustomizeView,
       setShowDesignView: state.setShowDesignView,
       setShowHarnessBoardView: state.setShowHarnessBoardView,
+      setMainView: state.setMainView,
       setEvolutionTab: state.setEvolutionTab,
       setCloudEvolutionUpdates: state.setCloudEvolutionUpdates
     }))
@@ -223,6 +231,7 @@ function App(): React.JSX.Element {
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
+  const [activeModeTab, setActiveModeTab] = useState<"design" | "requirements">("design")
 
   const [zoomLevel, setZoomLevel] = useState(1)
   const [bus, setBus] = useState(true)
@@ -244,6 +253,14 @@ function App(): React.JSX.Element {
     }
     setShowHarnessBoardView(true)
   }, [projectModeEnabled, setShowHarnessBoardView])
+  const selectDesignHistory = useCallback(() => {
+    setActiveModeTab("design")
+    setShowDesignView(true)
+  }, [setShowDesignView])
+  const selectRequirementHistory = useCallback(() => {
+    setActiveModeTab("requirements")
+    setShowDesignView(true)
+  }, [setShowDesignView])
   const isThreadWorkerFocusActive =
     mainView === "thread" &&
     Boolean(currentThreadId && workerFocusView?.threadId === currentThreadId)
@@ -288,11 +305,9 @@ function App(): React.JSX.Element {
       if (workerFocusTransportRef.current !== transport) return
       const messages = transport.convertFocusedCoordinatorWorkerIPCEvent(event, threadId)
       if (messages.length > 0) {
-        useAppStore
-          .getState()
-          .appendWorkerFocusMessages(workerThreadId, messages, {
-            orderedSnapshot: event.mode === "values"
-          })
+        useAppStore.getState().appendWorkerFocusMessages(workerThreadId, messages, {
+          orderedSnapshot: event.mode === "values"
+        })
       }
     })
 
@@ -800,55 +815,12 @@ function App(): React.JSX.Element {
       <div className="flex flex-col h-screen overflow-hidden bg-background">
         {/* Titlebar - logo centered, right panel toggle on right */}
         <div className="flex h-9 w-full shrink-0 app-drag-region items-center border-b border-border">
-          {/* Left: sidebar toggle */}
+          {/* Left: sidebar toggle and mode navigation */}
           <div
             className="flex flex-1 h-9 min-w-0 items-center"
             style={{ marginLeft: "var(--titlebar-inset-left, 0px)" }}
           >
-            {mainView === "design" && (
-              <div
-                role="tablist"
-                aria-label="工作模式"
-                className="ml-1 flex h-8 items-center gap-0.5 rounded-md bg-muted p-0.5"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={false}
-                  onClick={() => setShowDesignView(false)}
-                  className="inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
-                >
-                  <MessageSquare className="size-3 shrink-0" />
-                  对话模式
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={false}
-                  aria-disabled={!projectModeEnabled}
-                  onClick={selectDesignProjectMode}
-                  title={projectModeEnabled ? "切换到项目模式" : "项目模式暂未开放"}
-                  className={`inline-flex h-7 items-center gap-1 rounded px-2 text-xs font-semibold transition-colors ${
-                    projectModeEnabled
-                      ? "text-muted-foreground hover:bg-background hover:text-foreground"
-                      : "cursor-not-allowed text-muted-foreground/50"
-                  }`}
-                >
-                  <Workflow className="size-3 shrink-0" />
-                  项目模式
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected
-                  className="inline-flex h-7 items-center gap-1 rounded border border-border/70 bg-background px-2 text-xs font-semibold text-foreground shadow-sm"
-                >
-                  <Palette className="size-3 shrink-0" />
-                  设计模式
-                </button>
-              </div>
-            )}
-            {mainView !== "customize" && mainView !== "design" && !isAgentFocusActive && (
+            {mainView !== "customize" && !isAgentFocusActive && (
               <button
                 type="button"
                 className={`${panelToggleBaseClass} ${
@@ -876,6 +848,66 @@ function App(): React.JSX.Element {
                 )}
               </button>
             )}
+            <div role="tablist" aria-label="工作模式" className="ml-1 flex h-9 items-center gap-1">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "thread"}
+                onClick={() => setMainView("thread")}
+                className={`${panelToggleBaseClass} ${
+                  mainView === "thread" ? moduleActiveClass : moduleInactiveClass
+                }`}
+              >
+                <MessageSquare size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>对话模式</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "harness"}
+                aria-disabled={!projectModeEnabled}
+                onClick={selectDesignProjectMode}
+                title={projectModeEnabled ? "切换到项目模式" : "项目模式暂未开放"}
+                className={`${panelToggleBaseClass} ${
+                  projectModeEnabled
+                    ? mainView === "harness"
+                      ? moduleActiveClass
+                      : moduleInactiveClass
+                    : "cursor-not-allowed text-muted-foreground/50"
+                }`}
+              >
+                <Workflow size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>项目模式</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "design" && activeModeTab === "design"}
+                onClick={selectDesignHistory}
+                className={`${panelToggleBaseClass} ${
+                  mainView === "design" && activeModeTab === "design"
+                    ? moduleActiveClass
+                    : moduleInactiveClass
+                }`}
+              >
+                <Palette size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>设计模式</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mainView === "design" && activeModeTab === "requirements"}
+                onClick={selectRequirementHistory}
+                className={`${panelToggleBaseClass} ${
+                  mainView === "design" && activeModeTab === "requirements"
+                    ? moduleActiveClass
+                    : moduleInactiveClass
+                }`}
+              >
+                <ClipboardList size={16} className="shrink-0" strokeWidth={1.8} />
+                <span>需求模式</span>
+              </button>
+            </div>
           </div>
           {/* Center: logo + title */}
           <div
@@ -1164,7 +1196,7 @@ function App(): React.JSX.Element {
                   </div>
                 }
               >
-                <DesignView />
+                {activeModeTab === "requirements" ? <RequirementEntryView /> : <DesignView />}
               </Suspense>
             </main>
           </div>
