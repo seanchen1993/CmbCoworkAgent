@@ -3,6 +3,7 @@ import { Cpu, FolderOpen, Plus, Trash2, Pencil, Radio, Copy, Check } from "lucid
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import {
   Dialog,
   DialogContent,
@@ -696,9 +697,9 @@ export function ChatXPanel(): React.JSX.Element {
                   )}
                   onClick={() => handleToggleEnabled(!config.enabled)}
                 >
-                  <span
+                  <ToggleThumb
                     className={cn(
-                      "pointer-events-none inline-block size-3 rounded-full bg-white shadow-sm transition-transform",
+                      "inline-block size-3",
                       config.enabled ? "translate-x-3" : "translate-x-0"
                     )}
                   />

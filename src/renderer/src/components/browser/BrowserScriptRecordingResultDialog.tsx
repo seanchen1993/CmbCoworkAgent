@@ -243,7 +243,7 @@ export function BrowserScriptRecordingResultDialog({
                           index === scriptRecording.actions.length - 1 &&
                           isSelected
                           ? "border-status-info/35 bg-status-info/10 shadow-sm"
-                          : "border-gray-200 bg-background/90 hover:border-border-emphasis",
+                          : "border-border bg-background/90 hover:border-border-emphasis",
                         !isSelected && "opacity-55"
                       )}
                     >

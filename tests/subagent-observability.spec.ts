@@ -303,7 +303,8 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     compactTranscriptHandlerStart + 1
   )
   assert(
-    compactTranscriptHandlerStart >= 0 && focusedTranscriptHandlerStart > compactTranscriptHandlerStart,
+    compactTranscriptHandlerStart >= 0 &&
+      focusedTranscriptHandlerStart > compactTranscriptHandlerStart,
     "thread IPC should expose separate compact and focused transcript handlers"
   )
   const compactTranscriptHandler = threadIpc.slice(
@@ -501,7 +502,16 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     "runningCoordinatorWorkerIdsRef",
     "right panel no longer keys coordinator auto-open only by worker id"
   )
-  assertIncludes(rightPanel, "setAgentsOpen(true)", "right panel auto-opens agents section")
+  assertIncludes(
+    rightPanel,
+    'setExclusiveOpenPanel("agents")',
+    "right panel opens agents through the exclusive workspace panel control"
+  )
+  assertIncludes(
+    rightPanel,
+    "hasNewRunning && !hasOpenWorkspacePanelRef.current",
+    "right panel does not replace a panel the user is already viewing"
+  )
   assertIncludes(
     rightPanel,
     "worker.turns ?? 0",
@@ -836,7 +846,7 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
   )
   assertIncludes(
     workerCheckpointHistory,
-    'message.is_error === true ||',
+    "message.is_error === true ||",
     "worker checkpoint helper preserves explicit tool error flags"
   )
   assertIncludes(

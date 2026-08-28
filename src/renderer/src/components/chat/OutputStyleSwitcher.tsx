@@ -42,11 +42,11 @@ const OUTPUT_STYLE_OPTIONS: OutputStyleOption[] = [
     label: "标准",
     description: "保持日常回复方式，不额外调整表达。",
     icon: AlignLeft,
-    iconClassName: "text-slate-600 dark:text-slate-300",
+    iconClassName: "text-muted-foreground",
     iconBackgroundClassName: "bg-slate-500/10",
     selectedClassName:
-      "border-slate-300/80 bg-slate-100/70 ring-slate-200/70 dark:border-slate-500/40 dark:bg-slate-500/10 dark:ring-slate-500/20",
-    selectedCheckClassName: "bg-slate-600 dark:bg-slate-400"
+      "border-border bg-background-interactive/70 ring-border",
+    selectedCheckClassName: "bg-muted-foreground"
   },
   {
     value: "concise",

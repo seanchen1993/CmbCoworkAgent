@@ -277,18 +277,18 @@ export function SkillsByCategorySection({
         className={`space-y-2.5 py-4 ${showDivider ? "pt-5" : "pt-0"} last:pb-0`}
       >
         {showDivider && (
-          <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-slate-500/85 -mt-2 mb-4" />
+          <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-border -mt-2 mb-4" />
         )}
         <div className="text-xs text-muted-foreground font-medium tracking-wider flex items-center justify-between gap-1">
           <div className="flex items-center gap-1">
             <CategoryIcon className="size-3 text-amber-500" />
-            <span className={"text-black"}>{primaryCategory}</span>
+            <span className="text-foreground">{primaryCategory}</span>
           </div>
           {onlyPrimaryLevel && (
             <button
               type="button"
               onClick={() => onOpenMarketByCategory(primaryCategory)}
-              className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
+              className="cursor-pointer text-xs text-status-warning-foreground transition-colors hover:opacity-80"
             >
               更多{primaryMoreCount > 0 ? `（+${primaryMoreCount}）` : ""}
             </button>
@@ -308,14 +308,14 @@ export function SkillsByCategorySection({
                   className={`flex items-center px-1 ${secondaryCategory ? "justify-between" : "justify-end"}`}
                 >
                   {secondaryCategory ? (
-                    <div className="text-xs text-gray-700 dark:text-gray-300">
+                    <div className="text-xs text-gray-700 dark:text-muted-foreground">
                       {secondaryCategory}
                     </div>
                   ) : null}
                   <button
                     type="button"
                     onClick={() => onOpenMarketByCategory(secondaryCategory || primaryCategory)}
-                    className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
+                    className="cursor-pointer text-xs text-status-warning-foreground transition-colors hover:opacity-80"
                   >
                     更多{secondaryMoreCount > 0 ? `（+${secondaryMoreCount}）` : ""}
                   </button>
@@ -338,7 +338,7 @@ export function SkillsByCategorySection({
                             }
                             onUseSkillPrompt(skill, label)
                           }}
-                          className="group relative w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                          className="group relative w-full rounded-xl border border-slate-300/90 dark:border-border bg-slate-50/70 dark:bg-background-elevated px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] dark:shadow-[0_1px_0_rgb(0_0_0_/_18%)] hover:bg-slate-100/95 dark:hover:bg-background-interactive hover:border-slate-400/95 dark:hover:border-border-emphasis hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
                         >
                           {tags.length > 0 && (
                             <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">
@@ -347,8 +347,8 @@ export function SkillsByCategorySection({
                                   key={tag}
                                   className={
                                     tag === "精品"
-                                      ? "relative rounded-sm border border-amber-200 bg-amber-50 px-0.5 text-[9px] leading-3 text-amber-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['团队级']"
-                                      : "relative rounded-sm border border-emerald-200 bg-emerald-50 px-0.5 text-[9px] leading-3 text-emerald-700 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['室组级']"
+                                      ? "relative rounded-sm border border-amber-200 dark:border-amber-400/35 bg-amber-50 dark:bg-amber-400/10 px-0.5 text-[9px] leading-3 text-amber-700 dark:text-amber-200 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 dark:hover:after:border-border hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['团队级']"
+                                      : "relative rounded-sm border border-emerald-200 dark:border-emerald-400/35 bg-emerald-50 dark:bg-emerald-400/10 px-0.5 text-[9px] leading-3 text-emerald-700 dark:text-emerald-200 hover:z-10 hover:after:absolute hover:after:left-full hover:after:top-1/2 hover:after:ml-1.5 hover:after:-translate-y-1/2 hover:after:whitespace-nowrap hover:after:rounded-md hover:after:border hover:after:border-slate-200 dark:hover:after:border-border hover:after:bg-popover hover:after:px-2 hover:after:py-1 hover:after:text-[11px] hover:after:leading-none hover:after:text-popover-foreground hover:after:shadow-md hover:after:content-['室组级']"
                                   }
                                 >
                                   {tag}
@@ -359,7 +359,7 @@ export function SkillsByCategorySection({
                           <div
                             className={`flex items-center gap-2 min-w-0 ${tags.length > 0 ? "pr-8" : ""}`}
                           >
-                            <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                            <div className="rounded-md border border-border bg-background-interactive p-1.5 text-muted-foreground transition-colors group-hover:text-foreground">
                               <Wrench className="size-4" />
                             </div>
                             <div className="min-w-0 flex-1">

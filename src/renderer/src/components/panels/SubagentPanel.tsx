@@ -202,24 +202,24 @@ export function SubagentCard({
           }}
           className={cn(
             "group flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left text-xs transition-all",
-            "border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.06)]",
-            "hover:border-slate-300 hover:from-white hover:to-slate-100 hover:shadow-[0_4px_14px_rgba(15,23,42,0.08)]",
+            "border-border bg-background-elevated text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.06)]",
+            "hover:border-border-emphasis hover:bg-background-interactive hover:shadow-[0_4px_14px_rgba(0,0,0,0.08)]",
             "disabled:cursor-not-allowed disabled:opacity-55",
-            "dark:border-slate-700/80 dark:from-slate-900 dark:to-slate-950 dark:text-slate-100 dark:hover:border-slate-600"
+            "disabled:pointer-events-none"
           )}
         >
           <span className="flex min-w-0 items-center gap-2.5">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-sky-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-sky-300">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border bg-background-interactive text-primary shadow-sm">
               <Code2 className="size-3.5" />
             </span>
             <span className="min-w-0">
               <span className="block text-[12px] font-semibold leading-none">打开完整记录</span>
-              <span className="mt-1 block truncate text-[10px] text-slate-500 dark:text-slate-400">
+              <span className="mt-1 block truncate text-[10px] text-muted-foreground">
                 查看思考、工具参数和执行结果
               </span>
             </span>
           </span>
-          <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 dark:text-slate-500" />
+          <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
         </button>
 
         <div className="rounded-lg border border-border/55 bg-muted/20 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">

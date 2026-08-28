@@ -1,11 +1,10 @@
 import { useEffect, useState, useMemo } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { VirtualList } from "@/components/ui/virtual-list"
-import { createHighlighterCore, type HighlighterCore } from "shiki/core"
+import { createCssVariablesTheme, createHighlighterCore, type HighlighterCore } from "shiki/core"
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript"
 
-// Import bundled themes and languages
-import githubLight from "shiki/themes/github-light.mjs"
+// Import bundled languages
 import langTypescript from "shiki/langs/typescript.mjs"
 import langTsx from "shiki/langs/tsx.mjs"
 import langJavascript from "shiki/langs/javascript.mjs"
@@ -21,11 +20,15 @@ import langSql from "shiki/langs/sql.mjs"
 
 // Singleton highlighter instance (using JS engine - no WASM needed)
 let highlighterPromise: Promise<HighlighterCore> | null = null
+const appSyntaxTheme = createCssVariablesTheme({
+  name: "cmbdevclaw",
+  variablePrefix: "--shiki-"
+})
 
 async function getHighlighter(): Promise<HighlighterCore> {
   if (!highlighterPromise) {
     highlighterPromise = createHighlighterCore({
-      themes: [githubLight],
+      themes: [appSyntaxTheme],
       langs: [
         langTypescript,
         langTsx,
@@ -127,7 +130,7 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
 
         const html = highlighter.codeToHtml(content, {
           lang: language,
-          theme: "github-light"
+          theme: "cmbdevclaw"
         })
 
         if (cancelled) return
@@ -181,7 +184,10 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
         <ScrollArea className="flex-1 min-h-0">
           <div className="shiki-wrapper">
             {highlightedHtml ? (
-              <div className="shiki-content" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+              <div
+                className="shiki-content"
+                dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+              />
             ) : (
               // Fallback plain text rendering
               <pre className="p-4 text-sm font-mono leading-relaxed whitespace-pre-wrap break-all">

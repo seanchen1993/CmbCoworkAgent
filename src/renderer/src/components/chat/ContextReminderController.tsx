@@ -202,7 +202,7 @@ export function ContextReminderController({
           </button>
           <button
             type="button"
-            className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-md bg-button px-4 py-2 text-sm font-semibold text-button-foreground shadow-sm transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={creatingSession}
             onClick={() => void handleCreateSession()}
           >

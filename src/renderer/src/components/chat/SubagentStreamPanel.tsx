@@ -390,7 +390,7 @@ export function SubagentStreamPanel(): React.JSX.Element {
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",
             isRunning
               ? "border-blue-300/60 bg-blue-500/10 text-blue-700 dark:text-blue-300"
-              : "border-stone-300/80 bg-stone-100/70 text-stone-700 dark:border-stone-700 dark:bg-stone-900/45 dark:text-stone-300"
+              : "border-border bg-background-interactive/70 text-muted-foreground"
           )}
         >
           {isRunning ? "实时运行中" : "历史快照"}

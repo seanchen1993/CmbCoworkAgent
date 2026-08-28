@@ -89,6 +89,7 @@ function PiePanel({
             <Tooltip
               contentStyle={{
                 backgroundColor: "var(--color-card)",
+                color: "var(--color-foreground)",
                 border: "1px solid var(--color-border)",
                 borderRadius: 8,
                 fontSize: 12
@@ -228,9 +229,10 @@ function VersionPanel({ data }: { data: UserStatsData }) {
                     ))}
                   </Pie>
                   <Tooltip
-                    contentStyle={{
-                      backgroundColor: "var(--color-card)",
-                      border: "1px solid var(--color-border)",
+                  contentStyle={{
+                    backgroundColor: "var(--color-card)",
+                    color: "var(--color-foreground)",
+                    border: "1px solid var(--color-border)",
                       borderRadius: 8,
                       fontSize: 12
                     }}

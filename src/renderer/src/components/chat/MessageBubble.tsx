@@ -238,28 +238,28 @@ function hydrateToolCall(
 function getToolStatusMeta(status: ToolCallStatus): { label: string; className: string } {
   switch (status) {
     case "completed":
-      return { label: "OK", className: "bg-green-100 text-green-700 border border-green-200" }
+      return { label: "OK", className: "border border-status-nominal/25 bg-status-nominal/10 text-status-nominal" }
     case "failed":
-      return { label: "ERROR", className: "bg-red-100 text-red-700 border border-red-200" }
+      return { label: "ERROR", className: "border border-status-critical/25 bg-status-critical/10 text-status-critical" }
     case "awaiting_approval":
-      return { label: "APPROVAL", className: "bg-amber-100 text-amber-700 border border-amber-200" }
+      return { label: "APPROVAL", className: "border border-status-warning/25 bg-status-warning/10 text-status-warning" }
     case "queued":
-      return { label: "QUEUED", className: "bg-slate-100 text-slate-600 border border-slate-200" }
+      return { label: "QUEUED", className: "border border-border bg-background-interactive text-muted-foreground" }
     case "running":
       return {
         label: "RUNNING",
-        className: "bg-gray-100 text-gray-600 border border-gray-200 animate-pulse"
+        className: "animate-pulse border border-border bg-background-interactive text-muted-foreground"
       }
     case "rejected":
       return {
         label: "REJECTED",
-        className: "bg-orange-100 text-orange-700 border border-orange-200"
+        className: "border border-status-warning/25 bg-status-warning/10 text-status-warning"
       }
     case "interrupted":
     default:
       return {
         label: "INTERRUPTED",
-        className: "bg-amber-100 text-amber-700 border border-amber-200"
+        className: "border border-status-warning/25 bg-status-warning/10 text-status-warning"
       }
   }
 }
@@ -774,8 +774,8 @@ function MessageBubbleImpl({
 
   const renderGoalUserSetContent = (goalMessage: NonNullable<typeof goalUserSetMessage>): React.ReactNode => (
     <div className="space-y-2 text-left">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-[#5f6b66]">
-        <span className="flex size-6 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-black/[0.05]">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <span className="flex size-6 items-center justify-center rounded-full bg-background-interactive shadow-sm ring-1 ring-border">
           <Flag className="size-3.5 text-sky-600" />
         </span>
         <span>设为 Goal</span>
@@ -786,12 +786,12 @@ function MessageBubbleImpl({
       {(goalMessage.attachments || goalMessage.skillName) && (
         <div className="flex flex-wrap gap-1.5 pt-0.5">
           {goalMessage.attachments && (
-            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
               附件：{goalMessage.attachments}
             </span>
           )}
           {goalMessage.skillName && (
-            <span className="rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span className="rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
               技能：{goalMessage.skillName}
             </span>
           )}
@@ -804,11 +804,11 @@ function MessageBubbleImpl({
     goalMessage: NonNullable<typeof goalUserControlMessage>
   ): React.ReactNode => (
     <div className="flex items-center gap-2 text-left">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-sky-700 shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.05]">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-background-interactive text-primary shadow-[0_6px_18px_rgba(0,0,0,0.10)] ring-1 ring-border">
         <PlayCircle className="size-4" />
       </span>
       <span className="min-w-0">
-        <span className="block text-sm font-semibold text-[#35433f]">{goalMessage.label}</span>
+        <span className="block text-sm font-semibold text-foreground">{goalMessage.label}</span>
         <span className="block text-xs text-muted-foreground">{goalMessage.description}</span>
       </span>
     </div>
@@ -978,7 +978,7 @@ function MessageBubbleImpl({
             className={cn(
               "min-w-0 max-w-full overflow-hidden rounded-lg p-3",
               goalUserSetMessage || goalUserControlMessage
-                ? "border border-black/[0.07] bg-white/86 shadow-[0_14px_42px_rgba(24,24,27,0.10),0_1px_0_rgba(255,255,255,0.88)_inset]"
+                ? "border border-border bg-background-elevated/90 shadow-[0_14px_42px_rgba(0,0,0,0.16)] dark:shadow-[0_14px_42px_rgba(0,0,0,0.30)]"
                 : "bg-primary/10"
             )}
           >
@@ -1295,7 +1295,7 @@ function MessageBubbleImpl({
                       全部拒绝
                     </button>
                     <button
-                      className="px-3 py-1.5 text-xs bg-status-nominal text-background rounded-sm hover:bg-status-nominal/90 transition-colors"
+                      className="px-3 py-1.5 text-xs bg-status-nominal/15 text-status-nominal rounded-sm hover:bg-status-nominal/20 transition-colors"
                       onClick={(e) => {
                         e.stopPropagation()
                         onApprovalDecision("approve")

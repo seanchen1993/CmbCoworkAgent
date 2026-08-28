@@ -340,13 +340,13 @@ function UploadPluginDialog(props: {
           </DialogDescription>
         </DialogHeader>
         {PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL && (
-          <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+          <div className="mt-4 rounded-md border border-status-info/25 bg-status-info/10 px-3 py-2 text-sm text-status-info">
             <span>需要创建插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
             <a
               href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
               target="_blank"
               rel="noreferrer"
-              className="ml-1 inline-flex items-center gap-1 font-medium text-blue-700 underline-offset-2 hover:underline"
+              className="ml-1 inline-flex items-center gap-1 font-medium text-primary underline-offset-2 hover:underline"
             >
               下载插件模板
               <ExternalLink className="size-3.5" />

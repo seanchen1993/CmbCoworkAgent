@@ -38,7 +38,7 @@ export function OrgSkillMarketTabTrigger(): React.JSX.Element {
   return (
     <TabsTrigger
       value={ORG_SKILL_MARKET_TYPE}
-      className="text-xs rounded-lg data-[state=active]:bg-white data-[state=active]:text-[#141413] data-[state=active]:shadow-[rgba(0,0,0,0.06)_0px_1px_4px] text-[#87867f] data-[state=active]:font-medium transition-all"
+      className="rounded-lg text-xs text-muted-foreground transition-all data-[state=active]:bg-background-elevated data-[state=active]:font-medium data-[state=active]:text-foreground data-[state=active]:shadow-sm"
     >
       <Sparkles className="size-3 mr-1.5" />
       组织级技能
@@ -47,7 +47,7 @@ export function OrgSkillMarketTabTrigger(): React.JSX.Element {
 }
 
 export function OrgSkillMarketIntroIcon(): React.JSX.Element {
-  return <Sparkles className="mt-0.5 size-4 shrink-0 text-[#7c6fb0]" />
+  return <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" />
 }
 
 interface OrgSkillPaginationState {
@@ -134,7 +134,7 @@ function OrgSkillCard({
 
   return (
     <div
-      className="group flex h-full flex-col rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 hover:border-[#d9d5c8] hover:bg-white transition-colors shadow-[rgba(0,0,0,0.03)_0px_2px_10px] cursor-pointer"
+      className="group flex h-full cursor-pointer flex-col rounded-2xl border border-border bg-background-elevated p-4 shadow-[rgba(0,0,0,0.08)_0px_2px_10px] transition-colors hover:border-border-emphasis hover:bg-background-interactive"
       onClick={() => onOpenDetail(item)}
     >
       <div className="flex items-start justify-between gap-3">
@@ -142,17 +142,17 @@ function OrgSkillCard({
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className={"flex items-center space-x-2"}>
-                <h3 className="text-[15px] font-medium text-[#141413] leading-snug truncate">
+                <h3 className="truncate text-[15px] font-medium leading-snug text-foreground">
                   {item.chinese_name || item.name}
                 </h3>
-                <div className=" text-[12px] text-[#87867f] truncate">({item.name})</div>
+                <div className="truncate text-[12px] text-muted-foreground">({item.name})</div>
                 {item.category && (
-                  <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
                     <Tag className="size-3" />
                     {getCategoryFilterName(item.category)}
                   </span>
                 )}
-                <span className="inline-flex items-center gap-1  text-xs text-gray-500 ml-2">
+                <span className="ml-2 inline-flex items-center gap-1 text-xs text-muted-foreground">
             <Calendar className="size-3" />
             更新于 {new Date(updatedAt).toLocaleDateString("zh-CN")}
           </span>
@@ -160,22 +160,22 @@ function OrgSkillCard({
             </div>
             {item.installed && (
               <span
-                className="inline-flex items-center gap-1 rounded-full border border-[#c4e8d1] bg-[#edf7f0] px-2 py-0.5 text-[11px] font-medium text-[#2e7d4f] shrink-0">
+                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-nominal/25 bg-status-nominal/10 px-2 py-0.5 text-[11px] font-medium text-status-nominal">
                 <CheckCircle className="size-3" />
                 已安装
               </span>
             )}
           </div>
           {item.description && (
-            <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-[#87867f] mb-2">
+            <p className="mb-2 mt-2 line-clamp-2 text-sm leading-relaxed text-muted-foreground">
               {item.description}
             </p>
           )}
         </div>
       </div>
       {/*box bottom*/}
-      <div className={"mt-auto flex items-center justify-between border-t border-[#f0eee6] pt-1 mt-4"}>
-        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-[#87867f]">
+      <div className="mt-4 mt-auto flex items-center justify-between border-t border-border pt-1">
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted-foreground">
           {/*{item.version && (*/}
           {/*  <span className="inline-flex items-center gap-1">*/}
           {/*    <GitBranch className="size-3" />v{item.version}*/}
@@ -192,14 +192,14 @@ function OrgSkillCard({
         </div>
         <div className="mt-3 flex items-center justify-end gap-1.5">
           {isDownloading ? (
-            <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
+            <div className="size-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
           ) : (
             <>
               {item.installed ? (
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 px-2.5 gap-1 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg"
+                  className="h-7 gap-1 rounded-lg border-status-critical/30 px-2.5 text-xs text-status-critical hover:bg-status-critical/10"
                   onClick={(event) => {
                     event.stopPropagation()
                     void onUninstall(item)
@@ -238,14 +238,14 @@ function OrgSkillLabelFilter({
   const selectedLabelSet = new Set(selectedLabelIds)
 
   return (
-    <aside className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-3 xl:sticky xl:top-4">
+    <aside className="rounded-2xl border border-border bg-background-elevated p-3 xl:sticky xl:top-4">
       <div className="flex items-center justify-between mb-2 px-1">
-        <h3 className="text-xs font-medium text-[#5e5d59]">分类</h3>
+        <h3 className="text-xs font-medium text-muted-foreground">分类</h3>
         {selectedLabelIds.length > 0 && (
           <button
             type="button"
             onClick={onClearLabels}
-            className="text-xs text-[#b85a3a] hover:text-[#9f472d] transition-colors cursor-pointer"
+            className="cursor-pointer text-xs text-status-critical transition-colors hover:opacity-80"
           >
             清除
           </button>
@@ -253,24 +253,24 @@ function OrgSkillLabelFilter({
       </div>
       <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-1">
         {loading ? (
-          <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-[#87867f]">
-            <div className="size-3.5 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
+          <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground">
+            <div className="size-3.5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
             <span>分类加载中…</span>
           </div>
         ) : error ? (
           <div className="space-y-2 px-2 py-1.5">
-            <p className="text-xs leading-relaxed text-[#b53333]">{error}</p>
+            <p className="text-xs leading-relaxed text-status-critical">{error}</p>
             <Button
               variant="outline"
               size="sm"
-              className="h-7 px-2.5 text-[11px] border-[#fad4d4] bg-white text-[#b53333] hover:bg-[#fdf2f2] rounded-lg"
+              className="h-7 rounded-lg border-status-critical/30 bg-background-elevated px-2.5 text-[11px] text-status-critical hover:bg-status-critical/10"
               onClick={onRetry}
             >
               重试
             </Button>
           </div>
         ) : labels.length === 0 ? (
-          <p className="text-xs text-[#87867f] px-2 py-1.5">暂无分类</p>
+          <p className="px-2 py-1.5 text-xs text-muted-foreground">暂无分类</p>
         ) : (
           labels.map((label) => {
             const isActive = selectedLabelSet.has(label.labelId)
@@ -281,13 +281,13 @@ function OrgSkillLabelFilter({
                 onClick={() => onToggleLabel(label.labelId)}
                 className={`w-full flex items-center justify-between rounded-xl px-2.5 py-2 text-left transition-colors cursor-pointer ${
                   isActive
-                    ? "bg-[#fdf3e7] border border-[#f5d9c4] text-[#8b623d]"
-                    : "border border-transparent text-[#5e5d59] hover:bg-[#f5f4ed]"
+                    ? "border border-status-warning/25 bg-status-warning/10 text-status-warning"
+                    : "border border-transparent text-muted-foreground hover:bg-background-interactive"
                 }`}
               >
                 <span className="text-[13px] leading-tight pr-2 break-all">{label.labelName}</span>
                 {isActive && (
-                  <span className="inline-flex items-center justify-center rounded-full bg-[#f5d9c4] px-1.5 py-0.5 text-[#8b623d] shrink-0">
+                  <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-status-warning/15 px-1.5 py-0.5 text-status-warning">
                     <Check className="size-3" />
                   </span>
                 )}
@@ -441,7 +441,7 @@ export function OrgSkillMarketContent({
   const renderSearchToolbar = () => (
     <div className="flex items-center gap-2">
       <div className="relative flex-1">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-[#87867f] pointer-events-none" />
+        <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input
           placeholder="搜索组织级技能…"
           value={searchInput}
@@ -449,14 +449,14 @@ export function OrgSkillMarketContent({
           onKeyDown={(event) => {
             if (event.key === "Enter") submitSearch()
           }}
-          className="pl-9 pr-9 h-9 text-sm bg-white border-[#e8e6dc] text-[#141413] placeholder:text-[#b0aea5] rounded-xl focus-visible:ring-[#3898ec] focus-visible:border-[#3898ec]"
+          className="h-9 rounded-xl border-border bg-background-elevated pl-9 pr-9 text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-primary"
         />
         {searchInput && (
           <button
             type="button"
             aria-label="清空搜索"
             onClick={clearSearch}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 size-5 inline-flex items-center justify-center rounded-md text-[#87867f] hover:text-[#5e5d59] hover:bg-[#f5f4ed] transition-colors cursor-pointer"
+            className="absolute right-2.5 top-1/2 inline-flex size-5 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
           >
             <X className="size-3.5" />
           </button>
@@ -464,7 +464,7 @@ export function OrgSkillMarketContent({
       </div>
       <Button
         size="sm"
-        className="h-9 px-4 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 rounded-xl cursor-pointer"
+        className="h-9 cursor-pointer gap-1.5 rounded-xl border-0 bg-button px-4 text-xs text-button-foreground hover:bg-button/90"
         onClick={submitSearch}
         disabled={loading}
       >
@@ -512,8 +512,8 @@ export function OrgSkillMarketContent({
         <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-4 items-start">
           {renderLabelFilter()}
           <div className="space-y-3 min-w-0">
-            <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-              <div className="size-6 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mb-3" />
+            <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+              <div className="mb-3 size-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
               <span className="text-sm">加载中…</span>
             </div>
           </div>
@@ -530,19 +530,19 @@ export function OrgSkillMarketContent({
           {renderLabelFilter()}
           <div className="space-y-3 min-w-0">
             <div className="flex flex-col items-center justify-center py-16">
-              <div className="size-10 rounded-2xl bg-[#fdf2f2] border border-[#fad4d4] flex items-center justify-center mb-3">
+              <div className="mb-3 flex size-10 items-center justify-center rounded-2xl border border-status-critical/25 bg-status-critical/10 text-status-critical">
                 <span className="text-base">!</span>
               </div>
-              <p className="text-sm text-[#b53333] mb-3 text-center">{error}</p>
+              <p className="mb-3 text-center text-sm text-status-critical">{error}</p>
               {error?.includes("凭证已过期") && (
-                <p className="text-sm text-[#b53333] mb-3 text-center">
+                <p className="mb-3 text-center text-sm text-status-critical">
                   需要重新登陆，请退出app之后重新进入/登陆～
                 </p>
               )}
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 px-4 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg"
+                className="h-8 rounded-lg border-border bg-background-interactive px-4 text-xs text-muted-foreground hover:bg-secondary"
                 onClick={() => setRetryToken((prev) => prev + 1)}
               >
                 重试
@@ -563,7 +563,7 @@ export function OrgSkillMarketContent({
           key={items.length === 0 ? "org-skill-results-empty" : "org-skill-results-list"}
           className="space-y-3 min-w-0"
         >
-          <div className="flex items-center justify-between text-xs text-[#87867f] px-1">
+          <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
             <span>
               {selectedLabels.length > 0
                 ? `当前分类：${selectedLabels.map((label) => label.labelName).join("、")}`
@@ -572,9 +572,9 @@ export function OrgSkillMarketContent({
             </span>
           </div>
           {items.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-[#87867f]">
-              <div className="size-10 rounded-2xl bg-[#f5f4ed] border border-[#e8e6dc] flex items-center justify-center mb-3">
-                <Search className="size-5 text-[#b0aea5]" />
+            <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
+              <div className="mb-3 flex size-10 items-center justify-center rounded-2xl border border-border bg-background-interactive">
+                <Search className="size-5 text-muted-foreground" />
               </div>
               <p className="text-sm">
                 {submittedKeyword ? "未找到匹配的组织级技能" : "暂无组织级技能"}
@@ -593,7 +593,7 @@ export function OrgSkillMarketContent({
               ))}
             </div>
           )}
-          <div className="flex items-center justify-end gap-2 border-t border-[#f0eee6] pt-3 text-xs text-[#87867f]">
+          <div className="flex items-center justify-end gap-2 border-t border-border pt-3 text-xs text-muted-foreground">
             <span className={"mr-2"}>共 {pagination.total} 条</span>
             <span className="mr-1 tabular-nums">
               第 {pagination.pageNum} / {pagination.pages} 页
@@ -601,7 +601,7 @@ export function OrgSkillMarketContent({
             <Button
               variant="outline"
               size="sm"
-              className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+              className="h-7 rounded-lg border-border bg-background-elevated px-2.5 text-[11px] text-muted-foreground hover:bg-background-interactive"
               onClick={() => setPageNum((prev) => Math.max(1, prev - 1))}
               disabled={loading || !pagination.hasPreviousPage}
             >
@@ -610,7 +610,7 @@ export function OrgSkillMarketContent({
             <Button
               variant="outline"
               size="sm"
-              className="h-7 px-2.5 text-[11px] rounded-lg border-[#e8e6dc] bg-white text-[#5e5d59] hover:bg-[#f5f4ed]"
+              className="h-7 rounded-lg border-border bg-background-elevated px-2.5 text-[11px] text-muted-foreground hover:bg-background-interactive"
               onClick={() => setPageNum((prev) => Math.min(pagination.pages, prev + 1))}
               disabled={loading || !pagination.hasNextPage}
             >

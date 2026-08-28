@@ -119,13 +119,13 @@ const EVENT_BADGE: Record<
   },
   PreCompact: {
     label: "压缩前",
-    className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
+    className: "bg-muted text-muted-foreground",
     english: "PreCompact",
     tip: "上下文压缩前触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PostCompact: {
     label: "压缩后",
-    className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
+    className: "bg-muted text-muted-foreground",
     english: "PostCompact",
     tip: "上下文压缩后触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
@@ -483,7 +483,7 @@ function getHookTypeLabel(hook: Pick<HookConfig, "type">): string {
 function getHookTypeBadgeClass(hook: Pick<HookConfig, "type">): string {
   if (hook.type === "prompt") return "bg-violet-500/15 text-violet-600 dark:text-violet-400"
   if (hook.type === "http") return "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400"
-  return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400"
+  return "bg-muted text-muted-foreground"
 }
 
 function getHookTimeoutDisplay(hook: DisplayHook): string {

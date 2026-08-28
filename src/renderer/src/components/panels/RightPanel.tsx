@@ -39,11 +39,7 @@ import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
-import {
-  useThreadState,
-  useThreadStream,
-  type CoordinatorWorkerView
-} from "@/lib/thread-context"
+import { useThreadState, useThreadStream, type CoordinatorWorkerView } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import { getToolLabel } from "@/lib/tool-labels"
 import {
@@ -88,9 +84,9 @@ const BrowserPanel = lazy(() =>
   import("@/components/browser/BrowserPanel").then((m) => ({ default: m.BrowserPanel }))
 )
 
-const HEADER_HEIGHT = 52 // px
+const HEADER_HEIGHT = 48 // px
 const HANDLE_HEIGHT = 6 // px
-const SECTION_GAP = 8 // px
+const SECTION_GAP = 0 // px
 const MIN_CONTENT_HEIGHT = 60 // px
 const COLLAPSE_THRESHOLD = 55 // px - auto-collapse when below this
 const PREVIEW_MAX_HEIGHT = "100vh"
@@ -126,21 +122,31 @@ function SectionHeader({
   return (
     <button
       onClick={onToggle}
-      className="flex items-center gap-3 px-5 py-3 text-section-header hover:bg-background-interactive/60 transition-colors shrink-0 w-full"
+      aria-expanded={isOpen}
+      className={cn(
+        "group flex w-full shrink-0 items-center gap-3.5 px-5 text-foreground transition-colors duration-150",
+        "hover:bg-background-interactive/55 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/35",
+        isOpen && "bg-background-interactive/55"
+      )}
       style={{ height: HEADER_HEIGHT }}
     >
-      <ChevronRight
-        className={cn(
-          "size-3.5 text-muted-foreground transition-transform duration-200",
-          isOpen && "rotate-90"
-        )}
-      />
-      <Icon className="size-4.5 text-foreground/70" />
-      <span className="flex-1 text-left text-[16px] font-semibold leading-none">{title}</span>
+      <Icon className="size-5 shrink-0 text-foreground/75" strokeWidth={1.7} />
+      <span className="flex-1 text-left text-[15px] font-semibold leading-none tracking-[-0.01em]">
+        {title}
+      </span>
       {detail && <div className="shrink-0">{detail}</div>}
       {badge !== undefined && badge > 0 && (
-        <span className="text-xs text-muted-foreground tabular-nums">{badge}</span>
+        <span className="min-w-5 text-right text-xs font-medium text-muted-foreground tabular-nums">
+          {badge}
+        </span>
       )}
+      <ChevronRight
+        className={cn(
+          "size-[18px] shrink-0 text-muted-foreground/65 transition-transform duration-200",
+          isOpen && "rotate-90"
+        )}
+        strokeWidth={1.8}
+      />
     </button>
   )
 }
@@ -238,19 +244,18 @@ export function RightPanel({
     skillGenerationByThread,
     setRightModule,
     setSkillGenerationPhase
-  } =
-    useAppStore(
-      useShallow((s) => ({
-        currentThreadId: s.currentThreadId,
-        pluginVersion: s.pluginVersion,
-        rightModule: s.rightModule,
-        rightPanelWorkRequest: s.rightPanelWorkRequest,
-        // Subscribe to the whole map so we re-render when any thread's card changes
-        skillGenerationByThread: s.skillGenerationByThread,
-        setRightModule: s.setRightModule,
-        setSkillGenerationPhase: s.setSkillGenerationPhase
-      }))
-    )
+  } = useAppStore(
+    useShallow((s) => ({
+      currentThreadId: s.currentThreadId,
+      pluginVersion: s.pluginVersion,
+      rightModule: s.rightModule,
+      rightPanelWorkRequest: s.rightPanelWorkRequest,
+      // Subscribe to the whole map so we re-render when any thread's card changes
+      skillGenerationByThread: s.skillGenerationByThread,
+      setRightModule: s.setRightModule,
+      setSkillGenerationPhase: s.setSkillGenerationPhase
+    }))
+  )
   const currentThreadId = threadId ?? storeCurrentThreadId
   const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
   // Derive the current thread's card state from the per-thread map
@@ -274,6 +279,7 @@ export function RightPanel({
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
   const handledWorkRequestIdsRef = useRef<Set<number>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
+  const workspacePanelRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
   const [previewReloadToken, setPreviewReloadToken] = useState(0)
@@ -290,6 +296,7 @@ export function RightPanel({
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [hooksOpen, setHooksOpen] = useState(false)
   const [lspOpen, setLspOpen] = useState(false)
+  const hasOpenWorkspacePanelRef = useRef(false)
   const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
   const [skills, setSkills] = useState<SkillMetadata[]>([])
@@ -299,6 +306,45 @@ export function RightPanel({
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
   const [plugins, setPlugins] = useState<PluginMetadata[]>([])
   const [hooks, setHooks] = useState<DisplayHook[]>([])
+
+  const setExclusiveOpenPanel = useCallback((panel: keyof PanelHeights | null): void => {
+    setTasksOpen(panel === "tasks")
+    setFilesOpen(panel === "files")
+    setSystemConstraintsOpen(panel === "systemConstraints")
+    setAgentsOpen(panel === "agents")
+    setSkillsOpen(panel === "skills")
+    setPluginsOpen(panel === "plugins")
+    setHooksOpen(panel === "hooks")
+    setLspOpen(panel === "lsp")
+  }, [])
+
+  const toggleExclusivePanel = useCallback(
+    (panel: keyof PanelHeights, isOpen: boolean): void => {
+      setExclusiveOpenPanel(isOpen ? null : panel)
+    },
+    [setExclusiveOpenPanel]
+  )
+
+  useEffect(() => {
+    hasOpenWorkspacePanelRef.current =
+      tasksOpen ||
+      filesOpen ||
+      systemConstraintsOpen ||
+      agentsOpen ||
+      skillsOpen ||
+      pluginsOpen ||
+      hooksOpen ||
+      lspOpen
+  }, [
+    agentsOpen,
+    filesOpen,
+    hooksOpen,
+    lspOpen,
+    pluginsOpen,
+    skillsOpen,
+    systemConstraintsOpen,
+    tasksOpen
+  ])
 
   useEffect(() => {
     async function load(): Promise<void> {
@@ -399,10 +445,10 @@ export function RightPanel({
 
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
-    if (skillGenerationAgent.phase === "generating") {
-      setAgentsOpen(true)
+    if (skillGenerationAgent.phase === "generating" && !hasOpenWorkspacePanelRef.current) {
+      setExclusiveOpenPanel("agents")
     }
-  }, [skillGenerationAgent.phase])
+  }, [setExclusiveOpenPanel, skillGenerationAgent.phase])
 
   useEffect(() => {
     setSystemConstraintsOpen(false)
@@ -414,8 +460,8 @@ export function RightPanel({
     if (rightPanelWorkRequest.threadId !== currentThreadId) return
     if (handledWorkRequestIdsRef.current.has(rightPanelWorkRequest.id)) return
     handledWorkRequestIdsRef.current.add(rightPanelWorkRequest.id)
-    setSystemConstraintsOpen(true)
-  }, [currentThreadId, rightPanelWorkRequest, showSystemConstraints])
+    setExclusiveOpenPanel("systemConstraints")
+  }, [currentThreadId, rightPanelWorkRequest, setExclusiveOpenPanel, showSystemConstraints])
 
   // Auto-open once when an ordinary task subagent starts.
   useEffect(() => {
@@ -426,12 +472,12 @@ export function RightPanel({
       (id) => !runningSubagentIdsRef.current.has(id)
     )
 
-    if (hasNewRunning) {
-      setAgentsOpen(true)
+    if (hasNewRunning && !hasOpenWorkspacePanelRef.current) {
+      setExclusiveOpenPanel("agents")
     }
 
     runningSubagentIdsRef.current = runningIds
-  }, [subagents])
+  }, [setExclusiveOpenPanel, subagents])
 
   // Auto-open once when an async coordinator worker starts or continues.
   useEffect(() => {
@@ -447,12 +493,12 @@ export function RightPanel({
       (key) => !runningCoordinatorWorkerRunKeysRef.current.has(key)
     )
 
-    if (hasNewRunning) {
-      setAgentsOpen(true)
+    if (hasNewRunning && !hasOpenWorkspacePanelRef.current) {
+      setExclusiveOpenPanel("agents")
     }
 
     runningCoordinatorWorkerRunKeysRef.current = runningKeys
-  }, [coordinatorWorkers])
+  }, [coordinatorWorkers, setExclusiveOpenPanel])
 
   const lspHeaderStatus = useMemo(() => {
     if (!lspConfig) return null
@@ -764,31 +810,23 @@ export function RightPanel({
   // Calculate available content height
   const getAvailableContentHeight = useCallback(() => {
     if (rightModule !== "work") return 0
-    if (!containerRef.current) return 0
-    const totalHeight = containerRef.current.clientHeight
+    if (!workspacePanelRef.current) return 0
+    const totalHeight = workspacePanelRef.current.clientHeight
 
-    const openPanels = [
-      tasksOpen,
-      filesOpen,
-      showSystemConstraints && systemConstraintsOpen,
-      agentsOpen,
-      skillsOpen,
-      pluginsOpen,
-      hooksOpen,
-      lspOpen
-    ]
-    const sectionCount = showSystemConstraints ? 8 : 7
+    const sectionCount = 7 + (showSystemConstraints ? 1 : 0)
     let used = HEADER_HEIGHT * sectionCount
     // Fixed visual gaps between section blocks
     used += SECTION_GAP * (sectionCount - 1)
 
-    // Count handles between consecutive open panels
-    let handles = 0
-    let lastOpen = false
-    for (const isOpen of openPanels) {
-      if (isOpen && lastOpen) handles++
-      lastOpen = isOpen
-    }
+    // Keep this in sync with the resize handles rendered below.
+    const handles = [
+      tasksOpen && (filesOpen || (!showSystemConstraints && agentsOpen)),
+      !showSystemConstraints && filesOpen && agentsOpen,
+      agentsOpen && skillsOpen,
+      skillsOpen && pluginsOpen,
+      pluginsOpen && hooksOpen,
+      hooksOpen && lspOpen
+    ].filter(Boolean).length
     used += HANDLE_HEIGHT * handles
 
     return Math.max(0, totalHeight - used)
@@ -797,7 +835,6 @@ export function RightPanel({
     tasksOpen,
     filesOpen,
     showSystemConstraints,
-    systemConstraintsOpen,
     agentsOpen,
     skillsOpen,
     pluginsOpen,
@@ -1250,7 +1287,8 @@ export function RightPanel({
     <aside
       ref={containerRef}
       className={cn(
-        "flex w-full flex-col bg-transparent overflow-hidden border-l",
+        "flex w-full flex-col overflow-hidden",
+        rightModule === "work" ? "bg-transparent p-3" : "border-l border-border",
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
@@ -1269,8 +1307,11 @@ export function RightPanel({
       )}
 
       {rightModule === "preview" && (
-        <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-white">
-          <div className="bg-white h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
+        <div className="flex h-full min-h-0 flex-col rounded-2xl bg-background-elevated">
+          <div
+            className="h-full min-h-0 bg-background-elevated"
+            style={{ height: PREVIEW_MAX_HEIGHT }}
+          >
             {previewPath ? (
               <ResourcePreview
                 key={`${previewPath}:${previewReloadToken}`}
@@ -1283,51 +1324,55 @@ export function RightPanel({
                 onHidePreview={() => setRightModule("work")}
               />
             ) : (
-              <div className="flex h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+              <div className="flex h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),var(--background)] dark:bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.10),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.10),transparent_42%),var(--background)]">
                 <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-4 py-5">
                   <div className="mb-3">
-                    <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
+                    <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-border bg-background-interactive text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.08)] dark:shadow-none">
                       <FileText className="size-7" strokeWidth={1.7} />
                     </div>
-                    <p className="text-[10px] font-semibold tracking-[0.18em] text-stone-500">
+                    <p className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
                       FILE PREVIEW
                     </p>
-                    <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
+                    <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-foreground">
                       从一个文件开始预览
                     </h2>
-                    <p className="mt-2 text-xs leading-5 text-stone-600">
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
                       生成或编辑文件后，新的可预览内容会自动在这里展示。
                     </p>
                   </div>
 
-                  <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
-                    <div className="border-b border-stone-100 px-4 py-3">
-                      <p className="text-xs font-semibold text-stone-800">预览使用提示</p>
-                      <p className="mt-0.5 text-[11px] text-stone-500">
+                  <div className="overflow-hidden rounded-xl border border-border bg-background-elevated/90 shadow-[0_14px_38px_rgba(0,0,0,0.06)] dark:shadow-none">
+                    <div className="border-b border-border px-4 py-3">
+                      <p className="text-xs font-semibold text-foreground">预览使用提示</p>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
                         把文件查看、跳转和验证集中到同一处。
                       </p>
                     </div>
 
-                    <div className="divide-y divide-stone-100">
+                    <div className="divide-y divide-border">
                       <div className="flex gap-3 px-4 py-3">
-                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-status-info/10 text-status-info">
                           <Eye className="size-3.5" strokeWidth={1.8} />
                         </span>
                         <div className="min-w-0">
-                          <p className="text-xs font-medium text-stone-800">在工具调用里快速打开</p>
-                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                          <p className="text-xs font-medium text-foreground">
+                            在工具调用里快速打开
+                          </p>
+                          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                             点击预览图标，就能把对应文件直接切到这里查看完整内容。
                           </p>
                         </div>
                       </div>
 
                       <div className="flex gap-3 px-4 py-3">
-                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-status-warning/10 text-status-warning">
                           <Sparkles className="size-3.5" strokeWidth={1.8} />
                         </span>
                         <div className="min-w-0">
-                          <p className="text-xs font-medium text-stone-800">生成后自动接管预览区</p>
-                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                          <p className="text-xs font-medium text-foreground">
+                            生成后自动接管预览区
+                          </p>
+                          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                             当任务产出新的可预览文件时，这里会自动更新，不需要手动切换。
                           </p>
                         </div>
@@ -1336,11 +1381,13 @@ export function RightPanel({
                   </div>
 
                   <div className="mt-4 flex items-center justify-between gap-3">
-                    <p className="text-[11px] text-stone-500">准备好后，回到工作区继续生成内容。</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      准备好后，回到工作区继续生成内容。
+                    </p>
                     <button
                       type="button"
                       onClick={() => setRightModule("work")}
-                      className="inline-flex h-9 shrink-0 items-center justify-center rounded-xl border border-stone-200/90 bg-white px-4 text-xs font-medium text-stone-700 shadow-[0_8px_20px_rgba(41,37,36,0.06)] transition-[transform,background-color,color,box-shadow] hover:bg-stone-50 hover:text-stone-900 hover:shadow-[0_12px_28px_rgba(41,37,36,0.1)] active:scale-[0.98]"
+                      className="inline-flex h-9 shrink-0 items-center justify-center rounded-xl border border-border bg-background-interactive px-4 text-xs font-medium text-foreground shadow-[0_8px_20px_rgba(0,0,0,0.06)] transition-[transform,background-color,color,box-shadow] hover:bg-secondary hover:shadow-[0_12px_28px_rgba(0,0,0,0.1)] active:scale-[0.98] dark:shadow-none"
                     >
                       返回工作目录
                     </button>
@@ -1353,8 +1400,8 @@ export function RightPanel({
       )}
 
       {rightModule === "git" && (
-        <div className="flex h-full min-h-0 flex-col border border-border/75 rounded-2xl bg-white">
-          <div className="bg-white p-2 h-full min-h-0">
+        <div className="flex h-full min-h-0 flex-col rounded-2xl border border-border/75 bg-background-elevated">
+          <div className="h-full min-h-0 bg-background-elevated p-2">
             <Suspense fallback={<LazySectionFallback label="加载 Git 面板..." />}>
               <GitPanelView
                 key={currentThreadId ?? "git-panel-empty-thread"}
@@ -1384,18 +1431,28 @@ export function RightPanel({
       )}
 
       {rightModule === "work" && (
-        <>
+        <div
+          ref={workspacePanelRef}
+          data-testid="workspace-info-panel"
+          className={cn(
+            "flex min-h-0 flex-col overflow-hidden rounded-[26px] border border-border/80 bg-background-elevated",
+            allPanelsClosed ? "shrink-0" : "flex-1"
+          )}
+        >
           {/* TASKS */}
-          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+          <div className="flex shrink-0 flex-col">
             <SectionHeader
               title="任务"
               icon={ListTodo}
               badge={todos.length}
               isOpen={tasksOpen}
-              onToggle={() => setTasksOpen((prev) => !prev)}
+              onToggle={() => toggleExclusivePanel("tasks", tasksOpen)}
             />
             {tasksOpen && (
-              <div className="overflow-auto right-panel-scroll" style={{ height: heights.tasks }}>
+              <div
+                className="right-panel-scroll overflow-auto border-t border-border/45"
+                style={{ height: heights.tasks }}
+              >
                 <TasksContent threadId={currentThreadId} />
               </div>
             )}
@@ -1407,16 +1464,19 @@ export function RightPanel({
           )}
 
           {/* FILES */}
-          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+          <div className="flex shrink-0 flex-col">
             <SectionHeader
               title="文件"
               icon={FolderTree}
               badge={workspaceFiles.length}
               isOpen={filesOpen}
-              onToggle={() => setFilesOpen((prev) => !prev)}
+              onToggle={() => toggleExclusivePanel("files", filesOpen)}
             />
             {filesOpen && (
-              <div className="overflow-auto right-panel-scroll" style={{ height: heights.files }}>
+              <div
+                className="right-panel-scroll overflow-auto border-t border-border/45"
+                style={{ height: heights.files }}
+              >
                 <FilesContent threadId={currentThreadId} />
               </div>
             )}
@@ -1428,7 +1488,7 @@ export function RightPanel({
           )}
 
           {showSystemConstraints && (
-            <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+            <div className="flex shrink-0 flex-col">
               <SectionHeader
                 title="系统约束"
                 icon={ShieldCheck}
@@ -1438,11 +1498,11 @@ export function RightPanel({
                   </span>
                 }
                 isOpen={systemConstraintsOpen}
-                onToggle={() => setSystemConstraintsOpen((prev) => !prev)}
+                onToggle={() => toggleExclusivePanel("systemConstraints", systemConstraintsOpen)}
               />
               {systemConstraintsOpen && (
                 <div
-                  className="overflow-auto right-panel-scroll"
+                  className="right-panel-scroll overflow-auto border-t border-border/45"
                   style={{ height: heights.systemConstraints }}
                 >
                   <SystemConstraintsPanel state={threadState?.harnessAgentmdLoadStatus} />
@@ -1452,7 +1512,7 @@ export function RightPanel({
           )}
 
           {/* AGENTS */}
-          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+          <div className="flex shrink-0 flex-col">
             <SectionHeader
               title="代理"
               icon={GitBranch}
@@ -1462,10 +1522,13 @@ export function RightPanel({
                 (skillGenerationAgent.phase !== null ? 1 : 0)
               }
               isOpen={agentsOpen}
-              onToggle={() => setAgentsOpen((prev) => !prev)}
+              onToggle={() => toggleExclusivePanel("agents", agentsOpen)}
             />
             {agentsOpen && (
-              <div className="overflow-auto right-panel-scroll" style={{ height: heights.agents }}>
+              <div
+                className="right-panel-scroll overflow-auto border-t border-border/45"
+                style={{ height: heights.agents }}
+              >
                 <AgentsContent threadId={currentThreadId} />
               </div>
             )}
@@ -1475,16 +1538,19 @@ export function RightPanel({
           {agentsOpen && skillsOpen && <ResizeHandle onDrag={handleAgentsResize} />}
 
           {/* SKILLS */}
-          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+          <div className="flex shrink-0 flex-col">
             <SectionHeader
               title="技能"
               icon={Sparkles}
               badge={splitRightPanelSkillsByEnabled(skills, disabledSkills).enabled.length}
               isOpen={skillsOpen}
-              onToggle={() => setSkillsOpen((prev) => !prev)}
+              onToggle={() => toggleExclusivePanel("skills", skillsOpen)}
             />
             {skillsOpen && (
-              <div className="overflow-auto right-panel-scroll" style={{ height: heights.skills }}>
+              <div
+                className="right-panel-scroll overflow-auto border-t border-border/45"
+                style={{ height: heights.skills }}
+              >
                 <SkillsContent
                   skills={skills}
                   disabledSkills={disabledSkills}
@@ -1499,16 +1565,19 @@ export function RightPanel({
           {skillsOpen && pluginsOpen && <ResizeHandle onDrag={handleSkillsResize} />}
 
           {/* PLUGINS */}
-          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+          <div className="flex shrink-0 flex-col">
             <SectionHeader
               title="插件"
               icon={Puzzle}
               badge={plugins.length}
               isOpen={pluginsOpen}
-              onToggle={() => setPluginsOpen((prev) => !prev)}
+              onToggle={() => toggleExclusivePanel("plugins", pluginsOpen)}
             />
             {pluginsOpen && (
-              <div className="overflow-auto right-panel-scroll" style={{ height: heights.plugins }}>
+              <div
+                className="right-panel-scroll overflow-auto border-t border-border/45"
+                style={{ height: heights.plugins }}
+              >
                 <PluginsContent plugins={plugins} />
               </div>
             )}
@@ -1518,16 +1587,19 @@ export function RightPanel({
           {pluginsOpen && hooksOpen && <ResizeHandle onDrag={handlePluginsResize} />}
 
           {/* HOOKS */}
-          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+          <div className="flex shrink-0 flex-col">
             <SectionHeader
               title="钩子"
               icon={Webhook}
               badge={hooks.filter((h) => h.enabled).length}
               isOpen={hooksOpen}
-              onToggle={() => setHooksOpen((prev) => !prev)}
+              onToggle={() => toggleExclusivePanel("hooks", hooksOpen)}
             />
             {hooksOpen && (
-              <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
+              <div
+                className="right-panel-scroll overflow-auto border-t border-border/45"
+                style={{ height: heights.hooks }}
+              >
                 <HooksContent
                   hooks={hooks}
                   onChange={() => {
@@ -1542,21 +1614,24 @@ export function RightPanel({
           {hooksOpen && lspOpen && <ResizeHandle onDrag={handleHooksResize} />}
 
           {/* LSP */}
-          <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+          <div className="flex shrink-0 flex-col">
             <SectionHeader
               title="LSP"
               icon={Code2}
               detail={lspHeaderStatus}
               isOpen={lspOpen}
-              onToggle={() => setLspOpen((prev) => !prev)}
+              onToggle={() => toggleExclusivePanel("lsp", lspOpen)}
             />
             {lspOpen && (
-              <div className="overflow-auto right-panel-scroll" style={{ height: heights.lsp }}>
+              <div
+                className="right-panel-scroll overflow-auto border-t border-border/45"
+                style={{ height: heights.lsp }}
+              >
                 <LspPanel threadId={currentThreadId} embedded statusOnly />
               </div>
             )}
           </div>
-        </>
+        </div>
       )}
     </aside>
   )
@@ -1981,10 +2056,7 @@ function ResourcePreview({
   const [previewMode, setPreviewMode] = useState<"preview" | "source">("preview")
   const [copySuccess, setCopySuccess] = useState(false)
   const extension = getPathExtension(filePath).toLowerCase()
-  const supportsSourceView =
-    extension === "md" ||
-    extension === "markdown" ||
-    extension === "mdx"
+  const supportsSourceView = extension === "md" || extension === "markdown" || extension === "mdx"
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
   const canCopyContent = previewFileType.type === "code" || previewFileType.type === "text"
 
@@ -2266,7 +2338,13 @@ function buildFileTree(files: FileInfo[]): TreeNode[] {
   return root
 }
 
-function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | null }): React.JSX.Element {
+function FileTree({
+  files,
+  threadId
+}: {
+  files: FileInfo[]
+  threadId: string | null
+}): React.JSX.Element {
   const threadState = useThreadState(threadId)
   const openFile = threadState?.openFile
   const tree = useMemo(() => buildFileTree(files), [files])
@@ -2630,11 +2708,7 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
     return () => window.clearInterval(timer)
   }, [hasRunningCoordinatorWorker])
 
-  if (
-    subagents.length === 0 &&
-    coordinatorWorkers.length === 0 &&
-    !hasSkillGen
-  ) {
+  if (subagents.length === 0 && coordinatorWorkers.length === 0 && !hasSkillGen) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <GitBranch className="size-8 mb-2 opacity-50" />
@@ -2775,7 +2849,7 @@ function CoordinatorWorkerCard({
                   ? "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/35 dark:text-sky-300"
                   : worker.status === "failed"
                     ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/70 dark:bg-red-950/35 dark:text-red-300"
-                    : "border-stone-200 bg-stone-50 text-stone-700 dark:border-stone-800 dark:bg-stone-900/50 dark:text-stone-300"
+                    : "border-border bg-background-interactive text-muted-foreground"
               )}
             >
               <StatusIcon className={cn("size-4", statusMeta.iconClass)} />
@@ -2810,23 +2884,22 @@ function CoordinatorWorkerCard({
             onClick={openWorkerStream}
             className={cn(
               "mb-3 flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all",
-              "border-slate-200/90 bg-gradient-to-b from-white to-slate-50/90 text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.06)]",
-              "hover:border-slate-300 hover:from-white hover:to-slate-100 hover:shadow-[0_4px_14px_rgba(15,23,42,0.08)]",
-              "dark:border-slate-700/80 dark:from-slate-900 dark:to-slate-950 dark:text-slate-100 dark:hover:border-slate-600"
+              "border-border bg-background-elevated text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.06)]",
+              "hover:border-border-emphasis hover:bg-background-interactive hover:shadow-[0_4px_14px_rgba(0,0,0,0.08)]"
             )}
           >
             <span className="flex min-w-0 items-center gap-2.5">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-sky-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-sky-300">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border bg-background-interactive text-primary shadow-sm">
                 <Code2 className="size-3.5" />
               </span>
               <span className="min-w-0">
                 <span className="block text-[12px] font-semibold leading-none">打开工具流</span>
-                <span className="mt-1 block truncate text-[10px] text-slate-500 dark:text-slate-400">
+                <span className="mt-1 block truncate text-[10px] text-muted-foreground">
                   查看消息、工具参数和执行结果
                 </span>
               </span>
             </span>
-            <ChevronRight className="size-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 dark:text-slate-500" />
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
           </button>
         )}
 
@@ -2856,7 +2929,9 @@ function CoordinatorWorkerCard({
             {(worker.summary || worker.error || worker.result_path || worker.report_path) && (
               <div className="truncate">
                 <span className="text-foreground/70">
-                  {worker.status === "failed" || worker.status === "cancelled" ? "结果：" : "摘要："}
+                  {worker.status === "failed" || worker.status === "cancelled"
+                    ? "结果："
+                    : "摘要："}
                 </span>
                 {compactInline(
                   worker.error || worker.summary || worker.result_path || worker.report_path || ""
@@ -2949,9 +3024,9 @@ function getCoordinatorWorkerStatusMeta(status: CoordinatorWorkerView["status"])
     return {
       label: "已完成",
       icon: CheckCircle2,
-      iconClass: "text-stone-600 dark:text-stone-300",
+      iconClass: "text-muted-foreground",
       badgeClass:
-        "border-stone-200 bg-stone-100 text-stone-700 hover:bg-stone-100 dark:border-stone-800 dark:bg-stone-900/65 dark:text-stone-300"
+        "border-border bg-background-interactive text-muted-foreground hover:bg-background-interactive"
     }
   }
   if (status === "failed") {
@@ -3068,9 +3143,7 @@ function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeN
   for (const skill of skills) {
     const segments = getRightPanelSkillPathSegments(skill)
     const fallbackSegments =
-      segments.length > 0
-        ? segments
-        : [{ key: skill.name, label: skill.name }]
+      segments.length > 0 ? segments : [{ key: skill.name, label: skill.name }]
     let current = root
 
     for (const segment of fallbackSegments) {
@@ -3286,9 +3359,7 @@ function SkillsContent({
                           className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
                           title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
                         >
-                        <span className="truncate">
-                          插件
-                        </span>
+                          <span className="truncate">插件</span>
                         </Badge>
                       </div>
                     )}

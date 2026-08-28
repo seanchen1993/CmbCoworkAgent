@@ -610,7 +610,7 @@ export function ChatScrollNavigator({
               sideOffset={30}
               onMouseEnter={clearCloseTimer}
               onMouseLeave={armClose}
-              className="max-h-[70vh] mb-10 max-w-80 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border-border/70 bg-white px-3 py-2 leading-relaxed shadow-lg shadow-black/5 backdrop-blur-sm"
+              className="mb-10 max-h-[70vh] max-w-80 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border-border/70 bg-popover px-3 py-2 leading-relaxed shadow-lg shadow-black/5 backdrop-blur-sm"
             >
               {hoveredIndex !== null && renderPopoverContent(questions[hoveredIndex], hoveredIndex)}
             </PopoverContent>

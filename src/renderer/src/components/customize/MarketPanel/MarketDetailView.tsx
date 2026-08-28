@@ -131,13 +131,13 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
   const renderSkillTraceEntry = () => {
     if (activeTab !== "skill") return null
     return (
-      <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
+      <div className="space-y-3 rounded-2xl border border-border bg-background-elevated p-4 shadow-[rgba(0,0,0,0.08)_0px_2px_10px]">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h4 className="text-[13px] font-medium text-[#141413]">
+            <h4 className="text-[13px] font-medium text-foreground">
               最近 10 条 Trace 记录（本月）
             </h4>
-            <p className="mt-1 text-[11px] text-[#87867f]">
+            <p className="mt-1 text-[11px] text-muted-foreground">
               {skillTracesLoading
                 ? "Trace 加载中…"
                 : skillTracesError
@@ -145,7 +145,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                   : `已加载 ${selectedSkillTraces.length} 条记录`}
             </p>
           </div>
-          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-info/25 bg-status-info/10 px-2 py-0.5 text-[11px] text-status-info">
             <BarChart3 className="size-3" />
             <span className="tabular-nums">{selectedSkillTraces.length}</span>
           </span>
@@ -153,7 +153,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
         <Button
           variant="outline"
           size="sm"
-          className="h-8 w-full gap-1.5 text-xs text-[#5e5d59] border-[#e8e6dc] bg-white hover:bg-[#f5f4ed] rounded-lg cursor-pointer"
+          className="h-8 w-full cursor-pointer gap-1.5 rounded-lg border-border bg-background-elevated text-xs text-muted-foreground hover:bg-background-interactive"
           onClick={onOpenSkillTraceDialog}
         >
           <FileText className="size-3" />
@@ -170,7 +170,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
           <div className="space-y-3 xl:order-1 order-2">{detailFilePanel}</div>
 
           <div className="xl:order-2 order-1 space-y-3 xl:sticky xl:top-4 w-full h-full overflow-y-auto pr-1">
-            <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.04)_0px_4px_16px]">
+            <div className="space-y-3 rounded-2xl border border-border bg-background-elevated p-4 shadow-[rgba(0,0,0,0.10)_0px_4px_16px]">
               {selectedItem.description && (
                 <p className="my-4 text-xs  leading-relaxed whitespace-pre-wrap break-words">
                   {selectedItem.description}
@@ -179,29 +179,29 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
 
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 {selectedItem.category && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background-interactive px-2.5 py-1 text-muted-foreground">
                     <Tag className="size-3" />
                     {selectedItem.category}
                   </span>
                 )}
                 {selectedItem.version && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background-interactive px-2.5 py-1 text-muted-foreground">
                     <GitBranch className="size-3" />
                     {selectedItem.updateAvailable && selectedItem.installedVersion
                       ? `${formatMarketVersionLabel(selectedItem.installedVersion)} -> ${formatMarketVersionLabel(selectedItem.version)}`
                       : formatMarketVersionLabel(selectedItem.version)}
                   </span>
                 )}
-                <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background-interactive px-2.5 py-1 text-muted-foreground">
                   <Calendar className="size-3" />
                   创建于 {createdAtLabel}
                 </span>
-                <span className="inline-flex items-center gap-1 rounded-full bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background-interactive px-2.5 py-1 text-muted-foreground">
                   <Edit className="size-3" />
                   更新于 {updatedAtLabel}
                 </span>
                 {selectedItem.installed && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-2.5 py-1">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-status-nominal/25 bg-status-nominal/10 px-2.5 py-1 text-status-nominal">
                     <CheckCircle className="size-3" />
                     已安装
                   </span>
@@ -216,19 +216,19 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                   />
                 )}
                 {selectedItem.featured === "精品" && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1">
-                    <Star className="size-3 fill-[#c4956a]" />
+                  <span className="inline-flex items-center gap-1 rounded-full border border-status-warning/25 bg-status-warning/10 px-2.5 py-1 text-status-warning">
+                    <Star className="size-3 fill-current" />
                     精品
                   </span>
                 )}
                 {isAutoOptimizedMarketItem(selectedItem) && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[#eef5ff] border border-[#cdddf6] text-[#3b68a8] px-2.5 py-1">
+                  <span className="inline-flex items-center gap-1 rounded-full border border-status-info/25 bg-status-info/10 px-2.5 py-1 text-status-info">
                     <Sparkles className="size-3" />
                     系统优化
                   </span>
                 )}
                 {selectedUploaderFallback ? (
-                  <span className="flex min-w-0 max-w-full items-start gap-1 rounded-xl bg-[#f5f4ed] border border-[#e8e6dc] text-[#5e5d59] px-2.5 py-1">
+                  <span className="flex min-w-0 max-w-full items-start gap-1 rounded-xl border border-border bg-background-interactive px-2.5 py-1 text-muted-foreground">
                     <User className="mt-1 size-3 shrink-0" />
                     {renderUploaderProfile(selectedUploaderProfile, selectedUploaderFallback, {
                       multiline: true
@@ -236,16 +236,16 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                   </span>
                 ) : null}
                 {activeTab === "skill" && selectedSkillCallCount !== null && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-[#d7e2f5] bg-[linear-gradient(135deg,#f4f8ff_0%,#e9f1ff_100%)] text-[#365d97] px-3 py-1">
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-status-info/25 bg-status-info/10 px-3 py-1 text-status-info">
                     <BarChart3 className="size-3" />
-                    <span className="text-[11px] text-[#6a7fa5]">调用次数</span>
+                    <span className="text-[11px] text-status-info/80">调用次数</span>
                     <span className="font-semibold tabular-nums">{selectedSkillCallCount}</span>
                   </span>
                 )}
                 {activeTab === "skill" && selectedSkillUserCount !== null && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-[#cfe4d9] bg-[linear-gradient(135deg,#f2faf5_0%,#e8f7ef_100%)] text-[#2f7a55] px-3 py-1">
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-status-nominal/25 bg-status-nominal/10 px-3 py-1 text-status-nominal">
                     <User className="size-3" />
-                    <span className="text-[11px] text-[#4c8669]">使用用户数</span>
+                    <span className="text-[11px] text-status-nominal/80">使用用户数</span>
                     <span className="font-semibold tabular-nums">{selectedSkillUserCount}</span>
                   </span>
                 )}
@@ -256,7 +256,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#3766a6] border-[#ccdcf5] bg-[#edf4ff] hover:bg-[#dceaff]"
+                    className="h-8 cursor-pointer gap-1.5 rounded-lg border-status-info/25 bg-status-info/10 text-xs text-status-info hover:bg-status-info/15"
                     onClick={handleOpenSubscribe}
                   >
                     <Sparkles className="size-3" />
@@ -265,7 +265,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                 )}
                 {selectedItem.installed ? (
                   activeTab === "orgSkill" ? (
-                    <span className="text-xs bg-[#edf7f0] border border-[#c4e8d1] text-[#2e7d4f] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1.5 rounded-lg border border-status-nominal/25 bg-status-nominal/10 px-3 py-2 text-xs text-status-nominal">
                       <CheckCircle className="size-3" />
                       已安装
                     </span>
@@ -273,7 +273,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                     <TooltipProvider delayDuration={180}>
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <span className="col-span-2 text-xs bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-3 py-2 rounded-lg inline-flex items-center gap-1.5">
+                          <span className="col-span-2 inline-flex items-center gap-1.5 rounded-lg border border-status-warning/25 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
                             <Zap className="size-3" />
                             自动保持最新
                           </span>
@@ -291,7 +291,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                             <Button
                               variant="outline"
                               size="sm"
-                              className="pointer-events-none h-8 w-full gap-1.5 text-xs rounded-lg text-[#9b8f80] border-[#e8e0d4] bg-[#f6f2ea] opacity-90"
+                              className="pointer-events-none h-8 w-full gap-1.5 rounded-lg border-border bg-background-interactive text-xs text-muted-foreground opacity-90"
                               disabled
                               aria-disabled="true"
                             >
@@ -314,7 +314,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                       <Button
                         variant="outline"
                         size="sm"
-                        className="market-update-bounce h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0]"
+                        className="market-update-bounce h-8 cursor-pointer gap-1.5 rounded-lg border-status-nominal/30 bg-status-nominal/10 text-xs text-status-nominal hover:bg-status-nominal/15"
                         onClick={() => onUpdateInstall(selectedItem)}
                         disabled={updatingItems.has(getItemKey(selectedItem))}
                       >
@@ -326,7 +326,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-8 gap-1.5 text-xs rounded-lg cursor-pointer text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc]"
+                      className="h-8 cursor-pointer gap-1.5 rounded-lg border-border bg-background-interactive text-xs text-muted-foreground hover:bg-secondary"
                       onClick={() => onUpdateInstall(selectedItem)}
                       disabled={updatingItems.has(getItemKey(selectedItem))}
                     >
@@ -341,7 +341,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                         <span className="col-span-2 inline-flex cursor-not-allowed">
                           <Button
                             size="sm"
-                            className="pointer-events-none h-8 w-full gap-1.5 text-xs bg-[#d8c8b5] text-[#faf9f5] border-0 rounded-lg opacity-85"
+                            className="pointer-events-none h-8 w-full gap-1.5 rounded-lg border-0 bg-muted text-xs text-muted-foreground opacity-85"
                             disabled
                             aria-disabled="true"
                           >
@@ -358,7 +358,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                 ) : (
                   <Button
                     size="sm"
-                    className="h-8 gap-1.5 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] rounded-lg cursor-pointer"
+                    className="h-8 cursor-pointer gap-1.5 rounded-lg border-0 bg-button text-xs text-button-foreground hover:bg-button/90"
                     onClick={() => onDownload(selectedItem, false)}
                     disabled={downloadingItems.has(getItemKey(selectedItem))}
                   >
@@ -372,7 +372,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
+                      className="h-8 cursor-pointer gap-1.5 rounded-lg border-status-critical/30 text-xs text-status-critical hover:bg-status-critical/10"
                       onClick={() => onUninstall(selectedItem)}
                     >
                       <Trash2 className="size-3" />
@@ -384,7 +384,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                       <Button
                         variant="outline"
                         size="sm"
-                        className="h-8 gap-1.5 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] rounded-lg cursor-pointer"
+                        className="h-8 cursor-pointer gap-1.5 rounded-lg border-border bg-background-interactive text-xs text-muted-foreground hover:bg-secondary"
                         onClick={() => onUpdate(selectedItem)}
                       >
                         <Edit className="size-3" />
@@ -393,7 +393,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                       <Button
                         variant="outline"
                         size="sm"
-                        className="h-8 gap-1.5 text-xs border-[#fad4d4] text-[#b53333] hover:text-[#b53333] hover:bg-[#fdf2f2] rounded-lg cursor-pointer"
+                        className="h-8 cursor-pointer gap-1.5 rounded-lg border-status-critical/30 text-xs text-status-critical hover:bg-status-critical/10"
                         onClick={() => onDelete(selectedItem)}
                       >
                         <Trash2 className="size-3" />
@@ -405,30 +405,30 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
             </div>
 
             {activeTab === "skill" && canViewSkillUserDetail && (
-              <div className="rounded-2xl border border-[#e8e6dc] bg-[#faf9f5] p-4 space-y-3 shadow-[rgba(0,0,0,0.03)_0px_2px_10px]">
+              <div className="space-y-3 rounded-2xl border border-border bg-background-elevated p-4 shadow-[rgba(0,0,0,0.08)_0px_2px_10px]">
                 <div className="flex items-center justify-between">
-                  <h4 className="text-[13px] font-medium text-[#141413]">使用用户明细（本月）</h4>
+                  <h4 className="text-[13px] font-medium text-foreground">使用用户明细（本月）</h4>
                   <div className="flex items-center gap-1.5">
-                    <span className="inline-flex items-center gap-1 rounded-full border border-[#d7e2f5] bg-[#eef4ff] px-2 py-0.5 text-[11px] text-[#365d97]">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-status-info/25 bg-status-info/10 px-2 py-0.5 text-[11px] text-status-info">
                       <BarChart3 className="size-3" />
                       <span className="tabular-nums">{selectedSkillCallCount ?? 0}</span>
                     </span>
-                    <span className="inline-flex items-center gap-1 rounded-full border border-[#cfe4d9] bg-[#edf8f2] px-2 py-0.5 text-[11px] text-[#2f7a55]">
+                    <span className="inline-flex items-center gap-1 rounded-full border border-status-nominal/25 bg-status-nominal/10 px-2 py-0.5 text-[11px] text-status-nominal">
                       <User className="size-3" />
                       <span className="tabular-nums">{selectedSkillUserCount ?? 0}</span>
                     </span>
                   </div>
                 </div>
                 {skillUsageLoading ? (
-                  <div className="flex items-center justify-center py-5 text-xs text-[#87867f]">
-                    <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin mr-2" />
+                  <div className="flex items-center justify-center py-5 text-xs text-muted-foreground">
+                    <div className="mr-2 size-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                     加载中…
                   </div>
                 ) : (
-                  <div className="max-h-[260px] overflow-auto border border-[#f0eee6] rounded-xl">
+                  <div className="max-h-[260px] overflow-auto rounded-xl border border-border">
                     <table className="w-full text-[12px]">
-                      <thead className="bg-[#f5f4ed]">
-                        <tr className="text-[#87867f]">
+                      <thead className="bg-background-interactive">
+                        <tr className="text-muted-foreground">
                           <th className="text-left py-2 px-2 font-medium">Id</th>
                           <th className="text-left py-2 px-2 font-medium">名称</th>
                           <th className="text-left py-2 px-2 font-medium">机构</th>
@@ -439,7 +439,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                         {selectedSkillUsageRows.map((user) => (
                           <tr
                             key={user.sapId}
-                            className="border-t border-[#f0eee6] text-[#5e5d59]"
+                            className="border-t border-border text-muted-foreground"
                           >
                             <td className="py-1.5 px-2 font-mono">
                               {user.sapId === "__empty_user__" ? "—" : user.sapId}
@@ -455,7 +455,7 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
                         ))}
                         {selectedSkillUsageRows.length === 0 && (
                           <tr>
-                            <td colSpan={4} className="py-6 text-center text-[#87867f]">
+                            <td colSpan={4} className="py-6 text-center text-muted-foreground">
                               暂无调用用户数据
                             </td>
                           </tr>
@@ -470,12 +470,12 @@ export function MarketDetailView(props: MarketDetailViewProps): React.JSX.Elemen
             {renderSkillTraceEntry()}
 
             {selectedItem.guidance && (
-              <div className="rounded-xl border border-[#f5d9c4] bg-[#fdf3e7] p-4 text-sm shadow-[rgba(0,0,0,0.03)_0px_2px_8px]">
-                <div className="flex items-center gap-2 mb-2 text-[11px] uppercase tracking-[0.08em] text-[#c4956a] font-medium">
+              <div className="rounded-xl border border-status-warning/25 bg-status-warning/10 p-4 text-sm shadow-[rgba(0,0,0,0.03)_0px_2px_8px]">
+                <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.08em] text-status-warning">
                   <Lightbulb className="size-3.5 shrink-0" />
                   <span>使用指引</span>
                 </div>
-                <p className="text-[#5e5d59] whitespace-pre-wrap leading-relaxed break-all text-[13px]">
+                <p className="break-all whitespace-pre-wrap text-[13px] leading-relaxed text-muted-foreground">
                   {selectedItem.guidance}
                 </p>
               </div>

@@ -8,6 +8,7 @@ import {
   Info,
   Loader2
 } from "lucide-react"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { cn } from "@/lib/utils"
 
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
@@ -318,9 +319,9 @@ export function SandboxPanel(): React.JSX.Element {
                 yolo ? "bg-amber-500" : "bg-muted-foreground/30"
               )}
             >
-              <span
+              <ToggleThumb
                 className={cn(
-                  "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
+                  "mt-0.5 inline-block size-4 shadow",
                   yolo ? "translate-x-4" : "translate-x-0.5"
                 )}
               />
@@ -398,9 +399,9 @@ export function SandboxPanel(): React.JSX.Element {
                 failureFuseWarning ? "bg-blue-500" : "bg-muted-foreground/30"
               )}
             >
-              <span
+              <ToggleThumb
                 className={cn(
-                  "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
+                  "mt-0.5 inline-block size-4 shadow",
                   failureFuseWarning ? "translate-x-4" : "translate-x-0.5"
                 )}
               />
@@ -440,9 +441,9 @@ export function SandboxPanel(): React.JSX.Element {
                 failureFuseModelFeedback ? "bg-blue-500" : "bg-muted-foreground/30"
               )}
             >
-              <span
+              <ToggleThumb
                 className={cn(
-                  "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
+                  "mt-0.5 inline-block size-4 shadow",
                   failureFuseModelFeedback ? "translate-x-4" : "translate-x-0.5"
                 )}
               />
@@ -484,9 +485,9 @@ export function SandboxPanel(): React.JSX.Element {
                 failureFuseDebug ? "bg-blue-500" : "bg-muted-foreground/30"
               )}
             >
-              <span
+              <ToggleThumb
                 className={cn(
-                  "inline-block size-4 rounded-full bg-white shadow transition-transform mt-0.5",
+                  "mt-0.5 inline-block size-4 shadow",
                   failureFuseDebug ? "translate-x-4" : "translate-x-0.5"
                 )}
               />

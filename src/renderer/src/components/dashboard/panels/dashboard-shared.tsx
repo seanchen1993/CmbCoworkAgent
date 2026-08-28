@@ -763,7 +763,7 @@ function SkillRankingTabs({
 
 function MarketSkillTag(): React.JSX.Element {
   return (
-    <span className="shrink-0 rounded-sm border border-emerald-200 bg-emerald-50 px-1 py-px text-[9px] font-medium leading-3 text-emerald-700">
+    <span className="shrink-0 rounded-sm border border-status-nominal/25 bg-status-nominal/10 px-1 py-px text-[9px] font-medium leading-3 text-status-nominal">
       市场
     </span>
   )
@@ -772,7 +772,7 @@ function MarketSkillTag(): React.JSX.Element {
 function PluginSkillTag({ pluginName }: { pluginName?: string }): React.JSX.Element {
   return (
     <span
-      className="inline-flex max-w-[120px] shrink-0 items-center rounded-sm border border-sky-200 bg-sky-50 px-1 py-px text-[9px] font-medium leading-3 text-sky-700"
+      className="inline-flex max-w-[120px] shrink-0 items-center rounded-sm border border-status-info/25 bg-status-info/10 px-1 py-px text-[9px] font-medium leading-3 text-status-info"
       title={pluginName ? `Plugin · ${pluginName}` : "Plugin"}
     >
       <span className="truncate">{pluginName ? `Plugin · ${pluginName}` : "Plugin"}</span>

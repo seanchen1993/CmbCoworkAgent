@@ -150,10 +150,10 @@ function WorkerSplitHandle({ onDrag }: WorkerSplitHandleProps): React.JSX.Elemen
       aria-orientation="vertical"
       title="拖动调整主对话和代理记录宽度"
       onMouseDown={handleMouseDown}
-      className="group relative z-20 flex h-full w-5 shrink-0 cursor-col-resize select-none items-center justify-center border-x border-stone-300/70 bg-stone-100/55 shadow-[0_0_18px_rgba(120,113,108,0.12)] backdrop-blur transition-colors hover:border-stone-400/80 hover:bg-stone-200/45 dark:border-stone-700/70 dark:bg-stone-900/35 dark:hover:border-stone-500/80 dark:hover:bg-stone-800/45"
+      className="group relative z-20 flex h-full w-5 shrink-0 cursor-col-resize select-none items-center justify-center border-x border-border bg-background-interactive/55 shadow-[0_0_18px_rgba(0,0,0,0.08)] backdrop-blur transition-colors hover:border-border-emphasis hover:bg-background-interactive"
     >
       <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-gradient-to-b from-transparent via-stone-500/45 to-transparent" />
-      <div className="relative flex h-12 w-3 items-center justify-center rounded-full border border-stone-300/80 bg-background text-stone-500 opacity-75 shadow-sm transition-all group-hover:scale-105 group-hover:border-stone-400 group-hover:text-stone-700 group-hover:opacity-100 dark:border-stone-700 dark:text-stone-400 dark:group-hover:text-stone-200">
+      <div className="relative flex h-12 w-3 items-center justify-center rounded-full border border-border bg-background text-muted-foreground opacity-75 shadow-sm transition-all group-hover:scale-105 group-hover:border-border-emphasis group-hover:text-foreground group-hover:opacity-100">
         <GripVertical className="size-3" strokeWidth={2.2} />
       </div>
     </div>

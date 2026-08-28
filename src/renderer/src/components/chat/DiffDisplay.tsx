@@ -1,8 +1,10 @@
 import { GitCommit, Maximize2, Minimize2, Eye, Minus, Plus } from "lucide-react"
-import { memo, useEffect, useMemo, useState } from "react"
+import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react"
 import { VirtualList } from "@/components/ui/virtual-list"
 import { cn } from "@/lib/utils"
 import { parseUnifiedDiffRows, type DiffRow } from "@/lib/diff-utils"
+import { DEFAULT_THEME_ID, getThemeDefinition } from "@/lib/theme-registry"
+import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
 
 type DiffViewerModule = typeof import("react-diff-viewer-continued")
 
@@ -12,6 +14,43 @@ let diffViewerModulePromise: Promise<DiffViewerModule> | null = null
 const DIFF_ROW_HEIGHT = 20
 /** Diff lines exceeding this threshold switch to virtualized rendering in fullscreen. */
 const VIRTUALIZED_DIFF_LINE_THRESHOLD = 200
+
+const DIFF_VIEWER_THEME_VARIABLES = {
+  diffViewerBackground: "var(--background-elevated)",
+  diffViewerColor: "var(--foreground)",
+  addedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 88%, var(--status-nominal)), color-mix(in lab, var(--background-elevated) 80%, var(--status-nominal)))",
+  addedColor: "var(--foreground)",
+  removedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 88%, var(--status-critical)), color-mix(in lab, var(--background-elevated) 80%, var(--status-critical)))",
+  removedColor: "var(--foreground)",
+  changedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 88%, var(--status-warning)), color-mix(in lab, var(--background-elevated) 80%, var(--status-warning)))",
+  wordAddedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 72%, var(--status-nominal)), color-mix(in lab, var(--background-elevated) 64%, var(--status-nominal)))",
+  wordRemovedBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 72%, var(--status-critical)), color-mix(in lab, var(--background-elevated) 64%, var(--status-critical)))",
+  addedGutterBackground:
+    "light-dark(color-mix(in lab, var(--background) 82%, var(--status-nominal)), color-mix(in lab, var(--background) 70%, var(--status-nominal)))",
+  removedGutterBackground:
+    "light-dark(color-mix(in lab, var(--background) 82%, var(--status-critical)), color-mix(in lab, var(--background) 70%, var(--status-critical)))",
+  gutterBackground: "var(--background)",
+  gutterBackgroundDark: "var(--background-interactive)",
+  highlightBackground:
+    "light-dark(color-mix(in lab, var(--background-elevated) 82%, var(--status-warning)), color-mix(in lab, var(--background-elevated) 72%, var(--status-warning)))",
+  highlightGutterBackground:
+    "light-dark(color-mix(in lab, var(--background) 74%, var(--status-warning)), color-mix(in lab, var(--background) 64%, var(--status-warning)))",
+  codeFoldGutterBackground: "var(--background-interactive)",
+  codeFoldBackground: "var(--background-interactive)",
+  emptyLineBackground: "var(--background)",
+  gutterColor: "var(--tertiary-foreground)",
+  addedGutterColor: "var(--status-nominal-foreground)",
+  removedGutterColor: "var(--status-critical-foreground)",
+  codeFoldContentColor: "var(--muted-foreground)",
+  diffViewerTitleBackground: "var(--background-interactive)",
+  diffViewerTitleColor: "var(--foreground)",
+  diffViewerTitleBorderColor: "var(--border)"
+} as const
 
 function renderDiffListItem(row: DiffRow): React.ReactNode {
   if (row.type === "file") {
@@ -223,6 +262,12 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [diffViewerModule, setDiffViewerModule] = useState<DiffViewerModule | null>(null)
   const [diffViewerLoadError, setDiffViewerLoadError] = useState<string | null>(null)
+  const themePreference = useSyncExternalStore(
+    subscribeThemePreference,
+    getThemePreference,
+    () => DEFAULT_THEME_ID
+  )
+  const isDarkTheme = getThemeDefinition(themePreference).colorScheme === "dark"
 
   useEffect(() => {
     if (diffViewerModule) return
@@ -330,10 +375,14 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
               title={file.displayPath}
             >
               <span className="truncate font-mono">{file.displayPath}</span>
-              {file.isNewFile && <span className="rounded bg-green-100 px-1 text-green-700">new</span>}
-              {file.isDeletedFile && <span className="rounded bg-red-100 px-1 text-red-700">del</span>}
-              {file.addedLines > 0 && <span className="text-green-700">+{file.addedLines}</span>}
-              {file.removedLines > 0 && <span className="text-red-700">-{file.removedLines}</span>}
+              {file.isNewFile && <span className="rounded bg-status-nominal/10 px-1 text-status-nominal">new</span>}
+              {file.isDeletedFile && <span className="rounded bg-status-critical/10 px-1 text-status-critical">del</span>}
+              {file.addedLines > 0 && (
+                <span className="text-status-nominal-foreground">+{file.addedLines}</span>
+              )}
+              {file.removedLines > 0 && (
+                <span className="text-status-critical-foreground">-{file.removedLines}</span>
+              )}
             </button>
           )
         })}
@@ -399,7 +448,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
               }
             : undefined
         }
-        useDarkTheme={false}
+        useDarkTheme={isDarkTheme}
         loadingElement={() => (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
             <div className="size-3 rounded-full bg-primary/40 animate-pulse" />
@@ -410,32 +459,8 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
         compareMethod={viewerUsesPreview ? DiffMethod.LINES : DiffMethod.WORDS}
         styles={{
           variables: {
-            light: {
-              diffViewerBackground: "#ffffff",
-              diffViewerColor: "#292524",
-              addedBackground: "#dcfce7",
-              addedColor: "#166534",
-              removedBackground: "#fee2e2",
-              removedColor: "#991b1b",
-              wordAddedBackground: "#bbf7d0",
-              wordRemovedBackground: "#fecaca",
-              addedGutterBackground: "#bbf7d0",
-              removedGutterBackground: "#fecaca",
-              gutterBackground: "#FAF9F6",
-              gutterBackgroundDark: "#F0EEE9",
-              highlightBackground: "#fef9c3",
-              highlightGutterBackground: "#fef08a",
-              codeFoldGutterBackground: "#F5F3EF",
-              codeFoldBackground: "#F5F3EF",
-              emptyLineBackground: "#F5F3EF",
-              gutterColor: "#A8A29E",
-              addedGutterColor: "#16a34a",
-              removedGutterColor: "#dc2626",
-              codeFoldContentColor: "#A8A29E",
-              diffViewerTitleBackground: "#F0EEE9",
-              diffViewerTitleColor: "#44403C",
-              diffViewerTitleBorderColor: "#EEECE7"
-            }
+            light: DIFF_VIEWER_THEME_VARIABLES,
+            dark: DIFF_VIEWER_THEME_VARIABLES
           },
           diffContainer: {
             width: "100%",
@@ -551,7 +576,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
 
       {/* Diff content */}
       <div
-        className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-white font-mono w-full"
+        className="relative flex min-h-0 w-full flex-1 flex-col overflow-hidden bg-background-elevated font-mono"
       >
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           {makeDiffViewer(false)}
@@ -615,7 +640,7 @@ export const DiffDisplay = memo(({ diff, oldValue, newValue, filePath }: DiffDis
 
           {/* Modal content */}
           <div className="flex-1 overflow-hidden p-4">
-            <div className="h-full rounded-md border border-border overflow-auto bg-white font-mono text-xs">
+            <div className="h-full overflow-auto rounded-md border border-border bg-background-elevated font-mono text-xs">
               {makeDiffViewer(true)}
             </div>
           </div>

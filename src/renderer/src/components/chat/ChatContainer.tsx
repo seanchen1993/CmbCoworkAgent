@@ -87,14 +87,8 @@ import {
   isCoordinatorNotificationPrompt
 } from "@/lib/message-display-helpers"
 import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
-import {
-  buildToolResultAssociations,
-  getWorkerToolUiKey
-} from "@/lib/worker-tool-result-key"
-import {
-  buildVisibleMessageLayout,
-  messageHasVisibleRow
-} from "@/lib/message-display-visibility"
+import { buildToolResultAssociations, getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
+import { buildVisibleMessageLayout, messageHasVisibleRow } from "@/lib/message-display-visibility"
 import { createToolDerivationMessageSelector } from "@/lib/message-render-stability"
 import {
   isCoordinatorModeMetadata,
@@ -222,15 +216,17 @@ import { HookLogChip, HookLogModal } from "./HookLogViews"
 const PROJECT_MODE_AGENT_TEAM_ENABLED =
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
 
-function interruptionNoticeCopy(event: string, action: string): {
+function interruptionNoticeCopy(
+  event: string,
+  action: string
+): {
   title: string
   explanation: string
 } {
   if (event.startsWith("Failure fuse")) {
     return {
       title: "工具失败熔断已停止本轮",
-      explanation:
-        "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+      explanation: "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
     }
   }
   if (event.startsWith("Tool-call loop")) {
@@ -264,20 +260,20 @@ function goalStatusView(status: "active" | "paused" | "complete"): {
     return {
       label: "已完成",
       icon: <CheckCircle2 className="size-4 text-emerald-600" />,
-      className: "text-[#23483c]"
+      className: "text-status-nominal"
     }
   }
   if (status === "paused") {
     return {
       label: "已暂停",
       icon: <PauseCircle className="size-4 text-amber-600" />,
-      className: "text-[#51453a]"
+      className: "text-status-warning"
     }
   }
   return {
     label: "进行中",
     icon: <Flag className="size-4 text-sky-600" />,
-    className: "text-[#2f3f4a]"
+    className: "text-status-info"
   }
 }
 
@@ -326,7 +322,7 @@ function GoalStatusPanel({
       <div className="relative mx-auto mb-2 max-w-3xl">
         <div
           className={cn(
-            "flex items-center gap-3 rounded-2xl border border-black/[0.07] bg-white/82 px-3 py-2 shadow-[0_14px_42px_rgba(24,24,27,0.09),0_1px_0_rgba(255,255,255,0.88)_inset] backdrop-blur-2xl",
+            "flex items-center gap-3 rounded-2xl border border-border bg-background-elevated/90 px-3 py-2 shadow-[0_14px_42px_rgba(0,0,0,0.12)] backdrop-blur-2xl dark:shadow-[0_16px_42px_rgba(0,0,0,0.28)]",
             status.className
           )}
         >
@@ -335,13 +331,13 @@ function GoalStatusPanel({
             className="flex min-w-0 flex-1 items-center gap-3 text-left"
             onClick={() => onOpenChange(!open)}
           >
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.06]">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-background-interactive shadow-[0_6px_18px_rgba(0,0,0,0.10)] ring-1 ring-border">
               {status.icon}
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex flex-wrap items-center gap-2">
                 <span className="shrink-0 text-sm font-semibold">Goal {status.label}</span>
-                <span className="shrink-0 rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="shrink-0 rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
                   {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
                 </span>
               </span>
@@ -354,7 +350,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={onEditGoal}
                   aria-label="编辑 Goal"
                 >
@@ -368,7 +364,7 @@ function GoalStatusPanel({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={() => onCommand("/goal pause")}
                     aria-label="暂停 Goal"
                   >
@@ -383,7 +379,7 @@ function GoalStatusPanel({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={() => onCommand("/goal resume")}
                     aria-label="继续 Goal"
                   >
@@ -397,7 +393,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={() => onOpenChange(!open)}
                   aria-label="查看 Goal 详情"
                 >
@@ -410,7 +406,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={() => onCommand("/goal clear")}
                   aria-label="清除 Goal"
                 >
@@ -423,16 +419,16 @@ function GoalStatusPanel({
         </div>
 
         {open && (
-          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-black/[0.08] bg-[#fbfaf8] shadow-[0_24px_80px_rgba(24,24,27,0.18)]">
-            <div className="border-b border-black/[0.06] bg-white px-5 py-4">
+          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-border bg-background shadow-[0_24px_80px_rgba(0,0,0,0.22)] dark:shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+            <div className="border-b border-border bg-background-elevated px-5 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="flex size-10 items-center justify-center rounded-full bg-[#f7f7f5] shadow-sm ring-1 ring-black/[0.06]">
+                    <span className="flex size-10 items-center justify-center rounded-full bg-background-interactive shadow-sm ring-1 ring-border">
                       {status.icon}
                     </span>
                     <div className="text-lg font-semibold text-foreground">Goal {status.label}</div>
-                    <div className="rounded-full border border-black/[0.06] bg-[#f6f5f2] px-2 py-0.5 text-xs text-muted-foreground">
+                    <div className="rounded-full border border-border bg-background-interactive px-2 py-0.5 text-xs text-muted-foreground">
                       {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
                     </div>
                     <div
@@ -450,14 +446,14 @@ function GoalStatusPanel({
                 </div>
                 <button
                   type="button"
-                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#f6f5f2] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-background-interactive text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   onClick={() => onOpenChange(false)}
                   aria-label="关闭 Goal 详情"
                 >
                   <X className="size-4" />
                 </button>
               </div>
-              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#eeece8]">
+              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-background-interactive">
                 <div
                   className={cn(
                     "h-full rounded-full",
@@ -475,7 +471,7 @@ function GoalStatusPanel({
             <div className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-5 py-4 text-sm break-words [overflow-wrap:anywhere]">
               <section
                 className={cn(
-                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[0_1px_0_rgba(255,255,255,0.8)_inset]",
+                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[inset_0_1px_0_var(--border)]",
                   goalVerdictTone(goal.lastVerdict)
                 )}
               >
@@ -486,13 +482,13 @@ function GoalStatusPanel({
                 <div className="whitespace-pre-wrap break-words text-base leading-7 text-foreground/90 [overflow-wrap:anywhere]">
                   {evaluatorReason}
                 </div>
-                <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <div className="mt-3 rounded-xl bg-background-interactive/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
                   这里展示的是 evaluator 根据最近一轮 assistant 回复、工具结果和持久化 ledger
                   做出的判断。它解释为什么 Goal 会继续、暂停或完成。
                 </div>
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Flag className="size-4" />
                   目标与完成标准
@@ -507,7 +503,7 @@ function GoalStatusPanel({
                     </div>
                   </div>
                   {goal.completionCondition !== goal.objective && (
-                    <div className="border-t border-black/[0.06] pt-3">
+                    <div className="border-t border-border pt-3">
                       <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                         完成条件
                       </div>
@@ -517,7 +513,7 @@ function GoalStatusPanel({
                     </div>
                   )}
                   {contextText && (
-                    <div className="border-t border-black/[0.06] pt-3">
+                    <div className="border-t border-border pt-3">
                       <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                         <Notebook className="size-3.5" />
                         启动上下文
@@ -530,7 +526,7 @@ function GoalStatusPanel({
                 </div>
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Layers className="size-4" />
                   进展与证据
@@ -541,7 +537,7 @@ function GoalStatusPanel({
                 </div>
 
                 {!hasLedgerDetails ? (
-                  <div className="rounded-xl border border-dashed border-black/[0.10] bg-[#fbfaf8] px-3 py-4 text-center text-xs text-muted-foreground">
+                  <div className="rounded-xl border border-dashed border-border bg-background-interactive/70 px-3 py-4 text-center text-xs text-muted-foreground">
                     暂无 ledger 条目。下一轮评估后会在这里记录进展、证据或阻塞。
                   </div>
                 ) : (
@@ -555,7 +551,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allProgressItems.map((item, index) => (
                             <li key={`progress-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[11px] font-semibold text-emerald-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-nominal/10 text-[11px] font-semibold text-status-nominal">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -568,7 +564,7 @@ function GoalStatusPanel({
                     )}
 
                     {allEvidenceItems.length > 0 && (
-                      <div className="border-t border-black/[0.06] pt-4">
+                      <div className="border-t border-border pt-4">
                         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
                           <Database className="size-3.5 text-sky-600" />
                           证据
@@ -576,7 +572,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allEvidenceItems.map((item, index) => (
                             <li key={`evidence-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-info/10 text-[11px] font-semibold text-status-info">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -589,7 +585,7 @@ function GoalStatusPanel({
                     )}
 
                     {allBlockerItems.length > 0 && (
-                      <div className="border-t border-black/[0.06] pt-4">
+                      <div className="border-t border-border pt-4">
                         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
                           <CircleAlert className="size-3.5 text-amber-600" />
                           未解决问题
@@ -597,7 +593,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allBlockerItems.map((item, index) => (
                             <li key={`blocker-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-warning/10 text-[11px] font-semibold text-status-warning">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -612,26 +608,29 @@ function GoalStatusPanel({
                 )}
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Clock className="size-4" />
                   最近事件
                 </div>
-                <div className="mb-3 rounded-xl bg-[#fbfaf8] px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <div className="mb-3 rounded-xl bg-background-interactive/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
                   最近一条：{recentEventSummary}
                 </div>
                 <details>
-                  <summary className="cursor-pointer list-none rounded-lg border border-black/[0.06] px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
+                  <summary className="cursor-pointer list-none rounded-lg border border-border px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
                     展开事件历史（{latestEvents.length}）
                   </summary>
                   {latestEvents.length === 0 ? (
-                    <div className="mt-3 rounded-lg bg-[#fbfaf8] px-3 py-2 text-xs text-muted-foreground">
+                    <div className="mt-3 rounded-lg bg-background-interactive/70 px-3 py-2 text-xs text-muted-foreground">
                       暂无事件
                     </div>
                   ) : (
                     <div className="mt-3 space-y-3">
                       {latestEvents.map((event) => (
-                        <div key={event.event_id} className="border-l-2 border-black/[0.10] pl-3">
+                        <div
+                          key={event.event_id}
+                          className="border-l-2 border-border-emphasis pl-3"
+                        >
                           <div className="mb-1 text-[11px] text-muted-foreground">
                             {goalEventTimeLabel(event.created_at)}
                           </div>
@@ -646,7 +645,7 @@ function GoalStatusPanel({
               </section>
             </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-black/[0.06] bg-white px-5 py-3">
+            <div className="flex items-center justify-between gap-2 border-t border-border bg-background-elevated px-5 py-3">
               <button
                 type="button"
                 className="rounded-xl px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted"
@@ -657,7 +656,7 @@ function GoalStatusPanel({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  className="rounded-xl border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
                   onClick={onEditGoal}
                 >
                   编辑
@@ -682,7 +681,7 @@ function GoalStatusPanel({
                 )}
                 <button
                   type="button"
-                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  className="rounded-xl border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
                   onClick={() => onCommand("/goal clear")}
                 >
                   清除
@@ -2004,18 +2003,16 @@ export function ChatContainer({
   const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
   const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
   const showSystemConstraintsButton = surface === "harness-project"
-  const systemConstraintsTitle =
-    systemConstraintsLoadFailed
-      ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
-      : systemConstraintCounts.total > 0
+  const systemConstraintsTitle = systemConstraintsLoadFailed
+    ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+    : systemConstraintCounts.total > 0
       ? `系统约束已加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
       : "系统约束，点击查看详情"
-  const systemConstraintsLabel =
-    systemConstraintsLoadFailed
-      ? "系统约束未全部加载"
-      : systemConstraintCounts.loaded > 0
-        ? "系统约束已加载"
-        : "系统约束"
+  const systemConstraintsLabel = systemConstraintsLoadFailed
+    ? "系统约束未全部加载"
+    : systemConstraintCounts.loaded > 0
+      ? "系统约束已加载"
+      : "系统约束"
   const handleOpenSystemConstraints = useCallback((): void => {
     requestOpenRightPanelSystemConstraints(threadId)
   }, [requestOpenRightPanelSystemConstraints, threadId])
@@ -2883,12 +2880,7 @@ export function ChatContainer({
     const normalizedLiveMessages = normalizeLiveStreamMessageIds(
       threadMessages.map((message) => ({
         id: message.id,
-        type:
-          message.role === "user"
-            ? "human"
-            : message.role === "assistant"
-              ? "ai"
-              : message.role
+        type: message.role === "user" ? "human" : message.role === "assistant" ? "ai" : message.role
       })),
       streamData.liveMessages || []
     )
@@ -2972,7 +2964,8 @@ export function ChatContainer({
   }, [threadMessages, streamData.liveMessages, streamData.messages])
 
   const chatScrollNavigatorMessages = useMemo(
-    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
+    () =>
+      filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
     [threadMessages]
   )
 
@@ -3107,9 +3100,7 @@ export function ChatContainer({
 
     for (const { key, call: toolCall } of orderedToolCalls) {
       const baseState =
-        lastOccurrenceKeyByCallId.get(toolCall.id) === key
-          ? toolCallStates[toolCall.id]
-          : undefined
+        lastOccurrenceKeyByCallId.get(toolCall.id) === key ? toolCallStates[toolCall.id] : undefined
       const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
       const result = toolResults.get(key)
       let status: ToolCallStatus
@@ -3170,10 +3161,7 @@ export function ChatContainer({
     const configuredLimit = normalizeChatAutoScrollMessageLimit(
       chatScrollSettings.autoScrollMessageLimit
     )
-    if (
-      configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS &&
-      displayMessages.length > configuredLimit
-    ) {
+    if (configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS && displayMessages.length > configuredLimit) {
       const noticeKey = `${threadId}:${configuredLimit}`
       if (chatScrollLimitNoticeKeyRef.current !== noticeKey) {
         chatScrollLimitNoticeKeyRef.current = noticeKey
@@ -3474,12 +3462,7 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [
-      setInput,
-      setSelectedBuiltinBrowser,
-      setSelectedSkill,
-      slashResetSelection
-    ]
+    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
   const applyAtFileMention = useCallback(
@@ -3509,28 +3492,28 @@ export function ChatContainer({
         }
 
         clearError()
-          void (async () => {
-            let contentChars = 0
-            try {
-              const readResult = await window.api.workspace.readFile(
-                threadId,
-                selection.mentionedFile.workspaceFilePath
-              )
-              if (readResult.success && typeof readResult.content === "string") {
-                contentChars = readResult.content.length
-              }
-            } catch {
-              contentChars = 0
+        void (async () => {
+          let contentChars = 0
+          try {
+            const readResult = await window.api.workspace.readFile(
+              threadId,
+              selection.mentionedFile.workspaceFilePath
+            )
+            if (readResult.success && typeof readResult.content === "string") {
+              contentChars = readResult.content.length
             }
+          } catch {
+            contentChars = 0
+          }
 
-            setMentionedFiles((prev) => [
-              ...prev,
-              {
-                ...selection.mentionedFile,
-                contentChars
-              }
-            ])
-          })()
+          setMentionedFiles((prev) => [
+            ...prev,
+            {
+              ...selection.mentionedFile,
+              contentChars
+            }
+          ])
+        })()
 
         const { nextInput, nextCursor } = removeAtFileTokenFromInput(input, {
           startPos: atFileMentions.mode.startPos,
@@ -3763,9 +3746,9 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent, defaultText=''): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = defaultText ||  input.trim()
+    const trimmedInput = defaultText || input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -3791,10 +3774,7 @@ export function ChatContainer({
     })
     const willEnqueueWhileBusy =
       !isGoalSlashInput &&
-      (isLoading ||
-        Boolean(pendingApproval) ||
-        approvalQueue.length > 0 ||
-        shouldQueueBehindSubmit)
+      (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
@@ -5748,7 +5728,7 @@ export function ChatContainer({
             <p className="text-xs">可重试或选择受限沙箱模式继续使用。</p>
             <div className="flex gap-2 mt-1">
               <button
-                className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                className="px-3 py-1.5 text-xs bg-button text-button-foreground rounded-md hover:bg-button/90 transition-colors"
                 onClick={() => {
                   setNuxError(null)
                   setNuxLoading(true)
@@ -6008,9 +5988,7 @@ export function ChatContainer({
                     userSendTimeLabelById={userSendTimeLabelById}
                   />
 
-                  {contextCompaction && (
-                    <ContextCompactionCard compaction={contextCompaction} />
-                  )}
+                  {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
 
                   {/*测试git diff功能*/}
                   {/*<DisplayDiffTest/>*/}
@@ -6337,7 +6315,7 @@ export function ChatContainer({
                             <>
                               {approvalTypes.includes("approve") && (
                                 <button
-                                  className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                                  className="rounded-md bg-button px-4 py-2 text-sm font-semibold text-button-foreground shadow-sm transition-colors hover:bg-button/90"
                                   onClick={() => handleApprovalDecision("approve")}
                                 >
                                   {isFileApproval
@@ -6432,7 +6410,7 @@ export function ChatContainer({
                       type="button"
                       onClick={onOpenGitPanel}
                       disabled={!onOpenGitPanel}
-                      className="rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-md bg-status-warning/15 px-2.5 py-1 text-xs font-medium text-status-warning transition-colors hover:bg-status-warning/20 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       打开
                     </button>
@@ -6506,9 +6484,9 @@ export function ChatContainer({
                               }}
                               onDragEnd={() => setDraggingQueueId(null)}
                               className={cn(
-                                "rounded-xl bg-amber-900/5 px-2.5 py-2 transition-colors",
+                                "rounded-xl bg-status-warning/5 px-2.5 py-2 transition-colors",
                                 draggingQueueId === queued.id && "opacity-50",
-                                !isEditing && "hover:bg-amber-900/10"
+                                !isEditing && "hover:bg-status-warning/10"
                               )}
                             >
                               {isEditing ? (
@@ -6541,7 +6519,7 @@ export function ChatContainer({
                                     <button
                                       type="button"
                                       onClick={saveEditingQueuedMessage}
-                                      className="flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-xs text-primary-foreground hover:bg-primary/90"
+                                      className="flex h-7 items-center gap-1 rounded-md bg-button px-2 text-xs text-button-foreground hover:bg-button/90"
                                     >
                                       <Check className="size-3.5" />
                                       保存
@@ -6630,8 +6608,8 @@ export function ChatContainer({
                         pendingUserInput
                           ? "border-primary/25 bg-background"
                           : appleIntelligenceGlowEnabled && glowVisible
-                            ? "bg-white/80"
-                            : "bg-white",
+                            ? "bg-background-elevated/80"
+                            : "bg-background-elevated",
                         dragOver && "border-primary"
                       )}
                       onDrop={handleDrop}
@@ -6782,8 +6760,7 @@ export function ChatContainer({
                             locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
+                              disableCoordinatorModeOption || disableWorkflowModeOption
                                 ? {
                                     coordinator: disableCoordinatorModeOption,
                                     workflow: disableWorkflowModeOption
@@ -6791,8 +6768,7 @@ export function ChatContainer({
                                 : undefined
                             }
                             disabledModeReasons={
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
+                              disableCoordinatorModeOption || disableWorkflowModeOption
                                 ? {
                                     coordinator: disableCoordinatorModeOption
                                       ? "项目模式暂不支持 Agent Team。"
@@ -6837,7 +6813,7 @@ export function ChatContainer({
                                   type="submit"
                                   disabled={goalSendButtonDisabledWhileLoading}
                                   aria-label="发送 goal 命令"
-                                  className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                  className="flex items-center justify-center size-7 rounded-md bg-button text-button-foreground hover:bg-button/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
                                   <Send className="size-3.5" />
                                 </button>
@@ -6873,34 +6849,6 @@ export function ChatContainer({
                                   </Tooltip>
                                 </TooltipProvider>
                               )}
-                              <TooltipProvider delayDuration={180}>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (effectiveInputDisabled) return
-                                        // 创建伪造的表单提交事件
-                                        const fakeEvent = {
-                                          preventDefault: () => {}
-                                        } as React.FormEvent
-                                        // 发送继续消息
-                                        handleSubmit(fakeEvent, "继续")
-                                      }}
-                                      disabled={effectiveInputDisabled}
-                                      className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                      aria-label="继续对话"
-                                    >
-                                      <Send className="size-3.5" />
-                                      <span className="text-xs font-medium">继续</span>
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top" sideOffset={6}>
-                                    点击自动发送“继续”2字
-                                  </TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
-
                               <button
                                 type="submit"
                                 disabled={
@@ -6912,7 +6860,7 @@ export function ChatContainer({
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
-                                className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                className="flex items-center justify-center size-7 rounded-md bg-button text-button-foreground hover:bg-button/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                               >
                                 <Send className="size-3.5" />
                               </button>

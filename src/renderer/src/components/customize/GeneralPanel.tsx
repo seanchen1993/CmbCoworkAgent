@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import {
   AlertTriangle,
+  Check,
   Gauge,
   Loader2,
+  Palette,
   PanelTopClose,
   Settings2,
   Sparkles,
@@ -48,6 +50,14 @@ import {
   setAppleIntelligenceGlowEnabled,
   subscribeAppleIntelligenceGlow
 } from "@/lib/apple-intelligence-glow"
+import {
+  getThemePreference,
+  setThemePreference,
+  subscribeThemePreference,
+  type ThemePreference
+} from "@/lib/theme-preference"
+import { DEFAULT_THEME_ID, THEME_DEFINITIONS } from "@/lib/theme-registry"
+import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import {
   CHAT_AUTO_SCROLL_ALWAYS,
@@ -55,6 +65,19 @@ import {
   normalizeChatAutoScrollMessageLimit,
   type ChatScrollSettings
 } from "../../../../shared/chat-scroll"
+
+const THEME_GROUPS = [
+  {
+    colorScheme: "light",
+    label: "浅色主题",
+    themes: THEME_DEFINITIONS.filter((theme) => theme.colorScheme === "light")
+  },
+  {
+    colorScheme: "dark",
+    label: "深色主题",
+    themes: THEME_DEFINITIONS.filter((theme) => theme.colorScheme === "dark")
+  }
+] as const
 
 export function GeneralPanel(): React.JSX.Element {
   const [closeBehavior, setCloseBehavior] = useState<WindowCloseBehavior | null>(null)
@@ -88,6 +111,11 @@ export function GeneralPanel(): React.JSX.Element {
     subscribeAppleIntelligenceGlow,
     getAppleIntelligenceGlowEnabled,
     () => false
+  )
+  const themePreference = useSyncExternalStore(
+    subscribeThemePreference,
+    getThemePreference,
+    () => DEFAULT_THEME_ID
   )
 
   const loadCloseBehavior = useCallback(async (): Promise<void> => {
@@ -191,6 +219,12 @@ export function GeneralPanel(): React.JSX.Element {
       console.error("[GeneralPanel] Failed to save input glow setting:", saveError)
       toast.error("光效设置保存失败")
     }
+  }, [])
+
+  const handleThemeChange = useCallback((theme: ThemePreference): void => {
+    setThemePreference(theme)
+    const label = THEME_DEFINITIONS.find((item) => item.id === theme)?.label ?? theme
+    toast.success(`已切换为${label}主题`)
   }, [])
 
   const persistChatScrollSettings = useCallback(
@@ -626,7 +660,84 @@ export function GeneralPanel(): React.JSX.Element {
           <div className="border-b border-border/60 bg-muted/35 px-5 py-4">
             <h2 className="text-sm font-semibold text-foreground">外观</h2>
           </div>
-          <div className="flex items-center justify-between gap-4 px-5 py-5">
+          <div className="px-5 py-5">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background-elevated text-muted-foreground shadow-sm ring-1 ring-border/60">
+                <Palette className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-foreground">界面主题</div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  使用 CMBDevClaw 经典配色或其他内置主题；选择会在下次启动时保留。
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 space-y-5">
+              {THEME_GROUPS.map((group) => (
+                <section key={group.colorScheme}>
+                  <div className="mb-2 flex items-center gap-2 px-0.5">
+                    <span className="text-[11px] font-medium text-muted-foreground">
+                      {group.label}
+                    </span>
+                    <span className="rounded-full bg-background-interactive px-1.5 py-0.5 text-[9px] tabular-nums text-tertiary-foreground">
+                      {group.themes.length}
+                    </span>
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                    {group.themes.map((theme) => {
+                      const selected = themePreference === theme.id
+                      return (
+                        <button
+                          key={theme.id}
+                          type="button"
+                          aria-pressed={selected}
+                          onClick={() => handleThemeChange(theme.id)}
+                          className={cn(
+                            "group relative min-w-0 rounded-xl border p-3 text-left transition-colors",
+                            selected
+                              ? "border-primary bg-primary/10 ring-1 ring-primary/25"
+                              : "border-border bg-background-elevated hover:border-border-emphasis hover:bg-background-interactive"
+                          )}
+                        >
+                          <span className="flex items-center gap-2.5">
+                            <span
+                              className="flex h-9 w-12 shrink-0 overflow-hidden rounded-lg border shadow-sm"
+                              style={{
+                                backgroundColor: theme.palette.background,
+                                borderColor: theme.palette.border
+                              }}
+                            >
+                              <span
+                                className="h-full w-1/2"
+                                style={{ backgroundColor: theme.palette.backgroundElevated }}
+                              />
+                              <span
+                                className="m-auto size-2.5 rounded-full"
+                                style={{ backgroundColor: theme.palette.primary }}
+                              />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                                <span className="truncate">{theme.label}</span>
+                                {selected ? (
+                                  <Check className="size-3.5 shrink-0 text-primary" />
+                                ) : null}
+                              </span>
+                              <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+                                {theme.description}
+                              </span>
+                            </span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-4 border-t border-border/60 px-5 py-5">
             <div className="flex min-w-0 items-start gap-3 sm:pr-8">
               <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60">
                 <Sparkles className="size-4" />

@@ -120,17 +120,17 @@ export function OrganizationSkillsSection({
   return (
     <div className={`space-y-2.5 py-4 ${showDivider ? "pt-5" : "pt-0"} last:pb-0`}>
       {showDivider && (
-        <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-slate-500/85 -mt-2 mb-4" />
+        <div className="h-px bg-gradient-to-r from-transparent via-slate-400/90 to-transparent dark:via-border -mt-2 mb-4" />
       )}
       <div className="text-xs text-muted-foreground font-medium tracking-wider flex items-center justify-between gap-1">
         <div className="flex items-center gap-1">
           <Building2 className="size-3 text-amber-500" />
-          <span className={"text-black"}>组织级技能</span>
+          <span className="text-foreground">组织级技能</span>
         </div>
         <button
           type="button"
           onClick={() => onOpenOrganizationSkillMarket()}
-          className="text-xs text-amber-600 hover:text-amber-700 transition-colors cursor-pointer"
+          className="cursor-pointer text-xs text-status-warning-foreground transition-colors hover:opacity-80"
         >
           更多{moreCount > 0 ? `（+${moreCount}）` : ""}
         </button>
@@ -151,10 +151,10 @@ export function OrganizationSkillsSection({
                     }
                     onUseSkillPrompt(skill, label)
                   }}
-                  className="group relative w-full rounded-xl border border-slate-300/90 dark:border-slate-600/85 bg-slate-50/70 dark:bg-slate-900/35 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:bg-slate-100/95 dark:hover:bg-slate-800/55 hover:border-slate-400/95 dark:hover:border-slate-500/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                  className="group relative w-full rounded-xl border border-slate-300/90 dark:border-border bg-slate-50/70 dark:bg-background-elevated px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] dark:shadow-[0_1px_0_rgb(0_0_0_/_18%)] hover:bg-slate-100/95 dark:hover:bg-background-interactive hover:border-slate-400/95 dark:hover:border-border-emphasis hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
                 >
                   <div className="flex items-center gap-2 min-w-0">
-                    <div className="rounded-md border border-slate-300/90 dark:border-slate-600/80 bg-white/80 dark:bg-slate-900/45 p-1.5 text-slate-500 dark:text-slate-300 group-hover:text-slate-700 dark:group-hover:text-slate-100 transition-colors">
+                    <div className="rounded-md border border-border bg-background-interactive p-1.5 text-muted-foreground transition-colors group-hover:text-foreground">
                       <Wrench className="size-4" />
                     </div>
                     <div className="min-w-0 flex-1">

@@ -1132,7 +1132,7 @@ function ProjectPluginUpdateButton({
         type="button"
         variant="outline"
         size="sm"
-        className="market-update-bounce h-7 gap-1 rounded-lg border-[#78d7cb] bg-[#e5fbf7] px-3 text-xs text-[#0f766e] hover:bg-[#d4f7f0] disabled:cursor-not-allowed disabled:opacity-70"
+        className="market-update-bounce h-7 gap-1 rounded-lg border-status-nominal/30 bg-status-nominal/10 px-3 text-xs text-status-nominal hover:bg-status-nominal/15 disabled:cursor-not-allowed disabled:opacity-70"
         disabled={updatingPlugin}
         onClick={(event) => {
           event.stopPropagation()
@@ -1629,7 +1629,7 @@ function HarnessProjectPhaseFlow({
     <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background-elevated/80 p-3 shadow-sx">
       <div className="mb-2 flex">
 	<span className="text-sm">项目流程</span>
-        <span className="ml-2 shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+        <span className="ml-2 shrink-0 rounded border border-status-info/25 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
           来自精益之星
         </span>
       </div>
@@ -1672,7 +1672,7 @@ function HarnessProjectPhaseFlow({
                     className={cn(
                       "flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-all duration-200",
                       isDone && "bg-status-nominal text-white",
-                      step.tone === "upcoming" && "bg-gray-200 text-muted-foreground"
+                      step.tone === "upcoming" && "bg-background-interactive text-muted-foreground"
                     )}
                   >
                     {isDone ? <Check className="size-3.5" /> : step.order}
@@ -4118,11 +4118,11 @@ function ProjectBadgeRow({
   return (
     <div className="flex min-w-0 items-center">
       {children}
-      <span className="text-xs mx-1 text-gray-500 max-w-[100px] truncate">
+      <span className="mx-1 max-w-[100px] truncate text-xs text-muted-foreground">
         / {project.projectCode}
       </span>
       {project.projectFromLean && (
-        <span className="shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+        <span className="shrink-0 rounded border border-status-info/25 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
           精益之星
         </span>
       )}
@@ -4522,7 +4522,7 @@ function ArchivedProjectsTable({
                     <div className="flex min-w-0 items-center gap-1.5">
                       <span className="truncate font-medium">{project.name}</span>
                       {project.projectFromLean && (
-                        <span className="shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+                        <span className="shrink-0 rounded border border-status-info/25 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
                           精益之星
                         </span>
                       )}
@@ -4803,7 +4803,7 @@ function FeatureDeployUnitsPanel({
   deployUnits: HarnessDeployUnitMapping[]
 }): React.JSX.Element {
   return (
-    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-white")}>
+    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-background-elevated")}>
       <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-4 py-3 text-sm font-semibold">
         <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
         <span className="truncate">当前特性绑定的发布单元</span>
@@ -6873,7 +6873,7 @@ function ProjectFeatureSidebar({
                           已归档
                         </span>
                       )}
-                      {hasUnreadSession && <span className="size-2 rounded-full bg-blue-500 shrink-0" />}
+                      {hasUnreadSession && <span className="size-2 rounded-full bg-status-info shrink-0" />}
                     </div>
                   </div>
                   <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
@@ -6953,7 +6953,7 @@ function ProjectFeatureSidebar({
                             <span className="min-w-0 flex-1 truncate text-xs font-medium" title={featureGroup.title}>
                               {featureGroup.title}
                             </span>
-                            {hasUnreadFeatureSession && <span className="size-2 rounded-full bg-blue-500 shrink-0" />}
+                            {hasUnreadFeatureSession && <span className="size-2 rounded-full bg-status-info shrink-0" />}
                             <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
                               <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                                 {featureGroup.sessions.length}

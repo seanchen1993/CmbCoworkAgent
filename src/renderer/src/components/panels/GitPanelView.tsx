@@ -1319,7 +1319,7 @@ export function GitPanelView({
       <div
         key={file.path}
         className={cn(
-          "border-t border-border/60 bg-white transition-colors first:border-t-0 dark:bg-background",
+          "border-t border-border/60 bg-background transition-colors first:border-t-0",
           isExpanded && "bg-blue-500/5"
         )}
       >
@@ -1634,7 +1634,7 @@ export function GitPanelView({
     return (
       <div
         key={`${repositoryKey}:${row.id}`}
-        className="border-t border-border/60 bg-white first:border-t-0 dark:bg-background"
+        className="border-t border-border/60 bg-background first:border-t-0"
       >
         <div
           className="flex items-center justify-between gap-2 py-1.5 pr-2 text-xs"
@@ -1673,9 +1673,9 @@ export function GitPanelView({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-white dark:bg-background">
-      <div className="sticky top-0 z-10 shrink-0 border-b border-border/70 bg-white/95  backdrop-blur dark:bg-background-elevated/80">
-        <div className=" bg-white px-2.5 py-2 dark:bg-background/90">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-background">
+      <div className="sticky top-0 z-10 shrink-0 border-b border-border/70 bg-background-elevated/90 backdrop-blur">
+        <div className="bg-background px-2.5 py-2">
           {isInitialMetaLoading ? (
             <>
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
@@ -1950,7 +1950,7 @@ export function GitPanelView({
         {/* 左侧：变更文件 tree 列表 */}
         <div
           className={cn(
-            "flex min-h-0 flex-col bg-white dark:bg-background",
+            "flex min-h-0 flex-col bg-background",
             shouldExpandEmptyDiffState
               ? "min-w-0 flex-1"
               : "w-[min(340px,42%)] shrink-0 border-r border-border/70"
@@ -2135,7 +2135,7 @@ export function GitPanelView({
                         return (
                           <section
                             key={repositoryKey}
-                            className="overflow-hidden bg-white dark:bg-background"
+                            className="overflow-hidden bg-background"
                           >
                             {hasMultipleRepositories && group.repo && (
                               <div className="flex items-center justify-between gap-3 border-b border-border/70 bg-blue-500/5 px-3 py-2">
@@ -2202,7 +2202,7 @@ export function GitPanelView({
           </div>
         </div>
         {!shouldExpandEmptyDiffState && (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white dark:bg-background">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
             {visibleDiffFiles.length > 0 && renderDiffPane()}
           </div>
         )}
