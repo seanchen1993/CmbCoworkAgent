@@ -14,6 +14,10 @@ import {
   ThreadMessageHydrationWorkerUnavailableError
 } from "./client"
 import { isThreadMessagePageContinuousWithBoundary } from "../../renderer/src/lib/thread-message-pages"
+import {
+  THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET,
+  THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT
+} from "./page-reader"
 
 const temporaryDirectories: string[] = []
 const clients: ThreadMessageHydrationClient[] = []
@@ -88,6 +92,23 @@ function createDatabase(): { database: DatabaseSync; path: string } {
       total_chars INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY(thread_id, message_id)
+    );
+    CREATE TABLE legacy_checkpoint_transcript_migrations (
+      thread_id TEXT PRIMARY KEY,
+      checkpoint_id TEXT NOT NULL,
+      total_messages INTEGER NOT NULL,
+      next_index INTEGER NOT NULL,
+      current_fragment_index INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE thread_goal_events (
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id TEXT NOT NULL,
+      goal_id TEXT,
+      active_window_id TEXT,
+      message TEXT NOT NULL,
+      created_at INTEGER NOT NULL
     );
   `)
   return { database, path }
@@ -428,6 +449,219 @@ describe("thread message hydration worker", () => {
     expect(older.beforeMessageId).toBeNull()
   }, 30_000)
 
+  it("resolves visible-conversation presence only when initial hydration requests it", async () => {
+    const { database, path } = createDatabase()
+    database
+      .prepare(
+        `INSERT INTO thread_messages (
+           thread_id, message_id, role, content_json, created_at, ordinal
+         ) VALUES ('presence', ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "internal-goal",
+        "user",
+        JSON.stringify(
+          "[Starting active goal]\n<untrusted_objective>keep working</untrusted_objective>"
+        ),
+        1,
+        0
+      )
+    database
+      .prepare(
+        `INSERT INTO thread_message_buckets (
+           thread_id, message_count, next_ordinal, updated_at
+         ) VALUES ('presence', 1, 1, ?)`
+      )
+      .run(Date.now())
+
+    const client = createWorkerClient(path)
+    const internalOnly = await client.readPage("presence", {
+      limit: 1,
+      includeVisibleMessagePresence: true
+    })
+    expect(internalOnly.total).toBe(1)
+    expect(internalOnly.hasVisibleMessages).toBe(true)
+    expect(internalOnly.legacyCheckpointMigrationStatus).toBeNull()
+
+    database
+      .prepare(
+        `UPDATE thread_messages
+         SET content_json = ?
+         WHERE thread_id = 'presence' AND message_id = 'internal-goal'`
+      )
+      .run(
+        JSON.stringify(
+          "[Continuing active goal]\n<untrusted_objective>keep working</untrusted_objective>"
+        )
+      )
+    const continuingOnly = await client.readPage("presence", {
+      limit: 1,
+      includeVisibleMessagePresence: true
+    })
+    expect(continuingOnly.hasVisibleMessages).toBe(false)
+
+    database
+      .prepare(
+        `INSERT INTO thread_goal_events (thread_id, message, created_at)
+         VALUES ('presence', '__cmb_goal_user_message__:/goal resume', 1)`
+      )
+      .run()
+    const visibleGoalEvent = await client.readPage("presence", {
+      limit: 1,
+      includeVisibleMessagePresence: true
+    })
+    expect(visibleGoalEvent.hasVisibleMessages).toBe(true)
+    database.prepare("DELETE FROM thread_goal_events WHERE thread_id = 'presence'").run()
+
+    const ordinaryPage = await client.readPage("presence", { limit: 1 })
+    expect(ordinaryPage.hasVisibleMessages).toBeUndefined()
+    expect(ordinaryPage.legacyCheckpointMigrationStatus).toBeUndefined()
+
+    database
+      .prepare(
+        `INSERT INTO legacy_checkpoint_transcript_migrations (
+           thread_id, checkpoint_id, total_messages, next_index,
+           current_fragment_index, status, updated_at
+         ) VALUES ('presence', 'checkpoint-1', 2, 1, 0, 'migrating', ?)`
+      )
+      .run(Date.now())
+    const interrupted = await client.readPage("presence", {
+      limit: 1,
+      includeVisibleMessagePresence: true
+    })
+    expect(interrupted.legacyCheckpointMigrationStatus).toBe("migrating")
+
+    database
+      .prepare(
+        `INSERT INTO thread_messages (
+           thread_id, message_id, role, content_json, created_at, ordinal
+         ) VALUES ('presence', 'real-user', 'user', ?, 2, 1)`
+      )
+      .run(JSON.stringify("继续修复"))
+    database
+      .prepare(
+        `UPDATE thread_message_buckets
+         SET message_count = 2, next_ordinal = 2, updated_at = ?
+         WHERE thread_id = 'presence'`
+      )
+      .run(Date.now())
+    database
+      .prepare(
+        `UPDATE legacy_checkpoint_transcript_migrations
+         SET next_index = total_messages, status = 'complete', updated_at = ?
+         WHERE thread_id = 'presence'`
+      )
+      .run(Date.now())
+
+    const withConversation = await client.readPage("presence", {
+      limit: 1,
+      includeVisibleMessagePresence: true
+    })
+    expect(withConversation.hasVisibleMessages).toBe(true)
+    expect(withConversation.legacyCheckpointMigrationStatus).toBe("complete")
+  }, 30_000)
+
+  it("bounds exact presence work while resolving ordinary long internal histories", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(
+      `INSERT INTO thread_messages (
+         thread_id, message_id, role, content_json, created_at, ordinal
+       ) VALUES (?, ?, 'user', ?, ?, ?)`
+    )
+    const internalContent = JSON.stringify(
+      "[Continuing active goal]\n<untrusted_objective>keep working</untrusted_objective>"
+    )
+    database.exec("BEGIN")
+    for (let ordinal = 0; ordinal < 512; ordinal += 1) {
+      insert.run("presence-long-internal", `internal-${ordinal}`, internalContent, ordinal, ordinal)
+    }
+    for (let ordinal = 0; ordinal <= THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT; ordinal += 1) {
+      insert.run("presence-over-budget", `internal-${ordinal}`, internalContent, ordinal, ordinal)
+    }
+    const aggregatePayload = "x".repeat(512 * 1024)
+    const aggregateRows =
+      Math.ceil(THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET / aggregatePayload.length) + 2
+    const aggregateInternalContent = JSON.stringify(
+      `[Continuing active goal]\n<untrusted_objective>${aggregatePayload}</untrusted_objective>`
+    )
+    for (let ordinal = 0; ordinal < aggregateRows; ordinal += 1) {
+      insert.run(
+        "presence-over-byte-budget",
+        `internal-${ordinal}`,
+        aggregateInternalContent,
+        ordinal,
+        ordinal
+      )
+    }
+    database
+      .prepare(
+        `INSERT INTO thread_messages (
+           thread_id, message_id, role, content_json, created_at, ordinal
+         ) VALUES ('presence-oversized-internal', 'huge', 'user', ?, 0, 0)`
+      )
+      .run(
+        JSON.stringify(
+          `[Continuing active goal]\n<untrusted_objective>${"x".repeat(2 * 1024 * 1024)}</untrusted_objective>`
+        )
+      )
+    database
+      .prepare(
+        `INSERT INTO thread_message_buckets
+         (thread_id, message_count, next_ordinal, updated_at) VALUES (?, ?, ?, ?)`
+      )
+      .run("presence-long-internal", 512, 512, Date.now())
+    database
+      .prepare(
+        `INSERT INTO thread_message_buckets
+         (thread_id, message_count, next_ordinal, updated_at) VALUES (?, ?, ?, ?)`
+      )
+      .run(
+        "presence-over-budget",
+        THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT + 1,
+        THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT + 1,
+        Date.now()
+      )
+    database
+      .prepare(
+        `INSERT INTO thread_message_buckets
+         (thread_id, message_count, next_ordinal, updated_at) VALUES (?, ?, ?, ?)`
+      )
+      .run("presence-over-byte-budget", aggregateRows, aggregateRows, Date.now())
+    database
+      .prepare(
+        `INSERT INTO thread_message_buckets
+         (thread_id, message_count, next_ordinal, updated_at) VALUES (?, 1, 1, ?)`
+      )
+      .run("presence-oversized-internal", Date.now())
+    database.exec("COMMIT")
+
+    const client = createWorkerClient(path)
+    await expect(
+      client.readPage("presence-long-internal", {
+        limit: 1,
+        includeVisibleMessagePresence: true
+      })
+    ).resolves.toMatchObject({ hasVisibleMessages: false })
+    await expect(
+      client.readPage("presence-over-budget", {
+        limit: 1,
+        includeVisibleMessagePresence: true
+      })
+    ).resolves.toMatchObject({ hasVisibleMessages: true })
+    await expect(
+      client.readPage("presence-over-byte-budget", {
+        limit: 1,
+        includeVisibleMessagePresence: true
+      })
+    ).resolves.toMatchObject({ hasVisibleMessages: true })
+    await expect(
+      client.readPage("presence-oversized-internal", {
+        limit: 1,
+        includeVisibleMessagePresence: true
+      })
+    ).resolves.toMatchObject({ hasVisibleMessages: true })
+  }, 30_000)
+
   it("projects one oversized structured row without breaking the IPC page budget", async () => {
     const { database, path } = createDatabase()
     const insert = database.prepare(`
@@ -488,6 +722,58 @@ describe("thread message hydration worker", () => {
     expect(older.messages.map((message) => message.id)).toEqual(["older"])
     expect(older.hasMore).toBe(false)
   }, 30_000)
+
+  it("marks field-level content, tool-call, and fragment clamps as lossy", async () => {
+    const { database, path } = createDatabase()
+    const insert = database.prepare(`
+      INSERT INTO thread_messages (
+        thread_id, message_id, role, content_json, tool_calls_json, created_at, ordinal
+      ) VALUES ('lossy-fields', ?, 'assistant', ?, ?, ?, ?)
+    `)
+    insert.run("long-text", JSON.stringify("x".repeat(120_001)), null, 1, 0)
+    insert.run(
+      "many-tools",
+      JSON.stringify("tools"),
+      JSON.stringify(
+        Array.from({ length: 51 }, (_, index) => ({
+          id: `call-${index}`,
+          name: "noop",
+          args: {}
+        }))
+      ),
+      2,
+      1
+    )
+    insert.run("fragment-overflow", JSON.stringify("base"), null, 3, 2)
+    database
+      .prepare(
+        `INSERT INTO thread_message_fragments
+         (thread_id, message_id, content_text, created_at)
+         VALUES ('lossy-fields', 'fragment-overflow', ?, 3)`
+      )
+      .run("z".repeat(120_001))
+    database
+      .prepare(
+        `INSERT INTO thread_message_fragment_states
+         (thread_id, message_id, total_chars, updated_at)
+         VALUES ('lossy-fields', 'fragment-overflow', 120001, 3)`
+      )
+      .run()
+    database
+      .prepare(
+        `INSERT INTO thread_message_buckets
+         (thread_id, message_count, next_ordinal, updated_at)
+         VALUES ('lossy-fields', 3, 3, ?)`
+      )
+      .run(Date.now())
+    database.close()
+
+    const page = await createWorkerClient(path).readPage("lossy-fields", { limit: 10 })
+    expect(page.messages).toHaveLength(3)
+    expect(new Set(page.truncatedMessageIds)).toEqual(
+      new Set(["long-text", "many-tools", "fragment-overflow"])
+    )
+  })
 
   it("keeps the main event-loop ticker moving while parsing a large page", async () => {
     const { database, path } = createDatabase()

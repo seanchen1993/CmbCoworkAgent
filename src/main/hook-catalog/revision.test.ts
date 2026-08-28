@@ -39,9 +39,18 @@ describe("hook catalog main-process revisions", () => {
     expect(evolution).toContain(
       'if (channel === "skills:changed") bumpHookCatalogGlobalRevision()'
     )
-    expect(optimizer).toMatch(
-      /invalidateEnabledSkillsCache\(\)\s+bumpHookCatalogGlobalRevision\(\)\s+notifyRenderer\("skills:changed"\)/
+    const applyCandidate = optimizer.slice(
+      optimizer.indexOf("function applyCandidate"),
+      optimizer.indexOf("function ensureEvolvedSkillMarker")
     )
+    const writeIndex = applyCandidate.indexOf('writeFileSync(join(skillDir, "SKILL.md")')
+    const revisionIndex = applyCandidate.indexOf("bumpHookCatalogGlobalRevision()")
+    const invalidationIndex = applyCandidate.indexOf("invalidateEnabledSkillsCache()")
+    const notificationIndex = applyCandidate.indexOf('notifyRenderer("skills:changed")')
+    expect(writeIndex).toBeGreaterThanOrEqual(0)
+    expect(revisionIndex).toBeGreaterThan(writeIndex)
+    expect(invalidationIndex).toBeGreaterThan(revisionIndex)
+    expect(notificationIndex).toBeGreaterThan(invalidationIndex)
     expect(pluginFiles).toMatch(
       /const payload = \{ reason \}\s+bumpHookCatalogGlobalRevision\(\)/
     )

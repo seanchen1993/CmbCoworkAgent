@@ -27,6 +27,9 @@ describe("renderer skill/plugin catalog pagination", () => {
         void requestScope
         return {
           kind: input.kind,
+          sourceKey: "summary-source",
+          catalogGlobalRevision: 0,
+          disabledSkillsRevision: 0,
           skills: [],
           plugins: [],
           disabledSkillIds: [],
@@ -85,6 +88,9 @@ describe("renderer skill/plugin catalog pagination", () => {
         const nextOffset = offset + selected.length
         const page: SkillPluginCatalogPage = {
           kind: input.kind,
+          sourceKey: `${input.kind}-large-source`,
+          catalogGlobalRevision: 0,
+          disabledSkillsRevision: 0,
           skills: input.kind === "skills" ? selected : [],
           plugins: [],
           disabledSkillIds: [],
@@ -127,6 +133,9 @@ describe("renderer skill/plugin catalog pagination", () => {
         input: { kind: "skills" | "plugins" | "disabled" }
       ): Promise<SkillPluginCatalogPage> => ({
         kind: input.kind,
+        sourceKey: `${input.kind}-detail-source`,
+        catalogGlobalRevision: 0,
+        disabledSkillsRevision: 0,
         skills:
           input.kind === "skills"
             ? [
@@ -243,6 +252,12 @@ describe("renderer skill/plugin catalog pagination", () => {
     expect(skillsSource).toContain("filteredBuiltin.slice(0, visibleSkillLimit)")
     expect(skillsSource).toContain("加载更多（剩余")
     expect(skillsSource).not.toContain("window.api.skills.list()")
+    const toggleBlock = skillsSource.slice(
+      skillsSource.indexOf("const toggleSkillEnabled"),
+      skillsSource.indexOf("const handleDeleteSkill")
+    )
+    expect(toggleBlock).not.toContain("window.api.skills.getDisabled()")
+    expect(toggleBlock).toContain("void refreshSkills(true)")
     expect(pluginsSource).toMatch(
       /useState\(\s*SKILL_PLUGIN_CATALOG_RENDER_BATCH\s*\)/
     )
@@ -269,6 +284,12 @@ describe("renderer skill/plugin catalog pagination", () => {
     )
 
     expect(appSource).toContain("configureAppCatalogLoaders({")
+    const disabledMigration = appSource.slice(
+      appSource.indexOf("async function migrateDisabledSkillsFromLocalStorage"),
+      appSource.indexOf("const LEFT_MIN")
+    )
+    expect(disabledMigration).toContain("window.api.skills.setDisabled")
+    expect(disabledMigration).not.toContain("window.api.skills.getDisabled")
     expect(appSource).toContain(
       "const installedSkills = (await revalidateSkillCatalog(pluginVersion)).localSkills"
     )

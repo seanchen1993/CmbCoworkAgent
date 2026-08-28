@@ -2799,7 +2799,7 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
     "threads:update blocks leaving workflow to ANY non-workflow mode"
   )
   // agent:invoke + resume paths use a shared workflowLeaveBlockedMessage helper,
-  // gated on leaving workflow (effectiveAgentMode / requestedAgentMode !== workflow).
+  // gated on leaving workflow (effectiveAgentMode / current requestedResumeMode !== workflow).
   assert.match(
     agentIpcSource,
     /function workflowLeaveBlockedMessage\(/,
@@ -2812,7 +2812,7 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   )
   assert.match(
     agentIpcSource,
-    /getAgentModeFromMetadata\(latestMetadata\) === "workflow" &&\s*requestedAgentMode !== "workflow"/,
+    /getAgentModeFromMetadata\(latestMetadata\) === "workflow" &&\s*requestedResumeMode !== "workflow"/,
     "resume path blocks leaving workflow using the latest serialized metadata"
   )
   // Regression guard: the workflow guard must NOT be bound to "switch to normal"

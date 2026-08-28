@@ -1,7 +1,14 @@
 import type { GoalEvent, Message } from "@/types"
-import { isWorkflowPlumbingTranscriptContent } from "../../../shared/checkpoint-transcript"
-import { GOAL_USER_MESSAGE_EVENT_PREFIX } from "../../../shared/goal-events"
-import { isGoalClearAlias, splitGoalTransportPayload } from "../../../shared/goal-slash"
+import {
+  isVisibleTranscriptMessage,
+  isWorkflowPlumbingTranscriptContent
+} from "../../../shared/checkpoint-transcript"
+import {
+  formatGoalUserEventMessage,
+  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  isVisibleGoalUserEventMessage
+} from "../../../shared/goal-events"
+import { splitGoalTransportPayload } from "../../../shared/goal-slash"
 import { isInternalGoalPromptMessage, type GoalNoticeEvent } from "./goal-notice-messages"
 
 export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "content">): boolean {
@@ -23,11 +30,7 @@ export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "conten
 export function isVisibleCheckpointTranscriptMessage(
   message: Pick<Message, "role" | "content">
 ): boolean {
-  return (
-    !isInternalGoalPromptMessage(message) &&
-    !isGoalTranscriptArtifact(message) &&
-    !isWorkflowPlumbingTranscriptContent(message.content)
-  )
+  return isVisibleTranscriptMessage(message.role, message.content)
 }
 
 export function buildCheckpointTranscriptForDisplay(messages: Message[]): Message[] {
@@ -35,10 +38,7 @@ export function buildCheckpointTranscriptForDisplay(messages: Message[]): Messag
 }
 
 export function formatGoalEventMessage(message: string): string {
-  const trimmed = message.trim()
-  return trimmed.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
-    ? trimmed.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length).trim()
-    : trimmed
+  return formatGoalUserEventMessage(message)
 }
 
 export function goalNoticeEventsToGoalUiEvents(
@@ -64,22 +64,10 @@ export function isGoalUserEvent(event: Pick<GoalEvent, "message">): boolean {
   return event.message.trim().startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
 }
 
-function shouldRestoreGoalUserCommandToTranscript(content: string): boolean {
-  const { commandText } = splitGoalTransportPayload(content)
-  const trimmed = commandText.trim()
-  if (!/^\/goal(?:\s|$)/i.test(trimmed)) return false
-
-  const arg = trimmed.slice("/goal".length).trim().toLowerCase()
-  if (arg === "" || arg === "status" || arg === "pause" || isGoalClearAlias(arg)) {
-    return false
-  }
-  return true
-}
-
 export function goalUserEventToMessage(event: GoalEvent): Message | null {
   if (!isGoalUserEvent(event)) return null
   const content = formatGoalEventMessage(event.message)
-  if (!shouldRestoreGoalUserCommandToTranscript(content)) return null
+  if (!isVisibleGoalUserEventMessage(event.message)) return null
 
   const createdAt = toGoalEventDate(event.created_at)
   return {

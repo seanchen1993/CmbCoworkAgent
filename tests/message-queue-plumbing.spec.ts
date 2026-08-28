@@ -362,7 +362,15 @@ function testClearOnEveryRunExit(): void {
   const durableTailStart = agentIpc.indexOf(
     "const durableRuntimeTailSetup = await awaitPhysicalStreamRunSetup({"
   )
-  const durableTailBody = agentIpc.slice(durableTailStart, durableTailStart + 2400)
+  const durableTailEnd = agentIpc.indexOf(
+    "const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState",
+    durableTailStart
+  )
+  assert(
+    durableTailStart >= 0 && durableTailEnd > durableTailStart,
+    "invoke durable-tail setup semantic boundary is present"
+  )
+  const durableTailBody = agentIpc.slice(durableTailStart, durableTailEnd)
   assertSourceOrder(
     durableTailBody,
     "const tail = await getDurableRuntimeTail(threadId",

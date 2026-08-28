@@ -1,5 +1,13 @@
 import { basename } from "path"
-import { normalizeSkillRelativePath, type DiscoveredSkill } from "./discovery"
+import {
+  MAX_SKILL_DISCOVERY_DEPTH,
+  normalizeSkillRelativePath,
+  type DiscoveredSkill
+} from "./discovery"
+
+export const MAX_CANONICAL_STANDALONE_SKILL_ID_LENGTH = 4_096
+export const MAX_DISABLED_STANDALONE_SKILL_IDS = 20_000
+const PLUGIN_SKILL_ID_PREFIX = "plugin:"
 
 export interface SkillIdentityLike {
   name: string
@@ -9,6 +17,70 @@ export interface SkillIdentityLike {
 
 export function normalizeSkillId(input: string): string {
   return normalizeSkillRelativePath(input.trim()).toLowerCase()
+}
+
+function isPluginSkillId(skillId: string): boolean {
+  return skillId.startsWith(PLUGIN_SKILL_ID_PREFIX)
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) return true
+  }
+  return false
+}
+
+/**
+ * Validate the exact standalone identity emitted by the catalog worker.
+ *
+ * This deliberately performs no discovery and no filesystem reads: a renderer
+ * toggle must not synchronously walk every skill directory on Electron main.
+ * Legacy display-name aliases are resolved only by the batch/worker paths.
+ */
+export function normalizeCanonicalStandaloneSkillId(input: string): string | null {
+  if (
+    input.length === 0 ||
+    input.length > MAX_CANONICAL_STANDALONE_SKILL_ID_LENGTH ||
+    input !== input.trim() ||
+    input.includes("\\") ||
+    hasControlCharacter(input)
+  ) {
+    return null
+  }
+
+  const normalized = normalizeSkillId(input)
+  if (!normalized || normalized !== input || isPluginSkillId(normalized)) return null
+
+  const segments = normalized.split("/")
+  if (
+    segments.length > MAX_SKILL_DISCOVERY_DEPTH ||
+    segments.some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    return null
+  }
+  return normalized
+}
+
+/**
+ * Normalize the persisted standalone snapshot without resolving legacy aliases.
+ * Plugin-owned ids never enter this store, even if an older build wrote one.
+ */
+export function normalizeStandaloneDisabledSkillIds(disabledSkillIds: string[]): string[] {
+  const normalized = new Set<string>()
+  for (const entry of disabledSkillIds) {
+    const skillId = normalizeSkillId(entry)
+    if (
+      !skillId ||
+      isPluginSkillId(skillId) ||
+      skillId.length > MAX_CANONICAL_STANDALONE_SKILL_ID_LENGTH
+    ) {
+      continue
+    }
+    normalized.add(skillId)
+    if (normalized.size >= MAX_DISABLED_STANDALONE_SKILL_IDS) break
+  }
+  return [...normalized]
 }
 
 export function getDiscoveredSkillId(skill: SkillIdentityLike): string {
@@ -80,6 +152,32 @@ export function resolveDisabledSkillIds(
   }
 
   return [...resolved]
+}
+
+/**
+ * Apply one enablement change to a canonical disabled-skill snapshot.
+ *
+ * Only an exact canonical id from the standalone builtin/custom catalog may be
+ * mutated. Plugin-owned ids intentionally remain outside this store because a
+ * plugin skill is controlled by its plugin's enablement state.
+ */
+export function setDisabledSkillIdState(
+  disabledSkillIds: string[],
+  skillId: string,
+  disabled: boolean
+): string[] {
+  const current = new Set(normalizeStandaloneDisabledSkillIds(disabledSkillIds))
+  const targetId = normalizeCanonicalStandaloneSkillId(skillId)
+  if (!targetId) return [...current]
+
+  if (disabled) {
+    if (current.size < MAX_DISABLED_STANDALONE_SKILL_IDS || current.has(targetId)) {
+      current.add(targetId)
+    }
+  } else {
+    current.delete(targetId)
+  }
+  return [...current]
 }
 
 function matchesSkillIdOrDescendant(entry: string, skillId: string): boolean {

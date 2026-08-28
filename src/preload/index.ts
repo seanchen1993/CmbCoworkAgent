@@ -816,8 +816,8 @@ const api = {
         expectedFocusToken: options?.expectedFocusToken
       }) as Promise<void>
     },
-    isCoordinatorModeForced: (): Promise<boolean> => {
-      return ipcRenderer.invoke("agent:coordinator-mode-forced") as Promise<boolean>
+    isCoordinatorModeForced: (threadId?: string): Promise<boolean> => {
+      return ipcRenderer.invoke("agent:coordinator-mode-forced", threadId) as Promise<boolean>
     },
     canPreviewSystemPrompt: (): Promise<boolean> => {
       return ipcRenderer.invoke("agent:system-prompt-preview-access") as Promise<boolean>
@@ -2145,6 +2145,9 @@ const api = {
     },
     setDisabled: (skillNames: string[]): Promise<void> => {
       return ipcRenderer.invoke("skills:setDisabled", skillNames)
+    },
+    setDisabledState: (skillId: string, disabled: boolean): Promise<string[]> => {
+      return ipcRenderer.invoke("skills:setDisabledState", { skillId, disabled })
     },
     backupForCloudEvolution: (payload: {
       skillPath: string

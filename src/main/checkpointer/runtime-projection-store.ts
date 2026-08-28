@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite"
 import { existsSync } from "node:fs"
+import { randomUUID } from "node:crypto"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats
@@ -9,7 +10,11 @@ import {
   getMessageProviderTupleFromMetadata,
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
-import { isWorkflowPlumbingTranscriptContent } from "../../shared/checkpoint-transcript"
+import {
+  isRestorableConversationTranscriptMessage,
+  isWorkflowPlumbingTranscriptContent
+} from "../../shared/checkpoint-transcript"
+import { isSerializedSummarizationMessage } from "../../shared/context-compaction-messages"
 import {
   buildCheckpointRuntimeProjection,
   CHECKPOINT_RUNTIME_PROJECTION_VERSION
@@ -21,6 +26,8 @@ const LEGACY_TRANSCRIPT_BATCH_LIMIT = 64
 const LEGACY_TRANSCRIPT_BATCH_BYTE_BUDGET = 1024 * 1024
 const LEGACY_TRANSCRIPT_FRAGMENT_CHAR_LIMIT = 16 * 1024
 const LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES = 512 * 1024
+const CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET = 8 * 1024 * 1024
+const CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT = 4_096
 
 class CheckpointRuntimeProjectionCancelledError extends Error {
   constructor() {
@@ -213,13 +220,68 @@ export function prepareLatestRuntimeProjectionMigration(
   return row ? prepareRuntimeProjectionMigration(row) : null
 }
 
+function checkpointSnapshotChainFitsPresenceBudget(
+  database: DatabaseSync,
+  row: StoredCheckpointRow,
+  cancellation?: Int32Array
+): boolean {
+  const visited = new Set<string>()
+  let cursor: string | null = row.checkpointId
+  let totalBytes = 0
+  while (cursor) {
+    throwIfCancelled(cancellation)
+    if (visited.has(cursor) || visited.size >= CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT) {
+      return false
+    }
+    visited.add(cursor)
+    const snapshot = database
+      .prepare(
+        `SELECT parent_checkpoint_id, suffix
+         FROM checkpoint_message_snapshots
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+         LIMIT 1`
+      )
+      .get(row.threadId, row.checkpointNs, cursor) as Record<string, unknown> | undefined
+    if (!snapshot) return false
+    totalBytes += payloadBytes(normalizePayload(snapshot.suffix, "message snapshot"))
+    if (totalBytes > CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET) return false
+    cursor =
+      snapshot.parent_checkpoint_id === null || snapshot.parent_checkpoint_id === undefined
+        ? null
+        : String(snapshot.parent_checkpoint_id)
+  }
+  return true
+}
+
+function isVisibleSerializedCheckpointMessage(raw: unknown): boolean {
+  if (isSerializedSummarizationMessage(raw)) return false
+  const message = objectRecord(raw)
+  if (!message) return false
+  const kwargs = objectRecord(message.kwargs) ?? {}
+  const additionalKwargs =
+    objectRecord(message.additional_kwargs) ?? objectRecord(kwargs.additional_kwargs) ?? {}
+  if (additionalKwargs.cmb_internal_coordinator_notification === true) return false
+  const role = serializedMessageRole(message, kwargs)
+  const rawContent = message.content ?? kwargs.content
+  const visibleUserMessage = additionalKwargs.cmb_visible_user_message
+  const effectiveContent =
+    role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
+      ? visibleUserMessage
+      : rawContent
+  const content =
+    typeof effectiveContent === "string" || Array.isArray(effectiveContent)
+      ? effectiveContent
+      : ""
+  return isRestorableConversationTranscriptMessage(role, content)
+}
+
 /**
- * Lightweight compatibility guard for pre-durable-message tasks. The checkpoint
- * payload is inspected only inside the worker and only a boolean crosses back to
- * Electron main. Incremental checkpoints use their embedded message count and do
- * not hydrate message snapshots; legacy inline JSON is parsed off the main loop.
+ * Compatibility guard for tasks whose durable transcript is not authoritative
+ * yet. Small internal-only checkpoints are distinguished from real conversation
+ * rows inside the isolated worker. Oversized/cyclic snapshots return true so a
+ * mutation fails closed without hydrating unbounded history.
  */
-export function hasCheckpointTranscript(
+export function hasVisibleCheckpointTranscript(
   checkpointDatabasePath: string,
   threadId: string,
   checkpointNs = "",
@@ -235,27 +297,28 @@ export function hasCheckpointTranscript(
     const row = readLatestCheckpointRow(database, threadId, checkpointNs, true)
     if (!row || row.metadata === undefined) return false
     throwIfCancelled(cancellation)
+    if (payloadBytes(row.checkpoint) > CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET) return true
     const parsed = parseTypedJson(row.type, row.checkpoint, "checkpoint")
     throwIfCancelled(cancellation)
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false
     const channelValues = objectRecord((parsed as Record<string, unknown>).channel_values)
     const messages = channelValues?.messages
-    if (Array.isArray(messages)) return messages.length > 0
+    if (Array.isArray(messages)) return messages.some(isVisibleSerializedCheckpointMessage)
     const reference = objectRecord(messages)
     if (reference?.[EXTERNAL_MESSAGES_MARKER] !== true) return false
     const messageCount = Number(reference.messageCount)
-    if (Number.isSafeInteger(messageCount) && messageCount > 0) return true
-    const snapshot = database
-      .prepare(
-        `SELECT message_count
-         FROM checkpoint_message_snapshots
-         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
-         LIMIT 1`
-      )
-      .get(row.threadId, row.checkpointNs, row.checkpointId) as
-      | { message_count?: unknown }
-      | undefined
-    return Number(snapshot?.message_count) > 0
+    if (Number.isSafeInteger(messageCount) && messageCount === 0) return false
+    if (!checkpointSnapshotChainFitsPresenceBudget(database, row, cancellation)) return true
+    const hydrated = hydrateRawCheckpointMessages(
+      database,
+      row,
+      parsed as Record<string, unknown>,
+      cancellation
+    )
+    const hydratedMessages = objectRecord(hydrated.channel_values)?.messages
+    return Array.isArray(hydratedMessages)
+      ? hydratedMessages.some(isVisibleSerializedCheckpointMessage)
+      : true
   } finally {
     database.close()
   }
@@ -299,6 +362,39 @@ function exactSourceIsStillLatest(
   return Boolean(current)
 }
 
+function ensureMessageSnapshotGeneration(database: DatabaseSync): void {
+  let transactionStarted = false
+  try {
+    database.exec("BEGIN IMMEDIATE")
+    transactionStarted = true
+    const columns = database
+      .prepare("PRAGMA table_info(checkpoint_message_snapshots)")
+      .all() as Array<{ name?: unknown }>
+    if (!columns.some((column) => column.name === "generation")) {
+      database.exec(
+        `ALTER TABLE checkpoint_message_snapshots
+         ADD COLUMN generation TEXT NOT NULL DEFAULT ''`
+      )
+    }
+    database.exec(
+      `UPDATE checkpoint_message_snapshots
+       SET generation = lower(hex(randomblob(16)))
+       WHERE generation IS NULL OR typeof(generation) != 'text' OR length(generation) = 0`
+    )
+    database.exec("COMMIT")
+    transactionStarted = false
+  } catch (error) {
+    if (transactionStarted) {
+      try {
+        database.exec("ROLLBACK")
+      } catch {
+        // Keep the original migration failure.
+      }
+    }
+    throw error
+  }
+}
+
 /**
  * Install a worker-prepared projection only while the exact source row is
  * still authoritative. The write transaction begins after the expensive JSON
@@ -309,6 +405,9 @@ export function commitPreparedRuntimeProjection(
   prepared: PreparedRuntimeProjectionMigration
 ): boolean {
   const { row } = prepared
+  if (prepared.messages && prepared.compactCheckpoint) {
+    ensureMessageSnapshotGeneration(database)
+  }
   database.exec("BEGIN IMMEDIATE")
   try {
     if (!exactSourceIsStillLatest(database, prepared)) {
@@ -319,16 +418,24 @@ export function commitPreparedRuntimeProjection(
     if (prepared.messages && prepared.compactCheckpoint) {
       database
         .prepare(
-          `INSERT OR REPLACE INTO checkpoint_message_snapshots
+          `INSERT INTO checkpoint_message_snapshots
            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, prefix_length,
-            message_count, type, suffix)
-           VALUES (?, ?, ?, NULL, 0, ?, 'json', ?)`
+            message_count, generation, type, suffix)
+           VALUES (?, ?, ?, NULL, 0, ?, ?, 'json', ?)
+           ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET
+             parent_checkpoint_id = excluded.parent_checkpoint_id,
+             prefix_length = excluded.prefix_length,
+             message_count = excluded.message_count,
+             generation = excluded.generation,
+             type = excluded.type,
+             suffix = excluded.suffix`
         )
         .run(
           row.threadId,
           row.checkpointNs,
           row.checkpointId,
           prepared.messageCount,
+          randomUUID(),
           prepared.messages
         )
       database
@@ -626,6 +733,7 @@ function buildDurableLegacyCheckpointMessages(
 
   for (let index = 0; index < rawMessages.length; index += 1) {
     if (index % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) throwIfCancelled(cancellation)
+    if (isSerializedSummarizationMessage(rawMessages[index])) continue
     const message = objectRecord(rawMessages[index])
     if (!message) continue
     const kwargs = objectRecord(message.kwargs) ?? {}
@@ -640,7 +748,15 @@ function buildDurableLegacyCheckpointMessages(
         ? rawIdValue.trim()
         : `checkpoint-${index}`
     const rawContent = message.content ?? kwargs.content
-    const content = typeof rawContent === "string" || Array.isArray(rawContent) ? rawContent : ""
+    const visibleUserMessage = additionalKwargs.cmb_visible_user_message
+    const effectiveContent =
+      role === "user" && typeof visibleUserMessage === "string" && visibleUserMessage.length > 0
+        ? visibleUserMessage
+        : rawContent
+    const content =
+      typeof effectiveContent === "string" || Array.isArray(effectiveContent)
+        ? effectiveContent
+        : ""
     if (isWorkflowPlumbingTranscriptContent(content)) continue
     const rawToolCalls = message.tool_calls ?? kwargs.tool_calls
     const toolCalls = Array.isArray(rawToolCalls) ? rawToolCalls : null
@@ -1223,9 +1339,29 @@ export function bootstrapLegacyCheckpointTranscript(
 ): LegacyCheckpointTranscriptBootstrapResult {
   const cancellation = new Int32Array(cancellationBuffer)
   throwIfCancelled(cancellation)
+  const emptyResult = (): LegacyCheckpointTranscriptBootstrapResult => ({
+    runtimeTuple: null,
+    stats: {
+      checkpointId: null,
+      totalMessages: 0,
+      migratedMessages: 0,
+      batches: 0,
+      payloadBytes: 0
+    }
+  })
+  if (!existsSync(checkpointDatabasePath)) return emptyResult()
   const checkpointDatabase = new DatabaseSync(checkpointDatabasePath, { timeout: 5_000 })
   try {
     checkpointDatabase.exec("PRAGMA busy_timeout = 5000")
+    const hasCheckpointTable = checkpointDatabase
+      .prepare(
+        `SELECT 1
+         FROM sqlite_master
+         WHERE type = 'table' AND name = 'checkpoints'
+         LIMIT 1`
+      )
+      .get()
+    if (!hasCheckpointTable) return emptyResult()
     checkpointDatabase.exec("BEGIN")
     let row: StoredCheckpointRow | null = null
     let rawCheckpoint: Record<string, unknown> | null = null
@@ -1235,16 +1371,7 @@ export function bootstrapLegacyCheckpointTranscript(
       row = readLatestCheckpointRow(checkpointDatabase, threadId, checkpointNs, true)
       if (!row || row.metadata === undefined) {
         checkpointDatabase.exec("COMMIT")
-        return {
-          runtimeTuple: null,
-          stats: {
-            checkpointId: null,
-            totalMessages: 0,
-            migratedMessages: 0,
-            batches: 0,
-            payloadBytes: 0
-          }
-        }
+        return emptyResult()
       }
       const parsed = parseTypedJson(row.type, row.checkpoint, "checkpoint")
       throwIfCancelled(cancellation)

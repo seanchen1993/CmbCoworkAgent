@@ -635,6 +635,18 @@ class WorkflowRunManager {
     return this.active.get(threadId)?.workspacePath
   }
 
+  /** In-memory ownership fence for a workflow agent currently using a checkout. */
+  activeManagedWorktreeOwner(
+    directory: string
+  ): { threadId: string; runId: string } | undefined {
+    for (const run of this.active.values()) {
+      if (run.worktrees.ownsWorktreeDirectory(directory)) {
+        return { threadId: run.threadId, runId: run.runId }
+      }
+    }
+    return undefined
+  }
+
   /**
    * Async preflight for the deliberately synchronous launch critical section.
    * It resolves both workspace aliases and the managed storage authority before

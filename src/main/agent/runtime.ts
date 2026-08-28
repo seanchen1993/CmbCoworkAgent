@@ -36,6 +36,7 @@ import { getProjectThreadDataDirectory } from "./context-history-path"
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
+import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
   agentFileWriteContext,
@@ -3367,7 +3368,10 @@ async function getCheckpointerInternal(
       ? 0
       : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
     maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
-    maxNonRootCheckpoints: 1
+    maxNonRootCheckpoints: 1,
+    recoverMissingCheckpointMessages: isSubThreadCheckpoint
+      ? undefined
+      : recoverMainCheckpointMessages
   })
   await checkpointer.initialize()
   // Re-check AFTER the awaits above: a deletion landing while this instance

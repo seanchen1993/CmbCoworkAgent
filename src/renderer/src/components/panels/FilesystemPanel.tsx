@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
+import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 import { getWorkspaceSelectionErrorMessage } from "@/lib/workspace-utils"
 import {
   loadWorkspaceFilesDeduped,
@@ -26,7 +27,7 @@ export function FilesystemPanel() {
   const threadState = useThreadState(currentThreadId)
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
-  const messages = threadState?.messages ?? []
+  const canChangeWorkspace = canChangeThreadWorkspace(threadState ?? undefined)
   const setWorkspacePath = threadState?.setWorkspacePath
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set())
@@ -59,7 +60,14 @@ export function FilesystemPanel() {
 
   // Handle selecting a workspace folder
   async function handleSelectFolder() {
-    if (!currentThreadId || !setWorkspacePath || !setWorkspaceFiles) return
+    if (
+      !canChangeWorkspace ||
+      !currentThreadId ||
+      !setWorkspacePath ||
+      !setWorkspaceFiles
+    ) {
+      return
+    }
 
     setLoading(true)
     try {
@@ -254,20 +262,22 @@ export function FilesystemPanel() {
           <span className="text-xs text-muted-foreground mb-4">
             Select a folder for the agent to work in
           </span>
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handleSelectFolder}
-            disabled={loading || !currentThreadId}
-            className="h-8 px-4"
-          >
-            {loading ? (
-              <Loader2 className="size-4 mr-2 animate-spin" />
-            ) : (
-              <FolderOpen className="size-4 mr-2" />
-            )}
-            Select Folder
-          </Button>
+          {canChangeWorkspace && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleSelectFolder}
+              disabled={loading || !currentThreadId}
+              className="h-8 px-4"
+            >
+              {loading ? (
+                <Loader2 className="size-4 mr-2 animate-spin" />
+              ) : (
+                <FolderOpen className="size-4 mr-2" />
+              )}
+              Select Folder
+            </Button>
+          )}
         </div>
       </div>
     )
@@ -299,7 +309,7 @@ export function FilesystemPanel() {
                 <RefreshCw className="size-3" />
               )}
             </Button>
-            {messages.length === 0 && !isWorktree && (
+            {canChangeWorkspace && !isWorktree && (
               <Button
                 variant="ghost"
                 size="sm"

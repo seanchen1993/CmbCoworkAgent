@@ -15,12 +15,21 @@ import {
   restorePhysicalStreamRunPredecessorToken,
   type PhysicalStreamRunSetupGuard
 } from "../agent/physical-stream-run-setup"
+import {
+  TimedOutPredecessorFence,
+  canUseBoundedCheckpointRecovery
+} from "../agent/run-settlement-fence"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import {
   resolveThreadOutputStyle,
   type AgentOutputStyle
 } from "../../shared/agent-output-style"
+import {
+  areForcedCoordinatorRequestsAllowed,
+  isCoordinatorModeForcedForMetadata,
+  isProjectModeAgentTeamEnabled
+} from "../../shared/project-mode-agent-team"
 import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages"
 import { getDurableRuntimeTail } from "./thread-runtime-tail"
 import { Command } from "@langchain/langgraph"
@@ -56,9 +65,17 @@ import {
   upsertThreadMessages
 } from "../db"
 import {
+  assertNoTranscriptAgentModeTransition,
+  getThreadExecutionMode,
   parseThreadMetadata,
   patchLatestThreadMetadata
 } from "../services/thread-metadata"
+import { readThreadConversationPresenceForMutation } from "../services/thread-conversation-presence"
+import {
+  commitGuardedInitialCoordinatorPrefix,
+  containsCoordinatorInternalMarker,
+  neutralizeCoordinatorInternalUserText
+} from "../services/initial-coordinator-prefix-commit"
 import { matchesAgentPublicationContext } from "../services/agent-publication-context"
 import {
   captureThreadIncarnation,
@@ -215,6 +232,7 @@ import {
   extractCoordinatorSelectedSkill,
   getAgentModeFromMetadata,
   isCoordinatorModeForcedByEnvironment,
+  resolveCurrentAgentModeRequest,
   resolveCoordinatorModeRequest,
   type AgentMode,
   type CoordinatorSelectedSkill
@@ -355,6 +373,7 @@ import {
 } from "../hooks/result-callback"
 import type { ScopeSkipCallback } from "../hooks/scope"
 import { notifyHooksChanged } from "../hooks/notifications"
+import { bumpHookCatalogGlobalRevision } from "../hook-catalog/revision"
 import type {
   AgentInvokeParams,
   AgentResumeParams,
@@ -372,6 +391,13 @@ const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
+const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
+  import.meta.env?.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
+)
+
+function allowsForcedCoordinatorRequests(metadata: Record<string, unknown>): boolean {
+  return areForcedCoordinatorRequestsAllowed(metadata, PROJECT_MODE_AGENT_TEAM_ENABLED)
+}
 
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
@@ -543,6 +569,7 @@ function isGoalMutationSignatureCurrent(
   )
 }
 const activeRunSettled = new Map<string, Promise<void>>()
+const timedOutPredecessorFence = new TimedOutPredecessorFence()
 const activeRunReplacementLocks = new AsyncKeyedLock()
 type CurrentRunMessagePreparation =
   | { accepted: true; content: string }
@@ -834,6 +861,7 @@ async function waitForReplacedRunToSettle(threadId: string): Promise<"settled" |
       })
     ])
     if (outcome === "timed_out") {
+      timedOutPredecessorFence.track(threadId, settled)
       console.warn(
         `[Agent] Prior run did not settle within ${ACTIVE_RUN_REPLACEMENT_MAX_WAIT_MS}ms for thread ${threadId}; allowing replacement run to take over with late cleanup risk`
       )
@@ -3279,23 +3307,9 @@ function buildCoordinatorTurnContextPrompt(workerContext: string): string | unde
 ${sections.join("\n\n")}`
 }
 
-const COORDINATOR_INTERNAL_CONTEXT_START = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_START]]"
-const COORDINATOR_INTERNAL_CONTEXT_END = "[[CMB_COORDINATOR_INTERNAL_CONTEXT_END]]"
-const COORDINATOR_INTERNAL_NOTIFICATION_START = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_START]]"
-const COORDINATOR_INTERNAL_NOTIFICATION_END = "[[CMB_COORDINATOR_INTERNAL_NOTIFICATION_END]]"
-const COORDINATOR_INTERNAL_MARKERS = [
-  COORDINATOR_NOTIFICATION_PROMPT_PREFIX,
-  COORDINATOR_INTERNAL_CONTEXT_START,
-  COORDINATOR_INTERNAL_CONTEXT_END,
-  COORDINATOR_INTERNAL_NOTIFICATION_START,
-  COORDINATOR_INTERNAL_NOTIFICATION_END
-]
 const COORDINATOR_INTERNAL_NOTIFICATION_MESSAGE_KEY = "cmb_internal_coordinator_notification"
 const COORDINATOR_AUGMENTED_USER_MESSAGE_KEY = "cmb_coordinator_augmented_user_message"
 const COORDINATOR_VISIBLE_USER_MESSAGE_KEY = "cmb_visible_user_message"
-function containsCoordinatorInternalMarker(content: string): boolean {
-  return COORDINATOR_INTERNAL_MARKERS.some((marker) => content.includes(marker))
-}
 
 function sendAutoCommitResult(
   window: BrowserWindow,
@@ -4096,11 +4110,11 @@ function persistVisibleUserTranscriptMessage(
   content: string,
   messageId?: string,
   goal?: Pick<ThreadGoal, "goalId" | "activeWindowId"> | null
-): void {
-  if (!content.trim()) return
-  if (isWorkflowPlumbingTranscriptContent(content)) return
+): boolean {
+  if (!content.trim()) return true
+  if (isWorkflowPlumbingTranscriptContent(content)) return true
   try {
-    upsertThreadMessages(
+    const changed = upsertThreadMessages(
       threadId,
       [
         {
@@ -4114,8 +4128,10 @@ function persistVisibleUserTranscriptMessage(
       ],
       { preserveExistingOrder: true }
     )
+    return changed > 0
   } catch (error) {
     console.warn("[Agent] Failed to persist user transcript message:", error)
+    return false
   }
 }
 
@@ -4846,6 +4862,7 @@ async function writeSkillToDisk(skillId: string, content: string, name: string):
   const skillDir = join(getCustomSkillsDir(), skillId)
   mkdirSync(skillDir, { recursive: true })
   writeFileSync(join(skillDir, "SKILL.md"), content, "utf-8")
+  bumpHookCatalogGlobalRevision()
   invalidateEnabledSkillsCache()
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("skills:changed")
@@ -5419,9 +5436,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle("agent:coordinator-mode-forced", async (): Promise<boolean> => {
-    return isCoordinatorModeForcedByEnvironment()
-  })
+  ipcMain.handle(
+    "agent:coordinator-mode-forced",
+    async (_event, threadId?: unknown): Promise<boolean> => {
+      if (!isCoordinatorModeForcedByEnvironment()) return false
+      if (typeof threadId !== "string" || !threadId.trim()) return true
+      const metadata = parseThreadMetadata(getThreadCore(threadId)?.metadata)
+      return isCoordinatorModeForcedForMetadata(
+        metadata,
+        PROJECT_MODE_AGENT_TEAM_ENABLED,
+        true
+      )
+    }
+  )
 
   ipcMain.handle("agent:system-prompt-preview-access", async (): Promise<boolean> => {
     return canPreviewSystemPrompt()
@@ -5566,6 +5593,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const initialInvokeThread = getThreadCore(threadId)
       const initialInvokeMetadata = parseThreadMetadata(initialInvokeThread?.metadata)
       const initialInvokeAgentMode = getAgentModeFromMetadata(initialInvokeMetadata)
+      const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(
+        message,
+        initialInvokeMetadata,
+        { allowForcedRequests: allowsForcedCoordinatorRequests(initialInvokeMetadata) }
+      )
       const initialInvokeWorkspacePath =
         typeof initialInvokeMetadata.workspacePath === "string"
           ? initialInvokeMetadata.workspacePath
@@ -5870,7 +5902,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const expectedPublicationContext = {
         workspacePath: initialInvokeWorkspacePath,
         mode: initialInvokeAgentMode,
-        modeForcedByEnvironment: isCoordinatorModeForcedByEnvironment(),
+        modeForcedByEnvironment: initialInvokeCoordinatorRequest.source === "environment",
         normalSubagentsEnabled: initialInvokeMetadata.subagentsEnabled !== false,
         threadIncarnation: captureThreadIncarnation(initialInvokeThread)
       }
@@ -5907,10 +5939,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // reclaim the replacement's queue after one of its setup awaits.
           setCurrentRunMessageQueueOwner(threadId, nextInvokeRunToken)
           const existingController = activeRuns.get(threadId)
+          let predecessorSettlement: "settled" | "timed_out" = "settled"
           if (existingController) {
             console.log("[Agent] Aborting existing stream for thread:", threadId)
             existingController.abort()
-            await waitForReplacedRunToSettle(threadId)
+            predecessorSettlement = await waitForReplacedRunToSettle(threadId)
           }
           if (rejectAgentStartDuringShutdown(window, channel)) {
             clearCurrentRunMessageQueue(threadId, nextInvokeRunToken)
@@ -5941,6 +5974,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             abortController: nextAbortController,
             turnState: nextTurnState,
             runToken: nextRunToken,
+            allowBoundedCheckpointRecovery: canUseBoundedCheckpointRecovery(
+              predecessorSettlement,
+              timedOutPredecessorFence.hasPending(threadId)
+            ),
             activeRunSettledPromise: nextActiveRunSettledPromise,
             resolveActiveRunSettled: nextResolveActiveRunSettled
           }
@@ -5972,6 +6009,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         abortController,
         turnState,
         runToken,
+        allowBoundedCheckpointRecovery,
         activeRunSettledPromise,
         resolveActiveRunSettled
       } = replacement
@@ -6003,6 +6041,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
       })
       const trimmedInitialMessage = message.trimStart()
+      const shouldDeferUserTranscriptForModeCommit =
+        initialInvokeCoordinatorRequest.source === "message-prefix"
       const goalTranscriptBoundary = /^\/goal(?:\s|$)/i.test(trimmedInitialMessage)
         ? goalManager.get(threadId)
         : null
@@ -6015,7 +6055,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         guard: physicalStreamRunSetupGuard,
         operation: async () => {
           const tail = await getDurableRuntimeTail(threadId, {
-            excludeMessages: userMessageId ? [{ id: userMessageId, role: "user" }] : []
+            excludeMessages: userMessageId ? [{ id: userMessageId, role: "user" }] : [],
+            allowBoundedCheckpointRecovery
           })
           if (tail.persistedMessages.length > 0 && tail.checkpointHasInterrupt) {
             throw new Error(
@@ -6029,14 +6070,114 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       const durableRuntimeTail = durableRuntimeTailSetup.value
       let userTranscriptMessagePersisted = false
       let visibleTranscriptUserMessage = message
-      if (!isTrustedCoordinatorNotificationInvoke && !shouldDeferUserTranscriptPersistence) {
-        persistVisibleUserTranscriptMessage(
+      let prefixedCoordinatorModeCommitted = false
+
+      // A coordinator prefix is both a mode transition request and the first
+      // visible conversation message. Do not let workspace discovery, Harness
+      // setup, SessionStart, explicit-skill activation, or UserPromptSubmit
+      // return before that message becomes durable. The prior implementation
+      // deferred the row until after all of those awaits, so a blocked/failed
+      // first turn appeared in the renderer but vanished after restart.
+      //
+      // Keep the prior-conversation guard and the two writes in the same
+      // transition/mutation critical section. The mode is written first because
+      // inserting the message first would make the guarded empty thread look
+      // non-empty; if transcript persistence fails synchronously, restore the
+      // prior mode before surfacing the setup failure.
+      if (
+        shouldDeferUserTranscriptForModeCommit &&
+        !isTrustedCoordinatorNotificationInvoke
+      ) {
+        const prefixedCommitSetup = await awaitPhysicalStreamRunSetup({
+          guard: physicalStreamRunSetupGuard,
+          operation: async () => {
+            const committedPrefix = await commitGuardedInitialCoordinatorPrefix({
+              rawMessage: message,
+              prefixStrippedMessage: initialInvokeCoordinatorRequest.message,
+              withMutation: (operation) =>
+                workflowRunManager.withThreadTransitionLease(threadId, () =>
+                  withThreadRunMutationLock(threadId, operation)
+                ),
+              readExpectedMetadata: () => {
+                const latestThread = getThreadCore(threadId)
+                if (
+                  !latestThread ||
+                  !matchesThreadIncarnation(
+                    latestThread,
+                    expectedPublicationContext.threadIncarnation
+                  )
+                ) {
+                  return null
+                }
+                const latestMetadata = parseThreadMetadata(latestThread.metadata)
+                if (
+                  !matchesAgentPublicationContext(
+                    latestThread,
+                    latestMetadata,
+                    expectedPublicationContext
+                  )
+                ) {
+                  return null
+                }
+                return latestMetadata
+              },
+              readWorkflowLeaveBlock: (metadata) => {
+                const latestWorkspacePath =
+                  typeof metadata.workspacePath === "string" ? metadata.workspacePath : undefined
+                return workflowLeaveBlockedMessage(threadId, latestWorkspacePath)
+              },
+              readConversationPresence: () =>
+                readThreadConversationPresenceForMutation(threadId),
+              isActive: () => physicalStreamRunSetupGuard.isActive(),
+              persistAgentMode: (metadata) =>
+                persistAgentOwnedMetadataFields(
+                  threadId,
+                  metadata,
+                  ["agentMode"]
+                ),
+              persistTranscript: (visibleMessage) =>
+                persistVisibleUserTranscriptMessage(
+                  threadId,
+                  visibleMessage,
+                  userMessageId,
+                  goalTranscriptBoundary
+                ),
+              onRollbackError: (rollbackError) => {
+                console.error(
+                  "[Agent] Failed to roll back coordinator mode after transcript persistence failure:",
+                  rollbackError
+                )
+              }
+            })
+            visibleTranscriptUserMessage = committedPrefix.visibleMessage
+            userTranscriptMessagePersisted = true
+            prefixedCoordinatorModeCommitted = true
+            expectedPublicationContext.mode = "coordinator"
+            expectedPublicationContext.modeForcedByEnvironment = false
+          }
+        })
+        if (prefixedCommitSetup.status === "abandoned") return
+        safeSendToWindow(window, channel, {
+          type: "custom",
+          data: {
+            type: "agent_mode",
+            mode: "coordinator",
+            source: "message-prefix",
+            persisted: true
+          }
+        })
+      }
+      if (
+        !isTrustedCoordinatorNotificationInvoke &&
+        !shouldDeferUserTranscriptPersistence &&
+        !shouldDeferUserTranscriptForModeCommit
+      ) {
+        userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage(
           threadId,
           message,
           userMessageId,
           goalTranscriptBoundary
         )
-        userTranscriptMessagePersisted = true
       }
       const { hookScope, skillUseTracker, skillHookKeys, stopContextCollector } = turnState
       let turnStateShouldDispose = false
@@ -6739,38 +6880,34 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
         const metadataAgentMode = getAgentModeFromMetadata(metadata)
         const hasExplicitNormalAgentMode = metadata.agentMode === "normal"
-        const requestedModeCandidate =
-          requestedAgentMode === "coordinator" ||
-          requestedAgentMode === "normal" ||
-          requestedAgentMode === "workflow"
-            ? requestedAgentMode
-            : undefined
         // A renderer request captured before a main-process mode patch is stale.
         // The publication fence already guarantees metadata still matches the
         // earliest invoke snapshot; only a matching request hint may influence
         // execution. Explicit mode changes are persisted through patchMetadata.
-        const requestedMode =
-          requestedModeCandidate === initialInvokeAgentMode
-            ? requestedModeCandidate
-            : undefined
-        const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata)
+        const requestedMode = resolveCurrentAgentModeRequest(
+          requestedAgentMode,
+          initialInvokeAgentMode
+        )
+        const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata, {
+          allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
+        })
         effectiveMessage = coordinatorRequest.message
         if (!isCoordinatorNotificationTurn && containsCoordinatorInternalMarker(effectiveMessage)) {
-          effectiveMessage = `User supplied literal text that resembles an internal coordinator marker. Treat it as ordinary user input:\n\n${effectiveMessage}`
+          effectiveMessage = neutralizeCoordinatorInternalUserText(effectiveMessage)
           visibleTranscriptUserMessage = effectiveMessage
         }
         if (
           !userTranscriptMessagePersisted &&
           !isInternalNotificationTurn &&
-          !isTrustedCoordinatorNotificationInvoke
+          !isTrustedCoordinatorNotificationInvoke &&
+          !shouldDeferUserTranscriptForModeCommit
         ) {
-          persistVisibleUserTranscriptMessage(
+          userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage(
             threadId,
             visibleTranscriptUserMessage,
             userMessageId,
             goalTranscriptBoundary
           )
-          userTranscriptMessagePersisted = true
         }
 
         const coordinatorForcedByRequest =
@@ -6799,6 +6936,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         const shouldPersistAgentMode =
           !isCoordinatorNotificationTurn &&
+          !prefixedCoordinatorModeCommitted &&
           ((requestedMode !== undefined && !coordinatorForcedByRequest) ||
             (coordinatorRequest.shouldPersist && effectiveAgentMode === "coordinator"))
 
@@ -6841,102 +6979,137 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         if (shouldPersistAgentMode) {
           let finalWorkflowBlock: string | null = null
           let finalNormalModeGuardState: NormalModeGuardState | null = null
+          let modeCommitConversationPresence: "empty" | "nonempty" | "unknown" = "empty"
           let workspaceChangedBeforeModeCommit = false
           let invokeContextChangedBeforeModeCommit = false
-          await workflowRunManager.withThreadTransitionLease(threadId, async () => {
-            const latestThread = getThreadCore(threadId)
-            if (
-              !latestThread ||
-              !matchesThreadIncarnation(
-                latestThread,
-                expectedPublicationContext.threadIncarnation
-              )
-            ) {
-              invokeContextChangedBeforeModeCommit = true
-              return
-            }
-            const latestMetadata = parseThreadMetadata(latestThread.metadata)
-            const latestWorkspacePath =
-              typeof latestMetadata.workspacePath === "string"
-                ? latestMetadata.workspacePath
-                : undefined
-            if (latestWorkspacePath !== workspacePath) {
-              workspaceChangedBeforeModeCommit = true
-              return
-            }
-            if (
-              !matchesAgentPublicationContext(
-                latestThread,
-                latestMetadata,
-                expectedPublicationContext
-              )
-            ) {
-              invokeContextChangedBeforeModeCommit = true
-              return
-            }
-            throwIfInvokeAborted()
-            if (
-              getAgentModeFromMetadata(latestMetadata) === "workflow" &&
-              effectiveAgentMode !== "workflow"
-            ) {
-              finalWorkflowBlock = await workflowLeaveBlockedMessage(
-                threadId,
-                latestWorkspacePath
-              )
-              if (finalWorkflowBlock) return
-            }
-            if (
-              (requestedMode === "normal" || requestedMode === "workflow") &&
-              latestMetadata.agentMode !== requestedMode
-            ) {
-              finalNormalModeGuardState = await getNormalModeGuardState(
-                threadId,
-                latestWorkspacePath
-              )
+          await workflowRunManager.withThreadTransitionLease(threadId, () =>
+            withThreadRunMutationLock(threadId, async () => {
+              const latestThread = getThreadCore(threadId)
+              if (
+                !latestThread ||
+                !matchesThreadIncarnation(
+                  latestThread,
+                  expectedPublicationContext.threadIncarnation
+                )
+              ) {
+                invokeContextChangedBeforeModeCommit = true
+                return
+              }
+              const latestMetadata = parseThreadMetadata(latestThread.metadata)
+              const latestWorkspacePath =
+                typeof latestMetadata.workspacePath === "string"
+                  ? latestMetadata.workspacePath
+                  : undefined
+              if (latestWorkspacePath !== workspacePath) {
+                workspaceChangedBeforeModeCommit = true
+                return
+              }
+              if (
+                !matchesAgentPublicationContext(
+                  latestThread,
+                  latestMetadata,
+                  expectedPublicationContext
+                )
+              ) {
+                invokeContextChangedBeforeModeCommit = true
+                return
+              }
               throwIfInvokeAborted()
-              if (isNormalModeBlocked(finalNormalModeGuardState)) return
-            }
-            // Both guards above yield. Deletion uses the thread mutation lock,
-            // not this transition lease, so the same id may now refer to a new
-            // heartbeat incarnation. Re-read immediately before the synchronous
-            // metadata patch and verify both the original context and run owner.
-            const commitThread = getThreadCore(threadId)
-            if (
-              !commitThread ||
-              !matchesThreadIncarnation(
-                commitThread,
-                expectedPublicationContext.threadIncarnation
-              )
-            ) {
-              invokeContextChangedBeforeModeCommit = true
-              return
-            }
-            const commitMetadata = parseThreadMetadata(commitThread.metadata)
-            const commitWorkspacePath =
-              typeof commitMetadata.workspacePath === "string"
-                ? commitMetadata.workspacePath
-                : undefined
-            if (commitWorkspacePath !== workspacePath) {
-              workspaceChangedBeforeModeCommit = true
-              return
-            }
-            if (
-              !matchesAgentPublicationContext(
-                commitThread,
+              if (
+                getAgentModeFromMetadata(latestMetadata) === "workflow" &&
+                effectiveAgentMode !== "workflow"
+              ) {
+                finalWorkflowBlock = await workflowLeaveBlockedMessage(
+                  threadId,
+                  latestWorkspacePath
+                )
+                if (finalWorkflowBlock) return
+              }
+              if (
+                (requestedMode === "normal" || requestedMode === "workflow") &&
+                latestMetadata.agentMode !== requestedMode
+              ) {
+                finalNormalModeGuardState = await getNormalModeGuardState(
+                  threadId,
+                  latestWorkspacePath
+                )
+                throwIfInvokeAborted()
+                if (isNormalModeBlocked(finalNormalModeGuardState)) return
+              }
+              const guardedCandidateMetadata = {
+                ...latestMetadata,
+                agentMode: effectiveAgentMode
+              }
+              if (
+                getThreadExecutionMode(latestMetadata) !==
+                getThreadExecutionMode(guardedCandidateMetadata)
+              ) {
+                modeCommitConversationPresence =
+                  await readThreadConversationPresenceForMutation(threadId)
+              }
+              // Every async guard above runs under the same thread mutation lock
+              // as this commit. Re-read immediately before the synchronous patch
+              // to bind the result to the original incarnation and run context.
+              const commitThread = getThreadCore(threadId)
+              if (
+                !commitThread ||
+                !matchesThreadIncarnation(
+                  commitThread,
+                  expectedPublicationContext.threadIncarnation
+                )
+              ) {
+                invokeContextChangedBeforeModeCommit = true
+                return
+              }
+              const commitMetadata = parseThreadMetadata(commitThread.metadata)
+              const commitWorkspacePath =
+                typeof commitMetadata.workspacePath === "string"
+                  ? commitMetadata.workspacePath
+                  : undefined
+              if (commitWorkspacePath !== workspacePath) {
+                workspaceChangedBeforeModeCommit = true
+                return
+              }
+              if (
+                !matchesAgentPublicationContext(
+                  commitThread,
+                  commitMetadata,
+                  expectedPublicationContext
+                )
+              ) {
+                invokeContextChangedBeforeModeCommit = true
+                return
+              }
+              throwIfInvokeAborted()
+              const commitCandidateMetadata = {
+                ...commitMetadata,
+                agentMode: effectiveAgentMode
+              }
+              assertNoTranscriptAgentModeTransition(
                 commitMetadata,
-                expectedPublicationContext
+                commitCandidateMetadata,
+                modeCommitConversationPresence !== "empty"
               )
-            ) {
-              invokeContextChangedBeforeModeCommit = true
-              return
-            }
-            throwIfInvokeAborted()
-            commitMetadata.agentMode = effectiveAgentMode
-            // Commit at the lease boundary. The later metadata write also folds
-            // in coordinator selections, but cannot be the first durable mode
-            // update after an async guard or launch could slip into the gap.
-            metadata = persistAgentOwnedMetadataFields(threadId, commitMetadata, ["agentMode"])
-          })
+              commitMetadata.agentMode = effectiveAgentMode
+              // Commit at the lease boundary. The later metadata write also folds
+              // in coordinator selections, but cannot be the first durable mode
+              // update after an async guard or launch could slip into the gap.
+              metadata = persistAgentOwnedMetadataFields(threadId, commitMetadata, ["agentMode"])
+              if (
+                shouldDeferUserTranscriptForModeCommit &&
+                !userTranscriptMessagePersisted &&
+                !isInternalNotificationTurn &&
+                !isTrustedCoordinatorNotificationInvoke
+              ) {
+                userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage(
+                  threadId,
+                  visibleTranscriptUserMessage,
+                  userMessageId,
+                  goalTranscriptBoundary
+                )
+              }
+            })
+          )
           if (invokeContextChangedBeforeModeCommit) {
             safeSendToWindow(window, channel, {
               type: "error",
@@ -6969,6 +7142,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             await tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
             return
           }
+        }
+
+        if (
+          !userTranscriptMessagePersisted &&
+          !isInternalNotificationTurn &&
+          !isTrustedCoordinatorNotificationInvoke
+        ) {
+          userTranscriptMessagePersisted = persistVisibleUserTranscriptMessage(
+            threadId,
+            visibleTranscriptUserMessage,
+            userMessageId,
+            goalTranscriptBoundary
+          )
         }
 
         console.log("[CoordinatorMode] mode resolved", {
@@ -7203,16 +7389,16 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         }
         if (
-          shouldPersistAgentMode ||
           coordinatorTurnPromptMetadataChanged ||
           selectedSkillMetadataChanged ||
           explicitSelectedSkillMetadataChanged ||
           notificationSelectedSkillsMetadataChanged
         ) {
-          persistAgentOwnedMetadataFields(threadId, metadata, [
-            ...(shouldPersistAgentMode ? ["agentMode"] : []),
-            ...COORDINATOR_OWNED_THREAD_METADATA_KEYS
-          ])
+          persistAgentOwnedMetadataFields(
+            threadId,
+            metadata,
+            COORDINATOR_OWNED_THREAD_METADATA_KEYS
+          )
         }
 
         const requestedModelId = modelId || (metadata.model as string | undefined)
@@ -9462,25 +9648,33 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         channel,
         harnessAgentContext
       )
-      const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
+      const resumeCoordinatorRequest = resolveCoordinatorModeRequest("", metadata, {
+        allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
+      })
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
+      const initialResumeAgentMode = getAgentModeFromMetadata(metadata)
+      // Resume carries the renderer's last-known mode as a routing hint. Mode
+      // changes themselves go through threads:patchMetadata, so a hint that no
+      // longer matches the authoritative entry snapshot must never write back.
+      const requestedResumeMode = resolveCurrentAgentModeRequest(
+        requestedAgentMode,
+        initialResumeAgentMode
+      )
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
         ? "coordinator"
-        : requestedAgentMode === "coordinator" ||
-            requestedAgentMode === "normal" ||
-            requestedAgentMode === "workflow"
-          ? requestedAgentMode
-          : getAgentModeFromMetadata(metadata)
+        : (requestedResumeMode ?? initialResumeAgentMode)
+      const expectedResumePublicationContext = {
+        workspacePath,
+        mode: resumeAgentMode,
+        modeForcedByEnvironment: resumeForcedByEnvironment,
+        normalSubagentsEnabled: metadata.subagentsEnabled !== false,
+        threadIncarnation: resumeThreadIncarnation!
+      }
 
-      if (
-        !resumeForcedByEnvironment &&
-        (requestedAgentMode === "coordinator" ||
-          requestedAgentMode === "normal" ||
-          requestedAgentMode === "workflow")
-      ) {
+      if (!resumeForcedByEnvironment && requestedResumeMode !== undefined) {
         const modePersisted = await workflowRunManager.withThreadTransitionLease(
           threadId,
-          async () => {
+          () => withThreadRunMutationLock(threadId, async () => {
             const latestThread = getThreadCore(threadId)
             if (!latestThread) throw new Error("Thread not found")
             if (
@@ -9505,10 +9699,23 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
               return false
             }
+            if (
+              !matchesAgentPublicationContext(
+                latestThread,
+                latestMetadata,
+                expectedResumePublicationContext
+              )
+            ) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "会话模式已在恢复请求准备期间发生变化，请重新操作。"
+              })
+              return false
+            }
             // Leaving workflow → any non-workflow mode: block to avoid orphaning a run.
             if (
               getAgentModeFromMetadata(latestMetadata) === "workflow" &&
-              requestedAgentMode !== "workflow"
+              requestedResumeMode !== "workflow"
             ) {
               const workflowBlock = await workflowLeaveBlockedMessage(
                 threadId,
@@ -9520,8 +9727,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               }
             }
             if (
-              requestedAgentMode !== "coordinator" &&
-              latestMetadata.agentMode !== requestedAgentMode
+              requestedResumeMode !== "coordinator" &&
+              latestMetadata.agentMode !== requestedResumeMode
             ) {
               if (!latestWorkspacePath) {
                 safeSendToWindow(window, channel, {
@@ -9545,9 +9752,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 return false
               }
             }
+            const guardedCandidateMetadata = {
+              ...latestMetadata,
+              agentMode: requestedResumeMode
+            }
+            let modeCommitConversationPresence: "empty" | "nonempty" | "unknown" = "empty"
+            if (
+              getThreadExecutionMode(latestMetadata) !==
+              getThreadExecutionMode(guardedCandidateMetadata)
+            ) {
+              modeCommitConversationPresence =
+                await readThreadConversationPresenceForMutation(threadId)
+            }
             // The workflow/worker guards above yield. Deletion uses the run-mutation
-            // lock rather than the transition lease, so bind the commit to the exact
-            // row captured before resume preparation instead of trusting a reused id.
+            // lock too, so bind the commit to the exact row and publication context
+            // captured before resume preparation instead of trusting a reused id.
             const commitThread = getThreadCore(threadId)
             if (
               !commitThread ||
@@ -9572,10 +9791,32 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
               return false
             }
-            commitMetadata.agentMode = requestedAgentMode
+            if (
+              !matchesAgentPublicationContext(
+                commitThread,
+                commitMetadata,
+                expectedResumePublicationContext
+              )
+            ) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "会话模式已在恢复请求准备期间发生变化，请重新操作。"
+              })
+              return false
+            }
+            const commitCandidateMetadata = {
+              ...commitMetadata,
+              agentMode: requestedResumeMode
+            }
+            assertNoTranscriptAgentModeTransition(
+              commitMetadata,
+              commitCandidateMetadata,
+              modeCommitConversationPresence !== "empty"
+            )
+            commitMetadata.agentMode = requestedResumeMode
             metadata = persistAgentOwnedMetadataFields(threadId, commitMetadata, ["agentMode"])
             return true
-          }
+          })
         )
         if (!modePersisted) return
       }
@@ -9599,13 +9840,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
           const latestThread = getThreadCore(threadId)
           const latestMetadata = parseThreadMetadata(latestThread?.metadata)
-          if (!matchesAgentPublicationContext(latestThread, latestMetadata, {
-            workspacePath,
-            mode: resumeAgentMode,
-            modeForcedByEnvironment: resumeForcedByEnvironment,
-            normalSubagentsEnabled: metadata.subagentsEnabled !== false,
-            threadIncarnation: resumeThreadIncarnation!
-          })) {
+          if (
+            !matchesAgentPublicationContext(
+              latestThread,
+              latestMetadata,
+              expectedResumePublicationContext
+            )
+          ) {
             return { threadContextChanged: true as const }
           }
           // Transfer ownership before aborting. Even if settlement times out, the
@@ -10704,7 +10945,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       channel,
       harnessAgentContext
     )
-    const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
+    const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata, {
+      allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
+    })
     const interruptAgentMode: AgentMode =
       interruptCoordinatorRequest.source === "environment"
         ? "coordinator"

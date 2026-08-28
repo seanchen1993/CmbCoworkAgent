@@ -110,14 +110,30 @@ async function coordinatorInFlightContract(): Promise<void> {
 
 async function main(): Promise<void> {
   assert.equal(
-    shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, total: 0 }),
+    shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, page: { total: 0 } }),
     true,
     "an empty DB page must wait for its legacy checkpoint fallback"
   )
   assert.equal(
-    shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, total: 1 }),
+    shouldKeepMainTranscriptLoadingAfterPage({ succeeded: true, page: { total: 1 } }),
+    true,
+    "an unmarked durable page still waits for the one-time legacy checkpoint migration"
+  )
+  assert.equal(
+    shouldKeepMainTranscriptLoadingAfterPage({
+      succeeded: true,
+      page: { total: 2, legacyCheckpointMigrationStatus: "migrating" }
+    }),
+    true,
+    "an interrupted legacy copy must remain loading until bootstrap resumes it"
+  )
+  assert.equal(
+    shouldKeepMainTranscriptLoadingAfterPage({
+      succeeded: true,
+      page: { total: 0, legacyCheckpointMigrationStatus: "complete" }
+    }),
     false,
-    "a non-empty DB page releases first-screen loading"
+    "a completed empty migration must not rehydrate the checkpoint on every reopen"
   )
   assert.equal(
     shouldKeepMainTranscriptLoadingAfterPage({ succeeded: false }),

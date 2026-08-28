@@ -1,6 +1,8 @@
+export type ThreadConversationPresence = "unknown" | "empty" | "nonempty"
+
 export interface ThreadAgentModeSwitchState {
   historyLoading: boolean
-  historyMessageTotal: number
+  conversationPresence: ThreadConversationPresence
   residentMessageCount: number
 }
 
@@ -14,7 +16,7 @@ export function canChangeThreadAgentMode(
   return Boolean(
     state &&
       !state.historyLoading &&
-      state.historyMessageTotal === 0 &&
+      state.conversationPresence === "empty" &&
       state.residentMessageCount === 0
   )
 }

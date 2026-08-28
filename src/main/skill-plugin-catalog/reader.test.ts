@@ -14,6 +14,11 @@ import {
   resolveSkillPreview,
   resetSkillPluginCatalogSnapshotsForTests
 } from "./reader"
+import { commitCanonicalDisabledSkillMutation } from "../skills/disabled-state-mutation"
+import {
+  DISABLED_SKILL_STORE_MISSING_FINGERPRINT,
+  fingerprintDisabledSkillStoreText
+} from "../skills/disabled-store-fingerprint"
 
 const temporaryDirectories: string[] = []
 
@@ -45,6 +50,7 @@ describe("skill/plugin catalog reader", () => {
       customSkillsDir: join(root, "custom"),
       pluginsStorePath: join(root, "plugins.json"),
       disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
       globalRevision: 0
     }
     const builtin = join(source.builtinSkillsDir, "review")
@@ -142,6 +148,181 @@ describe("skill/plugin catalog reader", () => {
     ).toEqual({ filePath: join(custom, "SKILL.md") })
   })
 
+  it("resolves one legacy display-name alias to every matching standalone canonical id", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-alias-reader-"))
+    temporaryDirectories.push(root)
+    const source: SkillPluginCatalogSourceConfig = {
+      builtinSkillsDir: join(root, "builtin"),
+      customSkillsDir: join(root, "custom"),
+      pluginsStorePath: join(root, "plugins.json"),
+      disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
+      globalRevision: 0
+    }
+    for (const id of ["canonical-a", "canonical-b"]) {
+      const directory = join(source.builtinSkillsDir, id)
+      mkdirSync(directory, { recursive: true })
+      writeFileSync(join(directory, "SKILL.md"), "---\nname: Shared Legacy Name\n---\n")
+    }
+    mkdirSync(source.customSkillsDir, { recursive: true })
+    writeFileSync(source.pluginsStorePath, "[]")
+    writeFileSync(source.disabledSkillsPath, '["Shared Legacy Name"]')
+
+    const disabled = readSkillPluginCatalogPage(source, {
+      kind: "disabled",
+      limit: 10,
+      revision: "legacy-alias"
+    })
+    expect(disabled.disabledSkillIds).toEqual(["canonical-a", "canonical-b"])
+
+    source.disabledSkillsRevision += 1
+    writeFileSync(source.disabledSkillsPath, '["persisted-x"]')
+    const persistedDirectory = join(source.customSkillsDir, "persisted-x")
+    mkdirSync(persistedDirectory, { recursive: true })
+    writeFileSync(join(persistedDirectory, "SKILL.md"), "---\nname: Persisted X\n---\n")
+    const merged = readSkillPluginCatalogPage(source, {
+      kind: "disabled",
+      limit: 10,
+      mergeDisabledSkillIds: ["Shared Legacy Name"],
+      revision: "legacy-alias-merge"
+    })
+    expect(merged.disabledSkillIds).toHaveLength(3)
+    expect(merged.disabledSkillIds).toEqual(
+      expect.arrayContaining(["canonical-a", "canonical-b", "persisted-x"])
+    )
+  })
+
+  it("keeps disabled identity scans independent from a truncated plugin store", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-plugin-isolation-"))
+    temporaryDirectories.push(root)
+    const source: SkillPluginCatalogSourceConfig = {
+      builtinSkillsDir: join(root, "builtin"),
+      customSkillsDir: join(root, "custom"),
+      pluginsStorePath: join(root, "plugins.json"),
+      disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 7,
+      globalRevision: 0
+    }
+    const skillDirectory = join(source.builtinSkillsDir, "canonical-review")
+    mkdirSync(skillDirectory, { recursive: true })
+    mkdirSync(source.customSkillsDir, { recursive: true })
+    writeFileSync(join(skillDirectory, "SKILL.md"), "---\nname: Legacy Review\n---\n")
+    writeFileSync(source.disabledSkillsPath, '["Legacy Review"]')
+    writeFileSync(source.pluginsStorePath, "x".repeat(8 * 1024 * 1024 + 1))
+
+    const disabled = readSkillPluginCatalogPage(source, {
+      kind: "disabled",
+      limit: 128,
+      revision: "plugin-isolation"
+    })
+    expect(disabled.disabledSkillIds).toEqual(["canonical-review"])
+    expect(disabled.disabledSkillsRevision).toBe(7)
+    expect(disabled.truncated).toBe(false)
+    expect(disabled.stats.readBytes).toBeLessThan(1024)
+
+    source.globalRevision += 1
+    const skills = readSkillPluginCatalogPage(source, {
+      kind: "skills",
+      limit: 128,
+      revision: "plugin-isolation-control"
+    })
+    expect(skills.truncatedReasons).toContain("plugins-store-bytes")
+  })
+
+  it.each([
+    ["malformed JSON", '["review"'],
+    ["non-array JSON", '{"review":true}']
+  ])("fails closed for an existing %s disabled-skill store", async (_label, contents) => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-invalid-"))
+    temporaryDirectories.push(root)
+    const source: SkillPluginCatalogSourceConfig = {
+      builtinSkillsDir: join(root, "builtin"),
+      customSkillsDir: join(root, "custom"),
+      pluginsStorePath: join(root, "plugins.json"),
+      disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
+      globalRevision: 0
+    }
+    mkdirSync(source.builtinSkillsDir, { recursive: true })
+    mkdirSync(source.customSkillsDir, { recursive: true })
+    writeFileSync(source.disabledSkillsPath, contents)
+
+    const page = readSkillPluginCatalogPage(source, {
+      kind: "disabled",
+      limit: 10,
+      revision: "invalid-disabled-store"
+    })
+    expect(page.truncated).toBe(true)
+    expect(page.truncatedReasons).toContain("disabled-skills-invalid")
+    expect(page.disabledStoreFingerprint).toBe(
+      fingerprintDisabledSkillStoreText(contents)
+    )
+
+    let commitCalled = false
+    await expect(
+      commitCanonicalDisabledSkillMutation(
+        async (input) => readSkillPluginCatalogPage(source, input),
+        () => {
+          commitCalled = true
+          writeFileSync(source.disabledSkillsPath, "[]")
+          return []
+        }
+      )
+    ).rejects.toThrow("disabled-skills-invalid")
+    expect(commitCalled).toBe(false)
+    expect(readFileSync(source.disabledSkillsPath, "utf8")).toBe(contents)
+  })
+
+  it("treats a missing disabled-skill store as an empty valid store", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-missing-"))
+    temporaryDirectories.push(root)
+    const source: SkillPluginCatalogSourceConfig = {
+      builtinSkillsDir: join(root, "builtin"),
+      customSkillsDir: join(root, "custom"),
+      pluginsStorePath: join(root, "plugins.json"),
+      disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
+      globalRevision: 0
+    }
+    mkdirSync(source.builtinSkillsDir, { recursive: true })
+    mkdirSync(source.customSkillsDir, { recursive: true })
+
+    const page = readSkillPluginCatalogPage(source, {
+      kind: "disabled",
+      limit: 10,
+      revision: "missing-disabled-store"
+    })
+    expect(page.disabledSkillIds).toEqual([])
+    expect(page.disabledStoreFingerprint).toBe(
+      DISABLED_SKILL_STORE_MISSING_FINGERPRINT
+    )
+    expect(page.truncated).toBe(false)
+  })
+
+  it("fails closed when the disabled-skill store path is not a regular file", () => {
+    const root = mkdtempSync(join(tmpdir(), "cmb-skill-disabled-directory-"))
+    temporaryDirectories.push(root)
+    const source: SkillPluginCatalogSourceConfig = {
+      builtinSkillsDir: join(root, "builtin"),
+      customSkillsDir: join(root, "custom"),
+      pluginsStorePath: join(root, "plugins.json"),
+      disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
+      globalRevision: 0
+    }
+    mkdirSync(source.builtinSkillsDir, { recursive: true })
+    mkdirSync(source.customSkillsDir, { recursive: true })
+    mkdirSync(source.disabledSkillsPath)
+
+    const page = readSkillPluginCatalogPage(source, {
+      kind: "disabled",
+      limit: 10,
+      revision: "directory-disabled-store"
+    })
+    expect(page.truncated).toBe(true)
+    expect(page.truncatedReasons).toContain("disabled-skills-invalid")
+  })
+
   it("bounds expanded skill metadata snapshots and preserves disabled summary semantics", () => {
     const root = mkdtempSync(join(tmpdir(), "cmb-skill-plugin-snapshot-bytes-"))
     temporaryDirectories.push(root)
@@ -150,6 +331,7 @@ describe("skill/plugin catalog reader", () => {
       customSkillsDir: join(root, "custom"),
       pluginsStorePath: join(root, "plugins.json"),
       disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
       globalRevision: 0
     }
     mkdirSync(source.builtinSkillsDir, { recursive: true })
@@ -211,6 +393,7 @@ describe("skill/plugin catalog reader", () => {
       customSkillsDir: join(root, "custom"),
       pluginsStorePath: join(root, "plugins.json"),
       disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
       globalRevision: 0
     }
     const skillDirectory = join(source.builtinSkillsDir, "review")
@@ -249,6 +432,7 @@ describe("skill/plugin catalog reader", () => {
       customSkillsDir: join(root, "custom"),
       pluginsStorePath: join(root, "plugins.json"),
       disabledSkillsPath: join(root, "disabled-skills.json"),
+      disabledSkillsRevision: 0,
       globalRevision: 0
     }
     mkdirSync(source.builtinSkillsDir, { recursive: true })

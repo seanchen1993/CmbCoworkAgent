@@ -1,4 +1,8 @@
-import type { SkillPluginCatalogPage, SkillPluginCatalogPageInput } from "../types"
+import type {
+  SkillPluginCatalogKind,
+  SkillPluginCatalogPage,
+  SkillPluginCatalogPageInput
+} from "../types"
 import type { SkillPreviewGrantRequest } from "../../shared/skill-preview"
 
 export const SKILL_PLUGIN_CATALOG_DEFAULT_PAGE_SIZE = 128
@@ -20,11 +24,23 @@ export const SKILL_PLUGIN_CATALOG_MAX_SKILLS = 20_000
 export const SKILL_PLUGIN_CATALOG_MAX_PLUGINS = 10_000
 export const SKILL_PLUGIN_CATALOG_MAX_ENTRIES = 30_000
 
+/**
+ * Keep the renderer-facing IPC boundary fail-closed without collapsing the
+ * disabled-id projection into the full skills projection. Unknown values use
+ * the safe default, while every protocol-supported projection keeps its own
+ * worker request identity.
+ */
+export function normalizeSkillPluginCatalogKind(value: unknown): SkillPluginCatalogKind {
+  return value === "plugins" || value === "disabled" ? value : "skills"
+}
+
 export interface SkillPluginCatalogSourceConfig {
   builtinSkillsDir: string
   customSkillsDir: string
   pluginsStorePath: string
   disabledSkillsPath: string
+  /** Disabled-store CAS epoch captured before this Worker request. */
+  disabledSkillsRevision: number
   /** Main-process source epoch shared across renderer windows. */
   globalRevision: number
 }

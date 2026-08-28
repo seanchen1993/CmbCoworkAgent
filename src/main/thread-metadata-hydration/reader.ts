@@ -1,9 +1,8 @@
 import type { DatabaseSync } from "node:sqlite"
 import {
-  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  isVisibleGoalUserEventMessage,
   isStaleCheckpointBoundaryNoticeMessage
 } from "../../shared/goal-events"
-import { GOAL_CLEAR_ALIASES } from "../../shared/goal-slash"
 import type { Thread, ThreadGroupSelectionEntry } from "../types"
 import type {
   ThreadGoalHydrationEvent,
@@ -85,13 +84,6 @@ const GIT_CONTEXT_TRACKED_FILE_LIMIT = 512
 const GIT_CONTEXT_TRACKED_FILE_CHAR_BUDGET = 256 * 1024
 const GIT_CONTEXT_PATH_CHAR_LIMIT = 4_096
 const GOAL_EVENT_TRUNCATION_SUFFIX = "\n…[历史 Goal 事件已截断]"
-const NON_TRANSCRIPT_GOAL_COMMANDS = new Set([
-  "/goal",
-  "/goal status",
-  "/goal pause",
-  ...GOAL_CLEAR_ALIASES.map((alias) => `/goal ${alias}`)
-])
-
 export class ThreadMetadataHydrationCancelledError extends Error {
   readonly code = THREAD_METADATA_HYDRATION_CANCELLED
 
@@ -248,10 +240,7 @@ function stats(
 }
 
 function isRestorableGoalUserEventMessage(message: string): boolean {
-  const trimmed = message.trim()
-  if (!trimmed.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)) return false
-  const command = trimmed.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length).trim().toLowerCase()
-  return !NON_TRANSCRIPT_GOAL_COMMANDS.has(command)
+  return isVisibleGoalUserEventMessage(message)
 }
 
 function truncateUtf8(text: string, maxBytes: number): string {

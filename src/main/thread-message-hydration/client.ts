@@ -264,7 +264,10 @@ export class ThreadMessageHydrationClient {
               beforeMessageId: options.beforeMessageId,
               anchorMessageId: options.anchorMessageId,
               limit: options.limit,
-              byteBudget: options.byteBudget
+              byteBudget: options.byteBudget,
+              includeVisibleMessagePresence: options.includeVisibleMessagePresence,
+              notAfterCreatedAt: options.notAfterCreatedAt,
+              recoveryCheckpointId: options.recoveryCheckpointId
             },
             cancellationBuffer
           })

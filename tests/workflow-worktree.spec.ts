@@ -21,6 +21,7 @@ import {
   cleanupWorkflowWorktree,
   diffWorkflowWorktree,
   discardWorkflowWorktree,
+  findBlockingWorkflowWorktreeOwnership,
   finalizeWorkflowWorktreeRecord,
   identifyRepository,
   isWorktreePristine,
@@ -31,7 +32,9 @@ import {
   persistWorkflowWorktreeRecord,
   prepareWorkflowWorktreeSource,
   removeWorkflowWorktree,
+  rollbackAttemptedWorktreeCreation,
   setLegacyWorktreeAppDataRootForTest,
+  withGitWorktreeRepositoryLock,
   type WorkflowWorktreeInfo
 } from "../src/main/services/git-worktree.ts"
 import {
@@ -616,6 +619,57 @@ async function testConcurrentCreatesAreSerializedAndUnique(): Promise<void> {
   }
 }
 
+async function testManualAndWorkflowCreationShareRepositoryLock(): Promise<void> {
+  const repo = makeRepo()
+  const appDataRoot = makeAppDataRoot()
+  const linkedSource = `${repo}-manual-linked`
+  try {
+    git(repo, ["worktree", "add", "-b", "manual-lock-source", linkedSource])
+    let releaseLock!: () => void
+    let markLockEntered!: () => void
+    const lockEntered = new Promise<void>((resolveEntered) => {
+      markLockEntered = resolveEntered
+    })
+    const lockRelease = new Promise<void>((resolveRelease) => {
+      releaseLock = resolveRelease
+    })
+    const heldByManualMutation = withGitWorktreeRepositoryLock(linkedSource, async () => {
+      markLockEntered()
+      await lockRelease
+      git(repo, ["worktree", "remove", "--force", linkedSource])
+    })
+    await lockEntered
+
+    // Supply a frozen source so createWorkflowWorktree queues onto the lock
+    // synchronously. This models the workflow path racing a manual IPC creator.
+    const source = await prepareWorkflowWorktreeSource(repo)
+    let workflowCreationSettled = false
+    const workflowCreation = createWorkflowWorktree({
+      workspacePath: repo,
+      runId: "wf_shared_lock",
+      appDataRoot,
+      source
+    }).finally(() => {
+      workflowCreationSettled = true
+    })
+    await Promise.resolve()
+    assert(
+      !workflowCreationSettled,
+      "workflow creation must wait behind a linked-checkout manual mutation on the same repository"
+    )
+
+    releaseLock()
+    await heldByManualMutation
+    const info = await workflowCreation
+    assert(!existsSync(linkedSource), "the manual-style removal should complete under the lock")
+    assert(existsSync(info.directory), "workflow creation should resume after the shared lock")
+  } finally {
+    rmSync(linkedSource, { recursive: true, force: true })
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(appDataRoot, { recursive: true, force: true })
+  }
+}
+
 async function testLongLabelOwnershipRecordsDoNotCollide(): Promise<void> {
   const repo = makeRepo()
   const appDataRoot = makeAppDataRoot()
@@ -882,6 +936,84 @@ async function testRemoveIsCompleteAndIdempotent(): Promise<void> {
   }
 }
 
+async function testAttemptedCreationRollbackCleansLateGitSuccess(): Promise<void> {
+  const repo = makeRepo()
+  const appDataRoot = makeAppDataRoot()
+  const directory = `${repo}-reported-timeout`
+  const branch = "manual/reported-timeout"
+  try {
+    const baseCommit = git(repo, ["rev-parse", "HEAD"])
+    // Deterministically model execFile reporting timeout/non-zero only AFTER Git
+    // completed every durable side effect. The caller's `created` flag is still
+    // false, so rollback must discover the registry/path/ref itself.
+    git(repo, ["worktree", "add", "-b", branch, directory, baseCommit])
+
+    await rollbackAttemptedWorktreeCreation({
+      directory,
+      gitRoot: repo,
+      branch,
+      expectedBaseCommit: baseCommit,
+      branchWasAbsentBeforeAttempt: true
+    })
+
+    assert(!existsSync(directory), "indeterminate add rollback must remove the late checkout")
+    const registrations = parseWorktreeList(git(repo, ["worktree", "list", "--porcelain"]))
+    assert(
+      !registrations.some((entry) => sameFilesystemPath(entry.path, directory)),
+      "indeterminate add rollback must remove the late registration"
+    )
+    let branchStillExists = true
+    try {
+      git(repo, ["show-ref", "--verify", `refs/heads/${branch}`])
+    } catch {
+      branchStillExists = false
+    }
+    assert(!branchStillExists, "indeterminate add rollback must delete only the expected base ref")
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(appDataRoot, { recursive: true, force: true })
+  }
+}
+
+async function testAttemptedCreationRollbackPreservesRacedExternalBranch(): Promise<void> {
+  const repo = makeRepo()
+  const appDataRoot = makeAppDataRoot()
+  const directory = `${repo}-external-ref-race`
+  const branch = "manual/external-ref-race"
+  try {
+    const baseCommit = git(repo, ["rev-parse", "HEAD"])
+    // The app's preflight observed no ref. Before its `worktree add -b` ran, an
+    // external Git process created the same name at the same base and caused add
+    // to fail. That preflight fact must never authorize deleting the external ref.
+    git(repo, ["branch", branch, baseCommit])
+
+    let rejected = false
+    try {
+      await rollbackAttemptedWorktreeCreation({
+        directory,
+        gitRoot: repo,
+        branch,
+        expectedBaseCommit: baseCommit,
+        branchWasAbsentBeforeAttempt: true
+      })
+    } catch (error) {
+      rejected = /retained for manual inspection/i.test(String(error))
+    }
+
+    assert(rejected, "branch-only rollback must fail closed after an external ref race")
+    assert(!existsSync(directory), "the failed add must not fabricate a checkout path")
+    assert(
+      git(repo, ["show-ref", "--verify", "--hash", `refs/heads/${branch}`]) === baseCommit,
+      "rollback must preserve an externally created same-name/same-base branch"
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(appDataRoot, { recursive: true, force: true })
+  }
+}
+
 async function testManagedOperationsDoNotPruneUnrelatedWorktrees(): Promise<void> {
   const repo = makeRepo()
   const appDataRoot = makeAppDataRoot()
@@ -1026,8 +1158,39 @@ async function testLedgerKeepsOnlyChangedSuccesses(): Promise<void> {
   try {
     // Succeeded + changed → kept as a host-managed deliverable.
     const changed = await ledger.acquire("worker")
+    assert(
+      ledger.ownsWorktreeDirectory(changed.directory),
+      "an active workflow ledger must protect its running checkout"
+    )
+    const runningRecord = (
+      await listWorkflowWorktreeRecords(changed.commonDir, appDataRoot)
+    ).find((record) => record.id === changed.name)
+    assert(runningRecord?.status === "running", "ownership manifest must expose active status")
+    assert(
+      findBlockingWorkflowWorktreeOwnership([runningRecord!], changed.directory)?.id ===
+        runningRecord!.id,
+      "a running ownership manifest must block manual deletion"
+    )
+    assert(
+      findBlockingWorkflowWorktreeOwnership(
+        [{ ...runningRecord!, status: "merged" }],
+        changed.directory
+      ) === null,
+      "a terminal ownership manifest without pending cleanup must not block ordinary removal"
+    )
+    assert(
+      findBlockingWorkflowWorktreeOwnership(
+        [{ ...runningRecord!, status: "discarded", cleanupPending: true }],
+        changed.directory
+      )?.id === runningRecord!.id,
+      "a terminal ownership manifest with pending cleanup must still block manual deletion"
+    )
     writeFileSync(join(changed.directory, "out.txt"), "result\n")
     await ledger.settle(changed, { succeeded: true })
+    assert(
+      !ledger.ownsWorktreeDirectory(changed.directory),
+      "settled worktree must leave the active in-memory ownership set"
+    )
     const changedRecord = (await listWorkflowWorktreeRecords(changed.commonDir, appDataRoot)).find(
       (record) => record.id === changed.name
     )
@@ -3376,6 +3539,8 @@ function testParseWorktreeList(): void {
     ].join("\n")
   )
   assert(parsed.length === 3, `expected 3 entries, got ${parsed.length}`)
+  assert(parsed[0].head === "abc123", "worktree HEAD should be parsed for rollback fencing")
+  assert(parsed[1].head === "def456", "linked worktree HEAD should be parsed")
   assert(parsed[0].branch === "main", "refs/heads/ prefix should be stripped")
   assert(parsed[1].branch === "cmbcowork/wf/run/agent-1", "namespaced branch should parse")
   assert(parsed[2].branch === undefined, "a detached worktree has no branch")
@@ -3397,12 +3562,15 @@ async function main(): Promise<void> {
     await testDirtySourceUsesCommittedHead()
     await testSubdirectoryScopeAndLinkedSourceHead()
     await testConcurrentCreatesAreSerializedAndUnique()
+    await testManualAndWorkflowCreationShareRepositoryLock()
     await testLongLabelOwnershipRecordsDoNotCollide()
     await testCreateFromInsideAWorktreeUsesPrimaryRepo()
     await testSymlinkedWorkspaceKeepsOneRepositoryIdentity()
     await testCreateRejectsNonGitDirectory()
     await testPristineDetection()
     await testRemoveIsCompleteAndIdempotent()
+    await testAttemptedCreationRollbackCleansLateGitSuccess()
+    await testAttemptedCreationRollbackPreservesRacedExternalBranch()
     await testManagedOperationsDoNotPruneUnrelatedWorktrees()
     await testSafeRemovalRejectsAnAdvancedBranch()
     await testGitRemovalFailureNeverFallsBackToRecursiveDelete()
@@ -3447,7 +3615,7 @@ async function main(): Promise<void> {
     testWorktreePromptMatchesRuntimeBoundary()
     testGitEnvironmentOverridesAreRemoved()
 
-    console.log("PASS workflow-worktree (63 tests)")
+    console.log("PASS workflow-worktree (66 tests)")
   } finally {
     if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
     else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT

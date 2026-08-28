@@ -5,6 +5,11 @@ import type {
   ThreadMessageHydrationReadRequest
 } from "./protocol"
 import { THREAD_MESSAGE_HYDRATION_CANCELLED } from "./protocol"
+import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
+import {
+  GOAL_USER_MESSAGE_EVENT_PREFIX,
+  isVisibleGoalUserEventMessage
+} from "../../shared/goal-events"
 
 const THREAD_MESSAGE_TEXT_LIMIT = 120_000
 const THREAD_MESSAGE_BLOCK_LIMIT = 80
@@ -17,6 +22,9 @@ const THREAD_MESSAGE_TOOL_CALL_LIMIT = 50
 const DEFAULT_THREAD_MESSAGES_PAGE_LIMIT = 500
 const MAX_THREAD_MESSAGES_PAGE_LIMIT = 1_000
 export const THREAD_MESSAGE_HYDRATION_MAX_BYTE_BUDGET = 4 * 1024 * 1024
+export const THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT = 4_096
+export const THREAD_CONVERSATION_PRESENCE_ROW_BYTE_LIMIT = 1024 * 1024
+export const THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET = 8 * 1024 * 1024
 const THREAD_MESSAGE_HYDRATION_MIN_BYTE_BUDGET = 64 * 1024
 const THREAD_MESSAGE_HYDRATION_RESPONSE_OVERHEAD = 1024
 const OVERSIZED_MESSAGE_MARKER = "\n[完整消息过大，当前仅显示有界预览]"
@@ -51,6 +59,12 @@ interface CandidateRow {
 interface FragmentSummary {
   prefix: string
   length: number
+}
+
+interface LegacyCheckpointMigrationBoundary {
+  checkpointId: string
+  totalMessages: number
+  status: "migrating" | "complete"
 }
 
 export class ThreadMessageHydrationCancelledError extends Error {
@@ -209,8 +223,7 @@ function normalizeMessageContent(content: unknown): Message["content"] {
   return ""
 }
 
-function parseToolCalls(raw: unknown, cancellation: Int32Array): ToolCall[] | undefined {
-  const parsed = parseJsonValue(raw, cancellation)
+function parsedToolCalls(parsed: unknown): ToolCall[] | undefined {
   if (!Array.isArray(parsed)) return undefined
   return parsed
     .slice(0, THREAD_MESSAGE_TOOL_CALL_LIMIT)
@@ -222,6 +235,63 @@ function parseToolCalls(raw: unknown, cancellation: Int32Array): ToolCall[] | un
         depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
       })
     ) as ToolCall[]
+}
+
+function jsonValueNeedsTranscriptClamp(
+  value: unknown,
+  options: {
+    stringLimit: number
+    arrayLimit: number
+    objectKeyLimit: number
+    depthLimit: number
+  },
+  depth = 0
+): boolean {
+  if (typeof value === "string") return value.length > options.stringLimit
+  if (!value || typeof value !== "object") return false
+  if (depth >= options.depthLimit) return true
+  if (Array.isArray(value)) {
+    return (
+      value.length > options.arrayLimit ||
+      value
+        .slice(0, options.arrayLimit)
+        .some((nested) => jsonValueNeedsTranscriptClamp(nested, options, depth + 1))
+    )
+  }
+  const entries = Object.entries(value)
+  return (
+    entries.length > options.objectKeyLimit ||
+    entries
+      .slice(0, options.objectKeyLimit)
+      .some(([, nested]) => jsonValueNeedsTranscriptClamp(nested, options, depth + 1))
+  )
+}
+
+function messageContentNeedsTranscriptClamp(content: unknown): boolean {
+  if (typeof content === "string") return content.length > THREAD_MESSAGE_TEXT_LIMIT
+  if (!Array.isArray(content)) return content !== undefined && content !== null
+  if (content.length > THREAD_MESSAGE_BLOCK_LIMIT) return true
+  return content.some((block) =>
+    jsonValueNeedsTranscriptClamp(block, {
+      stringLimit: THREAD_MESSAGE_BLOCK_TEXT_LIMIT,
+      arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
+      objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
+      depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
+    })
+  )
+}
+
+function toolCallsNeedTranscriptClamp(toolCalls: unknown): boolean {
+  if (!Array.isArray(toolCalls)) return toolCalls !== undefined && toolCalls !== null
+  if (toolCalls.length > THREAD_MESSAGE_TOOL_CALL_LIMIT) return true
+  return toolCalls.some((toolCall) =>
+    jsonValueNeedsTranscriptClamp(toolCall, {
+      stringLimit: THREAD_MESSAGE_JSON_STRING_LIMIT,
+      arrayLimit: THREAD_MESSAGE_JSON_ARRAY_LIMIT,
+      objectKeyLimit: THREAD_MESSAGE_JSON_OBJECT_KEY_LIMIT,
+      depthLimit: THREAD_MESSAGE_JSON_DEPTH_LIMIT
+    })
+  )
 }
 
 function messageBoolean(value: unknown): boolean | undefined {
@@ -249,37 +319,49 @@ function rowToMessage(
   row: ThreadMessageRow,
   fragment: FragmentSummary | undefined,
   cancellation: Int32Array
-): Message {
+): { message: Message; truncated: boolean } {
   throwIfCancelled(cancellation)
   const createdAt = dateFromTimestamp(row.created_at) ?? new Date()
   const startAt = dateFromTimestamp(row.start_at)
   const endAt = dateFromTimestamp(row.end_at)
   const isError = messageBoolean(row.is_error)
-  const toolCalls = parseToolCalls(row.tool_calls_json, cancellation)
-  const storedContent = normalizeMessageContent(parseJsonValue(row.content_json, cancellation))
+  const parsedToolCallValues = parseJsonValue(row.tool_calls_json, cancellation)
+  const toolCalls = parsedToolCalls(parsedToolCallValues)
+  const parsedContent = parseJsonValue(row.content_json, cancellation)
+  const storedContent = normalizeMessageContent(parsedContent)
   const content = appendFragmentSummary(storedContent, fragment)
 
   return {
-    id: row.message_id,
-    ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
-    ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
-      ? { provider_occurrence: row.provider_occurrence }
-      : {}),
-    role: row.role,
-    content,
-    ...(toolCalls ? { tool_calls: toolCalls } : {}),
-    ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}),
-    ...(row.name ? { name: row.name } : {}),
-    ...(row.status ? { status: row.status } : {}),
-    ...(isError !== undefined ? { is_error: isError } : {}),
-    ...(typeof row.content_priority === "number" && row.content_priority > 0
-      ? { content_priority: row.content_priority }
-      : {}),
-    ...(row.goal_id ? { goal_id: row.goal_id } : {}),
-    ...(row.active_window_id ? { active_window_id: row.active_window_id } : {}),
-    created_at: createdAt,
-    ...(startAt ? { start_at: startAt } : {}),
-    ...(endAt ? { end_at: endAt } : {})
+    message: {
+      id: row.message_id,
+      ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
+      ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
+        ? { provider_occurrence: row.provider_occurrence }
+        : {}),
+      role: row.role,
+      content,
+      ...(toolCalls ? { tool_calls: toolCalls } : {}),
+      ...(row.tool_call_id ? { tool_call_id: row.tool_call_id } : {}),
+      ...(row.name ? { name: row.name } : {}),
+      ...(row.status ? { status: row.status } : {}),
+      ...(isError !== undefined ? { is_error: isError } : {}),
+      ...(typeof row.content_priority === "number" && row.content_priority > 0
+        ? { content_priority: row.content_priority }
+        : {}),
+      ...(row.goal_id ? { goal_id: row.goal_id } : {}),
+      ...(row.active_window_id ? { active_window_id: row.active_window_id } : {}),
+      created_at: createdAt,
+      ...(startAt ? { start_at: startAt } : {}),
+      ...(endAt ? { end_at: endAt } : {})
+    },
+    truncated:
+      messageContentNeedsTranscriptClamp(parsedContent) ||
+      toolCallsNeedTranscriptClamp(parsedToolCallValues) ||
+      Boolean(
+        fragment &&
+          typeof storedContent === "string" &&
+          storedContent.length + fragment.length > THREAD_MESSAGE_TEXT_LIMIT
+      )
   }
 }
 
@@ -364,7 +446,8 @@ function readCandidates(
   database: DatabaseSync,
   request: ThreadMessageHydrationReadRequest,
   limit: number,
-  cancellation: Int32Array
+  cancellation: Int32Array,
+  legacyMigration: LegacyCheckpointMigrationBoundary | null
 ): CandidateRow[] {
   const beforeOrdinal = request.options.beforeOrdinal
   const beforeMessageId = request.options.beforeMessageId?.trim() ?? ""
@@ -372,6 +455,30 @@ function readCandidates(
   const hasBeforeOrdinal = Number.isSafeInteger(beforeOrdinal) && (beforeOrdinal ?? -1) >= 0
   const hasBeforeMessageId = beforeMessageId.length > 0
   const hasAnchorMessageId = anchorMessageId.length > 0
+  const notAfterCreatedAt = normalizeTimestamp(request.options.notAfterCreatedAt)
+  const recoveryCheckpointId = request.options.recoveryCheckpointId?.trim() ?? ""
+  const legacyMessageCount = Math.max(0, legacyMigration?.totalMessages ?? 0)
+  const completedLegacyMigration = legacyMigration?.status === "complete"
+  const recoveryTargetsMigratedCheckpoint =
+    completedLegacyMigration &&
+    Boolean(recoveryCheckpointId) &&
+    legacyMigration.checkpointId === recoveryCheckpointId
+  const createdAtBoundarySql =
+    notAfterCreatedAt === null
+      ? ""
+      : recoveryTargetsMigratedCheckpoint
+        ? "\n           AND m.ordinal < ?"
+        : completedLegacyMigration
+          ? "\n           AND (m.ordinal < ? OR m.created_at <= ?)"
+          : "\n           AND m.created_at <= ?"
+  const boundaryBindings: number[] =
+    notAfterCreatedAt === null
+      ? []
+      : recoveryTargetsMigratedCheckpoint
+        ? [legacyMessageCount]
+        : completedLegacyMigration
+          ? [legacyMessageCount, notAfterCreatedAt]
+          : [notAfterCreatedAt]
   if (hasBeforeOrdinal !== hasBeforeMessageId) {
     throw new Error(
       "Thread message page cursor requires beforeOrdinal and beforeMessageId together"
@@ -388,11 +495,15 @@ function readCandidates(
   const anchor = hasAnchorMessageId
     ? database
         .prepare(
-          `SELECT ordinal
-           FROM thread_messages
-           WHERE thread_id = ? AND message_id = ?`
+          `SELECT m.ordinal
+           FROM thread_messages AS m
+           WHERE m.thread_id = ? AND m.message_id = ?${createdAtBoundarySql}`
         )
-        .get(request.threadId, anchorMessageId)
+        .get(
+          request.threadId,
+          anchorMessageId,
+          ...boundaryBindings
+        )
     : undefined
   if (hasAnchorMessageId && !anchor) {
     throw new Error("Thread message forward-page anchor was not found")
@@ -419,6 +530,7 @@ function readCandidates(
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
            AND (m.ordinal > ? OR (m.ordinal = ? AND m.message_id > ?))
+           ${createdAtBoundarySql}
          ORDER BY m.ordinal ASC, m.message_id ASC
          LIMIT ?`
       : hasBeforeOrdinal
@@ -434,6 +546,7 @@ function readCandidates(
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
            AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id < ?))
+           ${createdAtBoundarySql}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
       : `SELECT m.message_id, m.ordinal,
@@ -447,14 +560,29 @@ function readCandidates(
          LEFT JOIN thread_message_fragment_states AS fragments
            ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
          WHERE m.thread_id = ?
+           ${createdAtBoundarySql}
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
   )
   const bindings: Array<string | number> = hasBeforeOrdinal
-    ? [request.threadId, beforeOrdinal as number, beforeOrdinal as number, beforeMessageId, limit + 1]
+    ? [
+        request.threadId,
+        beforeOrdinal as number,
+        beforeOrdinal as number,
+        beforeMessageId,
+        ...boundaryBindings,
+        limit + 1
+      ]
     : hasAnchorMessageId
-      ? [request.threadId, anchorOrdinal as number, anchorOrdinal as number, anchorMessageId, limit + 1]
-    : [request.threadId, limit + 1]
+      ? [
+          request.threadId,
+          anchorOrdinal as number,
+          anchorOrdinal as number,
+          anchorMessageId,
+          ...boundaryBindings,
+          limit + 1
+        ]
+      : [request.threadId, ...boundaryBindings, limit + 1]
   const rows: CandidateRow[] = []
   for (const raw of statement.iterate(...bindings)) {
     throwIfCancelled(cancellation)
@@ -541,6 +669,126 @@ function readFragmentSummaries(
   return fragments
 }
 
+function hasVisibleThreadConversation(
+  database: DatabaseSync,
+  threadId: string,
+  cancellation: Int32Array
+): boolean {
+  const statement = database.prepare(
+    `SELECT role,
+            length(CAST(content_json AS BLOB)) AS content_bytes,
+            CASE WHEN length(CAST(content_json AS BLOB)) <= ? THEN content_json ELSE NULL END AS content_json
+     FROM thread_messages
+     WHERE thread_id = ?
+     LIMIT ?`
+  )
+  let scannedRows = 0
+  let scannedBytes = 0
+  for (const raw of statement.iterate(
+    THREAD_CONVERSATION_PRESENCE_ROW_BYTE_LIMIT,
+    threadId,
+    THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT + 1
+  )) {
+    throwIfCancelled(cancellation)
+    if (scannedRows >= THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT) return true
+    scannedRows += 1
+    const contentBytes = Number(raw.content_bytes)
+    if (
+      !Number.isFinite(contentBytes) ||
+      contentBytes < 0 ||
+      contentBytes > THREAD_CONVERSATION_PRESENCE_ROW_BYTE_LIMIT ||
+      scannedBytes + contentBytes > THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET ||
+      typeof raw.content_json !== "string"
+    ) {
+      return true
+    }
+    scannedBytes += contentBytes
+    if (
+      typeof raw.role === "string" &&
+      isRestorableConversationTranscriptMessage(
+        raw.role,
+        parseJsonValue(raw.content_json, cancellation)
+      )
+    ) {
+      return true
+    }
+  }
+
+  const hasGoalEventTable = database
+    .prepare(
+      `SELECT 1
+       FROM sqlite_master
+       WHERE type = 'table' AND name = 'thread_goal_events'
+       LIMIT 1`
+    )
+    .get()
+  if (!hasGoalEventTable) return false
+  const goalEventStatement = database.prepare(
+    `SELECT length(CAST(message AS BLOB)) AS message_bytes,
+            CASE WHEN length(CAST(message AS BLOB)) <= ? THEN message ELSE NULL END AS message
+     FROM thread_goal_events
+     WHERE thread_id = ?
+       AND substr(trim(message), 1, length(?)) = ?
+     LIMIT ?`
+  )
+  scannedRows = 0
+  for (const raw of goalEventStatement.iterate(
+    THREAD_CONVERSATION_PRESENCE_ROW_BYTE_LIMIT,
+    threadId,
+    GOAL_USER_MESSAGE_EVENT_PREFIX,
+    GOAL_USER_MESSAGE_EVENT_PREFIX,
+    THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT + 1
+  )) {
+    throwIfCancelled(cancellation)
+    if (scannedRows >= THREAD_CONVERSATION_PRESENCE_SCAN_LIMIT) return true
+    scannedRows += 1
+    const messageBytes = Number(raw.message_bytes)
+    if (
+      !Number.isFinite(messageBytes) ||
+      messageBytes < 0 ||
+      messageBytes > THREAD_CONVERSATION_PRESENCE_ROW_BYTE_LIMIT ||
+      scannedBytes + messageBytes > THREAD_CONVERSATION_PRESENCE_SCAN_BYTE_BUDGET ||
+      typeof raw.message !== "string"
+    ) {
+      return true
+    }
+    scannedBytes += messageBytes
+    if (isVisibleGoalUserEventMessage(raw.message)) return true
+  }
+  return false
+}
+
+function getLegacyCheckpointMigration(
+  database: DatabaseSync,
+  threadId: string
+): LegacyCheckpointMigrationBoundary | null {
+  const hasMigrationTable = database
+    .prepare(
+      `SELECT 1
+       FROM sqlite_master
+       WHERE type = 'table' AND name = 'legacy_checkpoint_transcript_migrations'
+       LIMIT 1`
+    )
+    .get()
+  if (!hasMigrationTable) return null
+  const row = database
+    .prepare(
+      `SELECT checkpoint_id, total_messages, status
+       FROM legacy_checkpoint_transcript_migrations
+       WHERE thread_id = ?
+       LIMIT 1`
+    )
+    .get(threadId) as
+    | { checkpoint_id?: unknown; total_messages?: unknown; status?: unknown }
+    | undefined
+  if (!row || typeof row.checkpoint_id !== "string") return null
+  return {
+    checkpointId: row.checkpoint_id,
+    totalMessages: Math.max(0, Number(row.total_messages) || 0),
+    status: row.status === "complete" ? "complete" : "migrating"
+  }
+}
+
 export function openThreadMessageHydrationDatabase(databasePath: string): DatabaseSync {
   const database = new DatabaseSync(databasePath, {
     readOnly: true,
@@ -572,7 +820,22 @@ export function readThreadMessagesPage(
       )
       .get(request.threadId)
     const total = Math.max(0, Number(bucket?.message_count) || 0)
-    const candidates = readCandidates(database, request, limit, cancellation)
+    const hasVisibleMessages = request.options.includeVisibleMessagePresence
+      ? hasVisibleThreadConversation(database, request.threadId, cancellation)
+      : undefined
+    const legacyCheckpointMigration = request.options.includeVisibleMessagePresence
+      ? getLegacyCheckpointMigration(database, request.threadId)
+      : null
+    const legacyCheckpointMigrationStatus = request.options.includeVisibleMessagePresence
+      ? (legacyCheckpointMigration?.status ?? null)
+      : undefined
+    const candidates = readCandidates(
+      database,
+      request,
+      limit,
+      cancellation,
+      legacyCheckpointMigration
+    )
     const { selected, estimatedBytes } = selectCandidates(candidates, limit, byteBudget)
     const rowsById = readRowsById(
       database,
@@ -594,14 +857,16 @@ export function readThreadMessagesPage(
       throwIfCancelled(cancellation)
       const row = rowsById.get(candidate.message_id)
       if (!row) continue
-      const message = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
+      const hydrated = rowToMessage(row, fragments.get(candidate.message_id), cancellation)
       const remaining = Math.max(1, byteBudget - responseBytes)
-      const projected = projectMessageToByteBudget(message, remaining)
+      const projected = projectMessageToByteBudget(hydrated.message, remaining)
       if (orderedMessages.length > 0 && projected.truncated) break
       orderedMessages.push(projected.message)
       returnedCandidates.push(candidate)
       responseBytes += projected.bytes + 1
-      if (projected.truncated) truncatedMessageIds.push(candidate.message_id)
+      if (projected.truncated || hydrated.truncated) {
+        truncatedMessageIds.push(candidate.message_id)
+      }
     }
     throwIfCancelled(cancellation)
     database.exec("COMMIT")
@@ -615,6 +880,10 @@ export function readThreadMessagesPage(
           !isForwardPage && hasMore && oldest ? oldest.message_id : null,
         hasMore,
         total,
+        ...(hasVisibleMessages !== undefined ? { hasVisibleMessages } : {}),
+        ...(legacyCheckpointMigrationStatus !== undefined
+          ? { legacyCheckpointMigrationStatus }
+          : {}),
         ...(isForwardPage
           ? { verifiedAnchorMessageId: request.options.anchorMessageId?.trim() }
           : {}),

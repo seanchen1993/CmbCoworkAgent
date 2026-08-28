@@ -3,6 +3,7 @@ import type { Worker } from "node:worker_threads"
 import type { SkillPluginCatalogPage, SkillPluginCatalogPageInput } from "../types"
 import { getCatalogSourcePaths } from "../catalog-source-paths"
 import { getHookCatalogGlobalRevision } from "../hook-catalog/revision"
+import { getDisabledSkillStoreRevision } from "../skills/disabled-store-revision"
 import type { SkillPreviewGrantRequest } from "../../shared/skill-preview"
 import {
   SKILL_PLUGIN_CATALOG_CANCELLED,
@@ -78,6 +79,7 @@ async function defaultSource(): Promise<SkillPluginCatalogSourceConfig> {
     customSkillsDir,
     pluginsStorePath: join(openworkDir, "plugins.json"),
     disabledSkillsPath: join(openworkDir, "disabled-skills.json"),
+    disabledSkillsRevision: getDisabledSkillStoreRevision(),
     globalRevision: getHookCatalogGlobalRevision()
   }
 }
@@ -90,10 +92,12 @@ function requestKey(
     input.kind,
     input.cursor ?? null,
     input.limit ?? null,
+    input.mergeDisabledSkillIds ?? null,
     source.builtinSkillsDir,
     source.customSkillsDir,
     source.pluginsStorePath,
     source.disabledSkillsPath,
+    source.disabledSkillsRevision,
     source.globalRevision
   ])
 }
@@ -112,6 +116,7 @@ function previewRequestKey(
     source.customSkillsDir,
     source.pluginsStorePath,
     source.disabledSkillsPath,
+    source.disabledSkillsRevision,
     source.globalRevision
   ])
 }

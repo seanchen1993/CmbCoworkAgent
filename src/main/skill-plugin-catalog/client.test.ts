@@ -63,6 +63,7 @@ function makeSource(root: string): SkillPluginCatalogSourceConfig {
     customSkillsDir: join(root, "custom-skills"),
     pluginsStorePath: join(root, "plugins.json"),
     disabledSkillsPath: join(root, "disabled-skills.json"),
+    disabledSkillsRevision: 0,
     globalRevision: 0
   }
 }
@@ -300,7 +301,14 @@ worker.postMessage({
   type: "read-page",
   requestId: 1,
   input: { kind: "skills", limit: 128, revision: "asar-regression" },
-  source: { builtinSkillsDir, customSkillsDir, pluginsStorePath, disabledSkillsPath, globalRevision: 0 },
+  source: {
+    builtinSkillsDir,
+    customSkillsDir,
+    pluginsStorePath,
+    disabledSkillsPath,
+    disabledSkillsRevision: 0,
+    globalRevision: 0
+  },
   cancelBuffer: new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
 })
 `
@@ -491,6 +499,9 @@ function successResponse(
 function emptyPage(kind: SkillPluginCatalogPage["kind"]): SkillPluginCatalogPage {
   return {
     kind,
+    sourceKey: "empty-source",
+    catalogGlobalRevision: 0,
+    disabledSkillsRevision: 0,
     skills: [],
     plugins: [],
     disabledSkillIds: [],

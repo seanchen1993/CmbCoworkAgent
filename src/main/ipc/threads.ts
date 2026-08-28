@@ -12,7 +12,6 @@ import {
   getThreadValuesJson,
   getThreadValuesJsonPage,
   getThreadMessages,
-  getThreadMessageCount,
   getThreadMessageIdentityContext,
   getThreadMessagesAfterAnyId,
   getThreadMessagesByIds,
@@ -188,10 +187,12 @@ import type { ThreadGoalHydrationEvent } from "../thread-metadata-hydration/prot
 import {
   bootstrapLegacyCheckpointTranscriptInWorker,
   cancelLegacyCheckpointTranscriptBootstrap,
-  hasCheckpointTranscriptInWorker,
   isCheckpointRuntimeProjectionCancelled,
   readLatestCheckpointTupleInWorker
 } from "../checkpointer/runtime-projection-client"
+import {
+  readThreadConversationPresenceForMutation
+} from "../services/thread-conversation-presence"
 import {
   cancelLegacySubagentTranscriptMigration,
   ensureLegacySubagentTranscriptRows as ensureSubagentTranscriptRows,
@@ -3155,22 +3156,17 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           let guardedMetadata = parseThreadMetadata(guardedRow.metadata)
           for (let attempt = 0; attempt < 4; attempt += 1) {
             const guardedCandidate = applyThreadMetadataPatch(guardedMetadata, patch)
-            let guardedHasCheckpointTranscript = false
+            let guardedConversationPresence: "empty" | "nonempty" | "unknown" = "empty"
             if (
               getThreadExecutionMode(guardedMetadata) !==
               getThreadExecutionMode(guardedCandidate)
             ) {
-              const hasDurableTranscript = getThreadMessageCount(threadId) > 0
-              guardedHasCheckpointTranscript =
-                !hasDurableTranscript &&
-                (await hasCheckpointTranscriptInWorker(
-                  getThreadCheckpointPath(threadId),
-                  threadId
-                ))
+              guardedConversationPresence =
+                await readThreadConversationPresenceForMutation(threadId)
               assertNoTranscriptAgentModeTransition(
                 guardedMetadata,
                 guardedCandidate,
-                hasDurableTranscript || guardedHasCheckpointTranscript
+                guardedConversationPresence !== "empty"
               )
             }
             await assertCanPersistExplicitNormalMode(
@@ -3202,7 +3198,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
             assertNoTranscriptAgentModeTransition(
               latestMetadata,
               latestCandidate,
-              getThreadMessageCount(threadId) > 0 || guardedHasCheckpointTranscript
+              guardedConversationPresence !== "empty"
             )
             assertNoActiveAgentModeTransition(
               latestMetadata,
@@ -4061,7 +4057,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     } catch (e) {
       if (isCheckpointRuntimeProjectionCancelled(e)) return null
       console.warn("Failed to get latest thread checkpoint runtime state:", e)
-      return null
+      // `null` means the task genuinely has no checkpoint. Propagating worker
+      // failures lets the renderer's bounded hydration recovery retry todos,
+      // interrupts and other runtime channels instead of silently treating a
+      // transient read failure as an authoritative empty runtime state.
+      throw e
     }
   })
 
@@ -4082,7 +4082,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           "",
           `thread-hydration:${event.sender.id}`
         )
-        const pageOptions = { limit: 128, byteBudget: 1024 * 1024 }
+        const pageOptions = {
+          limit: 128,
+          byteBudget: 1024 * 1024,
+          includeVisibleMessagePresence: true
+        }
         let page
         try {
           // Do not mark this as foreground/latest-wins. A stale bootstrap must

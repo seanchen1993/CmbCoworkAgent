@@ -98,10 +98,7 @@ async function migrateDisabledSkillsFromLocalStorage(): Promise<void> {
     if (!saved) return
     const parsed = JSON.parse(saved) as unknown
     if (!Array.isArray(parsed) || parsed.length === 0) return
-    const current = await window.api.skills.getDisabled()
-    if (current.length === 0) {
-      await window.api.skills.setDisabled(parsed.filter((s): s is string => typeof s === "string"))
-    }
+    await window.api.skills.setDisabled(parsed.filter((s): s is string => typeof s === "string"))
     localStorage.removeItem("disabled-skills")
   } catch { /* migration is best-effort */ }
 }

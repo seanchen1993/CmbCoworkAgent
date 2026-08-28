@@ -39,8 +39,10 @@ import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/ski
 import {
   invalidateSkillCatalog,
   readSkillCatalogCache,
-  revalidateSkillCatalog
+  revalidateSkillCatalog,
+  subscribeSkillCatalogInvalidation
 } from "@/lib/app-catalog-cache"
+import { SkillDisabledMutationCoordinator } from "@/lib/skill-disabled-mutation-coordinator"
 import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import { marketApi, type MarketItem } from "../../api/market"
 import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
@@ -1454,6 +1456,13 @@ export function SkillsPanel(): React.JSX.Element {
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(
     () => initialSkillSnapshot?.disabledSkillIds ?? new Set()
   )
+  const disabledSkillsRef = useRef(disabledSkills)
+  const disabledSkillMutationCoordinatorRef = useRef(
+    new SkillDisabledMutationCoordinator(disabledSkills)
+  )
+  const disabledSkillMutationChainRef = useRef<Promise<void>>(Promise.resolve())
+  const disabledSkillAuthorityRevisionRef = useRef(0)
+  const skillMutationMountedRef = useRef(true)
   const [skillCatalogLoadState, setSkillCatalogLoadState] = useState<SkillCatalogLoadState>(
     initialSkillSnapshot ? "ready" : "loading"
   )
@@ -1486,11 +1495,21 @@ export function SkillsPanel(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    return () => clearTimeout(debounceTimer.current)
+    skillMutationMountedRef.current = true
+    return () => {
+      skillMutationMountedRef.current = false
+      clearTimeout(debounceTimer.current)
+    }
+  }, [])
+
+  const publishDisabledSkillSnapshot = useCallback((snapshot: Set<string>): void => {
+    disabledSkillsRef.current = snapshot
+    if (skillMutationMountedRef.current) setDisabledSkills(snapshot)
   }, [])
 
   const refreshSkills = useCallback(async (invalidate = false): Promise<SkillMetadata[]> => {
     const generation = ++skillRefreshGeneration.current
+    const disabledAuthorityRevision = disabledSkillAuthorityRevisionRef.current
     setSkillCatalogLoadState("loading")
     setSkillCatalogLoadError(null)
     if (invalidate) invalidateSkillCatalog()
@@ -1516,7 +1535,13 @@ export function SkillsPanel(): React.JSX.Element {
       }
       if (generation === skillRefreshGeneration.current) {
         setSkills(snapshot.localSkills)
-        setDisabledSkills(snapshot.disabledSkillIds)
+        if (disabledAuthorityRevision === disabledSkillAuthorityRevisionRef.current) {
+          publishDisabledSkillSnapshot(
+            disabledSkillMutationCoordinatorRef.current.replaceAuthoritative(
+              snapshot.disabledSkillIds
+            )
+          )
+        }
         setSkillCatalogLoadState("ready")
       }
       return snapshot.localSkills
@@ -1527,7 +1552,7 @@ export function SkillsPanel(): React.JSX.Element {
       }
       throw error
     }
-  }, [])
+  }, [publishDisabledSkillSnapshot])
 
   useEffect(() => {
     let active = true
@@ -1543,6 +1568,12 @@ export function SkillsPanel(): React.JSX.Element {
       clearTimeout(timer)
       skillRefreshGeneration.current += 1
     }
+  }, [refreshSkills])
+
+  useEffect(() => {
+    return subscribeSkillCatalogInvalidation(() => {
+      void refreshSkills().catch(console.error)
+    })
   }, [refreshSkills])
 
   const reloadUploadedSkillNames = useCallback(() => {
@@ -1722,19 +1753,51 @@ export function SkillsPanel(): React.JSX.Element {
     })
   }, [])
 
-  const toggleSkillEnabled = useCallback((skill: SkillMetadata) => {
-    setDisabledSkills((prev) => {
-      const next = new Set(prev)
+  const toggleSkillEnabled = useCallback(
+    (skill: SkillMetadata) => {
       const skillId = getSkillMetadataId(skill)
-      if (isSkillDisabled(skill, next)) {
-        next.delete(skillId)
-      } else {
-        next.add(skillId)
-      }
-      window.api.skills.setDisabled([...next]).catch(console.error)
-      return next
-    })
-  }, [])
+      if (!skillId) return
+      const disabled = !isSkillDisabled(skill, disabledSkillsRef.current)
+      const { version, snapshot } = disabledSkillMutationCoordinatorRef.current.begin(
+        skillId,
+        disabled
+      )
+      disabledSkillAuthorityRevisionRef.current += 1
+      publishDisabledSkillSnapshot(snapshot)
+
+      disabledSkillMutationChainRef.current = disabledSkillMutationChainRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          try {
+            const authoritative = await window.api.skills.setDisabledState(skillId, disabled)
+            disabledSkillAuthorityRevisionRef.current += 1
+            publishDisabledSkillSnapshot(
+              disabledSkillMutationCoordinatorRef.current.settle(
+                skillId,
+                version,
+                authoritative
+              )
+            )
+          } catch (error) {
+            disabledSkillAuthorityRevisionRef.current += 1
+            publishDisabledSkillSnapshot(
+              disabledSkillMutationCoordinatorRef.current.abandon(skillId, version)
+            )
+            // Roll back immediately from the renderer's last authoritative
+            // snapshot, then revalidate through the isolated catalog Worker.
+            // Never recover a Worker failure by scanning SKILL.md on main.
+            console.error("[SkillsPanel] Failed to update disabled skill:", error)
+            if (skillMutationMountedRef.current) {
+              void refreshSkills(true).catch((refreshError) => {
+                console.error("[SkillsPanel] Failed to refresh disabled skills:", refreshError)
+              })
+              toast.error("技能启用状态保存失败，已恢复到保存前状态")
+            }
+          }
+        })
+    },
+    [publishDisabledSkillSnapshot, refreshSkills]
+  )
 
   const handleDeleteSkill = useCallback(
     async (skill: SkillMetadata) => {

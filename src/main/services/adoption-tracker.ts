@@ -375,6 +375,9 @@ let currentShardStartMs = 0
  */
 let appendChain: Promise<unknown> = Promise.resolve()
 
+/** Accepted recordGen calls that have not finished their asynchronous git/JSONL/index work. */
+const inFlightRecordGenTasks = new Set<Promise<void>>()
+
 /** In-flight measurement dedup keyed by absolute file path. */
 const inFlightFileMeasurements = new Set<string>()
 
@@ -1182,11 +1185,26 @@ export function recordGen(input: RecordGenInput): void {
   console.log(
     `[AdoptionTracker] recordGen: tool=${input.tool} file=${input.filePath} threadId=${input.threadId}`
   )
-  queueMicrotask(() => {
-    doRecordGen(input).catch((e) => {
-      console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+  const task = new Promise<void>((resolveTask) => {
+    queueMicrotask(() => {
+      void doRecordGen(input)
+        .catch((e) => {
+          console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+        })
+        .finally(resolveTask)
     })
   })
+  inFlightRecordGenTasks.add(task)
+  void task.then(() => {
+    inFlightRecordGenTasks.delete(task)
+  })
+}
+
+/** @internal Standalone regression seam; production recordGen remains fire-and-forget. */
+export async function waitForAdoptionRecordGenIdleForTest(): Promise<void> {
+  while (inFlightRecordGenTasks.size > 0) {
+    await Promise.all([...inFlightRecordGenTasks])
+  }
 }
 
 function buildCodeGenerationProperties(args: {

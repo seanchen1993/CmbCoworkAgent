@@ -1,6 +1,8 @@
+import type { ThreadConversationPresence } from "./agent-mode-switch-availability"
+
 export interface WorkspaceSwitchThreadState {
   historyLoading: boolean
-  historyMessageTotal: number
+  historyConversationPresence: ThreadConversationPresence
   messages: readonly unknown[]
 }
 
@@ -11,7 +13,7 @@ export function canChangeThreadWorkspace(
   return Boolean(
     state &&
       !state.historyLoading &&
-      state.historyMessageTotal === 0 &&
+      state.historyConversationPresence === "empty" &&
       state.messages.length === 0
   )
 }

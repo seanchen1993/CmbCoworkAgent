@@ -67,6 +67,7 @@ export function createDehydratedThreadStatePatch(retainedUi?: {
     historyPageWindows: [] as never[],
     historyWindowGap: null,
     historyMessageTotal: 0,
+    historyConversationPresence: "unknown" as const,
     historyLoadedMessageCount: 0
   }
 }

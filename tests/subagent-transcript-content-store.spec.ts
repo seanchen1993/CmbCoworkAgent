@@ -393,7 +393,7 @@ async function testCompactionIsIdempotentAndManifestRowsStaySmall(
   )
 }
 
-function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
+function testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store: ContentStore): void {
   const transcripts = Object.fromEntries(
     Array.from({ length: 40 }, (_, index) => {
       const id = `startup-task-${index}`
@@ -421,7 +421,7 @@ function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
       ]
     })
   )
-  const startup = store.buildSubagentTranscriptStartupManifests(transcripts, 2)
+  const startup = store.buildSubagentTranscriptStartupManifests(transcripts)
   assert.deepEqual(
     Object.keys(startup),
     Object.keys(transcripts).reverse(),
@@ -449,6 +449,11 @@ function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
       "startup must fingerprint the full legacy final before projection"
     )
   }
+  assert.deepEqual(
+    store.buildSubagentTranscriptStartupManifests(transcripts, 2),
+    {},
+    "the startup projection must honor an explicit hard byte ceiling"
+  )
 }
 
 function testStartupProjectionMergePreservesDurableFields(store: ContentStore): void {
@@ -488,7 +493,7 @@ function testStartupProjectionMergePreservesDurableFields(store: ContentStore): 
       subagent_reasoning_fingerprint: "full-reasoning-fp"
     }
   ]
-  const startup = store.buildSubagentTranscriptStartupManifests({ [id]: durable }, 2)[
+  const startup = store.buildSubagentTranscriptStartupManifests({ [id]: durable })[
     id
   ] as UnknownRecord[]
   const correction = {
@@ -631,7 +636,7 @@ async function main(): Promise<void> {
     await testCorruptSameHashBlobSelfHeals(store, root, retainedHashes)
     await testGarbageCollection(store, root, retainedHashes)
     await testCompactionIsIdempotentAndManifestRowsStaySmall(store)
-    testStartupIndexNeverDropsBuckets(store)
+    testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store)
     testStartupProjectionMergePreservesDurableFields(store)
     testManifestPagingIsBounded(store)
     await testManifestPagingHonorsHydrationByteBudget(store)

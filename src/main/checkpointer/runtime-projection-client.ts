@@ -1,4 +1,5 @@
 import type { Worker } from "node:worker_threads"
+import { existsSync } from "node:fs"
 import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats,
@@ -19,6 +20,19 @@ interface PendingRequest {
 export interface LegacyCheckpointTranscriptBootstrapResult {
   runtimeTuple: unknown | null
   stats: LegacyCheckpointTranscriptMigrationStats
+}
+
+function emptyLegacyCheckpointBootstrapResult(): LegacyCheckpointTranscriptBootstrapResult {
+  return {
+    runtimeTuple: null,
+    stats: {
+      checkpointId: null,
+      totalMessages: 0,
+      migratedMessages: 0,
+      batches: 0,
+      payloadBytes: 0
+    }
+  }
 }
 
 export class CheckpointRuntimeProjectionWorkerUnavailableError extends Error {
@@ -433,6 +447,11 @@ export function readLatestCheckpointTupleInWorker(
     foregroundKey?: string | number
   } = {}
 ): Promise<unknown | null> {
+  // A task does not get a checkpoint database until its first persisted run.
+  // Preserve `null` exclusively for that authoritative empty state; once the
+  // file exists, worker/SQLite/decoding failures must still reject so callers
+  // can distinguish a failed read from an absent checkpoint.
+  if (!existsSync(databasePath)) return Promise.resolve(null)
   return getDefaultClient().readLatestTuple(databasePath, threadId, checkpointNs, options)
 }
 
@@ -443,6 +462,9 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
   checkpointNs = "",
   foregroundKey?: string | number
 ): Promise<LegacyCheckpointTranscriptBootstrapResult> {
+  if (!existsSync(databasePath)) {
+    return Promise.resolve(emptyLegacyCheckpointBootstrapResult())
+  }
   return getDefaultClient().bootstrapLegacyTranscript(
     databasePath,
     messageDatabasePath,
@@ -452,12 +474,13 @@ export function bootstrapLegacyCheckpointTranscriptInWorker(
   )
 }
 
-export function hasCheckpointTranscriptInWorker(
+export function hasVisibleCheckpointTranscriptInWorker(
   databasePath: string,
   threadId: string,
   checkpointNs = "",
   foregroundKey?: string | number
 ): Promise<boolean> {
+  if (!existsSync(databasePath)) return Promise.resolve(false)
   return getDefaultClient().hasTranscript(databasePath, threadId, checkpointNs, foregroundKey)
 }
 

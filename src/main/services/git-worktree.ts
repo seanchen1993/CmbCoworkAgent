@@ -196,6 +196,14 @@ function gitFailure(result: GitResult, fallback: string): string {
   return result.stderr.trim() || result.stdout.trim() || fallback
 }
 
+function isMissingGitRef(result: GitResult): boolean {
+  return (
+    result.code !== 0 &&
+    !result.infrastructureFailure &&
+    (result.code === 1 || /not a valid ref|does not exist|not found/i.test(gitFailure(result, "")))
+  )
+}
+
 async function writeWorkflowWorktreeExcludesFile(
   repoRoot: string,
   targetPath: string,
@@ -789,6 +797,30 @@ export async function identifyRepository(
   return { gitRoot, sourceRoot, commonDir }
 }
 
+/**
+ * Serialize a caller-owned Git worktree mutation with every workflow worktree
+ * mutation for the same repository. The canonical common directory is the only
+ * stable lock identity shared by a primary checkout and all linked worktrees.
+ */
+export async function withGitWorktreeRepositoryLock<T>(
+  directory: string,
+  task: () => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  const repo = await identifyRepository(directory, signal)
+  if (!repo) {
+    throw new GitWorktreeError(
+      `worktree mutation needs a git repository — "${directory}" is not inside one`
+    )
+  }
+  return withRepoLock(canonicalKey(repo.commonDir), async () => {
+    if (signal?.aborted) {
+      throw new GitWorktreeError("worktree mutation was cancelled", "source-busy")
+    }
+    return task()
+  })
+}
+
 export interface WorkflowWorktreeSource extends RepoIdentity {
   workspacePath: string
   sourceRelativePath: string
@@ -1219,6 +1251,22 @@ export async function listWorkflowWorktreeRecordsForPrune(
   appDataRoot?: string
 ): Promise<{ records: WorkflowWorktreeRecord[]; reliable: boolean }> {
   return scanWorkflowWorktreeRecords(commonDir, appDataRoot, true)
+}
+
+/** A managed checkout is manually removable only after ownership is terminal. */
+export function findBlockingWorkflowWorktreeOwnership(
+  records: readonly WorkflowWorktreeRecord[],
+  directory: string
+): WorkflowWorktreeRecord | null {
+  const targetKey = canonicalKey(directory)
+  return (
+    records.find(
+      (record) =>
+        canonicalKey(record.directory) === targetKey &&
+        ((record.status !== "merged" && record.status !== "discarded") ||
+          record.cleanupPending === true)
+    ) ?? null
+  )
 }
 
 async function readWorkflowWorktreeRecord(
@@ -1700,6 +1748,88 @@ interface RemoveWorkflowWorktreeInput {
   preserveChanges?: boolean
 }
 
+export interface AttemptedWorktreeCreationRollbackInput {
+  directory: string
+  gitRoot: string
+  branch: string
+  expectedBaseCommit: string
+  /** Diagnostic preflight fact only. It is NOT ownership proof: an external Git
+   * process can create the same ref after the check and before `worktree add`. */
+  branchWasAbsentBeforeAttempt: boolean
+}
+
+/**
+ * Reconcile an indeterminate `git worktree add` result. A timeout/non-zero exit
+ * can arrive after Git created the ref, registration and directory, so cleanup
+ * must inspect those durable side effects rather than trust a local `created`
+ * boolean. Every deletion is fenced by exact path + branch + expected HEAD.
+ */
+export async function rollbackAttemptedWorktreeCreation(
+  input: AttemptedWorktreeCreationRollbackInput
+): Promise<boolean> {
+  const directory = path.resolve(input.directory)
+  const listed = await git(
+    input.gitRoot,
+    ["worktree", "list", "--porcelain"],
+    getWorkflowWorktreeRemoveTimeoutMs()
+  )
+  if (listed.code !== 0) {
+    throw new GitWorktreeError(
+      `cannot inspect attempted worktree creation: ${gitFailure(listed, "worktree list failed")}`
+    )
+  }
+
+  const registration = parseWorktreeList(listed.stdout).find(
+    (entry) => canonicalKey(entry.path) === canonicalKey(directory)
+  )
+  if (registration) {
+    if (
+      registration.branch !== input.branch ||
+      registration.head !== input.expectedBaseCommit
+    ) {
+      throw new GitWorktreeError(
+        `refusing attempted-worktree rollback: ${directory} no longer matches ${input.branch}@${input.expectedBaseCommit}`
+      )
+    }
+    return removeWorkflowWorktree({
+      directory,
+      gitRoot: input.gitRoot,
+      branch: input.branch,
+      expectedBranchHead: input.expectedBaseCommit,
+      preserveChanges: true
+    })
+  }
+
+  // Never recursively delete an unregistered directory: it may predate this
+  // request or contain user data. Surface it for manual recovery instead.
+  if (await pathExists(directory)) {
+    throw new GitWorktreeError(
+      `attempted worktree path exists without the expected Git registration: ${directory}`
+    )
+  }
+
+  const branchHead = await git(input.gitRoot, [
+    "show-ref",
+    "--verify",
+    "--hash",
+    `refs/heads/${input.branch}`
+  ])
+  if (isMissingGitRef(branchHead)) return true
+  if (branchHead.code !== 0) {
+    throw new GitWorktreeError(
+      `cannot inspect attempted worktree branch: ${gitFailure(branchHead, "branch query failed")}`
+    )
+  }
+
+  // A preflight absence check is not atomic ownership: another Git process may
+  // create this same branch at the same base commit before our `worktree add`
+  // fails. Without the exact path+branch+HEAD registration above, retain every
+  // existing ref and fail closed instead of risking deletion of external work.
+  throw new GitWorktreeError(
+    `attempted worktree branch ${input.branch}@${branchHead.stdout.trim()} has no matching worktree registration; it was retained for manual inspection`
+  )
+}
+
 async function findUnavailableWorktreeRegistrations(
   gitRoot: string,
   targetDirectory: string
@@ -1749,10 +1879,7 @@ export async function removeWorkflowWorktree(input: RemoveWorkflowWorktreeInput)
         `refusing to remove worktree ${directory}: branch ${input.branch} advanced unexpectedly`
       )
     }
-    const refMissing =
-      current.code !== 0 &&
-      !current.infrastructureFailure &&
-      /not a valid ref|does not exist|not found/i.test(gitFailure(current, ""))
+    const refMissing = isMissingGitRef(current)
     if (refMissing) {
       if (await pathExists(directory)) {
         throw new GitWorktreeError(
@@ -1850,10 +1977,7 @@ export async function removeWorkflowWorktree(input: RemoveWorkflowWorktreeInput)
         "--hash",
         `refs/heads/${input.branch}`
       ])
-      const missing =
-        remaining.code !== 0 &&
-        !remaining.infrastructureFailure &&
-        /not a valid ref|does not exist|not found/i.test(gitFailure(remaining, ""))
+      const missing = isMissingGitRef(remaining)
       if (!missing) {
         throw new GitWorktreeError(
           `worktree was removed but branch ${input.branch} could not be safely verified/deleted (${gitFailure(deleted, "safe branch deletion failed")})`
@@ -2989,6 +3113,7 @@ export async function finalizeWorkflowWorktreeRecord(
 interface WorktreeListEntry {
   path: string
   branch?: string
+  head?: string
 }
 
 /** Parse `git worktree list --porcelain` into entries (primary checkout first). */
@@ -3003,6 +3128,10 @@ export function parseWorktreeList(text: string): WorktreeListEntry[] {
     }
     const current = entries[entries.length - 1]
     if (!current) continue
+    if (line.startsWith("HEAD ")) {
+      current.head = line.slice("HEAD ".length).trim()
+      continue
+    }
     if (line.startsWith("branch ")) {
       current.branch = line
         .slice("branch ".length)

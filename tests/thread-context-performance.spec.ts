@@ -552,8 +552,59 @@ async function main(): Promise<void> {
   )
   assert.match(
     loadHistorySource,
-    /messagePageResult\.succeeded &&\s*messagePageResult\.page\.total === 0[\s\S]*bootstrapLegacyCheckpointTranscript\(threadId\)[\s\S]*getLatestCheckpointRuntimeState\(threadId\)/,
-    "an empty legacy transcript must be imported through the bounded worker bridge"
+    /messagePageResult\.succeeded &&\s*shouldBootstrapLegacyCheckpointTranscript\(messagePageResult\.page\)[\s\S]*if \(shouldBootstrapLegacyTranscript\)[\s\S]*bootstrapLegacyCheckpointTranscript\(threadId\)[\s\S]*getLatestCheckpointRuntimeState\(threadId\)/,
+    "an empty or interrupted legacy transcript must be imported through the bounded worker bridge"
+  )
+  assert.match(
+    loadHistorySource,
+    /bootstrapLegacyCheckpointTranscript\(threadId\)[\s\S]*if \(!bootstrap\) \{[\s\S]*throw new Error\([\s\S]*criticalHistoryHydrationFailed = true/,
+    "a cancelled legacy bootstrap must remain unknown and enter the bounded retry chain"
+  )
+  assert.match(
+    loadHistorySource,
+    /historyConversationPresence: "unknown"[\s\S]*scheduleThreadHistoryHydrationRetry\(threadId, loadGeneration, foregroundToken\)/,
+    "a failed initial page must fail closed and retry without blocking the renderer"
+  )
+  assert.match(
+    loadHistorySource,
+    /if \(criticalHistoryHydrationFailed\) \{[\s\S]*scheduleThreadHistoryHydrationRetry\(threadId, loadGeneration, foregroundToken\)[\s\S]*else \{[\s\S]*delete threadHistoryHydrationRetryCountsRef\.current\[threadId\]/,
+    "the shared history retry backoff must reset only after page, goal and checkpoint hydration all succeed"
+  )
+  assert.match(
+    loadHistorySource,
+    /if \(goalEventsResult\.succeeded\) \{[\s\S]*restoredGoalEvents = goalEventsResult\.events[\s\S]*else \{\s*criticalHistoryHydrationFailed = true/,
+    "a failed goal-sidecar read must enter recovery instead of becoming an empty sidecar"
+  )
+  assert.match(
+    loadHistorySource,
+    /const checkpointRuntimeResult = await checkpointRuntimeLoad\s*if \(!checkpointRuntimeResult\.succeeded\) throw checkpointRuntimeResult\.error[\s\S]*catch \(error\) \{\s*if \(!isCurrentLoad\(\)\) return\s*criticalHistoryHydrationFailed = true/,
+    "a failed checkpoint read must enter recovery instead of becoming an empty runtime state"
+  )
+  const subagentResultSource = loadHistorySource.slice(subagentAwait)
+  assert.match(
+    subagentResultSource,
+    /if \(subagentTranscriptResult\.succeeded\) \{[\s\S]*subagentTranscriptHydrationSucceeded = true[\s\S]*else if \(!subagentTranscriptHydrationSucceeded\) \{\s*scheduleSubagentTranscriptHydrationRetry/,
+    "a failed subagent transcript read must use its independent retry path"
+  )
+  assert.doesNotMatch(
+    subagentResultSource,
+    /criticalHistoryHydrationFailed = true/,
+    "subagent transcript failures must not consume or reset the main history retry budget"
+  )
+  assert.equal(
+    (source.match(/cancelThreadHistoryHydrationRetry\(threadId\)/g) ?? []).length,
+    4,
+    "older, target, released-gap and latest window intents must cancel a background hydration retry"
+  )
+  assert.match(
+    source,
+    /getThreadHistoryHydrationRetryDisposition\([\s\S]*messageWindowIntentCoordinator\.activeKind\(threadId\)[\s\S]*hasHistoricalWindow/,
+    "a retry timer must recheck the active and resident window before it can begin hydration"
+  )
+  assert.match(
+    source,
+    /state\.historyConversationPresence === "unknown"[\s\S]*!attemptIsCurrent[\s\S]*loadThreadHistory\(threadId\)/,
+    "returning to a task whose retry was cancelled must restart unknown hydration"
   )
   assert.doesNotMatch(
     loadHistorySource,
@@ -779,6 +830,11 @@ async function main(): Promise<void> {
   )
   assert.match(
     initializeSource,
+    /if \(foregroundToken\) \{[\s\S]*delete threadHistoryHydrationRetryCountsRef\.current\[threadId\][\s\S]*delete subagentTranscriptHydrationRetryCountsRef\.current\[threadId\][\s\S]*delete subagentTranscriptPersistRetryCountRef\.current\[threadId\][\s\S]*initializedThreadsRef\.current\.add\(threadId\)/,
+    "explicitly reopening a dehydrated thread must reset all independent hydration and persistence retry budgets"
+  )
+  assert.match(
+    initializeSource,
     /attemptMatchesForeground[\s\S]*!attemptIsCurrent[\s\S]*loadThreadHistory\(threadId\)/,
     "revisiting A after its old foreground generation was cancelled must start a fresh load"
   )
@@ -822,6 +878,36 @@ async function main(): Promise<void> {
   assert.ok(
     (persistSource.match(/if \(!isCurrentPersistGeneration\(\)\) return/g)?.length ?? 0) >= 4,
     "subagent persistence must recheck its row generation before dispatch, merge, retry and follow-up"
+  )
+  assert.match(
+    persistSource,
+    /markDirty\(batchIds\)[\s\S]*getSubagentTranscriptPersistRetrySchedule\(retryCount\)[\s\S]*if \(retrySchedule\.exhausted \|\| retrySchedule\.delayMs === null\) \{[\s\S]*setDehydrationEligibilityRevision[\s\S]*return/,
+    "permanent subagent write failures must retain dirty rows and stop the automatic retry timer"
+  )
+  assert.doesNotMatch(
+    persistSource,
+    /retrySchedule\.exhausted[\s\S]{0,500}delete subagentTranscript(?:DirtyIds|PendingMessages|UrgentIds)Ref/,
+    "retry exhaustion must not discard unpersisted subagent output"
+  )
+  const appendSubagentStart = source.indexOf(
+    "const appendSubagentTranscriptMessages = useCallback"
+  )
+  const appendSubagentEnd = source.indexOf("useEffect(() => {", appendSubagentStart)
+  const appendSubagentSource = source.slice(appendSubagentStart, appendSubagentEnd)
+  assert.match(
+    appendSubagentSource,
+    /isSubagentTranscriptPersistRetryExhausted\([\s\S]*subagentTranscriptPersistChainsRef\.current\[threadId\][\s\S]*subagentTranscriptPersistRecoveryRequestsRef\.current\.add\(threadId\)[\s\S]*delete subagentTranscriptPersistRetryCountRef\.current\[threadId\]/,
+    "a foreground delta must defer its exhausted-budget reset while the old attempt still owns the chain"
+  )
+  assert.match(
+    persistSource,
+    /subagentTranscriptPersistRecoveryRequestsRef\.current\.delete\(threadId\)[\s\S]*isSubagentTranscriptPersistRetryExhausted\([\s\S]*delete subagentTranscriptPersistRetryCountRef\.current\[threadId\][\s\S]*scheduleSubagentTranscriptsPersistRef\.current\(threadId\)/,
+    "a delta racing the final failed write must restart once after the old chain settles"
+  )
+  assert.match(
+    initializeSource,
+    /attemptMatchesForeground[\s\S]*shouldRestartSubagentPersist[\s\S]*delete subagentTranscriptPersistRetryCountRef\.current\[threadId\][\s\S]*scheduleSubagentTranscriptsPersist\(threadId\)/,
+    "explicitly revisiting a resident task must reset and restart exhausted subagent persistence"
   )
   assert.equal(
     dehydrationHelperSource.match(/historyLoading: true/g)?.length ?? 0,

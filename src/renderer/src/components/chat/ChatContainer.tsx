@@ -258,9 +258,14 @@ import {
   type ChatScrollState,
   type ChatScrollTransition
 } from "../../../../shared/chat-scroll-controller"
+import {
+  isProjectModeAgentTeamEnabled,
+  isProjectModeAgentTeamSelectionDisabled
+} from "../../../../shared/project-mode-agent-team"
 
-const PROJECT_MODE_AGENT_TEAM_ENABLED =
-  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
+  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
+)
 const CHAT_AT_BOTTOM_THRESHOLD_PX = 32
 const CHAT_SCROLL_UP_DETACH_DELTA_PX = 1
 const CHAT_USER_SCROLL_INTENT_WINDOW_MS = 350
@@ -1837,7 +1842,11 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
-  const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const disableCoordinatorModeOption = isProjectModeAgentTeamSelectionDisabled(
+    currentThread?.metadata,
+    isProjectModeAgentContext,
+    PROJECT_MODE_AGENT_TEAM_ENABLED
+  )
   const disableWorkflowModeOption = false
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
@@ -1865,7 +1874,7 @@ export function ChatContainer({
         return "coordinator"
       }
       const environmentForcedCoordinator = await window.api.agent
-        .isCoordinatorModeForced()
+        .isCoordinatorModeForced(threadId)
         .catch((error) => {
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
@@ -1875,7 +1884,7 @@ export function ChatContainer({
       }
       return isMultiModeMetadata(metadata) ? "multi" : "normal"
     },
-    [disableCoordinatorModeOption, disableWorkflowModeOption]
+    [disableCoordinatorModeOption, disableWorkflowModeOption, threadId]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -2058,6 +2067,7 @@ export function ChatContainer({
     historyHasMore,
     historyWindowGap,
     historyMessageTotal,
+    historyConversationPresence,
     historyLoadedMessageCount,
     scheduledTaskId,
     modelRetry,
@@ -2213,7 +2223,7 @@ export function ChatContainer({
 
   const canChangeAgentMode = canChangeThreadAgentMode({
     historyLoading,
-    historyMessageTotal,
+    conversationPresence: historyConversationPresence,
     residentMessageCount: threadMessages.length
   })
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
@@ -2233,7 +2243,9 @@ export function ChatContainer({
   const agentModeSwitchDisabledReason = !canChangeAgentMode
     ? historyLoading
       ? "会话历史加载中，暂时不能切换执行模式。"
-      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+      : historyConversationPresence === "unknown"
+        ? "会话消息状态尚未确认，请稍后重试。"
+        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
     : isLoading
       ? "当前请求执行中，结束后才能切换执行模式。"
       : undefined
@@ -2258,13 +2270,23 @@ export function ChatContainer({
           toast.error("会话历史加载中，暂时不能切换执行模式。")
           return
         }
-        if (historyMessageTotal > 0 || threadMessages.length > 0) {
+        if (
+          !canChangeThreadAgentMode({
+            historyLoading,
+            conversationPresence: historyConversationPresence,
+            residentMessageCount: threadMessages.length
+          })
+        ) {
+          if (historyConversationPresence === "unknown") {
+            toast.error("会话消息状态尚未确认，请稍后重试。")
+            return
+          }
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
         if (nextMode !== "coordinator" && !disableCoordinatorModeOption) {
           const isEnvironmentForcedCoordinator = await window.api.agent
-            .isCoordinatorModeForced()
+            .isCoordinatorModeForced(threadId)
             .catch(() => false)
           if (requestId !== agentModeChangeRequestRef.current) return
           if (isEnvironmentForcedCoordinator) {
@@ -2328,7 +2350,7 @@ export function ChatContainer({
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
       historyLoading,
-      historyMessageTotal,
+      historyConversationPresence,
       threadId,
       threadMessages,
       patchThreadMetadata
@@ -5292,6 +5314,7 @@ export function ChatContainer({
 
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
+        canChangeAgentMode &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
       let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
         ? "normal"
@@ -5325,7 +5348,11 @@ export function ChatContainer({
       ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
-      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      } else if (
+        !coordinatorPrefixed &&
+        submitAgentMode === "coordinator" &&
+        agentMode !== "coordinator"
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -5741,6 +5768,7 @@ export function ChatContainer({
       }
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
+        canChangeAgentMode &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
       let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
         ? "normal"
@@ -5774,7 +5802,11 @@ export function ChatContainer({
       ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
-      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      } else if (
+        !coordinatorPrefixed &&
+        submitAgentMode === "coordinator" &&
+        agentMode !== "coordinator"
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -5829,6 +5861,7 @@ export function ChatContainer({
     [
       agentMode,
       appendVisibleUserMessageWithTime,
+      canChangeAgentMode,
       clearFinishedWorkflowRun,
       currentModel,
       deleteQueuedMessage,

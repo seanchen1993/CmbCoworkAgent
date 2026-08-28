@@ -7,7 +7,7 @@ import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "./runtime-projection-pr
 import {
   bootstrapLegacyCheckpointTranscript,
   ensureCheckpointRuntimeProjection,
-  hasCheckpointTranscript,
+  hasVisibleCheckpointTranscript,
   readLatestCheckpointTuple
 } from "./runtime-projection-store"
 
@@ -54,7 +54,7 @@ workerPort.on("message", (request: CheckpointRuntimeProjectionWorkerRequest) => 
         type: "inspect-transcript-presence-result",
         requestId: request.requestId,
         ok: true,
-        hasTranscript: hasCheckpointTranscript(
+        hasTranscript: hasVisibleCheckpointTranscript(
           request.databasePath,
           request.threadId,
           request.checkpointNs,

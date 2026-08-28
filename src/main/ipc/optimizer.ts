@@ -171,9 +171,9 @@ function applyCandidate(
     }
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), ensureEvolvedSkillMarker(content), "utf-8")
+    bumpHookCatalogGlobalRevision()
     if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
-    bumpHookCatalogGlobalRevision()
     notifyRenderer("skills:changed")
     return { success: true }
   } catch (e) {

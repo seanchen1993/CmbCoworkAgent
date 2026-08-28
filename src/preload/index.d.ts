@@ -965,7 +965,7 @@ interface CustomAPI {
         expectedFocusToken?: string | null
       }
     ) => Promise<void>
-    isCoordinatorModeForced: () => Promise<boolean>
+    isCoordinatorModeForced: (threadId?: string) => Promise<boolean>
     canPreviewSystemPrompt: () => Promise<boolean>
     getSystemPromptPreview: (
       threadId: string
@@ -1628,6 +1628,7 @@ interface CustomAPI {
     }>
     getDisabled: () => Promise<string[]>
     setDisabled: (skillNames: string[]) => Promise<void>
+    setDisabledState: (skillId: string, disabled: boolean) => Promise<string[]>
     backupForCloudEvolution: (payload: {
       skillPath: string
       candidateId: string

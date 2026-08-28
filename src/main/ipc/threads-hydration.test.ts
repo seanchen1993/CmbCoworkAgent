@@ -143,6 +143,31 @@ describe("threads:get hydration contract", () => {
     expect(handler).toContain(":foreground`")
   })
 
+  it("does not turn a failed subagent transcript read into an authoritative empty baseline", () => {
+    const channel = source.indexOf('"threads:getSubagentTranscripts"')
+    const start = source.lastIndexOf("ipcMain.handle(", channel)
+    const end = source.indexOf('ipcMain.handle(\n    "threads:getSubagentTranscript"', start)
+    const handler = source.slice(start, end)
+
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(handler).toContain("if (!getThreadCore(threadId)) return {}")
+    expect(handler).toContain("if (isSubagentTranscriptStartupCancelled(error)) return {}")
+    expect(handler).toContain("throw error")
+  })
+
+  it("uses an empty goal sidecar only for a successful read or bounded worker fallback", () => {
+    const channel = source.indexOf('"threads:goalEvents"')
+    const start = source.lastIndexOf("ipcMain.handle(", channel)
+    const end = source.indexOf('"threads:goalState"', start)
+    const handler = source.slice(start, end)
+
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(handler).toContain("events = result.events")
+    expect(handler).toContain("if (!isThreadMetadataHydrationWorkerUnavailable(error)) throw error")
+    expect(handler).toContain("events = getThreadGoalEventsHydrationFallback(threadId")
+    expect(handler).not.toMatch(/catch \(error\) \{[\s\S]{0,300}events = \[\]/)
+  })
+
   it("keeps the empty-transcript checkpoint bridge bounded across IPC", () => {
     const channel = source.indexOf('"threads:bootstrap-legacy-checkpoint-transcript"')
     const start = source.lastIndexOf("ipcMain.handle(", channel)
@@ -190,6 +215,10 @@ describe("threads:get hydration contract", () => {
     expect(handler).toContain("messageByteBudget: 0")
     expect(handler).toContain("foregroundKey: `thread-hydration:${event.sender.id}`")
     expect(handler).toContain("isCheckpointRuntimeProjectionCancelled(e)")
+    expect(handler).toContain("throw e")
+    expect(handler).not.toMatch(
+      /Failed to get latest thread checkpoint runtime state:[\s\S]*return null/
+    )
     expect(handler).not.toContain("withCheckpointer")
     expect(handler).not.toContain("getLatestRuntimeTuple")
   })

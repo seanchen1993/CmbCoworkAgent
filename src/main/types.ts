@@ -258,6 +258,19 @@ export interface ThreadMessagesPageOptions {
    * cancels the previous foreground page without affecting history pagination.
    */
   requestScope?: "foreground-hydration"
+  /**
+   * Ask the off-main-thread reader to resolve whether any durable row belongs
+   * to the visible conversation. Initial hydration requests this once; history
+   * pagination reuses the resulting renderer scalar and avoids repeated scans.
+   */
+  includeVisibleMessagePresence?: boolean
+  /**
+   * Internal checkpoint-recovery fence. Rows persisted after this timestamp
+   * belong to a later graph input and must not be folded into the old state.
+   */
+  notAfterCreatedAt?: number
+  /** Checkpoint identity paired with notAfterCreatedAt for legacy ordinal fencing. */
+  recoveryCheckpointId?: string
 }
 
 export interface ThreadHydrationOptions {
@@ -329,6 +342,14 @@ export interface ThreadMessagesPage {
   verifiedAnchorMessageId?: string
   /** Total durable messages for the thread, independent of the cursor. */
   total: number
+  /** Present only when includeVisibleMessagePresence was requested. */
+  hasVisibleMessages?: boolean
+  /**
+   * Present only with the initial presence summary. `migrating` means a legacy
+   * checkpoint copy was interrupted and must be resumed before an empty
+   * conversation can be trusted; `complete` makes the durable table authoritative.
+   */
+  legacyCheckpointMigrationStatus?: "migrating" | "complete" | null
   /** Durable rows represented by bounded previews because their payload exceeded the page budget. */
   truncatedMessageIds?: string[]
 }
@@ -1120,6 +1141,8 @@ export interface SkillPluginCatalogPageInput {
   kind: SkillPluginCatalogKind
   cursor?: string | null
   limit?: number
+  /** Main-process-only legacy migration entries resolved by the disabled projection. */
+  mergeDisabledSkillIds?: string[]
   /**
    * Renderer cache token used for latest-wins UI state. Worker snapshot
    * identity comes from the main-process source epoch so different windows can
@@ -1137,6 +1160,14 @@ export interface SkillPluginCatalogPageStats {
 
 export interface SkillPluginCatalogPage {
   kind: SkillPluginCatalogKind
+  /** Opaque Worker snapshot identity; stable across every page of one scan. */
+  sourceKey: string
+  /** Skill/plugin topology epoch captured before the Worker scan. */
+  catalogGlobalRevision: number
+  /** Disabled-store epoch captured by the main process before the scan. */
+  disabledSkillsRevision: number
+  /** Exact disabled-store content identity for projections that read that store. */
+  disabledStoreFingerprint?: string
   skills: SkillMetadata[]
   plugins: PluginMetadata[]
   disabledSkillIds: string[]

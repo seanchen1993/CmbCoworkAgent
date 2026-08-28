@@ -64,10 +64,29 @@ import { parseSkillFrontmatter } from "./skills/frontmatter"
 import {
   getDiscoveredSkillId,
   isDiscoveredSkillDisabled,
+  MAX_CANONICAL_STANDALONE_SKILL_ID_LENGTH,
+  MAX_DISABLED_STANDALONE_SKILL_IDS,
+  normalizeCanonicalStandaloneSkillId,
   normalizeSkillId,
+  normalizeStandaloneDisabledSkillIds,
   removeDisabledSkillEntriesForSkills,
-  resolveDisabledSkillIds
+  resolveDisabledSkillIds,
+  setDisabledSkillIdState
 } from "./skills/ids"
+import {
+  DISABLED_SKILL_STORE_MISSING_FINGERPRINT,
+  fingerprintDisabledSkillStoreText
+} from "./skills/disabled-store-fingerprint"
+import {
+  bumpDisabledSkillStoreRevision,
+  getDisabledSkillStoreRevision
+} from "./skills/disabled-store-revision"
+import { SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES } from "./skill-plugin-catalog/protocol"
+import { getHookCatalogGlobalRevision } from "./hook-catalog/revision"
+import {
+  isSkillCatalogTopologyMutationBusy,
+  waitForSkillCatalogTopologyIdle
+} from "./skill-plugin-catalog/topology-mutation-gate"
 import {
   DEFAULT_PLUGIN_HOOKS_PATH,
   getPluginSkillSearchSources,
@@ -1047,22 +1066,96 @@ export function setCodeExecEnabled(enabled: boolean): void {
 
 const DISABLED_SKILLS_FILE = join(OPENWORK_DIR, "disabled-skills.json")
 
-function readDisabledSkillEntries(): string[] {
+interface DisabledSkillStoreSnapshot {
+  entries: string[]
+  fingerprint: string
+  valid: boolean
+}
+
+export interface DisabledSkillRuntimePolicy {
+  readonly disabledSkillIds: readonly string[]
+  readonly disabledSkillIdSet: ReadonlySet<string>
+  readonly disabledSkillDirs: readonly string[]
+  readonly disabledSkillDirKeys: ReadonlySet<string>
+  readonly denyAllStandaloneSkills: boolean
+  readonly catalogGlobalRevision: number
+}
+
+interface LastKnownGoodDisabledSkillRuntimePolicy extends DisabledSkillRuntimePolicy {
+  readonly storeFingerprint: string
+}
+
+let lastKnownGoodDisabledSkillRuntimePolicy: LastKnownGoodDisabledSkillRuntimePolicy | null = null
+
+function hasDisabledSkillStoreControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) return true
+  }
+  return false
+}
+
+function readDisabledSkillStoreSnapshot(): DisabledSkillStoreSnapshot {
   getOpenworkDir()
-  if (!existsSync(DISABLED_SKILLS_FILE)) return []
   try {
+    const stat = statSync(DISABLED_SKILLS_FILE)
+    if (!stat.isFile() || stat.size > SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES) {
+      return { entries: [], fingerprint: "invalid", valid: false }
+    }
     const content = readFileSync(DISABLED_SKILLS_FILE, "utf-8")
+    if (
+      Buffer.byteLength(content, "utf-8") >
+      SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES
+    ) {
+      return { entries: [], fingerprint: "invalid", valid: false }
+    }
+    const fingerprint = fingerprintDisabledSkillStoreText(content)
     const parsed = JSON.parse(content) as unknown
-    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : []
-  } catch {
-    return []
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length > MAX_DISABLED_STANDALONE_SKILL_IDS ||
+      parsed.some(
+        (entry) =>
+          typeof entry !== "string" ||
+          entry.length === 0 ||
+          entry.length > MAX_CANONICAL_STANDALONE_SKILL_ID_LENGTH ||
+          hasDisabledSkillStoreControlCharacter(entry)
+      )
+    ) {
+      return { entries: [], fingerprint, valid: false }
+    }
+    return { entries: parsed, fingerprint, valid: true }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? {
+          entries: [],
+          fingerprint: DISABLED_SKILL_STORE_MISSING_FINGERPRINT,
+          valid: true
+        }
+      : { entries: [], fingerprint: "invalid", valid: false }
   }
 }
 
 function writeDisabledSkillEntries(disabledEntries: string[]): void {
   getOpenworkDir()
-  writeFileSync(DISABLED_SKILLS_FILE, JSON.stringify(disabledEntries, null, 2))
+  const tempFile = `${DISABLED_SKILLS_FILE}.tmp`
+  const content = JSON.stringify(disabledEntries, null, 2)
+  if (Buffer.byteLength(content, "utf-8") > SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES) {
+    throw new RangeError("Disabled skill store is too large")
+  }
+  writeFileSync(tempFile, content)
+  renameSync(tempFile, DISABLED_SKILLS_FILE)
+  bumpDisabledSkillStoreRevision()
   invalidateEnabledSkillsCache()
+}
+
+export interface DisabledSkillStoreMutationResult {
+  disabledSkillIds: string[]
+  revision: number
+}
+
+export function getDisabledSkillsRevision(): number {
+  return getDisabledSkillStoreRevision()
 }
 
 function resolveDisabledSkillEntries(
@@ -1080,26 +1173,228 @@ function resolveDisabledSkillEntries(
 }
 
 export function getDisabledSkills(): string[] {
-  return resolveDisabledSkillEntries(readDisabledSkillEntries())
+  return [...getDisabledSkillRuntimePolicy().disabledSkillIds]
 }
 
-let _disabledSkillDirsCache: string[] | null = null
+/**
+ * Runtime authorization must not turn a corrupt/unreadable disabled store into
+ * an empty allow-list. A valid file (including a missing file) refreshes the
+ * process-local last-known-good policy. Invalid input reuses that policy, or
+ * denies every standalone skill during a cold start when none exists yet.
+ */
+export function getDisabledSkillRuntimePolicy(): DisabledSkillRuntimePolicy {
+  const snapshot = readDisabledSkillStoreSnapshot()
+  const catalogGlobalRevision = getHookCatalogGlobalRevision()
+  if (isSkillCatalogTopologyMutationBusy()) {
+    if (
+      lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision ===
+      catalogGlobalRevision
+    ) {
+      return lastKnownGoodDisabledSkillRuntimePolicy
+    }
+    return denyAllStandaloneSkillRuntimePolicy(catalogGlobalRevision)
+  }
+  if (snapshot.valid) {
+    if (
+      lastKnownGoodDisabledSkillRuntimePolicy?.storeFingerprint === snapshot.fingerprint &&
+      lastKnownGoodDisabledSkillRuntimePolicy.catalogGlobalRevision === catalogGlobalRevision
+    ) {
+      return lastKnownGoodDisabledSkillRuntimePolicy
+    }
+    const skills = discoverSkillsFromSourcesSync()
+    const disabledSkillIds = resolveDisabledSkillIds(snapshot.entries, skills)
+    const disabledSet = new Set(disabledSkillIds.map((name) => name.trim().toLowerCase()))
+    const disabledSkillDirs = skills
+      .filter((skill) => isDiscoveredSkillDisabled(skill, disabledSet))
+      .map((skill) => skill.rootDir)
+    const policy: LastKnownGoodDisabledSkillRuntimePolicy = {
+      disabledSkillIds,
+      disabledSkillIdSet: disabledSet,
+      disabledSkillDirs,
+      disabledSkillDirKeys: new Set(disabledSkillDirs.map(normalizeSkillDirPath)),
+      denyAllStandaloneSkills: false,
+      catalogGlobalRevision,
+      storeFingerprint: snapshot.fingerprint
+    }
+    lastKnownGoodDisabledSkillRuntimePolicy = policy
+    return policy
+  }
+  if (
+    lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision === catalogGlobalRevision
+  ) {
+    return lastKnownGoodDisabledSkillRuntimePolicy
+  }
+  return denyAllStandaloneSkillRuntimePolicy(catalogGlobalRevision)
+}
+
+function denyAllStandaloneSkillRuntimePolicy(
+  catalogGlobalRevision: number
+): DisabledSkillRuntimePolicy {
+  return {
+    disabledSkillIds: [],
+    disabledSkillIdSet: new Set(),
+    disabledSkillDirs: [],
+    disabledSkillDirKeys: new Set(),
+    denyAllStandaloneSkills: true,
+    catalogGlobalRevision
+  }
+}
+
+export function isStandaloneSkillDisabledByRuntimePolicy(
+  skill: DiscoveredSkill,
+  policy: DisabledSkillRuntimePolicy
+): boolean {
+  if (policy.denyAllStandaloneSkills) return true
+  if (policy.disabledSkillDirKeys.has(normalizeSkillDirPath(skill.rootDir))) return true
+  return isDiscoveredSkillDisabled(skill, policy.disabledSkillIdSet)
+}
+
+export function isDisabledSkillRuntimePolicyCurrent(
+  policy: DisabledSkillRuntimePolicy
+): boolean {
+  return (
+    !isSkillCatalogTopologyMutationBusy() &&
+    policy.catalogGlobalRevision === getHookCatalogGlobalRevision()
+  )
+}
 
 export function getDisabledSkillDirs(): string[] {
-  if (_disabledSkillDirsCache) return _disabledSkillDirsCache
-  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
-  const result =
-    disabled.size === 0
-      ? []
-      : discoverSkillsFromSourcesSync()
-          .filter((skill) => isDiscoveredSkillDisabled(skill, disabled))
-          .map((skill) => skill.rootDir)
-  _disabledSkillDirsCache = result
-  return result
+  const policy = getDisabledSkillRuntimePolicy()
+  if (policy.denyAllStandaloneSkills) {
+    return getSkillsSources()
+  }
+  return [...policy.disabledSkillDirs]
 }
 
 export function setDisabledSkills(skillIds: string[]): void {
   writeDisabledSkillEntries(resolveDisabledSkillEntries(skillIds))
+}
+
+/**
+ * Atomically mutate one standalone skill against the latest persisted state.
+ * Since the read/modify/write sequence is synchronous on Electron's main
+ * thread, concurrent renderer requests cannot overwrite each other's stale
+ * snapshots. The returned ids are the authoritative post-mutation state.
+ */
+function setSkillDisabledStateFromEntries(
+  skillId: string,
+  disabled: boolean,
+  currentEntries: string[],
+  resolvedDisabledSkillIds?: readonly string[]
+): string[] {
+  const persisted = normalizeStandaloneDisabledSkillIds(currentEntries)
+  const current = normalizeStandaloneDisabledSkillIds(
+    resolvedDisabledSkillIds ? [...resolvedDisabledSkillIds] : currentEntries
+  )
+  const targetId = normalizeCanonicalStandaloneSkillId(skillId)
+  if (!targetId) return current
+  if (
+    disabled &&
+    !current.includes(targetId) &&
+    current.length >= MAX_DISABLED_STANDALONE_SKILL_IDS
+  ) {
+    throw new RangeError("Disabled skill limit reached")
+  }
+  const next = setDisabledSkillIdState(current, targetId, disabled)
+  const changed =
+    persisted.length !== next.length || persisted.some((entry, index) => entry !== next[index])
+  if (changed) writeDisabledSkillEntries(next)
+  return next
+}
+
+export function setSkillDisabledState(
+  skillId: string,
+  disabled: boolean,
+  resolvedDisabledSkillIds?: readonly string[]
+): string[] {
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!persistedSnapshot.valid) {
+    throw new Error("Disabled skill store is invalid; refusing to overwrite it")
+  }
+  return setSkillDisabledStateFromEntries(
+    skillId,
+    disabled,
+    persistedSnapshot.entries,
+    resolvedDisabledSkillIds
+  )
+}
+
+function matchesDisabledSkillStoreFingerprint(
+  snapshot: DisabledSkillStoreSnapshot,
+  expectedFingerprint: string
+): boolean {
+  if (snapshot.valid && snapshot.fingerprint === expectedFingerprint) return true
+  // The Worker cache key only changes when this epoch advances. If content
+  // changed before fs.watch delivered its event, advance it here so the CAS
+  // retry performs a fresh Worker scan instead of reusing the stale snapshot.
+  bumpDisabledSkillStoreRevision()
+  return false
+}
+
+/**
+ * Apply a worker-resolved canonical snapshot only if neither the in-process
+ * revision nor the exact file content changed since the Worker scan. The
+ * comparison and synchronous read/modify/write execute without an await,
+ * which makes this a real CAS boundary on Electron's main-process event loop.
+ */
+export function compareAndSetSkillDisabledState(
+  skillId: string,
+  disabled: boolean,
+  resolvedDisabledSkillIds: readonly string[],
+  expectedRevision: number,
+  expectedFingerprint: string,
+  expectedCatalogGlobalRevision: number
+): DisabledSkillStoreMutationResult | null {
+  if (
+    isSkillCatalogTopologyMutationBusy() ||
+    getHookCatalogGlobalRevision() !== expectedCatalogGlobalRevision
+  ) {
+    return null
+  }
+  if (getDisabledSkillStoreRevision() !== expectedRevision) return null
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!matchesDisabledSkillStoreFingerprint(persistedSnapshot, expectedFingerprint)) {
+    return null
+  }
+  const disabledSkillIds = setSkillDisabledStateFromEntries(
+    skillId,
+    disabled,
+    persistedSnapshot.entries,
+    resolvedDisabledSkillIds
+  )
+  return {
+    disabledSkillIds,
+    revision: getDisabledSkillStoreRevision()
+  }
+}
+
+/** Commit a complete canonical Worker projection without main-thread discovery. */
+export function compareAndSetCanonicalDisabledSkills(
+  resolvedDisabledSkillIds: readonly string[],
+  expectedRevision: number,
+  expectedFingerprint: string,
+  expectedCatalogGlobalRevision: number
+): DisabledSkillStoreMutationResult | null {
+  if (
+    isSkillCatalogTopologyMutationBusy() ||
+    getHookCatalogGlobalRevision() !== expectedCatalogGlobalRevision
+  ) {
+    return null
+  }
+  if (getDisabledSkillStoreRevision() !== expectedRevision) return null
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!matchesDisabledSkillStoreFingerprint(persistedSnapshot, expectedFingerprint)) {
+    return null
+  }
+  const persisted = normalizeStandaloneDisabledSkillIds(persistedSnapshot.entries)
+  const next = normalizeStandaloneDisabledSkillIds([...resolvedDisabledSkillIds])
+  const changed =
+    persisted.length !== next.length || persisted.some((entry, index) => entry !== next[index])
+  if (changed) writeDisabledSkillEntries(next)
+  return {
+    disabledSkillIds: next,
+    revision: getDisabledSkillStoreRevision()
+  }
 }
 
 function normalizeSkillDirPath(input: string): string {
@@ -1132,12 +1427,14 @@ export function findExistingSkillById(skillId: string): DiscoveredSkill | null {
 }
 
 function computeDisabledSkillEntriesWithoutSkillDir(skillDir: string): string[] | null {
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!persistedSnapshot.valid) return null
   const allSkills = discoverSkillsFromSourcesSync()
   const skillsToRemove = allSkills.filter((skill) => isSameOrChildPath(skill.rootDir, skillDir))
   if (skillsToRemove.length === 0) return null
 
   const remainingSkills = allSkills.filter((skill) => !isSameOrChildPath(skill.rootDir, skillDir))
-  const currentEntries = readDisabledSkillEntries()
+  const currentEntries = persistedSnapshot.entries
   const nextEntries = removeDisabledSkillEntriesForSkills(
     currentEntries,
     skillsToRemove,
@@ -1155,9 +1452,27 @@ export function clearDisabledSkillsForSkillDir(skillDir: string): void {
 }
 
 export function prepareDisabledSkillsCleanupForSkillDir(skillDir: string): () => void {
-  const nextEntries = computeDisabledSkillEntriesWithoutSkillDir(skillDir)
+  // Capture identities while the directory still exists, but re-read the
+  // persisted entries only when cleanup executes after the awaited trash
+  // operation. This preserves toggles committed by another window in the gap
+  // without performing a second full main-thread directory scan.
+  const allSkills = discoverSkillsFromSourcesSync()
+  const skillsToRemove = allSkills.filter((skill) => isSameOrChildPath(skill.rootDir, skillDir))
+  const remainingSkills = allSkills.filter((skill) => !isSameOrChildPath(skill.rootDir, skillDir))
   return () => {
-    if (nextEntries) writeDisabledSkillEntries(nextEntries)
+    if (skillsToRemove.length === 0) return
+    const persistedSnapshot = readDisabledSkillStoreSnapshot()
+    if (!persistedSnapshot.valid) return
+    const currentEntries = persistedSnapshot.entries
+    const nextEntries = removeDisabledSkillEntriesForSkills(
+      currentEntries,
+      skillsToRemove,
+      remainingSkills
+    )
+    const unchanged =
+      currentEntries.length === nextEntries.length &&
+      currentEntries.every((entry, index) => entry === nextEntries[index])
+    if (!unchanged) writeDisabledSkillEntries(nextEntries)
   }
 }
 
@@ -1193,9 +1508,8 @@ export function invalidateEnabledSkillsCache(): void {
   _pluginSkillSourcesCache = null
   _pluginMcpCache = null
   _pluginHooksCache = null
-  _skillHooksCache = null
   _skillHookMetadataCache = null
-  _disabledSkillDirsCache = null
+  _skillHookMetadataCacheRevision = -1
 }
 
 /**
@@ -1204,6 +1518,7 @@ export function invalidateEnabledSkillsCache(): void {
  */
 export async function getEnabledSkillsSources(): Promise<string[]> {
   await cleanupLegacyEnabledSkillsDirsAsync()
+  await waitForSkillCatalogTopologyIdle()
   return getSkillsSources()
 }
 
@@ -1242,45 +1557,56 @@ export async function cleanCmbSkillsFromClaudeDir(workDir: string): Promise<void
 export async function syncSkillsToClaudeDir(workDir: string): Promise<void> {
   const claudeSkillsDir = join(workDir, ".claude", "skills")
   await mkdir(claudeSkillsDir, { recursive: true })
-
-  // Clean up old _cmb_ skills
-  await cleanCmbSkillsFromClaudeDir(workDir)
-
-  // Copy enabled skills
-  const sourceDirs = await getEnabledSkillsSources()
-  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
-  let count = 0
-  const usedDestNames = new Map<string, string>()
-  for (const sourceDir of sourceDirs) {
-    if (!existsSync(sourceDir)) continue
-    const skills = await discoverSkills(sourceDir)
-    for (const skill of skills) {
-      if (isDiscoveredSkillDisabled(skill, disabled)) continue
-      const relativeName = skill.relativePath || basename(skill.rootDir)
-      let destName = CMB_SKILL_PREFIX + makeFlattenedSkillDirName(relativeName)
-      const existingRelativeName = usedDestNames.get(destName)
-      if (existingRelativeName && existingRelativeName !== relativeName) {
-        const hash = createHash("sha256").update(relativeName).digest("hex").slice(0, 8)
-        destName = `${destName}-${hash}`
-      }
-      usedDestNames.set(destName, relativeName)
-      const dest = join(claudeSkillsDir, destName)
-      try {
-        // Remove existing dest to avoid merge with prior copy (e.g. builtin vs custom same name)
-        if (existsSync(dest)) await rm(dest, { recursive: true, force: true })
-        await copyDirRecursive(skill.rootDir, dest)
-        count++
-      } catch (e) {
-        console.warn(`[Storage] Failed to sync skill ${skill.name} to Claude dir:`, e)
+  const maxAttempts = 2
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    // Always remove the previous attempt before consulting a fresh policy.
+    await cleanCmbSkillsFromClaudeDir(workDir)
+    const sourceDirs = await getEnabledSkillsSources()
+    const runtimePolicy = getDisabledSkillRuntimePolicy()
+    if (runtimePolicy.denyAllStandaloneSkills) {
+      console.warn(
+        `[Storage] Disabled skill policy unavailable; removed managed skills from ${claudeSkillsDir}`
+      )
+      return
+    }
+    let count = 0
+    const usedDestNames = new Map<string, string>()
+    for (const sourceDir of sourceDirs) {
+      if (!existsSync(sourceDir)) continue
+      const skills = await discoverSkills(sourceDir)
+      for (const skill of skills) {
+        if (isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)) continue
+        const relativeName = skill.relativePath || basename(skill.rootDir)
+        let destName = CMB_SKILL_PREFIX + makeFlattenedSkillDirName(relativeName)
+        const existingRelativeName = usedDestNames.get(destName)
+        if (existingRelativeName && existingRelativeName !== relativeName) {
+          const hash = createHash("sha256").update(relativeName).digest("hex").slice(0, 8)
+          destName = `${destName}-${hash}`
+        }
+        usedDestNames.set(destName, relativeName)
+        const dest = join(claudeSkillsDir, destName)
         try {
-          await rm(dest, { recursive: true, force: true })
-        } catch {
-          /* ignore */
+          // Remove existing dest to avoid merge with prior copy (e.g. builtin vs custom same name)
+          if (existsSync(dest)) await rm(dest, { recursive: true, force: true })
+          await copyDirRecursive(skill.rootDir, dest)
+          count++
+        } catch (e) {
+          console.warn(`[Storage] Failed to sync skill ${skill.name} to Claude dir:`, e)
+          try {
+            await rm(dest, { recursive: true, force: true })
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
+    if (isDisabledSkillRuntimePolicyCurrent(runtimePolicy)) {
+      console.log(`[Storage] Synced ${count} skills to ${claudeSkillsDir}`)
+      return
+    }
   }
-  console.log(`[Storage] Synced ${count} skills to ${claudeSkillsDir}`)
+  await cleanCmbSkillsFromClaudeDir(workDir)
+  console.warn(`[Storage] Skill topology kept changing; left ${claudeSkillsDir} fail-closed`)
 }
 
 // Custom model configurations stored as JSON in ~/.cmbcoworkagent/custom-models.json
@@ -2843,8 +3169,8 @@ let _pluginSkillsCache: string[] | null = null
 let _pluginSkillSourcesCache: PluginSkillSourceMetadata[] | null = null
 let _pluginMcpCache: Record<string, PluginMcpServerConfig> | null = null
 let _pluginHooksCache: PluginHookMetadata[] | null = null
-let _skillHooksCache: HookConfig[] | null = null
 let _skillHookMetadataCache: SkillHookMetadata[] | null = null
+let _skillHookMetadataCacheRevision = -1
 
 export function getPluginsDir(): string {
   if (!existsSync(PLUGINS_DIR)) {
@@ -3993,7 +4319,7 @@ interface SkillHookSource {
 
 function collectSkillHookSourcesFromDir(
   sourceDir: string,
-  disabledSkills: Set<string>,
+  runtimePolicy: DisabledSkillRuntimePolicy,
   respectDisabledList: boolean,
   seenDirs: Set<string>,
   pluginMeta?: { pluginId: string; pluginName: string; pluginRoot: string },
@@ -4003,7 +4329,12 @@ function collectSkillHookSourcesFromDir(
   if (!existsSync(sourceDir)) return result
 
   const pushSkill = (skill: ReturnType<typeof discoverSkillsSync>[number]): void => {
-    if (respectDisabledList && isDiscoveredSkillDisabled(skill, disabledSkills)) return
+    if (
+      respectDisabledList &&
+      isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)
+    ) {
+      return
+    }
     const skillDir = skill.rootDir
     if (seenDirs.has(skillDir)) return
     seenDirs.add(skillDir)
@@ -4022,19 +4353,21 @@ function collectSkillHookSourcesFromDir(
 }
 
 function getEnabledSkillHookSources(): SkillHookSource[] {
-  const disabledSkills = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
+  const runtimePolicy = getDisabledSkillRuntimePolicy()
   const seenDirs = new Set<string>()
   const sources: SkillHookSource[] = []
 
-  for (const sourceDir of getSkillsSources()) {
-    sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, true, seenDirs))
+  if (!runtimePolicy.denyAllStandaloneSkills) {
+    for (const sourceDir of getSkillsSources()) {
+      sources.push(...collectSkillHookSourcesFromDir(sourceDir, runtimePolicy, true, seenDirs))
+    }
   }
 
   for (const source of getEnabledPluginSkillSourceMetadata()) {
     sources.push(
       ...collectSkillHookSourcesFromDir(
         source.sourceDir,
-        disabledSkills,
+        runtimePolicy,
         false,
         seenDirs,
         { pluginId: source.pluginId, pluginName: source.pluginName, pluginRoot: source.pluginRoot },
@@ -4156,16 +4489,28 @@ function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
 }
 
 export function getEnabledSkillHookMetadata(): SkillHookMetadata[] {
-  if (_skillHookMetadataCache) return _skillHookMetadataCache
-  _skillHookMetadataCache = buildEnabledSkillHookMetadata()
-  _skillHooksCache = _skillHookMetadataCache
-  return _skillHookMetadataCache
+  const catalogGlobalRevision = getHookCatalogGlobalRevision()
+  const topologyBusy = isSkillCatalogTopologyMutationBusy()
+  if (
+    !topologyBusy &&
+    _skillHookMetadataCache &&
+    _skillHookMetadataCacheRevision === catalogGlobalRevision
+  ) {
+    return _skillHookMetadataCache
+  }
+  const metadata = buildEnabledSkillHookMetadata()
+  if (
+    !topologyBusy &&
+    catalogGlobalRevision === getHookCatalogGlobalRevision()
+  ) {
+    _skillHookMetadataCache = metadata
+    _skillHookMetadataCacheRevision = catalogGlobalRevision
+  }
+  return metadata
 }
 
 export function getEnabledSkillHooks(): HookConfig[] {
-  if (_skillHooksCache) return _skillHooksCache
-  _skillHooksCache = getEnabledSkillHookMetadata()
-  return _skillHooksCache
+  return getEnabledSkillHookMetadata()
 }
 
 export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: boolean): void {

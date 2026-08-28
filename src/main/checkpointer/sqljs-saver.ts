@@ -2,6 +2,8 @@ import {
   NativeSqliteAdapter,
   openNativeSqliteDatabase
 } from "../db/native-sqlite-adapter"
+import { resolve } from "node:path"
+import { randomUUID } from "node:crypto"
 import { sqliteFileSize } from "../utils/sqlite-durable-file"
 import { ensureCheckpointRuntimeProjectionInWorker } from "./runtime-projection-client"
 import {
@@ -48,6 +50,7 @@ interface CheckpointMessageSnapshotRow {
   parent_checkpoint_id: string | null
   prefix_length: number
   message_count: number
+  generation: string
   type: string | null
   suffix: string | Uint8Array
 }
@@ -61,6 +64,7 @@ interface CheckpointMessageWriteState {
   hasExternalSnapshot: boolean
   snapshotDepth: number
   deltaBytes: number
+  snapshotGeneration: string | null
 }
 
 interface CheckpointMessageSentinel {
@@ -72,10 +76,70 @@ interface HydratedCheckpointMessages {
   messages: unknown[]
   snapshotDepth: number
   deltaBytes: number
+  snapshotGeneration: string | null
+}
+
+export interface CheckpointMessageRecoveryContext {
+  threadId: string
+  checkpointNs: string
+  checkpointId: string
+  missingCheckpointId: string
+  expectedMessageCount: number
+  hasInterrupt: boolean
+  /** Interrupts, pending sends, and pending writes require an exact transcript. */
+  requiresExactRecovery: boolean
+  /** Durable transcript rows after this checkpoint must not be folded into it. */
+  checkpointTs: string
+}
+
+export interface CheckpointMessageRecoveryResult {
+  messages: readonly unknown[]
+  /** True only when every durable row was returned without a bounded preview. */
+  complete: boolean
+  /** True only when complete=false solely because older complete rows remain. */
+  boundedByHistory?: boolean
+}
+
+export const LOCAL_CHECKPOINT_MESSAGE_RECOVERY_ERROR =
+  "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"
+
+export class CheckpointMessageSnapshotRecoveryError extends Error {
+  readonly code = LOCAL_CHECKPOINT_MESSAGE_RECOVERY_ERROR
+
+  constructor(checkpointId: string, options?: ErrorOptions) {
+    super(
+      "本地会话消息索引不完整，自动恢复失败；已保存的会话消息没有被删除。" +
+        "请重启应用后重试，如仍失败请导出日志。" +
+        `（checkpoint: ${checkpointId}）`,
+      options
+    )
+    this.name = "CheckpointMessageSnapshotRecoveryError"
+  }
+}
+
+class MissingCheckpointMessageSnapshotError extends Error {
+  constructor(readonly checkpointId: string) {
+    super(`[SqlJsSaver] Missing checkpoint message snapshot: ${checkpointId}`)
+    this.name = "MissingCheckpointMessageSnapshotError"
+  }
 }
 
 const EXTERNAL_MESSAGES_MARKER = "__cmb_sqljs_external_messages_v1"
 const MAX_HYDRATED_MESSAGE_SNAPSHOTS = 8
+
+/**
+ * A replacement run can construct a second saver for the same thread before the
+ * predecessor's slow serde finishes. Keep the FIFO module-wide (not saver-wide)
+ * so those two instances cannot invalidate each other's selected message parent.
+ * Cross-process writers are still fenced by the SQLite transaction checks.
+ */
+const checkpointNamespaceQueues = new Map<string, Promise<void>>()
+const checkpointNamespacePendingWriteIntents = new Map<string, number>()
+
+function canonicalCheckpointDatabaseKey(dbPath: string): string {
+  const absolute = resolve(dbPath)
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute
+}
 
 interface ExternalMessagesReference {
   [EXTERNAL_MESSAGES_MARKER]: true
@@ -263,6 +327,14 @@ export interface SqlJsSaverOptions {
   maxDatabaseBytes?: number
   /** @deprecated Native SQLite no longer loads the whole file into memory. */
   maxOversizedRecoveryBytes?: number
+  /**
+   * Cold-path repair for a historical external-message chain whose snapshot row
+   * is missing. The runtime implementation reads a bounded durable transcript in
+   * a Worker; normal checkpoint reads and writes never call it.
+   */
+  recoverMissingCheckpointMessages?: (
+    context: CheckpointMessageRecoveryContext
+  ) => Promise<CheckpointMessageRecoveryResult | null>
 }
 
 interface CheckpointRuntimeProjectionRow {
@@ -323,6 +395,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
    * needs only the latest snapshot; the bound also prevents fork-history inspection retaining
    * every transcript in a long-lived saver. */
   private hydratedCheckpointMessages = new Map<string, HydratedCheckpointMessages>()
+  /** Coalesce concurrent readers of the same broken checkpoint into one Worker/CAS repair. */
+  private checkpointMessageRecoveryRequests = new Map<
+    string,
+    Promise<HydratedCheckpointMessages>
+  >()
 
   /** Root checkpoints are for runtime state and recent fork boundaries. User-visible
    * transcript history lives in the main database, so checkpoint retention can stay small.
@@ -332,10 +409,13 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   private maxRootForkBoundaryBytes = DEFAULT_MAX_ROOT_FORK_BOUNDARY_BYTES
   private maxNonRootCheckpoints = 1
   private maxDatabaseBytes = DEFAULT_MAX_DB_SIZE_BYTES
+  private recoverMissingCheckpointMessages?: SqlJsSaverOptions["recoverMissingCheckpointMessages"]
+  private readonly checkpointDatabaseKey: string
 
   constructor(dbPath: string, serde?: SerializerProtocol, options: SqlJsSaverOptions = {}) {
     super(serde)
     this.dbPath = dbPath
+    this.checkpointDatabaseKey = canonicalCheckpointDatabaseKey(dbPath)
     const legacyMax = options.maxCheckpointsPerNamespace
     this.maxRootCheckpoints = normalizePositiveInteger(
       options.maxRootCheckpoints ?? legacyMax,
@@ -357,6 +437,45 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       options.maxDatabaseBytes,
       DEFAULT_MAX_DB_SIZE_BYTES
     )
+    this.recoverMissingCheckpointMessages = options.recoverMissingCheckpointMessages
+  }
+
+  private async acquireCheckpointNamespace(
+    threadId: string,
+    checkpointNs: string
+  ): Promise<() => void> {
+    const key = this.checkpointNamespaceQueueKey(threadId, checkpointNs)
+    const previous = checkpointNamespaceQueues.get(key) ?? Promise.resolve()
+    let releaseGate: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    const tail = previous.catch(() => {}).then(() => gate)
+    checkpointNamespaceQueues.set(key, tail)
+    await previous.catch(() => {
+      // A failed predecessor releases, rather than poisons, the namespace.
+    })
+
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      releaseGate()
+      void tail.finally(() => {
+        if (checkpointNamespaceQueues.get(key) === tail) {
+          checkpointNamespaceQueues.delete(key)
+        }
+      })
+    }
+  }
+
+  private checkpointNamespaceQueueKey(threadId: string, checkpointNs: string): string {
+    return `${this.checkpointDatabaseKey}\u0000${checkpointMessageNamespaceKey(threadId, checkpointNs)}`
+  }
+
+  private hasPendingWriteIntent(threadId: string, checkpointNs: string): boolean {
+    const key = this.checkpointNamespaceQueueKey(threadId, checkpointNs)
+    return (checkpointNamespacePendingWriteIntents.get(key) ?? 0) > 0
   }
 
   /**
@@ -601,11 +720,50 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         parent_checkpoint_id TEXT,
         prefix_length INTEGER NOT NULL DEFAULT 0,
         message_count INTEGER NOT NULL,
+        generation TEXT NOT NULL DEFAULT '',
         type TEXT,
         suffix BLOB NOT NULL,
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
       )
     `)
+
+    // The runtime-projection worker can open the same legacy database before a
+    // saver is initialized. Serialize the PRAGMA/ALTER pair across connections
+    // so two cold-upgrade paths cannot both observe the column as missing.
+    let messageSnapshotMigrationStarted = false
+    try {
+      this.db.run("BEGIN IMMEDIATE")
+      messageSnapshotMigrationStarted = true
+      const messageSnapshotColumns = new Set(
+        (this.db.exec("PRAGMA table_info(checkpoint_message_snapshots)")[0]?.values ?? []).map(
+          (row) => String(row[1] ?? "")
+        )
+      )
+      if (!messageSnapshotColumns.has("generation")) {
+        this.db.run(
+          `ALTER TABLE checkpoint_message_snapshots
+           ADD COLUMN generation TEXT NOT NULL DEFAULT ''`
+        )
+      }
+      // Backfill legacy rows entirely inside SQLite; never deserialize a long
+      // transcript merely to establish its optimistic-concurrency identity.
+      this.db.run(
+        `UPDATE checkpoint_message_snapshots
+         SET generation = lower(hex(randomblob(16)))
+         WHERE generation IS NULL OR typeof(generation) != 'text' OR length(generation) = 0`
+      )
+      this.db.run("COMMIT")
+      messageSnapshotMigrationStarted = false
+    } catch (error) {
+      if (messageSnapshotMigrationStarted) {
+        try {
+          this.db.run("ROLLBACK")
+        } catch {
+          // Preserve the schema migration error; a failed BEGIN has no txn.
+        }
+      }
+      throw error
+    }
 
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_checkpoint_message_snapshot_parent
@@ -654,6 +812,23 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
   }
 
+  private checkpointMessageCacheIsCurrent(
+    threadId: string,
+    checkpointNs: string,
+    checkpointId: string,
+    cached: HydratedCheckpointMessages
+  ): boolean {
+    if (!this.db || !cached.snapshotGeneration) return false
+    const result = this.db.exec(
+      `SELECT message_count, generation FROM checkpoint_message_snapshots
+       WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+       LIMIT 1`,
+      [threadId, checkpointNs, checkpointId]
+    )
+    const row = result[0]?.values[0]
+    return Number(row?.[0]) === cached.messages.length && row?.[1] === cached.snapshotGeneration
+  }
+
   private async loadCheckpointMessages(
     threadId: string,
     checkpointNs: string,
@@ -663,10 +838,14 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     const targetKey = checkpointMessageCacheKey(threadId, checkpointNs, checkpointId)
     const cachedTarget = this.hydratedCheckpointMessages.get(targetKey)
-    if (cachedTarget) {
+    if (
+      cachedTarget &&
+      this.checkpointMessageCacheIsCurrent(threadId, checkpointNs, checkpointId, cachedTarget)
+    ) {
       this.rememberHydratedCheckpointMessages(targetKey, cachedTarget)
       return cachedTarget
     }
+    if (cachedTarget) this.hydratedCheckpointMessages.delete(targetKey)
 
     const pendingRows: CheckpointMessageSnapshotRow[] = []
     const visited = new Set<string>()
@@ -674,7 +853,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     let base: HydratedCheckpointMessages = {
       messages: [],
       snapshotDepth: 0,
-      deltaBytes: 0
+      deltaBytes: 0,
+      snapshotGeneration: null
     }
 
     while (cursor) {
@@ -685,21 +865,23 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
       const cursorKey = checkpointMessageCacheKey(threadId, checkpointNs, cursor)
       const cached = this.hydratedCheckpointMessages.get(cursorKey)
-      if (cached) {
+      if (cached && this.checkpointMessageCacheIsCurrent(threadId, checkpointNs, cursor, cached)) {
         base = cached
         this.rememberHydratedCheckpointMessages(cursorKey, cached)
         break
       }
+      if (cached) this.hydratedCheckpointMessages.delete(cursorKey)
 
       const stmt = this.db.prepare(`
-        SELECT checkpoint_id, parent_checkpoint_id, prefix_length, message_count, type, suffix
+        SELECT checkpoint_id, parent_checkpoint_id, prefix_length, message_count,
+               generation, type, suffix
         FROM checkpoint_message_snapshots
         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
       `)
       stmt.bind([threadId, checkpointNs, cursor])
       if (!stmt.step()) {
         stmt.free()
-        throw new Error(`[SqlJsSaver] Missing checkpoint message snapshot: ${cursor}`)
+        throw new MissingCheckpointMessageSnapshotError(cursor)
       }
       const row = stmt.getAsObject() as unknown as CheckpointMessageSnapshotRow
       stmt.free()
@@ -753,7 +935,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     // allocate the full transcript only once; repeated slice/concat here turns
     // restart or task re-entry into O(checkpoints * history).
     const messages = materializeCheckpointMessageChunks(chunks, messageCount)
-    const hydrated = { messages, snapshotDepth, deltaBytes }
+    const targetGeneration = pendingRows[0]?.generation
+    const hydrated = {
+      messages,
+      snapshotDepth,
+      deltaBytes,
+      snapshotGeneration:
+        typeof targetGeneration === "string" && targetGeneration
+          ? targetGeneration
+          : base.snapshotGeneration
+    }
 
     // Heal databases created before depth/byte bounds existed. The first legacy
     // recovery may traverse the old chain once; all subsequent restores start
@@ -763,14 +954,17 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       deltaBytes > MAX_CHECKPOINT_MESSAGE_DELTA_BYTES
     ) {
       const [type, suffix] = await this.serde.dumpsTyped(messages)
+      const generation = randomUUID()
       this.db.run(
         `UPDATE checkpoint_message_snapshots
-         SET parent_checkpoint_id = NULL, prefix_length = 0, message_count = ?, type = ?, suffix = ?
+         SET parent_checkpoint_id = NULL, prefix_length = 0, message_count = ?,
+             generation = ?, type = ?, suffix = ?
          WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
-        [messages.length, type, suffix, threadId, checkpointNs, checkpointId]
+        [messages.length, generation, type, suffix, threadId, checkpointNs, checkpointId]
       )
       hydrated.snapshotDepth = 1
       hydrated.deltaBytes = 0
+      hydrated.snapshotGeneration = generation
       this.pruneUnreachableMessageSnapshots(threadId, checkpointNs, this.db)
     }
 
@@ -780,19 +974,36 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
   private async hydrateCheckpointMessages(
     row: CheckpointRow,
-    checkpoint: Checkpoint
+    checkpoint: Checkpoint,
+    allowBoundedHistoryRecovery = false
   ): Promise<Checkpoint> {
     const channelValues = checkpoint.channel_values as Record<string, unknown>
     const storedMessages = channelValues.messages
     if (!isExternalMessagesReference(storedMessages)) return checkpoint
 
-    const hydrated = await this.loadCheckpointMessages(
-      row.thread_id,
-      row.checkpoint_ns,
-      row.checkpoint_id
-    )
+    let hydrated: HydratedCheckpointMessages
+    let expectedHydratedMessageCount = storedMessages.messageCount
+    try {
+      hydrated = await this.loadCheckpointMessages(
+        row.thread_id,
+        row.checkpoint_ns,
+        row.checkpoint_id
+      )
+    } catch (error) {
+      if (!(error instanceof MissingCheckpointMessageSnapshotError)) throw error
+      hydrated = await this.recoverMissingCheckpointMessageSnapshot(
+        row,
+        checkpoint,
+        storedMessages.messageCount,
+        error,
+        allowBoundedHistoryRecovery
+      )
+      // Recovery atomically replaces the historical marker with a bounded,
+      // self-contained base whose authoritative count is the recovered count.
+      expectedHydratedMessageCount = hydrated.messages.length
+    }
     const messages = hydrated.messages
-    if (messages.length !== storedMessages.messageCount) {
+    if (messages.length !== expectedHydratedMessageCount) {
       throw new Error(`[SqlJsSaver] External checkpoint message count mismatch: ${row.checkpoint_id}`)
     }
     checkpoint.channel_values = {
@@ -802,57 +1013,315 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return checkpoint
   }
 
+  private checkpointHasInterrupt(checkpoint: Checkpoint): boolean {
+    const interrupt = (checkpoint.channel_values as Record<string, unknown>).__interrupt__
+    return Array.isArray(interrupt) ? interrupt.length > 0 : Boolean(interrupt)
+  }
+
+  private checkpointHasPendingWrites(row: CheckpointRow, database: NativeSqliteAdapter): boolean {
+    const result = database.exec(
+      `SELECT 1 FROM writes
+       WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+       LIMIT 1`,
+      [row.thread_id, row.checkpoint_ns, row.checkpoint_id]
+    )
+    return Boolean(result[0]?.values.length)
+  }
+
+  private isExactLatestCheckpointRow(
+    row: CheckpointRow,
+    database: NativeSqliteAdapter
+  ): boolean {
+    const result = database.exec(
+      `SELECT 1
+       FROM checkpoints AS source
+       WHERE source.thread_id = ? AND source.checkpoint_ns = ? AND source.checkpoint_id = ?
+         AND source.type IS ? AND source.checkpoint = ?
+         AND COALESCE(source.fork_boundary_marker, 0) = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM checkpoints AS newer
+           WHERE newer.thread_id = source.thread_id
+             AND newer.checkpoint_ns = source.checkpoint_ns
+             AND (
+               COALESCE(newer.checkpoint_ts, newer.checkpoint_id) >
+                 COALESCE(source.checkpoint_ts, source.checkpoint_id)
+               OR (
+                 COALESCE(newer.checkpoint_ts, newer.checkpoint_id) =
+                   COALESCE(source.checkpoint_ts, source.checkpoint_id)
+                 AND newer.checkpoint_id > source.checkpoint_id
+               )
+             )
+         )
+       LIMIT 1`,
+      [
+        row.thread_id,
+        row.checkpoint_ns,
+        row.checkpoint_id,
+        row.type,
+        row.checkpoint,
+        Number(row.fork_boundary_marker) === 1 ? 1 : 0
+      ]
+    )
+    return Boolean(result[0]?.values.length)
+  }
+
+  private async recoverMissingCheckpointMessageSnapshot(
+    row: CheckpointRow,
+    checkpoint: Checkpoint,
+    expectedMessageCount: number,
+    missing: MissingCheckpointMessageSnapshotError,
+    allowBoundedHistoryRecovery: boolean
+  ): Promise<HydratedCheckpointMessages> {
+    const key = checkpointMessageCacheKey(row.thread_id, row.checkpoint_ns, row.checkpoint_id)
+    const existing = this.checkpointMessageRecoveryRequests.get(key)
+    if (existing) return existing
+
+    const request = this.performMissingCheckpointMessageRecovery(
+      row,
+      checkpoint,
+      expectedMessageCount,
+      missing,
+      allowBoundedHistoryRecovery
+    ).finally(() => {
+      if (this.checkpointMessageRecoveryRequests.get(key) === request) {
+        this.checkpointMessageRecoveryRequests.delete(key)
+      }
+    })
+    this.checkpointMessageRecoveryRequests.set(key, request)
+    return request
+  }
+
+  private async performMissingCheckpointMessageRecovery(
+    row: CheckpointRow,
+    checkpoint: Checkpoint,
+    expectedMessageCount: number,
+    missing: MissingCheckpointMessageSnapshotError,
+    allowBoundedHistoryRecovery: boolean
+  ): Promise<HydratedCheckpointMessages> {
+    const recover = this.recoverMissingCheckpointMessages
+    const database = this.db
+    // The durable transcript represents the current conversation. Applying it
+    // to a historical checkpoint would inject future turns into an old fork.
+    if (!recover || !database || !this.isExactLatestCheckpointRow(row, database)) {
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+    }
+
+    const hasInterrupt = this.checkpointHasInterrupt(checkpoint)
+    const pendingSends = (checkpoint as Checkpoint & { pending_sends?: unknown }).pending_sends
+    const hasPendingSends = Array.isArray(pendingSends) && pendingSends.length > 0
+    const requiresExactRecovery =
+      !allowBoundedHistoryRecovery ||
+      hasInterrupt ||
+      hasPendingSends ||
+      this.checkpointHasPendingWrites(row, database) ||
+      this.hasPendingWriteIntent(row.thread_id, row.checkpoint_ns)
+    let recovered: CheckpointMessageRecoveryResult | null
+    try {
+      recovered = await recover({
+        threadId: row.thread_id,
+        checkpointNs: row.checkpoint_ns,
+        checkpointId: row.checkpoint_id,
+        missingCheckpointId: missing.checkpointId,
+        expectedMessageCount,
+        hasInterrupt,
+        requiresExactRecovery,
+        checkpointTs: checkpoint.ts
+      })
+    } catch (error) {
+      console.warn("[SqlJsSaver] Checkpoint message recovery source failed:", error)
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: error })
+    }
+    // A bounded tail is safe for an ordinary completed turn, but an interrupt
+    // can refer to an older tool-call message. Keep the broken state fail-closed
+    // unless the Worker proved that it returned the complete durable transcript.
+    if (
+      !recovered ||
+      !Array.isArray(recovered.messages) ||
+      recovered.messages.length > expectedMessageCount ||
+      (recovered.complete && recovered.messages.length !== expectedMessageCount) ||
+      (!recovered.complete && recovered.boundedByHistory !== true) ||
+      (requiresExactRecovery &&
+        (!recovered.complete || recovered.messages.length !== expectedMessageCount))
+    ) {
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+    }
+
+    const messages = Array.from(recovered.messages)
+    // Preserve legacy/forward-compatible top-level state such as pending_sends;
+    // copyCheckpoint() intentionally drops fields unknown to its current type.
+    const preparedCheckpoint = { ...checkpoint }
+    preparedCheckpoint.channel_values = {
+      ...preparedCheckpoint.channel_values,
+      messages: buildExternalMessagesReference(messages.length)
+    }
+    const [[messageType, serializedMessages], [checkpointType, serializedCheckpoint]] =
+      await Promise.all([
+        this.serde.dumpsTyped(messages),
+        this.serde.dumpsTyped(preparedCheckpoint)
+      ])
+    const recoveryGeneration = randomUUID()
+
+    if (!this.db) {
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+    }
+    try {
+      database.run("BEGIN IMMEDIATE")
+      if (!this.isExactLatestCheckpointRow(row, database)) {
+        database.run("ROLLBACK")
+        throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+      }
+      const stillRequiresExactRecovery =
+        !allowBoundedHistoryRecovery ||
+        hasInterrupt ||
+        hasPendingSends ||
+        this.checkpointHasPendingWrites(row, database) ||
+        this.hasPendingWriteIntent(row.thread_id, row.checkpoint_ns)
+      if (
+        stillRequiresExactRecovery &&
+        (!recovered.complete || messages.length !== expectedMessageCount)
+      ) {
+        database.run("ROLLBACK")
+        throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: missing })
+      }
+      database.run(
+        `INSERT INTO checkpoint_message_snapshots
+         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, prefix_length,
+          message_count, generation, type, suffix)
+         VALUES (?, ?, ?, NULL, 0, ?, ?, ?, ?)
+         ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET
+           parent_checkpoint_id = excluded.parent_checkpoint_id,
+           prefix_length = excluded.prefix_length,
+           message_count = excluded.message_count,
+           generation = excluded.generation,
+           type = excluded.type,
+           suffix = excluded.suffix`,
+        [
+          row.thread_id,
+          row.checkpoint_ns,
+          row.checkpoint_id,
+          messages.length,
+          recoveryGeneration,
+          messageType,
+          serializedMessages
+        ]
+      )
+      database.run(
+        `UPDATE checkpoints SET type = ?, checkpoint = ?
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+           AND type IS ? AND checkpoint = ?`,
+        [
+          checkpointType,
+          serializedCheckpoint,
+          row.thread_id,
+          row.checkpoint_ns,
+          row.checkpoint_id,
+          row.type,
+          row.checkpoint
+        ]
+      )
+      database.run("COMMIT")
+    } catch (error) {
+      try {
+        database.run("ROLLBACK")
+      } catch {
+        // Preserve the recovery/CAS failure.
+      }
+      if (error instanceof CheckpointMessageSnapshotRecoveryError) throw error
+      throw new CheckpointMessageSnapshotRecoveryError(row.checkpoint_id, { cause: error })
+    }
+
+    const hydrated = {
+      messages,
+      snapshotDepth: 1,
+      deltaBytes: 0,
+      snapshotGeneration: recoveryGeneration
+    }
+    this.rememberHydratedCheckpointMessages(
+      checkpointMessageCacheKey(row.thread_id, row.checkpoint_ns, row.checkpoint_id),
+      hydrated
+    )
+    // This now-full base supersedes the broken orphan chain. Collection itself
+    // uses an atomic reachability snapshot, so a concurrent Worker writer cannot
+    // turn one of the rows selected for deletion into a live ancestor mid-GC.
+    this.pruneUnreachableMessageSnapshots(row.thread_id, row.checkpoint_ns, database)
+    return hydrated
+  }
+
   private pruneUnreachableMessageSnapshots(
     threadId: string,
     checkpointNs: string,
     database: NativeSqliteAdapter
   ): void {
-    const snapshotTable = database.exec(
-      `SELECT name FROM sqlite_master
-       WHERE type = 'table' AND name = 'checkpoint_message_snapshots'`
-    )
-    if (!snapshotTable[0]?.values.length) return
-
-    const checkpointResult = database.exec(
-      `SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?`,
-      [threadId, checkpointNs]
-    )
-    const reachable = new Set<string>(
-      (checkpointResult[0]?.values ?? []).map((row) => String(row[0] ?? "")).filter(Boolean)
-    )
-
-    const snapshotResult = database.exec(
-      `SELECT checkpoint_id, parent_checkpoint_id
-       FROM checkpoint_message_snapshots
-       WHERE thread_id = ? AND checkpoint_ns = ?`,
-      [threadId, checkpointNs]
-    )
-    const parents = new Map<string, string | null>()
-    for (const row of snapshotResult[0]?.values ?? []) {
-      const id = String(row[0] ?? "")
-      if (!id) continue
-      parents.set(id, row[1] == null ? null : String(row[1]))
-    }
-
-    const queue = Array.from(reachable)
-    for (let index = 0; index < queue.length; index += 1) {
-      const parent = parents.get(queue[index])
-      if (!parent || reachable.has(parent)) continue
-      reachable.add(parent)
-      queue.push(parent)
-    }
-
-    const staleIds = Array.from(parents.keys()).filter((id) => !reachable.has(id))
-    if (staleIds.length === 0) return
-    for (let offset = 0; offset < staleIds.length; offset += MESSAGE_SNAPSHOT_DELETE_BATCH_SIZE) {
-      const batch = staleIds.slice(offset, offset + MESSAGE_SNAPSHOT_DELETE_BATCH_SIZE)
-      const placeholders = batch.map(() => "?").join(", ")
-      database.run(
-        `DELETE FROM checkpoint_message_snapshots
-         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN (${placeholders})`,
-        [threadId, checkpointNs, ...batch]
+    let staleIds: string[] = []
+    let transactionStarted = false
+    try {
+      database.run("BEGIN IMMEDIATE")
+      transactionStarted = true
+      const snapshotTable = database.exec(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name = 'checkpoint_message_snapshots'`
       )
+      if (snapshotTable[0]?.values.length) {
+        const checkpointResult = database.exec(
+          `SELECT checkpoint_id FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?`,
+          [threadId, checkpointNs]
+        )
+        const reachable = new Set<string>(
+          (checkpointResult[0]?.values ?? [])
+            .map((row) => String(row[0] ?? ""))
+            .filter(Boolean)
+        )
+
+        const snapshotResult = database.exec(
+          `SELECT checkpoint_id, parent_checkpoint_id
+           FROM checkpoint_message_snapshots
+           WHERE thread_id = ? AND checkpoint_ns = ?`,
+          [threadId, checkpointNs]
+        )
+        const parents = new Map<string, string | null>()
+        for (const row of snapshotResult[0]?.values ?? []) {
+          const id = String(row[0] ?? "")
+          if (!id) continue
+          parents.set(id, row[1] == null ? null : String(row[1]))
+        }
+
+        const queue = Array.from(reachable)
+        for (let index = 0; index < queue.length; index += 1) {
+          const parent = parents.get(queue[index])
+          if (!parent || reachable.has(parent)) continue
+          reachable.add(parent)
+          queue.push(parent)
+        }
+
+        staleIds = Array.from(parents.keys()).filter((id) => !reachable.has(id))
+        for (
+          let offset = 0;
+          offset < staleIds.length;
+          offset += MESSAGE_SNAPSHOT_DELETE_BATCH_SIZE
+        ) {
+          const batch = staleIds.slice(offset, offset + MESSAGE_SNAPSHOT_DELETE_BATCH_SIZE)
+          const placeholders = batch.map(() => "?").join(", ")
+          database.run(
+            `DELETE FROM checkpoint_message_snapshots
+             WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN (${placeholders})`,
+            [threadId, checkpointNs, ...batch]
+          )
+        }
+      }
+      database.run("COMMIT")
+      transactionStarted = false
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          database.run("ROLLBACK")
+        } catch {
+          // Keep GC best-effort; the already committed checkpoint stays valid.
+        }
+      }
+      console.warn("[SqlJsSaver] Failed to prune unreachable message snapshots:", error)
+      return
     }
+
     for (const checkpointId of staleIds) {
       this.hydratedCheckpointMessages.delete(
         checkpointMessageCacheKey(threadId, checkpointNs, checkpointId)
@@ -889,15 +1358,20 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     }
 
     const limit = this.retentionLimitForNamespace(checkpointNs)
-    const countResult = database.exec(
-      `SELECT COUNT(*) FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?`,
-      [threadId, checkpointNs]
-    )
-    const total = countResult[0]?.values[0]?.[0] as number
-    if (total <= limit) return
-
+    let transactionStarted = false
     try {
-      database.run("BEGIN")
+      database.run("BEGIN IMMEDIATE")
+      transactionStarted = true
+      const countResult = database.exec(
+        `SELECT COUNT(*) FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?`,
+        [threadId, checkpointNs]
+      )
+      const total = countResult[0]?.values[0]?.[0] as number
+      if (total <= limit) {
+        database.run("COMMIT")
+        transactionStarted = false
+        return
+      }
 
       database.run(
         `DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id IN (
@@ -920,95 +1394,114 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       )
 
       database.run("COMMIT")
+      transactionStarted = false
     } catch (e) {
-      database.run("ROLLBACK")
+      if (transactionStarted) {
+        try {
+          database.run("ROLLBACK")
+        } catch {
+          // Retention can retry after the next successful checkpoint write.
+        }
+      }
       console.warn("[SqlJsSaver] Failed to prune old checkpoints:", e)
     }
   }
 
   private pruneRootCheckpoints(threadId: string, database: NativeSqliteAdapter): void {
-    const result = database.exec(
-      `WITH RECURSIVE message_chain(
-         root_checkpoint_id, checkpoint_id, parent_checkpoint_id, payload_bytes
-       ) AS (
-         SELECT checkpoint.checkpoint_id,
-                snapshot.checkpoint_id,
-                snapshot.parent_checkpoint_id,
-                LENGTH(COALESCE(snapshot.suffix, ''))
-         FROM checkpoints AS checkpoint
-         JOIN checkpoint_message_snapshots AS snapshot
-           ON snapshot.thread_id = checkpoint.thread_id
-          AND snapshot.checkpoint_ns = checkpoint.checkpoint_ns
-          AND snapshot.checkpoint_id = checkpoint.checkpoint_id
-         WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
-         UNION
-         SELECT chain.root_checkpoint_id,
-                parent.checkpoint_id,
-                parent.parent_checkpoint_id,
-                LENGTH(COALESCE(parent.suffix, ''))
-         FROM message_chain AS chain
-         JOIN checkpoint_message_snapshots AS parent
-           ON parent.thread_id = ?
-          AND parent.checkpoint_ns = ''
-          AND parent.checkpoint_id = chain.parent_checkpoint_id
-       ), message_payload AS (
-         SELECT root_checkpoint_id, SUM(payload_bytes) AS payload_bytes
-         FROM message_chain
-         GROUP BY root_checkpoint_id
-       )
-       SELECT checkpoint.checkpoint_id,
-              checkpoint.fork_boundary_marker,
-              LENGTH(COALESCE(checkpoint.checkpoint, '')) +
-                LENGTH(COALESCE(checkpoint.metadata, '')) +
-                COALESCE(message_payload.payload_bytes, 0) AS payload_bytes
-       FROM checkpoints AS checkpoint
-       LEFT JOIN message_payload
-         ON message_payload.root_checkpoint_id = checkpoint.checkpoint_id
-       WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
-       ORDER BY COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id) DESC,
-                checkpoint.checkpoint_id DESC`,
-      [threadId, threadId, threadId]
-    )
-    const rows = (result[0]?.values ?? []).map((row) => ({
-      checkpoint_id: typeof row[0] === "string" ? row[0] : String(row[0] ?? ""),
-      fork_boundary_marker: typeof row[1] === "number" ? row[1] : Number(row[1] ?? 0),
-      payload_bytes: typeof row[2] === "number" ? row[2] : Number(row[2] ?? 0)
-    })) as RootCheckpointRetentionRow[]
-    if (rows.length <= this.maxRootCheckpoints) return
-
-    const keepIds = new Set<string>()
-    for (const row of rows.slice(0, this.maxRootCheckpoints)) {
-      if (row.checkpoint_id) keepIds.add(row.checkpoint_id)
-    }
-
-    const hasAnyForkBoundary = rows.some((row) => row.fork_boundary_marker === 1)
-    let seenForkBoundary = false
-    let archivedCount = 0
-    let archivedBytes = 0
-
-    for (const row of rows.slice(this.maxRootCheckpoints)) {
-      const isForkBoundary = row.fork_boundary_marker === 1
-      const isLegacyCandidate = !isForkBoundary && (!hasAnyForkBoundary || seenForkBoundary)
-      if (isForkBoundary || isLegacyCandidate) {
-        const nextBytes = archivedBytes + Math.max(0, row.payload_bytes)
-        if (
-          archivedCount < this.maxRootForkBoundaryCheckpoints &&
-          nextBytes <= this.maxRootForkBoundaryBytes
-        ) {
-          keepIds.add(row.checkpoint_id)
-          archivedCount += 1
-          archivedBytes = nextBytes
-        }
-      }
-      if (isForkBoundary) seenForkBoundary = true
-    }
-
-    if (keepIds.size >= rows.length) return
-    const placeholders = Array.from(keepIds, () => "?").join(", ")
-    const params = [threadId, ...keepIds]
-
+    let transactionStarted = false
     try {
-      database.run("BEGIN")
+      // The retention snapshot and its deletes must share one writer
+      // transaction. Otherwise another saver can commit a new checkpoint after
+      // keepIds is computed and the stale NOT IN set will delete that new row.
+      database.run("BEGIN IMMEDIATE")
+      transactionStarted = true
+      const result = database.exec(
+        `WITH RECURSIVE message_chain(
+           root_checkpoint_id, checkpoint_id, parent_checkpoint_id, payload_bytes
+         ) AS (
+           SELECT checkpoint.checkpoint_id,
+                  snapshot.checkpoint_id,
+                  snapshot.parent_checkpoint_id,
+                  LENGTH(COALESCE(snapshot.suffix, ''))
+           FROM checkpoints AS checkpoint
+           JOIN checkpoint_message_snapshots AS snapshot
+             ON snapshot.thread_id = checkpoint.thread_id
+            AND snapshot.checkpoint_ns = checkpoint.checkpoint_ns
+            AND snapshot.checkpoint_id = checkpoint.checkpoint_id
+           WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
+           UNION
+           SELECT chain.root_checkpoint_id,
+                  parent.checkpoint_id,
+                  parent.parent_checkpoint_id,
+                  LENGTH(COALESCE(parent.suffix, ''))
+           FROM message_chain AS chain
+           JOIN checkpoint_message_snapshots AS parent
+             ON parent.thread_id = ?
+            AND parent.checkpoint_ns = ''
+            AND parent.checkpoint_id = chain.parent_checkpoint_id
+         ), message_payload AS (
+           SELECT root_checkpoint_id, SUM(payload_bytes) AS payload_bytes
+           FROM message_chain
+           GROUP BY root_checkpoint_id
+         )
+         SELECT checkpoint.checkpoint_id,
+                checkpoint.fork_boundary_marker,
+                LENGTH(COALESCE(checkpoint.checkpoint, '')) +
+                  LENGTH(COALESCE(checkpoint.metadata, '')) +
+                  COALESCE(message_payload.payload_bytes, 0) AS payload_bytes
+         FROM checkpoints AS checkpoint
+         LEFT JOIN message_payload
+           ON message_payload.root_checkpoint_id = checkpoint.checkpoint_id
+         WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ''
+         ORDER BY COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id) DESC,
+                  checkpoint.checkpoint_id DESC`,
+        [threadId, threadId, threadId]
+      )
+      const rows = (result[0]?.values ?? []).map((row) => ({
+        checkpoint_id: typeof row[0] === "string" ? row[0] : String(row[0] ?? ""),
+        fork_boundary_marker: typeof row[1] === "number" ? row[1] : Number(row[1] ?? 0),
+        payload_bytes: typeof row[2] === "number" ? row[2] : Number(row[2] ?? 0)
+      })) as RootCheckpointRetentionRow[]
+      if (rows.length <= this.maxRootCheckpoints) {
+        database.run("COMMIT")
+        transactionStarted = false
+        return
+      }
+
+      const keepIds = new Set<string>()
+      for (const row of rows.slice(0, this.maxRootCheckpoints)) {
+        if (row.checkpoint_id) keepIds.add(row.checkpoint_id)
+      }
+
+      const hasAnyForkBoundary = rows.some((row) => row.fork_boundary_marker === 1)
+      let seenForkBoundary = false
+      let archivedCount = 0
+      let archivedBytes = 0
+
+      for (const row of rows.slice(this.maxRootCheckpoints)) {
+        const isForkBoundary = row.fork_boundary_marker === 1
+        const isLegacyCandidate = !isForkBoundary && (!hasAnyForkBoundary || seenForkBoundary)
+        if (isForkBoundary || isLegacyCandidate) {
+          const nextBytes = archivedBytes + Math.max(0, row.payload_bytes)
+          if (
+            archivedCount < this.maxRootForkBoundaryCheckpoints &&
+            nextBytes <= this.maxRootForkBoundaryBytes
+          ) {
+            keepIds.add(row.checkpoint_id)
+            archivedCount += 1
+            archivedBytes = nextBytes
+          }
+        }
+        if (isForkBoundary) seenForkBoundary = true
+      }
+
+      if (keepIds.size >= rows.length) {
+        database.run("COMMIT")
+        transactionStarted = false
+        return
+      }
+      const placeholders = Array.from(keepIds, () => "?").join(", ")
+      const params = [threadId, ...keepIds]
 
       database.run(
         `DELETE FROM writes
@@ -1023,8 +1516,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       )
 
       database.run("COMMIT")
+      transactionStarted = false
     } catch (e) {
-      database.run("ROLLBACK")
+      if (transactionStarted) {
+        try {
+          database.run("ROLLBACK")
+        } catch {
+          // Retention can retry after the next successful checkpoint write.
+        }
+      }
       console.warn("[SqlJsSaver] Failed to prune old root checkpoints:", e)
     }
   }
@@ -1170,6 +1670,43 @@ export class SqlJsSaver extends BaseCheckpointSaver {
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
+    const threadId = config.configurable?.thread_id
+    if (typeof threadId !== "string" || !threadId) return this.getTupleUnlocked(config)
+    const release = await this.acquireCheckpointNamespace(
+      threadId,
+      config.configurable?.checkpoint_ns ?? ""
+    )
+    try {
+      return await this.getTupleUnlocked(config)
+    } finally {
+      release()
+    }
+  }
+
+  /**
+   * Recovery-only latest-root read used after the invoke path has proven that
+   * the predecessor run settled. It is deliberately not a RunnableConfig flag,
+   * so fork/export/general graph reads cannot opt into bounded salvage.
+   */
+  async getLatestTupleForDurableTailRecovery(
+    threadId: string
+  ): Promise<CheckpointTuple | undefined> {
+    if (!threadId) return undefined
+    const release = await this.acquireCheckpointNamespace(threadId, "")
+    try {
+      return await this.getTupleUnlocked(
+        { configurable: { thread_id: threadId, checkpoint_ns: "" } },
+        true
+      )
+    } finally {
+      release()
+    }
+  }
+
+  private async getTupleUnlocked(
+    config: RunnableConfig,
+    allowBoundedHistoryRecovery = false
+  ): Promise<CheckpointTuple | undefined> {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
 
@@ -1180,14 +1717,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     if (checkpoint_id) {
       sql = `
-        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
+               metadata, fork_boundary_marker
         FROM checkpoints
         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
       `
       params = [thread_id, checkpoint_ns, checkpoint_id]
     } else {
       sql = `
-        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
+               metadata, fork_boundary_marker
         FROM checkpoints
         WHERE thread_id = ? AND checkpoint_ns = ?
         ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
@@ -1230,7 +1769,11 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const hasExternalSnapshot = isExternalMessagesReference(
       (serializedCheckpoint.channel_values as Record<string, unknown>).messages
     )
-    const checkpoint = await this.hydrateCheckpointMessages(row, serializedCheckpoint)
+    const checkpoint = await this.hydrateCheckpointMessages(
+      row,
+      serializedCheckpoint,
+      allowBoundedHistoryRecovery
+    )
 
     const restoredMessages = (checkpoint.channel_values as Record<string, unknown>).messages
     if (Array.isArray(restoredMessages)) {
@@ -1247,7 +1790,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
           ...captureCheckpointMessageSentinels(restoredMessages),
           hasExternalSnapshot,
           snapshotDepth: hydrated?.snapshotDepth ?? 0,
-          deltaBytes: hydrated?.deltaBytes ?? 0
+          deltaBytes: hydrated?.deltaBytes ?? 0,
+          snapshotGeneration: hydrated?.snapshotGeneration ?? null
         }
       )
     }
@@ -1286,6 +1830,30 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     config: RunnableConfig,
     options?: CheckpointListOptions
   ): AsyncGenerator<CheckpointTuple> {
+    const threadId = config.configurable?.thread_id
+    if (typeof threadId !== "string" || !threadId) {
+      yield* this.listUnlocked(config, options)
+      return
+    }
+    const release = await this.acquireCheckpointNamespace(
+      threadId,
+      config.configurable?.checkpoint_ns ?? ""
+    )
+    const tuples: CheckpointTuple[] = []
+    try {
+      for await (const tuple of this.listUnlocked(config, options)) tuples.push(tuple)
+    } finally {
+      // Never retain the namespace gate across a consumer-controlled yield.
+      // A loop body is allowed to call get/put for the same namespace.
+      release()
+    }
+    yield* tuples
+  }
+
+  private async *listUnlocked(
+    config: RunnableConfig,
+    options?: CheckpointListOptions
+  ): AsyncGenerator<CheckpointTuple> {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
 
@@ -1294,7 +1862,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const checkpoint_ns = config.configurable?.checkpoint_ns ?? ""
 
     let sql = `
-      SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+      SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
+             metadata, fork_boundary_marker
       FROM checkpoints
       WHERE thread_id = ? AND checkpoint_ns = ?
     `
@@ -1393,6 +1962,26 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     checkpoint: Checkpoint,
     metadata: CheckpointMetadata
   ): Promise<RunnableConfig> {
+    const threadId = config.configurable?.thread_id
+    if (typeof threadId !== "string" || !threadId) {
+      return this.putUnlocked(config, checkpoint, metadata)
+    }
+    const release = await this.acquireCheckpointNamespace(
+      threadId,
+      config.configurable?.checkpoint_ns ?? ""
+    )
+    try {
+      return await this.putUnlocked(config, checkpoint, metadata)
+    } finally {
+      release()
+    }
+  }
+
+  private async putUnlocked(
+    config: RunnableConfig,
+    checkpoint: Checkpoint,
+    metadata: CheckpointMetadata
+  ): Promise<RunnableConfig> {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
     const database = this.db
@@ -1413,6 +2002,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const namespaceKey = checkpointMessageNamespaceKey(thread_id, checkpoint_ns)
     const messages = (preparedCheckpoint.channel_values as Record<string, unknown>).messages
     let messageSnapshotParentCheckpointId: string | null = null
+    let messageSnapshotExpectedParentCount: number | null = null
+    let messageSnapshotExpectedParentGeneration: string | null = null
     let messageSnapshotPrefixLength = 0
     let externalMessageCount: number | undefined
     let serializedMessageSuffix: [string, string | Uint8Array] | undefined
@@ -1425,12 +2016,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       const previous = this.checkpointMessageWriteStates.get(namespaceKey)
       if (
         previous?.hasExternalSnapshot &&
+        previous.snapshotGeneration &&
         parent_checkpoint_id === previous.checkpointId &&
         previous.snapshotDepth < MAX_CHECKPOINT_MESSAGE_SNAPSHOT_DEPTH
       ) {
         messageSnapshotPrefixLength = commonMessageReferencePrefix(previous, messages)
         if (messageSnapshotPrefixLength > 0) {
           messageSnapshotParentCheckpointId = previous.checkpointId
+          messageSnapshotExpectedParentCount = previous.messageCount
+          messageSnapshotExpectedParentGeneration = previous.snapshotGeneration
         }
       }
 
@@ -1446,6 +2040,8 @@ export class SqlJsSaver extends BaseCheckpointSaver {
           previous.deltaBytes + serializedPayloadBytes(serializedMessageSuffix[1])
         if (candidateDeltaBytes > MAX_CHECKPOINT_MESSAGE_DELTA_BYTES) {
           messageSnapshotParentCheckpointId = null
+          messageSnapshotExpectedParentCount = null
+          messageSnapshotExpectedParentGeneration = null
           messageSnapshotPrefixLength = 0
           serializedMessageSuffix = await this.serde.dumpsTyped(messages)
           nextSnapshotDepth = 1
@@ -1492,83 +2088,140 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const checkpointTs =
       typeof preparedCheckpoint.ts === "string" ? preparedCheckpoint.ts : preparedCheckpoint.id
     const forkBoundaryMarker = checkpointMetadataHasForkBoundaryMarker(metadata) ? 1 : 0
+    const nextSnapshotGeneration = serializedMessageSuffix ? randomUUID() : null
 
-    try {
-      database.run("BEGIN")
-      if (serializedMessageSuffix) {
+    let committed = false
+    while (!committed) {
+      let transactionStarted = false
+      try {
+        database.run("BEGIN IMMEDIATE")
+        transactionStarted = true
+
+        if (messageSnapshotParentCheckpointId) {
+          const parentResult = database.exec(
+            `SELECT message_count, generation FROM checkpoint_message_snapshots
+             WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+             LIMIT 1`,
+            [thread_id, checkpoint_ns, messageSnapshotParentCheckpointId]
+          )
+          const persistedParentCount = Number(parentResult[0]?.values[0]?.[0])
+          const persistedParentGeneration = parentResult[0]?.values[0]?.[1]
+          if (
+            !Number.isSafeInteger(persistedParentCount) ||
+            persistedParentCount !== messageSnapshotExpectedParentCount ||
+            persistedParentGeneration !== messageSnapshotExpectedParentGeneration
+          ) {
+            // A different saver may have rebased and collected this parent while
+            // serde was suspended. Release the writer lock before the expensive
+            // full serialization, then retry as an independent base snapshot.
+            database.run("ROLLBACK")
+            transactionStarted = false
+            messageSnapshotParentCheckpointId = null
+            messageSnapshotExpectedParentCount = null
+            messageSnapshotExpectedParentGeneration = null
+            messageSnapshotPrefixLength = 0
+            if (!Array.isArray(messages)) {
+              throw new Error("Checkpoint message delta parent exists without an array payload")
+            }
+            serializedMessageSuffix = await this.serde.dumpsTyped(messages)
+            nextSnapshotDepth = 1
+            nextDeltaBytes = 0
+            shouldPruneMessageSnapshots = true
+            continue
+          }
+        }
+
+        if (serializedMessageSuffix) {
+          database.run(
+            `INSERT INTO checkpoint_message_snapshots
+             (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, prefix_length,
+              message_count, generation, type, suffix)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET
+               parent_checkpoint_id = excluded.parent_checkpoint_id,
+               prefix_length = excluded.prefix_length,
+               message_count = excluded.message_count,
+               generation = excluded.generation,
+               type = excluded.type,
+               suffix = excluded.suffix`,
+            [
+              thread_id,
+              checkpoint_ns,
+              checkpoint.id,
+              messageSnapshotParentCheckpointId,
+              messageSnapshotPrefixLength,
+              externalMessageCount,
+              nextSnapshotGeneration,
+              serializedMessageSuffix[0],
+              serializedMessageSuffix[1]
+            ]
+          )
+        } else {
+          database.run(
+            `DELETE FROM checkpoint_message_snapshots
+             WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
+            [thread_id, checkpoint_ns, checkpoint.id]
+          )
+        }
+
         database.run(
-          `INSERT OR REPLACE INTO checkpoint_message_snapshots
-           (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, prefix_length,
-            message_count, type, suffix)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO checkpoints
+           (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
+            metadata, checkpoint_ts, fork_boundary_marker)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             thread_id,
             checkpoint_ns,
             checkpoint.id,
-            messageSnapshotParentCheckpointId,
-            messageSnapshotPrefixLength,
-            externalMessageCount,
-            serializedMessageSuffix[0],
-            serializedMessageSuffix[1]
+            parent_checkpoint_id ?? null,
+            type1,
+            serializedCheckpoint,
+            serializedMetadata,
+            checkpointTs,
+            forkBoundaryMarker
           ]
         )
-      } else {
         database.run(
-          `DELETE FROM checkpoint_message_snapshots
-           WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
-          [thread_id, checkpoint_ns, checkpoint.id]
+          `INSERT INTO checkpoint_runtime_projections
+           (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+            checkpoint_ts, projection_version, type, runtime_checkpoint)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(thread_id, checkpoint_ns) DO UPDATE SET
+             checkpoint_id = excluded.checkpoint_id,
+             parent_checkpoint_id = excluded.parent_checkpoint_id,
+             checkpoint_ts = excluded.checkpoint_ts,
+             projection_version = excluded.projection_version,
+             type = excluded.type,
+             runtime_checkpoint = excluded.runtime_checkpoint
+           WHERE excluded.checkpoint_ts > checkpoint_runtime_projections.checkpoint_ts
+              OR (
+                excluded.checkpoint_ts = checkpoint_runtime_projections.checkpoint_ts
+                AND excluded.checkpoint_id >= checkpoint_runtime_projections.checkpoint_id
+              )`,
+          [
+            thread_id,
+            checkpoint_ns,
+            checkpoint.id,
+            parent_checkpoint_id ?? null,
+            checkpointTs,
+            CHECKPOINT_RUNTIME_PROJECTION_VERSION,
+            runtimeType,
+            serializedRuntimeCheckpoint
+          ]
         )
+        database.run("COMMIT")
+        transactionStarted = false
+        committed = true
+      } catch (error) {
+        if (transactionStarted) {
+          try {
+            database.run("ROLLBACK")
+          } catch {
+            // Preserve the put/serialization failure.
+          }
+        }
+        throw error
       }
-
-      database.run(
-        `INSERT OR REPLACE INTO checkpoints
-         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
-          metadata, checkpoint_ts, fork_boundary_marker)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          thread_id,
-          checkpoint_ns,
-          checkpoint.id,
-          parent_checkpoint_id ?? null,
-          type1,
-          serializedCheckpoint,
-          serializedMetadata,
-          checkpointTs,
-          forkBoundaryMarker
-        ]
-      )
-      database.run(
-        `INSERT INTO checkpoint_runtime_projections
-         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
-          checkpoint_ts, projection_version, type, runtime_checkpoint)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(thread_id, checkpoint_ns) DO UPDATE SET
-           checkpoint_id = excluded.checkpoint_id,
-           parent_checkpoint_id = excluded.parent_checkpoint_id,
-           checkpoint_ts = excluded.checkpoint_ts,
-           projection_version = excluded.projection_version,
-           type = excluded.type,
-           runtime_checkpoint = excluded.runtime_checkpoint
-         WHERE excluded.checkpoint_ts > checkpoint_runtime_projections.checkpoint_ts
-            OR (
-              excluded.checkpoint_ts = checkpoint_runtime_projections.checkpoint_ts
-              AND excluded.checkpoint_id >= checkpoint_runtime_projections.checkpoint_id
-            )`,
-        [
-          thread_id,
-          checkpoint_ns,
-          checkpoint.id,
-          parent_checkpoint_id ?? null,
-          checkpointTs,
-          CHECKPOINT_RUNTIME_PROJECTION_VERSION,
-          runtimeType,
-          serializedRuntimeCheckpoint
-        ]
-      )
-      database.run("COMMIT")
-    } catch (error) {
-      database.run("ROLLBACK")
-      throw error
     }
 
     if (Array.isArray(messages)) {
@@ -1578,14 +2231,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         ...captureCheckpointMessageSentinels(messages),
         hasExternalSnapshot: true,
         snapshotDepth: nextSnapshotDepth,
-        deltaBytes: nextDeltaBytes
+        deltaBytes: nextDeltaBytes,
+        snapshotGeneration: nextSnapshotGeneration
       })
       this.rememberHydratedCheckpointMessages(
         checkpointMessageCacheKey(thread_id, checkpoint_ns, checkpoint.id),
         {
           messages,
           snapshotDepth: nextSnapshotDepth,
-          deltaBytes: nextDeltaBytes
+          deltaBytes: nextDeltaBytes,
+          snapshotGeneration: nextSnapshotGeneration
         }
       )
     } else {
@@ -1610,6 +2265,25 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     config: RunnableConfig,
     updater: (metadata: CheckpointMetadata) => CheckpointMetadata
   ): Promise<CheckpointMetadata | undefined> {
+    const threadId = config.configurable?.thread_id
+    if (typeof threadId !== "string" || !threadId) {
+      return this.updateCheckpointMetadataUnlocked(config, updater)
+    }
+    const release = await this.acquireCheckpointNamespace(
+      threadId,
+      config.configurable?.checkpoint_ns ?? ""
+    )
+    try {
+      return await this.updateCheckpointMetadataUnlocked(config, updater)
+    } finally {
+      release()
+    }
+  }
+
+  private async updateCheckpointMetadataUnlocked(
+    config: RunnableConfig,
+    updater: (metadata: CheckpointMetadata) => CheckpointMetadata
+  ): Promise<CheckpointMetadata | undefined> {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
     const database = this.db
@@ -1631,14 +2305,16 @@ export class SqlJsSaver extends BaseCheckpointSaver {
 
     if (checkpoint_id) {
       sql = `
-        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
+               metadata, fork_boundary_marker
         FROM checkpoints
         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
       `
       params = [thread_id, checkpoint_ns, checkpoint_id]
     } else {
       sql = `
-        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata
+        SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint,
+               metadata, fork_boundary_marker
         FROM checkpoints
         WHERE thread_id = ? AND checkpoint_ns = ?
         ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
@@ -1666,22 +2342,91 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       throw new Error("Failed to serialize updated checkpoint metadata to the existing type.")
     }
 
-    database.run(
-      `UPDATE checkpoints
-       SET metadata = ?, fork_boundary_marker = ?
-       WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
-      [
-        serializedMetadata,
-        checkpointMetadataHasForkBoundaryMarker(nextMetadata) ? 1 : 0,
-        row.thread_id,
-        row.checkpoint_ns,
-        row.checkpoint_id
-      ]
-    )
-    return nextMetadata
+    let transactionStarted = false
+    try {
+      database.run("BEGIN IMMEDIATE")
+      transactionStarted = true
+      const updated = database.exec(
+        `UPDATE checkpoints AS source
+         SET metadata = ?, fork_boundary_marker = ?
+         WHERE source.thread_id = ? AND source.checkpoint_ns = ? AND source.checkpoint_id = ?
+           AND source.type IS ? AND source.checkpoint = ? AND source.metadata = ?
+           AND COALESCE(source.fork_boundary_marker, 0) = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM checkpoints AS newer
+             WHERE newer.thread_id = source.thread_id
+               AND newer.checkpoint_ns = source.checkpoint_ns
+               AND (
+                 COALESCE(newer.checkpoint_ts, newer.checkpoint_id) >
+                   COALESCE(source.checkpoint_ts, source.checkpoint_id)
+                 OR (
+                   COALESCE(newer.checkpoint_ts, newer.checkpoint_id) =
+                     COALESCE(source.checkpoint_ts, source.checkpoint_id)
+                   AND newer.checkpoint_id > source.checkpoint_id
+                 )
+               )
+           )
+         RETURNING checkpoint_id`,
+        [
+          serializedMetadata,
+          checkpointMetadataHasForkBoundaryMarker(nextMetadata) ? 1 : 0,
+          row.thread_id,
+          row.checkpoint_ns,
+          row.checkpoint_id,
+          row.type,
+          row.checkpoint,
+          row.metadata,
+          Number(row.fork_boundary_marker) === 1 ? 1 : 0
+        ]
+      )
+      if (!updated[0]?.values.length) {
+        database.run("ROLLBACK")
+        transactionStarted = false
+        return undefined
+      }
+      database.run("COMMIT")
+      transactionStarted = false
+      return nextMetadata
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          database.run("ROLLBACK")
+        } catch {
+          // Preserve the metadata CAS/serialization failure.
+        }
+      }
+      throw error
+    }
   }
 
   async putWrites(config: RunnableConfig, writes: PendingWrite[], taskId: string): Promise<void> {
+    const threadId = config.configurable?.thread_id
+    if (typeof threadId !== "string" || !threadId) {
+      return this.putWritesUnlocked(config, writes, taskId)
+    }
+    const checkpointNs = config.configurable?.checkpoint_ns ?? ""
+    const intentKey = this.checkpointNamespaceQueueKey(threadId, checkpointNs)
+    checkpointNamespacePendingWriteIntents.set(
+      intentKey,
+      (checkpointNamespacePendingWriteIntents.get(intentKey) ?? 0) + 1
+    )
+    let release: (() => void) | null = null
+    try {
+      release = await this.acquireCheckpointNamespace(threadId, checkpointNs)
+      await this.putWritesUnlocked(config, writes, taskId)
+    } finally {
+      release?.()
+      const remaining = (checkpointNamespacePendingWriteIntents.get(intentKey) ?? 1) - 1
+      if (remaining > 0) checkpointNamespacePendingWriteIntents.set(intentKey, remaining)
+      else checkpointNamespacePendingWriteIntents.delete(intentKey)
+    }
+  }
+
+  private async putWritesUnlocked(
+    config: RunnableConfig,
+    writes: PendingWrite[],
+    taskId: string
+  ): Promise<void> {
     await this.initialize()
     if (!this.db) throw new Error("Database not initialized")
     const database = this.db
@@ -1701,8 +2446,10 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     const serializedWrites = await Promise.all(
       writes.map(async (write) => ({ write, serialized: await this.serde.dumpsTyped(write[1]) }))
     )
+    let transactionStarted = false
     try {
-      database.run("BEGIN")
+      database.run("BEGIN IMMEDIATE")
+      transactionStarted = true
       for (let idx = 0; idx < serializedWrites.length; idx += 1) {
         const { write, serialized } = serializedWrites[idx]
         database.run(
@@ -1722,8 +2469,15 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         )
       }
       database.run("COMMIT")
+      transactionStarted = false
     } catch (error) {
-      database.run("ROLLBACK")
+      if (transactionStarted) {
+        try {
+          database.run("ROLLBACK")
+        } catch {
+          // Preserve the pending-write persistence failure.
+        }
+      }
       throw error
     }
   }
@@ -1787,6 +2541,7 @@ export class SqlJsSaver extends BaseCheckpointSaver {
       }
       this.checkpointMessageWriteStates.clear()
       this.hydratedCheckpointMessages.clear()
+      this.checkpointMessageRecoveryRequests.clear()
       if (failure) throw failure
     })().finally(() => {
       if (this.closePromise === closePromise) this.closePromise = null

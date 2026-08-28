@@ -15,7 +15,8 @@ import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import {
   CheckpointRuntimeProjectionClient,
-  CheckpointRuntimeProjectionWorkerUnavailableError
+  CheckpointRuntimeProjectionWorkerUnavailableError,
+  readLatestCheckpointTupleInWorker
 } from "./runtime-projection-client"
 import {
   commitPreparedRuntimeProjection,
@@ -215,6 +216,54 @@ function rejectLargeDeserialization(
 }
 
 describe("checkpoint runtime projection worker", () => {
+  it("returns an authoritative empty result when the checkpoint database is absent", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-absent-"))
+    temporaryDirectories.push(directory)
+
+    await expect(
+      readLatestCheckpointTupleInWorker(
+        join(directory, "not-created.sqlite"),
+        "thread-without-a-run"
+      )
+    ).resolves.toBeNull()
+  })
+
+  it("serializes concurrent saver and worker upgrades of a pre-generation snapshot table", async () => {
+    const threadId = "legacy-generation-upgrade"
+    const { databasePath } = await seedLegacyInlineFixture({
+      threadId,
+      messages: [{ id: "legacy-message", type: "human", content: "upgrade me" }]
+    })
+    const legacyDatabase = new DatabaseSync(databasePath)
+    legacyDatabase.exec("ALTER TABLE checkpoint_message_snapshots DROP COLUMN generation")
+    legacyDatabase.close()
+
+    const client = createClient()
+    const saver = new SqlJsSaver(databasePath)
+    const [migration] = await Promise.all([
+      client.ensureRuntimeProjection(databasePath, threadId),
+      saver.initialize()
+    ])
+    expect(migration.migrated).toBe(true)
+    await expect(client.ensureRuntimeProjection(databasePath, threadId)).resolves.toBeDefined()
+    await saver.close()
+
+    const verifier = new DatabaseSync(databasePath, { readOnly: true })
+    const columns = verifier
+      .prepare("PRAGMA table_info(checkpoint_message_snapshots)")
+      .all() as Array<{ name?: unknown }>
+    const snapshot = verifier
+      .prepare(
+        `SELECT generation FROM checkpoint_message_snapshots
+         WHERE thread_id = ? AND checkpoint_ns = ''`
+      )
+      .get(threadId) as { generation?: unknown } | undefined
+    verifier.close()
+    expect(columns.some((column) => column.name === "generation")).toBe(true)
+    expect(typeof snapshot?.generation).toBe("string")
+    expect(String(snapshot?.generation ?? "")).toMatch(/^[0-9a-f-]{32,36}$/)
+  })
+
   it("replaces an untrusted full-checkpoint projection before main deserializes it", async () => {
     const threadId = "legacy-fake-projection"
     const { databasePath, legacyCheckpoint } = await seedLegacyInlineFixture({

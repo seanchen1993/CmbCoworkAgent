@@ -10,7 +10,7 @@ import {
   RefreshCw,
   Trash2
 } from "lucide-react"
-import { useState, useEffect, memo, useCallback } from "react"
+import { useState, useEffect, memo, useCallback, useRef } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -34,7 +34,15 @@ function getFolderName(path: string | null | undefined): string | undefined {
   return path?.split(/[\\/]/).filter(Boolean).pop()
 }
 
-function PathRow({ label, path, highlight = false }: { label: string; path: string; highlight?: boolean }): React.JSX.Element {
+function PathRow({
+  label,
+  path,
+  highlight = false
+}: {
+  label: string
+  path: string
+  highlight?: boolean
+}): React.JSX.Element {
   const [hovered, setHovered] = useState(false)
 
   async function handleOpenFolder(): Promise<void> {
@@ -109,6 +117,7 @@ function WorkspacePickerImpl({
   const setWorkspaceFiles = threadActions?.setWorkspaceFiles
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
+  const worktreeCreateInFlightRef = useRef(false)
 
   // Git detection state
   const [isGit, setIsGit] = useState(false)
@@ -240,7 +249,10 @@ function WorkspacePickerImpl({
     if (selection.status !== "success") return
     const newPath = await window.api.workspace.get(threadId)
     if (newPath) {
-      const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false, threadId })
+      const gitInfo = await window.api.workspace.isGit(newPath, {
+        includeWorktrees: false,
+        threadId
+      })
       setIsGit(gitInfo.isGit)
       setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
       setIsWorktreePath(gitInfo.isWorktreePath)
@@ -256,19 +268,19 @@ function WorkspacePickerImpl({
   }
 
   async function handleCreateWorktree(): Promise<void> {
+    // React state is not visible until the next render, so a button click and
+    // Enter keydown in the same tick need a synchronous re-entry guard.
+    if (worktreeCreateInFlightRef.current) return
     if (!canChangeWorkspace) {
       toast.error(WORKSPACE_SWITCH_LOCKED_MESSAGE)
       return
     }
     if (!gitRoot || !branchName.trim()) return
+    worktreeCreateInFlightRef.current = true
     setLoading(true)
     setWorktreeError(null)
     try {
-      const result = await window.api.workspace.createWorktree(
-        threadId,
-        gitRoot,
-        branchName.trim()
-      )
+      const result = await window.api.workspace.createWorktree(threadId, gitRoot, branchName.trim())
       if (!result.success || !result.path || !result.branch) {
         setWorktreeError(result.error ?? "创建失败")
         return
@@ -290,6 +302,7 @@ function WorkspacePickerImpl({
     } catch (e) {
       setWorktreeError(e instanceof Error ? e.message : "创建失败")
     } finally {
+      worktreeCreateInFlightRef.current = false
       setLoading(false)
     }
   }
@@ -345,16 +358,19 @@ function WorkspacePickerImpl({
   const folderName = getFolderName(workspacePath)
 
   return (
-    <Popover open={open} onOpenChange={(v) => {
-      setOpen(v)
-      if (!v) {
-        setBranchName("")
-        setWorktreeError(null)
-      } else {
-        // Restore worktree creation form if mode was already set to worktree
-        if (mode === "worktree" && !isWorktree && canChangeWorkspace) setCreatingWorktree(true)
-      }
-    }}>
+    <Popover
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v)
+        if (!v) {
+          setBranchName("")
+          setWorktreeError(null)
+        } else {
+          // Restore worktree creation form if mode was already set to worktree
+          if (mode === "worktree" && !isWorktree && canChangeWorkspace) setCreatingWorktree(true)
+        }
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
@@ -511,8 +527,12 @@ function WorkspacePickerImpl({
                         {worktreeList.map((item) => (
                           <div key={item.path} className="px-2 py-1.5 flex items-center gap-2">
                             <div className="min-w-0 flex-1">
-                              <div className="text-[11px] truncate text-foreground">{item.branch}</div>
-                              <div className="text-[10px] truncate text-muted-foreground">{item.path}</div>
+                              <div className="text-[11px] truncate text-foreground">
+                                {item.branch}
+                              </div>
+                              <div className="text-[10px] truncate text-muted-foreground">
+                                {item.path}
+                              </div>
                             </div>
                             {item.isMain ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
@@ -564,7 +584,11 @@ function WorkspacePickerImpl({
                   onClick={handleSelectFolder}
                   disabled={loading}
                 >
-                  {loading ? <Loader2 className="size-3 mr-1.5 animate-spin" /> : <Folder className="size-3.5 mr-1.5" />}
+                  {loading ? (
+                    <Loader2 className="size-3 mr-1.5 animate-spin" />
+                  ) : (
+                    <Folder className="size-3.5 mr-1.5" />
+                  )}
                   更换文件夹
                 </Button>
               )}

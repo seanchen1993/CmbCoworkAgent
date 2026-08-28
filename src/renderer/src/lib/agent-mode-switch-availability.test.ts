@@ -10,17 +10,27 @@ describe("thread agent mode switch availability", () => {
     expect(
       canChangeThreadAgentMode({
         historyLoading: true,
-        historyMessageTotal: 0,
+        conversationPresence: "empty",
         residentMessageCount: 0
       })
     ).toBe(false)
   })
 
-  it("rejects a virtualized empty resident window when durable messages exist", () => {
+  it("rejects a virtualized thread with a confirmed conversation", () => {
     expect(
       canChangeThreadAgentMode({
         historyLoading: false,
-        historyMessageTotal: 12,
+        conversationPresence: "nonempty",
+        residentMessageCount: 0
+      })
+    ).toBe(false)
+  })
+
+  it("rejects a thread whose conversation presence is not known yet", () => {
+    expect(
+      canChangeThreadAgentMode({
+        historyLoading: false,
+        conversationPresence: "unknown",
         residentMessageCount: 0
       })
     ).toBe(false)
@@ -30,7 +40,7 @@ describe("thread agent mode switch availability", () => {
     expect(
       canChangeThreadAgentMode({
         historyLoading: false,
-        historyMessageTotal: 0,
+        conversationPresence: "empty",
         residentMessageCount: 0
       })
     ).toBe(true)

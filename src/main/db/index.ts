@@ -11,6 +11,7 @@ import { mergeThreadValueObjects } from "../../shared/thread-values"
 import {
   GOAL_UI_EVENT_LIMIT,
   GOAL_USER_MESSAGE_EVENT_PREFIX,
+  isVisibleGoalUserEventMessage,
   isStaleCheckpointBoundaryNoticeMessage,
   STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES,
   STALE_CHECKPOINT_BOUNDARY_NOTICE_PREFIXES
@@ -24,6 +25,7 @@ import {
   getMessageRoleCollisionSourceId,
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
+import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
 import type {
   Message,
   ThreadMessageSearchMatch,
@@ -83,6 +85,15 @@ export const THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET = 512 * 1024
 export const THREAD_MESSAGE_SEARCH_QUERY_LIMIT = 256
 export const THREAD_MESSAGE_SEARCH_PREVIEW_LIMIT = 320
 export const THREAD_MESSAGE_SEARCH_RESPONSE_BYTE_BUDGET = 128 * 1024
+// Mode changes run on Electron main. Inspect only a small prefix there; an
+// over-budget internal-only transcript is treated as unknown and therefore
+// locked, while the exact initial-hydration scan stays in the worker.
+export const THREAD_MODE_VISIBLE_MESSAGE_SCAN_LIMIT = 256
+export const THREAD_MODE_VISIBLE_ROW_BYTE_LIMIT = 64 * 1024
+export const THREAD_MODE_VISIBLE_SCAN_BYTE_BUDGET = 2 * 1024 * 1024
+
+export type ThreadVisibleMessagePresence = "empty" | "nonempty" | "unknown"
+export type LegacyCheckpointMigrationStatus = "migrating" | "complete" | null
 
 function textChunkEnd(text: string, start: number, maxCodeUnits: number): number {
   let end = Math.min(text.length, start + Math.max(0, maxCodeUnits))
@@ -1224,6 +1235,153 @@ export function hasThreadMessages(threadId: string): boolean {
   return getThreadMessageCount(threadId) > 0
 }
 
+/**
+ * Read the resumable legacy-checkpoint copy state by its primary key. Unknown
+ * status values fail closed as `migrating`; a corrupt marker must never make a
+ * partial transcript look authoritative.
+ */
+export function getLegacyCheckpointMigrationStatus(
+  threadId: string
+): LegacyCheckpointMigrationStatus {
+  const database = getDb()
+  const stmt = database.prepare(
+    `SELECT status
+     FROM legacy_checkpoint_transcript_migrations
+     WHERE thread_id = ?
+     LIMIT 1`
+  )
+  stmt.bind([threadId])
+  try {
+    if (!stmt.step()) return null
+    const status = (stmt.getAsObject() as { status?: unknown }).status
+    return status === "complete" ? "complete" : "migrating"
+  } finally {
+    stmt.free()
+  }
+}
+
+/**
+ * Bounded main-thread presence check for execution-mode mutation guards. The
+ * extra row distinguishes a proven empty/internal-only transcript from a scan
+ * that exceeded its CPU budget. Callers must treat `unknown` as non-empty.
+ */
+export function getBoundedThreadVisibleMessagePresence(
+  threadId: string
+): ThreadVisibleMessagePresence {
+  const database = getDb()
+  const stmt = database.prepare(
+    `SELECT role,
+            length(CAST(content_json AS BLOB)) AS content_bytes,
+            CASE WHEN length(CAST(content_json AS BLOB)) <= ? THEN content_json ELSE NULL END AS content_json
+     FROM thread_messages
+     WHERE thread_id = ?
+     LIMIT ?`
+  )
+  stmt.bind([
+    THREAD_MODE_VISIBLE_ROW_BYTE_LIMIT,
+    threadId,
+    THREAD_MODE_VISIBLE_MESSAGE_SCAN_LIMIT + 1
+  ])
+  let scannedRows = 0
+  let scannedBytes = 0
+  try {
+    while (stmt.step()) {
+      if (scannedRows >= THREAD_MODE_VISIBLE_MESSAGE_SCAN_LIMIT) return "unknown"
+      scannedRows += 1
+      const row = stmt.getAsObject() as {
+        role?: unknown
+        content_bytes?: unknown
+        content_json?: unknown
+      }
+      const contentBytes = Number(row.content_bytes)
+      if (
+        !Number.isFinite(contentBytes) ||
+        contentBytes < 0 ||
+        contentBytes > THREAD_MODE_VISIBLE_ROW_BYTE_LIMIT ||
+        scannedBytes + contentBytes > THREAD_MODE_VISIBLE_SCAN_BYTE_BUDGET ||
+        typeof row.content_json !== "string"
+      ) {
+        return "unknown"
+      }
+      scannedBytes += contentBytes
+      if (
+        typeof row.role === "string" &&
+        isRestorableConversationTranscriptMessage(
+          row.role,
+          parseMessageContent(row.content_json)
+        )
+      ) {
+        return "nonempty"
+      }
+    }
+    return "empty"
+  } finally {
+    stmt.free()
+  }
+}
+
+export function getBoundedThreadVisibleGoalEventPresence(
+  threadId: string
+): ThreadVisibleMessagePresence {
+  const database = getDb()
+  const stmt = database.prepare(
+    `SELECT length(CAST(message AS BLOB)) AS message_bytes,
+            CASE WHEN length(CAST(message AS BLOB)) <= ? THEN message ELSE NULL END AS message
+     FROM thread_goal_events
+     WHERE thread_id = ?
+       AND substr(trim(message), 1, length(?)) = ?
+     LIMIT ?`
+  )
+  stmt.bind([
+    THREAD_MODE_VISIBLE_ROW_BYTE_LIMIT,
+    threadId,
+    GOAL_USER_MESSAGE_EVENT_PREFIX,
+    GOAL_USER_MESSAGE_EVENT_PREFIX,
+    THREAD_MODE_VISIBLE_MESSAGE_SCAN_LIMIT + 1
+  ])
+  let scannedRows = 0
+  let scannedBytes = 0
+  try {
+    while (stmt.step()) {
+      if (scannedRows >= THREAD_MODE_VISIBLE_MESSAGE_SCAN_LIMIT) return "unknown"
+      scannedRows += 1
+      const row = stmt.getAsObject() as { message_bytes?: unknown; message?: unknown }
+      const messageBytes = Number(row.message_bytes)
+      if (
+        !Number.isFinite(messageBytes) ||
+        messageBytes < 0 ||
+        messageBytes > THREAD_MODE_VISIBLE_ROW_BYTE_LIMIT ||
+        scannedBytes + messageBytes > THREAD_MODE_VISIBLE_SCAN_BYTE_BUDGET ||
+        typeof row.message !== "string"
+      ) {
+        return "unknown"
+      }
+      scannedBytes += messageBytes
+      if (isVisibleGoalUserEventMessage(row.message)) return "nonempty"
+    }
+    return "empty"
+  } finally {
+    stmt.free()
+  }
+}
+
+export function getBoundedThreadConversationPresence(
+  threadId: string
+): ThreadVisibleMessagePresence {
+  const messagePresence = getBoundedThreadVisibleMessagePresence(threadId)
+  if (messagePresence === "nonempty") return "nonempty"
+  const goalEventPresence = getBoundedThreadVisibleGoalEventPresence(threadId)
+  if (goalEventPresence === "nonempty") return "nonempty"
+  return messagePresence === "unknown" || goalEventPresence === "unknown"
+    ? "unknown"
+    : "empty"
+}
+
+/** Main-thread boolean guard; an over-budget scan fails closed as present. */
+export function hasVisibleThreadMessages(threadId: string): boolean {
+  return getBoundedThreadConversationPresence(threadId) !== "empty"
+}
+
 export function getThreadMessages(threadId: string): Message[] {
   const database = getDb()
   const stmt = database.prepare(
@@ -1286,6 +1444,9 @@ export function getThreadMessagesPage(
 
   const bucket = getThreadMessageBucketRow(database, threadId)
   const total = bucket ? Math.max(0, Number(bucket.message_count) || 0) : 0
+  const legacyCheckpointMigrationStatus = options.includeVisibleMessagePresence
+    ? getLegacyCheckpointMigrationStatus(threadId)
+    : undefined
 
   let anchorOrdinal: number | null = null
   if (hasAnchorMessageId) {
@@ -1441,6 +1602,12 @@ export function getThreadMessagesPage(
       !hasAnchorMessageId && hasMore && oldestRow ? oldestRow.message_id : null,
     hasMore,
     total,
+    ...(options.includeVisibleMessagePresence
+      ? { hasVisibleMessages: hasVisibleThreadMessages(threadId) }
+      : {}),
+    ...(legacyCheckpointMigrationStatus !== undefined
+      ? { legacyCheckpointMigrationStatus }
+      : {}),
     ...(hasAnchorMessageId
       ? { verifiedAnchorMessageId: normalizedAnchorMessageId }
       : {})
@@ -4916,6 +5083,81 @@ export function getAllThreadSummaries(): ThreadSummaryRow[] {
   return threads
 }
 
+export interface PersistedThreadWorkspaceBinding {
+  threadId: string
+  workspacePath: string
+  isWorktree: boolean
+  worktreeBranch: string | null
+}
+
+/**
+ * Read only durable workspace identity fields for destructive worktree guards.
+ * SQL JSON projection keeps transcript/thread-values and the remainder of large
+ * metadata blobs out of Electron's main-process heap.
+ */
+export function getPersistedThreadWorkspaceBindings(): PersistedThreadWorkspaceBinding[] {
+  const database = getDb()
+  const invalidMetadata = database.prepare(
+    `SELECT thread_id
+     FROM threads
+     WHERE metadata IS NOT NULL
+       AND NOT json_valid(metadata)
+     LIMIT 1`
+  )
+  try {
+    if (invalidMetadata.step()) {
+      const threadId = (invalidMetadata.getAsObject() as { thread_id?: unknown }).thread_id
+      throw new Error(
+        `cannot verify workspace bindings because task ${String(threadId)} has invalid metadata`
+      )
+    }
+  } finally {
+    invalidMetadata.free()
+  }
+
+  const stmt = database.prepare(
+    `SELECT
+       thread_id,
+       json_extract(metadata, '$.workspacePath') AS workspace_path,
+       CASE
+         WHEN json_type(metadata, '$.isWorktree') = 'true' THEN 1
+         ELSE 0
+       END AS is_worktree,
+       CASE
+         WHEN json_type(metadata, '$.worktreeBranch') = 'text'
+         THEN json_extract(metadata, '$.worktreeBranch')
+         ELSE NULL
+       END AS worktree_branch
+     FROM threads
+     WHERE metadata IS NOT NULL
+       AND json_valid(metadata)
+       AND json_type(metadata, '$.workspacePath') = 'text'
+     ORDER BY thread_id ASC`
+  )
+  const bindings: PersistedThreadWorkspaceBinding[] = []
+  try {
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as {
+        thread_id?: unknown
+        workspace_path?: unknown
+        is_worktree?: unknown
+        worktree_branch?: unknown
+      }
+      if (typeof row.thread_id !== "string" || typeof row.workspace_path !== "string") continue
+      bindings.push({
+        threadId: row.thread_id,
+        workspacePath: row.workspace_path,
+        isWorktree: Number(row.is_worktree) === 1,
+        worktreeBranch:
+          typeof row.worktree_branch === "string" ? row.worktree_branch : null
+      })
+    }
+  } finally {
+    stmt.free()
+  }
+  return bindings
+}
+
 /** Metadata/status projection for hot main-process paths. */
 export function getThreadCore(threadId: string): ThreadSummaryRow | null {
   const database = getDb()
@@ -5423,10 +5665,7 @@ const NON_TRANSCRIPT_GOAL_COMMANDS = new Set([
 ])
 
 function isRestorableGoalUserEventMessage(message: string): boolean {
-  const trimmed = message.trim()
-  if (!trimmed.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)) return false
-  const command = trimmed.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length).trim().toLowerCase()
-  return !NON_TRANSCRIPT_GOAL_COMMANDS.has(command)
+  return isVisibleGoalUserEventMessage(message)
 }
 
 /**

@@ -16,7 +16,14 @@ export interface ThreadMessageHydrationReadRequest {
   threadId: string
   options: Pick<
     ThreadMessagesPageOptions,
-    "beforeOrdinal" | "beforeMessageId" | "anchorMessageId" | "limit" | "byteBudget"
+    | "beforeOrdinal"
+    | "beforeMessageId"
+    | "anchorMessageId"
+    | "limit"
+    | "byteBudget"
+    | "includeVisibleMessagePresence"
+    | "notAfterCreatedAt"
+    | "recoveryCheckpointId"
   >
   cancellationBuffer: SharedArrayBuffer
 }

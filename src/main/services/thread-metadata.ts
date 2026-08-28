@@ -1,6 +1,10 @@
 import { getThreadCore, updateThread, type ThreadRow } from "../db"
 import type { ThreadMetadataPatch } from "../types"
 import { isAgentOutputStyle } from "../../shared/agent-output-style"
+import {
+  resolveThreadExecutionModeFromMetadata,
+  type ThreadExecutionMode
+} from "../../shared/agent-mode-metadata"
 
 const UNSAFE_METADATA_KEYS = new Set(["__proto__", "prototype", "constructor"])
 const RENDERER_METADATA_PATCH_MAX_BYTES = 8 * 1024
@@ -38,11 +42,8 @@ export function parseThreadMetadata(raw: string | null | undefined): Record<stri
 
 export function getThreadExecutionMode(
   metadata: Record<string, unknown>
-): "normal" | "multi" | "coordinator" | "workflow" {
-  if (metadata.agentMode === "coordinator" || metadata.agentMode === "workflow") {
-    return metadata.agentMode
-  }
-  return metadata.subagentsEnabled === false ? "normal" : "multi"
+): ThreadExecutionMode {
+  return resolveThreadExecutionModeFromMetadata(metadata)
 }
 
 export function assertNoActiveAgentModeTransition(

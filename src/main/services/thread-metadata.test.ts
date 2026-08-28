@@ -3,6 +3,7 @@ import {
   applyThreadMetadataPatch,
   assertNoActiveAgentModeTransition,
   assertNoTranscriptAgentModeTransition,
+  getThreadExecutionMode,
   parseThreadMetadata,
   validateRendererThreadMetadataPatch,
   validateThreadMetadataPatch
@@ -115,6 +116,20 @@ describe("thread metadata patch", () => {
     expect(() =>
       assertNoTranscriptAgentModeTransition(
         { agentMode: "normal", subagentsEnabled: false },
+        { agentMode: "coordinator" },
+        false
+      )
+    ).not.toThrow()
+    expect(() =>
+      assertNoTranscriptAgentModeTransition(
+        { agentMode: "normal", subagentsEnabled: false },
+        { agentMode: "coordinator" },
+        true
+      )
+    ).toThrow(/已有对话消息/)
+    expect(() =>
+      assertNoTranscriptAgentModeTransition(
+        { agentMode: "normal", subagentsEnabled: false },
         { agentMode: "normal", subagentsEnabled: true },
         true
       )
@@ -126,5 +141,23 @@ describe("thread metadata patch", () => {
         true
       )
     ).not.toThrow()
+  })
+
+  it("uses the legacy coordinator flag consistently in all execution-mode guards", () => {
+    expect(getThreadExecutionMode({ coordinatorMode: "true" })).toBe("coordinator")
+    expect(() =>
+      assertNoTranscriptAgentModeTransition(
+        { coordinatorMode: true },
+        { coordinatorMode: true, agentMode: "coordinator" },
+        true
+      )
+    ).not.toThrow()
+    expect(() =>
+      assertNoTranscriptAgentModeTransition(
+        { coordinatorMode: true },
+        { agentMode: "normal", subagentsEnabled: true },
+        true
+      )
+    ).toThrow(/已有对话消息/)
   })
 })

@@ -8,8 +8,13 @@ import {
   statSync,
   type Dirent
 } from "node:fs"
+import { createHash } from "node:crypto"
 import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { getDiscoveredSkillAliases, getDiscoveredSkillId, normalizeSkillId } from "../skills/ids"
+import {
+  DISABLED_SKILL_STORE_MISSING_FINGERPRINT,
+  fingerprintDisabledSkillStoreText
+} from "../skills/disabled-store-fingerprint"
 import { parseYamlFrontmatter } from "../utils/skill-identifiers"
 import type {
   PluginMetadata,
@@ -101,6 +106,10 @@ interface SkillPreviewCandidate {
 interface CatalogSnapshot {
   id: string
   key: string
+  sourceKey: string
+  catalogGlobalRevision: number
+  disabledSkillsRevision: number
+  disabledStoreFingerprint?: string
   skills: SkillMetadata[]
   plugins: PluginMetadata[]
   disabledSkillIds: string[]
@@ -163,11 +172,11 @@ function retainBoundedEntry<T>(
   return true
 }
 
-function setBoundedMetadata(
-  target: Map<string, SkillMetadata>,
+function setBoundedMapEntry<T>(
+  target: Map<string, T>,
   retainedBytes: Map<string, number>,
   key: string,
-  value: SkillMetadata,
+  value: T,
   budget: SnapshotBudget,
   context: BuildContext
 ): boolean {
@@ -611,20 +620,60 @@ function toSkillMetadata(
   }
 }
 
-function resolveDisabledIds(
+function readDisabledSkillStore(
   source: SkillPluginCatalogSourceConfig,
-  globalSkills: DisabledSkillIdentity[],
   context: BuildContext
-): string[] {
-  const parsed = readJson(
+): { entries: string[]; fingerprint: string } {
+  let disabledStoreExists = false
+  try {
+    disabledStoreExists = statSync(source.disabledSkillsPath).isFile()
+    if (!disabledStoreExists) markTruncated(context, "disabled-skills-invalid")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { entries: [], fingerprint: DISABLED_SKILL_STORE_MISSING_FINGERPRINT }
+    }
+    markTruncated(context, "disabled-skills-invalid")
+  }
+  if (!disabledStoreExists) return { entries: [], fingerprint: "invalid" }
+
+  const text = readBoundedText(
     source.disabledSkillsPath,
     SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES,
     context,
-    "disabled-skills-bytes"
+    { allowPrefix: false, reason: "disabled-skills-bytes" }
   )
-  const rawEntries = Array.isArray(parsed)
-    ? parsed.filter((entry): entry is string => typeof entry === "string")
-    : []
+  if (text === null) {
+    markTruncated(context, "disabled-skills-invalid")
+    return { entries: [], fingerprint: "invalid" }
+  }
+  const fingerprint = fingerprintDisabledSkillStoreText(text)
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!Array.isArray(parsed)) {
+      markTruncated(context, "disabled-skills-invalid")
+      return { entries: [], fingerprint }
+    }
+    return {
+      entries: parsed.filter((entry): entry is string => typeof entry === "string"),
+      fingerprint
+    }
+  } catch {
+    markTruncated(context, "disabled-skills-invalid")
+    return { entries: [], fingerprint }
+  }
+}
+
+function resolveDisabledIds(
+  source: SkillPluginCatalogSourceConfig,
+  globalSkills: DisabledSkillIdentity[],
+  context: BuildContext,
+  additionalEntries: readonly string[] = []
+): { disabledSkillIds: string[]; fingerprint: string } {
+  const disabledStore = readDisabledSkillStore(source, context)
+  const rawEntries = [
+    ...disabledStore.entries,
+    ...additionalEntries.filter((entry): entry is string => typeof entry === "string")
+  ]
   const byId = new Set<string>()
   const aliases = new Map<string, Set<string>>()
   for (const skill of globalSkills) {
@@ -658,21 +707,31 @@ function resolveDisabledIds(
   if (rawEntries.length > SKILL_PLUGIN_CATALOG_MAX_SKILLS) {
     markTruncated(context, "disabled-skill-count")
   }
-  return [...resolved]
+  return { disabledSkillIds: [...resolved], fingerprint: disabledStore.fingerprint }
 }
 
 function sourceKey(
   source: SkillPluginCatalogSourceConfig,
-  projection: "plugins-only" | "skills-and-disabled"
+  projection: "plugins-only" | "skills-and-disabled" | "disabled-identities",
+  mergeDisabledSkillIds: readonly string[] = []
 ): string {
-  return JSON.stringify([
+  const common = [
     source.globalRevision,
+    source.disabledSkillsRevision,
     projection,
     source.builtinSkillsDir,
     source.customSkillsDir,
-    source.pluginsStorePath,
     source.disabledSkillsPath
-  ])
+  ]
+  return JSON.stringify(
+    projection === "disabled-identities"
+      ? [...common, mergeDisabledSkillIds]
+      : [...common, source.pluginsStorePath]
+  )
+}
+
+function opaqueSourceKey(key: string): string {
+  return createHash("sha256").update(key).digest("hex")
 }
 
 function deleteSnapshot(snapshot: CatalogSnapshot): void {
@@ -744,8 +803,13 @@ function buildSnapshot(
   input: SkillPluginCatalogPageInput,
   cancelFlag?: Int32Array
 ): CatalogSnapshot {
-  const projection = input.kind === "plugins" ? "plugins-only" : "skills-and-disabled"
-  const key = sourceKey(source, projection)
+  const projection =
+    input.kind === "plugins"
+      ? "plugins-only"
+      : input.kind === "disabled"
+        ? "disabled-identities"
+        : "skills-and-disabled"
+  const key = sourceKey(source, projection, input.mergeDisabledSkillIds)
   trimSnapshots()
   const cachedId = snapshotIdByKey.get(key)
   const cached = cachedId ? snapshotsById.get(cachedId) : undefined
@@ -757,6 +821,108 @@ function buildSnapshot(
     stats: { scannedDirectories: 0, scannedFiles: 0, discoveredSkills: 0, readBytes: 0 },
     truncatedReasons: new Set()
   }
+  const localSources: SkillSource[] = [
+    { sourceDir: source.builtinSkillsDir, source: "project", kind: "builtin" },
+    { sourceDir: source.customSkillsDir, source: "user", kind: "custom" }
+  ]
+
+  if (projection === "disabled-identities") {
+    // This projection exists only to canonicalize legacy aliases before a
+    // disabled-store mutation. It intentionally skips plugins.json, plugin
+    // directories, and full SkillMetadata construction so unrelated plugin
+    // truncation cannot make a standalone skill impossible to toggle.
+    const identityBudget: SnapshotBudget = {
+      bytes: 0,
+      limit: SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES
+    }
+    const identities = new Map<string, DisabledSkillIdentity>()
+    const identityBytes = new Map<string, number>()
+    for (const localSource of localSources) {
+      for (const skill of discoverSkills(localSource, context)) {
+        const id =
+          boundedString(
+            context,
+            getDiscoveredSkillId(skill),
+            MAX_SKILL_ID,
+            "skill-id-bytes"
+          ) || ""
+        if (!id) continue
+        const identity: DisabledSkillIdentity = {
+          name:
+            boundedString(context, skill.name, 1_024, "skill-name-bytes") ||
+            basename(skill.rootDir),
+          relativePath: boundedString(
+            context,
+            skill.relativePath,
+            MAX_PATH,
+            "skill-relative-path-bytes"
+          ),
+          rootDir:
+            boundedString(context, skill.rootDir, MAX_PATH, "skill-path-bytes") ||
+            skill.rootDir
+        }
+        setBoundedMapEntry(
+          identities,
+          identityBytes,
+          id,
+          identity,
+          identityBudget,
+          context
+        )
+      }
+    }
+
+    const { disabledSkillIds, fingerprint: disabledStoreFingerprint } = resolveDisabledIds(
+      source,
+      [...identities.values()],
+      context,
+      input.mergeDisabledSkillIds
+    )
+    const disabledSet = new Set(disabledSkillIds.map(normalizeSkillId))
+    const relevantDisabledIds = new Set<string>()
+    for (const identityId of identities.keys()) {
+      let candidate = normalizeSkillId(identityId)
+      while (candidate) {
+        if (disabledSet.has(candidate)) relevantDisabledIds.add(candidate)
+        const separator = candidate.lastIndexOf("/")
+        if (separator < 0) break
+        candidate = candidate.slice(0, separator)
+      }
+    }
+    const orderedDisabledSkillIds = [
+      ...relevantDisabledIds,
+      ...disabledSkillIds.filter((id) => !relevantDisabledIds.has(normalizeSkillId(id)))
+    ]
+    const snapshotBudget: SnapshotBudget = {
+      bytes: 0,
+      limit: SKILL_PLUGIN_CATALOG_MAX_SNAPSHOT_BYTES
+    }
+    const retainedDisabledSkillIds: string[] = []
+    for (const id of orderedDisabledSkillIds) {
+      retainBoundedEntry(retainedDisabledSkillIds, id, snapshotBudget, context)
+    }
+    checkCancelled(context)
+    const snapshot: CatalogSnapshot = {
+      id: `spc-${nextSnapshotId++}`,
+      key,
+      sourceKey: opaqueSourceKey(key),
+      catalogGlobalRevision: source.globalRevision,
+      disabledSkillsRevision: source.disabledSkillsRevision,
+      disabledStoreFingerprint,
+      skills: [],
+      plugins: [],
+      disabledSkillIds: retainedDisabledSkillIds,
+      enabledSkillCount: 0,
+      truncated: context.truncatedReasons.size > 0,
+      truncatedReasons: [...context.truncatedReasons],
+      stats: { ...context.stats },
+      expiresAt: Date.now() + SNAPSHOT_TTL_MS
+    }
+    snapshotsById.set(snapshot.id, snapshot)
+    snapshotIdByKey.set(key, snapshot.id)
+    return snapshot
+  }
+
   const plugins = parsePlugins(source, context)
   if (projection === "plugins-only") {
     checkCancelled(context)
@@ -769,6 +935,9 @@ function buildSnapshot(
     const snapshot: CatalogSnapshot = {
       id: `spc-${nextSnapshotId++}`,
       key,
+      sourceKey: opaqueSourceKey(key),
+      catalogGlobalRevision: source.globalRevision,
+      disabledSkillsRevision: source.disabledSkillsRevision,
       skills: [],
       plugins: retainedPlugins,
       disabledSkillIds: [],
@@ -782,10 +951,6 @@ function buildSnapshot(
     snapshotIdByKey.set(key, snapshot.id)
     return snapshot
   }
-  const localSources: SkillSource[] = [
-    { sourceDir: source.builtinSkillsDir, source: "project", kind: "builtin" },
-    { sourceDir: source.customSkillsDir, source: "user", kind: "custom" }
-  ]
   const skillBudget: SnapshotBudget = {
     bytes: 0,
     limit:
@@ -798,7 +963,7 @@ function buildSnapshot(
     for (const skill of discoverSkills(localSource, context)) {
       const metadata = toSkillMetadata(skill, localSource, context)
       const key = normalizeSkillId(metadata.id || metadata.name)
-      const retained = setBoundedMetadata(
+      const retained = setBoundedMapEntry(
         localById,
         localBytesById,
         key,
@@ -823,7 +988,7 @@ function buildSnapshot(
     for (const pluginSource of pluginSkillSources(plugin, context)) {
       for (const skill of discoverSkills(pluginSource, context)) {
         const metadata = toSkillMetadata(skill, pluginSource, context)
-        setBoundedMetadata(
+        setBoundedMapEntry(
           pluginSkills,
           pluginBytesById,
           `${plugin.id}:${normalizeSkillId(metadata.id || metadata.name)}`,
@@ -839,7 +1004,7 @@ function buildSnapshot(
     markTruncated(context, "entry-count")
     skills = skills.slice(0, Math.max(0, SKILL_PLUGIN_CATALOG_MAX_ENTRIES - plugins.length))
   }
-  const disabledSkillIds = resolveDisabledIds(
+  const { disabledSkillIds, fingerprint: disabledStoreFingerprint } = resolveDisabledIds(
     source,
     [...globalSkillIdentities.values()],
     context
@@ -874,6 +1039,10 @@ function buildSnapshot(
   const snapshot: CatalogSnapshot = {
     id: `spc-${nextSnapshotId++}`,
     key,
+    sourceKey: opaqueSourceKey(key),
+    catalogGlobalRevision: source.globalRevision,
+    disabledSkillsRevision: source.disabledSkillsRevision,
+    disabledStoreFingerprint,
     skills,
     plugins: [],
     disabledSkillIds: retainedDisabledSkillIds,
@@ -947,6 +1116,12 @@ export function readSkillPluginCatalogPage(
   }
   const createPage = (): SkillPluginCatalogPage => ({
     kind: input.kind,
+    sourceKey: snapshot.sourceKey,
+    catalogGlobalRevision: snapshot.catalogGlobalRevision,
+    disabledSkillsRevision: snapshot.disabledSkillsRevision,
+    ...(snapshot.disabledStoreFingerprint
+      ? { disabledStoreFingerprint: snapshot.disabledStoreFingerprint }
+      : {}),
     skills: input.kind === "skills" ? (selected as SkillMetadata[]) : [],
     plugins: input.kind === "plugins" ? (selected as PluginMetadata[]) : [],
     disabledSkillIds: input.kind === "disabled" ? (selected as string[]) : [],

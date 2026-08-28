@@ -102,6 +102,7 @@ async function testTransportCountsHiddenSubagentTools(): Promise<void> {
 
 async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
+  const threadHydration = await readProjectFile("src/renderer/src/lib/thread-hydration.ts")
   const threadStateHelpers = await readProjectFile("src/renderer/src/lib/thread-state-helpers.ts")
   const subagentTranscripts = await readProjectFile("src/renderer/src/lib/subagent-transcripts.ts")
   const subagentTranscriptStorage = await readProjectFile(
@@ -276,8 +277,18 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "Math.min(30_000, 500 * 2 ** Math.min(retryCount - 1, 6))",
-    "transcript persistence retries remain rate-limited at a bounded maximum interval"
+    "getSubagentTranscriptPersistRetrySchedule(retryCount)",
+    "transcript persistence delegates retries to the shared bounded policy"
+  )
+  assertIncludes(
+    threadHydration,
+    "Math.min(30_000, 500 * 2 ** Math.min(normalizedCount, 6))",
+    "the shared retry policy caps transcript persistence backoff at 30 seconds"
+  )
+  assertIncludes(
+    threadHydration,
+    "SUBAGENT_TRANSCRIPT_PERSIST_MAX_AUTO_RETRIES = 6",
+    "transcript persistence retries have a finite automatic retry budget"
   )
   assertSourceOrder(
     threadContext,
@@ -772,6 +783,9 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
 
 async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   const sidebar = await readProjectFile("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
+  const deletionHelper = await readProjectFile(
+    "src/renderer/src/lib/thread-group-deletion.ts"
+  )
   const harnessBoard = await readProjectFile(
     "src/renderer/src/components/harness-board/HarnessBoardView.tsx"
   )
@@ -801,11 +815,16 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
     /const\s+hasRunningFeatureSession\s*=\s*featureSessionThreadIds\.some\([\s\S]*?allStreamLoadingStates\[threadId\]\s*===\s*true[\s\S]*?allThreadStates\[threadId\]\?\.workflowRunning\s*===\s*true/u,
     "project-mode stage animation remains active while a dynamic workflow is running"
   )
-  assertSourceOrder(
+  assertIncludes(
     sidebar,
-    "await deleteThread(thread.thread_id)",
-    "cleanupThread(thread.thread_id)",
-    "sidebar only tears down thread context after backend deletion succeeds"
+    "deleteThreadGroupSequentially([threadToDelete.thread_id]",
+    "sidebar routes single deletion through the shared committed-deletion helper"
+  )
+  assertSourceOrder(
+    deletionHelper,
+    "await handlers.deleteThread(threadId)",
+    "handlers.cleanupThread(threadId)",
+    "the shared deletion helper tears down renderer state only after backend deletion succeeds"
   )
 }
 
