@@ -507,14 +507,12 @@ function hasPullKnowledgeCommand(plugin: PluginMetadata): boolean {
 
 function pluginToHarnessAdapter(plugin: PluginMetadata): HarnessAdapterRegistryItem {
   const id = pluginAdapterId(plugin)
-  const useScenario = normalizeText(plugin.useScenario)
   return {
     id,
     name: normalizeText(plugin.name) || id,
     version: normalizeText(plugin.version),
     type: "plugin",
     description: normalizeText(plugin.description),
-    ...(useScenario ? { useScenario } : {}),
     pullKnowledgeAvailable: hasPullKnowledgeCommand(plugin),
     boardCompatibility: evaluateBoardPluginCompatibility(plugin, normalizeText(plugin.name) || id)
   }
