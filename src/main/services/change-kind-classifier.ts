@@ -8,13 +8,16 @@
  *
  * The signal is the line-level multiset diff carried by the generation:
  *
- *     newRatio = generatedLines / (generatedLines + deletedLines)
+ *     replacementLines = min(generatedLines, deletedLines)
+ *     newRatio = (generatedLines - replacementLines) / generatedLines
+ *              = max(generatedLines - deletedLines, 0) / generatedLines
  *
  * `generatedLines` contains normalised, non-blank lines found only in the new
  * fragment; `deletedLines` contains lines found only in the old fragment. The
  * latter therefore includes replaced lines, not just a reduction in total line
- * count. A pure insertion still has 0 deleted lines, while an equal-size rewrite
- * has matching generated/deleted counts and is correctly treated as legacy work.
+ * count. Pairing generated and deleted lines estimates how many generated lines
+ * replaced existing code: a pure insertion scores 1, while an equal-size rewrite
+ * scores 0.
  *
  * Both the raw ratio and the derived label are persisted. Keeping the raw value
  * means the threshold can be re-tuned later and historical data re-bucketed
@@ -37,10 +40,11 @@ function toFiniteNonNegative(value: unknown): number {
 }
 
 /**
- * Share of the change that is added (rather than replaced) lines.
+ * Share of generated lines that are net additions rather than replacements.
  *
- * Returns null when the generation touched no lines at all — there is nothing
- * to classify, and a null keeps that distinguishable from a genuine 0.
+ * Returns null when there are no generated lines — deletion-only work has no
+ * generated code to classify, and a null keeps that distinct from a genuine
+ * rewrite ratio of 0.
  */
 export function computeNewRatio(
   generatedLineCount: unknown,
@@ -48,15 +52,14 @@ export function computeNewRatio(
 ): number | null {
   const generated = toFiniteNonNegative(generatedLineCount)
   const deleted = toFiniteNonNegative(deletedLineCount)
-  const total = generated + deleted
-  if (total <= 0) return null
-  return generated / total
+  if (generated <= 0) return null
+  return Math.max(generated - deleted, 0) / generated
 }
 
 /**
- * Bucket a generation by its new-line share. A null ratio (nothing touched)
- * falls back to "new": it contributes no lines to either bucket, so the label
- * only matters for keeping the field non-null.
+ * Bucket a generation by its new-line share. A null ratio (nothing generated)
+ * falls back to "new": it contributes no generated lines to either bucket, so
+ * the label only matters for keeping the field non-null.
  */
 export function classifyChangeKind(newRatio: number | null): ChangeKind {
   if (newRatio === null) return "new"

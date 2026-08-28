@@ -155,8 +155,16 @@ function NewRatioHistogram({
       <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
         <span>新增行占比分布</span>
         <Hint>
-          每次生成的新增行占比分布。0.7 是当前的分桶阈值。如果阈值正好落在分布密集处，
-          说明两桶划分对阈值很敏感，微调阈值会大幅改变结果——此时应该按分布的稀疏处重新定阈值。
+          <div className="space-y-1">
+            <div>
+              计算公式：新增行占比 = max（生成行数 − 删除或被替换的旧行数，0）÷ 生成行数。
+              等量改写为 0，纯新增为 1。
+            </div>
+            <div>
+              0.7 是当前的分桶阈值。如果阈值正好落在分布密集处，说明两桶划分对阈值很敏感，
+              微调阈值会大幅改变结果——此时应该按分布的稀疏处重新定阈值。
+            </div>
+          </div>
         </Hint>
       </div>
       <div className="mt-2 flex h-16 items-end gap-px">

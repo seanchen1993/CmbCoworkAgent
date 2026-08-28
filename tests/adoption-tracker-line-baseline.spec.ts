@@ -122,7 +122,7 @@ function testReplacementIsClassifiedAsLegacy(): void {
 
   assert(rewrite.generatedLineHashes.length === 2, "rewrite should contain two new-only lines")
   assert(rewrite.supersededLineHashes.length === 2, "rewrite should contain two old-only lines")
-  assert(attribution.newRatio === 0.5, "equal-size rewrite should have a 0.5 new ratio")
+  assert(attribution.newRatio === 0, "equal-size rewrite should have a zero new ratio")
   assert(attribution.changeKind === "legacy", "equal-size rewrite should be classified as legacy")
 }
 
