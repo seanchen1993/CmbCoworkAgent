@@ -11,6 +11,14 @@ function heavyRouteSurface(): string {
   return appSource.slice(start, end)
 }
 
+function backgroundThreadRefreshSurface(): string {
+  const start = appSource.indexOf("Reload thread list when main process signals a change")
+  const end = appSource.indexOf("if (isLoading)")
+  expect(start).toBeGreaterThanOrEqual(0)
+  expect(end).toBeGreaterThan(start)
+  return appSource.slice(start, end)
+}
+
 describe("App route isolation", () => {
   it("defers one atomic route object instead of task and mode independently", () => {
     expect(appSource).toContain("const selectedRenderRoute = useMemo(")
@@ -37,5 +45,15 @@ describe("App route isolation", () => {
     expect(surface).toContain("data-app-route-control")
     expect(surface).toContain("renderRoutePending &&")
     expect(surface).toContain("正在切换任务")
+  })
+
+  it("reserves automatic thread selection for startup bootstrap", () => {
+    expect(appSource.match(/loadThreads\(\{ selectInitialThread: true \}\)/g)).toHaveLength(1)
+
+    const refreshSurface = backgroundThreadRefreshSurface()
+    expect(refreshSurface).toContain("onThreadsChanged")
+    expect(refreshSurface).toContain('window.addEventListener("focus", onFocus)')
+    expect(refreshSurface.match(/loadThreads\(\)/g)).toHaveLength(2)
+    expect(refreshSurface).not.toContain("selectInitialThread")
   })
 })

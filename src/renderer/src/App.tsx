@@ -865,7 +865,7 @@ function App(): React.JSX.Element {
       try {
         await migrateDisabledSkillsFromLocalStorage()
         const [, , loadedBrowserCdpConfig] = await Promise.all([
-          loadThreads(),
+          loadThreads({ selectInitialThread: true }),
           loadDashboardAllowed(),
           window.api.browser.getCdpConfig().catch((error: unknown) => {
             console.error("Failed to load Browser CDP config during initialization:", error)

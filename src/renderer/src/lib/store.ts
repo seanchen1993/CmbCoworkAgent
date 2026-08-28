@@ -38,6 +38,8 @@ const THREAD_DIRECTORY_PAGE_LIMIT = 128
 const THREAD_DIRECTORY_PAGE_BYTE_BUDGET = 512 * 1024
 const THREAD_DIRECTORY_LOAD_MORE_PAGE_BATCH = 4
 let threadDirectoryLoadGeneration = 0
+let threadDirectoryBootstrapSelectionPending = false
+let threadDirectoryLatestLoadPromise: Promise<boolean> | null = null
 let threadDirectoryCursor: { beforeUpdatedAt: number; beforeThreadId: string } | null = null
 let threadDirectoryLoadMorePromise: Promise<void> | null = null
 let threadDirectoryMutationEpoch = 0
@@ -64,6 +66,25 @@ function markThreadDirectoryMutation(threadId: string): void {
 function forgetAcknowledgedThreadDirectoryMutations(requestEpoch: number): void {
   for (const [threadId, epoch] of threadDirectoryMutationEpochById) {
     if (epoch <= requestEpoch) threadDirectoryMutationEpochById.delete(threadId)
+  }
+}
+
+async function waitForAppliedThreadDirectoryLoad(initialLoad: Promise<boolean>): Promise<void> {
+  let pendingLoad = initialLoad
+  for (;;) {
+    try {
+      const applied = await pendingLoad
+      if (applied) return
+    } catch (error) {
+      const latestLoad = threadDirectoryLatestLoadPromise
+      if (!latestLoad || latestLoad === pendingLoad) throw error
+      pendingLoad = latestLoad
+      continue
+    }
+
+    const latestLoad = threadDirectoryLatestLoadPromise
+    if (!latestLoad || latestLoad === pendingLoad) return
+    pendingLoad = latestLoad
   }
 }
 
@@ -829,6 +850,10 @@ interface ThreadNavigationOptions {
   preserveView?: boolean
 }
 
+interface ThreadDirectoryLoadOptions {
+  selectInitialThread?: boolean
+}
+
 function resolveChatThreadId(threads: Thread[], preferredThreadId?: string | null): string | null {
   const preferredThread = preferredThreadId
     ? threads.find((thread) => thread.thread_id === preferredThreadId)
@@ -972,7 +997,7 @@ interface AppState {
   marketInitialTab: string | null
 
   // Thread actions
-  loadThreads: () => Promise<void>
+  loadThreads: (options?: ThreadDirectoryLoadOptions) => Promise<void>
   loadMoreThreads: () => Promise<void>
   touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
   createThread: (
@@ -1144,42 +1169,56 @@ export const useAppStore = create<AppState>((set, get) => ({
   evolutionLastRunOpts: null,
 
   // Thread actions
-  loadThreads: async () => {
+  loadThreads: (options) => {
+    if (options?.selectInitialThread) threadDirectoryBootstrapSelectionPending = true
     const generation = ++threadDirectoryLoadGeneration
     threadDirectoryLoadMorePromise = null
     const requestMutationEpoch = threadDirectoryMutationEpoch
-    const page = await window.api.threads.listPage({
-      limit: THREAD_DIRECTORY_PAGE_LIMIT,
-      byteBudget: THREAD_DIRECTORY_PAGE_BYTE_BUDGET
-    })
-    if (generation !== threadDirectoryLoadGeneration) return
-
-    threadDirectoryCursor =
-      page.hasMore && page.beforeUpdatedAt !== null && page.beforeThreadId !== null
-        ? { beforeUpdatedAt: page.beforeUpdatedAt, beforeThreadId: page.beforeThreadId }
-        : null
-    set((state) => {
-      const threads = mergeThreadDirectoryFirstPage(state.threads, page.threads, {
-        requestMutationEpoch,
-        mutationEpochById: threadDirectoryMutationEpochById,
-        knownIndexById: getThreadDirectoryIndex(state.threads),
-        completeSnapshot: !page.hasMore,
-        authoritativePageBoundary: page.hasMore ? page.threads.at(-1) : undefined
+    const loadPromise = (async (): Promise<boolean> => {
+      const page = await window.api.threads.listPage({
+        limit: THREAD_DIRECTORY_PAGE_LIMIT,
+        byteBudget: THREAD_DIRECTORY_PAGE_BYTE_BUDGET
       })
-      return {
-        threads: threads === state.threads ? state.threads : adoptThreadDirectorySnapshot(threads),
-        threadDirectoryHasMore: threadDirectoryCursor !== null,
-        threadDirectoryLoadingMore: false
-      }
-    })
-    forgetAcknowledgedThreadDirectoryMutations(requestMutationEpoch)
+      if (generation !== threadDirectoryLoadGeneration) return false
 
-    // Only the newest bounded page gates app startup. Older directory pages are
-    // explicit/idle work and must never delay the first usable chat surface.
-    if (!get().currentThreadId) {
-      const firstChatThread = findFirstChatThread(get().threads)
-      if (firstChatThread) await get().selectThread(firstChatThread.thread_id)
-    }
+      threadDirectoryCursor =
+        page.hasMore && page.beforeUpdatedAt !== null && page.beforeThreadId !== null
+          ? { beforeUpdatedAt: page.beforeUpdatedAt, beforeThreadId: page.beforeThreadId }
+          : null
+      set((state) => {
+        const threads = mergeThreadDirectoryFirstPage(state.threads, page.threads, {
+          requestMutationEpoch,
+          mutationEpochById: threadDirectoryMutationEpochById,
+          knownIndexById: getThreadDirectoryIndex(state.threads),
+          completeSnapshot: !page.hasMore,
+          authoritativePageBoundary: page.hasMore ? page.threads.at(-1) : undefined
+        })
+        return {
+          threads:
+            threads === state.threads ? state.threads : adoptThreadDirectorySnapshot(threads),
+          threadDirectoryHasMore: threadDirectoryCursor !== null,
+          threadDirectoryLoadingMore: false
+        }
+      })
+      forgetAcknowledgedThreadDirectoryMutations(requestMutationEpoch)
+
+      // Directory refreshes are data-only. Only the explicit startup bootstrap may
+      // choose a task, and a route change while the request was pending wins.
+      const shouldSelectInitialThread = threadDirectoryBootstrapSelectionPending
+      threadDirectoryBootstrapSelectionPending = false
+      const state = get()
+      if (shouldSelectInitialThread && state.mainView === "thread" && !state.currentThreadId) {
+        const firstChatThread = findFirstChatThread(state.threads)
+        if (firstChatThread) await get().selectThread(firstChatThread.thread_id)
+      }
+
+      return true
+    })()
+    threadDirectoryLatestLoadPromise = loadPromise
+
+    return options?.selectInitialThread
+      ? waitForAppliedThreadDirectoryLoad(loadPromise)
+      : loadPromise.then(() => undefined)
   },
 
   loadMoreThreads: async () => {
