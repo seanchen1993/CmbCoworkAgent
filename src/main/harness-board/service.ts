@@ -2882,16 +2882,13 @@ async function readHarnessFeatureSessionContextAgentPrompt(
     }
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
     const sessionContext = normalizeText(result.sessionContext).trim()
-    if (!sessionContext) {
-      const detail = message || "sessionContext 为空"
-      console.warn("[HarnessBoard] session_context_inject returned empty sessionContext, fallback to CMBDevClaw AGENTS.md:", {
-        projectId: project.projectId,
-        featureId,
-        message
-      })
-      return { warning: formatSessionContextInjectWarning(detail) }
-    }
     const agentConfig = normalizeHarnessAgentConfig(result.agentConfig)
+    if (!sessionContext) {
+      return {
+        agentmdLoadStatus,
+        ...(agentConfig ? { agentConfig } : {})
+      }
+    }
     if (sessionContext.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
       console.warn("[HarnessBoard] session_context_inject sessionContext truncated:", {
         chars: sessionContext.length,
