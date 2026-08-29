@@ -133,6 +133,30 @@ import type {
   WorkflowWorktreeActionResponse
 } from "../main/ipc/workflow-worktree-payload"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
+import { BROWSER_PANEL_REQUEST_CHANNEL, BROWSER_SESSION_ID } from "../shared/browser-types"
+import type {
+  BrowserRecordingSession,
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
+  BrowserScreenshotResult,
+  ScriptRecordingStartOptions,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserRecordingDraftUpdateInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
+  BrowserState
+} from "../shared/browser-types"
+import { BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL } from "../shared/browser-types"
 import type { ExpertAgentEntry } from "../shared/expert-agent-types"
 import {
   APP_ATTENTION_CHANNEL,
@@ -308,6 +332,129 @@ const electronAPI = {
   process: {
     platform: process.platform,
     versions: process.versions
+  }
+}
+
+function createBrowserApi() {
+  return {
+    attach: (options?: BrowserAttachOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:attach", options) as Promise<BrowserState>
+    },
+    detach: (): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:detach") as Promise<BrowserState>
+    },
+    setBounds: (bounds: BrowserBounds, visible?: boolean): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:setBounds", bounds, visible) as Promise<BrowserState>
+    },
+    navigate: (url: string, options?: BrowserNavigateOptions): Promise<BrowserState> => {
+      return ipcRenderer.invoke("browser:navigate", url, options) as Promise<BrowserState>
+    },
+    goBack: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goBack") as Promise<BrowserState>,
+    goForward: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:goForward") as Promise<BrowserState>,
+    reload: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:reload") as Promise<BrowserState>,
+    stop: (): Promise<BrowserState> => ipcRenderer.invoke("browser:stop") as Promise<BrowserState>,
+    clearConsole: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:clearConsole") as Promise<BrowserState>,
+    getState: (): Promise<BrowserState> =>
+      ipcRenderer.invoke("browser:getState") as Promise<BrowserState>,
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke(
+        "browser:startScriptRecording",
+        options
+      ) as Promise<BrowserRecordingSession>,
+    pauseScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:pauseScriptRecording") as Promise<BrowserRecordingSession>,
+    updateScriptRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke(
+        "browser:updateScriptRecordingDraft",
+        input
+      ) as Promise<BrowserRecordingSession>,
+    resumeScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:resumeScriptRecording") as Promise<BrowserRecordingSession>,
+    stopScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:stopScriptRecording") as Promise<BrowserRecordingSession>,
+    getScriptRecording: (): Promise<BrowserRecordingSession> =>
+      ipcRenderer.invoke("browser:getScriptRecording") as Promise<BrowserRecordingSession>,
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ): Promise<BrowserScriptLibraryEntry> =>
+      ipcRenderer.invoke(
+        "browser:saveScriptLibraryEntry",
+        input
+      ) as Promise<BrowserScriptLibraryEntry>,
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ): Promise<BrowserScriptLibraryEntry[]> =>
+      ipcRenderer.invoke("browser:listScriptLibraryEntries", options) as Promise<
+        BrowserScriptLibraryEntry[]
+      >,
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput): Promise<string> =>
+      ipcRenderer.invoke("browser:readScriptLibraryScript", input) as Promise<string>,
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput): Promise<void> =>
+      ipcRenderer.invoke("browser:updateScriptLibraryEntry", input) as Promise<void>,
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput): Promise<void> =>
+      ipcRenderer.invoke("browser:deleteScriptLibraryEntry", input) as Promise<void>,
+    executeRecordingScript: (input: BrowserScriptExecutionInput): Promise<void> =>
+      ipcRenderer.invoke("browser:executeRecordingScript", input) as Promise<void>,
+    getScriptExecutionState: (): Promise<BrowserScriptExecutionState> =>
+      ipcRenderer.invoke("browser:getScriptExecutionState") as Promise<BrowserScriptExecutionState>,
+    cancelRecordingScriptExecution: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:cancelRecordingScriptExecution") as Promise<boolean>,
+    getCdpConfig: (): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:getCdpConfig") as Promise<BrowserCdpConfig>,
+    isProfileImportRuntimeEnabled: (): Promise<boolean> =>
+      ipcRenderer.invoke("browser:isProfileImportRuntimeEnabled") as Promise<boolean>,
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>): Promise<BrowserCdpConfig> =>
+      ipcRenderer.invoke("browser:saveCdpConfig", updates) as Promise<BrowserCdpConfig>,
+    captureScreenshot: (): Promise<BrowserScreenshotResult> =>
+      ipcRenderer.invoke("browser:captureScreenshot") as Promise<BrowserScreenshotResult>,
+    importProfileData: (
+      options: BrowserProfileImportOptions
+    ): Promise<BrowserProfileImportResult> =>
+      ipcRenderer.invoke(
+        "browser:importProfileData",
+        options
+      ) as Promise<BrowserProfileImportResult>,
+    disposeAllForRendererUnload: (): void => {
+      ipcRenderer.send("browser:disposeAllForRendererUnload")
+    },
+    onState: (callback: (state: BrowserState) => void): (() => void) => {
+      const channel = `browser:state:${BROWSER_SESSION_ID}`
+      const handler = (_: unknown, state: BrowserState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void): (() => void) => {
+      const handler = (_: unknown, request: BrowserPanelRequest): void => {
+        callback(request)
+      }
+      ipcRenderer.on(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_PANEL_REQUEST_CHANNEL, handler)
+      }
+    },
+    onScriptExecutionState: (
+      callback: (state: BrowserScriptExecutionState) => void
+    ): (() => void) => {
+      const handler = (_: unknown, state: BrowserScriptExecutionState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
+      return () => {
+        ipcRenderer.removeListener(BROWSER_SCRIPT_EXECUTION_STATE_CHANNEL, handler)
+      }
+    }
   }
 }
 
@@ -2398,6 +2545,7 @@ const api = {
     list: (query?: TaskCardsQuery): Promise<TaskCardsListResult> =>
       ipcRenderer.invoke("taskCards:list", query) as Promise<TaskCardsListResult>
   },
+  browser: createBrowserApi(),
   heartbeat: {
     getConfig: (): Promise<HeartbeatConfig> =>
       ipcRenderer.invoke("heartbeat:getConfig") as Promise<HeartbeatConfig>,
@@ -3879,6 +4027,9 @@ const api = {
       ipcRenderer.on("harnessBoard:managedRunThreadCreated", handler)
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
     }
+  },
+  app: {
+    restart: (): Promise<void> => ipcRenderer.invoke("app:restart") as Promise<void>
   },
   update: {
     check: (): Promise<

@@ -672,7 +672,7 @@ class WorkflowRunManager {
     }
     // Deletion tombstone: a foreground turn that outlived its thread's deletion
     // could still reach the workflow tool. Refusing here (rather than silently
-    // skipping artifacts) keeps `.cmbdevclaw/workflows/<threadId>` deleted —
+    // skipping artifacts) keeps the selected workflow run directory deleted —
     // persistScriptFile below would otherwise mkdir it back — and fails the
     // tool call cleanly instead of starting a run whose every persist and
     // subagent checkpointer is already tombstoned.

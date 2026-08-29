@@ -1,17 +1,19 @@
 import { randomUUID } from "crypto"
-import { readFileSync, statSync } from "fs"
+import { readFileSync, realpathSync, statSync } from "fs"
+import { basename, dirname, resolve } from "path"
 import { tool } from "langchain"
 import { z } from "zod"
 import type { DynamicStructuredTool } from "@langchain/core/tools"
 import type { ApprovalStore } from "../approval-store"
 import type { ApprovalDecision, ApprovalRequest } from "../../types"
-import { resolveExistingWorkspacePath } from "./paths"
+import { isPathInside } from "./paths"
 import { WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
 import { loadAgentProfiles } from "../agent-registry"
 import { workflowRunManager } from "./run-manager"
 import {
   clearAllAgentToolStreams,
   generateWorkflowRunId,
+  getWorkflowRunsDir,
   isValidWorkflowRunId,
   isWorkflowRunDirDisposed,
   loadWorkflowRun,
@@ -22,6 +24,7 @@ import { MAX_WORKFLOW_SCRIPT_BYTES, validateWorkflowScript } from "./script"
 import type { WorkflowSubagentDeps } from "./subagent"
 import {
   resolveResumeArgsAndJournal,
+  WorkflowFatalError,
   WorkflowScriptError,
   type ParsedWorkflowScript,
   type PersistedWorkflowRun
@@ -151,7 +154,13 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // script source when the model passes only resumeFromRunId (self-contained
       // resume — it need not re-send the script).
       const resume = resolveResumeRun(workspacePath, threadId, input.resumeFromRunId)
-      const source = resolveScriptSource(workspacePath, input, resume.run?.script, resume.note)
+      const source = resolveScriptSource(
+        workspacePath,
+        threadId,
+        input,
+        resume.run?.script,
+        resume.note
+      )
       const parsed = validateWorkflowScript(source.script)
       const runId = resume.run?.runId ?? generateWorkflowRunId()
       // script-sha invalidation: when resuming, if the script changed since the
@@ -420,6 +429,7 @@ async function ensureWorkflowApproved(
 
 function resolveScriptSource(
   workspacePath: string,
+  threadId: string,
   input: { script?: string; scriptPath?: string },
   resumeScript?: string,
   resumeNote?: string
@@ -427,8 +437,7 @@ function resolveScriptSource(
   // Precedence: scriptPath > inline script > persisted-run script (resume).
   if (input.scriptPath?.trim()) {
     const requested = input.scriptPath.trim()
-    // Realpath-based containment (blocks symlink escapes too).
-    const resolved = resolveExistingWorkspacePath(workspacePath, requested, "scriptPath")
+    const resolved = resolveTopLevelWorkflowScriptPath(workspacePath, threadId, requested)
     try {
       const st = statSync(resolved)
       // Must be a REGULAR file: a FIFO/socket/device under the workspace would
@@ -467,6 +476,50 @@ function resolveScriptSource(
     resumeNote
       ? `${resumeNote}. To run regardless, pass \`script\` or \`scriptPath\`.`
       : "one of `script`, `scriptPath`, or a resolvable `resumeFromRunId` is required"
+  )
+}
+
+/**
+ * A top-level launch accepts ordinary workspace scripts plus the exact
+ * app-managed script files returned by an earlier launch in this thread. Keep
+ * the exception deliberately narrow: another thread's script, run sidecars,
+ * nested files, and symlink escapes remain outside the executable boundary.
+ */
+function resolveTopLevelWorkflowScriptPath(
+  workspacePath: string,
+  threadId: string,
+  requested: string
+): string {
+  const requestedPath = resolve(workspacePath, requested)
+  let workspaceRoot: string
+  let resolved: string
+  try {
+    workspaceRoot = realpathSync(resolve(workspacePath))
+    resolved = realpathSync(requestedPath)
+  } catch {
+    throw new WorkflowScriptError(`scriptPath not found at ${requestedPath}`)
+  }
+
+  if (isPathInside(workspaceRoot, resolved)) return resolved
+
+  let workflowRunsRoot: string
+  try {
+    workflowRunsRoot = realpathSync(getWorkflowRunsDir(workspacePath, threadId))
+  } catch {
+    throw new WorkflowFatalError(
+      `scriptPath must stay inside the workspace or reference a workflow script previously returned for this thread (got "${requested}")`
+    )
+  }
+
+  const fileName = basename(resolved)
+  const suffix = ".workflow.js"
+  const runId = fileName.endsWith(suffix) ? fileName.slice(0, -suffix.length) : ""
+  if (dirname(resolved) === workflowRunsRoot && isValidWorkflowRunId(runId)) {
+    return resolved
+  }
+
+  throw new WorkflowFatalError(
+    `scriptPath must stay inside the workspace or reference a workflow script previously returned for this thread (got "${requested}")`
   )
 }
 

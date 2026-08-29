@@ -3,6 +3,7 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -20,11 +21,8 @@ import { ToolOrchestrator } from "../src/main/agent/tool-orchestrator.ts"
 import { SkillLifecycleRegistry } from "../src/main/agent/skill-lifecycle/registry.ts"
 import type { HookConfig } from "../src/main/hooks/types.ts"
 import {
-  assertWorkflowWorktreeGitOperationTarget,
-  commitWorkflowWorktree,
   createWorkflowWorktree,
-  resolveWorkflowWorktreeIsolationBoundary,
-  stageWorkflowWorktree
+  resolveWorkflowWorktreeIsolationBoundary
 } from "../src/main/services/git-worktree.ts"
 
 function git(cwd: string, args: string[]): string {
@@ -42,13 +40,35 @@ async function run(): Promise<void> {
     git(repo, ["config", "user.name", "Worktree Test"])
     git(repo, ["config", "user.email", "worktree@example.com"])
     git(repo, ["remote", "add", "origin", "https://example.invalid/source.git"])
+    const userExcludesFile = join(repo, "user-global-excludes")
+    writeFileSync(userExcludesFile, "*.userignored\n")
+    git(repo, ["config", "core.excludesFile", "user-global-excludes"])
     writeFileSync(join(repo, "README.md"), "base\n")
-    git(repo, ["add", "README.md"])
+    writeFileSync(join(repo, ".gitignore"), "nested-repo/\n")
+    mkdirSync(join(repo, ".cmbdevclaw"), { recursive: true })
+    writeFileSync(join(repo, ".cmbdevclaw", "tracked.txt"), "tracked baseline\n")
+    git(repo, [
+      "add",
+      "README.md",
+      ".gitignore",
+      ".cmbdevclaw/tracked.txt",
+      "user-global-excludes"
+    ])
     git(repo, ["commit", "-m", "base"])
+    const nativeHookMarker = join(appDataRoot, "native-pre-commit-ran.txt")
+    const preCommitHook = join(repo, ".git", "hooks", "pre-commit")
+    writeFileSync(
+      preCommitHook,
+      `#!/bin/sh\nprintf 'ran\\n' > '${nativeHookMarker.replace(/'/g, "'\\''")}'\n`
+    )
+    chmodSync(preCommitHook, 0o755)
     const hookRelativeOutput = "isolated-hook-cwd.txt"
     const sourceHookDir = join(repo, ".cmbdevclaw", "hooks")
     mkdirSync(sourceHookDir, { recursive: true })
-    writeFileSync(join(repo, ".cmbdevclaw", "config.json"), JSON.stringify({ label: "source-config" }))
+    writeFileSync(
+      join(repo, ".cmbdevclaw", "config.json"),
+      JSON.stringify({ label: "source-config" })
+    )
     mkdirSync(join(repo, ".cmbdevclaw", "workflows"), { recursive: true })
     writeFileSync(join(repo, ".cmbdevclaw", "workflows", "source-run.json"), "source state\n")
     writeFileSync(join(repo, ".cmbdevclaw", "setup-state.json"), "source setup state\n")
@@ -113,23 +133,7 @@ async function run(): Promise<void> {
         async () => ({ type: "reject", tool_call_id: "unexpected" }),
         true,
         false,
-        false,
-        async (operation, message, cwd) => {
-          try {
-            await assertWorkflowWorktreeGitOperationTarget(boundary, cwd)
-            const output =
-              operation === "stage"
-                ? await stageWorkflowWorktree(boundary)
-                : await commitWorkflowWorktree(boundary, message ?? "")
-            return { output, exitCode: 0, truncated: false }
-          } catch (error) {
-            return {
-              output: error instanceof Error ? error.message : String(error),
-              exitCode: 1,
-              truncated: false
-            }
-          }
-        }
+        false
       )
     )
 
@@ -167,7 +171,11 @@ async function run(): Promise<void> {
     const sourceUserName = git(repo, ["config", "--get", "user.name"])
     const sourceRemote = git(repo, ["remote", "get-url", "origin"])
     const configMutation = await sandbox.execute("git config user.name isolated-evil")
-    assert.notEqual(configMutation.exitCode, 0, "isolated worktree must not change shared Git config")
+    assert.notEqual(
+      configMutation.exitCode,
+      0,
+      "isolated worktree must not change shared Git config"
+    )
     assert.match(configMutation.output, /shared Git configuration/i)
     assert.equal(git(repo, ["config", "--get", "user.name"]), sourceUserName)
     const remoteMutation = await sandbox.execute(
@@ -182,6 +190,25 @@ async function run(): Promise<void> {
       join(info.workspaceDirectory, ".cmbdevclaw", "hooks", "check.js"),
       "process.exit(0)\n"
     )
+
+    // Native Git must ignore only Cmb's untracked runtime support. A tracked
+    // `.cmbdevclaw` file remains an ordinary user file and is still stageable.
+    writeFileSync(join(info.workspaceDirectory, ".cmbdevclaw", "tracked.txt"), "tracked changed\n")
+    writeFileSync(join(info.workspaceDirectory, "private.userignored"), "ignored\n")
+    const stageAll = await sandbox.execute("git add -A")
+    assert.equal(stageAll.exitCode, 0, `native git add -A should work: ${stageAll.output}`)
+    const stagedWithExcludes = git(info.directory, ["diff", "--cached", "--name-only"])
+    assert.match(stagedWithExcludes, /(?:^|\n)\.cmbdevclaw\/tracked\.txt(?:\n|$)/)
+    assert.doesNotMatch(stagedWithExcludes, /\.cmbdevclaw\/(?:config\.json|hooks\/check\.js)/)
+    assert.doesNotMatch(
+      stagedWithExcludes,
+      /private\.userignored/,
+      "Cmb's private exclude must not replace the user's configured excludes"
+    )
+    const resetStage = await sandbox.execute("git reset")
+    assert.equal(resetStage.exitCode, 0, resetStage.output)
+    const restoreTracked = await sandbox.execute("git checkout -- .cmbdevclaw/tracked.txt")
+    assert.equal(restoreTracked.exitCode, 0, restoreTracked.output)
 
     const skillForeground = await sandbox.execute(
       `node -e ${JSON.stringify("console.log(process.cwd())")}`,
@@ -204,14 +231,63 @@ async function run(): Promise<void> {
     writeFileSync(join(nestedRepo, "nested.txt"), "nested\n")
     git(nestedRepo, ["add", "nested.txt"])
     git(nestedRepo, ["commit", "-m", "nested base"])
+    assert.equal(
+      git(info.directory, ["check-ignore", "nested-repo/nested.txt"]),
+      "nested-repo/nested.txt",
+      "the regression fixture must be invisible to the outer repository's normal status"
+    )
     const outerHeadBeforeNestedCommit = git(info.directory, ["rev-parse", "HEAD"])
-    const nestedCommit = await sandbox.execute("git commit -m nested", nestedRepo)
-    assert.notEqual(nestedCommit.exitCode, 0, "nested repository commit must be rejected")
-    assert.match(nestedCommit.output, /nested repository/i)
+    const nestedHeadBeforeBlockedCommit = git(nestedRepo, ["rev-parse", "HEAD"])
+    writeFileSync(join(nestedRepo, "nested.txt"), "nested updated\n")
+    const nestedStatus = await sandbox.execute("git status --short", nestedRepo)
+    assert.equal(
+      nestedStatus.exitCode,
+      0,
+      `nested repository read-only Git should remain available: ${nestedStatus.output}`
+    )
+    const nestedCommit = await sandbox.execute(
+      "git add nested.txt && git commit -m nested",
+      nestedRepo
+    )
+    assert.notEqual(
+      nestedCommit.exitCode,
+      0,
+      "a nested repository cannot become an independent workflow deliverable"
+    )
+    assert.match(
+      nestedCommit.output,
+      /assigned workflow worktree repository; nested repositories are read-only/i
+    )
+    assert.equal(
+      git(nestedRepo, ["rev-parse", "HEAD"]),
+      nestedHeadBeforeBlockedCommit,
+      "a blocked nested commit must not advance the nested repository"
+    )
+    const gitCNestedCommit = await sandbox.execute(
+      `git -C ${JSON.stringify(nestedRepo)} add nested.txt && git -C ${JSON.stringify(nestedRepo)} commit -m nested-via-c`
+    )
+    assert.notEqual(gitCNestedCommit.exitCode, 0)
+    assert.match(
+      gitCNestedCommit.output,
+      /assigned workflow worktree repository; nested repositories are read-only/i
+    )
+    assert.equal(git(nestedRepo, ["rev-parse", "HEAD"]), nestedHeadBeforeBlockedCommit)
+    if (process.platform !== "win32") {
+      const wrappedNestedCommit = await sandbox.execute(
+        `bash -lc ${JSON.stringify('git add nested.txt && git commit -m "wrapped nested"')}`,
+        nestedRepo
+      )
+      assert.notEqual(wrappedNestedCommit.exitCode, 0)
+      assert.match(
+        wrappedNestedCommit.output,
+        /assigned workflow worktree repository; nested repositories are read-only/i
+      )
+      assert.equal(git(nestedRepo, ["rev-parse", "HEAD"]), nestedHeadBeforeBlockedCommit)
+    }
     assert.equal(
       git(info.directory, ["rev-parse", "HEAD"]),
       outerHeadBeforeNestedCommit,
-      "nested commit must not advance the outer workflow branch"
+      "a nested repository commit must not advance the outer workflow branch"
     )
     const fileWrite = await sandbox.write("file-tool-local.txt", "before\n")
     assert.ok(!fileWrite.error, `isolated file write should work: ${fileWrite.error ?? ""}`)
@@ -256,11 +332,52 @@ async function run(): Promise<void> {
       /(?:^|\n)local\.txt(?:\n|$)/,
       "rejected background staging must not mutate the index"
     )
-    const commit = await sandbox.execute("git commit -m isolated")
-    assert.equal(commit.exitCode, 0, `normal assigned-branch commit must work: ${commit.output}`)
+    writeFileSync(join(info.workspaceDirectory, "native-a.txt"), "a1\n")
+    writeFileSync(join(info.workspaceDirectory, "native-b.txt"), "b1\n")
+    const headBeforeNativeCommit = git(info.directory, ["rev-parse", "HEAD"])
+    const commit = await sandbox.execute('git add native-a.txt && git commit -m "native partial"')
+    assert.equal(commit.exitCode, 0, `native chained add/commit must work: ${commit.output}`)
+    const firstNativeHead = git(info.directory, ["rev-parse", "HEAD"])
+    assert.notEqual(firstNativeHead, headBeforeNativeCommit)
+    assert.equal(
+      git(info.directory, ["show", "--format=", "--name-only", "HEAD"]),
+      "native-a.txt",
+      "the framework must respect the agent's actual index instead of staging the whole scope"
+    )
+    assert.match(git(info.directory, ["status", "--short"]), /\?\? native-b\.txt/)
+    assert.equal(readFileSync(nativeHookMarker, "utf8"), "ran\n", "repository hooks must run")
+
+    writeFileSync(join(info.workspaceDirectory, "native-a.txt"), "a2\n")
+    const amend = await sandbox.execute("git add native-a.txt && git commit --amend --no-edit")
+    assert.equal(amend.exitCode, 0, `native amend must work: ${amend.output}`)
+    assert.notEqual(git(info.directory, ["rev-parse", "HEAD"]), firstNativeHead)
     assert.equal(git(info.directory, ["branch", "--show-current"]), info.branch)
+    if (process.platform !== "win32") {
+      writeFileSync(join(info.workspaceDirectory, "wrapped-native.txt"), "wrapped\n")
+      const wrappedCommit = await sandbox.execute(
+        `bash -lc ${JSON.stringify('git add wrapped-native.txt && git commit -m "wrapped native"')}`
+      )
+      assert.equal(
+        wrappedCommit.exitCode,
+        0,
+        `isolated native Git must not inherit task-card wrapper restrictions: ${wrappedCommit.output}`
+      )
+      assert.match(
+        git(info.directory, ["show", "--format=", "--name-only", "HEAD"]),
+        /(?:^|\n)wrapped-native\.txt(?:\n|$)/
+      )
+    }
     const push = await sandbox.execute("git push origin HEAD")
-    assert.notEqual(push.exitCode, 0, "transient workflow branches must not be pushed")
+    assert.notEqual(push.exitCode, 0, "transient workflow branch push requires user approval")
+    assert.match(push.output, /rejected by user/i)
+    for (const command of [
+      "bash -lc 'git push origin HEAD'",
+      "git -c alias.pub='!git push origin HEAD' pub"
+    ]) {
+      const indirectPush = await sandbox.execute(command)
+      assert.notEqual(indirectPush.exitCode, 0, command)
+      assert.match(indirectPush.output, /must be issued directly/i, command)
+    }
 
     // Claude Code exposes a force-sync hook path for lifecycle-sensitive
     // contexts. Worktree agents use the same small rule: a configured async

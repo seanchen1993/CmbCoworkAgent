@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import {
   assessCommandSafety,
+  containsIndirectGitPush,
   extractGitCommitMessage,
   extractGitCommitPathspecs,
   getWorktreeShellIsolationViolation,
@@ -12,8 +13,6 @@ import {
   isChainedShellCommand,
   isForcePushCommand,
   isGitCommitCommand,
-  isSimpleIsolatedGitCommitCommand,
-  isWholeScopeGitAddCommand,
   normalizeCdPrefixedGitCommitCommand,
   normalizeGitAddPrefixedGitCommitCommand,
   resolveGitCommandCwd,
@@ -32,44 +31,6 @@ const WORKTREE_BOUNDARY: WorkflowWorktreeIsolationBoundary = {
   branch: "cmbcowork/wf/run/agent-a"
 }
 
-describe("isolated Git broker grammar", () => {
-  it("accepts only whole-scope staging forms", () => {
-    for (const command of ["git add -A", "git add --all"]) {
-      expect(isWholeScopeGitAddCommand(command)).toBe(true)
-    }
-    for (const command of [
-      "git add .",
-      "git add -- .",
-      "git add src/a.ts",
-      "git add -u",
-      "git -C src add -A"
-    ]) {
-      expect(isWholeScopeGitAddCommand(command)).toBe(false)
-    }
-  })
-
-  it("accepts one explicit message and rejects semantic rewrites", () => {
-    for (const command of [
-      'git commit -m "isolated work"',
-      "git commit --message=isolated",
-      "git commit -misolated"
-    ]) {
-      expect(isSimpleIsolatedGitCommitCommand(command)).toBe(true)
-    }
-    for (const command of [
-      "git commit --amend -m x",
-      "git commit --fixup HEAD -m x",
-      "git commit -m x -- src/a.ts",
-      "git commit -am x",
-      "git commit -m one -m two",
-      "git -C src commit -m x",
-      "git commit -m x && git status"
-    ]) {
-      expect(isSimpleIsolatedGitCommitCommand(command)).toBe(false)
-    }
-  })
-})
-
 describe("dynamic-workflow worktree shell isolation", () => {
   it("allows normal checkout-local development and Git operations", () => {
     for (const command of [
@@ -77,9 +38,11 @@ describe("dynamic-workflow worktree shell isolation", () => {
       "git status --short",
       "git add src/app.ts",
       'git commit -m "work"',
+      `bash -lc 'git add src/app.ts && git commit -m "work"'`,
       "git -C src status",
       "git -c core.fsmonitor=false status",
       "git config --get user.name",
+      "git -c alias.co='checkout' co HEAD -- src/app.ts",
       "git checkout HEAD -- src/app.ts",
       "git checkout .",
       "git checkout ./src/app.ts",
@@ -100,6 +63,9 @@ describe("dynamic-workflow worktree shell isolation", () => {
       "git apply change.patch",
       "git fetch origin",
       "git pull --ff-only",
+      "git push origin HEAD",
+      "git push origin cmbcowork/wf/run/agent-a",
+      "git push origin HEAD:cmbcowork/wf/run/agent-a",
       "git merge --abort",
       "git merge --continue",
       "git merge --quit",
@@ -190,7 +156,14 @@ describe("dynamic-workflow worktree shell isolation", () => {
       "git remote -v add x https://example.invalid/repo.git",
       "git remote set-url origin https://example.invalid/repo.git",
       "git remote --verbose set-url origin https://example.invalid/repo.git",
-      "git remote remove origin"
+      "git remote remove origin",
+      "git push",
+      "git push origin HEAD:main",
+      "git push --force origin HEAD",
+      "git push -u origin HEAD",
+      "git push origin --delete main",
+      "bash -lc 'git push origin HEAD'",
+      "git -c alias.pub='!git push origin HEAD' pub"
     ]
     for (const command of blocked) {
       expect(
@@ -198,6 +171,70 @@ describe("dynamic-workflow worktree shell isolation", () => {
         command
       ).not.toBeNull()
     }
+  })
+
+  it("applies the same worktree violations inside visible shell wrappers", () => {
+    for (const command of [
+      `bash -lc 'git -C ${SOURCE_ROOT} reset --hard'`,
+      `bash -lc 'cd ${SOURCE_ROOT} && touch escaped.txt'`,
+      `bash -lc 'git worktree remove --force /other/worktree'`
+    ]) {
+      expect(
+        getWorktreeShellIsolationViolation(command, WORKTREE_ROOT, WORKTREE_BOUNDARY),
+        command
+      ).not.toBeNull()
+    }
+  })
+
+  it("blocks PowerShell Git repository redirection inside a visible wrapper", () => {
+    const command =
+      `powershell -Command "` +
+      `$env:GIT_DIR=${SOURCE_ROOT}/.git; ` +
+      `$env:GIT_WORK_TREE=${SOURCE_ROOT}; ` +
+      `git commit --allow-empty -m escaped"`
+
+    expect(
+      getWorktreeShellIsolationViolation(command, WORKTREE_ROOT, WORKTREE_BOUNDARY)
+    ).toContain("GIT_DIR")
+  })
+
+  it("distinguishes direct push approval from visible wrapper and inline-alias bypasses", () => {
+    expect(containsIndirectGitPush("git push origin HEAD")).toBe(false)
+    expect(containsIndirectGitPush("bash -lc 'git add -A && git commit -m x'")).toBe(false)
+    expect(containsIndirectGitPush("bash -lc 'git push origin HEAD'")).toBe(true)
+    expect(containsIndirectGitPush("sudo git push origin HEAD")).toBe(true)
+    expect(
+      containsIndirectGitPush('powershell -Command "git push origin HEAD"', "powershell")
+    ).toBe(true)
+    expect(containsIndirectGitPush('cmd /c "git push origin HEAD"', "cmd")).toBe(true)
+    expect(containsIndirectGitPush("git -c alias.pub='push origin HEAD' pub")).toBe(true)
+    expect(containsIndirectGitPush("git -c alias.pub='!git push origin HEAD' pub")).toBe(true)
+  })
+
+  it("bounds repeated execution-wrapper push inspection", () => {
+    const wrappers = Array.from({ length: 200 }, () => "env").join(" ")
+    const startedAt = Date.now()
+    expect(containsIndirectGitPush(`${wrappers} printf ok`)).toBe(false)
+    expect(containsIndirectGitPush(`${wrappers} git push origin HEAD`)).toBe(true)
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
+  })
+
+  it("reports unverifiable shell nesting without misclassifying it as an indirect push", () => {
+    let nestedRead = "printf ok"
+    let nestedPush = "git push origin HEAD"
+    for (let depth = 0; depth < 6; depth += 1) {
+      nestedRead = `sh -c ${JSON.stringify(nestedRead)}`
+      nestedPush = `sh -c ${JSON.stringify(nestedPush)}`
+    }
+
+    expect(containsIndirectGitPush(nestedRead)).toBe(false)
+    expect(containsIndirectGitPush(nestedPush)).toBe(false)
+    expect(
+      getWorktreeShellIsolationViolation(nestedRead, WORKTREE_ROOT, WORKTREE_BOUNDARY)
+    ).toContain("too deep to verify")
+    expect(
+      getWorktreeShellIsolationViolation(nestedPush, WORKTREE_ROOT, WORKTREE_BOUNDARY)
+    ).toContain("too deep to verify")
   })
 
   it("allows ordinary absolute-path reads because worktree mode is not a security sandbox", () => {
@@ -239,7 +276,11 @@ describe("dynamic-workflow worktree shell isolation", () => {
         /outside the assigned workspace/i
       )
       expect(
-        getWorktreeShellIsolationViolation("git -C escape rev-parse --show-toplevel", worktree, boundary)
+        getWorktreeShellIsolationViolation(
+          "git -C escape rev-parse --show-toplevel",
+          worktree,
+          boundary
+        )
       ).toMatch(/outside the assigned workspace/i)
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -258,6 +299,12 @@ describe("dynamic-workflow worktree shell isolation", () => {
         skillRoot
       ])
     ).toBeNull()
+    for (const command of ["git add SKILL.md", "git commit -m skill", "git push origin HEAD"]) {
+      expect(
+        getWorktreeShellIsolationViolation(command, skillRoot, WORKTREE_BOUNDARY, [skillRoot]),
+        command
+      ).toMatch(/only allows git .* inside the assigned worktree workspace/i)
+    }
     expect(
       getWorktreeShellIsolationViolation(
         `cd ${SOURCE_ROOT} && touch escaped.txt`,
@@ -314,20 +361,18 @@ describe("git submit commands are no longer forbidden", () => {
     )
     expect(assessCommandSafety("cmd /c git commit -m x", CWD).level).toBe("forbidden")
     expect(assessCommandSafety('env -S "git commit -m x"', CWD).level).toBe("forbidden")
-    expect(assessCommandSafety('env --split-string="git commit -m x"', CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety('env --split-string="git commit -m x"', CWD).level).toBe("forbidden")
     expect(assessCommandSafety('env --split-s="${RUN_COMMAND}"', CWD).level).toBe("forbidden")
     expect(assessCommandSafety('env -iS "${RUN_COMMAND}"', CWD).level).toBe("forbidden")
     expect(assessCommandSafety('command command env -S "${RUN_COMMAND}"', CWD).level).toBe(
       "forbidden"
     )
-    expect(
-      assessCommandSafety("env --chd /tmp sh -c 'git commit -m x'", CWD).level
-    ).toBe("forbidden")
-    expect(
-      assessCommandSafety("env --list-signal-handling git commit -m x", CWD).level
-    ).toBe("forbidden")
+    expect(assessCommandSafety("env --chd /tmp sh -c 'git commit -m x'", CWD).level).toBe(
+      "forbidden"
+    )
+    expect(assessCommandSafety("env --list-signal-handling git commit -m x", CWD).level).toBe(
+      "forbidden"
+    )
     expect(assessCommandSafety("timeout 30 git commit -am x", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("nice git commit -am x", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("nohup git commit -am x", CWD).level).toBe("forbidden")
@@ -337,18 +382,14 @@ describe("git submit commands are no longer forbidden", () => {
     expect(assessCommandSafety("wsl bash -c 'g\\it commit -m x -- a.ts'", CWD).level).toBe(
       "forbidden"
     )
-    expect(assessCommandSafety("powershell -co 'git commit -m x'", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("powershell -co 'git commit -m x'", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("pwsh /Command git commit -m x", CWD).level).toBe("forbidden")
-    expect(assessCommandSafety("powershell -EncodedCommand ZgBvAG8A", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("powershell -EncodedCommand ZgBvAG8A", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("cmd /cgit commit -m x", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("cmd /d/cgit commit -m x", CWD).level).toBe("forbidden")
-    expect(
-      assessCommandSafety("bash --init-file /dev/null -c 'git commit -m x'", CWD).level
-    ).toBe("forbidden")
+    expect(assessCommandSafety("bash --init-file /dev/null -c 'git commit -m x'", CWD).level).toBe(
+      "forbidden"
+    )
     expect(assessCommandSafety("bash -O nullglob -c 'git commit -m x'", CWD).level).toBe(
       "forbidden"
     )
@@ -356,60 +397,39 @@ describe("git submit commands are no longer forbidden", () => {
       assessCommandSafety("cmd /c \"echo 'x & git commit -m x -- a.ts & echo y'\"", CWD).level
     ).toBe("forbidden")
     expect(
-      assessCommandSafety("cmd /c 'echo ^\" & git commit -m x -- a.ts & echo ^\"'", CWD)
-        .level
+      assessCommandSafety("cmd /c 'echo ^\" & git commit -m x -- a.ts & echo ^\"'", CWD).level
     ).toBe("forbidden")
     expect(
       assessCommandSafety("pwsh -Command 'echo `\" ; git commit -m x -- a.ts ; echo `\"'", CWD)
         .level
     ).toBe("forbidden")
-    expect(assessCommandSafety("pwsh -cwa 'git commit -m x -- a.ts'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("cmd /c '@git commit -m x -- a.ts'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("cmd /c '@ @git commit -m x -- a.ts'", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("pwsh -cwa 'git commit -m x -- a.ts'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("cmd /c '@git commit -m x -- a.ts'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("cmd /c '@ @git commit -m x -- a.ts'", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("cmd /c 'call git commit -m x -- a.ts'", CWD).level).toBe(
       "forbidden"
     )
-    expect(assessCommandSafety("dash -c 'git commit -m x -- a.ts'", CWD).level).toBe(
+    expect(assessCommandSafety("dash -c 'git commit -m x -- a.ts'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("ksh -c 'git commit -m x -- a.ts'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("fish -c 'git commit -m x -- a.ts'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("busybox sh -c 'git commit -m x -- a.ts'", CWD).level).toBe(
       "forbidden"
     )
-    expect(assessCommandSafety("ksh -c 'git commit -m x -- a.ts'", CWD).level).toBe(
+    expect(assessCommandSafety("dash -c 'git add -f .env'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("busybox ash -c 'git add -f .env'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("fish --command='git add -f .env'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("fish --init-command='git add -f .env' -c true", CWD).level).toBe(
       "forbidden"
     )
-    expect(assessCommandSafety("fish -c 'git commit -m x -- a.ts'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(
-      assessCommandSafety("busybox sh -c 'git commit -m x -- a.ts'", CWD).level
-    ).toBe("forbidden")
-    expect(assessCommandSafety("dash -c 'git add -f .env'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("busybox ash -c 'git add -f .env'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("fish --command='git add -f .env'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(
-      assessCommandSafety("fish --init-command='git add -f .env' -c true", CWD).level
-    ).toBe("forbidden")
     expect(assessCommandSafety("noglob git add -f .env", CWD).level).toBe("forbidden")
-    expect(assessCommandSafety("nocorrect git commit -m x -- a.ts", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("nocorrect git commit -m x -- a.ts", CWD).level).toBe("forbidden")
   })
 
   it("does not forbid wrapped text that only mentions git commit", () => {
     expect(assessCommandSafety("bash -c 'echo git commit'", CWD).level).not.toBe("forbidden")
-    expect(
-      assessCommandSafety("bash -c 'echo ONE\\& git commit -m x'", CWD).level
-    ).not.toBe("forbidden")
+    expect(assessCommandSafety("bash -c 'echo ONE\\& git commit -m x'", CWD).level).not.toBe(
+      "forbidden"
+    )
     expect(
       assessCommandSafety("pwsh -Command 'Write-Output ONE\\& git commit -m x'", CWD).level
     ).toBe("forbidden")
@@ -424,6 +444,31 @@ describe("git submit commands are no longer forbidden", () => {
     // `--check` / `--norc` are not `-c`; the script-bearing arg is absent, so nothing wrapped.
     expect(assessCommandSafety("bash --check 'git commit -m x'", CWD).level).not.toBe("forbidden")
     expect(assessCommandSafety("bash --norc 'git status'", CWD).level).not.toBe("forbidden")
+  })
+})
+
+describe("isolated worktree native Git safety", () => {
+  it("does not apply ordinary task-card grammar restrictions", () => {
+    const nativeOptions = { nativeGitWorktree: true, shellSyntax: "posix" as const }
+    for (const command of [
+      "bash -lc 'git add src/a.ts && git commit -m native'",
+      "git ci -am native",
+      "git add -f generated.fixture",
+      "git commit-tree HEAD^{tree} -p HEAD"
+    ]) {
+      expect(assessCommandSafety(command, CWD, nativeOptions).level, command).not.toBe("forbidden")
+    }
+  })
+
+  it("keeps ordinary task-card grammar unchanged", () => {
+    for (const command of [
+      "bash -lc 'git add src/a.ts && git commit -m native'",
+      "git ci -am native",
+      "git add -f generated.fixture",
+      "git commit-tree HEAD^{tree} -p HEAD"
+    ]) {
+      expect(assessCommandSafety(command, CWD).level, command).toBe("forbidden")
+    }
   })
 })
 
@@ -505,9 +550,9 @@ describe("isChainedShellCommand", () => {
   })
 
   it("uses the native PowerShell and cmd escape characters", () => {
-    expect(
-      assessCommandSafety("g`it add -f .env", CWD, { shellSyntax: "powershell" }).level
-    ).toBe("forbidden")
+    expect(assessCommandSafety("g`it add -f .env", CWD, { shellSyntax: "powershell" }).level).toBe(
+      "forbidden"
+    )
     expect(isGitCommitCommand("g`it commit -m x -- a.ts", "powershell")).toBe(true)
     expect(assessCommandSafety("g^it add -f .env", CWD, { shellSyntax: "cmd" }).level).toBe(
       "forbidden"
@@ -516,9 +561,9 @@ describe("isChainedShellCommand", () => {
   })
 
   it("removes shell line continuations before detecting Git mutations", () => {
-    expect(
-      assessCommandSafety("g\\\nit add -f .env", CWD, { shellSyntax: "posix" }).level
-    ).toBe("forbidden")
+    expect(assessCommandSafety("g\\\nit add -f .env", CWD, { shellSyntax: "posix" }).level).toBe(
+      "forbidden"
+    )
     expect(
       assessCommandSafety("g`\nit add -f .env", CWD, { shellSyntax: "powershell" }).level
     ).toBe("forbidden")
@@ -532,9 +577,7 @@ describe("isChainedShellCommand", () => {
     expect(assessCommandSafety("if git commit -m x -- a.ts; then :; fi", CWD).level).toBe(
       "forbidden"
     )
-    expect(assessCommandSafety("& { git commit -m x -- a.ts }", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("& { git commit -m x -- a.ts }", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("(git commit -m x -- a.ts)", CWD).level).toBe("forbidden")
     expect(
       assessCommandSafety('& ("g"+"it") commit -m x -- a.ts', CWD, {
@@ -557,9 +600,9 @@ describe("isChainedShellCommand", () => {
     expect(
       assessCommandSafety("%GIT% commit -m x -- a.ts", CWD, { shellSyntax: "cmd" }).level
     ).toBe("forbidden")
-    expect(
-      assessCommandSafety("git$IFS add -f .env", CWD, { shellSyntax: "posix" }).level
-    ).toBe("forbidden")
+    expect(assessCommandSafety("git$IFS add -f .env", CWD, { shellSyntax: "posix" }).level).toBe(
+      "forbidden"
+    )
     expect(
       assessCommandSafety("git$IFS commit -m x -- a.ts", CWD, {
         shellSyntax: "posix"
@@ -585,9 +628,9 @@ describe("isChainedShellCommand", () => {
         shellSyntax: "posix"
       }).level
     ).toBe("forbidden")
-    expect(
-      assessCommandSafety(". git add -f .env", CWD, { shellSyntax: "powershell" }).level
-    ).toBe("forbidden")
+    expect(assessCommandSafety(". git add -f .env", CWD, { shellSyntax: "powershell" }).level).toBe(
+      "forbidden"
+    )
     expect(
       assessCommandSafety(". (Get-Command git) commit -m x -- a.ts", CWD, {
         shellSyntax: "powershell"
@@ -688,36 +731,26 @@ describe("isChainedShellCommand", () => {
         shellSyntax: "posix"
       }).level
     ).toBe("forbidden")
-    expect(assessCommandSafety("git apply --cached patch.diff", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("git apply --index patch.diff", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("git apply --intent-to-add patch.diff", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("git apply --3way patch.diff", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("git apply --cached patch.diff", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("git apply --index patch.diff", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("git apply --intent-to-add patch.diff", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("git apply --3way patch.diff", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("git apply -3 patch.diff", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("git apply -N patch.diff", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("git apply -3v patch.diff", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("git apply -vN patch.diff", CWD).level).toBe("forbidden")
-    expect(
-      assessCommandSafety("git add -? .env", CWD, { shellSyntax: "posix" }).level
-    ).toBe("forbidden")
+    expect(assessCommandSafety("git add -? .env", CWD, { shellSyntax: "posix" }).level).toBe(
+      "forbidden"
+    )
     expect(
       assessCommandSafety("git add --{f..f}{o..o}{r..r}{c..c}{e..e} .env", CWD, {
         shellSyntax: "posix"
       }).level
     ).toBe("forbidden")
-    expect(assessCommandSafety("/usr/lib/git-core/git-add -f .env", CWD).level).toBe(
+    expect(assessCommandSafety("/usr/lib/git-core/git-add -f .env", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("/usr/lib/git-core/git-commit -m x -- a.ts", CWD).level).toBe(
       "forbidden"
     )
-    expect(
-      assessCommandSafety("/usr/lib/git-core/git-commit -m x -- a.ts", CWD).level
-    ).toBe("forbidden")
     expect(
       assessCommandSafety("Set-Alias g git; g add -f .env", CWD, {
         shellSyntax: "powershell"
@@ -739,27 +772,15 @@ describe("isChainedShellCommand", () => {
       }).level
     ).toBe("forbidden")
     expect(assessCommandSafety("not git add -f .env", CWD).level).toBe("forbidden")
-    expect(assessCommandSafety("true; and git add -f .env", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("false; or git commit -m x -- a.ts", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("flock .git/cmb.lock git add -f .env", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("true; and git add -f .env", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("false; or git commit -m x -- a.ts", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("flock .git/cmb.lock git add -f .env", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("taskset 0x1 git commit -m x -- a.ts", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("arch git commit -m x -- a.ts", CWD).level).toBe("forbidden")
     expect(
-      assessCommandSafety("taskset 0x1 git commit -m x -- a.ts", CWD).level
-    ).toBe("forbidden")
-    expect(assessCommandSafety("arch git commit -m x -- a.ts", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(
-      assessCommandSafety(
-        "rg --pre=/usr/lib/git-core/git-commit x -- -mfoo",
-        CWD,
-        { shellSyntax: "posix" }
-      ).level
+      assessCommandSafety("rg --pre=/usr/lib/git-core/git-commit x -- -mfoo", CWD, {
+        shellSyntax: "posix"
+      }).level
     ).toBe("forbidden")
   })
 })
@@ -854,7 +875,10 @@ describe("normalizeGitAddPrefixedGitCommitCommand", () => {
       normalizeGitAddPrefixedGitCommitCommand('git add -- "" && git commit -m x', CWD)
     ).toBeNull()
     expect(
-      normalizeGitAddPrefixedGitCommitCommand("git add src/a.ts && git commit -m x && git push", CWD)
+      normalizeGitAddPrefixedGitCommitCommand(
+        "git add src/a.ts && git commit -m x && git push",
+        CWD
+      )
     ).toBeNull()
   })
 
@@ -871,17 +895,13 @@ describe("normalizeGitAddPrefixedGitCommitCommand", () => {
 
   it("forbids direct and wrapped Git aliases that could hide a commit", () => {
     expect(assessCommandSafety("git ci -am bypass", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("git -c alias.ci=commit ci -am bypass", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("git -c alias.STATUS=commit STATUS -am bypass", CWD).level).toBe(
+      "forbidden"
+    )
     expect(
-      assessCommandSafety("git -c alias.ci=commit ci -am bypass", CWD).level
-    ).toBe("forbidden")
-    expect(
-      assessCommandSafety("git -c alias.STATUS=commit STATUS -am bypass", CWD).level
-    ).toBe("forbidden")
-    expect(
-      assessCommandSafety(
-        "git -c alias.ci='!git add -f .env && git commit -m bypass' ci",
-        CWD
-      ).level
+      assessCommandSafety("git -c alias.ci='!git add -f .env && git commit -m bypass' ci", CWD)
+        .level
     ).toBe("forbidden")
     expect(assessCommandSafety("bash -c 'git ci -am bypass'", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("git status --short", CWD).level).not.toBe("forbidden")
@@ -894,15 +914,9 @@ describe("normalizeGitAddPrefixedGitCommitCommand", () => {
     expect(assessCommandSafety("env git stage --force .env", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("timeout 30 git add -f .env", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("bash -c 'git add -f .env'", CWD).level).toBe("forbidden")
-    expect(assessCommandSafety("wsl bash -c 'g\\it add -f .env'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("timeout 30 bash -c 'git add -f .env'", CWD).level).toBe(
-      "forbidden"
-    )
-    expect(assessCommandSafety("cmd /c 'if 1==1 git add -f .env'", CWD).level).toBe(
-      "forbidden"
-    )
+    expect(assessCommandSafety("wsl bash -c 'g\\it add -f .env'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("timeout 30 bash -c 'git add -f .env'", CWD).level).toBe("forbidden")
+    expect(assessCommandSafety("cmd /c 'if 1==1 git add -f .env'", CWD).level).toBe("forbidden")
     expect(assessCommandSafety("git add -- -f", CWD).level).not.toBe("forbidden")
     expect(
       assessCommandSafety("git update-index --add --cacheinfo 100644,abc123,.env", CWD).level
@@ -914,10 +928,7 @@ describe("normalizeGitAddPrefixedGitCommitCommand", () => {
 
   it("does not treat git -C on an add as a persistent shell cd", () => {
     expect(
-      normalizeGitAddPrefixedGitCommitCommand(
-        "git -C child add a.ts && git commit -m x",
-        CWD
-      )
+      normalizeGitAddPrefixedGitCommitCommand("git -C child add a.ts && git commit -m x", CWD)
     ).toBeNull()
   })
 
@@ -998,9 +1009,7 @@ describe("extractGitCommitPathspecs", () => {
   })
 
   it("uses POSIX shell escaping for an unquoted backslash pathspec", () => {
-    expect(extractGitCommitPathspecs("git commit -m x -- foo\\bar", "posix")).toEqual([
-      "foobar"
-    ])
+    expect(extractGitCommitPathspecs("git commit -m x -- foo\\bar", "posix")).toEqual(["foobar"])
     expect(extractGitCommitPathspecs("git commit -m x -- foo\\bar", "powershell")).toEqual([
       "foo\\bar"
     ])
@@ -1013,9 +1022,7 @@ describe("extractGitCommitPathspecs", () => {
     expect(extractGitCommitPathspecs("git commit -m x -- dir\\ file.ts", "posix")).toEqual([
       "dir file.ts"
     ])
-    expect(
-      extractGitCommitPathspecs("git commit -m x -- dir\\ file.ts", "powershell")
-    ).toEqual([
+    expect(extractGitCommitPathspecs("git commit -m x -- dir\\ file.ts", "powershell")).toEqual([
       "dir\\",
       "file.ts"
     ])

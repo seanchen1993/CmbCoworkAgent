@@ -3,9 +3,11 @@ import { tmpdir } from "os"
 import { join } from "path"
 import { describe, expect, it } from "vitest"
 import {
+  canonicalizeWorkspacePathSync,
   deleteProjectThreadDataDirectory,
   getConversationHistoryDirectory,
   getProjectThreadDataDirectory,
+  getProjectThreadDataDirectorySync,
   sanitizeHistoryPathComponent
 } from "./context-history-path"
 
@@ -33,6 +35,53 @@ describe("conversation history paths", () => {
     expect(sanitizeHistoryPathComponent("/Users/chenqiang/IdeaProjects/firstDemo")).toBe(
       "-Users-chenqiang-IdeaProjects-firstDemo"
     )
+  })
+
+  it("keeps synchronous workflow storage paths aligned with the async thread directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cmb-thread-path-sync-"))
+    const workspace = join(root, "workspace")
+    const userHome = join(root, "home")
+    await mkdir(workspace, { recursive: true })
+
+    try {
+      expect(canonicalizeWorkspacePathSync(workspace)).toBe(await realpath(workspace))
+      await expect(getProjectThreadDataDirectory(workspace, "thread-sync", userHome)).resolves.toBe(
+        getProjectThreadDataDirectorySync(
+          workspace,
+          "thread-sync",
+          join(userHome, ".cmbcoworkagent")
+        )
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps all default thread paths under CMB_COWORK_AGENT_HOME", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cmb-thread-path-override-"))
+    const workspace = join(root, "workspace")
+    const appDataRoot = join(root, "portable-data")
+    const previous = process.env.CMB_COWORK_AGENT_HOME
+    await mkdir(workspace, { recursive: true })
+    process.env.CMB_COWORK_AGENT_HOME = appDataRoot
+
+    try {
+      const expected = getProjectThreadDataDirectorySync(workspace, "thread-portable")
+      await expect(getProjectThreadDataDirectory(workspace, "thread-portable")).resolves.toBe(
+        expected
+      )
+      await expect(getConversationHistoryDirectory(workspace, "thread-portable")).resolves.toBe(
+        join(expected, "conversation_history")
+      )
+
+      await mkdir(join(expected, "large_tool_results"), { recursive: true })
+      await deleteProjectThreadDataDirectory(workspace, "thread-portable")
+      await expect(access(expected)).rejects.toThrow()
+    } finally {
+      if (previous === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+      else process.env.CMB_COWORK_AGENT_HOME = previous
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it("bounds unusually long project and thread path components", () => {
@@ -81,6 +130,9 @@ describe("conversation history paths", () => {
       await expect(getProjectThreadDataDirectory(root, "", join(root, "home"))).rejects.toThrow(
         "Thread ID is required"
       )
+      expect(() =>
+        getProjectThreadDataDirectorySync(root, "", join(root, "home", ".cmbcoworkagent"))
+      ).toThrow("Thread ID is required")
     } finally {
       await rm(root, { recursive: true, force: true })
     }

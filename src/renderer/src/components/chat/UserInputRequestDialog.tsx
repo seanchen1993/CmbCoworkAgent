@@ -198,8 +198,8 @@ export function UserInputRequestDialog({
       className={cn(
         "absolute z-30 flex items-stretch overflow-hidden rounded-[calc(1.5rem+1px)] border border-primary/25 bg-background shadow-[0_-12px_30px_rgba(15,23,42,0.08)] transition-[inset,min-height,max-height] duration-200",
         collapsed
-          ? "-inset-px"
-          : "-inset-x-px -bottom-px min-h-[320px] max-h-[520px]"
+          ? "-inset-x-px -top-px bottom-12"
+          : "-inset-x-px bottom-12 min-h-[320px] max-h-[520px]"
       )}
     >
       <div

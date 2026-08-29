@@ -66,12 +66,21 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { TabbedPanel } from "@/components/tabs"
 import { ThreadListItem } from "@/components/sidebar/ThreadSidebar"
 import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheckpointDialog"
+import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteDialog"
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
 import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
 import { createHarnessFeatureThread } from "@/lib/harness-feature-thread"
 import { setPendingHarnessNextAction } from "@/lib/harness-next-action"
 import { getHarnessRunNextAction } from "@/lib/harness-run-next-action"
+import {
+  buildHarnessPluginRunArtifactsContext,
+  type HarnessPluginRunArtifactsContext
+} from "@/lib/harness-plugin-run-artifacts"
+import {
+  deleteThreadGroupSequentially,
+  hasRunningThreadForDeletion
+} from "@/lib/thread-group-deletion"
 import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
@@ -187,6 +196,7 @@ const THREAD_UNREAD_STORAGE_KEY = "threads:unreadIds"
 const SYSTEM_CONSTRAINT_UPDATE_KIND = "system-constraints-update"
 const FEATURE_SESSION_INITIAL_VISIBLE_COUNT = 5
 const FEATURE_SESSION_VISIBLE_INCREMENT = 8
+const PLUGIN_RUN_ARTIFACTS_DEBOUNCE_MS = 3000
 const OTHER_ADAPTER_SCENARIO = "其他类别"
 const ADAPTER_SELECT_PLACEHOLDER = "请选择已安装的支持项目模式的插件"
 const PROJECT_STATUS_POLL_INTERVAL_MS = 60 * 1000
@@ -411,6 +421,14 @@ interface ProjectSessionProjectGroup {
   deleted?: boolean
 }
 
+interface ProjectThreadGroupDeleteTarget {
+  kind: "project" | "feature"
+  projectId: string
+  slug?: string
+  name: string
+  threadIds: string[]
+}
+
 type EnterpriseProjectDetailCacheEntry =
   | { kind: "hit"; project: HarnessEnterpriseProjectDetailItem }
   | { kind: "miss" }
@@ -476,6 +494,7 @@ type ThreadWorkspaceStateMap = Record<
     pendingApproval?: unknown
     pendingUserInput?: unknown
     contextReminder?: { pending?: boolean }
+    workflowRun?: { status?: string } | null
   } | undefined
 >
 
@@ -2179,25 +2198,49 @@ function AdapterSelectGroups({
   installingPluginNames: Set<string>
   onInstallPlugin: (adapter: HarnessAdapterRegistryItem) => void | Promise<void>
 }): React.JSX.Element {
-  const groups = groupAdaptersByUseScenario(registry)
+  const sections = [
+    {
+      key: "installed",
+      label: "已安装插件",
+      groups: groupAdaptersByUseScenario(
+        registry.filter((adapter) => adapter.boardCompatibility.status !== "missing-plugin")
+      )
+    },
+    {
+      key: "available",
+      label: "更多插件",
+      groups: groupAdaptersByUseScenario(
+        registry.filter((adapter) => adapter.boardCompatibility.status === "missing-plugin")
+      )
+    }
+  ].filter((section) => section.groups.length > 0)
+
   return (
     <>
-      {groups.map((group, index) => (
-        <Fragment key={group.useScenario}>
-          <SelectGroup>
-            <SelectLabel className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
-              {group.useScenario}
-            </SelectLabel>
-            {group.adapters.map((adapter) => (
-              <AdapterSelectItem
-                key={adapter.id}
-                adapter={adapter}
-                installingPluginNames={installingPluginNames}
-                onInstallPlugin={onInstallPlugin}
-              />
-            ))}
-          </SelectGroup>
-          {index < groups.length - 1 && <SelectSeparator />}
+      {sections.map((section, sectionIndex) => (
+        <Fragment key={section.key}>
+          <div className="px-2 pb-1 pt-2 text-xs font-semibold text-foreground">
+            {section.label}
+          </div>
+          {section.groups.map((group, groupIndex) => (
+            <Fragment key={group.useScenario}>
+              <SelectGroup>
+                <SelectLabel className="px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+                  {group.useScenario}
+                </SelectLabel>
+                {group.adapters.map((adapter) => (
+                  <AdapterSelectItem
+                    key={adapter.id}
+                    adapter={adapter}
+                    installingPluginNames={installingPluginNames}
+                    onInstallPlugin={onInstallPlugin}
+                  />
+                ))}
+              </SelectGroup>
+              {groupIndex < section.groups.length - 1 && <SelectSeparator />}
+            </Fragment>
+          ))}
+          {sectionIndex < sections.length - 1 && <SelectSeparator className="my-1" />}
         </Fragment>
       ))}
     </>
@@ -6836,6 +6879,7 @@ function ProjectFeatureSidebar({
   onSelectSession,
   onRunFinished,
   onDeleteSession,
+  onDeleteThreadGroup,
   onExportSession,
   onForkSession,
   onForkSessionFromCheckpoint,
@@ -6873,6 +6917,7 @@ function ProjectFeatureSidebar({
   onSelectSession: (projectId: string, slug: string, threadId: string, deleted?: boolean) => void
   onRunFinished: (threadId: string) => void
   onDeleteSession: (thread: Thread) => void
+  onDeleteThreadGroup: (target: ProjectThreadGroupDeleteTarget) => void
   onExportSession: (thread: Thread) => void
   onForkSession: (thread: Thread) => void
   onForkSessionFromCheckpoint: (thread: Thread) => void
@@ -6968,7 +7013,9 @@ function ProjectFeatureSidebar({
     onSelect: () => void
   ): React.JSX.Element => {
     const threadState = allThreadStates[thread.thread_id]
-    const isLoading = allStreamLoadingStates[thread.thread_id] ?? false
+    const isLoading =
+      (allStreamLoadingStates[thread.thread_id] ?? false) ||
+      threadState?.workflowRun?.status === "running"
     const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
     const hasPendingApproval = Boolean(threadState?.pendingApproval)
     const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
@@ -7112,6 +7159,19 @@ function ProjectFeatureSidebar({
             const groupSessionCount =
               group.projectSessions.length +
               group.featureGroups.reduce((count, featureGroup) => count + featureGroup.sessions.length, 0)
+            const groupThreadIds = Array.from(
+              new Set([
+                ...group.projectSessions.map((session) => session.threadId),
+                ...group.featureGroups.flatMap((featureGroup) =>
+                  featureGroup.sessions.map((session) => session.threadId)
+                )
+              ])
+            )
+            const hasRunningGroupSession = hasRunningThreadForDeletion(
+              groupThreadIds,
+              allThreadStates,
+              allStreamLoadingStates
+            )
 
             return (
               <div key={group.key} className="space-y-1">
@@ -7167,6 +7227,30 @@ function ProjectFeatureSidebar({
                     <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                       {groupSessionCount}
                     </span>
+                    <span className="pointer-events-none absolute right-0 flex items-center justify-end opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
+                        title={
+                          hasRunningGroupSession
+                            ? "项目内有运行中的会话，无法删除"
+                            : "删除项目全部会话"
+                        }
+                        disabled={hasRunningGroupSession}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          onDeleteThreadGroup({
+                            kind: "project",
+                            projectId: group.project.projectId,
+                            name: group.project.name,
+                            threadIds: groupThreadIds
+                          })
+                        }}
+                      >
+                        <Trash2 className="size-3" />
+                      </Button>
+                    </span>
                   </span>
                 </div>
 
@@ -7211,6 +7295,14 @@ function ProjectFeatureSidebar({
                       const hasUnreadFeatureSession = featureGroup.sessions.some((session) =>
                         unreadIds.has(session.threadId)
                       )
+                      const featureThreadIds = Array.from(
+                        new Set(featureGroup.sessions.map((session) => session.threadId))
+                      )
+                      const hasRunningFeatureSession = hasRunningThreadForDeletion(
+                        featureThreadIds,
+                        allThreadStates,
+                        allStreamLoadingStates
+                      )
                       const visibleSessionCount = getVisibleSessionCount(
                         featureGroup.key,
                         featureGroup.sessions.length
@@ -7246,19 +7338,51 @@ function ProjectFeatureSidebar({
                                 {featureGroup.sessions.length}
                               </span>
                               <span className="pointer-events-none absolute right-0 flex items-center justify-end gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                                {!projectDeleted && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
+                                    title="新增会话"
+                                    disabled={creatingSession}
+                                    onClick={(event) => {
+                                      event.stopPropagation()
+                                      void onCreateSession(
+                                        group.project,
+                                        featureGroup.slug,
+                                        featureGroup.sessions
+                                      )
+                                    }}
+                                  >
+                                    {creatingSession ? (
+                                      <Loader2 className="size-3 animate-spin" />
+                                    ) : (
+                                      <Plus className="size-3" />
+                                    )}
+                                  </Button>
+                                )}
                                 <Button
                                   variant="ghost"
                                   size="icon-sm"
-                                  className="size-6 shrink-0 opacity-70 hover:bg-accent/20"
-                                  title={projectDeleted ? "项目已删除，无法新增会话" : "新增会话"}
-                                  disabled={creatingSession || projectDeleted}
+                                  className="size-6 shrink-0 opacity-70 hover:bg-destructive/10 hover:text-destructive"
+                                  title={
+                                    hasRunningFeatureSession
+                                      ? "特性组内有运行中的会话，无法删除"
+                                      : "删除特性组全部会话"
+                                  }
+                                  disabled={hasRunningFeatureSession}
                                   onClick={(event) => {
                                     event.stopPropagation()
-                                    if (projectDeleted) return
-                                    void onCreateSession(group.project, featureGroup.slug, featureGroup.sessions)
+                                    onDeleteThreadGroup({
+                                      kind: "feature",
+                                      projectId: group.project.projectId,
+                                      slug: featureGroup.slug,
+                                      name: featureGroup.title,
+                                      threadIds: featureThreadIds
+                                    })
                                   }}
                                 >
-                                  {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
+                                  <Trash2 className="size-3" />
                                 </Button>
                               </span>
                             </span>
@@ -7316,6 +7440,7 @@ interface HarnessBoardViewProps {
   onDismissGitChangeNotice?: () => void
   onThreadGitStatusChange?: (threadId: string, isGit: boolean) => void
   onActiveSessionThreadChange?: (threadId: string | null) => void
+  onPluginRunArtifactsChange?: (context: HarnessPluginRunArtifactsContext | null) => void
 }
 
 export function HarnessBoardView({
@@ -7323,7 +7448,8 @@ export function HarnessBoardView({
   onRequestOpenGitPanel,
   onDismissGitChangeNotice,
   onThreadGitStatusChange,
-  onActiveSessionThreadChange
+  onActiveSessionThreadChange,
+  onPluginRunArtifactsChange
 }: HarnessBoardViewProps = {}): React.JSX.Element {
   const [projects, setProjects] = useState<HarnessProjectListItem[]>([])
   const [detailsByProjectId, setDetailsByProjectId] = useState<Record<string, HarnessProjectDetailViewModel>>({})
@@ -7424,6 +7550,9 @@ export function HarnessBoardView({
   const [forkingThreadId, setForkingThreadId] = useState<string | null>(null)
   const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
   const [sidebarThreadToDelete, setSidebarThreadToDelete] = useState<Thread | null>(null)
+  const [threadGroupDeleteTarget, setThreadGroupDeleteTarget] =
+    useState<ProjectThreadGroupDeleteTarget | null>(null)
+  const [confirmingThreadGroupDeletion, setConfirmingThreadGroupDeletion] = useState(false)
   const [creatingSidebarSessionKey, setCreatingSidebarSessionKey] = useState<string | null>(null)
   const [creatingProjectSessionProjectId, setCreatingProjectSessionProjectId] = useState<string | null>(null)
   const creatingFeatureRef = useRef(false)
@@ -7445,6 +7574,7 @@ export function HarnessBoardView({
   const skipRunDetailLoadForSessionRef = useRef<string | null>(null)
   const loadProjectsRequestIdRef = useRef(0)
   const featureWorkflowRequestIdRef = useRef(0)
+  const publishedPluginRunArtifactsRef = useRef<HarnessPluginRunArtifactsContext | null>(null)
   projectsRef.current = projects
   enterpriseProjectDetailsByCodeRef.current = enterpriseProjectDetailsByCode
   selectedProjectIdRef.current = selectedProjectId
@@ -8720,6 +8850,53 @@ export function HarnessBoardView({
     },
     [isViewingSession, runDetail, selectedFeature, selectedFeatureProjectDetail, selectedFeatureSessions]
   )
+  const selectedFeatureSessionThreadIdsKey = selectedFeatureSessions
+    .map((session) => session.threadId)
+    .join("\u0000")
+  const pluginRunArtifactsContext = useMemo(
+    () =>
+      runDetail && !selectedFeature?.deleted
+        ? buildHarnessPluginRunArtifactsContext(
+            runDetail,
+            selectedFeatureSessionThreadIdsKey
+              ? selectedFeatureSessionThreadIdsKey.split("\u0000")
+              : []
+          )
+        : null,
+    [runDetail, selectedFeature?.deleted, selectedFeatureSessionThreadIdsKey]
+  )
+
+  useEffect(() => {
+    if (!onPluginRunArtifactsChange) return
+    if (!pluginRunArtifactsContext) {
+      publishedPluginRunArtifactsRef.current = null
+      onPluginRunArtifactsChange(null)
+      return
+    }
+
+    const publishedContext = publishedPluginRunArtifactsRef.current
+    const sameFeature =
+      publishedContext?.projectId === pluginRunArtifactsContext.projectId &&
+      publishedContext.slug === pluginRunArtifactsContext.slug
+    onPluginRunArtifactsChange({
+      ...pluginRunArtifactsContext,
+      files: sameFeature ? publishedContext.files : []
+    })
+
+    const timer = window.setTimeout(() => {
+      publishedPluginRunArtifactsRef.current = pluginRunArtifactsContext
+      onPluginRunArtifactsChange(pluginRunArtifactsContext)
+    }, PLUGIN_RUN_ARTIFACTS_DEBOUNCE_MS)
+
+    return () => window.clearTimeout(timer)
+  }, [onPluginRunArtifactsChange, pluginRunArtifactsContext])
+
+  useEffect(
+    () => () => {
+      onPluginRunArtifactsChange?.(null)
+    },
+    [onPluginRunArtifactsChange]
+  )
   const showingUnboundRunDetail =
     runDetailWithSessions !== null &&
     runDetail === null &&
@@ -9416,6 +9593,47 @@ export function HarnessBoardView({
     ]
   )
 
+  const confirmDeleteThreadGroup = useCallback(async (): Promise<void> => {
+    if (!threadGroupDeleteTarget || confirmingThreadGroupDeletion) return
+
+    setConfirmingThreadGroupDeletion(true)
+    try {
+      await deleteThreadGroupSequentially(threadGroupDeleteTarget.threadIds, {
+        deleteThread,
+        cleanupThread,
+        markRead
+      })
+
+      const selectedFeatureValue = selectedFeatureRef.current
+      const selectedProjectSessionValue = selectedProjectSessionRef.current
+      const deletingSelectedFeature =
+        selectedFeatureValue?.projectId === threadGroupDeleteTarget.projectId &&
+        (threadGroupDeleteTarget.kind === "project" ||
+          selectedFeatureValue.slug === threadGroupDeleteTarget.slug)
+      const deletingSelectedProjectSession =
+        threadGroupDeleteTarget.kind === "project" &&
+        selectedProjectSessionValue?.projectId === threadGroupDeleteTarget.projectId
+
+      if (deletingSelectedFeature || deletingSelectedProjectSession) {
+        setSelectedFeature(null)
+        setSelectedProjectSession(null)
+        setIsViewingSession(false)
+      }
+      setThreadGroupDeleteTarget(null)
+    } catch (error) {
+      toast.error(cleanIpcError(error))
+      setThreadGroupDeleteTarget(null)
+    } finally {
+      setConfirmingThreadGroupDeletion(false)
+    }
+  }, [
+    cleanupThread,
+    confirmingThreadGroupDeletion,
+    deleteThread,
+    markRead,
+    threadGroupDeleteTarget
+  ])
+
   const handleCreateSidebarSession = useCallback(
     async (
       project: ProjectFeatureSidebarProject,
@@ -9469,29 +9687,49 @@ export function HarnessBoardView({
   )
 
   const sidebarDeleteDialog = (
-    <Dialog
-      open={!!sidebarThreadToDelete}
-      onOpenChange={(open) => {
-        if (!open) setSidebarThreadToDelete(null)
-      }}
-    >
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>确认删除会话</DialogTitle>
-          <DialogDescription>
-            {`确定要删除「${sidebarThreadToDelete ? getThreadTitle(sidebarThreadToDelete) : ""}」吗？删除后不可恢复。`}
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setSidebarThreadToDelete(null)}>
-            取消
-          </Button>
-          <Button variant="destructive" onClick={() => void confirmDeleteSidebarThread()}>
-            删除
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <>
+      <Dialog
+        open={!!sidebarThreadToDelete}
+        onOpenChange={(open) => {
+          if (!open) setSidebarThreadToDelete(null)
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认删除会话</DialogTitle>
+            <DialogDescription>
+              {`确定要删除「${sidebarThreadToDelete ? getThreadTitle(sidebarThreadToDelete) : ""}」吗？删除后不可恢复。`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSidebarThreadToDelete(null)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={() => void confirmDeleteSidebarThread()}>
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ThreadGroupDeleteDialog
+        open={!!threadGroupDeleteTarget}
+        title={
+          threadGroupDeleteTarget?.kind === "feature"
+            ? "确认删除特性组会话"
+            : "确认删除项目会话"
+        }
+        description={
+          threadGroupDeleteTarget
+            ? `确定要删除「${threadGroupDeleteTarget.name}」下的全部 ${threadGroupDeleteTarget.threadIds.length} 个会话吗？删除后不可恢复。`
+            : ""
+        }
+        confirming={confirmingThreadGroupDeletion}
+        onOpenChange={(open) => {
+          if (!open && !confirmingThreadGroupDeletion) setThreadGroupDeleteTarget(null)
+        }}
+        onConfirm={() => void confirmDeleteThreadGroup()}
+      />
+    </>
   )
 
   const handleSessionViewChange = useCallback((viewing: boolean): void => {
@@ -9585,6 +9823,7 @@ export function HarnessBoardView({
               }}
               onRunFinished={handleRunFinished}
               onDeleteSession={setSidebarThreadToDelete}
+              onDeleteThreadGroup={setThreadGroupDeleteTarget}
               onExportSession={(thread) => void handleExportSidebarThread(thread)}
               onForkSession={(thread) => void handleForkSidebarThread(thread)}
               onForkSessionFromCheckpoint={setForkDialogThread}

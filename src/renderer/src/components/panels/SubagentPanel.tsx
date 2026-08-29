@@ -16,6 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
+import { getToolLabel } from "@/lib/tool-labels"
 import type { Subagent } from "@/types"
 
 // Icon component for subagent type (avoid creating components during render)
@@ -140,7 +141,9 @@ export function SubagentCard({
 
   const config = getStatusConfig()
   const StatusIcon = config.icon
-  const latestToolLabel = subagent.currentTool || "等待工具调用"
+  const latestToolLabel = subagent.currentTool
+    ? getToolLabel(subagent.currentTool, { showToolName: false })
+    : "等待工具调用"
 
   const getDuration = (): string | null => {
     if (!subagent.startedAt || !subagent.completedAt) return null

@@ -15,6 +15,8 @@ import { validateWorkflowScript } from "./script"
 import { workflowRunManager } from "./run-manager"
 import { generateWorkflowRunId, loadWorkflowRun, sha256Hex } from "./run-store"
 
+const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
+
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
     encoding: "utf8",
@@ -35,34 +37,42 @@ function makeRepo(): string {
 
 describe("isolated worktree provisioning failure", () => {
   let repo: string
+  let workflowDataRoot: string
   let threadId: string
   let runId: string
 
   beforeEach(() => {
+    workflowDataRoot = mkdtempSync(join(tmpdir(), "cmb-workflow-fallback-data-"))
+    process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
     repo = makeRepo()
     threadId = `thread-no-shared-fallback-${Date.now()}`
     runId = generateWorkflowRunId()
   })
 
   afterEach(async () => {
-    if (workflowRunManager.isActive(threadId)) {
-      workflowRunManager.cancel(threadId, runId)
-      await workflowRunManager.waitForRunLifecycle(threadId, runId)
+    try {
+      if (workflowRunManager.isActive(threadId)) {
+        workflowRunManager.cancel(threadId, runId)
+        await workflowRunManager.waitForRunLifecycle(threadId, runId)
+      }
+    } finally {
+      if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+      else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
+      rmSync(repo, { recursive: true, force: true })
+      rmSync(workflowDataRoot, { recursive: true, force: true })
     }
-    rmSync(repo, { recursive: true, force: true })
   })
 
   test("never starts the subagent in the shared workspace", async () => {
-    const dirtyPath = join(repo, "uncommitted-user-work.txt")
     const escapedMarker = join(repo, "SHARED-WORKSPACE-FALLBACK.txt")
     const script = `export const meta = { name: "no-shared-fallback", description: "d" }
 const result = await agent("create SHARED-WORKSPACE-FALLBACK.txt", { isolation: "worktree" })
 return result === null ? "PROVISIONING_BLOCKED" : "UNEXPECTED_AGENT_RESULT"`
     let runtimeStarts = 0
 
-    // This change is intentionally absent from HEAD. A worktree created from
-    // HEAD would silently omit it, so provisioning must fail closed.
-    writeFileSync(dirtyPath, "user work that is not in HEAD\n")
+    // Detached source checkouts cannot supply the managed source branch. This
+    // provisioning failure must return null, never retry in the shared checkout.
+    git(repo, ["checkout", "--detach"])
 
     const launch = workflowRunManager.launch({
       threadId,
@@ -91,7 +101,7 @@ return result === null ? "PROVISIONING_BLOCKED" : "UNEXPECTED_AGENT_RESULT"`
     const persisted = loadWorkflowRun(repo, threadId, runId)
     expect(persisted?.status).toBe("completed")
     expect(persisted?.result).toBe("PROVISIONING_BLOCKED")
-    expect(persisted?.agents[0]?.error).toContain("clean assigned workspace")
+    expect(persisted?.agents[0]?.error).toContain("attached to a branch")
     expect(runtimeStarts).toBe(0)
     expect(existsSync(escapedMarker)).toBe(false)
     expect(
