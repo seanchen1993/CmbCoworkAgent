@@ -2329,11 +2329,6 @@ export function getHarnessFeatureBinding(
   return findFeatureDeployUnitBinding(projectId, featureId)
 }
 
-export function getHarnessProjectSessionWorkspacePath(projectId: string): string {
-  const project = requireProject(projectId)
-  return project.sessionWorkspacePath || project.workspacePath
-}
-
 export function getHarnessProjectRootPath(projectId: string): string {
   return projectDirectoryPath(requireProject(projectId))
 }
@@ -2357,14 +2352,6 @@ export function listHarnessManagedRunProjectDirectories(): Array<{
     }
   }
   return directories
-}
-
-export function getHarnessProjectConfiguredSessionWorkspacePath(
-  projectId: string
-): string | null {
-  const project = requireProject(projectId)
-  const workspacePath = project.sessionWorkspacePath?.trim()
-  return workspacePath || null
 }
 
 export function listHarnessDeployUnitMappings(): HarnessDeployUnitMapping[] {

@@ -5963,6 +5963,10 @@ function FeatureDetailPage({
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
   const [updatingManagedRun, setUpdatingManagedRun] = useState(false)
+  const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
+  const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
+  const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
+  const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
   const managedRunActionInFlightRef = useRef(false)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
@@ -6087,55 +6091,104 @@ function FeatureDetailPage({
     threadsById
   ])
 
-  const handleManagedRunChange = useCallback(async (shouldStart: boolean): Promise<void> => {
-    if (
-      !detail ||
-      updatingManagedRun ||
-      projectInteractionDisabled ||
-      managedRunActionInFlightRef.current
-    ) {
-      return
-    }
-
-    managedRunActionInFlightRef.current = true
-    setUpdatingManagedRun(true)
+  const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
+    if (pickingManagedRunWorkspace) return
+    setPickingManagedRunWorkspace(true)
     try {
-      let startStatus: "running" | "completed" | "failed" | "cancelled" | "corrupt" | null = null
-      let startFailureReason: string | undefined
-      if (shouldStart) {
-        const startedRun = await window.api.harnessBoard.startManagedRun({
-          projectId: detail.project.projectId,
-          featureId: detail.run.slug
-        })
-        startStatus = startedRun.status
-        startFailureReason = startedRun.failureReason
-      } else {
-        const runId = detail.run.managedRun?.runId
-        if (!runId) throw new Error("当前没有可停止的托管 Run")
-        const stopped = await window.api.harnessBoard.stopManagedRun({
-          projectId: detail.project.projectId,
-          featureId: detail.run.slug,
-          runId
-        })
-        if (!stopped) throw new Error("托管 Run 已发生变化，请刷新后重试")
-      }
-      await onRefresh()
-      if (!shouldStart) {
-        toast.success("已停止托管")
-      } else if (startStatus === "running") {
-        toast.success("已开始托管")
-      } else if (startStatus === "completed") {
-        toast.success("特性已完成，无需继续托管")
-      } else {
-        toast.error(startFailureReason || "托管未能启动，请查看托管运行记录")
-      }
-    } catch (error) {
-      toast.error(cleanIpcError(error))
+      const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
+      if (workspacePath) setManagedRunWorkspacePath(workspacePath)
     } finally {
-      managedRunActionInFlightRef.current = false
-      setUpdatingManagedRun(false)
+      setPickingManagedRunWorkspace(false)
     }
-  }, [detail, onRefresh, projectInteractionDisabled, updatingManagedRun])
+  }, [pickingManagedRunWorkspace])
+
+  const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
+    if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled) return
+    setOpeningManagedRunDialog(true)
+    try {
+      const latestSessionWorkspacePath = await getLatestSessionWorkspacePath(
+        detail.sessions,
+        threadsById,
+        allThreadStates
+      )
+      const configuredWorkspacePath = normalizeWorkspacePath(detail.project.sessionWorkspacePath)
+      const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
+      setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
+      setManagedRunDialogOpen(true)
+    } finally {
+      setOpeningManagedRunDialog(false)
+    }
+  }, [
+    allThreadStates,
+    detail,
+    openingManagedRunDialog,
+    projectInteractionDisabled,
+    threadsById,
+    updatingManagedRun
+  ])
+
+  const handleManagedRunChange = useCallback(
+    async (shouldStart: boolean, workspacePath?: string): Promise<boolean> => {
+      if (
+        !detail ||
+        updatingManagedRun ||
+        projectInteractionDisabled ||
+        managedRunActionInFlightRef.current
+      ) {
+        return false
+      }
+
+      managedRunActionInFlightRef.current = true
+      setUpdatingManagedRun(true)
+      try {
+        let startStatus: "running" | "completed" | "failed" | "cancelled" | "corrupt" | null = null
+        let startFailureReason: string | undefined
+        if (shouldStart) {
+          const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
+          if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
+          const startedRun = await window.api.harnessBoard.startManagedRun({
+            projectId: detail.project.projectId,
+            featureId: detail.run.slug,
+            workspacePath: confirmedWorkspacePath
+          })
+          startStatus = startedRun.status
+          startFailureReason = startedRun.failureReason
+        } else {
+          const runId = detail.run.managedRun?.runId
+          if (!runId) throw new Error("当前没有可停止的托管 Run")
+          const stopped = await window.api.harnessBoard.stopManagedRun({
+            projectId: detail.project.projectId,
+            featureId: detail.run.slug,
+            runId
+          })
+          if (!stopped) throw new Error("托管 Run 已发生变化，请刷新后重试")
+        }
+        await onRefresh()
+        if (!shouldStart) {
+          toast.success("已停止托管")
+        } else if (startStatus === "running") {
+          toast.success("已开始托管")
+        } else if (startStatus === "completed") {
+          toast.success("特性已完成，无需继续托管")
+        } else {
+          toast.error(startFailureReason || "托管未能启动，请查看托管运行记录")
+        }
+        return true
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+        return false
+      } finally {
+        managedRunActionInFlightRef.current = false
+        setUpdatingManagedRun(false)
+      }
+    },
+    [detail, onRefresh, projectInteractionDisabled, updatingManagedRun]
+  )
+
+  const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
+    const started = await handleManagedRunChange(true, managedRunWorkspacePath)
+    if (started) setManagedRunDialogOpen(false)
+  }, [handleManagedRunChange, managedRunWorkspacePath])
 
   const handleContextReminderSessionCreated = useCallback((threadId: string): void => {
     if (!threadId) return
@@ -6389,24 +6442,42 @@ function FeatureDetailPage({
           </div>
           {effectiveActiveDetailTab === "feature" && (
             <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
-              <Button
-                type="button"
-                variant={detail?.run.managedRun?.status === "running" ? "outline" : "default"}
-                size="sm"
-                className={cn(harnessDetailSecondaryButtonClassName, "w-[132px]")}
-                onClick={() =>
-                  void handleManagedRunChange(detail?.run.managedRun?.status !== "running")
-                }
-                disabled={
-                  loading ||
-                  !detail ||
-                  projectInteractionDisabled ||
-                  updatingManagedRun
-                }
-              >
-                {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
-                {detail?.run.managedRun?.status === "running" ? "停止托管" : "开始托管"}
-              </Button>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant={detail?.run.managedRun?.status === "running" ? "outline" : "default"}
+                      size="sm"
+                      className={cn(harnessDetailSecondaryButtonClassName, "w-[132px]")}
+                      onClick={() => {
+                        if (detail?.run.managedRun?.status === "running") {
+                          void handleManagedRunChange(false)
+                          return
+                        }
+                        void handleOpenManagedRunDialog()
+                      }}
+                      disabled={
+                        loading ||
+                        !detail ||
+                        projectInteractionDisabled ||
+                        openingManagedRunDialog ||
+                        updatingManagedRun
+                      }
+                    >
+                      {(openingManagedRunDialog || updatingManagedRun) && (
+                        <Loader2 className="size-4 animate-spin" />
+                      )}
+                      {detail?.run.managedRun?.status === "running" ? "停止托管" : "开始托管"}
+                    </Button>
+                  </TooltipTrigger>
+                  {detail?.run.managedRun?.status !== "running" && (
+                    <TooltipContent side="bottom" className="z-[70] max-w-72">
+                      将自动在会话结束时创建新会话、推进到下一阶段
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              </TooltipProvider>
               <Button
                 type="button"
                 variant="ghost"
@@ -6662,6 +6733,79 @@ function FeatureDetailPage({
           </div>
         </div>
       )}
+      <Dialog
+        open={managedRunDialogOpen}
+        onOpenChange={(open) => {
+          if (!updatingManagedRun) setManagedRunDialogOpen(open)
+        }}
+      >
+        <DialogContent className={harnessDialogContentClassName}>
+          <DialogHeader>
+            <DialogTitle>开启托管</DialogTitle>
+            <DialogDescription>确认本次托管自动创建会话时使用的会话工作区。</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-2 py-2">
+            <div className="flex items-center gap-1.5 text-sm font-medium">
+              <span>会话工作区</span>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      aria-label="托管模式会话工作区提示"
+                      className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      <Info className="size-3.5" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="z-[70] max-w-72">
+                    该路径将作为本次托管模式自动创建会话时使用的会话工作区
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            <div className="flex min-w-0 gap-2">
+              <Input
+                value={managedRunWorkspacePath}
+                readOnly
+                placeholder="请选择文件夹"
+                className="min-w-0 flex-1"
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                className="shrink-0 gap-2"
+                onClick={() => void handlePickManagedRunWorkspace()}
+                disabled={pickingManagedRunWorkspace || updatingManagedRun}
+              >
+                {pickingManagedRunWorkspace ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <FolderOpen className="size-4" />
+                )}
+                选择文件夹
+              </Button>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setManagedRunDialogOpen(false)}
+              disabled={updatingManagedRun}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleConfirmManagedRun()}
+              disabled={!managedRunWorkspacePath.trim() || updatingManagedRun}
+            >
+              {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
+              确认并开启托管
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

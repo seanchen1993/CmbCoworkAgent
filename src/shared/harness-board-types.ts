@@ -367,9 +367,12 @@ export interface HarnessFeatureDeployUnitUpdateInput {
 export interface ManagedRunStartInput {
   projectId: string
   featureId: string
+  workspacePath: string
 }
 
-export interface ManagedRunStopInput extends ManagedRunStartInput {
+export interface ManagedRunStopInput {
+  projectId: string
+  featureId: string
   runId: string
 }
 
@@ -462,6 +465,7 @@ export interface ManagedRunSnapshot {
   projectId: string
   featureId: string
   status: ManagedRunStatus
+  workspacePath?: string
   currentSession?: {
     threadId: string
     workspacePath?: string

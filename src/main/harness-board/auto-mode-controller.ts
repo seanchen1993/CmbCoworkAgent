@@ -1,13 +1,11 @@
 import { BrowserWindow } from "electron"
+import { existsSync, statSync } from "fs"
 import { getAllThreads, getThread } from "../db"
 import type { AgentRunDelivery } from "../agent/agent-run-service"
 import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
 import { AsyncKeyedLock } from "../ipc/async-keyed-lock"
-import {
-  getHarnessProjectConfiguredSessionWorkspacePath,
-  readHarnessFeatureMetadata
-} from "./service"
+import { readHarnessFeatureMetadata } from "./service"
 import { inspectHarnessManagedFeatureStatus } from "./managed-feature-status"
 import {
   createAndStartManagedHarnessSession,
@@ -121,76 +119,6 @@ function hasActiveFeatureThread(projectId: string, featureId: string): boolean {
     }
   }
   return false
-}
-
-function readThreadWorkspacePath(threadId: string): string | null {
-  const thread = getThread(threadId)
-  if (!thread?.metadata) return null
-  try {
-    const metadata = JSON.parse(thread.metadata) as unknown
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null
-    const workspacePath = (metadata as Record<string, unknown>).workspacePath
-    return typeof workspacePath === "string" && workspacePath.trim()
-      ? workspacePath.trim()
-      : null
-  } catch {
-    return null
-  }
-}
-
-function resolveManagedSessionWorkspacePath(
-  projectId: string,
-  featureId: string,
-  currentThreadId?: string,
-  persistedWorkspacePath?: string
-): string | null {
-  let currentWorkspacePath: string | null = null
-  let currentIsManualFeatureSession = false
-  if (currentThreadId) {
-    currentWorkspacePath = readThreadWorkspacePath(currentThreadId)
-    const currentThread = getThread(currentThreadId)
-    if (currentThread?.metadata) {
-      try {
-        const currentFeature = readHarnessFeatureMetadata(
-          JSON.parse(currentThread.metadata) as unknown
-        )
-        currentIsManualFeatureSession = Boolean(
-          currentFeature?.projectId === projectId &&
-            currentFeature.slug === featureId &&
-            !currentFeature.runId
-        )
-      } catch {
-        currentIsManualFeatureSession = false
-      }
-    }
-  }
-  if (currentIsManualFeatureSession && currentWorkspacePath) {
-    return currentWorkspacePath
-  }
-  let manualFeatureWorkspacePath: string | null = null
-  let managedFeatureWorkspacePath: string | null = null
-  for (const thread of getAllThreads()) {
-    if (thread.thread_id === currentThreadId || !thread.metadata) continue
-    try {
-      const feature = readHarnessFeatureMetadata(JSON.parse(thread.metadata) as unknown)
-      if (feature?.projectId !== projectId || feature.slug !== featureId) continue
-      const workspacePath = readThreadWorkspacePath(thread.thread_id)
-      if (!workspacePath) continue
-      if (feature.runId) managedFeatureWorkspacePath ||= workspacePath
-      else manualFeatureWorkspacePath ||= workspacePath
-    } catch {
-      // Ignore malformed metadata while looking for another Feature session.
-    }
-  }
-  if (manualFeatureWorkspacePath) return manualFeatureWorkspacePath
-  if (currentWorkspacePath) return currentWorkspacePath
-  if (persistedWorkspacePath?.trim()) return persistedWorkspacePath.trim()
-  if (managedFeatureWorkspacePath) return managedFeatureWorkspacePath
-  try {
-    return getHarnessProjectConfiguredSessionWorkspacePath(projectId)
-  } catch {
-    return null
-  }
 }
 
 function toManagedRunSessionAction(
@@ -576,12 +504,16 @@ async function inspectAndLaunch(
   }
 
   const nextAction = toManagedRunSessionAction(feature.nextAction)
-  const workspacePath = resolveManagedSessionWorkspacePath(
-    decidedRun.projectId,
-    decidedRun.featureId,
-    decidedRun.currentSession?.threadId,
-    decidedRun.currentSession?.workspacePath
-  )
+  const workspacePath = decidedRun.workspacePath?.trim()
+  if (!workspacePath) {
+    await markTerminal(
+      decidedRun,
+      "failed",
+      "当前托管 Run 没有已确认的会话工作区",
+      "run_failed"
+    )
+    return
+  }
   const sessionInput: CreateManagedHarnessSessionInput = {
     projectId: decidedRun.projectId,
     featureId: decidedRun.featureId,
@@ -590,15 +522,6 @@ async function inspectAndLaunch(
     nextAction,
     workspacePath,
     delivery
-  }
-  if (workspacePath === null) {
-    await markTerminal(
-      decidedRun,
-      "failed",
-      "当前特性没有可用的会话工作区，无法启动托管会话",
-      "run_failed"
-    )
-    return
   }
   if (isManagedRunStopRequested(decidedRun)) return
   try {
@@ -609,8 +532,7 @@ async function inspectAndLaunch(
         ...decidedRun,
         status: "running",
         currentSession: {
-          threadId: created.threadId,
-          ...(workspacePath ? { workspacePath } : {})
+          threadId: created.threadId
         },
         decisionBaseline: {
           nodeId: feature.currentNodeId,
@@ -677,6 +599,19 @@ async function inspectAndLaunch(
 
 export async function startManagedRun(input: ManagedRunStartRequest): Promise<ManagedRunSummary> {
   return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
+    const workspacePath = typeof input.workspacePath === "string" ? input.workspacePath.trim() : ""
+    if (!workspacePath) {
+      throw new Error("请选择本次托管使用的会话工作区")
+    }
+    let workspaceDirectoryExists = false
+    try {
+      workspaceDirectoryExists = existsSync(workspacePath) && statSync(workspacePath).isDirectory()
+    } catch {
+      workspaceDirectoryExists = false
+    }
+    if (!workspaceDirectoryExists) {
+      throw new Error("所选会话工作区不存在或不是文件夹")
+    }
     const existing = managedRunStore.findRunningRun(input.projectId, input.featureId)
     if (hasActiveFeatureThread(input.projectId, input.featureId)) {
       throw new Error("已有运行中的会话，无法开启托管")
@@ -685,7 +620,7 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
       throw new Error("已有运行中的托管 Run，无法开启新的托管")
     }
 
-    const created = managedRunStore.createRun(input.projectId, input.featureId)
+    const created = managedRunStore.createRun(input.projectId, input.featureId, workspacePath)
     publishManagedRunChanged(lastRunSummary(created))
     try {
       await inspectAndLaunch(created, input.delivery)

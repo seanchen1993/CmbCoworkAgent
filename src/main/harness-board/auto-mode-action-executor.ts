@@ -11,10 +11,7 @@ import { createThreadService } from "../services/thread-service"
 import { generateTitle } from "../services/title-generator"
 import { getDisabledSkills } from "../storage"
 import type { AgentInvokeParams, SkillMetadata } from "../types"
-import {
-  getHarnessProjectAdapterSnapshot,
-  getHarnessProjectSessionWorkspacePath
-} from "./service"
+import { getHarnessProjectAdapterSnapshot } from "./service"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
 import {
@@ -47,7 +44,7 @@ export interface CreateManagedHarnessSessionInput {
   runId: string
   nodeId: string
   nextAction: ManagedRunSessionAction
-  workspacePath?: string | null
+  workspacePath: string
   delivery: AgentRunDelivery
 }
 
@@ -289,13 +286,9 @@ export async function createAndStartManagedHarnessSession(
 export async function createManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
 ): Promise<{ threadId: string }> {
-  const workspacePath =
-    input.workspacePath === null
-      ? null
-      : input.workspacePath?.trim() || getHarnessProjectSessionWorkspacePath(input.projectId)
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const thread = await createThreadService({
-    workspacePath,
+    workspacePath: input.workspacePath,
     ...(titleSource ? { title: generateTitle(titleSource) } : {}),
     harnessFeature: {
       projectId: input.projectId,

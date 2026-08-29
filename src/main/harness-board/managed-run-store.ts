@@ -385,6 +385,7 @@ function normalizeSnapshot(value: unknown): ManagedRunSnapshot {
     typeof snapshot.featureId !== "string" ||
     !snapshot.featureId.trim() ||
     !MANAGED_RUN_STATUSES.has(snapshot.status as string) ||
+    !isOptionalText(snapshot.workspacePath, 4096) ||
     !isManagedRunCurrentSession(snapshot.currentSession) ||
     !isManagedRunDecisionBaseline(snapshot.decisionBaseline) ||
     (snapshot.currentSession === undefined) !== (snapshot.decisionBaseline === undefined) ||
@@ -683,7 +684,7 @@ export class ManagedRunStore {
     return validated
   }
 
-  createRun(projectId: string, featureId: string): ManagedRunSnapshot {
+  createRun(projectId: string, featureId: string, workspacePath?: string): ManagedRunSnapshot {
     const runId = `mr_${randomUUID().replace(/-/gu, "")}`
     const now = formatManagedRunTimestamp()
     const snapshot: ManagedRunSnapshot = {
@@ -692,6 +693,7 @@ export class ManagedRunStore {
       projectId,
       featureId,
       status: "running",
+      ...(workspacePath?.trim() ? { workspacePath: workspacePath.trim() } : {}),
       providerRetryCount: 0,
       bizRetryCount: 0,
       startedAt: now,
