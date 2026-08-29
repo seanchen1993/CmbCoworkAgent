@@ -815,6 +815,7 @@ export type UserInputAnswer =
       optionIndex: number
       label: string
       description: string
+      additionalText?: string
     }
   | {
       type: "other"
