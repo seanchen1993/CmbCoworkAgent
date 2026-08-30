@@ -44,4 +44,3 @@ workerPort.on("message", (request: HookCatalogWorkerRequest) => {
     } satisfies HookCatalogWorkerResponse)
   }
 })
-

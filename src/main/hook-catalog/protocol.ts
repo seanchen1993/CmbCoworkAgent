@@ -65,4 +65,3 @@ export type HookCatalogWorkerResponse =
   | HookCatalogShutdownComplete
 
 export const HOOK_CATALOG_CANCELLED = "HOOK_CATALOG_CANCELLED"
-

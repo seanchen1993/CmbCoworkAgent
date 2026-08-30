@@ -70,4 +70,3 @@ parentPort.on("message", (request: WorkspaceFilePreviewWorkerRequest) => {
     }
   })()
 })
-

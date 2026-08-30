@@ -75,4 +75,3 @@ export function resetWorkspaceFilePreviewCacheForTests(): void {
   cache.clear()
   cacheBytes = 0
 }
-

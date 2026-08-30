@@ -331,4 +331,3 @@ export async function closeHookCatalogWorker(): Promise<void> {
   defaultClient = null
   await client?.close()
 }
-

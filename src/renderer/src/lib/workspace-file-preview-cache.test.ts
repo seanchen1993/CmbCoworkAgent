@@ -35,4 +35,3 @@ describe("workspace file preview renderer cache", () => {
     expect(readWorkspaceFilePreviewCache("file-99")?.content.startsWith("99")).toBe(true)
   })
 })
-
