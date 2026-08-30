@@ -49,6 +49,10 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
+import {
+  listPendingHumanGateRuntimeThreadIds,
+  requestHumanGate
+} from "../harness-board/human-gate-service"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -410,7 +414,9 @@ export function hasPendingWorkflowApproval(parentThreadId: string, runId?: strin
   for (const approval of pendingApprovals.values()) {
     if (isWorkflowSubagentThreadOf(approval.runtimeThreadId, parentThreadId, runId)) return true
   }
-  return false
+  return listPendingHumanGateRuntimeThreadIds().some((runtimeThreadId) =>
+    isWorkflowSubagentThreadOf(runtimeThreadId, parentThreadId, runId)
+  )
 }
 
 /**
@@ -428,7 +434,9 @@ export function hasPendingApprovalForRuntimeThread(runtimeThreadId: string): boo
       return true
     }
   }
-  return false
+  return listPendingHumanGateRuntimeThreadIds().some((pendingThreadId) =>
+    approvalMatchesRuntimeThread(pendingThreadId, runtimeThreadId)
+  )
 }
 
 coordinatorWorkerManager.setWorkerApprovalProbe(hasPendingApprovalForRuntimeThread)
@@ -4592,6 +4600,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookScope,
     onHookResult,
     onFailureFuseNotice,
+    requestHumanGate,
+    humanGateThreadId: approvalThreadId,
     hookTurnId,
     pluginOutputDir,
     systemId,

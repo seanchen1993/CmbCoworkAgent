@@ -39,6 +39,11 @@ import {
   createBrowserWindowAgentRunDelivery
 } from "../agent/agent-run-service"
 import { managedRunController } from "../harness-board/managed-run-controller"
+import {
+  approveHumanGate,
+  getHumanGateForThread,
+  rejectHumanGate
+} from "../harness-board/human-gate-service"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import {
@@ -71,6 +76,8 @@ import type {
   HarnessDynamicWorkflowConfig,
   HarnessKnowledgePreviewResult,
   HarnessFeatureDeployUnitBinding,
+  HarnessHumanGateDecisionInput,
+  HarnessHumanGateSnapshot,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
@@ -98,6 +105,27 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("harnessBoard:listProjects", async (): Promise<HarnessProjectListItem[]> => {
     return listHarnessProjects()
   })
+
+  ipcMain.handle(
+    "harnessBoard:getHumanGateForThread",
+    async (_event, threadId: string): Promise<HarnessHumanGateSnapshot | undefined> => {
+      return getHumanGateForThread(typeof threadId === "string" ? threadId : "")
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:approveHumanGate",
+    async (_event, input: HarnessHumanGateDecisionInput): Promise<boolean> => {
+      return approveHumanGate(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:rejectHumanGate",
+    async (_event, input: HarnessHumanGateDecisionInput): Promise<boolean> => {
+      return rejectHumanGate(input)
+    }
+  )
 
   ipcMain.handle("harnessBoard:getDeployUnitMappings", async (): Promise<HarnessDeployUnitMapping[]> => {
     return listHarnessDeployUnitMappings()

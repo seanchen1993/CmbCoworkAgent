@@ -131,6 +131,31 @@ export interface HarnessLeanTokenConfig {
 
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
 
+export interface HarnessHumanGateSnapshot {
+  gateId: string
+  status: "pending"
+  projectId: string
+  featureId: string
+  sourceThreadId: string
+  sourceManagedRunId?: string
+  hookId: string
+  message: string
+  createdAt: string
+}
+
+export interface HarnessHumanGateDecisionInput {
+  projectId: string
+  featureId: string
+  gateId: string
+}
+
+export interface HarnessHumanGateChangedEvent {
+  projectId: string
+  featureId: string
+  sourceThreadId: string
+  humanGate?: HarnessHumanGateSnapshot
+}
+
 export interface HarnessAgentmdLoadStatusItem {
   deployUnitId: string
   path: string
@@ -151,6 +176,7 @@ export interface HarnessFeatureDeployUnitBinding {
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
+  humanGate?: HarnessHumanGateSnapshot
 }
 
 function normalizeHarnessText(value: unknown): string {
@@ -534,6 +560,10 @@ export type ManagedRunEventType =
   | "provider_retry_reset"
   | "biz_retry_reuse_thread"
   | "biz_retry_new_thread"
+  | "human_gate_requested"
+  | "human_gate_approved"
+  | "human_gate_rejected"
+  | "human_gate_conflict"
   | "run_cancelled"
   | "run_failed"
   | "run_completed"
@@ -545,7 +575,12 @@ export interface ManagedRunEvent {
   type: ManagedRunEventType
   runId: string
   scope: "global" | "stage"
-  source?: "feature_status" | "agent_end_reason" | "controller_policy" | "managed_run"
+  source?:
+    | "feature_status"
+    | "agent_end_reason"
+    | "controller_policy"
+    | "managed_run"
+    | "human_gate"
   nodeId?: string
   featureStatus?: HarnessFeatureStatus
   nodeStatus?: HarnessNodeStatus
@@ -629,6 +664,7 @@ export interface HarnessFeatureSummary {
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
+  humanGate?: HarnessHumanGateSnapshot
   summary: {
     text: string
     updatedAt: string
@@ -864,6 +900,7 @@ export interface HarnessRunDetailViewModel {
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
     managedRun?: ManagedRunSummary
+    humanGate?: HarnessHumanGateSnapshot
   }
   sessions: HarnessSessionBinding[]
 }

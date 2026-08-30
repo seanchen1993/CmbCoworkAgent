@@ -1,6 +1,18 @@
 import { spawn, type ChildProcess } from "child_process"
-import { createHash } from "crypto"
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs"
+import { createHash, randomUUID } from "crypto"
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "fs"
 import type { Dirent } from "fs"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import * as chardet from "jschardet"
@@ -49,6 +61,7 @@ import type {
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
   HarnessKnowledgePreviewResult,
+  HarnessHumanGateSnapshot,
   ManagedFeatureStatusSnapshot,
   HarnessStatus,
   HarnessWatchRef,
@@ -2114,6 +2127,7 @@ function normalizeFeatureDeployUnitBinding(
   const featureId = normalizeText(value.featureId).trim()
   const selectedDeployUnitMappings = normalizeDeployUnitMappings(value.selectedDeployUnitMappings)
   if (!projectId || !featureId) return null
+  const humanGate = normalizeHumanGate(value.humanGate, projectId, featureId)
   return {
     projectId,
     featureId,
@@ -2121,8 +2135,47 @@ function normalizeFeatureDeployUnitBinding(
     sessionContextInjectionSource: normalizeSessionContextInjectionSource(
       value.sessionContextInjectionSource
     ),
+    ...(humanGate ? { humanGate } : {}),
     createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
     updatedAt: normalizeText(value.updatedAt).trim() || undefined
+  }
+}
+
+function normalizeHumanGate(
+  value: unknown,
+  projectId: string,
+  featureId: string
+): HarnessHumanGateSnapshot | undefined {
+  if (value === undefined) return undefined
+  if (!isObject(value)) return undefined
+  const gateId = normalizeText(value.gateId).trim()
+  const sourceThreadId = normalizeText(value.sourceThreadId).trim()
+  const sourceManagedRunId = normalizeText(value.sourceManagedRunId).trim()
+  const hookId = normalizeText(value.hookId).trim()
+  const message = normalizeText(value.message).trim()
+  const createdAt = normalizeText(value.createdAt).trim()
+  if (
+    value.status !== "pending" ||
+    !gateId ||
+    !sourceThreadId ||
+    !hookId ||
+    !message ||
+    message.length > 2_000 ||
+    !isGmt8Timestamp(createdAt)
+  ) {
+    console.error("[HumanGate] Ignoring invalid persisted Gate", { projectId, featureId })
+    return undefined
+  }
+  return {
+    gateId,
+    status: "pending",
+    projectId,
+    featureId,
+    sourceThreadId,
+    ...(sourceManagedRunId ? { sourceManagedRunId } : {}),
+    hookId,
+    message,
+    createdAt
   }
 }
 
@@ -2252,7 +2305,20 @@ function writeFeatureDeployUnitBindingStore(
   store: HarnessFeatureDeployUnitBindingStoreFile
 ): void {
   getOpenworkDir()
-  writeFileSync(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, `${JSON.stringify(store, null, 2)}\n`)
+  const temporaryPath = `${HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE}.tmp-${process.pid}-${randomUUID()}`
+  let descriptor: number | null = null
+  try {
+    descriptor = openSync(temporaryPath, "w", 0o600)
+    writeFileSync(descriptor, `${JSON.stringify(store, null, 2)}\n`, "utf8")
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = null
+    renameSync(temporaryPath, HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE)
+  } catch (error) {
+    if (descriptor !== null) closeSync(descriptor)
+    if (existsSync(temporaryPath)) rmSync(temporaryPath, { force: true })
+    throw error
+  }
 }
 
 function findFeatureDeployUnitBinding(
@@ -2285,6 +2351,7 @@ function saveFeatureDeployUnitBinding(
     featureId,
     selectedDeployUnitMappings,
     sessionContextInjectionSource,
+    ...(existing?.humanGate ? { humanGate: existing.humanGate } : {}),
     createdAt:
       existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
     updatedAt: now
@@ -2327,6 +2394,35 @@ export function getHarnessFeatureBinding(
   featureId: string
 ): HarnessFeatureDeployUnitBinding | null {
   return findFeatureDeployUnitBinding(projectId, featureId)
+}
+
+export function listHarnessHumanGates(): HarnessHumanGateSnapshot[] {
+  return readFeatureDeployUnitBindingStore().bindings.flatMap((binding) =>
+    binding.humanGate ? [binding.humanGate] : []
+  )
+}
+
+export function setHarnessHumanGate(
+  projectId: string,
+  featureId: string,
+  humanGate: HarnessHumanGateSnapshot | undefined
+): HarnessFeatureDeployUnitBinding {
+  const store = readFeatureDeployUnitBindingStore()
+  const key = featureDeployUnitBindingKey(projectId, featureId)
+  const existingIndex = store.bindings.findIndex(
+    (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
+  )
+  if (existingIndex < 0) throw new Error("未找到该特性的项目模式绑定记录")
+  const existing = store.bindings[existingIndex]
+  const next: HarnessFeatureDeployUnitBindingRecord = {
+    ...existing,
+    ...(humanGate ? { humanGate } : {}),
+    updatedAt: formatGmt8Timestamp()
+  }
+  if (!humanGate) delete next.humanGate
+  store.bindings[existingIndex] = next
+  writeFeatureDeployUnitBindingStore(store)
+  return next
 }
 
 export function getHarnessProjectRootPath(projectId: string): string {
@@ -2732,7 +2828,10 @@ function makeProjectDetailViewModel(
     },
     projectState: data.projectState,
     workflow: data.workflow,
-    runs: data.runs,
+    runs: data.runs.map((run) => {
+      const humanGate = findFeatureDeployUnitBinding(project.projectId, run.slug)?.humanGate
+      return humanGate ? { ...run, humanGate } : run
+    }),
     ...(systemConstraintUpdate ? { systemConstraintUpdate } : {}),
     watchRefs: data.watchRefs,
     loading: false,
@@ -4048,7 +4147,8 @@ export async function getHarnessRunDetail(
       currentNodeId,
       nodes: nodesWithHookLogs,
       unmatchedHooks,
-      ...(managedRun ? { managedRun } : {})
+      ...(managedRun ? { managedRun } : {}),
+      ...(featureBinding?.humanGate ? { humanGate: featureBinding.humanGate } : {})
     },
     sessions: []
   }

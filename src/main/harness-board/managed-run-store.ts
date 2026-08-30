@@ -96,6 +96,10 @@ const MANAGED_RUN_EVENT_TYPES = new Set<ManagedRunEvent["type"]>([
   "provider_retry_reset",
   "biz_retry_reuse_thread",
   "biz_retry_new_thread",
+  "human_gate_requested",
+  "human_gate_approved",
+  "human_gate_rejected",
+  "human_gate_conflict",
   "run_cancelled",
   "run_failed",
   "run_completed"
@@ -133,7 +137,8 @@ const MANAGED_RUN_EVENT_SOURCES = new Set([
   "feature_status",
   "agent_end_reason",
   "controller_policy",
-  "managed_run"
+  "managed_run",
+  "human_gate"
 ])
 const AGENT_END_REASON_CODES = new Set([
   "normal",

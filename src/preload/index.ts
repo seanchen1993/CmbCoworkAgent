@@ -104,6 +104,9 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
+  HarnessHumanGateSnapshot,
   ManagedRunEventCursor,
   ManagedRunEventsPage,
   ManagedRunIdentity,
@@ -3866,6 +3869,14 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
+    getHumanGateForThread: (threadId: string): Promise<HarnessHumanGateSnapshot | undefined> =>
+      ipcRenderer.invoke("harnessBoard:getHumanGateForThread", threadId) as Promise<
+        HarnessHumanGateSnapshot | undefined
+      >,
+    approveHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
+      ipcRenderer.invoke("harnessBoard:approveHumanGate", input) as Promise<boolean>,
+    rejectHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
+      ipcRenderer.invoke("harnessBoard:rejectHumanGate", input) as Promise<boolean>,
     getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
         HarnessDeployUnitMapping[]
@@ -4026,6 +4037,12 @@ const api = {
         callback(payload)
       ipcRenderer.on("harnessBoard:managedRunThreadCreated", handler)
       return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
+    },
+    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void): (() => void) => {
+      const handler = (_event: unknown, payload: HarnessHumanGateChangedEvent): void =>
+        callback(payload)
+      ipcRenderer.on("harnessBoard:humanGateChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:humanGateChanged", handler)
     }
   },
   app: {

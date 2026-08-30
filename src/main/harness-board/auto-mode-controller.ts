@@ -660,6 +660,38 @@ export async function stopManagedRun(input: ManagedRunStopInput): Promise<boolea
   })
 }
 
+export async function cancelManagedRunForHumanGate(input: {
+  projectId: string
+  featureId: string
+  runId: string
+  threadId: string
+  reasonCode: "human_gate_rejected" | "app_closed_during_human_gate"
+  summary: string
+}): Promise<boolean> {
+  cancelProviderRetry(input.projectId, input.featureId)
+  return featureLocks.withKey(featureKey(input.projectId, input.featureId), async () => {
+    const record = managedRunStore.getRun(input)
+    if (!record.snapshot || record.corrupt || record.snapshot.status !== "running") return false
+    managedRunStore.appendEvent(record.snapshot, {
+      type: "human_gate_rejected",
+      scope: "stage",
+      source: "human_gate",
+      nodeId: record.snapshot.decisionBaseline?.nodeId,
+      threadId: input.threadId,
+      reasonCode: input.reasonCode,
+      summary: input.summary
+    })
+    await markTerminal(
+      record.snapshot,
+      "cancelled",
+      input.summary,
+      "run_cancelled",
+      input.reasonCode
+    )
+    return true
+  })
+}
+
 export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInput): Promise<void> {
   const feature = readHarnessFeatureContext(input.threadId)
   if (!feature?.runId) return

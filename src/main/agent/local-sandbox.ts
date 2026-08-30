@@ -333,6 +333,20 @@ export interface LocalSandboxOptions {
   onHookResult?: HookResultCallback
   /** Optional callback invoked when repeated tool failures should be shown to the user. */
   onFailureFuseNotice?: FailureFuseNoticeCallback
+  /** Project-mode Feature approval requested by a synchronous PreToolUse Hook. */
+  requestHumanGate?: (input: {
+    projectId: string
+    featureId: string
+    threadId: string
+    runtimeThreadId: string
+    hookId: string
+    hookPluginId?: string
+    harnessPluginId?: string
+    message: string
+    abortSignal?: AbortSignal
+  }) => Promise<{ release: () => void }>
+  /** Parent conversation where a worker/subagent Gate must be displayed. */
+  humanGateThreadId?: string
   /** Renderer user message id that owns this chat turn, used to group hook logs. */
   hookTurnId?: string
   /** AbortSignal for cancelling running child processes when the user aborts.
@@ -495,6 +509,7 @@ export class LocalSandbox
   private readonly windowsSandbox: WindowsSandboxMode
   private readonly pluginOutputDir?: string
   private readonly pluginRoot?: string
+  private readonly pluginId?: string
   private readonly systemId?: string
   private readonly agentId?: string
   private readonly pluginWorkspace?: string
@@ -512,6 +527,8 @@ export class LocalSandbox
   private readonly _hookScope?: HookScopeController
   private readonly _onHookResult?: HookResultCallback
   private readonly _onFailureFuseNotice?: FailureFuseNoticeCallback
+  private readonly _requestHumanGate?: LocalSandboxOptions["requestHumanGate"]
+  private readonly _humanGateThreadId: string
   private readonly _hookTurnId?: string
   /** Physical directory backing DeepAgents' logical /large_tool_results files. */
   private readonly _largeToolResultsDir: string
@@ -1850,6 +1867,7 @@ export class LocalSandbox
     this.windowsSandbox = options.windowsSandbox ?? "none"
     this.pluginOutputDir = options.pluginOutputDir
     this.pluginRoot = pluginRoot || undefined
+    this.pluginId = pluginId || undefined
     this.systemId = systemId || undefined
     this.agentId = agentId || undefined
     this.pluginWorkspace = pluginWorkspace || undefined
@@ -1868,6 +1886,8 @@ export class LocalSandbox
     this._hookScope = options.hookScope
     this._onHookResult = options.onHookResult
     this._onFailureFuseNotice = options.onFailureFuseNotice
+    this._requestHumanGate = options.requestHumanGate
+    this._humanGateThreadId = options.humanGateThreadId?.trim() || this.runId
     this._hookTurnId = options.hookTurnId
     this._onFileMutation = options.onFileMutation
     this._skillLifecycleRegistry = options.skillLifecycleRegistry
@@ -6023,6 +6043,39 @@ export class LocalSandbox
     }
   >()
 
+  private async requestHumanGateForExecute(
+    result: HookResult | null
+  ): Promise<{ release: () => void } | undefined> {
+    if (result?.decision !== "human_gate") return undefined
+    const fallbackReason =
+      "decision=human_gate 仅支持当前项目绑定插件的 PreToolUse(execute) Hook"
+    if (
+      !this._requestHumanGate ||
+      !this.harnessProjectId ||
+      !this.featureId ||
+      !result.decisionSource?.hookId
+    ) {
+      throwIfHookHalt("PreToolUse", {
+        ...result,
+        blocked: true,
+        continue: false,
+        stopReason: fallbackReason
+      }, fallbackReason)
+      return undefined
+    }
+    return this._requestHumanGate({
+      projectId: this.harnessProjectId,
+      featureId: this.featureId,
+      threadId: this._humanGateThreadId,
+      runtimeThreadId: this.runId,
+      hookId: result.decisionSource.hookId,
+      hookPluginId: result.decisionSource.pluginId,
+      harnessPluginId: this.pluginId,
+      message: result.systemMessage ?? "",
+      abortSignal: this.abortSignal
+    })
+  }
+
   /**
    * Execute a command in the background — returns immediately with the task-output prompt.
    * The command runs asynchronously with a long timeout.
@@ -6030,11 +6083,36 @@ export class LocalSandbox
    */
   async executeBackground(command: string, cwd?: string): Promise<string> {
     const requestedCwd = this.resolveExecutionCwd(cwd)
-    const toolArgs = { command, run_in_background: true, cwd: requestedCwd }
+    const toolArgs = { command, run_in_background: true as const, cwd: requestedCwd }
     const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
     if (preResult?.blocked || preResult?.decision === "block") {
       return `[Hook blocked] ${preResult.stdout || preResult.reason || "execute was blocked by a hook"}`
     }
+    const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    let leaseTransferred = false
+    try {
+      return await this.executeBackgroundAfterPreToolUse(
+        command,
+        requestedCwd,
+        toolArgs,
+        preResult,
+        (completion) => {
+          leaseTransferred = true
+          void completion.finally(humanGateLease?.release)
+        }
+      )
+    } finally {
+      if (!leaseTransferred) humanGateLease?.release()
+    }
+  }
+
+  private async executeBackgroundAfterPreToolUse(
+    command: string,
+    requestedCwd: string,
+    toolArgs: { command: string; run_in_background: true; cwd: string },
+    preResult: HookResult | null,
+    transferHumanGateLease: (completion: Promise<void>) => void
+  ): Promise<string> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(toolArgs, preResult?.updatedInput)
     const effectiveCommand =
       typeof updatedArgs.command === "string" && updatedArgs.command.trim()
@@ -6254,6 +6332,7 @@ export class LocalSandbox
           10 * 60 * 1000
         )
       })
+    transferHumanGateLease(completion)
     if (this.worktreeIsolation) task.completion = completion
 
     const startedMessage = `Background task started (id: ${taskId}). Use task_output tool with this id to check results later.`
@@ -6391,6 +6470,20 @@ export class LocalSandbox
         truncated: false
       }
     }
+    const humanGateLease = await this.requestHumanGateForExecute(preResult)
+    try {
+      return await this.executeAfterPreToolUse(command, requestedCwd, requestedArgs, preResult)
+    } finally {
+      humanGateLease?.release()
+    }
+  }
+
+  private async executeAfterPreToolUse(
+    command: string,
+    requestedCwd: string,
+    requestedArgs: { command: string; cwd: string },
+    preResult: HookResult | null
+  ): Promise<ExecuteResponse> {
     const updatedArgs = LocalSandbox.mergeUpdatedInput(requestedArgs, preResult?.updatedInput)
     const effectiveCommand =
       typeof updatedArgs.command === "string" && updatedArgs.command.trim()

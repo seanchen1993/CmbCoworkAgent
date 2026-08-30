@@ -120,6 +120,7 @@ import type {
   GoalUiState,
   ForkableCheckpoint,
   HITLRequest,
+  HarnessHumanGateSnapshot,
   Message,
   SkillMetadata,
   Thread,
@@ -1772,6 +1773,50 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const [humanGate, setHumanGate] = useState<HarnessHumanGateSnapshot | null>(null)
+  const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
+    null
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    void window.api.harnessBoard.getHumanGateForThread(threadId).then((gate) => {
+      if (cancelled) return
+      setHumanGate(gate ?? null)
+    })
+    const unsubscribe = window.api.harnessBoard.onHumanGateChanged((event) => {
+      if (event.sourceThreadId !== threadId) return
+      setHumanGate(event.humanGate ?? null)
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [threadId])
+
+  const decideHumanGate = useCallback(
+    async (decision: "approve" | "reject"): Promise<void> => {
+      if (!humanGate || humanGateDecisionBusy) return
+      setHumanGateDecisionBusy(decision)
+      try {
+        const input = {
+          projectId: humanGate.projectId,
+          featureId: humanGate.featureId,
+          gateId: humanGate.gateId
+        }
+        const changed =
+          decision === "approve"
+            ? await window.api.harnessBoard.approveHumanGate(input)
+            : await window.api.harnessBoard.rejectHumanGate(input)
+        if (!changed) toast.error("Human Gate 已发生变化，请刷新后重试")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : String(error))
+      } finally {
+        setHumanGateDecisionBusy(null)
+      }
+    },
+    [humanGate, humanGateDecisionBusy]
+  )
   const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
   const disableWorkflowModeOption = false
   const pendingHarnessNextActionVersion = useSyncExternalStore(
@@ -6114,6 +6159,38 @@ export function ChatContainer({
                 </div>
               </div>
             </ScrollArea>
+            {humanGate && (
+              <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
+                <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-md border border-amber-400/60 bg-amber-50/70 px-3 py-2.5 dark:border-amber-500/40 dark:bg-amber-500/10">
+                  <PauseCircle className="size-4 shrink-0 text-amber-600 dark:text-amber-300" />
+                  <div className="min-w-0 flex-1 text-left">
+                    <div className="text-sm font-medium text-amber-900 dark:text-amber-100">
+                      等待人工确认
+                    </div>
+                    <div className="truncate text-xs text-amber-800/80 dark:text-amber-200/80">
+                      {humanGate.message}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void decideHumanGate("reject")}
+                  >
+                    拒绝
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void decideHumanGate("approve")}
+                  >
+                    批准推进
+                  </Button>
+                </div>
+              </div>
+            )}
             {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
             {pendingApproval &&
               Boolean(

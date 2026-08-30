@@ -24,6 +24,7 @@ import {
   MessageSquarePlus,
   Minimize2,
   MoreHorizontal,
+  PauseCircle,
   Pencil,
   Plus,
   RefreshCcw,
@@ -4177,7 +4178,12 @@ function FeatureCard({
           <div className="truncate text-sm font-semibold">{run.title}</div>
           <div className="mt-1 truncate text-[11px] text-muted-foreground">{run.slug}</div>
         </div>
-        <StatusPill status={run.overallStatus} />
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <StatusPill status={run.overallStatus} />
+          {run.humanGate && (
+            <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
+          )}
+        </div>
       </div>
       <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
       <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
@@ -4287,6 +4293,7 @@ function ProjectCard({
     run.overallStatus.uiKind === "blocked" ||
     run.overallStatus.uiKind === "error"
   ).length
+  const pendingHumanGateCount = runs.filter((run) => Boolean(run.humanGate)).length
   const projectStatus = pluginCompatibilityMessage
     ? pluginCompatibilityStatus
     : detail?.projectState
@@ -4365,7 +4372,7 @@ function ProjectCard({
               <StatusPill status={detail.projectState} tooltip={detailError} />
             </div>
           ) : (
-            <div className="grid grid-cols-4 gap-1.5">
+            <div className="grid grid-cols-5 gap-1.5">
               <div className="min-w-0 text-[11px] text-muted-foreground">
                 特性
                 <strong className="mt-0.5 block text-sm text-foreground">
@@ -4388,6 +4395,12 @@ function ProjectCard({
                 风险
                 <strong className="mt-0.5 block text-sm text-status-warning">
                   {loading || !detail ? "-" : riskCount}
+                </strong>
+              </div>
+              <div className="min-w-0 text-[11px] text-muted-foreground">
+                待确认
+                <strong className="mt-0.5 block text-sm text-status-warning">
+                  {loading || !detail ? "-" : pendingHumanGateCount}
                 </strong>
               </div>
             </div>
@@ -6006,6 +6019,9 @@ function FeatureDetailPage({
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
   const [updatingManagedRun, setUpdatingManagedRun] = useState(false)
+  const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<
+    "approve" | "reject" | null
+  >(null)
   const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
   const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
   const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
@@ -6240,6 +6256,32 @@ function FeatureDetailPage({
     setActiveDetailTab("session")
     onSessionViewChange?.(true)
   }, [detailKey, onActiveSessionChange, onSessionViewChange])
+
+  const handleHumanGateDecision = useCallback(
+    async (decision: "approve" | "reject"): Promise<void> => {
+      const humanGate = detail?.run.humanGate
+      if (!humanGate || humanGateDecisionBusy) return
+      setHumanGateDecisionBusy(decision)
+      try {
+        const input = {
+          projectId: humanGate.projectId,
+          featureId: humanGate.featureId,
+          gateId: humanGate.gateId
+        }
+        const changed =
+          decision === "approve"
+            ? await window.api.harnessBoard.approveHumanGate(input)
+            : await window.api.harnessBoard.rejectHumanGate(input)
+        if (!changed) throw new Error("Human Gate 已发生变化，请刷新后重试")
+        await onRefresh()
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setHumanGateDecisionBusy(null)
+      }
+    },
+    [detail, humanGateDecisionBusy, onRefresh]
+  )
 
   const canSkipNode = useCallback((node: HarnessRunNode | null): boolean => Boolean(
     detail &&
@@ -6605,6 +6647,44 @@ function FeatureDetailPage({
       ) : (
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {detail.run.humanGate && (
+              <section className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <PauseCircle className="mt-0.5 size-5 shrink-0 text-status-warning" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold">需要人工确认</div>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                      {detail.run.humanGate.message}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex shrink-0 justify-end gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void handleHumanGateDecision("reject")}
+                  >
+                    {humanGateDecisionBusy === "reject" && (
+                      <Loader2 className="size-4 animate-spin" />
+                    )}
+                    拒绝并终止
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void handleHumanGateDecision("approve")}
+                  >
+                    {humanGateDecisionBusy === "approve" && (
+                      <Loader2 className="size-4 animate-spin" />
+                    )}
+                    批准推进
+                  </Button>
+                </div>
+              </section>
+            )}
             <section className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}>
               <video
                 aria-hidden="true"
@@ -8310,6 +8390,35 @@ export function HarnessBoardView({
       if (event.run.status !== "running") {
         void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
       }
+    })
+  }, [loadProjectDetail])
+
+  useEffect(() => {
+    return window.api.harnessBoard.onHumanGateChanged((event) => {
+      void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
+      const currentFeature = selectedFeatureRef.current
+      if (
+        !currentFeature ||
+        currentFeature.deleted ||
+        currentFeature.projectId !== event.projectId ||
+        currentFeature.slug !== event.featureId
+      ) {
+        return
+      }
+      void window.api.harnessBoard
+        .getRunDetail(event.projectId, event.featureId)
+        .then((detail) => {
+          const current = selectedFeatureRef.current
+          if (
+            current &&
+            current.projectId === event.projectId &&
+            current.slug === event.featureId
+          ) {
+            setRunDetail((currentDetail) =>
+              areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
+            )
+          }
+        })
     })
   }, [loadProjectDetail])
 

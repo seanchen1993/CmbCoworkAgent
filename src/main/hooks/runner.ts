@@ -1073,8 +1073,12 @@ function parseHookJsonOutput(result: HookResult): HookResult {
         : undefined
 
     const decisionValue = parsed.decision
-    const decision: "block" | "approve" | undefined =
-      decisionValue === "block" ? "block" : decisionValue === "approve" ? "approve" : undefined
+    const decision: HookResult["decision"] =
+      decisionValue === "block" ||
+      decisionValue === "approve" ||
+      decisionValue === "human_gate"
+        ? decisionValue
+        : undefined
 
     // Nested permissionDecision=deny maps to block for backwards compat with our dispatcher
     const permDecision =
@@ -1132,6 +1136,24 @@ function parseHookJsonOutput(result: HookResult): HookResult {
   } catch {
     // stdout is not JSON — treat as plain text (backwards compatible)
     return result
+  }
+}
+
+function normalizeHumanGateDecisionForEvent(
+  result: HookResult,
+  hook: HookConfig,
+  event: HookEvent
+): HookResult {
+  if (result.decision !== "human_gate") return result
+  if (event === "PreToolUse" && hook.async !== true) return result
+  console.warn(
+    `[Hooks] Ignoring decision=human_gate from unsupported ${hook.async === true ? "async " : ""}${event} hook "${hook.id}"`
+  )
+  return {
+    ...result,
+    decision: undefined,
+    systemMessage: undefined,
+    decisionSource: undefined
   }
 }
 
@@ -1243,7 +1265,10 @@ async function executeSyncHook(
     if (diagnostic) stdinPayload = builtPayload
     result = await executeCommandHook(hook, env, builtPayload, getCommandCwd(context))
   }
-  const finalized = applyConfiguredOnBlock(parseHookJsonOutput(result), hook)
+  const finalized = applyConfiguredOnBlock(
+    normalizeHumanGateDecisionForEvent(parseHookJsonOutput(result), hook, event),
+    hook
+  )
   finalized.durationMs = Date.now() - startedAt
   if (stdinPayload !== undefined) finalized.stdinPayload = stdinPayload
   if (diagnostic) finalized.cwd = getCommandCwd(context)
@@ -1462,6 +1487,9 @@ export async function runHooks(
     let mergedAdditionalContext: string | undefined
     let mergedSystemMessage: string | undefined
     let mergedSuppressOutput = false
+    let humanGateDecision:
+      | { systemMessage: string; decisionSource: NonNullable<HookResult["decisionSource"]> }
+      | undefined
     for (const hook of matched) {
       const hookContext = enrichContextFromHook(hook, context)
       const result = applyForcedOutcome(
@@ -1505,6 +1533,41 @@ export async function runHooks(
           blocked: true
         }
       }
+      if (result.decision === "human_gate") {
+        const scopedHook = hook as ScopedHook
+        const systemMessage = result.systemMessage?.trim() ?? ""
+        if (context.toolName !== "execute") {
+          return {
+            ...result,
+            blocked: true,
+            continue: false,
+            stopReason: "decision=human_gate 仅支持 PreToolUse(execute) Hook"
+          }
+        }
+        if (!systemMessage) {
+          return {
+            ...result,
+            blocked: true,
+            continue: false,
+            stopReason: "decision=human_gate 必须提供非空 systemMessage"
+          }
+        }
+        if (humanGateDecision) {
+          return {
+            ...result,
+            blocked: true,
+            continue: false,
+            stopReason: "一次 execute 只能由一个 Hook 请求 decision=human_gate"
+          }
+        }
+        humanGateDecision = {
+          systemMessage,
+          decisionSource: {
+            hookId: hook.id,
+            pluginId: scopedHook.pluginId
+          }
+        }
+      }
       // Non-zero, non-blocking exit (error in hook itself) — log but continue
       if (result.exitCode !== 0 && result.exitCode !== null) {
         console.warn(
@@ -1532,8 +1595,10 @@ export async function runHooks(
       blocked: false,
       updatedInput: mergedUpdatedInput,
       additionalContext: mergedAdditionalContext,
-      systemMessage: mergedSystemMessage,
-      suppressOutput: mergedSuppressOutput || undefined
+      systemMessage: humanGateDecision?.systemMessage ?? mergedSystemMessage,
+      suppressOutput: mergedSuppressOutput || undefined,
+      decision: humanGateDecision ? "human_gate" : undefined,
+      decisionSource: humanGateDecision?.decisionSource
     }
   }
 

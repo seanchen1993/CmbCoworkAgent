@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ChevronDown, ChevronRight, CircleDot, Loader2, RefreshCw } from "lucide-react"
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleDot,
+  Loader2,
+  MessageSquare,
+  RefreshCw
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { MANAGED_RUN_STATUS_LABELS } from "../../../../shared/harness-board-types"
@@ -24,6 +32,10 @@ const EVENT_LABELS: Record<string, string> = {
   provider_retry_reset: "模型服务已恢复",
   biz_retry_reuse_thread: "继续当前任务",
   biz_retry_new_thread: "重新执行当前阶段",
+  human_gate_requested: "需要人工确认",
+  human_gate_approved: "用户同意推进",
+  human_gate_rejected: "用户拒绝推进",
+  human_gate_conflict: "同特性确认冲突，自动拒绝",
   run_cancelled: "已停止托管",
   run_failed: "托管失败",
   run_completed: "托管完成"
@@ -281,11 +293,24 @@ function EventRow({
     (threadId, index, values): threadId is string =>
       Boolean(threadId) && values.indexOf(threadId) === index
   )
+  const threadTitle = (threadId: string): string =>
+    sessionTitles?.get(threadId) || "关联会话"
+  const threadRole = (threadId: string): string =>
+    event.sourceThreadId === threadId
+      ? "来源"
+      : event.targetThreadId === threadId
+        ? "目标"
+        : "关联"
   return (
     <div className="grid gap-2 rounded-lg border border-border/60 bg-background/60 px-3 py-2.5 text-[11px] md:grid-cols-[132px_minmax(0,1fr)]">
-      <div className="font-mono text-muted-foreground">{event.createTime}</div>
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <div className="font-mono leading-5 text-muted-foreground">{event.createTime}</div>
+      <div
+        className={cn(
+          "relative min-w-0",
+          threadIds.length > 1 ? "pr-20" : threadIds.length === 1 ? "pr-8" : undefined
+        )}
+      >
+        <div className="flex min-h-5 flex-wrap items-center gap-x-2 gap-y-1 leading-5">
           <span className="font-semibold text-foreground">
             {EVENT_LABELS[event.type] || event.type}
           </span>
@@ -298,22 +323,63 @@ function EventRow({
             />
           )}
         </div>
-        {event.type !== "decision_made" && (
+        {event.type !== "decision_made" &&
+          event.type !== "human_gate_approved" &&
+          event.type !== "session_completed" && (
           <div className="mt-1 leading-5 text-muted-foreground">{eventSummary(event)}</div>
         )}
-        {threadIds.length > 0 && (
-          <div className="mt-1.5 flex flex-wrap gap-2">
-            {threadIds.map((threadId) => (
-              <button
-                key={threadId}
-                type="button"
-                className="max-w-full truncate rounded-md border border-border/70 px-1.5 py-0.5 text-left text-[10px] text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                onClick={() => onSelectThread?.(threadId)}
-                title={threadId}
-              >
-                {sessionTitles?.get(threadId) || "查看会话"}
-              </button>
-            ))}
+        {threadIds.length === 1 && (
+          <div className="absolute -top-0.5 right-0">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex size-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => onSelectThread?.(threadIds[0])}
+                  aria-label={`查看关联会话：${threadTitle(threadIds[0])}`}
+                >
+                  <MessageSquare className="size-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="max-w-80">
+                查看关联会话：{threadTitle(threadIds[0])}
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        )}
+        {threadIds.length > 1 && (
+          <div className="absolute -top-0.5 right-0">
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-label={`查看 ${threadIds.length} 个关联会话`}
+                >
+                  <MessageSquare className="size-3.5" />
+                  会话 {threadIds.length}
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-72 p-2">
+                <div className="px-2 pb-1.5 text-xs font-semibold">关联会话</div>
+                <div className="space-y-1">
+                  {threadIds.map((threadId) => (
+                    <button
+                      key={threadId}
+                      type="button"
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => onSelectThread?.(threadId)}
+                      title={threadTitle(threadId)}
+                    >
+                      <span className="min-w-0 flex-1 truncate">{threadTitle(threadId)}</span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {threadRole(threadId)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
         )}
       </div>

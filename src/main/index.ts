@@ -289,6 +289,7 @@ import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { recoverHumanGatesAtStartup } from "./harness-board/human-gate-service"
 import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
 import {
   getHarnessProjectRootPath,
@@ -919,6 +920,7 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
+    await recoverHumanGatesAtStartup()
     recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
