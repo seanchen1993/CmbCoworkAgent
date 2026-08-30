@@ -24,6 +24,10 @@ import {
   runSettlementPhases,
   type RunSettlementPhase
 } from "../agent/run-settlement-fence"
+import {
+  runMemoryNamespacesSequentially,
+  shouldSchedulePostRunMemoryMaintenance
+} from "../agent/post-run-memory-maintenance"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 import {
@@ -4549,9 +4553,10 @@ function runSkillProposalInBackground(
 
 function runCoalescedMemoryMaintenance(
   scopeKey: string,
-  batch: MemoryMaintenanceBatch,
+  batch: MemoryMaintenanceBatch | undefined,
   operation: (batch: MemoryMaintenanceBatch) => Promise<void>
 ): void {
+  if (!batch) return
   memoryMaintenanceCoalescer.enqueue(
     scopeKey,
     batch,
@@ -9678,9 +9683,20 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
 
           const conversation =
-            invokeFinalOutcome === "success" && !isInternalNotificationTurn && postRunAssistantText
+            memoryEnabledForThread &&
+            invokeFinalOutcome === "success" &&
+            !isInternalNotificationTurn &&
+            postRunAssistantText
               ? `User: ${rootUserPrompt}\n\nAssistant: ${postRunAssistantText}`
               : ""
+
+          const memoryMaintenanceBatch =
+            shouldSchedulePostRunMemoryMaintenance({
+              memoryEnabled: memoryEnabledForThread,
+              conversationLength: conversation.length
+            })
+              ? createMemoryMaintenanceBatch(conversation, fileWritePaths)
+              : undefined
 
           try {
             runCoalescedMemoryMaintenance(
@@ -9690,7 +9706,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 featureId: harnessAgentContext.featureId,
                 memoryEnabled: memoryEnabledForThread
               }),
-              createMemoryMaintenanceBatch(conversation, fileWritePaths),
+              memoryMaintenanceBatch,
               async (memoryBatch) => {
                 const batchConversation = formatMemoryMaintenanceConversation(memoryBatch)
                 const memoryStillEnabledForThread = (() => {
@@ -9823,8 +9839,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 if (conversation.length < MIN_CHARS_FOR_MEMORY) return
                 const memoryModel = await resolveMemoryModel()
                 if (!memoryModel) return
-                await Promise.all(
-                  namespaces.map(async (ns) => {
+                const summarizedNamespaces = await runMemoryNamespacesSequentially(
+                  namespaces,
+                  async (ns) => {
                     await summarizeAndSave({
                       model: memoryModel,
                       conversation,
@@ -9835,9 +9852,21 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     for (let index = 0; index < memoryBatch.turns.length; index += 1) {
                       incrementDreamSessions(ns.dir)
                     }
-                    tryTriggerDream(memoryModel, ns.dir)
-                  })
+                  },
+                  (ns, error) => {
+                    console.warn(
+                      `[Agent] Memory maintenance failed for ${ns.scope} namespace:`,
+                      error
+                    )
+                  }
                 )
+
+                // Dream may perform another model invocation. Trigger it only
+                // after every namespace's summary attempt has settled so it
+                // cannot overlap the global/project extraction burst.
+                for (const ns of summarizedNamespaces) {
+                  tryTriggerDream(memoryModel, ns.dir)
+                }
               }
             )
           } catch (error) {

@@ -808,6 +808,28 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
   )
   assertIncludes(
     agentIpc,
+    "shouldSchedulePostRunMemoryMaintenance({",
+    "memory maintenance without a usable conversation is rejected before enqueue"
+  )
+  assertNotIncludes(
+    agentIpc.slice(
+      agentIpc.indexOf("shouldSchedulePostRunMemoryMaintenance({"),
+      agentIpc.indexOf("shouldSchedulePostRunMemoryMaintenance({") + 300
+    ),
+    "minimumConversationLength",
+    "short memory turns remain eligible for coalescing before the aggregate threshold check"
+  )
+  const coalescedMemoryStart = agentIpc.indexOf("function runCoalescedMemoryMaintenance(")
+  assert(coalescedMemoryStart >= 0, "coalesced memory maintenance helper exists")
+  const coalescedMemoryBody = agentIpc.slice(coalescedMemoryStart, coalescedMemoryStart + 700)
+  assertSourceOrder(
+    coalescedMemoryBody,
+    "if (!batch) return",
+    "memoryMaintenanceCoalescer.enqueue(",
+    "invalid memory maintenance returns before entering the coalescer"
+  )
+  assertIncludes(
+    agentIpc,
     "mergeMemoryMaintenanceBatches",
     "queued memory maintenance aggregates intermediate turns instead of replacing them"
   )
@@ -850,6 +872,22 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
     agentIpc,
     "isPathInsideAnyDirectory(filePath, memoryDirectoryPaths, workspacePath)",
     "memory-write evidence uses absolute normalized directory-boundary matching"
+  )
+  const sequentialMemoryStart = agentIpc.indexOf(
+    "const summarizedNamespaces = await runMemoryNamespacesSequentially("
+  )
+  assert(sequentialMemoryStart >= 0, "memory namespace summaries use the sequential helper")
+  const sequentialMemoryBody = agentIpc.slice(sequentialMemoryStart, sequentialMemoryStart + 2200)
+  assertNotIncludes(
+    sequentialMemoryBody,
+    "Promise.all(",
+    "global and project memory summaries cannot launch concurrently"
+  )
+  assertSourceOrder(
+    sequentialMemoryBody,
+    "const summarizedNamespaces = await runMemoryNamespacesSequentially(",
+    "for (const ns of summarizedNamespaces)",
+    "automatic Dream checks start only after every namespace summary attempt settles"
   )
   assertNotIncludes(
     agentIpc,
