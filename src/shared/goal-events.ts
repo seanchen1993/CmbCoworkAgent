@@ -1,3 +1,5 @@
+import { isGoalClearAlias, splitGoalTransportPayload } from "./goal-slash"
+
 export const GOAL_USER_MESSAGE_EVENT_PREFIX = "__cmb_goal_user_message__:"
 export const GOAL_UI_EVENT_LIMIT = 200
 export const RUNTIME_RESTORED_GOAL_PAUSE_NOTICE =
@@ -25,6 +27,34 @@ export const STALE_CHECKPOINT_BOUNDARY_NOTICE_MESSAGES = [
 
 export function isGoalUserEventMessage(message: string): boolean {
   return message.trim().startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
+}
+
+export function formatGoalUserEventMessage(message: string): string {
+  const trimmed = message.trim()
+  return trimmed.startsWith(GOAL_USER_MESSAGE_EVENT_PREFIX)
+    ? trimmed.slice(GOAL_USER_MESSAGE_EVENT_PREFIX.length).trim()
+    : trimmed
+}
+
+/**
+ * Goal control events are persisted outside `thread_messages`, but some of
+ * them restore a visible user bubble. Keep presence guards and the renderer on
+ * the same definition so a restored `/goal` request cannot be mistaken for an
+ * empty conversation.
+ */
+export function isVisibleGoalUserEventMessage(message: unknown): boolean {
+  if (typeof message !== "string" || !isGoalUserEventMessage(message)) return false
+  const { commandText } = splitGoalTransportPayload(formatGoalUserEventMessage(message))
+  const trimmed = commandText.trim()
+  if (!/^\/goal(?:\s|$)/i.test(trimmed)) return false
+
+  const argument = trimmed.slice("/goal".length).trim().toLowerCase()
+  return (
+    argument !== "" &&
+    argument !== "status" &&
+    argument !== "pause" &&
+    !isGoalClearAlias(argument)
+  )
 }
 
 export function isStaleCheckpointBoundaryNoticeMessage(message: string): boolean {

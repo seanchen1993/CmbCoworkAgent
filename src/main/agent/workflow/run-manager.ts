@@ -1,21 +1,26 @@
 import { BrowserWindow, webContents, type WebContents } from "electron"
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "fs"
+import { mkdir, stat, writeFile } from "fs/promises"
 import { join, resolve } from "path"
+import { canonicalizeWorkspacePath } from "../context-history-path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import { runWorkflowEngine, toJsonSafe } from "./engine"
 import { isPathInside } from "./paths"
 import {
   clearAgentToolStream,
-  countUnresolvedWorkflowWorktrees,
+  countUnresolvedWorkflowWorktreesAsync,
   createWorkflowRunStore,
   findUndeliveredTerminalRun,
+  findUndeliveredTerminalRunAsync,
   getWorkflowRunsDir,
   isWorkflowRunDirDisposed,
+  loadWorkflowRunForResumeAsync,
   markWorkflowRunNotified,
   newerWorkflowWorktreeRecord,
   persistAgentToolStream,
   persistRecoveredRun,
+  prepareWorkflowRunStorage,
   pruneWorkflowRuns,
+  type WorkflowFlushFailureSnapshot,
   workflowThreadDisposalEpoch
 } from "./run-store"
 import { runWorkflowSubagent, type WorkflowSubagentDeps } from "./subagent"
@@ -34,6 +39,7 @@ import {
   resolveWorkflowWorktreeIsolationBoundary
 } from "../../services/git-worktree"
 import { emitAppAttention } from "../../app-attention-events"
+import type { AgentProfile } from "../agent-registry"
 
 /**
  * Background workflow run manager — the Claude Code execution model: the
@@ -65,6 +71,8 @@ export interface WorkflowLaunchRequest {
   /** True when this launch reuses a prior runId, even if it has no replayable journal. */
   resumed?: boolean
   resumeNote?: string
+  /** Registry snapshot whose fingerprint was approved for this exact launch. */
+  agentProfiles?: readonly AgentProfile[]
   subagentDeps: WorkflowSubagentDeps
   /** Run-level exclusive file-write lock, shared with subagent tool writes (see
    * WorkflowEngineOptions.runExclusiveFileWrite). Threaded straight to the engine. (#2) */
@@ -74,15 +82,17 @@ export interface WorkflowLaunchRequest {
 export interface WorkflowLaunchResult {
   runId: string
   scriptFilePath: string
-  /** Resolves once the run's initial snapshot is durably on disk. Await before
-   * reporting "launched" so a reload right after the tool returns can't miss the
-   * run (the eager initial persist is otherwise fire-and-forget). */
+  /** Resolves once the run's initial snapshot and editable script are durably on
+   * disk. Rejects when the script cannot be written, because the engine is not
+   * allowed to run without the source promised by scriptFilePath. */
   whenInitialPersisted: Promise<boolean>
 }
 
 interface ActiveWorkflowRun {
   threadId: string
   workspacePath: string
+  /** Canonical identity prepared asynchronously before production launch. */
+  workspaceKey: string
   runId: string
   workflowName: string
   controller: AbortController
@@ -311,37 +321,153 @@ function emitWorkflowAgentSnapshot(
 
 /** Max automatic re-reports of one run after a failed notification turn (E). */
 const MAX_RENOTIFY_ATTEMPTS = 3
-/** SOFT cap on in-memory flush-failed run snapshots (each holds a full journal under
- * a persistent disk fault). Best-effort, NOT a hard bound: only already-delivered,
- * not-in-flight snapshots are evicted, so the map CAN still exceed this when every
- * snapshot is unreported — we never drop a real completed/error result just to
- * enforce the cap. */
-const MAX_FLUSH_FAILED_RUNS = 8
+/**
+ * A failed terminal persist opens a storage circuit breaker. Healthy disks keep
+ * the existing cross-thread concurrency contract; once a result is retained in
+ * memory, unrelated launches stop before doing work so the failure backlog
+ * cannot grow without bound. A resume that replaces the sole retained run is
+ * still allowed because it does not increase the backlog cardinality.
+ */
 
 /**
- * Canonical key for workspace mutual exclusion. Two threads can name one directory
- * via a symlink, a macOS case-variant, or a trailing slash — a raw string compare
- * misses all three and lets a second run slip past the lock. realpathSync resolves
- * them; if the path can't be resolved (shouldn't happen for a live workspace) we
- * fall back to a lexical resolve so the check degrades safely rather than throwing.
+ * Canonical key for workspace mutual exclusion. Production paths prepare this
+ * identity asynchronously before entering the synchronous launch/lease critical
+ * section, so a slow/network workspace cannot block Electron's main loop. The
+ * lexical fallback is retained only for compatibility callers that have not yet
+ * used prepareWorkspaceKey (notably direct unit tests).
  */
-function workspaceKey(p: string): string {
-  try {
-    return realpathSync.native(p)
-  } catch {
-    return resolve(p)
+const workspaceKeyCache = new Map<string, string>()
+const workspaceKeyAsyncCache = new Map<string, Promise<string>>()
+const WORKSPACE_KEY_CACHE_MAX_ENTRIES = 512
+const WORKSPACE_KEY_MAX_IN_FLIGHT = 64
+const THREAD_TRANSITION_MAX_PER_THREAD = 16
+const THREAD_TRANSITION_MAX_GLOBAL = 128
+const RENOTIFY_CACHE_MAX_ENTRIES = 1_024
+let rejectedWorkspaceKeyResolutions = 0
+let rejectedThreadTransitions = 0
+let totalPendingThreadTransitions = 0
+let beforeWorkspaceKeyResolutionForTest:
+  | ((path: string) => void | Promise<void>)
+  | undefined
+
+function evictWorkspaceKeyCache(): void {
+  for (const key of workspaceKeyCache.keys()) {
+    if (workspaceKeyCache.size <= WORKSPACE_KEY_CACHE_MAX_ENTRIES) break
+    if (workspaceKeyAsyncCache.has(key)) continue
+    workspaceKeyCache.delete(key)
   }
+}
+
+function cacheWorkspaceKey(key: string, canonical: string): void {
+  workspaceKeyCache.delete(key)
+  workspaceKeyCache.set(key, canonical)
+  evictWorkspaceKeyCache()
+}
+
+function cachedWorkspaceKey(key: string): string | undefined {
+  const cached = workspaceKeyCache.get(key)
+  if (!cached) return undefined
+  workspaceKeyCache.delete(key)
+  workspaceKeyCache.set(key, cached)
+  return cached
+}
+
+/** @internal Cache boundary seams for long-lived workspace-switch tests. */
+export function getWorkflowManagerCacheDiagnosticsForTest(): {
+  workspaceKeyEntries: number
+  workspaceKeyMaxEntries: number
+  workspaceKeyInFlight: number
+  workspaceKeyMaxInFlight: number
+  workspaceKeyAdmissionRejected: number
+  threadTransitionsPending: number
+  threadTransitionsMaxGlobal: number
+  threadTransitionsMaxPerThread: number
+  threadTransitionAdmissionRejected: number
+  renotifyEntries: number
+  renotifyMaxEntries: number
+} {
+  return {
+    workspaceKeyEntries: workspaceKeyCache.size,
+    workspaceKeyMaxEntries: WORKSPACE_KEY_CACHE_MAX_ENTRIES,
+    workspaceKeyInFlight: workspaceKeyAsyncCache.size,
+    workspaceKeyMaxInFlight: WORKSPACE_KEY_MAX_IN_FLIGHT,
+    workspaceKeyAdmissionRejected: rejectedWorkspaceKeyResolutions,
+    threadTransitionsPending: totalPendingThreadTransitions,
+    threadTransitionsMaxGlobal: THREAD_TRANSITION_MAX_GLOBAL,
+    threadTransitionsMaxPerThread: THREAD_TRANSITION_MAX_PER_THREAD,
+    threadTransitionAdmissionRejected: rejectedThreadTransitions,
+    renotifyEntries: workflowRunManager.getRenotifyEntryCountForTest(),
+    renotifyMaxEntries: RENOTIFY_CACHE_MAX_ENTRIES
+  }
+}
+
+/** @internal Deterministic canonicalization admission seam. */
+export function setBeforeWorkflowWorkspaceKeyResolutionForTest(
+  hook?: (path: string) => void | Promise<void>
+): void {
+  beforeWorkspaceKeyResolutionForTest = hook
+}
+
+export async function prepareWorkflowWorkspaceKeyForTest(path: string): Promise<string> {
+  return await prepareWorkspaceKey(path)
+}
+
+function lexicalWorkspaceKey(p: string): string {
+  const normalized = resolve(p).normalize("NFC")
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+async function prepareWorkspaceKey(p: string): Promise<string> {
+  const lexical = lexicalWorkspaceKey(p)
+  const cached = cachedWorkspaceKey(lexical)
+  if (cached) return cached
+  const pending = workspaceKeyAsyncCache.get(lexical)
+  if (pending) return pending
+  if (workspaceKeyAsyncCache.size >= WORKSPACE_KEY_MAX_IN_FLIGHT) {
+    rejectedWorkspaceKeyResolutions += 1
+    throw new Error("workflow workspace resolver is busy; retry after current requests finish")
+  }
+  const resolving = Promise.resolve()
+    .then(() => beforeWorkspaceKeyResolutionForTest?.(p))
+    .then(() => canonicalizeWorkspacePath(p))
+    .then((canonicalPath) => {
+      const canonical = lexicalWorkspaceKey(canonicalPath)
+      cacheWorkspaceKey(lexical, canonical)
+      // A later caller may already use the canonical spelling. Seed both forms so
+      // it also stays on the no-I/O path.
+      cacheWorkspaceKey(lexicalWorkspaceKey(canonicalPath), canonical)
+      return canonical
+    })
+  workspaceKeyAsyncCache.set(lexical, resolving)
+  try {
+    return await resolving
+  } finally {
+    if (workspaceKeyAsyncCache.get(lexical) === resolving) {
+      workspaceKeyAsyncCache.delete(lexical)
+    }
+    evictWorkspaceKeyCache()
+  }
+}
+
+function workspaceKey(p: string): string {
+  const lexical = lexicalWorkspaceKey(p)
+  return cachedWorkspaceKey(lexical) ?? lexical
 }
 
 class WorkflowRunManager {
   private readonly active = new Map<string, ActiveWorkflowRun>()
+  private readonly threadTransitionTails = new Map<string, Promise<void>>()
+  private readonly pendingThreadTransitions = new Map<string, number>()
   private readonly workspaceIntegrationLeases = new Map<
     string,
-    { workspacePath: string; ownerRunId: string }
+    { workspacePath: string; workspaceKey: string; ownerRunId: string }
   >()
   private shuttingDown = false
   /** Per-run count of auto re-reports after a failed notification turn (E). */
-  private readonly renotifyAttempts = new Map<string, number>()
+  private readonly renotifyAttempts = new Map<
+    string,
+    { threadId: string; attempts: number }
+  >()
   /**
    * runIds whose completion notification turn is in flight THIS process. Kept in
    * memory and NEVER persisted: the durable `delivered` flag is only set on a
@@ -361,6 +487,11 @@ class WorkflowRunManager {
    * point the disk is still stale (disk full) and there's nothing better to report.
    */
   private readonly flushFailedRuns = new Map<string, PersistedWorkflowRun>()
+  private readonly flushFailedJournalSources = new Map<
+    string,
+    WorkflowFlushFailureSnapshot["journalSource"]
+  >()
+  private readonly flushFailedReservedBytes = new Map<string, number>()
   /** In-memory mutation revision for each flush-failed snapshot. A read-path
    * write-back can overlap a worktree action; only the revision it actually
    * persisted may remove the authoritative snapshot. */
@@ -373,8 +504,63 @@ class WorkflowRunManager {
 
   private dropFlushFailedRun(runId: string): void {
     this.flushFailedRuns.delete(runId)
+    this.flushFailedJournalSources.delete(runId)
+    this.flushFailedReservedBytes.delete(runId)
     this.flushFailedEpochs.delete(runId)
     this.flushFailedRevisions.delete(runId)
+  }
+
+  private rememberRenotifyState(
+    runId: string,
+    state: { threadId: string; attempts: number }
+  ): boolean {
+    this.renotifyAttempts.delete(runId)
+    this.renotifyAttempts.set(runId, state)
+    const activeRunIds = new Set(Array.from(this.active.values(), (entry) => entry.runId))
+    while (this.renotifyAttempts.size > RENOTIFY_CACHE_MAX_ENTRIES) {
+      let evicted = false
+      for (const [candidateRunId] of this.renotifyAttempts) {
+        if (candidateRunId === runId) continue
+        if (this.inFlightNotifications.has(candidateRunId)) continue
+        if (activeRunIds.has(candidateRunId)) continue
+        this.renotifyAttempts.delete(candidateRunId)
+        evicted = true
+        break
+      }
+      if (evicted) continue
+      // Every old entry is currently protected. Fail closed for the new retry:
+      // its durable delivered=false state remains available after hydrate/restart.
+      this.renotifyAttempts.delete(runId)
+      return false
+    }
+    return true
+  }
+
+  getRenotifyEntryCountForTest(): number {
+    return this.renotifyAttempts.size
+  }
+
+  private flushFailureReservedBytes(): number {
+    let total = 0
+    for (const bytes of this.flushFailedReservedBytes.values()) total += bytes
+    return total
+  }
+
+  private isLaunchBlockedByFlushFailure(runId: string, threadId: string): boolean {
+    const supersededSnapshot = this.flushFailedRuns.get(runId)
+    const replacesOwnedSnapshot = supersededSnapshot?.threadId === threadId
+    return this.flushFailedRuns.size - (replacesOwnedSnapshot ? 1 : 0) > 0
+  }
+
+  private captureFlushFailedRun(
+    request: Pick<WorkflowLaunchRequest, "runId" | "threadId">,
+    snapshot: WorkflowFlushFailureSnapshot
+  ): void {
+    this.flushFailedRuns.set(request.runId, snapshot.run)
+    this.flushFailedJournalSources.set(request.runId, snapshot.journalSource)
+    this.flushFailedReservedBytes.set(request.runId, snapshot.reservedBytes)
+    this.flushFailedEpochs.set(request.runId, workflowThreadDisposalEpoch(request.threadId))
+    this.flushFailedRevisions.set(request.runId, 0)
   }
 
   private async persistCurrentFlushFailedRun(
@@ -385,14 +571,24 @@ class WorkflowRunManager {
     const snapshot = this.flushFailedRuns.get(runId)
     if (!snapshot) return false
     const revision = this.flushFailedRevisions.get(runId) ?? 0
-    // persistRecoveredRun awaits filesystem work. Freeze the exact revision so
-    // a concurrent action cannot mutate the object being serialized underneath it.
-    const frozen = JSON.parse(JSON.stringify(snapshot)) as PersistedWorkflowRun
+    // persistRecoveredRun awaits filesystem work. Freeze mutable containers at
+    // the revision boundary, but keep immutable journal payload references: a
+    // JSON round-trip here can synchronously clone 128 MiB on Electron main.
+    const frozen: PersistedWorkflowRun = {
+      ...snapshot,
+      phases: [...snapshot.phases],
+      agents: snapshot.agents.map((record) => ({ ...record })),
+      worktrees: snapshot.worktrees?.map((record) => ({ ...record })),
+      logs: [...snapshot.logs],
+      journal: snapshot.journal.slice(),
+      stats: { ...snapshot.stats }
+    }
     const persisted = await persistRecoveredRun(
       workspacePath,
       threadId,
       frozen,
-      this.flushFailedEpochs.get(runId)
+      this.flushFailedEpochs.get(runId),
+      { preserveJournalSidecar: this.flushFailedJournalSources.get(runId) === "sidecar" }
     )
     if (
       persisted &&
@@ -439,6 +635,75 @@ class WorkflowRunManager {
     return this.active.get(threadId)?.workspacePath
   }
 
+  /** In-memory ownership fence for a workflow agent currently using a checkout. */
+  activeManagedWorktreeOwner(
+    directory: string
+  ): { threadId: string; runId: string } | undefined {
+    for (const run of this.active.values()) {
+      if (run.worktrees.ownsWorktreeDirectory(directory)) {
+        return { threadId: run.threadId, runId: run.runId }
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * Async preflight for the deliberately synchronous launch critical section.
+   * It resolves both workspace aliases and the managed storage authority before
+   * launch, leaving launch itself to register `active` without any filesystem I/O
+   * or an await gap that could weaken same-thread exclusivity.
+   */
+  async prepareLaunch(workspacePath: string, threadId: string): Promise<void> {
+    await Promise.all([
+      prepareWorkspaceKey(workspacePath),
+      prepareWorkflowRunStorage(workspacePath, threadId)
+    ])
+    // A metadata/workspace transition that started while storage was resolving
+    // must commit (or fail) before launch attempts its synchronous registration.
+    while (this.threadTransitionTails.has(threadId)) {
+      await this.threadTransitionTails.get(threadId)
+    }
+  }
+
+  /** Serialize an async mode/workspace guard through its final metadata commit.
+   * `launch()` rejects while a transition is queued or running, so no workflow
+   * can slip into the await gap after an apparently-idle guard. */
+  async withThreadTransitionLease<T>(threadId: string, task: () => Promise<T>): Promise<T> {
+    const pendingForThread = this.pendingThreadTransitions.get(threadId) ?? 0
+    if (
+      pendingForThread >= THREAD_TRANSITION_MAX_PER_THREAD ||
+      totalPendingThreadTransitions >= THREAD_TRANSITION_MAX_GLOBAL
+    ) {
+      rejectedThreadTransitions += 1
+      throw new Error("workflow thread transition queue is busy; retry after it settles")
+    }
+    const previous = this.threadTransitionTails.get(threadId) ?? Promise.resolve()
+    let release!: () => void
+    const held = new Promise<void>((resolveHeld) => {
+      release = resolveHeld
+    })
+    const tail = previous.then(() => held)
+    this.threadTransitionTails.set(threadId, tail)
+    this.pendingThreadTransitions.set(threadId, pendingForThread + 1)
+    totalPendingThreadTransitions += 1
+    await previous
+    try {
+      return await task()
+    } finally {
+      release()
+      const remaining = (this.pendingThreadTransitions.get(threadId) ?? 1) - 1
+      if (remaining > 0) this.pendingThreadTransitions.set(threadId, remaining)
+      else this.pendingThreadTransitions.delete(threadId)
+      totalPendingThreadTransitions = Math.max(0, totalPendingThreadTransitions - 1)
+      if (this.threadTransitionTails.get(threadId) === tail) {
+        await tail
+        if (this.threadTransitionTails.get(threadId) === tail) {
+          this.threadTransitionTails.delete(threadId)
+        }
+      }
+    }
+  }
+
   /**
    * A run active over the same workspace on ANY thread. NOT a launch mutex —
    * concurrent same-workspace workflows on different threads are intentionally
@@ -452,7 +717,7 @@ class WorkflowRunManager {
   activeRunForWorkspace(workspacePath: string): { threadId: string; runId: string } | undefined {
     const key = workspaceKey(workspacePath)
     for (const run of this.active.values()) {
-      const runKey = workspaceKey(run.workspacePath)
+      const runKey = run.workspaceKey
       // Equal OR nested EITHER way: a run on /repo and a launch/turn on
       // /repo/packages/a write into the same tree — the parent run can touch the
       // child dir, and the child's auto-commit can capture the parent run's edits.
@@ -466,12 +731,27 @@ class WorkflowRunManager {
     return undefined
   }
 
+  /** Production lookup: canonicalization is async, while the final map scan is
+   * synchronous and therefore observes one coherent active-run snapshot. */
+  async activeRunForWorkspaceAsync(
+    workspacePath: string
+  ): Promise<{ threadId: string; runId: string } | undefined> {
+    await prepareWorkspaceKey(workspacePath)
+    const activeAtStart = Array.from(this.active.values())
+    await Promise.all(
+      activeAtStart.map(async (run) => {
+        run.workspaceKey = await prepareWorkspaceKey(run.workspacePath)
+      })
+    )
+    return this.activeRunForWorkspace(workspacePath)
+  }
+
   private overlappingIntegrationLease(
     workspacePath: string
-  ): { workspacePath: string; ownerRunId: string } | undefined {
+  ): { workspacePath: string; workspaceKey: string; ownerRunId: string } | undefined {
     const key = workspaceKey(workspacePath)
     for (const lease of this.workspaceIntegrationLeases.values()) {
-      const leaseKey = workspaceKey(lease.workspacePath)
+      const leaseKey = lease.workspaceKey
       if (leaseKey === key || isPathInside(leaseKey, key) || isPathInside(key, leaseKey)) {
         return lease
       }
@@ -498,7 +778,7 @@ class WorkflowRunManager {
       }
     }
     const key = workspaceKey(workspacePath)
-    const lease = { workspacePath, ownerRunId }
+    const lease = { workspacePath, workspaceKey: key, ownerRunId }
     this.workspaceIntegrationLeases.set(key, lease)
     return {
       acquired: true,
@@ -518,6 +798,10 @@ class WorkflowRunManager {
     ownerRunId: string,
     task: () => Promise<T>
   ): Promise<T> {
+    // Resolve aliases before acquiring the synchronous reservation. There is no
+    // await between acquire and task invocation, so two callers that finish
+    // canonicalization together still serialize correctly.
+    await prepareWorkspaceKey(workspacePath)
     const lease = this.acquireWorkspaceIntegrationLease(workspacePath, ownerRunId)
     if (!lease.acquired) throw new Error(lease.reason)
     try {
@@ -536,6 +820,19 @@ class WorkflowRunManager {
     return this.hasDeliverablePendingNotification(workspacePath, threadId)
   }
 
+  /** Async production variant; compact-index discovery and point reads never
+   * block Electron's main loop. The synchronous method remains for compatibility
+   * callers that cannot await. */
+  async isBusyForThreadAsync(
+    threadId: string,
+    workspacePath: string | undefined
+  ): Promise<boolean> {
+    if (this.isActive(threadId)) return true
+    if (!workspacePath) return this.isActive(threadId)
+    const pending = await this.hasDeliverablePendingNotificationAsync(workspacePath, threadId)
+    return pending || this.isActive(threadId)
+  }
+
   /** Workspace switching has one additional constraint beyond an active run:
    * retained deliverables are indexed by the workspace that owns run.json.
    * Pin only that workspace until its explicit Merge/Discard/Cleanup decision;
@@ -544,15 +841,16 @@ class WorkflowRunManager {
     threadId: string,
     workspacePath: string | undefined
   ): Promise<boolean> {
-    if (this.isBusyForThread(threadId, workspacePath)) return true
+    if (await this.isBusyForThreadAsync(threadId, workspacePath)) return true
     if (!workspacePath) return false
     // Unlike thread deletion, workspace switching must not be locked forever by
     // an unrelated corrupt legacy run. Pin only a worktree record we can prove exists.
-    if (
-      countUnresolvedWorkflowWorktrees(workspacePath, threadId, {
-        failClosedOnUnreadable: false
-      }) > 0
-    ) {
+    const unresolvedWorktrees = await countUnresolvedWorkflowWorktreesAsync(
+      workspacePath,
+      threadId,
+      { failClosedOnUnreadable: false }
+    )
+    if (unresolvedWorktrees > 0) {
       return true
     }
     if (
@@ -576,21 +874,31 @@ class WorkflowRunManager {
     // only a manifest we can positively attribute pins the workspace.
     try {
       const repository = await identifyRepository(workspacePath)
-      if (!repository) return false
+      if (!repository) return this.isActive(threadId)
       const manifests = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
       // A damaged sibling manifest is not evidence about this thread, but it
       // must not erase a valid, positively attributed record we did parse.
       // `reliable` remains important to destructive prune callers; this guard
       // performs no mutation and needs only positive ownership evidence.
-      return manifests.records.some(
-        (record) =>
-          record.threadId === threadId &&
-          ((record.status !== "merged" && record.status !== "discarded") ||
-            record.cleanupPending === true ||
-            existsSync(record.directory))
-      )
+      for (const record of manifests.records) {
+        if (record.threadId !== threadId) continue
+        if (
+          (record.status !== "merged" && record.status !== "discarded") ||
+          record.cleanupPending === true
+        ) {
+          return true
+        }
+        try {
+          await stat(record.directory)
+          return true
+        } catch {
+          // A resolved manifest whose checkout no longer exists does not pin the
+          // workspace. Continue because a later record can still be authoritative.
+        }
+      }
+      return this.isActive(threadId)
     } catch {
-      return false
+      return this.isActive(threadId)
     }
   }
 
@@ -603,6 +911,13 @@ class WorkflowRunManager {
    * COUNTS as busy (it stays undelivered until its ack lands). */
   hasDeliverablePendingNotification(workspacePath: string, threadId: string): boolean {
     return this.hasDeliverablePendingNotificationExcept(workspacePath, threadId, undefined)
+  }
+
+  async hasDeliverablePendingNotificationAsync(
+    workspacePath: string,
+    threadId: string
+  ): Promise<boolean> {
+    return this.hasDeliverablePendingNotificationExceptAsync(workspacePath, threadId, undefined)
   }
 
   /** Like hasDeliverablePendingNotification, but ignores the run instance a
@@ -654,6 +969,35 @@ class WorkflowRunManager {
     )
   }
 
+  /** Async production counterpart of the compatibility guard above. */
+  async hasDeliverablePendingNotificationExceptAsync(
+    workspacePath: string,
+    threadId: string,
+    except: { runId: string; startedAt: string } | undefined
+  ): Promise<boolean> {
+    const isCurrentDelivery = (runId: string, startedAt: string): boolean =>
+      except !== undefined && runId === except.runId && startedAt === except.startedAt
+    const deliverableByRunId = (runId: string): boolean =>
+      this.inFlightNotifications.has(runId) || !this.isRenotifyExhausted(runId)
+    for (const snapshot of this.flushFailedRuns.values()) {
+      if (
+        snapshot.threadId === threadId &&
+        !snapshot.notificationDelivered &&
+        !isCurrentDelivery(snapshot.runId, snapshot.startedAt) &&
+        deliverableByRunId(snapshot.runId)
+      ) {
+        return true
+      }
+    }
+    return (
+      (await findUndeliveredTerminalRunAsync(
+        workspacePath,
+        threadId,
+        (run) => !isCurrentDelivery(run.runId, run.startedAt) && deliverableByRunId(run.runId)
+      )) !== null
+    )
+  }
+
   /** Launches a run in the background. Throws synchronously on invalid state. */
   launch(request: WorkflowLaunchRequest): WorkflowLaunchResult {
     if (this.shuttingDown) {
@@ -662,6 +1006,11 @@ class WorkflowRunManager {
     if (this.active.has(request.threadId)) {
       throw new Error(
         `A dynamic workflow (${this.active.get(request.threadId)!.runId}) is already running in this thread. Wait for its task-notification or cancel it from the workflow panel.`
+      )
+    }
+    if ((this.pendingThreadTransitions.get(request.threadId) ?? 0) > 0) {
+      throw new Error(
+        "This thread is changing mode or workspace; retry the workflow after the transition finishes."
       )
     }
     const integration = this.overlappingIntegrationLease(request.workspacePath)
@@ -678,6 +1027,11 @@ class WorkflowRunManager {
     // subagent checkpointer is already tombstoned.
     if (isWorkflowRunDirDisposed(request.workspacePath, request.threadId)) {
       throw new Error("This thread has been deleted; a workflow can no longer be launched on it.")
+    }
+    if (this.isLaunchBlockedByFlushFailure(request.runId, request.threadId)) {
+      throw new Error(
+        "Workflow launch is temporarily blocked because terminal results are waiting for durable storage. Free disk space or reopen the affected task, then retry."
+      )
     }
     // No workspace-level mutual exclusion: concurrent workflows over one workspace on
     // different threads remain allowed. Scripts that request worktree isolation
@@ -720,17 +1074,23 @@ class WorkflowRunManager {
       threadId: request.threadId,
       initial
     })
-    const scriptFilePath = persistScriptFile(
-      request.workspacePath,
-      request.threadId,
-      request.runId,
-      request.script
+    const scriptDir = getWorkflowRunsDir(request.workspacePath, request.threadId)
+    const scriptFilePath = join(scriptDir, `${request.runId}.workflow.js`)
+    const scriptPersisted = persistScriptFile(scriptDir, scriptFilePath, request.script)
+    // The tool awaits this same barrier before reporting success. A run.json
+    // fault retains the historical boolean/warning behavior, while a script
+    // write fault rejects: the editable source is part of the launch contract
+    // and the engine must never start agents without it.
+    const launchReady = Promise.all([runStore.whenInitialPersisted, scriptPersisted]).then(
+      ([initialPersisted]) => initialPersisted
     )
+    let launchInitializationFailed = false
 
     const controller = new AbortController()
     const entry: ActiveWorkflowRun = {
       threadId: request.threadId,
       workspacePath: request.workspacePath,
+      workspaceKey: workspaceKey(request.workspacePath),
       runId: request.runId,
       workflowName: request.parsed.meta.name,
       controller,
@@ -773,6 +1133,12 @@ class WorkflowRunManager {
     this.active.set(request.threadId, entry)
     entry.settled = (async () => {
       try {
+        try {
+          await launchReady
+        } catch (error) {
+          launchInitializationFailed = true
+          throw error
+        }
         if (request.resumeNote) {
           runStore.update((run) => {
             run.logs.push(request.resumeNote!)
@@ -787,6 +1153,7 @@ class WorkflowRunManager {
           runStore,
           args: request.args,
           tokenBudget: request.tokenBudget ?? null,
+          agentProfiles: request.agentProfiles,
           // Fold the session-default model into the engine's call-identity hash so a
           // resume after the user switched the thread's model re-runs default-model
           // agents instead of replaying the old model's cached result. (#1)
@@ -868,7 +1235,7 @@ class WorkflowRunManager {
             // leave a real checkout that history and recovery cannot discover.
             if (
               !(await runStore.whenInitialPersisted) &&
-              !runStore.isCurrentSnapshotPersisted()
+              !(await runStore.isCurrentSnapshotPersistedAsync())
             ) {
               throw new Error(
                 "cannot provision an isolated worktree because the workflow's initial run state was not persisted"
@@ -916,6 +1283,10 @@ class WorkflowRunManager {
           run.status = "error"
           run.error = error instanceof Error ? error.message : String(error)
           run.completedAt = new Date().toISOString()
+          // The foreground tool call already receives this launch failure. Mark
+          // it delivered so hydration cannot later turn the same failed launch
+          // into a second, misleading background completion notification.
+          if (launchInitializationFailed) run.notificationDelivered = true
         })
         await runStore.flush()
       } finally {
@@ -942,64 +1313,43 @@ class WorkflowRunManager {
         // entry. Readers either wait on the active run or see this snapshot;
         // there must be no gap where only a stale running run.json is visible.
         if (!entry.userCancelled && !finalPersisted) {
-          this.flushFailedRuns.set(request.runId, JSON.parse(JSON.stringify(runStore.state)))
-          this.flushFailedEpochs.set(request.runId, workflowThreadDisposalEpoch(request.threadId))
-          this.flushFailedRevisions.set(request.runId, 0)
+          this.captureFlushFailedRun(request, runStore.captureFlushFailureSnapshot())
         }
-        // Keep the run active until its last live-store writer and terminal
-        // manifest finalization have settled. UI integration cannot otherwise
-        // race this final flush and be overwritten by the in-memory snapshot.
-        this.active.delete(request.threadId)
-        let protectedRunIds: string[] | undefined
-        let pruneAllowed = true
-        const repository = await identifyRepository(request.workspacePath)
-        if (repository) {
-          const manifestState = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
-          if (!manifestState.reliable) {
-            pruneAllowed = false
-          } else {
-            protectedRunIds = manifestState.records.map((record) => record.runId)
-          }
-        }
-        if (pruneAllowed) {
-          pruneWorkflowRuns(request.workspacePath, request.threadId, 30, protectedRunIds)
-        }
-        // A user-initiated cancel needs no model turn — the user was present.
-        if (!entry.userCancelled) {
-          if (!finalPersisted) {
-            // Keep the FULL run incl. journal: recoverFlushFailedRun writes this
-            // snapshot back to disk on ack, and writing an empty journal would wipe
-            // the resume cache and force subagents to re-run (data-loss boundary).
-            // The journal can be large, but a failed final persist is rare and this
-            // holds one run. ONLY for a non-cancelled run: a cancelled run is never
-            // reported, so a snapshot would just get re-surfaced by
-            // findPendingNotification and wrongly reported.
-            // Bound memory: under a persistent disk fault these (each holding a full
-            // journal) could pile up. Evict the oldest ALREADY-DELIVERED snapshot —
-            // its result was already reported, so only its stale history copy is lost.
-            // NEVER evict an undelivered or in-flight one: that would drop a real
-            // completed/error result (its disk copy is a stale "running" that would
-            // then be mis-reconciled to "aborted"). If none are safely evictable the
-            // cap goes soft — correctness over a hard bound under a (rare) disk fault.
-            while (this.flushFailedRuns.size > MAX_FLUSH_FAILED_RUNS) {
-              let evicted = false
-              for (const [id, snap] of this.flushFailedRuns) {
-                if (snap.notificationDelivered && !this.inFlightNotifications.has(id)) {
-                  this.dropFlushFailedRun(id)
-                  evicted = true
-                  break
-                }
-              }
-              if (!evicted) break
+        // Keep the run active until its last live-store writer, manifest
+        // finalization, and async history prune have settled. Besides preventing
+        // UI integration from racing the final flush, this closes the new async
+        // prune window: a resume that reuses this runId cannot launch while old
+        // artifacts are still being selected/deleted.
+        try {
+          let protectedRunIds: string[] | undefined
+          let pruneAllowed = true
+          const repository = await identifyRepository(request.workspacePath)
+          if (repository) {
+            const manifestState = await listWorkflowWorktreeRecordsForPrune(repository.commonDir)
+            if (!manifestState.reliable) {
+              pruneAllowed = false
+            } else {
+              protectedRunIds = manifestState.records.map((record) => record.runId)
             }
           }
+          if (pruneAllowed) {
+            await pruneWorkflowRuns(request.workspacePath, request.threadId, 30, protectedRunIds)
+          }
+        } finally {
+          this.active.delete(request.threadId)
+        }
+        // A user-initiated cancel needs no model turn — the user was present.
+        if (!entry.userCancelled && !launchInitializationFailed) {
+          // Never evict an undelivered or resume-capable result here. Capturing
+          // the first failed terminal persist opens the launch circuit breaker,
+          // so persistent disk failure cannot keep growing the backlog.
           emitAppAttention({
             kind: runStore.state.status === "completed" ? "task-complete" : "task-error",
             threadId: request.threadId,
             key: `workflow:${request.runId}`
           })
           broadcast(request.threadId, { type: "workflow_notification", runId: request.runId })
-        } else {
+        } else if (entry.userCancelled) {
           // Mark the cancelled run delivered too: otherwise a later hydrate's
           // findUndeliveredTerminalRun would resurface this aborted run as a
           // pending notification and fire a model turn the user never asked for
@@ -1013,7 +1363,7 @@ class WorkflowRunManager {
     return {
       runId: request.runId,
       scriptFilePath,
-      whenInitialPersisted: runStore.whenInitialPersisted
+      whenInitialPersisted: launchReady
     }
   }
 
@@ -1115,6 +1465,39 @@ class WorkflowRunManager {
     return run
   }
 
+  /** Async production lookup backed by runs.index's pending set. */
+  async findPendingNotificationAsync(
+    workspacePath: string,
+    threadId: string
+  ): Promise<PersistedWorkflowRun | null> {
+    for (const snapshot of this.flushFailedRuns.values()) {
+      if (
+        snapshot.threadId === threadId &&
+        !snapshot.notificationDelivered &&
+        !this.inFlightNotifications.has(snapshot.runId)
+      ) {
+        return snapshot
+      }
+    }
+    const run = await findUndeliveredTerminalRunAsync(workspacePath, threadId)
+    if (run && this.inFlightNotifications.has(run.runId)) return null
+    return run
+  }
+
+  /** Atomically claims one pending notification after async discovery. Promise
+   * continuations run to completion on the JS thread, so the final recheck+add
+   * cannot interleave with another claimant even when both lookups resolve in
+   * the same event-loop turn. */
+  async claimPendingNotificationAsync(
+    workspacePath: string,
+    threadId: string
+  ): Promise<PersistedWorkflowRun | null> {
+    const run = await this.findPendingNotificationAsync(workspacePath, threadId)
+    if (!run || this.inFlightNotifications.has(run.runId)) return null
+    this.inFlightNotifications.add(run.runId)
+    return run
+  }
+
   /**
    * After a notification turn acks one run, re-broadcast for the NEXT still-
    * undelivered terminal run on this thread (if any). The user can launch a
@@ -1126,6 +1509,14 @@ class WorkflowRunManager {
    */
   kickNextPendingNotification(workspacePath: string, threadId: string): void {
     const next = this.findPendingNotification(workspacePath, threadId)
+    if (next) broadcast(threadId, { type: "workflow_notification", runId: next.runId })
+  }
+
+  async kickNextPendingNotificationAsync(
+    workspacePath: string,
+    threadId: string
+  ): Promise<void> {
+    const next = await this.findPendingNotificationAsync(workspacePath, threadId)
     if (next) broadcast(threadId, { type: "workflow_notification", runId: next.runId })
   }
 
@@ -1155,6 +1546,45 @@ class WorkflowRunManager {
    */
   getFlushFailedRun(runId: string): PersistedWorkflowRun | undefined {
     return this.flushFailedRuns.get(runId)
+  }
+
+  /** Resume needs the replay journal, while notification/history do not. A
+   * compact flush-failed snapshot reuses the already-durable journal sidecar and
+   * overlays its terminal metadata only on this explicit path. */
+  async getFlushFailedRunForResume(
+    workspacePath: string,
+    threadId: string,
+    runId: string
+  ): Promise<PersistedWorkflowRun | undefined> {
+    const snapshot = this.flushFailedRuns.get(runId)
+    if (!snapshot || snapshot.threadId !== threadId) return undefined
+    if (this.flushFailedJournalSources.get(runId) !== "sidecar") return snapshot
+    const persisted = await loadWorkflowRunForResumeAsync(workspacePath, threadId, runId)
+    if (!persisted || persisted.startedAt !== snapshot.startedAt) return undefined
+    return {
+      ...snapshot,
+      phases: [...snapshot.phases],
+      agents: snapshot.agents.map((record) => ({ ...record })),
+      worktrees: snapshot.worktrees?.map((record) => ({ ...record })),
+      logs: [...snapshot.logs],
+      journal: persisted.journal,
+      stats: { ...snapshot.stats }
+    }
+  }
+
+  /** @internal Storage-circuit diagnostics for persistent-disk-failure tests. */
+  getFlushFailureDiagnosticsForTest(): {
+    runs: number
+    reservedBytes: number
+    degraded: boolean
+    activeRuns: number
+  } {
+    return {
+      runs: this.flushFailedRuns.size,
+      reservedBytes: this.flushFailureReservedBytes(),
+      degraded: this.flushFailedRuns.size > 0,
+      activeRuns: this.active.size
+    }
   }
 
   /** Keep a flush-failed run actionable while its run.json is stale. The
@@ -1208,6 +1638,14 @@ class WorkflowRunManager {
         this.inFlightNotifications.delete(runId)
         this.renotifyAttempts.delete(runId)
       }
+    }
+    // Ordinary persisted runs never enter flushFailedRuns. Keep thread ownership
+    // in the retry record so deleting such a thread also releases exhausted
+    // notification budgets instead of leaking one runId for process lifetime.
+    for (const [runId, state] of this.renotifyAttempts) {
+      if (state.threadId !== threadId) continue
+      this.renotifyAttempts.delete(runId)
+      this.inFlightNotifications.delete(runId)
     }
   }
 
@@ -1301,7 +1739,9 @@ class WorkflowRunManager {
    * hydrate) but is no longer auto-re-reported. Returns true if it broadcast.
    */
   renotify(threadId: string, runId: string): boolean {
-    const attempts = (this.renotifyAttempts.get(runId) ?? 0) + 1
+    const current = this.renotifyAttempts.get(runId)
+    const attempts = (current?.threadId === threadId ? current.attempts : 0) + 1
+    if (!this.rememberRenotifyState(runId, { threadId, attempts })) return false
     if (attempts > MAX_RENOTIFY_ATTEMPTS) {
       // Record the REFUSAL as the exhaustion sentinel (attempts becomes
       // MAX+1). Exhaustion must not be declared one step earlier — at the
@@ -1310,10 +1750,8 @@ class WorkflowRunManager {
       // timer fires; the renderer then drops the notification (thread no
       // longer in workflow mode) and the last allowed report is silently
       // thrown away.
-      this.renotifyAttempts.set(runId, attempts)
       return false
     }
-    this.renotifyAttempts.set(runId, attempts)
     broadcast(threadId, { type: "workflow_notification", runId })
     return true
   }
@@ -1330,7 +1768,13 @@ class WorkflowRunManager {
     // STRICTLY greater: attempts === MAX means the final re-report has been
     // dispatched and is still pending — deliverable, not exhausted. The
     // sentinel (MAX+1) is written only when a further attempt is refused.
-    return (this.renotifyAttempts.get(runId) ?? 0) > MAX_RENOTIFY_ATTEMPTS
+    const state = this.renotifyAttempts.get(runId)
+    if (!state) return false
+    // Reads also refresh LRU order; a repeatedly consulted pending run should
+    // not be the first stale budget evicted under distant-thread churn.
+    this.renotifyAttempts.delete(runId)
+    this.renotifyAttempts.set(runId, state)
+    return state.attempts > MAX_RENOTIFY_ATTEMPTS
   }
 
   /**
@@ -1345,19 +1789,19 @@ class WorkflowRunManager {
 
 export const workflowRunManager = new WorkflowRunManager()
 
-function persistScriptFile(
-  workspacePath: string,
-  threadId: string,
-  runId: string,
+async function persistScriptFile(
+  dir: string,
+  path: string,
   script: string
-): string {
-  const dir = getWorkflowRunsDir(workspacePath, threadId)
-  const path = join(dir, `${runId}.workflow.js`)
+): Promise<void> {
   try {
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(path, script)
+    await mkdir(dir, { recursive: true })
+    await writeFile(path, script)
   } catch (error) {
     console.warn("[Workflow] Failed to persist script file:", error)
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `Could not persist the editable workflow script at ${path}: ${detail}`
+    )
   }
-  return path
 }

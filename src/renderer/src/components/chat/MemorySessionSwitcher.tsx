@@ -25,7 +25,7 @@ function isSessionMemoryEnabled(metadata: unknown): boolean {
 function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProps): JSX.Element {
   const currentThreadId = useAppStore((state) => state.currentThreadId)
   const threads = useAppStore((state) => state.threads)
-  const updateThread = useAppStore((state) => state.updateThread)
+  const patchThreadMetadata = useAppStore((state) => state.patchThreadMetadata)
   const [open, setOpen] = useState(false)
   const [globalEnabled, setGlobalEnabled] = useState(false)
   const [projectModeMemoryEnabled, setProjectModeMemoryEnabled] = useState(false)
@@ -106,13 +106,7 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
           if (mountedRef.current) setGlobalEnabled(true)
         }
 
-        const latestThread = await window.api.threads.get(currentThreadId)
-        const metadata = {
-          ...(currentThread?.metadata ?? {}),
-          ...(latestThread?.metadata ?? {}),
-          memoryEnabled: enabled
-        }
-        await updateThread(currentThreadId, { metadata })
+        await patchThreadMetadata(currentThreadId, { set: { memoryEnabled: enabled } })
         if (!mountedRef.current) return
         setOpen(false)
         toast.success(enabled ? "当前会话记忆已开启，将在下一次对话中生效" : "当前会话记忆已关闭")
@@ -124,11 +118,10 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
       }
     },
     [
-      currentThread?.metadata,
       currentThreadId,
       globalEnabled,
       pending,
-      updateThread
+      patchThreadMetadata
     ]
   )
 

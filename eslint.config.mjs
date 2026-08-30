@@ -17,6 +17,10 @@ export default defineConfig(
       "**/.vite",
       "**/dist",
       "**/out",
+      // Runtime conversations, generated workflow scripts, caches and traces.
+      // They are user data rather than repository source; scanning them makes
+      // lint time and output grow with application usage.
+      "**/.cmbdevclaw/**",
       "**/.claude/worktrees/**",
       "src/main/browser/record/common/playwright-codegen/codegen/**",
       "src/main/browser/record/common/playwright-codegen/generated/**",

@@ -24,6 +24,7 @@ import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import { emitAppAttention } from "../app-attention-events"
+import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 
 const TICK_INTERVAL_MS = 60_000
@@ -243,6 +244,7 @@ async function executeTask(taskId: string): Promise<void> {
     })
 
     const converter = new StreamConverter()
+    const serializeForRun = createStreamDataSerializer()
 
     const stream = await agent.stream(
       { messages: [new HumanMessage(finalPrompt)] },
@@ -258,8 +260,13 @@ async function executeTask(taskId: string): Promise<void> {
     for await (const chunk of stream) {
       if (abortController.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
-      const serialized = JSON.parse(JSON.stringify(data))
-      const events = converter.processChunk(mode, serialized)
+      const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } =
+        serializeForRun(mode, data)
+      const events = converter.processChunk(mode, serialized, {
+        valuesMessageIndexOffset,
+        valuesSnapshotScope: "turn",
+        valuesSnapshotKind
+      })
       for (const evt of events) {
         broadcastToChannel(channel, evt)
 
@@ -288,15 +295,18 @@ async function executeTask(taskId: string): Promise<void> {
         }
 
         // Capture last assistant text for notification
-        if (evt.type === "full-messages") {
+        if (evt.type === "full-messages" || evt.type === "turn-messages") {
           // 只取最后一条没有 tool_calls 的 assistant 消息（最终回复）
-          const finalMsgs = evt.messages.filter(
-            (m) =>
-              m.role === "assistant" &&
-              (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
-          )
-          const last = finalMsgs[finalMsgs.length - 1]
-          if (last?.content?.trim()) lastAssistantText = last.content.trim()
+          for (let index = evt.messages.length - 1; index >= 0; index -= 1) {
+            const candidate = evt.messages[index]
+            if (
+              candidate.role === "assistant" &&
+              (!Array.isArray(candidate.tool_calls) || candidate.tool_calls.length === 0)
+            ) {
+              if (candidate.content.trim()) lastAssistantText = candidate.content.trim()
+              break
+            }
+          }
         }
       }
       hasStreamedContent = true

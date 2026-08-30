@@ -420,4 +420,3 @@ Git Panel 需要频繁跑 Git 命令，所以实现里有多层保护：
 - 需要精细控制 Git hooks、签名、submodule 或 LFS 高级行为。
 
 这些场景建议使用终端或 IDE Git 工具完成，Git Panel 作为结果确认和轻量提交入口。
-
