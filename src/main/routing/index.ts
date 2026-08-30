@@ -9,7 +9,7 @@ import {
   getModelConfigs,
   toModelRef
 } from "../models/registry"
-import { getThread, updateThread } from "../db"
+import { getThreadCore, updateThread } from "../db"
 import type { RoutingTrace, RoutingLayerRecord } from "../agent/trace/types"
 
 export interface RoutingContext {
@@ -75,7 +75,7 @@ const FAILOVER_STICKY_TTL_MS = 30 * 60 * 1000 // 30 min — after failover, pref
 
 function readThreadRoutingState(threadId: string | undefined): ThreadRoutingState | null {
   if (!threadId) return null
-  const row = getThread(threadId)
+  const row = getThreadCore(threadId)
   if (!row?.metadata) return null
   try {
     const meta = JSON.parse(row.metadata) as Record<string, unknown>
@@ -86,7 +86,7 @@ function readThreadRoutingState(threadId: string | undefined): ThreadRoutingStat
 }
 
 function writeThreadRoutingState(threadId: string, patch: Partial<ThreadRoutingState>): void {
-  const row = getThread(threadId)
+  const row = getThreadCore(threadId)
   if (!row) return
   let meta: Record<string, unknown> = {}
   try {

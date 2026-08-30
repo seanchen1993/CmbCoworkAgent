@@ -3288,9 +3288,7 @@ export function DashboardView(): React.JSX.Element {
     let cancelled = false
 
     async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
-      // 与技能市场（MarketPanel）一致：用全量用户目录 queryAllUser 反查创建人，
-      // 而不是按使用埋点聚合的 userProfiles —— 否则像精品技能这种作者本人无使用记录的，
-      // 聚合里查不到对应 SAP 桶，创建人就会显示 “—”。
+      // 只按当前市场条目的已知上传者 ID 查询，避免挂载看板时加载完整用户目录。
       // 每个 user_id 对应一组候选 SAP，作为 resolveSkillUploaderExportInfo 的查表 key。
       const candidatesByUserId = new Map<string, string[]>()
       for (const item of items) {
@@ -3314,15 +3312,20 @@ export function DashboardView(): React.JSX.Element {
         return map
       }
 
-      if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+      if (typeof window.api?.dashboard?.userProfiles !== "function") {
         if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
         return
       }
 
       try {
-        const response = await window.api.dashboard.queryAllUser()
+        const requestedSapIds = Array.from(
+          new Set(Array.from(candidatesByUserId.values()).flat())
+        )
+        const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+          family: "dashboard-market"
+        })
         if (!response.success || !response.data) {
-          throw new Error(response.error || "获取全量用户信息失败")
+          throw new Error(response.error || "获取上传者信息失败")
         }
 
         const allUsers = response.data.filter((user) => user.sapId?.trim())

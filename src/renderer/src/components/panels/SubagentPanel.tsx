@@ -10,6 +10,7 @@ import {
   Code2,
   ChevronRight
 } from "lucide-react"
+import { useShallow } from "zustand/react/shallow"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -55,7 +56,7 @@ function getSubagentTypeBadge(subagentType?: string): string {
 }
 
 export function SubagentPanel(): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
+  const currentThreadId = useAppStore((state) => state.currentThreadId)
   const threadState = useThreadState(currentThreadId)
   const subagents = threadState?.subagents ?? []
 
@@ -118,7 +119,12 @@ export function SubagentCard({
   subagent: Subagent
   threadId?: string | null
 }): React.JSX.Element {
-  const { currentThreadId, openSubagentFocusView } = useAppStore()
+  const { currentThreadId, openSubagentFocusView } = useAppStore(
+    useShallow((state) => ({
+      currentThreadId: state.currentThreadId,
+      openSubagentFocusView: state.openSubagentFocusView
+    }))
+  )
   const effectiveThreadId = threadId ?? currentThreadId
   const getStatusConfig = (): {
     icon: React.ElementType

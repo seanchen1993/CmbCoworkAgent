@@ -1,19 +1,30 @@
 import { execFileSync } from "child_process"
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest"
 
+const electronSend = vi.hoisted(() => vi.fn())
+
 vi.mock("electron", () => ({
   app: { getPath: () => tmpdir(), getName: () => "cmb-test", getVersion: () => "0.0.0" },
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: {
+    getAllWindows: () => [
+      { isDestroyed: () => false, webContents: { send: electronSend } }
+    ]
+  },
   webContents: { getAllWebContents: () => [] },
   ipcMain: { handle: () => undefined, on: () => undefined }
 }))
 
 import { validateWorkflowScript } from "./script"
 import { workflowRunManager } from "./run-manager"
-import { generateWorkflowRunId, loadWorkflowRun, sha256Hex } from "./run-store"
+import {
+  generateWorkflowRunId,
+  getWorkflowRunsDir,
+  loadWorkflowRun,
+  sha256Hex
+} from "./run-store"
 
 const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
 
@@ -42,6 +53,7 @@ describe("isolated worktree provisioning failure", () => {
   let runId: string
 
   beforeEach(() => {
+    electronSend.mockClear()
     workflowDataRoot = mkdtempSync(join(tmpdir(), "cmb-workflow-fallback-data-"))
     process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
     repo = makeRepo()
@@ -74,6 +86,7 @@ return result === null ? "PROVISIONING_BLOCKED" : "UNEXPECTED_AGENT_RESULT"`
     // provisioning failure must return null, never retry in the shared checkout.
     git(repo, ["checkout", "--detach"])
 
+    await workflowRunManager.prepareLaunch(repo, threadId)
     const launch = workflowRunManager.launch({
       threadId,
       workspacePath: repo,
@@ -109,5 +122,50 @@ return result === null ? "PROVISIONING_BLOCKED" : "UNEXPECTED_AGENT_RESULT"`
         .split("\n")
         .filter((line) => line.startsWith("worktree "))
     ).toHaveLength(1)
+  })
+
+  test("does not start an agent when the editable script cannot be persisted", async () => {
+    const script = `export const meta = { name: "script-persist-failure", description: "d" }
+return await agent("must not start")`
+    let runtimeStarts = 0
+
+    await workflowRunManager.prepareLaunch(repo, threadId)
+    // A directory at the script-file path deterministically makes writeFile fail
+    // on every platform while leaving run.json itself writable.
+    mkdirSync(join(getWorkflowRunsDir(repo, threadId), `${runId}.workflow.js`), {
+      recursive: true
+    })
+
+    const launch = workflowRunManager.launch({
+      threadId,
+      workspacePath: repo,
+      runId,
+      parsed: validateWorkflowScript(script),
+      script,
+      scriptSha256: sha256Hex(script),
+      subagentDeps: {
+        parentThreadId: threadId,
+        createRuntime: async () => {
+          runtimeStarts += 1
+          throw new Error("the subagent runtime must not start before script persistence")
+        },
+        cleanupThread: async () => undefined,
+        isRetryableApiError: () => false
+      }
+    })
+
+    await expect(launch.whenInitialPersisted).rejects.toThrow(
+      "Could not persist the editable workflow script"
+    )
+    await workflowRunManager.waitForRunLifecycle(threadId, runId)
+
+    const persisted = loadWorkflowRun(repo, threadId, runId)
+    expect(persisted?.status).toBe("error")
+    expect(persisted?.error).toContain("Could not persist the editable workflow script")
+    expect(runtimeStarts).toBe(0)
+    expect(
+      electronSend.mock.calls.some((call) => call[1]?.type === "workflow_notification")
+    ).toBe(false)
+    expect(await workflowRunManager.findPendingNotificationAsync(repo, threadId)).toBeNull()
   })
 })

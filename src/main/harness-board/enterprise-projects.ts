@@ -17,17 +17,164 @@ import type {
   HarnessPipelineQueryItem,
   HarnessPipelineQueryResult,
   HarnessProjectReviewInput,
-  HarnessProjectReviewItem,
   HarnessProjectReviewResult
 } from "../../shared/harness-board-types"
-import { getHarnessLeanTokenConfig } from "./service"
+import { readBoundedResponseBody } from "./bounded-response-reader"
+import {
+  cancelHarnessCatalogScope,
+  readHarnessLeanTokenInWorker
+} from "./catalog-client"
+import {
+  cancelHarnessEnterpriseProjectionScope,
+  projectHarnessEnterpriseDetailsInWorker,
+  projectHarnessEnterpriseReviewsInWorker
+} from "./enterprise-projection-client"
+import {
+  HARNESS_ENTERPRISE_DETAIL_MAX_PROJECTS,
+  HARNESS_ENTERPRISE_DETAIL_MAX_RESPONSE_BYTES,
+  HARNESS_ENTERPRISE_REVIEW_PAGE_SIZE,
+  HARNESS_ENTERPRISE_REVIEW_SUMMARY_MAX_RESPONSE_BYTES,
+  HARNESS_ENTERPRISE_REVIEW_TYPES_MAX_RESPONSE_BYTES
+} from "./enterprise-projection-protocol"
 
 const ENTERPRISE_PROJECT_SEARCH_PAGE_SIZE = 15
 const DEPLOY_UNIT_SEARCH_PAGE_SIZE = 20
 const DEPLOY_UNIT_FALLBACK_ORG_ID = "991175"
 const ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS = 10000
 const ENTERPRISE_PROJECT_SUCCESS_CODE = "SUC0000"
-const LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS = 30000
+const LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS = 10000
+const ENTERPRISE_PROJECT_CODE_MAX_LENGTH = 128
+
+export interface HarnessEnterpriseRequestOptions {
+  scope?: string
+  signal?: AbortSignal
+}
+
+export class HarnessEnterpriseRequestCancelledError extends Error {
+  readonly code = "HARNESS_ENTERPRISE_REQUEST_CANCELLED"
+
+  constructor(message = "Harness enterprise request was superseded", options?: ErrorOptions) {
+    super(message, options)
+    this.name = "HarnessEnterpriseRequestCancelledError"
+  }
+}
+
+class HarnessEnterpriseRequestTimeoutError extends Error {
+  constructor() {
+    super("Harness enterprise request timed out")
+    this.name = "HarnessEnterpriseRequestTimeoutError"
+  }
+}
+
+interface EnterpriseRequestLifecycle {
+  signal: AbortSignal
+  workerScope: string
+  abort: (reason: Error) => void
+  finish: () => void
+}
+
+const activeEnterpriseRequestControllers = new Map<string, AbortController>()
+let nextUnscopedRequestId = 1
+
+function normalizedRequestScope(scope: string | undefined): string {
+  return typeof scope === "string" ? scope.slice(0, 256).trim() : ""
+}
+
+function beginEnterpriseRequest(
+  options: HarnessEnterpriseRequestOptions,
+  timeoutMs: number
+): EnterpriseRequestLifecycle {
+  const scope = normalizedRequestScope(options.scope)
+  const workerScope = scope || `enterprise-unscoped:${nextUnscopedRequestId++}`
+  const controller = new AbortController()
+
+  if (scope) {
+    const previous = activeEnterpriseRequestControllers.get(scope)
+    previous?.abort(new HarnessEnterpriseRequestCancelledError())
+    cancelHarnessEnterpriseProjectionScope(scope)
+    activeEnterpriseRequestControllers.set(scope, controller)
+  }
+
+  const abortFromCaller = (): void => {
+    controller.abort(
+      new HarnessEnterpriseRequestCancelledError("Harness enterprise request was cancelled", {
+        cause: options.signal?.reason
+      })
+    )
+  }
+  if (options.signal?.aborted) {
+    abortFromCaller()
+  } else {
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true })
+  }
+  const timeout = setTimeout(() => {
+    controller.abort(new HarnessEnterpriseRequestTimeoutError())
+  }, timeoutMs)
+  timeout.unref()
+
+  return {
+    signal: controller.signal,
+    workerScope,
+    abort: (reason) => controller.abort(reason),
+    finish: () => {
+      clearTimeout(timeout)
+      options.signal?.removeEventListener("abort", abortFromCaller)
+      if (scope && activeEnterpriseRequestControllers.get(scope) === controller) {
+        activeEnterpriseRequestControllers.delete(scope)
+      }
+    }
+  }
+}
+
+function mapEnterpriseRequestError(
+  error: unknown,
+  signal: AbortSignal,
+  timeoutMessage: string
+): Error {
+  if (signal.aborted) {
+    if (signal.reason instanceof HarnessEnterpriseRequestTimeoutError) {
+      return new Error(timeoutMessage)
+    }
+    if (signal.reason instanceof Error) return signal.reason
+    return new HarnessEnterpriseRequestCancelledError()
+  }
+  return error instanceof Error ? error : new Error(String(error))
+}
+
+export function cancelHarnessEnterpriseRequestScope(scope: string): void {
+  const normalizedScope = normalizedRequestScope(scope)
+  if (!normalizedScope) return
+  const controller = activeEnterpriseRequestControllers.get(normalizedScope)
+  activeEnterpriseRequestControllers.delete(normalizedScope)
+  controller?.abort(new HarnessEnterpriseRequestCancelledError())
+  cancelHarnessEnterpriseProjectionScope(normalizedScope)
+  cancelHarnessCatalogScope(`${normalizedScope}:lean-token`)
+}
+
+export function cancelAllHarnessEnterpriseRequestScopes(): void {
+  for (const scope of Array.from(activeEnterpriseRequestControllers.keys())) {
+    cancelHarnessEnterpriseRequestScope(scope)
+  }
+}
+
+function normalizeEnterpriseProjectCodes(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error("项目详情查询参数无效")
+  }
+  if (value.length > HARNESS_ENTERPRISE_DETAIL_MAX_PROJECTS) {
+    throw new Error(`项目详情单次最多查询 ${HARNESS_ENTERPRISE_DETAIL_MAX_PROJECTS} 个项目`)
+  }
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (let index = 0; index < value.length; index += 1) {
+    if (typeof value[index] !== "string") continue
+    const code = value[index].slice(0, ENTERPRISE_PROJECT_CODE_MAX_LENGTH).trim()
+    if (!code || seen.has(code)) continue
+    seen.add(code)
+    result.push(code)
+  }
+  return result
+}
 
 interface EnterpriseProjectQueryResponse {
   returnCode?: string
@@ -70,14 +217,6 @@ interface PipelineLabelQueryResponse {
   returnCode?: string
   errorMsg?: string | null
   body?: unknown[]
-}
-
-interface LeanstarReviewSummaryResponse {
-  reviewSummaries?: unknown[]
-}
-
-interface LeanstarReviewTypeResponse {
-  data?: unknown[]
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -209,19 +348,6 @@ function normalizeEnterpriseProjectItem(value: unknown): HarnessEnterpriseProjec
   }
 }
 
-function normalizeEnterpriseProjectDetailItem(value: unknown): HarnessEnterpriseProjectDetailItem | null {
-  const base = normalizeEnterpriseProjectItem(value)
-  if (!base) return null
-  if (!isObject(value)) return null
-
-  return {
-    ...base,
-    status: normalizeText(value.status),
-    phaseStatus: normalizeText(value.phaseStatus),
-    baselineEndDate: normalizeText(value.baselineEndDate)
-  }
-}
-
 function normalizeDeployUnitSearchItem(value: unknown): HarnessDeployUnitSearchItem | null {
   if (!isObject(value)) return null
 
@@ -268,53 +394,6 @@ function normalizePipelineLabelItem(value: unknown): HarnessPipelineLabelItem | 
   }
 }
 
-function buildLeanstarReviewTypeMap(reviewTypes: unknown[]): Map<string, string> {
-  const typeMap = new Map<string, string>()
-
-  const traverse = (types: unknown[], parentDesc = ""): void => {
-    for (const item of types) {
-      if (!isObject(item)) continue
-      const typeCode = normalizeText(item.type)
-      const description = normalizeText(item.description)
-      const subTypes = Array.isArray(item.subTypes) ? item.subTypes : []
-      if (typeCode) {
-        typeMap.set(typeCode, parentDesc ? `${parentDesc} - ${description}` : description)
-      }
-      if (subTypes.length > 0) {
-        traverse(subTypes, description)
-      }
-    }
-  }
-
-  traverse(reviewTypes)
-  return typeMap
-}
-
-function normalizeLeanstarReviewItem(
-  value: unknown,
-  typeMap: Map<string, string>
-): HarnessProjectReviewItem | null {
-  if (!isObject(value)) return null
-
-  const title = normalizeText(value.title)
-  const typeCode = normalizeText(value.type)
-  const creator = normalizeText(value.creator)
-  const creatorName = normalizeText(value.creatorName)
-  const reviewMembers = Array.isArray(value.reviewMembers) ? value.reviewMembers : []
-  const memberNames = reviewMembers
-    .map((member) => isObject(member) ? normalizeText(member.name) : "")
-    .filter(Boolean)
-
-  return {
-    title,
-    type: typeMap.get(typeCode) || "其他",
-    start_time: normalizeText(value.startTime),
-    end_time: normalizeText(value.endTime),
-    creator: `${creator} (${creatorName})`,
-    members: memberNames.join(", ")
-  }
-}
-
 function normalizeSearchResponse(
   response: EnterpriseProjectQueryResponse
 ): HarnessEnterpriseProjectSearchResult {
@@ -336,21 +415,6 @@ function normalizeSearchResponse(
     total,
     hasMore: total > projects.length || pages > pageNum
   }
-}
-
-function normalizeDetailResponse(
-  response: EnterpriseProjectQueryResponse
-): HarnessEnterpriseProjectDetailResult {
-  if (response.returnCode !== ENTERPRISE_PROJECT_SUCCESS_CODE) {
-    throw new Error(response.errorMsg || "找不到项目")
-  }
-
-  const rawData = Array.isArray(response.body) ? response.body : []
-  const projects = rawData
-    .map((item) => normalizeEnterpriseProjectDetailItem(item))
-    .filter((item): item is HarnessEnterpriseProjectDetailItem => item !== null)
-
-  return { projects }
 }
 
 function normalizeDeployUnitSearchResponse(
@@ -850,11 +914,10 @@ export async function queryPipelineLabels(
 }
 
 export async function getEnterpriseProjectDetails(
-  input: HarnessEnterpriseProjectDetailInput
+  input: HarnessEnterpriseProjectDetailInput,
+  options: HarnessEnterpriseRequestOptions = {}
 ): Promise<HarnessEnterpriseProjectDetailResult> {
-  const prjCodeList = Array.from(
-    new Set(input.prjCodeList.map((code) => normalizeText(code)).filter(Boolean))
-  )
+  const prjCodeList = normalizeEnterpriseProjectCodes(input.prjCodeList)
   if (prjCodeList.length === 0) {
     return { projects: [] }
   }
@@ -868,8 +931,7 @@ export async function getEnterpriseProjectDetails(
     throw new Error("未配置项目详情查询地址")
   }
 
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
+  const request = beginEnterpriseRequest(options, ENTERPRISE_PROJECT_SEARCH_TIMEOUT_MS)
 
   try {
     logHarnessHttpRequest(
@@ -884,29 +946,42 @@ export async function getEnterpriseProjectDetails(
         "content-type": "application/json"
       },
       body: JSON.stringify({ prjCodeList }),
-      signal: controller.signal
+      signal: request.signal
     })
 
     if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined)
       throw new Error("项目查询失败")
     }
 
-    const json = (await response.json()) as EnterpriseProjectQueryResponse
-    return normalizeDetailResponse(json)
+    const bytes = await readBoundedResponseBody(
+      response,
+      HARNESS_ENTERPRISE_DETAIL_MAX_RESPONSE_BYTES,
+      "Project detail",
+      request.signal
+    )
+    const result = await projectHarnessEnterpriseDetailsInWorker(
+      bytes,
+      request.workerScope
+    )
+    if (request.signal.aborted) throw request.signal.reason
+    return result
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("项目查询超时")
-    }
-    throw error
+    request.abort(error instanceof Error ? error : new Error(String(error)))
+    throw mapEnterpriseRequestError(error, request.signal, "项目查询超时")
   } finally {
-    clearTimeout(timeout)
+    request.finish()
   }
 }
 
 export async function getProjectReviews(
-  input: HarnessProjectReviewInput
+  input: HarnessProjectReviewInput,
+  options: HarnessEnterpriseRequestOptions = {}
 ): Promise<HarnessProjectReviewResult> {
-  const projectCode = normalizeText(input.projectCode)
+  const projectCode =
+    typeof input.projectCode === "string"
+      ? input.projectCode.slice(0, ENTERPRISE_PROJECT_CODE_MAX_LENGTH).trim()
+      : ""
   if (!projectCode) {
     return { tokenConfigured: true, reviews: [] }
   }
@@ -918,7 +993,8 @@ export async function getProjectReviews(
     return makeMockProjectReviewResult(projectCode)
   }
 
-  const token = getHarnessLeanTokenConfig().leanToken.trim()
+  const tokenScope = `${normalizedRequestScope(options.scope) || `enterprise-unscoped:${nextUnscopedRequestId++}`}:lean-token`
+  const token = (await readHarnessLeanTokenInWorker(tokenScope)).leanToken.trim()
   if (!token) {
     return { tokenConfigured: false, reviews: [] }
   }
@@ -928,60 +1004,86 @@ export async function getProjectReviews(
     "Content-Type": "application/json"
   }
   const reviewGatewayUrl = getLeanstarReviewGatewayUrl()
+  if (!reviewGatewayUrl) {
+    throw new Error("未配置精益平台评审查询地址")
+  }
   const summaryUrl = `${reviewGatewayUrl}/api/review/summary/${encodeURIComponent(projectCode)}`
   const reviewTypesUrl = `${reviewGatewayUrl}/api/review/review-types`
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS)
+  const request = beginEnterpriseRequest(options, LEANSTAR_REVIEW_REQUEST_TIMEOUT_MS)
 
   try {
-    const summarySearchParams = new URLSearchParams({ size: "999", page: "0" })
+    const summarySearchParams = new URLSearchParams({
+      size: String(HARNESS_ENTERPRISE_REVIEW_PAGE_SIZE),
+      page: "0"
+    })
     logHarnessHttpRequest(
       "review_summary",
       "GET",
       `${summaryUrl}?${summarySearchParams.toString()}`,
       `projectCode=${projectCode}`
     )
-    const summaryResponse = await fetch(`${summaryUrl}?${summarySearchParams.toString()}`, {
+    const summaryResponsePromise = fetch(`${summaryUrl}?${summarySearchParams.toString()}`, {
       method: "GET",
       headers,
-      signal: controller.signal
+      signal: request.signal
     })
+    logHarnessHttpRequest("review_types", "GET", reviewTypesUrl)
+    const reviewTypesResponsePromise = fetch(reviewTypesUrl, {
+      method: "GET",
+      headers,
+      signal: request.signal
+    })
+    const [summaryResponse, reviewTypesResponse] = await Promise.all([
+      summaryResponsePromise,
+      reviewTypesResponsePromise
+    ])
     if (summaryResponse.status === 401) {
+      void summaryResponse.body?.cancel().catch(() => undefined)
+      void reviewTypesResponse.body?.cancel().catch(() => undefined)
       throw new Error("精益平台 token 认证失败")
     }
     if (!summaryResponse.ok) {
+      void summaryResponse.body?.cancel().catch(() => undefined)
+      void reviewTypesResponse.body?.cancel().catch(() => undefined)
       throw new Error("项目评审查询失败")
     }
 
-    logHarnessHttpRequest("review_types", "GET", reviewTypesUrl)
-    const reviewTypesResponse = await fetch(reviewTypesUrl, {
-      method: "GET",
-      headers,
-      signal: controller.signal
-    })
     if (reviewTypesResponse.status === 401) {
+      void summaryResponse.body?.cancel().catch(() => undefined)
+      void reviewTypesResponse.body?.cancel().catch(() => undefined)
       throw new Error("精益平台 token 认证失败")
     }
     if (!reviewTypesResponse.ok) {
+      void summaryResponse.body?.cancel().catch(() => undefined)
+      void reviewTypesResponse.body?.cancel().catch(() => undefined)
       throw new Error("评审类型查询失败")
     }
 
-    const summaryJson = (await summaryResponse.json()) as LeanstarReviewSummaryResponse
-    const reviewTypesJson = (await reviewTypesResponse.json()) as LeanstarReviewTypeResponse
-    const typeMap = buildLeanstarReviewTypeMap(
-      Array.isArray(reviewTypesJson.data) ? reviewTypesJson.data : []
+    const [summaryBytes, reviewTypesBytes] = await Promise.all([
+      readBoundedResponseBody(
+        summaryResponse,
+        HARNESS_ENTERPRISE_REVIEW_SUMMARY_MAX_RESPONSE_BYTES,
+        "Review summary",
+        request.signal
+      ),
+      readBoundedResponseBody(
+        reviewTypesResponse,
+        HARNESS_ENTERPRISE_REVIEW_TYPES_MAX_RESPONSE_BYTES,
+        "Review types",
+        request.signal
+      )
+    ])
+    const result = await projectHarnessEnterpriseReviewsInWorker(
+      summaryBytes,
+      reviewTypesBytes,
+      request.workerScope
     )
-    const reviews = (Array.isArray(summaryJson.reviewSummaries) ? summaryJson.reviewSummaries : [])
-      .map((review) => normalizeLeanstarReviewItem(review, typeMap))
-      .filter((review): review is HarnessProjectReviewItem => review !== null)
-
-    return { tokenConfigured: true, reviews }
+    if (request.signal.aborted) throw request.signal.reason
+    return result
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("项目评审查询超时")
-    }
-    throw error
+    request.abort(error instanceof Error ? error : new Error(String(error)))
+    throw mapEnterpriseRequestError(error, request.signal, "项目评审查询超时")
   } finally {
-    clearTimeout(timeout)
+    request.finish()
   }
 }

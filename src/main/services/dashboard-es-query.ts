@@ -1,4 +1,5 @@
 import { createHash } from "crypto"
+import { queryDashboardEsInWorkerWithStats } from "./dashboard-es-client"
 
 export type DashboardEsIndexAlias = "event" | "trace"
 export type DashboardEsQueryOperation = "search" | "msearch" | "count" | "mapping" | "field_caps"
@@ -30,6 +31,7 @@ export interface DashboardEsQueryExecutionOptions {
   injectedFilters?: Record<string, unknown>[]
   access?: DashboardEsQueryAccess
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 export interface PreparedDashboardEsQuery {
@@ -100,7 +102,10 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {}
 }
 
-function cloneJsonObject(value: unknown, fallback: Record<string, unknown> = {}): Record<string, unknown> {
+function cloneJsonObject(
+  value: unknown,
+  fallback: Record<string, unknown> = {}
+): Record<string, unknown> {
   if (value === undefined || value === null) return { ...fallback }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("ES query body must be a JSON object")
@@ -163,7 +168,13 @@ function sanitizeSource(body: Record<string, unknown>, warnings: string[]): void
   body._source = { excludes: SENSITIVE_SOURCE_FIELDS }
 }
 
-function normalizeSize(value: unknown, max: number, fallback: number, label: string, warnings: string[]): number {
+function normalizeSize(
+  value: unknown,
+  max: number,
+  fallback: number,
+  label: string,
+  warnings: string[]
+): number {
   if (value === undefined) return fallback
   const numeric = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback
   if (numeric < 0) {
@@ -220,7 +231,13 @@ function clampAggSizes(value: unknown, warnings: string[], path: string[] = []):
     const isRoot = path.length === 0
     const max = isRoot ? MAX_RESULT_SIZE : MAX_BUCKET_SIZE
     const fallback = isRoot ? DEFAULT_RESULT_SIZE : DEFAULT_BUCKET_SIZE
-    record.size = normalizeSize(record.size, max, fallback, `${path.join(".") || "body"}.size`, warnings)
+    record.size = normalizeSize(
+      record.size,
+      max,
+      fallback,
+      `${path.join(".") || "body"}.size`,
+      warnings
+    )
   }
 
   for (const [key, child] of Object.entries(record)) {
@@ -231,7 +248,10 @@ function clampAggSizes(value: unknown, warnings: string[], path: string[] = []):
   }
 }
 
-function appendFilters(body: Record<string, unknown>, injectedFilters: Record<string, unknown>[]): void {
+function appendFilters(
+  body: Record<string, unknown>,
+  injectedFilters: Record<string, unknown>[]
+): void {
   if (injectedFilters.length === 0) return
   const existingQuery = body.query ?? { match_all: {} }
   body.query = {
@@ -258,7 +278,10 @@ function sanitizeSearchBody(
   return body
 }
 
-function sanitizeCountBody(rawBody: unknown, injectedFilters: Record<string, unknown>[]): Record<string, unknown> {
+function sanitizeCountBody(
+  rawBody: unknown,
+  injectedFilters: Record<string, unknown>[]
+): Record<string, unknown> {
   const body = cloneJsonObject(rawBody)
   enforceTermsLimit(body, ["body"])
   appendFilters(body, injectedFilters)
@@ -376,30 +399,17 @@ export async function executeDashboardEsQuery(
   }
 
   const startedAt = Date.now()
-  let lastError: Error | null = null
-  for (const node of options.nodes) {
-    const url = `${node.replace(/\/+$/, "")}${prepared.path}`
-    try {
-      const resp = await fetch(url, {
-        method: prepared.method,
-        headers,
-        body: prepared.method === "GET" ? undefined : prepared.bodyText,
-        signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-      })
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "")
-        throw new Error(`ES ${resp.status}: ${text.slice(0, 200)}`)
-      }
-      const data = await resp.json()
-      const elapsedMs = Date.now() - startedAt
-      const meta = { ...prepared.audit, elapsedMs, node }
-      console.log("[DashboardESQuery]", JSON.stringify(meta))
-      return { data, meta }
-    } catch (e) {
-      lastError = e instanceof Error ? e : new Error(String(e))
-      console.warn(`[DashboardESQuery] node failed: ${node}`, lastError.message)
-    }
-  }
-
-  throw lastError ?? new Error("All ES nodes failed")
+  const result = await queryDashboardEsInWorkerWithStats({
+    nodes: options.nodes,
+    method: prepared.method,
+    path: prepared.path,
+    headers,
+    bodyText: prepared.bodyText,
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    signal: options.signal
+  })
+  const elapsedMs = Date.now() - startedAt
+  const meta = { ...prepared.audit, elapsedMs, node: result.stats.node }
+  console.log("[DashboardESQuery]", JSON.stringify(meta))
+  return { data: result.value, meta }
 }

@@ -1002,6 +1002,31 @@ function getWrappedShellSyntax(tokens: string[]): CommandShellSyntax | null {
   return null
 }
 
+function hasWrappedShellCommandOption(tokens: string[]): boolean {
+  const invocation = getExecutableInvocationTokens(tokens)
+  const executable = normalizeExecutable(invocation[0] || "")
+  if (POSIX_SHELL_WRAPPERS.has(executable)) {
+    return invocation.slice(1).some((token) => /^-[A-Za-z]*c[A-Za-z]*$/.test(token))
+  }
+  if (POWERSHELL_WRAPPERS.has(executable)) {
+    return invocation.slice(1).some((token) => {
+      const lower = token.toLowerCase()
+      if (!lower.startsWith("-") && !lower.startsWith("/")) return false
+      const option = lower.slice(1)
+      return Boolean(
+        option &&
+          ("command".startsWith(option) ||
+            "commandwithargs".startsWith(option) ||
+            option === "cwa")
+      )
+    })
+  }
+  if (CMD_WRAPPERS.has(executable)) {
+    return invocation.slice(1).some((token) => /(?:^|\/)[ck]/i.test(token))
+  }
+  return false
+}
+
 function interpolatingShellText(command: string, shellSyntax: CommandShellSyntax): string {
   let result = ""
   let quote: "'" | '"' | null = null
@@ -1523,6 +1548,25 @@ function commandHasGitSubcommand(
   return false
 }
 
+/** Inspect only Git commands executed directly by the current shell layer.
+ * Unlike commandHasGitSubcommand, this deliberately does not scan arguments of
+ * another shell/execution wrapper; callers can then enforce their recursion cap
+ * before looking inside the next layer. */
+function commandHasDirectGitSubcommand(
+  command: string,
+  subcommands: Set<string>,
+  shellSyntax: CommandShellSyntax
+): boolean {
+  for (const segment of splitShellCommandSegments(command, shellSyntax)) {
+    const tokens = tokenizeCommand(segment, shellSyntax)
+    if (!tokens) continue
+    const gitTokens = getGitInvocationTokens(tokens)
+    const subcommand = gitTokens ? findGitSubcommand(gitTokens) : null
+    if (subcommand && subcommands.has(subcommand.subcommand)) return true
+  }
+  return false
+}
+
 function inlineGitAliasInvokesPush(
   gitTokens: string[],
   memo: Map<string, boolean>
@@ -1599,6 +1643,34 @@ function containsIndirectGitPushCommand(
     }
     const firstExecutable = normalizeExecutable(tokens[firstExecutableIndex] || "")
     const directGit = firstExecutable === "git"
+
+    const script = getWrappedShellScript(tokens)
+    const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
+    if (script === null && hasWrappedShellCommandOption(tokens)) {
+      // A command-bearing shell wrapper whose script cannot be recovered is
+      // opaque (usually malformed/deeply escaped quoting). Never fall through
+      // and treat its argument text as an ordinary safe command.
+      scanState.unverifiable = true
+      continue
+    }
+    if (script !== null) {
+      if (depth >= 4) {
+        scanState.unverifiable = true
+        continue
+      }
+      if (
+        commandHasDirectGitSubcommand(script, new Set(["push"]), childSyntax) ||
+        containsIndirectGitPushCommand(script, childSyntax, depth + 1, memo, scanState)
+      ) {
+        memo.set(memoKey, true)
+        return true
+      }
+      // Do not scan a shell script argument as if it were an executable token
+      // at this layer. Doing so bypasses the recursion cap for deeply nested
+      // wrappers and conflates "contains a push" with "cannot be verified".
+      continue
+    }
+
     for (const gitTokens of collectPotentialGitInvocations(tokens)) {
       const subcommand = findGitSubcommand(gitTokens)
       if (!directGit && subcommand?.subcommand === "push") {
@@ -1609,17 +1681,6 @@ function containsIndirectGitPushCommand(
         memo.set(memoKey, true)
         return true
       }
-    }
-
-    const script = getWrappedShellScript(tokens)
-    const childSyntax = getWrappedShellSyntax(tokens) ?? shellSyntax
-    if (
-      script &&
-      (commandHasGitSubcommand(script, new Set(["push"]), childSyntax) ||
-        containsIndirectGitPushCommand(script, childSyntax, depth + 1, memo, scanState))
-    ) {
-      memo.set(memoKey, true)
-      return true
     }
 
     // Wrapper suffix enumeration grows rapidly for inputs such as

@@ -32,6 +32,43 @@ function git(cwd: string, args: string[]): string {
   }).trim()
 }
 
+type DirectoryAliasKind = "symlink" | "junction"
+
+function isDirectoryAliasCapabilityError(error: unknown): boolean {
+  if (process.platform !== "win32") return false
+  const code = (error as NodeJS.ErrnoException).code
+  return code === "EPERM" || code === "EACCES" || code === "ENOSYS" || code === "EINVAL"
+}
+
+/**
+ * Windows directory symlinks require Developer Mode or elevation. Prefer the
+ * real symlink coverage, fall back to an unprivileged junction (also a reparse
+ * point), and skip only this alias assertion when neither filesystem capability
+ * exists. Unexpected fixture/path failures still fail the suite.
+ */
+function createDirectoryAlias(
+  target: string,
+  aliasPath: string,
+  label: string
+): DirectoryAliasKind | null {
+  try {
+    symlinkSync(target, aliasPath, "dir")
+    return "symlink"
+  } catch (error) {
+    if (!isDirectoryAliasCapabilityError(error)) throw error
+  }
+
+  try {
+    symlinkSync(target, aliasPath, "junction")
+    console.warn(`[FALLBACK] ${label}: directory symlink unavailable; exercising junction fallback`)
+    return "junction"
+  } catch (error) {
+    if (!isDirectoryAliasCapabilityError(error)) throw error
+    console.warn(`[SKIP] ${label}: neither directory symlink nor junction is available`)
+    return null
+  }
+}
+
 async function run(): Promise<void> {
   const repo = realpathSync(mkdtempSync(join(tmpdir(), "cmb-wt-shell-repo-")))
   const appDataRoot = realpathSync(mkdtempSync(join(tmpdir(), "cmb-wt-shell-data-")))
@@ -141,17 +178,26 @@ async function run(): Promise<void> {
     // checkout through a symlinked root must still get the canonical worktree
     // cwd rather than a false "outside" rejection.
     const worktreeAlias = join(appDataRoot, "worktree-alias")
-    symlinkSync(info.workspaceDirectory, worktreeAlias, "dir")
-    const aliasSandbox = new LocalSandbox({
-      rootDir: worktreeAlias,
-      worktreeIsolation: boundary,
-      windowsSandbox: "none",
-      timeout: 30_000,
-      env: { ...process.env } as NodeJS.ProcessEnv
-    })
-    const aliasCwd = await aliasSandbox.execute("pwd", worktreeAlias)
-    assert.equal(aliasCwd.exitCode, 0, aliasCwd.output)
-    assert.equal(realpathSync(aliasCwd.output.trim()), realpathSync(info.workspaceDirectory))
+    const worktreeAliasKind = createDirectoryAlias(
+      info.workspaceDirectory,
+      worktreeAlias,
+      "canonical worktree alias"
+    )
+    if (worktreeAliasKind) {
+      const aliasSandbox = new LocalSandbox({
+        rootDir: worktreeAlias,
+        worktreeIsolation: boundary,
+        windowsSandbox: "none",
+        timeout: 30_000,
+        env: { ...process.env } as NodeJS.ProcessEnv
+      })
+      const aliasCwd = await aliasSandbox.execute(
+        process.platform === "win32" ? "pwd -W" : "pwd",
+        worktreeAlias
+      )
+      assert.equal(aliasCwd.exitCode, 0, aliasCwd.output)
+      assert.equal(realpathSync(aliasCwd.output.trim()), realpathSync(info.workspaceDirectory))
+    }
 
     const localWrite = await sandbox.execute("printf 'local\\n' > local.txt")
     assert.equal(localWrite.exitCode, 0, localWrite.output)
@@ -304,17 +350,29 @@ async function run(): Promise<void> {
       "nested\n"
     )
 
-    symlinkSync(repo, join(info.workspaceDirectory, "source-link"), "dir")
-    const linkedWrite = await sandbox.write("source-link/file-tool-escaped.txt", "escaped\n")
-    assert.ok(linkedWrite.error, "file tool must reject a symlink-parent escape")
-    assert.ok(!existsSync(join(repo, "file-tool-escaped.txt")))
+    const sourceAliasKind = createDirectoryAlias(
+      repo,
+      join(info.workspaceDirectory, "source-link"),
+      "workspace escape alias"
+    )
+    if (sourceAliasKind) {
+      const linkedWrite = await sandbox.write("source-link/file-tool-escaped.txt", "escaped\n")
+      assert.ok(linkedWrite.error, "file tool must reject a symlink-parent escape")
+      assert.ok(!existsSync(join(repo, "file-tool-escaped.txt")))
+    }
 
-    const uploads = await sandbox.uploadFiles([
-      ["upload/deep/allowed.bin", new TextEncoder().encode("allowed\n")],
-      ["source-link/upload-escaped.bin", new TextEncoder().encode("escaped\n")]
-    ])
+    const uploads = await sandbox.uploadFiles(
+      sourceAliasKind
+        ? [
+            ["upload/deep/allowed.bin", new TextEncoder().encode("allowed\n")],
+            ["source-link/upload-escaped.bin", new TextEncoder().encode("escaped\n")]
+          ]
+        : [["upload/deep/allowed.bin", new TextEncoder().encode("allowed\n")]]
+    )
     assert.ok(!uploads[0].error, "nested upload inside the assigned workspace must work")
-    assert.ok(uploads[1].error, "a batch upload must reject a symlink-parent escape")
+    if (sourceAliasKind) {
+      assert.ok(uploads[1].error, "a batch upload must reject a symlink-parent escape")
+    }
     assert.equal(
       readFileSync(join(info.workspaceDirectory, "upload", "deep", "allowed.bin"), "utf8"),
       "allowed\n"
@@ -401,9 +459,11 @@ async function run(): Promise<void> {
     assert.notEqual(exportedRedirect.exitCode, 0)
     assert.match(exportedRedirect.output, /worktree isolation blocks Git environment redirection/i)
 
-    const symlinkCwdEscape = await sandbox.executeRaw("cd source-link && pwd", "none")
-    assert.notEqual(symlinkCwdEscape.exitCode, 0)
-    assert.match(symlinkCwdEscape.output, /outside the assigned workspace/i)
+    if (sourceAliasKind) {
+      const symlinkCwdEscape = await sandbox.executeRaw("cd source-link && pwd", "none")
+      assert.notEqual(symlinkCwdEscape.exitCode, 0)
+      assert.match(symlinkCwdEscape.output, /outside the assigned workspace/i)
+    }
 
     const gitPointerWrite = await sandbox.write(join(info.directory, ".git"), "corrupt\n")
     assert.match(

@@ -12,7 +12,12 @@ import {
   getWorkflowWorktreeRemoveTimeoutMs,
   getWorkflowWorktreeTimeoutMs
 } from "../../shared/agent-runtime-limits"
+import { getCmbCoworkAgentDataRoot } from "../app-data-root"
 import { withoutGitRepositoryOverrides } from "./git-environment"
+import {
+  openStableFileHandle,
+  readStableFileHandleBounded
+} from "./stable-file-handle"
 
 const execFileAsync = promisify(execFile)
 
@@ -47,7 +52,12 @@ const GIT_BASE_ENV: NodeJS.ProcessEnv = {
 }
 
 const GIT_SPAWN_OPTIONS = { windowsHide: true } as const
-const GIT_NO_HOOKS_ARGS = ["-c", "core.hooksPath=/dev/null"] as const
+// Git documents /dev/null as the hooks opt-out, but Git for Windows does not
+// consistently suppress post-index-change through that MSYS path. The native
+// null device is unresolvable as a hook directory and keeps host-side plumbing
+// from executing repository- or deliverable-controlled hooks on Windows.
+const GIT_DISABLED_HOOKS_PATH = process.platform === "win32" ? "NUL" : "/dev/null"
+const GIT_NO_HOOKS_ARGS = ["-c", `core.hooksPath=${GIT_DISABLED_HOOKS_PATH}`] as const
 
 /** Query timeout for the short plumbing commands (rev-parse, show-ref, config). */
 const GIT_QUERY_TIMEOUT_MS = 10_000
@@ -65,9 +75,24 @@ const WORKTREE_INTERNAL_EXCLUDES_FILE_NAME = ".cmb-internal-excludes"
 // them when removing an otherwise pristine worktree.
 const WORKTREE_INTERNAL_EXCLUDES = "**/.cmbdevclaw/**\n"
 const WORKFLOW_WORKTREE_DIFF_SUMMARY_MAX_CHARS = 32 * 1024
+const WORKFLOW_WORKTREE_RECORD_MAX_BYTES = 256 * 1024
+const WORKFLOW_WORKTREE_EXCLUDES_MAX_BYTES = 1024 * 1024
+const WORKFLOW_WORKTREE_RECORD_SCAN_MAX_FILES = 2048
+const WORKFLOW_WORKTREE_RECORD_SCAN_MAX_DIRECTORY_ENTRIES = 4096
+const WORKFLOW_WORKTREE_RECORD_SCAN_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+const WORKFLOW_WORKTREE_RECORD_SCAN_YIELD_EVERY = 128
 
 /** Branch namespace for machine-created worktrees. */
 const WORKFLOW_WORKTREE_BRANCH_PREFIX = "cmbcowork/wf"
+
+async function readStableWorktreeFile(filePath: string, maxBytes: number): Promise<Buffer> {
+  const opened = await openStableFileHandle(path.dirname(filePath), filePath)
+  try {
+    return await readStableFileHandleBounded(opened, maxBytes)
+  } finally {
+    await opened.handle.close().catch(() => undefined)
+  }
+}
 
 export interface WorkflowWorktreeInfo {
   /** Directory basename, unique within the repo's worktree root. */
@@ -112,6 +137,11 @@ interface GitResult {
   infrastructureFailure: boolean
 }
 
+interface GitProcessTestOverride {
+  executable: string
+  args: string[]
+}
+
 /**
  * Runs git and NEVER throws for a non-zero exit — callers branch on `code`. A
  * spawn failure (git missing, timeout, killed) also lands here as code 1 with the
@@ -121,16 +151,27 @@ async function git(
   cwd: string,
   args: string[],
   timeoutMs = GIT_QUERY_TIMEOUT_MS,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  processTestOverride?: GitProcessTestOverride
 ): Promise<GitResult> {
   try {
-    // Some `git worktree` subcommands opportunistically prune other missing
-    // registrations before acting. The application only owns its explicit
-    // target, so disable expiry for every lifecycle invocation; the target
-    // `worktree remove` still unregisters itself normally.
+    // These are host-owned lifecycle commands, so none may execute hooks from
+    // the source repository or an agent-controlled deliverable. Apply the hook
+    // guard centrally: even nominally read-only Git commands can refresh an
+    // index and invoke post-index-change on some platforms. Worktree expiry is
+    // likewise disabled globally so an operation cannot prune unrelated paths.
+    const executable = processTestOverride?.executable ?? "git"
+    const processArgs = processTestOverride?.args ?? [
+      "-c",
+      "gc.worktreePruneExpire=never",
+      ...GIT_NO_HOOKS_ARGS,
+      "-C",
+      cwd,
+      ...args
+    ]
     const { stdout, stderr } = await execFileAsync(
-      "git",
-      ["-c", "gc.worktreePruneExpire=never", "-C", cwd, ...args],
+      executable,
+      processArgs,
       {
         env: GIT_BASE_ENV,
         timeout: timeoutMs,
@@ -155,6 +196,14 @@ function gitFailure(result: GitResult, fallback: string): string {
   return result.stderr.trim() || result.stdout.trim() || fallback
 }
 
+function isMissingGitRef(result: GitResult): boolean {
+  return (
+    result.code !== 0 &&
+    !result.infrastructureFailure &&
+    (result.code === 1 || /not a valid ref|does not exist|not found/i.test(gitFailure(result, "")))
+  )
+}
+
 async function writeWorkflowWorktreeExcludesFile(
   repoRoot: string,
   targetPath: string,
@@ -170,7 +219,7 @@ async function writeWorkflowWorktreeExcludesFile(
     GIT_QUERY_TIMEOUT_MS,
     signal
   )
-  let inherited = Buffer.alloc(0)
+  let inherited: Buffer = Buffer.alloc(0)
   const configuredPath = configured.code === 0 ? configured.stdout.trim() : ""
   let inheritedPath = ""
   if (configuredPath) {
@@ -191,7 +240,10 @@ async function writeWorkflowWorktreeExcludesFile(
         : path.join(homedir(), ".config", "git", "ignore")
   }
   if (inheritedPath) {
-    inherited = await fs.readFile(inheritedPath).catch(() => Buffer.alloc(0))
+    inherited = await readStableWorktreeFile(
+      inheritedPath,
+      WORKFLOW_WORKTREE_EXCLUDES_MAX_BYTES
+    ).catch(() => Buffer.alloc(0))
   }
   const separator = inherited.length > 0 && inherited[inherited.length - 1] !== 0x0a ? "\n" : ""
   await fs.writeFile(
@@ -601,7 +653,9 @@ async function inspectSourceWorkspaceForProvisioning(
   directory: string,
   sourceRelativePath: string,
   timeoutMs = GIT_QUERY_TIMEOUT_MS,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  afterInitialSnapshot?: () => void | Promise<void>,
+  processTestOverride?: GitProcessTestOverride
 ): Promise<SourceWorkspaceSnapshot> {
   const scope = workflowScopePathspec(sourceRelativePath)
   const statusArgs = [
@@ -614,8 +668,16 @@ async function inspectSourceWorkspaceForProvisioning(
     "--",
     scope
   ]
-  const before = parseSourceWorkspaceSnapshot(await git(directory, statusArgs, timeoutMs, signal))
-  const after = parseSourceWorkspaceSnapshot(await git(directory, statusArgs, timeoutMs, signal))
+  const before = parseSourceWorkspaceSnapshot(
+    await git(directory, statusArgs, timeoutMs, signal, processTestOverride)
+  )
+  // Deterministic concurrency-test seam. Production callers omit it; the
+  // callback lets the Windows regression switch branches at the exact boundary
+  // without relying on PATH shell wrappers that cannot intercept git.exe.
+  await afterInitialSnapshot?.()
+  const after = parseSourceWorkspaceSnapshot(
+    await git(directory, statusArgs, timeoutMs, signal, processTestOverride)
+  )
   if (before.baseCommit !== after.baseCommit || before.sourceBranch !== after.sourceBranch) {
     throw new GitWorktreeError(
       "source HEAD changed while preparing worktree isolation; retry after branch activity stops",
@@ -689,12 +751,20 @@ interface RepoIdentity {
  * arithmetic, which fails for submodules/separate git dirs). `sourceRoot` remains
  * the actual checkout so isolation pins that checkout's HEAD.
  */
-export async function identifyRepository(directory: string): Promise<RepoIdentity | null> {
+export async function identifyRepository(
+  directory: string,
+  signal?: AbortSignal
+): Promise<RepoIdentity | null> {
   // Resolve Git's relative output ourselves instead of using
   // `--path-format=absolute`. Older Git for Windows (including 2.18) echoes that
   // unknown option to stdout while still exiting successfully, which can turn
   // `--path-format=absolute\n.git` into a fictitious filesystem path.
-  const commonRaw = await git(directory, ["rev-parse", "--git-common-dir"])
+  const commonRaw = await git(
+    directory,
+    ["rev-parse", "--git-common-dir"],
+    GIT_QUERY_TIMEOUT_MS,
+    signal
+  )
   if (commonRaw.code !== 0) return null
   const commonValue = commonRaw.stdout.trim()
   if (!commonValue) return null
@@ -702,19 +772,53 @@ export async function identifyRepository(directory: string): Promise<RepoIdentit
     path.resolve(directory, commonValue),
     "git common directory"
   )
-  const sourceTop = await git(directory, ["rev-parse", "--show-toplevel"])
+  const sourceTop = await git(
+    directory,
+    ["rev-parse", "--show-toplevel"],
+    GIT_QUERY_TIMEOUT_MS,
+    signal
+  )
   if (sourceTop.code !== 0 || !sourceTop.stdout.trim()) return null
   const sourceRoot = await canonicalExistingPath(sourceTop.stdout.trim(), "source checkout")
 
   // Do not derive the primary checkout from `dirname(commonDir)`: that is wrong
   // for submodules and --separate-git-dir repositories. Git's own worktree list is
   // authoritative; the first non-bare entry is the primary checkout.
-  const listed = await git(sourceRoot, ["worktree", "list", "--porcelain"])
+  const listed = await git(
+    sourceRoot,
+    ["worktree", "list", "--porcelain"],
+    GIT_QUERY_TIMEOUT_MS,
+    signal
+  )
   const primary = listed.code === 0 ? parseWorktreeList(listed.stdout)[0]?.path : undefined
   const gitRoot = primary
     ? await canonicalExistingPath(primary, "primary checkout")
     : sourceRoot
   return { gitRoot, sourceRoot, commonDir }
+}
+
+/**
+ * Serialize a caller-owned Git worktree mutation with every workflow worktree
+ * mutation for the same repository. The canonical common directory is the only
+ * stable lock identity shared by a primary checkout and all linked worktrees.
+ */
+export async function withGitWorktreeRepositoryLock<T>(
+  directory: string,
+  task: () => Promise<T>,
+  signal?: AbortSignal
+): Promise<T> {
+  const repo = await identifyRepository(directory, signal)
+  if (!repo) {
+    throw new GitWorktreeError(
+      `worktree mutation needs a git repository — "${directory}" is not inside one`
+    )
+  }
+  return withRepoLock(canonicalKey(repo.commonDir), async () => {
+    if (signal?.aborted) {
+      throw new GitWorktreeError("worktree mutation was cancelled", "source-busy")
+    }
+    return task()
+  })
 }
 
 export interface WorkflowWorktreeSource extends RepoIdentity {
@@ -729,10 +833,18 @@ export interface WorkflowWorktreeSource extends RepoIdentity {
  * untracked source-checkout changes are not copied into the isolated checkout. */
 export async function prepareWorkflowWorktreeSource(
   workspacePath: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  testHooks?: {
+    afterInitialSnapshot?: () => void | Promise<void>
+    /** @internal Replace only the two status probes in process-lifecycle tests. */
+    processTestOverride?: GitProcessTestOverride
+  }
 ): Promise<WorkflowWorktreeSource> {
   const workspace = await canonicalPath(workspacePath)
-  const repo = await identifyRepository(workspace)
+  const repo = await identifyRepository(workspace, signal)
+  if (signal?.aborted) {
+    throw new GitWorktreeError("workflow worktree preparation was cancelled", "source-busy")
+  }
   if (!repo) {
     throw new GitWorktreeError(
       `worktree isolation needs a git repository — "${workspacePath}" is not inside one`
@@ -748,7 +860,9 @@ export async function prepareWorkflowWorktreeSource(
     sourceRoot,
     sourceRelativePath,
     getWorkflowWorktreeTimeoutMs(),
-    signal
+    signal,
+    testHooks?.afterInitialSnapshot,
+    testHooks?.processTestOverride
   )
   if (!snapshot.sourceBranch) {
     throw new GitWorktreeError(
@@ -773,9 +887,71 @@ function worktreeRecordsRootFor(commonDir: string, appDataRoot: string): string 
   return path.join(worktreeRootFor(commonDir, appDataRoot), WORKTREE_RECORDS_DIR_NAME)
 }
 
-/** Default app data root (`~/.cmbcoworkagent`). Overridable for tests. */
-function defaultWorktreeAppDataRoot(userHome = homedir()): string {
-  return path.join(userHome, ".cmbcoworkagent")
+/** Default app data root. Honors CMB_COWORK_AGENT_HOME like every other
+ * app-managed store; explicit `appDataRoot` arguments remain test seams. */
+function defaultWorktreeAppDataRoot(): string {
+  return getCmbCoworkAgentDataRoot()
+}
+
+let legacyWorktreeAppDataRootForTest: string | undefined
+
+function legacyHomeWorktreeAppDataRoot(): string {
+  return legacyWorktreeAppDataRootForTest ?? path.join(homedir(), ".cmbcoworkagent")
+}
+
+/** @internal Standalone regression seam; production never overrides homedir(). */
+export function setLegacyWorktreeAppDataRootForTest(root?: string): void {
+  legacyWorktreeAppDataRootForTest = root ? path.resolve(root) : undefined
+}
+
+/** New records always use the configured root. Omitted roots on READ/ACTION
+ * paths additionally discover the pre-contract home root so enabling
+ * CMB_COWORK_AGENT_HOME cannot strand an existing linked checkout. */
+function worktreeAppDataReadRoots(explicitRoot?: string): string[] {
+  const roots = explicitRoot
+    ? [path.resolve(explicitRoot)]
+    : [defaultWorktreeAppDataRoot(), legacyHomeWorktreeAppDataRoot()]
+  const seen = new Set<string>()
+  return roots.filter((root) => {
+    const key = canonicalKey(path.resolve(root))
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+const workflowWorktreeRecordRoots = new WeakMap<WorkflowWorktreeRecord, string>()
+
+function rememberWorkflowWorktreeRecordRoot(
+  record: WorkflowWorktreeRecord,
+  appDataRoot: string
+): WorkflowWorktreeRecord {
+  workflowWorktreeRecordRoots.set(record, appDataRoot)
+  return record
+}
+
+function workflowWorktreeOwnershipIdentity(record: WorkflowWorktreeRecord): string {
+  return JSON.stringify({
+    id: record.id,
+    runId: record.runId,
+    threadId: record.threadId,
+    branch: record.branch,
+    directory: canonicalKey(record.directory),
+    workspaceDirectory: canonicalKey(record.workspaceDirectory),
+    sourceRoot: canonicalKey(record.sourceRoot),
+    sourceRelativePath: record.sourceRelativePath,
+    sourceBranch: record.sourceBranch,
+    gitRoot: canonicalKey(record.gitRoot),
+    commonDir: canonicalKey(record.commonDir),
+    baseCommit: record.baseCommit
+  })
+}
+
+function newerLocatedWorkflowWorktreeRecord(
+  left: WorkflowWorktreeRecord,
+  right: WorkflowWorktreeRecord
+): WorkflowWorktreeRecord {
+  return Date.parse(right.updatedAt) > Date.parse(left.updatedAt) ? right : left
 }
 
 function worktreeRecordPath(commonDir: string, id: string, appDataRoot: string): string {
@@ -875,29 +1051,196 @@ export async function deleteWorkflowWorktreeRecord(
   await fs.rm(worktreeRecordPath(commonDir, id, appDataRoot), { force: true })
 }
 
-export async function listWorkflowWorktreeRecords(
-  commonDir: string,
-  appDataRoot = defaultWorktreeAppDataRoot()
-): Promise<WorkflowWorktreeRecord[]> {
-  const root = worktreeRecordsRootFor(commonDir, appDataRoot)
-  let names: string[]
-  try {
-    names = await fs.readdir(root)
-  } catch {
-    return []
-  }
-  const records: WorkflowWorktreeRecord[] = []
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue
+async function deleteMatchingWorkflowWorktreeRecordCopies(
+  expected: WorkflowWorktreeRecord,
+  appDataRoot?: string
+): Promise<void> {
+  const authorizedPaths: string[] = []
+  for (const sourceRoot of worktreeAppDataReadRoots(appDataRoot)) {
+    const pathToRecord = worktreeRecordPath(expected.commonDir, expected.id, sourceRoot)
     try {
-      const parsed: unknown = JSON.parse(await fs.readFile(path.join(root, name), "utf8"))
-      if (isWorkflowWorktreeRecord(parsed)) records.push(parsed)
-    } catch {
-      // A corrupt record must never authorize deletion. Leave it in place for
-      // diagnostics; a corrupt record never authorizes automatic deletion.
+      const parsed: unknown = JSON.parse(
+        (await readStableWorktreeFile(pathToRecord, WORKFLOW_WORKTREE_RECORD_MAX_BYTES)).toString(
+          "utf8"
+        )
+      )
+      if (
+        !isWorkflowWorktreeRecord(parsed) ||
+        workflowWorktreeOwnershipIdentity(parsed) !==
+          workflowWorktreeOwnershipIdentity(expected)
+      ) {
+        throw new GitWorktreeError(
+          `workflow worktree "${expected.id}" has a conflicting ownership manifest`,
+          "unsafe-state"
+        )
+      }
+      authorizedPaths.push(pathToRecord)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      throw error
     }
   }
-  return records
+  // Validate every compatibility copy before deleting any of them. A conflict
+  // in the lower-authority root must fail closed without first erasing the
+  // configured-root ownership proof.
+  await Promise.all(authorizedPaths.map((pathToRecord) => fs.rm(pathToRecord, { force: true })))
+}
+
+class WorkflowWorktreeRecordScanLimitError extends GitWorktreeError {
+  constructor(message: string) {
+    super(message, "unsafe-state")
+    this.name = "WorkflowWorktreeRecordScanLimitError"
+  }
+}
+
+interface WorkflowWorktreeRecordScanBudget {
+  directoryEntries: number
+  files: number
+  processedFiles: number
+  totalBytes: number
+}
+
+/** @internal Observable limits for pressure regressions. */
+export function getWorkflowWorktreeRecordScanLimitsForTest(): {
+  maxRecordBytes: number
+  maxFiles: number
+  maxDirectoryEntries: number
+  maxTotalBytes: number
+} {
+  return {
+    maxRecordBytes: WORKFLOW_WORKTREE_RECORD_MAX_BYTES,
+    maxFiles: WORKFLOW_WORKTREE_RECORD_SCAN_MAX_FILES,
+    maxDirectoryEntries: WORKFLOW_WORKTREE_RECORD_SCAN_MAX_DIRECTORY_ENTRIES,
+    maxTotalBytes: WORKFLOW_WORKTREE_RECORD_SCAN_MAX_TOTAL_BYTES
+  }
+}
+
+async function yieldWorkflowWorktreeRecordScan(counter: number): Promise<void> {
+  if (counter % WORKFLOW_WORKTREE_RECORD_SCAN_YIELD_EVERY !== 0) return
+  await new Promise<void>((resolveYield) => setImmediate(resolveYield))
+}
+
+async function listBoundedWorkflowWorktreeRecordNames(
+  root: string,
+  budget: WorkflowWorktreeRecordScanBudget
+): Promise<string[]> {
+  const directory = await fs.opendir(root)
+  const names: string[] = []
+  try {
+    for await (const entry of directory) {
+      budget.directoryEntries += 1
+      if (budget.directoryEntries > WORKFLOW_WORKTREE_RECORD_SCAN_MAX_DIRECTORY_ENTRIES) {
+        throw new WorkflowWorktreeRecordScanLimitError(
+          "workflow worktree record directory exceeds the safe entry limit"
+        )
+      }
+      if (entry.name.endsWith(".json")) {
+        budget.files += 1
+        if (budget.files > WORKFLOW_WORKTREE_RECORD_SCAN_MAX_FILES) {
+          throw new WorkflowWorktreeRecordScanLimitError(
+            "workflow worktree record count exceeds the safe limit"
+          )
+        }
+        names.push(entry.name)
+      }
+      await yieldWorkflowWorktreeRecordScan(budget.directoryEntries)
+    }
+  } finally {
+    await directory.close().catch(() => undefined)
+  }
+  return names.sort()
+}
+
+async function scanWorkflowWorktreeRecords(
+  commonDir: string,
+  appDataRoot: string | undefined,
+  failClosedResult: boolean
+): Promise<{ records: WorkflowWorktreeRecord[]; reliable: boolean }> {
+  const records = new Map<string, WorkflowWorktreeRecord>()
+  const conflictedIds = new Set<string>()
+  const budget: WorkflowWorktreeRecordScanBudget = {
+    directoryEntries: 0,
+    files: 0,
+    processedFiles: 0,
+    totalBytes: 0
+  }
+  let reliable = true
+
+  for (const sourceRoot of worktreeAppDataReadRoots(appDataRoot)) {
+    const root = worktreeRecordsRootFor(commonDir, sourceRoot)
+    let names: string[]
+    try {
+      names = await listBoundedWorkflowWorktreeRecordNames(root, budget)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      if (error instanceof WorkflowWorktreeRecordScanLimitError) {
+        if (!failClosedResult) throw error
+        return { records: Array.from(records.values()), reliable: false }
+      }
+      if (failClosedResult) reliable = false
+      continue
+    }
+
+    for (const name of names) {
+      try {
+        const bytes = await readStableWorktreeFile(
+          path.join(root, name),
+          WORKFLOW_WORKTREE_RECORD_MAX_BYTES
+        )
+        budget.totalBytes += bytes.byteLength
+        if (budget.totalBytes > WORKFLOW_WORKTREE_RECORD_SCAN_MAX_TOTAL_BYTES) {
+          throw new WorkflowWorktreeRecordScanLimitError(
+            "workflow worktree record data exceeds the safe total-byte limit"
+          )
+        }
+        const parsed: unknown = JSON.parse(bytes.toString("utf8"))
+        if (!isWorkflowWorktreeRecord(parsed)) {
+          reliable = false
+          continue
+        }
+        const located = rememberWorkflowWorktreeRecordRoot(parsed, sourceRoot)
+        if (conflictedIds.has(located.id)) continue
+        const existing = records.get(located.id)
+        if (
+          existing &&
+          workflowWorktreeOwnershipIdentity(existing) !==
+            workflowWorktreeOwnershipIdentity(located)
+        ) {
+          if (!failClosedResult) {
+            throw new GitWorktreeError(
+              `conflicting ownership manifests exist for workflow worktree "${located.id}"`,
+              "unsafe-state"
+            )
+          }
+          reliable = false
+          conflictedIds.add(located.id)
+          records.delete(located.id)
+          continue
+        }
+        records.set(
+          located.id,
+          existing ? newerLocatedWorkflowWorktreeRecord(existing, located) : located
+        )
+      } catch (error) {
+        if (error instanceof WorkflowWorktreeRecordScanLimitError) {
+          if (!failClosedResult) throw error
+          return { records: Array.from(records.values()), reliable: false }
+        }
+        if (error instanceof GitWorktreeError && !failClosedResult) throw error
+        reliable = false
+      }
+      budget.processedFiles += 1
+      await yieldWorkflowWorktreeRecordScan(budget.processedFiles)
+    }
+  }
+  return { records: Array.from(records.values()), reliable }
+}
+
+export async function listWorkflowWorktreeRecords(
+  commonDir: string,
+  appDataRoot?: string
+): Promise<WorkflowWorktreeRecord[]> {
+  return (await scanWorkflowWorktreeRecords(commonDir, appDataRoot, false)).records
 }
 
 /** Prune needs to distinguish a genuinely absent store from an unreadable or
@@ -905,50 +1248,82 @@ export async function listWorkflowWorktreeRecords(
  * hydration; this variant is fail-closed for destructive history pruning. */
 export async function listWorkflowWorktreeRecordsForPrune(
   commonDir: string,
-  appDataRoot = defaultWorktreeAppDataRoot()
+  appDataRoot?: string
 ): Promise<{ records: WorkflowWorktreeRecord[]; reliable: boolean }> {
-  const root = worktreeRecordsRootFor(commonDir, appDataRoot)
-  let names: string[]
-  try {
-    names = await fs.readdir(root)
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT"
-      ? { records: [], reliable: true }
-      : { records: [], reliable: false }
-  }
-  const records: WorkflowWorktreeRecord[] = []
-  let reliable = true
-  for (const name of names) {
-    if (!name.endsWith(".json")) continue
-    try {
-      const parsed: unknown = JSON.parse(await fs.readFile(path.join(root, name), "utf8"))
-      if (isWorkflowWorktreeRecord(parsed)) records.push(parsed)
-      else reliable = false
-    } catch {
-      reliable = false
-    }
-  }
-  return { records, reliable }
+  return scanWorkflowWorktreeRecords(commonDir, appDataRoot, true)
+}
+
+/** A managed checkout is manually removable only after ownership is terminal. */
+export function findBlockingWorkflowWorktreeOwnership(
+  records: readonly WorkflowWorktreeRecord[],
+  directory: string
+): WorkflowWorktreeRecord | null {
+  const targetKey = canonicalKey(directory)
+  return (
+    records.find(
+      (record) =>
+        canonicalKey(record.directory) === targetKey &&
+        ((record.status !== "merged" && record.status !== "discarded") ||
+          record.cleanupPending === true)
+    ) ?? null
+  )
 }
 
 async function readWorkflowWorktreeRecord(
   commonDir: string,
   id: string,
-  appDataRoot: string
+  appDataRoot?: string
 ): Promise<WorkflowWorktreeRecord | undefined> {
-  try {
-    const parsed: unknown = JSON.parse(
-      await fs.readFile(worktreeRecordPath(commonDir, id, appDataRoot), "utf8")
-    )
-    return isWorkflowWorktreeRecord(parsed) && parsed.id === id ? parsed : undefined
-  } catch {
-    return undefined
+  let selected: WorkflowWorktreeRecord | undefined
+  for (const sourceRoot of worktreeAppDataReadRoots(appDataRoot)) {
+    const recordPath = worktreeRecordPath(commonDir, id, sourceRoot)
+    try {
+      const parsed: unknown = JSON.parse(
+        (
+          await readStableWorktreeFile(
+            recordPath,
+            WORKFLOW_WORKTREE_RECORD_MAX_BYTES
+          )
+        ).toString("utf8")
+      )
+      // A sibling root is part of the same ownership proof. Ignoring a corrupt,
+      // oversized, or foreign same-id manifest and accepting a valid copy from
+      // another root would let a destructive action proceed through ambiguous
+      // state. Point actions therefore fail closed even though the broad UI list
+      // remains best-effort.
+      if (!isWorkflowWorktreeRecord(parsed) || parsed.id !== id) {
+        throw new GitWorktreeError(
+          `workflow worktree "${id}" has an invalid ownership manifest`,
+          "unsafe-state"
+        )
+      }
+      const located = rememberWorkflowWorktreeRecordRoot(parsed, sourceRoot)
+      if (
+        selected &&
+        workflowWorktreeOwnershipIdentity(selected) !==
+          workflowWorktreeOwnershipIdentity(located)
+      ) {
+        throw new GitWorktreeError(
+          `conflicting ownership manifests exist for workflow worktree "${id}"`,
+          "unsafe-state"
+        )
+      }
+      selected = selected ? newerLocatedWorkflowWorktreeRecord(selected, located) : located
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      if (error instanceof GitWorktreeError) throw error
+      throw new GitWorktreeError(
+        `workflow worktree "${id}" has an unreadable ownership manifest at ${recordPath}`,
+        "unsafe-state"
+      )
+    }
   }
+  return selected
 }
 
 async function loadCurrentWorkflowWorktreeRecord(
   expected: WorkflowWorktreeRecord,
-  appDataRoot: string
+  appDataRoot?: string
 ): Promise<WorkflowWorktreeRecord> {
   const current = await readWorkflowWorktreeRecord(expected.commonDir, expected.id, appDataRoot)
   if (!current) {
@@ -957,13 +1332,22 @@ async function loadCurrentWorkflowWorktreeRecord(
     )
   }
   if (
-    current.runId !== expected.runId ||
-    current.branch !== expected.branch ||
-    canonicalKey(current.directory) !== canonicalKey(expected.directory)
+    workflowWorktreeOwnershipIdentity(current) !==
+    workflowWorktreeOwnershipIdentity(expected)
   ) {
     throw new GitWorktreeError("workflow worktree ownership changed; refusing stale action")
   }
   return current
+}
+
+function locatedWorkflowWorktreeAppDataRoot(
+  record: WorkflowWorktreeRecord,
+  explicitRoot?: string
+): string {
+  return (
+    workflowWorktreeRecordRoots.get(record) ??
+    (explicitRoot ? path.resolve(explicitRoot) : defaultWorktreeAppDataRoot())
+  )
 }
 
 function sanitizeNameComponent(input: string): string {
@@ -1364,6 +1748,88 @@ interface RemoveWorkflowWorktreeInput {
   preserveChanges?: boolean
 }
 
+export interface AttemptedWorktreeCreationRollbackInput {
+  directory: string
+  gitRoot: string
+  branch: string
+  expectedBaseCommit: string
+  /** Diagnostic preflight fact only. It is NOT ownership proof: an external Git
+   * process can create the same ref after the check and before `worktree add`. */
+  branchWasAbsentBeforeAttempt: boolean
+}
+
+/**
+ * Reconcile an indeterminate `git worktree add` result. A timeout/non-zero exit
+ * can arrive after Git created the ref, registration and directory, so cleanup
+ * must inspect those durable side effects rather than trust a local `created`
+ * boolean. Every deletion is fenced by exact path + branch + expected HEAD.
+ */
+export async function rollbackAttemptedWorktreeCreation(
+  input: AttemptedWorktreeCreationRollbackInput
+): Promise<boolean> {
+  const directory = path.resolve(input.directory)
+  const listed = await git(
+    input.gitRoot,
+    ["worktree", "list", "--porcelain"],
+    getWorkflowWorktreeRemoveTimeoutMs()
+  )
+  if (listed.code !== 0) {
+    throw new GitWorktreeError(
+      `cannot inspect attempted worktree creation: ${gitFailure(listed, "worktree list failed")}`
+    )
+  }
+
+  const registration = parseWorktreeList(listed.stdout).find(
+    (entry) => canonicalKey(entry.path) === canonicalKey(directory)
+  )
+  if (registration) {
+    if (
+      registration.branch !== input.branch ||
+      registration.head !== input.expectedBaseCommit
+    ) {
+      throw new GitWorktreeError(
+        `refusing attempted-worktree rollback: ${directory} no longer matches ${input.branch}@${input.expectedBaseCommit}`
+      )
+    }
+    return removeWorkflowWorktree({
+      directory,
+      gitRoot: input.gitRoot,
+      branch: input.branch,
+      expectedBranchHead: input.expectedBaseCommit,
+      preserveChanges: true
+    })
+  }
+
+  // Never recursively delete an unregistered directory: it may predate this
+  // request or contain user data. Surface it for manual recovery instead.
+  if (await pathExists(directory)) {
+    throw new GitWorktreeError(
+      `attempted worktree path exists without the expected Git registration: ${directory}`
+    )
+  }
+
+  const branchHead = await git(input.gitRoot, [
+    "show-ref",
+    "--verify",
+    "--hash",
+    `refs/heads/${input.branch}`
+  ])
+  if (isMissingGitRef(branchHead)) return true
+  if (branchHead.code !== 0) {
+    throw new GitWorktreeError(
+      `cannot inspect attempted worktree branch: ${gitFailure(branchHead, "branch query failed")}`
+    )
+  }
+
+  // A preflight absence check is not atomic ownership: another Git process may
+  // create this same branch at the same base commit before our `worktree add`
+  // fails. Without the exact path+branch+HEAD registration above, retain every
+  // existing ref and fail closed instead of risking deletion of external work.
+  throw new GitWorktreeError(
+    `attempted worktree branch ${input.branch}@${branchHead.stdout.trim()} has no matching worktree registration; it was retained for manual inspection`
+  )
+}
+
 async function findUnavailableWorktreeRegistrations(
   gitRoot: string,
   targetDirectory: string
@@ -1413,10 +1879,7 @@ export async function removeWorkflowWorktree(input: RemoveWorkflowWorktreeInput)
         `refusing to remove worktree ${directory}: branch ${input.branch} advanced unexpectedly`
       )
     }
-    const refMissing =
-      current.code !== 0 &&
-      !current.infrastructureFailure &&
-      /not a valid ref|does not exist|not found/i.test(gitFailure(current, ""))
+    const refMissing = isMissingGitRef(current)
     if (refMissing) {
       if (await pathExists(directory)) {
         throw new GitWorktreeError(
@@ -1514,10 +1977,7 @@ export async function removeWorkflowWorktree(input: RemoveWorkflowWorktreeInput)
         "--hash",
         `refs/heads/${input.branch}`
       ])
-      const missing =
-        remaining.code !== 0 &&
-        !remaining.infrastructureFailure &&
-        /not a valid ref|does not exist|not found/i.test(gitFailure(remaining, ""))
+      const missing = isMissingGitRef(remaining)
       if (!missing) {
         throw new GitWorktreeError(
           `worktree was removed but branch ${input.branch} could not be safely verified/deleted (${gitFailure(deleted, "safe branch deletion failed")})`
@@ -1755,9 +2215,9 @@ export async function recoverInterruptedWorkflowWorktree(input: {
   error: string
   appDataRoot?: string
 }): Promise<WorkflowWorktreeRecord> {
-  const appDataRoot = input.appDataRoot ?? defaultWorktreeAppDataRoot()
   return withWorktreeActionLock(input.record, async () => {
-    const current = await loadCurrentWorkflowWorktreeRecord(input.record, appDataRoot)
+    const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
+    const appDataRoot = locatedWorkflowWorktreeAppDataRoot(current, input.appDataRoot)
     return withRepoLock(canonicalKey(current.commonDir), async () => {
       const latest = await loadCurrentWorkflowWorktreeRecord(current, appDataRoot)
       if (
@@ -1785,9 +2245,9 @@ export async function diffWorkflowWorktree(input: {
   record: WorkflowWorktreeRecord
   appDataRoot?: string
 }): Promise<WorkflowWorktreeDiff> {
-  const appDataRoot = input.appDataRoot ?? defaultWorktreeAppDataRoot()
   return withWorktreeActionLock(input.record, async () => {
-    const current = await loadCurrentWorkflowWorktreeRecord(input.record, appDataRoot)
+    const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
+    const appDataRoot = locatedWorkflowWorktreeAppDataRoot(current, input.appDataRoot)
     return withRepoLock(canonicalKey(current.commonDir), async () => {
       const latest = await loadCurrentWorkflowWorktreeRecord(current, appDataRoot)
       if (latest.status === "merged" || latest.status === "discarded") {
@@ -1853,9 +2313,9 @@ export async function discardWorkflowWorktree(input: {
   record: WorkflowWorktreeRecord
   appDataRoot?: string
 }): Promise<WorkflowWorktreeActionResult> {
-  const appDataRoot = input.appDataRoot ?? defaultWorktreeAppDataRoot()
   return withWorktreeActionLock(input.record, async () => {
-    const current = await loadCurrentWorkflowWorktreeRecord(input.record, appDataRoot)
+    const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
+    const appDataRoot = locatedWorkflowWorktreeAppDataRoot(current, input.appDataRoot)
     return withRepoLock(canonicalKey(current.commonDir), async () => {
       const repo = await assertManagedWorkflowWorktree(current, input.workspacePath, appDataRoot, {
         allowMissingCheckout: true,
@@ -1944,9 +2404,9 @@ export async function cleanupWorkflowWorktree(input: {
   record: WorkflowWorktreeRecord
   appDataRoot?: string
 }): Promise<WorkflowWorktreeActionResult> {
-  const appDataRoot = input.appDataRoot ?? defaultWorktreeAppDataRoot()
   return withWorktreeActionLock(input.record, async () => {
-    const current = await loadCurrentWorkflowWorktreeRecord(input.record, appDataRoot)
+    const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
+    const appDataRoot = locatedWorkflowWorktreeAppDataRoot(current, input.appDataRoot)
     return withRepoLock(canonicalKey(current.commonDir), async () => {
       if (current.status !== "merged" && current.status !== "discarded") {
         throw new GitWorktreeError(`cannot retry cleanup while the worktree is ${current.status}`)
@@ -2018,8 +2478,9 @@ export async function mergeWorkflowWorktree(input: {
   record: WorkflowWorktreeRecord
   appDataRoot?: string
   signal?: AbortSignal
+  /** Deterministic regression seam for the irreversible ref-CAS boundary. */
+  testHooks?: { afterSourceRefAdvanced?: () => void | Promise<void> }
 }): Promise<WorkflowWorktreeActionResult> {
-  const appDataRoot = input.appDataRoot ?? defaultWorktreeAppDataRoot()
   const operationTimeoutMs = getWorkflowWorktreeTimeoutMs()
   const throwIfAborted = (): void => {
     if (input.signal?.aborted) {
@@ -2028,7 +2489,8 @@ export async function mergeWorkflowWorktree(input: {
   }
   return withWorktreeActionLock(input.record, async () => {
     throwIfAborted()
-    const current = await loadCurrentWorkflowWorktreeRecord(input.record, appDataRoot)
+    const current = await loadCurrentWorkflowWorktreeRecord(input.record, input.appDataRoot)
+    const appDataRoot = locatedWorkflowWorktreeAppDataRoot(current, input.appDataRoot)
     const repo = await assertManagedWorkflowWorktree(current, input.workspacePath, appDataRoot, {
       allowMissingCheckout: true
     })
@@ -2328,7 +2790,7 @@ export async function mergeWorkflowWorktree(input: {
             record.sourceRoot,
             [
               "-c",
-              "core.hooksPath=/dev/null",
+              `core.hooksPath=${GIT_DISABLED_HOOKS_PATH}`,
               "-c",
               "commit.gpgsign=false",
               "commit-tree",
@@ -2365,6 +2827,7 @@ export async function mergeWorkflowWorktree(input: {
               "source-busy"
             )
           }
+          await input.testHooks?.afterSourceRefAdvanced?.()
           // Once the expected-old ref CAS succeeds, finish the checkout refresh
           // even if cancellation was requested. Aborting halfway would leave a
           // source branch pointing at the integration commit with a stale index;
@@ -2593,28 +3056,30 @@ export async function mergeWorkflowWorktree(input: {
  * manifest instead of becoming an invisible dangling branch. */
 export async function finalizeWorkflowWorktreeRecord(
   record: WorkflowWorktreeRecord,
-  appDataRoot = defaultWorktreeAppDataRoot()
+  appDataRoot?: string
 ): Promise<boolean> {
-  return withWorktreeActionLock(record, async () =>
-    withRepoLock(canonicalKey(record.commonDir), async () => {
-      if (record.status !== "merged" && record.status !== "discarded") return false
-      if (await pathExists(record.directory)) return false
-      if (!record.branch.startsWith(`${WORKFLOW_WORKTREE_BRANCH_PREFIX}/`)) return false
+  return withWorktreeActionLock(record, async () => {
+    const current = await loadCurrentWorkflowWorktreeRecord(record, appDataRoot)
+    const manifestRoot = locatedWorkflowWorktreeAppDataRoot(current, appDataRoot)
+    return withRepoLock(canonicalKey(current.commonDir), async () => {
+      if (current.status !== "merged" && current.status !== "discarded") return false
+      if (await pathExists(current.directory)) return false
+      if (!current.branch.startsWith(`${WORKFLOW_WORKTREE_BRANCH_PREFIX}/`)) return false
 
-      const listed = await git(record.gitRoot, ["worktree", "list", "--porcelain"])
+      const listed = await git(current.gitRoot, ["worktree", "list", "--porcelain"])
       if (listed.code !== 0) return false
-      const directoryKey = canonicalKey(await canonicalPath(record.directory))
+      const directoryKey = canonicalKey(await canonicalPath(current.directory))
       for (const entry of parseWorktreeList(listed.stdout)) {
         if (canonicalKey(await canonicalPath(entry.path)) === directoryKey) return false
       }
 
-      const refName = `refs/heads/${record.branch}`
-      const branchHead = await git(record.gitRoot, ["show-ref", "--verify", "--hash", refName])
+      const refName = `refs/heads/${current.branch}`
+      const branchHead = await git(current.gitRoot, ["show-ref", "--verify", "--hash", refName])
       if (branchHead.code === 0) {
         const currentHead = branchHead.stdout.trim()
-        const expectedHead = record.headCommit
+        const expectedHead = current.headCommit
         if (!expectedHead || currentHead !== expectedHead) return false
-        const deleted = await git(record.gitRoot, [
+        const deleted = await git(current.gitRoot, [
           ...GIT_NO_HOOKS_ARGS,
           "update-ref",
           "-d",
@@ -2622,7 +3087,7 @@ export async function finalizeWorkflowWorktreeRecord(
           expectedHead
         ])
         if (deleted.code !== 0) {
-          const after = await git(record.gitRoot, ["show-ref", "--verify", "--hash", refName])
+          const after = await git(current.gitRoot, ["show-ref", "--verify", "--hash", refName])
           const missing =
             after.code !== 0 &&
             !after.infrastructureFailure &&
@@ -2636,15 +3101,19 @@ export async function finalizeWorkflowWorktreeRecord(
         return false
       }
 
-      await deleteWorkflowWorktreeRecord(record.commonDir, record.id, appDataRoot)
+      await deleteMatchingWorkflowWorktreeRecordCopies(
+        current,
+        appDataRoot === undefined ? undefined : manifestRoot
+      )
       return true
     })
-  )
+  })
 }
 
 interface WorktreeListEntry {
   path: string
   branch?: string
+  head?: string
 }
 
 /** Parse `git worktree list --porcelain` into entries (primary checkout first). */
@@ -2659,6 +3128,10 @@ export function parseWorktreeList(text: string): WorktreeListEntry[] {
     }
     const current = entries[entries.length - 1]
     if (!current) continue
+    if (line.startsWith("HEAD ")) {
+      current.head = line.slice("HEAD ".length).trim()
+      continue
+    }
     if (line.startsWith("branch ")) {
       current.branch = line
         .slice("branch ".length)

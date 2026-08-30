@@ -1,7 +1,10 @@
-function truthyCoordinatorFlag(value: unknown): boolean {
-  if (typeof value === "boolean") return value
-  if (typeof value !== "string") return false
-  return ["1", "true", "yes", "on", "coordinator"].includes(value.toLowerCase())
+import {
+  resolveAgentModeFromMetadata,
+  resolveThreadExecutionModeFromMetadata
+} from "../../../shared/agent-mode-metadata"
+
+function isMetadataRecord(metadata: unknown): boolean {
+  return metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
 }
 
 export function isExplicitNormalModeMetadata(metadata: unknown): boolean {
@@ -13,30 +16,13 @@ export function isExplicitNormalModeMetadata(metadata: unknown): boolean {
 }
 
 export function isMultiModeMetadata(metadata: unknown): boolean {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return false
-  }
-  const record = metadata as Record<string, unknown>
-  const isLegacyOrExplicitNormalMode =
-    record.agentMode === "normal" ||
-    (record.agentMode === undefined && !truthyCoordinatorFlag(record.coordinatorMode))
-  return isLegacyOrExplicitNormalMode && record.subagentsEnabled !== false
+  return isMetadataRecord(metadata) && resolveThreadExecutionModeFromMetadata(metadata) === "multi"
 }
 
 export function isCoordinatorModeMetadata(metadata: unknown): boolean {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return false
-  }
-  const record = metadata as Record<string, unknown>
-  if (isExplicitNormalModeMetadata(record) || isWorkflowModeMetadata(record)) {
-    return false
-  }
-  return record.agentMode === "coordinator" || truthyCoordinatorFlag(record.coordinatorMode)
+  return isMetadataRecord(metadata) && resolveAgentModeFromMetadata(metadata) === "coordinator"
 }
 
 export function isWorkflowModeMetadata(metadata: unknown): boolean {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return false
-  }
-  return (metadata as Record<string, unknown>).agentMode === "workflow"
+  return isMetadataRecord(metadata) && resolveAgentModeFromMetadata(metadata) === "workflow"
 }

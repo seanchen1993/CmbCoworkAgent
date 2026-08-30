@@ -1,4 +1,4 @@
-import { getThread, updateThread } from "../db"
+import { getThreadCore, updateThread } from "../db"
 import { createHookScope, type HookScopeController } from "./scope"
 
 export const THREAD_HOOK_SCOPE_METADATA_KEY = "hookScope"
@@ -32,7 +32,7 @@ export function readPersistentHookKeysFromMetadata(metadata: unknown): string[] 
 
 export function loadPersistentHookKeysForThread(threadId: string): string[] {
   try {
-    const thread = getThread(threadId)
+    const thread = getThreadCore(threadId)
     if (!thread) return []
     return readPersistentHookKeysFromMetadata(parseMetadata(thread.metadata))
   } catch (error) {
@@ -45,9 +45,9 @@ export function persistPersistentHookKeysForThread(
   threadId: string,
   keys: readonly string[]
 ): void {
-  let thread: ReturnType<typeof getThread>
+  let thread: ReturnType<typeof getThreadCore>
   try {
-    thread = getThread(threadId)
+    thread = getThreadCore(threadId)
   } catch (error) {
     console.warn("[Hooks] failed to read thread for hook scope persistence:", error)
     return
