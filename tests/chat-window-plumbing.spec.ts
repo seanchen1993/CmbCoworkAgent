@@ -94,6 +94,12 @@ async function main(): Promise<void> {
   assert.match(search, /createChatSearchMatcher\(CHAT_SEARCH_RESULT_LIMIT \+ 1\)/)
   assert.match(container, /searchDurableMessages=\{searchDurableMessages\}/)
   assert.match(container, /CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT/)
+  assert.match(container, /createMessageIdIndexLookup\(threadDisplayBaseline\)/)
+  assert.doesNotMatch(
+    container,
+    /threadDisplayBaseline\.findIndex/,
+    "streaming search updates must reuse the lazy long-history id index"
+  )
   assert.match(search, /onRevealMessage\(match\.messageId\)/)
   assert.match(search, /querySelectorAll<HTMLElement>\("\[data-chat-message-id\]"\)/)
 

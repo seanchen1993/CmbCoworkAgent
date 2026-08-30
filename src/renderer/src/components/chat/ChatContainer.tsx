@@ -194,6 +194,10 @@ import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summar
 import { projectVisibleChatSearchContent } from "../../../../shared/chat-search-visible-content"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
 import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
+import {
+  createMessageIdIndexLookup,
+  type MessageIdIndexLookup
+} from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
@@ -3432,6 +3436,7 @@ export function ChatContainer({
   )
   const stableSearchDocumentsRef = useRef<{
     baseline: readonly Message[]
+    baselineIndexLookup: MessageIdIndexLookup
     rawMessages: readonly Message[]
     indexById: ReadonlyMap<string, number>
     buildDocument: typeof buildSearchDocument
@@ -3470,9 +3475,7 @@ export function ChatContainer({
       const nextDocuments = [...cached.documents]
       for (const changedMessage of displayMessageProjection.changedMessages) {
         const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
-        const baselineIndex = threadDisplayBaseline.findIndex(
-          (message) => message.id === changedMessage.id
-        )
+        const baselineIndex = cached.baselineIndexLookup.findFirstIndex(changedMessage.id)
         const belongsToCachedWindow =
           baselineIndex >= cached.startIndex &&
           baselineIndex < threadDisplayBaseline.length
@@ -3569,6 +3572,7 @@ export function ChatContainer({
       )
       stableSearchDocumentsRef.current = {
         baseline: threadDisplayBaseline,
+        baselineIndexLookup: createMessageIdIndexLookup(threadDisplayBaseline),
         rawMessages: threadMessages,
         indexById: displayMessageProjection.indexById,
         buildDocument: buildSearchDocument,
