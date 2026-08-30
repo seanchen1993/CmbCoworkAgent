@@ -3,7 +3,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -48,8 +47,7 @@ import {
   clearAgentToolStream,
   clearAllAgentToolStreams,
   persistAgentToolStream,
-  readAgentToolStream,
-  setBeforeAgentToolStreamReadForTest
+  readAgentToolStream
 } from "../src/main/agent/workflow/run-store.ts"
 import {
   buildWorkflowNotificationMessage,
@@ -531,7 +529,7 @@ return "done"`
   let launchedWorktrees: PersistedWorkflowRun["worktrees"] | undefined
   let recoveredSnapshot: PersistedWorkflowRun | undefined
   const originalLaunch = workflowRunManager.launch
-  const originalGetFlushFailedRunForResume = workflowRunManager.getFlushFailedRunForResume
+  const originalGetFlushFailedRun = workflowRunManager.getFlushFailedRun
   workflowRunManager.launch = ((request) => {
     launchedWorktrees = request.existingWorktrees
     return {
@@ -540,19 +538,13 @@ return "done"`
       whenInitialPersisted: Promise.resolve(true)
     }
   }) as typeof workflowRunManager.launch
-  workflowRunManager.getFlushFailedRunForResume = (async (
-    candidateWorkspace,
-    candidateThreadId,
-    candidateRunId
-  ) =>
+  workflowRunManager.getFlushFailedRun = ((candidateRunId) =>
     candidateRunId === runId
       ? recoveredSnapshot
-      : originalGetFlushFailedRunForResume.call(
+      : originalGetFlushFailedRun.call(
           workflowRunManager,
-          candidateWorkspace,
-          candidateThreadId,
           candidateRunId
-        )) as typeof workflowRunManager.getFlushFailedRunForResume
+        )) as typeof workflowRunManager.getFlushFailedRun
   const workflowTool = createWorkflowTool({
     threadId,
     workspacePath: workspace,
@@ -591,7 +583,7 @@ return "done"`
     await workflowTool.invoke({ resumeFromRunId: runId })
   } finally {
     workflowRunManager.launch = originalLaunch
-    workflowRunManager.getFlushFailedRunForResume = originalGetFlushFailedRunForResume
+    workflowRunManager.getFlushFailedRun = originalGetFlushFailedRun
   }
   assert(
     launchedWorktrees?.[0]?.status === "merged" && launchedWorktrees[0].cleanupPending === false,
@@ -641,7 +633,7 @@ return "done"`
   }
   let launchedJournal: PersistedWorkflowRun["journal"] | undefined
   const originalLaunch = workflowRunManager.launch
-  const originalGetFlushFailedRunForResume = workflowRunManager.getFlushFailedRunForResume
+  const originalGetFlushFailedRun = workflowRunManager.getFlushFailedRun
   workflowRunManager.launch = ((request) => {
     launchedJournal = request.resumeJournal
     return {
@@ -650,19 +642,13 @@ return "done"`
       whenInitialPersisted: Promise.resolve(true)
     }
   }) as typeof workflowRunManager.launch
-  workflowRunManager.getFlushFailedRunForResume = (async (
-    candidateWorkspace,
-    candidateThreadId,
-    candidateRunId
-  ) =>
+  workflowRunManager.getFlushFailedRun = ((candidateRunId) =>
     candidateRunId === runId
       ? snapshot
-      : originalGetFlushFailedRunForResume.call(
+      : originalGetFlushFailedRun.call(
           workflowRunManager,
-          candidateWorkspace,
-          candidateThreadId,
           candidateRunId
-        )) as typeof workflowRunManager.getFlushFailedRunForResume
+        )) as typeof workflowRunManager.getFlushFailedRun
   const workflowTool = createWorkflowTool({
     threadId,
     workspacePath: workspace,
@@ -683,7 +669,7 @@ return "done"`
     await workflowTool.invoke({ resumeFromRunId: runId })
   } finally {
     workflowRunManager.launch = originalLaunch
-    workflowRunManager.getFlushFailedRunForResume = originalGetFlushFailedRunForResume
+    workflowRunManager.getFlushFailedRun = originalGetFlushFailedRun
   }
   assert(
     JSON.stringify(launchedJournal) === JSON.stringify(snapshotJournal),
@@ -1440,7 +1426,7 @@ async function testClearAllAgentToolStreamsSweepsRunIdSidecars(): Promise<void> 
     writeFileSync(join(dir, `${runId}.json`), "{}") // non-toolstream
     writeFileSync(join(dir, `${runId}.journal`), "[]") // non-toolstream
 
-    await clearAllAgentToolStreams(ws, threadId, runId)
+    clearAllAgentToolStreams(ws, threadId, runId)
 
     assert(!existsSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c0")), "swept c0")
     assert(!existsSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c1")), "swept c1")
@@ -1543,7 +1529,7 @@ async function testClearAllAgentToolStreamsHandlesPendingWriteNoRevival(): Promi
     persistAgentToolStream(ws, threadId, runId, key, {
       messages: [{ id: ["AIMessage"], kwargs: { content: "FLOW" } }]
     })
-    await clearAllAgentToolStreams(ws, threadId, runId)
+    clearAllAgentToolStreams(ws, threadId, runId)
     assert(
       (await readAgentToolStream(ws, threadId, runId, key)) === null,
       "an in-flight write does not survive the sweep — the ordered delete runs after it (no orphan revival)"
@@ -1638,56 +1624,6 @@ async function testReadAgentToolStreamDropsCorruptElements(): Promise<void> {
       "every returned element is an object → the renderer reads message.kwargs without crashing"
     )
   } finally {
-    rmSync(ws, { recursive: true, force: true })
-  }
-}
-
-async function testReadAgentToolStreamUsesStableBoundedCapability(): Promise<void> {
-  const ws = mkdtempSync(join(tmpdir(), "cmb-toolstream-stable-"))
-  const threadId = "thread-toolstream-stable"
-  const runId = "wf_streamstable01"
-  const key = "stable_c0"
-  const streamPath = agentToolStreamPath(ws, threadId, runId, key)
-  const valid = JSON.stringify({
-    runId,
-    toolStreamKey: key,
-    snapshotMessages: [{ id: ["AIMessage"], kwargs: { content: "safe" } }]
-  })
-  try {
-    mkdirSync(dirname(streamPath), { recursive: true })
-
-    writeFileSync(streamPath, "x".repeat(8 * 1024 * 1024 + 1))
-    assert(
-      (await readAgentToolStream(ws, threadId, runId, key)) === null,
-      "a pre-existing oversized tool stream is rejected before allocation/parse"
-    )
-
-    writeFileSync(streamPath, valid)
-    setBeforeAgentToolStreamReadForTest((path) => {
-      if (path === streamPath) {
-        writeFileSync(path, "x".repeat(8 * 1024 * 1024 + 1), { flag: "a" })
-      }
-    })
-    assert(
-      (await readAgentToolStream(ws, threadId, runId, key)) === null,
-      "a tool stream that grows after open is rejected by the max+1 capability read"
-    )
-
-    setBeforeAgentToolStreamReadForTest()
-    writeFileSync(streamPath, valid)
-    const displaced = `${streamPath}.displaced`
-    setBeforeAgentToolStreamReadForTest((path) => {
-      if (path === streamPath) {
-        renameSync(path, displaced)
-        writeFileSync(path, valid.replace("safe", "replacement"))
-      }
-    })
-    assert(
-      (await readAgentToolStream(ws, threadId, runId, key)) === null,
-      "path replacement after authorization cannot switch the file read by the UI"
-    )
-  } finally {
-    setBeforeAgentToolStreamReadForTest()
     rmSync(ws, { recursive: true, force: true })
   }
 }
@@ -2400,7 +2336,7 @@ async function testReviveDoesNotRearmOldStores(): Promise<void> {
       }
     })
     await store.whenInitialPersisted
-    await deleteWorkflowRunsForThread(ws, threadId) // sweep + tombstones + epoch bump
+    deleteWorkflowRunsForThread(ws, threadId) // sweep + tombstones + epoch bump
     reviveWorkflowThread(threadId) // legitimize the NEXT incarnation
     store.update((run) => {
       run.logs.push("late flush from the dead incarnation")
@@ -2445,7 +2381,7 @@ async function testRecoveredRunRespectsDisposalEpoch(): Promise<void> {
       updatedAt: now
     })
     const staleEpoch = workflowThreadDisposalEpoch(threadId) // captured pre-deletion
-    await deleteWorkflowRunsForThread(ws, threadId) // bump epoch + tombstones
+    deleteWorkflowRunsForThread(ws, threadId) // bump epoch + tombstones
     reviveWorkflowThread(threadId) // set tombstones cleared — epoch is the only fence left
     assert(
       (await persistRecoveredRun(ws, threadId, makeRun(generateWorkflowRunId()), staleEpoch)) ===
@@ -3108,7 +3044,7 @@ async function testZombieRunReconciled(workspace: string): Promise<void> {
 
   // deleteWorkflowRunsForThread removes the thread's run artifacts (disk-litter
   // cleanup on thread delete).
-  await deleteWorkflowRunsForThread(workspace, zombieThreadId)
+  deleteWorkflowRunsForThread(workspace, zombieThreadId)
   assert(
     loadWorkflowRunForResume(workspace, zombieThreadId, runId) === null,
     "run artifacts removed after delete"
@@ -3152,7 +3088,7 @@ async function testDeleteVsLateFlushRace(workspace: string): Promise<void> {
   )
 
   // Thread deleted mid-run → dir removed AND marked disposed.
-  await deleteWorkflowRunsForThread(workspace, threadId)
+  deleteWorkflowRunsForThread(workspace, threadId)
   assert(loadWorkflowRunForResume(workspace, threadId, runId) === null, "run dir removed on delete")
 
   // The still-settling run now does its final update + flush. This must be a
@@ -3960,28 +3896,6 @@ return await parallel([
 async function testChildWorkflowGuards(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
 
-  // Regression: workflow() must never bring synchronous workspace reads back
-  // onto Electron's main thread. Keep this scoped to the child loader so the
-  // unrelated synchronous validation helpers in this large module do not make
-  // the assertion brittle.
-  const engineSource = readFileSync(
-    join(process.cwd(), "src/main/agent/workflow/engine.ts"),
-    "utf8"
-  )
-  const childLoaderSource = engineSource.slice(
-    engineSource.indexOf("async function loadChildWorkflowSource("),
-    engineSource.indexOf("function defaultAgentLabel(")
-  )
-  assert(childLoaderSource.length > 0, "child workflow loader source located")
-  assert(
-    childLoaderSource.includes("await openStableFileHandle(workspacePath, requestedPath)"),
-    "child workflow loader acquires an async stable file handle"
-  )
-  assert(
-    !/\b(?:readFileSync|statSync|realpathSync)\b/.test(childLoaderSource),
-    "child workflow loader contains no synchronous filesystem reads"
-  )
-
   // A real file OUTSIDE the workspace: containment must reject it even though
   // it exists (realpath-based check, so symlinked tmpdirs are handled).
   const outsidePath = `${workspace}-outside.workflow.js`
@@ -4004,10 +3918,7 @@ async function testChildWorkflowGuards(workspace: string): Promise<void> {
     `export const meta = { name: "t", description: "d" }\nreturn workflow({ scriptPath: "../../no-such-file.js" })`,
     echoRunner
   )
-  assert(
-    ghost.status === "error" && ghost.error?.includes("not found"),
-    `ghost path rejected, got: ${ghost.status}: ${ghost.error}`
-  )
+  assert(ghost.status === "error" && ghost.error?.includes("not found"), "ghost path rejected")
 
   // workflow() only accepts { scriptPath } — a bare string (the removed by-name
   // form) is a clear type error, not a confusing 404 on a never-written path.
@@ -4020,31 +3931,8 @@ async function testChildWorkflowGuards(workspace: string): Promise<void> {
     `workflow(string) rejected with a scriptPath hint, got: ${badRef.error}`
   )
 
-  // The exact byte limit remains executable; the next byte is rejected. This
-  // guards both sides of the bounded handle read (including a file that grows
-  // beyond the size observed when the capability was acquired).
-  const exactLimitPath = `${workspace}/exact-limit.workflow.js`
-  const exactPrefix =
-    'export const meta = { name: "exact-limit", description: "d" }\nreturn "at-limit"\n/*'
-  const exactSuffix = "*/"
-  const paddingBytes =
-    MAX_WORKFLOW_SCRIPT_BYTES - Buffer.byteLength(exactPrefix) - Buffer.byteLength(exactSuffix)
-  writeFileSync(exactLimitPath, `${exactPrefix}${"x".repeat(paddingBytes)}${exactSuffix}`)
-  try {
-    const exactLimit = await harness.run(
-      `export const meta = { name: "t", description: "d" }\nreturn workflow({ scriptPath: "exact-limit.workflow.js" })`,
-      echoRunner
-    )
-    assert(
-      exactLimit.status === "completed" && exactLimit.result === "at-limit",
-      `child script at the exact byte limit executes, got: ${exactLimit.error}`
-    )
-  } finally {
-    rmSync(exactLimitPath, { force: true })
-  }
-
-  // An oversized child script is rejected before allocating or reading in
-  // proportion to its size, so a huge workspace file cannot stall/OOM main.
+  // #9: an oversized child script is rejected BY SIZE before the full sync read,
+  // so a path to a huge workspace file can't stall/OOM the main process.
   const hugePath = `${workspace}/huge.workflow.js`
   writeFileSync(hugePath, "x".repeat(MAX_WORKFLOW_SCRIPT_BYTES + 1))
   try {
@@ -4060,9 +3948,9 @@ async function testChildWorkflowGuards(workspace: string): Promise<void> {
     rmSync(hugePath, { force: true })
   }
 
-  // A child scriptPath pointing at a NON-regular file (dir/FIFO/socket/device)
-  // is rejected during non-blocking capability acquisition. A directory is the
-  // portable stand-in for "exists, not a file" on Windows and Unix.
+  // #8: a child scriptPath pointing at a NON-regular file (dir/FIFO/socket/device)
+  // is rejected before the synchronous readFileSync — reading a FIFO would freeze
+  // the main process. A directory is the portable stand-in for "exists, not a file".
   mkdirSync(join(workspace, "child-dir"), { recursive: true })
   const dirChild = await harness.run(
     `export const meta = { name: "t", description: "d" }\nreturn workflow({ scriptPath: "child-dir" })`,
@@ -4348,7 +4236,7 @@ return "newer"`,
     // oldest (= the undelivered buried run) past the cap; it must survive while
     // delivered runs past the cap are pruned.
     const before = listWorkflowRuns(buriedWs, THREAD_ID).length
-    await pruneWorkflowRuns(buriedWs, THREAD_ID, 3)
+    pruneWorkflowRuns(buriedWs, THREAD_ID, 3)
     const stillFound = findUndeliveredTerminalRun(buriedWs, THREAD_ID)
     assert(
       stillFound?.runId === buried.runId,
@@ -5202,7 +5090,6 @@ async function main(): Promise<void> {
     testWorkflowTraceToolDetails()
     await testWorkflowAgentSnapshotBounding()
     await testAgentToolStreamStaleSidecarKilled()
-    await testReadAgentToolStreamUsesStableBoundedCapability()
     await testClearAllAgentToolStreamsSweepsRunIdSidecars()
     await testClearAllAgentToolStreamsHandlesPendingWriteNoRevival()
     await testAppendJournalPreservesDifferentHashAtSameIndex()

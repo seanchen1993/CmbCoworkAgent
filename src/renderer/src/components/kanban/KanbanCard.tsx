@@ -14,7 +14,7 @@ interface ThreadCardProps {
 }
 
 interface SubagentCardProps {
-  subagent: Pick<Subagent, "id" | "name" | "description" | "status">
+  subagent: Subagent
   parentThread: Thread
   onClick: () => void
 }

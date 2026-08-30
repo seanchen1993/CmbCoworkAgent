@@ -10,7 +10,6 @@ import {
 import {
   isSubagentTranscriptBlobRef,
   projectSubagentDescription,
-  projectSubagentTranscriptBoundaries,
   projectSubagentTranscriptContentForStorage,
   SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY
 } from "../../../shared/subagent-transcript-storage"
@@ -22,35 +21,6 @@ export {
 } from "../../../shared/subagent-transcript-storage"
 
 const MAX_TRANSCRIPT_REPLACEMENT_ALIASES = 8
-const LIVE_TRANSCRIPT_PROJECTION_HEAD_CHARS = 24_000
-const LIVE_TRANSCRIPT_PROJECTION_TAIL_CHARS = 8_000
-
-export interface SubagentLiveTextProjection {
-  content: string
-  head: string
-  tail: string
-  totalLength: number
-}
-
-/** Append one trusted provider delta while retaining only bounded display text. */
-export function appendSubagentLiveTextProjection(
-  previous: SubagentLiveTextProjection | undefined,
-  delta: string
-): SubagentLiveTextProjection & { content: string } {
-  const totalLength = (previous?.totalLength ?? 0) + delta.length
-  const head = previous
-    ? previous.head.length >= LIVE_TRANSCRIPT_PROJECTION_HEAD_CHARS
-      ? previous.head
-      : `${previous.head}${delta}`.slice(0, LIVE_TRANSCRIPT_PROJECTION_HEAD_CHARS)
-    : delta.slice(0, LIVE_TRANSCRIPT_PROJECTION_HEAD_CHARS)
-  const tail = `${previous?.tail ?? ""}${delta}`.slice(-LIVE_TRANSCRIPT_PROJECTION_TAIL_CHARS)
-  return {
-    head,
-    tail,
-    totalLength,
-    content: projectSubagentTranscriptBoundaries(totalLength, head, tail)
-  }
-}
 
 /**
  * Drain transcript changes in batches. Callers atomically detach the currently
@@ -91,8 +61,6 @@ export function restoreSubagentsFromTranscripts(
   existingSubagents: Subagent[] = []
 ): Subagent[] {
   const restored = [...existingSubagents]
-  const restoredIndexById = new Map<string, number>()
-  restored.forEach((subagent, index) => restoredIndexById.set(subagent.id, index))
   let spawnIndex = existingSubagents.reduce(
     (maximum, subagent) => Math.max(maximum, (subagent.spawnIndex ?? -1) + 1),
     0
@@ -105,19 +73,15 @@ export function restoreSubagentsFromTranscripts(
         message.role === "user" &&
         (message.id === `subagent-prompt-${subagentId}` || !!message.subagent_tool_call_id)
     )
-    let final: Message | undefined
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]
-      if (
-        message.role === "assistant" &&
-        (message.id === `subagent-final-${subagentId}` ||
-          ((message.content_priority ?? 0) >= 1 &&
-            (message.status !== undefined || message.is_error === true)))
-      ) {
-        final = message
-        break
-      }
-    }
+    const final = [...messages]
+      .reverse()
+      .find(
+        (message) =>
+          message.role === "assistant" &&
+          (message.id === `subagent-final-${subagentId}` ||
+            ((message.content_priority ?? 0) >= 1 &&
+              (message.status !== undefined || message.is_error === true)))
+      )
     const firstMessage = messages[0]
     const lastMessage = messages[messages.length - 1]
     const subagentType = prompt?.subagent_type || "general-purpose"
@@ -135,8 +99,8 @@ export function restoreSubagentsFromTranscripts(
           ? "cancelled"
           : "completed"
       : "cancelled"
-    const existingIndex = restoredIndexById.get(subagentId)
-    if (existingIndex !== undefined) {
+    const existingIndex = restored.findIndex((subagent) => subagent.id === subagentId)
+    if (existingIndex >= 0) {
       const existing = restored[existingIndex]
       // A stable final row is authoritative even if a missed parent `done`
       // previously downgraded the still-running card to cancelled. Without a
@@ -171,7 +135,6 @@ export function restoreSubagentsFromTranscripts(
       spawnIndex,
       ...(!final && { restoredFromPromptOnly: true })
     })
-    restoredIndexById.set(subagentId, restored.length - 1)
     spawnIndex += 1
   }
   return restored
@@ -395,21 +358,11 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     !!existingContentRef &&
     !!incomingContentRef &&
     existingContentRef.sha256 !== incomingContentRef.sha256
-  const trustedIncomingContentDelta =
-    typeof incoming.content_stream_delta === "string" &&
-    incoming.content_is_projection === true &&
-    Number.isSafeInteger(incoming.content_full_length) &&
-    (incoming.content_full_length ?? -1) >= incoming.content_stream_delta.length
   const blocksIncomingContentProjection =
-    !trustedIncomingContentDelta &&
-    !existingIsProjection &&
-    incomingIsProjection &&
-    !contentRefChanged &&
-    !tightensToError
+    !existingIsProjection && incomingIsProjection && !contentRefChanged && !tightensToError
   const shouldUseIncomingContent =
     !preservesExistingError &&
-    (trustedIncomingContentDelta ||
-      (incomingContentPriority > existingContentPriority && incomingHasContent) ||
+    ((incomingContentPriority > existingContentPriority && incomingHasContent) ||
       (incomingContentPriority === existingContentPriority &&
         ((existingIsProjection && !incomingIsProjection && incomingHasContent) ||
           (!blocksIncomingContentProjection &&
@@ -432,36 +385,14 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     !!existingReasoningRef &&
     !!incomingReasoningRef &&
     existingReasoningRef.sha256 !== incomingReasoningRef.sha256
-  const trustedIncomingReasoningDelta =
-    typeof incoming.reasoning_stream_delta === "string" &&
-    incoming.reasoning_is_projection === true &&
-    Number.isSafeInteger(incoming.reasoning_full_length) &&
-    (incoming.reasoning_full_length ?? -1) >= incoming.reasoning_stream_delta.length
   const shouldUseIncomingReasoning =
     typeof incoming.reasoning === "string" &&
-    (trustedIncomingReasoningDelta ||
-      !(
+    !(
       incoming.reasoning_is_projection === true &&
       existing.reasoning_is_projection !== true &&
       !reasoningRefChanged &&
       !tightensToError
-      ))
-  const nextContentPendingDelta =
-    typeof incoming.content_pending_delta === "string"
-      ? incoming.content_pending_delta
-      : trustedIncomingContentDelta
-        ? `${existing.content_pending_delta ?? ""}${incoming.content_stream_delta}`
-        : shouldUseIncomingContent
-          ? undefined
-          : existing.content_pending_delta
-  const nextReasoningPendingDelta =
-    typeof incoming.reasoning_pending_delta === "string"
-      ? incoming.reasoning_pending_delta
-      : trustedIncomingReasoningDelta
-        ? `${existing.reasoning_pending_delta ?? ""}${incoming.reasoning_stream_delta}`
-        : shouldUseIncomingReasoning
-          ? undefined
-          : existing.reasoning_pending_delta
+    )
   const existingToolCallsRef = isSubagentTranscriptBlobRef(
     existing.tool_calls_ref,
     "tool_calls"
@@ -509,18 +440,7 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     content_full_length: shouldUseIncomingContent
       ? incoming.content_full_length
       : existing.content_full_length,
-    content_ref:
-      shouldUseIncomingContent && !trustedIncomingContentDelta
-        ? incoming.content_ref
-        : (incoming.content_ref ?? existing.content_ref),
-    content_persisted_length:
-      shouldUseIncomingContent && !trustedIncomingContentDelta
-        ? incoming.content_persisted_length
-        : (incoming.content_persisted_length ?? existing.content_persisted_length),
-    content_pending_delta: nextContentPendingDelta,
-    content_stream_delta: trustedIncomingContentDelta
-      ? incoming.content_stream_delta
-      : undefined,
+    content_ref: shouldUseIncomingContent ? incoming.content_ref : existing.content_ref,
     subagent_content_fingerprint: shouldUseIncomingContent
       ? incoming.subagent_content_fingerprint
       : existing.subagent_content_fingerprint,
@@ -531,18 +451,7 @@ export function mergeTranscriptMessage(existing: Message, incoming: Message): Me
     reasoning_full_length: shouldUseIncomingReasoning
       ? incoming.reasoning_full_length
       : existing.reasoning_full_length,
-    reasoning_ref:
-      shouldUseIncomingReasoning && !trustedIncomingReasoningDelta
-        ? incoming.reasoning_ref
-        : (incoming.reasoning_ref ?? existing.reasoning_ref),
-    reasoning_persisted_length:
-      shouldUseIncomingReasoning && !trustedIncomingReasoningDelta
-        ? incoming.reasoning_persisted_length
-        : (incoming.reasoning_persisted_length ?? existing.reasoning_persisted_length),
-    reasoning_pending_delta: nextReasoningPendingDelta,
-    reasoning_stream_delta: trustedIncomingReasoningDelta
-      ? incoming.reasoning_stream_delta
-      : undefined,
+    reasoning_ref: shouldUseIncomingReasoning ? incoming.reasoning_ref : existing.reasoning_ref,
     subagent_reasoning_fingerprint: shouldUseIncomingReasoning
       ? incoming.subagent_reasoning_fingerprint
       : existing.subagent_reasoning_fingerprint,
@@ -648,20 +557,6 @@ export function selectMergedTranscriptRowsForPersistence(
   mergedMessages: Message[],
   incomingMessages: Message[]
 ): Message[] {
-  if (incomingMessages.length === 1 && mergedMessages.length > 0) {
-    const incoming = incomingMessages[0]
-    const tail = mergedMessages.at(-1)!
-    if (
-      tail.role === incoming.role &&
-      (tail.id === incoming.id ||
-        tail.replaced_message_ids?.includes(incoming.id) ||
-        (getMessageProviderSourceId(tail) === getMessageProviderSourceId(incoming) &&
-          (getMessageProviderOccurrence(incoming) === undefined ||
-            getMessageProviderOccurrence(tail) === getMessageProviderOccurrence(incoming))))
-    ) {
-      return [tail]
-    }
-  }
   const selected: Message[] = []
   const selectedIds = new Set<string>()
   for (const incoming of incomingMessages) {
@@ -1160,253 +1055,12 @@ function orderCompleteTranscriptSnapshot(
   return orderMessagesByProviderOccurrence(ordered)
 }
 
-interface LiveTranscriptIndex {
-  length: number
-  tail: Message
-  indexById: Map<string, number>
-  providerRoleIdentities: Set<string>
-  replacementSourceIds: Set<string>
-  replacementPrefixes: Set<string>
-}
-
-const liveTranscriptIndexes = new WeakMap<Message[], LiveTranscriptIndex>()
-
-const TRANSCRIPT_TAIL_CONTENT_FIELDS = new Set([
-  "content",
-  "content_is_projection",
-  "content_full_length",
-  "reasoning",
-  "reasoning_is_projection",
-  "reasoning_full_length",
-  "content_persisted_length",
-  "content_pending_delta",
-  "content_stream_delta",
-  "reasoning_persisted_length",
-  "reasoning_pending_delta",
-  "reasoning_stream_delta",
-  "created_at"
-])
-
-function transcriptProviderRoleIdentity(message: Message): string {
-  return `${message.role}\0${getMessageProviderSourceId(message)}`
-}
-
-function addMessageToLiveTranscriptIndex(
-  index: LiveTranscriptIndex,
-  message: Message,
-  messageIndex: number
-): void {
-  index.indexById.set(message.id, messageIndex)
-  index.providerRoleIdentities.add(transcriptProviderRoleIdentity(message))
-  for (const sourceId of message.replaced_message_ids ?? []) {
-    index.replacementSourceIds.add(sourceId)
-  }
-  for (const prefix of [
-    ...(message.replaced_message_id_prefixes ?? []),
-    ...(message.compatible_replaced_message_id_prefixes ?? [])
-  ]) {
-    index.replacementPrefixes.add(prefix)
-  }
-}
-
-function buildLiveTranscriptIndex(messages: Message[]): Message[] {
-  const tail = messages.at(-1)
-  if (!tail) return messages
-  const index: LiveTranscriptIndex = {
-    length: messages.length,
-    tail,
-    indexById: new Map<string, number>(),
-    providerRoleIdentities: new Set<string>(),
-    replacementSourceIds: new Set<string>(),
-    replacementPrefixes: new Set<string>()
-  }
-  messages.forEach((message, messageIndex) => {
-    addMessageToLiveTranscriptIndex(index, message, messageIndex)
-  })
-  liveTranscriptIndexes.set(messages, index)
-  return messages
-}
-
-function messageMatchesReplacementPrefix(
-  messageId: string,
-  prefixes: ReadonlySet<string>
-): boolean {
-  for (let end = 1; end <= messageId.length; end += 1) {
-    if (prefixes.has(messageId.slice(0, end))) return true
-  }
-  return false
-}
-
-function hasTranscriptReplacementMetadata(message: Message): boolean {
-  const instruction = message as TranscriptReplacementInstruction
-  return (
-    !!readReplacementString(instruction.replaces_message_id) ||
-    !!readReplacementString(instruction.replaces_message_id_prefix) ||
-    (message.replaced_message_ids?.length ?? 0) > 0 ||
-    (message.replaced_message_id_prefixes?.length ?? 0) > 0 ||
-    (message.compatible_replaced_message_id_prefixes?.length ?? 0) > 0
-  )
-}
-
-function tryAppendTrustedTranscriptTail(
-  messages: Message[],
-  incoming: Message[],
-  options: UpsertTranscriptMessagesOptions
-): Message[] | undefined {
-  if (options.completeSnapshot || incoming.length !== 1 || messages.length === 0) {
-    return undefined
-  }
-  const index = liveTranscriptIndexes.get(messages)
-  const candidate = incoming[0]
-  if (
-    !index ||
-    index.length !== messages.length ||
-    !candidate.id.trim() ||
-    index.indexById.has(candidate.id) ||
-    index.providerRoleIdentities.has(transcriptProviderRoleIdentity(candidate)) ||
-    index.replacementSourceIds.has(candidate.id) ||
-    messageMatchesReplacementPrefix(candidate.id, index.replacementPrefixes) ||
-    hasTranscriptReplacementMetadata(candidate)
-  ) {
-    return undefined
-  }
-
-  // The index proves both the render id and provider-role identity are new.
-  // normalizeAppendedMessageIds would therefore leave this trusted live row at
-  // the tail unchanged, so mutating the owned registry is safe and O(1).
-  messages.push(candidate)
-  index.length = messages.length
-  index.tail = candidate
-  addMessageToLiveTranscriptIndex(index, candidate, messages.length - 1)
-  return messages
-}
-
-function isMonotonicTranscriptTextUpdate(
-  existingText: string,
-  incomingText: string,
-  existingIsProjection: boolean,
-  incomingIsProjection: boolean,
-  existingFullLength: number | undefined,
-  incomingFullLength: number | undefined
-): boolean {
-  if (incomingText === existingText) return true
-  if (incomingIsProjection) {
-    if (!Number.isSafeInteger(incomingFullLength) || (incomingFullLength ?? -1) < 0) {
-      return false
-    }
-    if (!existingIsProjection) {
-      return existingText.length === 0 && (incomingFullLength ?? 0) >= incomingText.length
-    }
-    if (!Number.isSafeInteger(existingFullLength) || (existingFullLength ?? -1) < 0) {
-      return false
-    }
-    return (incomingFullLength ?? 0) > (existingFullLength ?? 0)
-  }
-  if (existingIsProjection) {
-    return incomingText.length >= (existingFullLength ?? existingText.length)
-  }
-  return incomingText.startsWith(existingText)
-}
-
-function hasStableTranscriptToolIdentity(existing: Message, incoming: Message): boolean {
-  if (incoming.tool_calls === undefined) return true
-  if (incoming.tool_calls === existing.tool_calls) return true
-  const existingToolCalls = existing.tool_calls ?? []
-  if (existingToolCalls.length > incoming.tool_calls.length) return false
-  return existingToolCalls.every((toolCall, index) => {
-    const incomingToolCall = incoming.tool_calls?.[index]
-    if (!incomingToolCall) return false
-    return (
-      toolCall.id === incomingToolCall.id &&
-      toolCall.name === incomingToolCall.name
-    )
-  })
-}
-
-function tryUpsertTranscriptTailContentUpdate(
-  messages: Message[],
-  incoming: Message[],
-  options: UpsertTranscriptMessagesOptions
-): Message[] | undefined {
-  if (options.completeSnapshot || incoming.length !== 1 || messages.length === 0) {
-    return undefined
-  }
-  const eligibility = liveTranscriptIndexes.get(messages)
-  const existing = eligibility?.tail
-  const candidate = incoming[0]
-  if (
-    !eligibility ||
-    eligibility.length !== messages.length ||
-    !existing ||
-    existing.role !== "assistant" ||
-    candidate.role !== existing.role ||
-    candidate.id !== existing.id ||
-    typeof existing.content !== "string" ||
-    typeof candidate.content !== "string" ||
-    !hasStableTranscriptToolIdentity(existing, candidate)
-  ) {
-    return undefined
-  }
-
-  const existingRecord = existing as unknown as Record<string, unknown>
-  const incomingRecord = candidate as unknown as Record<string, unknown>
-  for (const key of Object.keys(incomingRecord)) {
-    if (
-      TRANSCRIPT_TAIL_CONTENT_FIELDS.has(key) ||
-      key === "tool_calls" ||
-      key === "status"
-    ) {
-      continue
-    }
-    if (!Object.is(existingRecord[key], incomingRecord[key])) return undefined
-  }
-  if (
-    typeof candidate.content_stream_delta !== "string" &&
-    !isMonotonicTranscriptTextUpdate(
-      existing.content,
-      candidate.content,
-      existing.content_is_projection === true,
-      candidate.content_is_projection === true,
-      existing.content_full_length,
-      candidate.content_full_length
-    )
-  ) {
-    return undefined
-  }
-  if (
-    typeof candidate.reasoning === "string" &&
-    typeof candidate.reasoning_stream_delta !== "string" &&
-    !isMonotonicTranscriptTextUpdate(
-      existing.reasoning ?? "",
-      candidate.reasoning,
-      existing.reasoning_is_projection === true,
-      candidate.reasoning_is_projection === true,
-      existing.reasoning_full_length,
-      candidate.reasoning_full_length
-    )
-  ) {
-    return undefined
-  }
-
-  // Eligibility is only recorded on arrays produced by the canonical fallback
-  // above. Replacing that owned tail slot in place keeps content-only stream
-  // frames O(1) even for a very long transcript; callers publish an explicit
-  // per-subagent content version so external-store consumers still update.
-  messages[messages.length - 1] = mergeTranscriptMessage(existing, candidate)
-  eligibility.tail = messages[messages.length - 1]
-  return messages
-}
-
 export function upsertTranscriptMessages(
   messages: Message[],
   incoming: Message[],
   options: UpsertTranscriptMessagesOptions = {}
 ): Message[] {
   if (incoming.length === 0) return messages
-  const tailContentUpdate = tryUpsertTranscriptTailContentUpdate(messages, incoming, options)
-  if (tailContentUpdate) return tailContentUpdate
-  const trustedTailAppend = tryAppendTrustedTranscriptTail(messages, incoming, options)
-  if (trustedTailAppend) return trustedTailAppend
   const next: Message[] = []
   const baselineIndexById = new Map<string, number>()
   for (const message of normalizeCompleteMessageIds(messages)) {
@@ -1445,7 +1099,7 @@ export function upsertTranscriptMessages(
   const ordered = options.completeSnapshot
     ? orderCompleteTranscriptSnapshot(baselineIds, next, resolvedIncoming)
     : next
-  return buildLiveTranscriptIndex(ordered)
+  return ordered
 }
 
 export function mergeSubagentTranscripts(
@@ -1454,15 +1108,9 @@ export function mergeSubagentTranscripts(
   messages: Message[],
   options: UpsertTranscriptMessagesOptions = {}
 ): Record<string, Message[]> {
-  const currentBucket = current[subagentId] ?? []
-  const nextBucket = upsertTranscriptMessages(currentBucket, messages, options)
-  // The trusted tail path owns and mutates only the selected bucket. Keep the
-  // registry reference so a live token never enumerates thousands of unrelated
-  // subagent ids; the caller publishes its explicit per-subagent content version.
-  if (nextBucket === currentBucket && current[subagentId] === currentBucket) return current
   return {
     ...current,
-    [subagentId]: nextBucket
+    [subagentId]: upsertTranscriptMessages(current[subagentId] ?? [], messages, options)
   }
 }
 
@@ -1547,8 +1195,6 @@ function revivePersistedSubagentMessage(value: unknown): Message | null {
     ...(contentIsProjection && { content_is_projection: true }),
     ...(contentFullLength !== undefined && { content_full_length: contentFullLength }),
     ...(contentRef && { content_ref: contentRef }),
-    ...(contentRef &&
-      contentFullLength !== undefined && { content_persisted_length: contentFullLength }),
     ...(typeof value.reasoning === "string" && { reasoning: value.reasoning }),
     ...(value.reasoning_is_projection === true && { reasoning_is_projection: true }),
     ...(typeof value.reasoning_full_length === "number" &&
@@ -1557,11 +1203,6 @@ function revivePersistedSubagentMessage(value: unknown): Message | null {
         reasoning_full_length: value.reasoning_full_length
       }),
     ...(reasoningRef && { reasoning_ref: reasoningRef }),
-    ...(reasoningRef &&
-      typeof value.reasoning_full_length === "number" &&
-      Number.isSafeInteger(value.reasoning_full_length) && {
-        reasoning_persisted_length: value.reasoning_full_length
-      }),
     ...(replacedMessageIds && { replaced_message_ids: replacedMessageIds }),
     ...(replacedMessageIdPrefixes && {
       replaced_message_id_prefixes: replacedMessageIdPrefixes
@@ -1643,48 +1284,7 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
     ...(message.start_at && { start_at: message.start_at.toISOString() }),
     ...(message.end_at && { end_at: message.end_at.toISOString() })
   }
-  const contentPendingDelta =
-    typeof message.content_pending_delta === "string" ? message.content_pending_delta : ""
-  const reasoningPendingDelta =
-    typeof message.reasoning_pending_delta === "string" ? message.reasoning_pending_delta : ""
-  const contentPersistedLength =
-    Number.isSafeInteger(message.content_persisted_length) &&
-    (message.content_persisted_length ?? -1) >= 0
-      ? message.content_persisted_length
-      : undefined
-  const reasoningPersistedLength =
-    Number.isSafeInteger(message.reasoning_persisted_length) &&
-    (message.reasoning_persisted_length ?? -1) >= 0
-      ? message.reasoning_persisted_length
-      : undefined
-  const liveTextPersistenceEligible =
-    message.role === "assistant" &&
-    (message.content_priority ?? 0) === 0 &&
-    message.is_error !== true &&
-    message.status === undefined &&
-    message.tool_calls === undefined &&
-    message.tool_calls_ref === undefined
-  const hasContentRef = isSubagentTranscriptBlobRef(message.content_ref, "content")
-  const hasReasoningRef = isSubagentTranscriptBlobRef(message.reasoning_ref, "reasoning")
-  const requiresLiveTextBootstrap =
-    liveTextPersistenceEligible &&
-    (contentPendingDelta.length > 0 || reasoningPendingDelta.length > 0) &&
-    !hasContentRef &&
-    !hasReasoningRef
-  for (const key of [
-    "content_persisted_length",
-    "content_pending_delta",
-    "content_stream_delta",
-    "reasoning_persisted_length",
-    "reasoning_pending_delta",
-    "reasoning_stream_delta"
-  ]) {
-    delete serialized[key]
-  }
-  const textDeltas: Record<string, unknown> = {}
-  const contentRef = hasContentRef ? message.content_ref : undefined
-  const reasoningRef = hasReasoningRef ? message.reasoning_ref : undefined
-  if (contentRef) {
+  if (isSubagentTranscriptBlobRef(message.content_ref, "content")) {
     if (typeof message.content === "string") {
       serialized.content = projectSubagentTranscriptContentForStorage(message.content)
       serialized.content_full_length =
@@ -1698,33 +1298,11 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
       serialized.content = []
     }
     serialized.content_is_projection = true
-    if (
-      contentPendingDelta &&
-      contentPersistedLength !== undefined
-    ) {
-      textDeltas.content = {
-        v: 1,
-        baseRefSha256: contentRef.sha256,
-        baseLength: contentPersistedLength,
-        targetLength: contentPersistedLength + contentPendingDelta.length,
-        delta: contentPendingDelta
-      }
-      serialized.content_full_length = contentPersistedLength + contentPendingDelta.length
-    }
-  } else if (
-    contentPendingDelta &&
-    message.role === "assistant" &&
-    (message.content_priority ?? 0) === 0 &&
-    message.is_error !== true &&
-    message.status === undefined
-  ) {
-    // Before the first sidecar acknowledgement the pending delta is the full
-    // stream text. Compact it once; subsequent saves carry suffixes only.
-    serialized.content = contentPendingDelta
-    delete serialized.content_is_projection
-    delete serialized.content_full_length
   }
-  if (reasoningRef && typeof message.reasoning === "string") {
+  if (
+    isSubagentTranscriptBlobRef(message.reasoning_ref, "reasoning") &&
+    typeof message.reasoning === "string"
+  ) {
     serialized.reasoning = projectSubagentTranscriptContentForStorage(message.reasoning)
     serialized.reasoning_full_length =
       message.reasoning_is_projection === true &&
@@ -1734,42 +1312,9 @@ function serializeSubagentMessage(message: Message): Record<string, unknown> {
         ? message.reasoning_full_length
         : message.reasoning.length
     serialized.reasoning_is_projection = true
-    if (reasoningPendingDelta && reasoningPersistedLength !== undefined) {
-      textDeltas.reasoning = {
-        v: 1,
-        baseRefSha256: reasoningRef.sha256,
-        baseLength: reasoningPersistedLength,
-        targetLength: reasoningPersistedLength + reasoningPendingDelta.length,
-        delta: reasoningPendingDelta
-      }
-      serialized.reasoning_full_length = reasoningPersistedLength + reasoningPendingDelta.length
-    }
-  } else if (
-    reasoningPendingDelta &&
-    message.role === "assistant" &&
-    (message.content_priority ?? 0) === 0 &&
-    message.is_error !== true &&
-    message.status === undefined
-  ) {
-    serialized.reasoning = reasoningPendingDelta
-    delete serialized.reasoning_is_projection
-    delete serialized.reasoning_full_length
   }
   if (isSubagentTranscriptBlobRef(message.tool_calls_ref, "tool_calls")) {
     delete serialized.tool_calls
-  }
-  if (requiresLiveTextBootstrap) {
-    serialized.content = contentPendingDelta
-    serialized.reasoning = reasoningPendingDelta
-    delete serialized.content_ref
-    delete serialized.content_is_projection
-    delete serialized.content_full_length
-    delete serialized.reasoning_ref
-    delete serialized.reasoning_is_projection
-    delete serialized.reasoning_full_length
-    serialized.subagent_live_text_bootstrap = true
-  } else if (Object.keys(textDeltas).length > 0) {
-    serialized.subagent_text_deltas = textDeltas
   }
   return serialized
 }
@@ -1804,160 +1349,12 @@ export function applyPersistedSubagentTranscriptRefs(
   sent: Record<string, Message[]>,
   persistedManifests: Record<string, unknown>
 ): Record<string, Message[]> {
-  const attachRefs = (
-    message: Message,
-    sentMessage: Message,
-    persisted: Record<string, unknown>
-  ): Message => {
-    const contentRef = isSubagentTranscriptBlobRef(persisted.content_ref, "content")
-      ? persisted.content_ref
-      : undefined
-    const reasoningRef = isSubagentTranscriptBlobRef(persisted.reasoning_ref, "reasoning")
-      ? persisted.reasoning_ref
-      : undefined
-    const toolCallsRef = isSubagentTranscriptBlobRef(
-      persisted.tool_calls_ref,
-      "tool_calls"
-    )
-      ? persisted.tool_calls_ref
-      : undefined
-    const persistedContentLength =
-      typeof persisted.content_full_length === "number" &&
-      Number.isSafeInteger(persisted.content_full_length) &&
-      persisted.content_full_length >= 0
-        ? persisted.content_full_length
-        : undefined
-    const persistedReasoningLength =
-      typeof persisted.reasoning_full_length === "number" &&
-      Number.isSafeInteger(persisted.reasoning_full_length) &&
-      persisted.reasoning_full_length >= 0
-        ? persisted.reasoning_full_length
-        : undefined
-    const sentContentBase = sentMessage.content_persisted_length ?? 0
-    const currentContentBase = message.content_persisted_length ?? 0
-    const sentContentDelta = sentMessage.content_pending_delta ?? ""
-    const currentContentDelta = message.content_pending_delta ?? ""
-    const acknowledgesContentDelta =
-      !!contentRef &&
-      persistedContentLength !== undefined &&
-      currentContentBase === sentContentBase &&
-      persistedContentLength === sentContentBase + sentContentDelta.length &&
-      currentContentDelta.length >= sentContentDelta.length
-    const sentReasoningBase = sentMessage.reasoning_persisted_length ?? 0
-    const currentReasoningBase = message.reasoning_persisted_length ?? 0
-    const sentReasoningDelta = sentMessage.reasoning_pending_delta ?? ""
-    const currentReasoningDelta = message.reasoning_pending_delta ?? ""
-    const acknowledgesReasoningDelta =
-      !!reasoningRef &&
-      persistedReasoningLength !== undefined &&
-      currentReasoningBase === sentReasoningBase &&
-      persistedReasoningLength === sentReasoningBase + sentReasoningDelta.length &&
-      currentReasoningDelta.length >= sentReasoningDelta.length
-    const canAttachContentRef =
-      !!contentRef &&
-      (acknowledgesContentDelta || transcriptFieldEquals(message.content, sentMessage.content))
-    const canAttachReasoningRef =
-      !!reasoningRef &&
-      (acknowledgesReasoningDelta ||
-        transcriptFieldEquals(message.reasoning, sentMessage.reasoning))
-    const canAttachToolCallsRef =
-      !!toolCallsRef && transcriptFieldEquals(message.tool_calls, sentMessage.tool_calls)
-    if (
-      (!canAttachContentRef ||
-        (message.content_ref?.sha256 === contentRef.sha256 &&
-          message.content_persisted_length === persistedContentLength &&
-          !acknowledgesContentDelta)) &&
-      (!canAttachReasoningRef ||
-        (message.reasoning_ref?.sha256 === reasoningRef.sha256 &&
-          message.reasoning_persisted_length === persistedReasoningLength &&
-          !acknowledgesReasoningDelta)) &&
-      (!canAttachToolCallsRef || message.tool_calls_ref?.sha256 === toolCallsRef.sha256)
-    ) {
-      return message
-    }
-    return {
-      ...message,
-      ...(canAttachContentRef && {
-        content_ref: contentRef,
-        ...(persistedContentLength !== undefined && {
-          content_persisted_length: persistedContentLength
-        }),
-        content_pending_delta: acknowledgesContentDelta
-          ? currentContentDelta.slice(sentContentDelta.length)
-          : message.content_pending_delta,
-        content_stream_delta: undefined
-      }),
-      ...(canAttachReasoningRef && {
-        reasoning_ref: reasoningRef,
-        ...(persistedReasoningLength !== undefined && {
-          reasoning_persisted_length: persistedReasoningLength
-        }),
-        reasoning_pending_delta: acknowledgesReasoningDelta
-          ? currentReasoningDelta.slice(sentReasoningDelta.length)
-          : message.reasoning_pending_delta,
-        reasoning_stream_delta: undefined
-      }),
-      ...(canAttachToolCallsRef && { tool_calls_ref: toolCallsRef })
-    }
-  }
-
-  let next: Record<string, Message[]> | undefined
+  let changed = false
+  const next = { ...current }
   for (const [subagentId, sentMessages] of Object.entries(sent)) {
     const currentMessages = current[subagentId]
     const rawPersistedMessages = persistedManifests[subagentId]
     if (!currentMessages || !Array.isArray(rawPersistedMessages)) continue
-    const sentTail = sentMessages.length === 1 ? sentMessages[0] : undefined
-    const persistedTail =
-      rawPersistedMessages.length === 1 && isRecord(rawPersistedMessages[0])
-        ? rawPersistedMessages[0]
-        : undefined
-    const tailIndex = currentMessages.length - 1
-    const currentTail = tailIndex >= 0 ? currentMessages[tailIndex] : undefined
-    if (
-      sentTail &&
-      persistedTail &&
-      currentTail?.id === sentTail.id &&
-      persistedTail.id === sentTail.id
-    ) {
-      const updatedTail = attachRefs(currentTail, sentTail, persistedTail)
-      if (updatedTail !== currentTail) {
-        // Ref metadata does not affect transcript structure/display. Mutating
-        // the trusted owned tail avoids copying 20k historical slots merely to
-        // attach a sidecar hash returned for one dirty row.
-        currentMessages[tailIndex] = updatedTail
-        const liveIndex = liveTranscriptIndexes.get(currentMessages)
-        if (
-          liveIndex &&
-          liveIndex.length === currentMessages.length &&
-          liveIndex.tail === currentTail
-        ) {
-          liveIndex.tail = updatedTail
-        }
-      }
-      continue
-    }
-    const liveIndex = liveTranscriptIndexes.get(currentMessages)
-    if (liveIndex && liveIndex.length === currentMessages.length) {
-      const persistedById = new Map(
-        rawPersistedMessages.flatMap((value) =>
-          isRecord(value) && typeof value.id === "string"
-            ? [[value.id, value] as const]
-            : []
-        )
-      )
-      for (const sentMessage of sentMessages) {
-        const messageIndex = liveIndex.indexById.get(sentMessage.id)
-        const persisted = persistedById.get(sentMessage.id)
-        if (messageIndex === undefined || !persisted) continue
-        const currentMessage = currentMessages[messageIndex]
-        if (!currentMessage) continue
-        const updatedMessage = attachRefs(currentMessage, sentMessage, persisted)
-        if (updatedMessage === currentMessage) continue
-        currentMessages[messageIndex] = updatedMessage
-        if (messageIndex === currentMessages.length - 1) liveIndex.tail = updatedMessage
-      }
-      continue
-    }
     const sentById = new Map(sentMessages.map((message) => [message.id, message]))
     const persistedById = new Map(
       rawPersistedMessages.flatMap((value) =>
@@ -1969,14 +1366,43 @@ export function applyPersistedSubagentTranscriptRefs(
       const sentMessage = sentById.get(message.id)
       const persisted = persistedById.get(message.id)
       if (!sentMessage || !persisted) return message
-      const updated = attachRefs(message, sentMessage, persisted)
-      if (updated !== message) bucketChanged = true
-      return updated
+      const contentRef = isSubagentTranscriptBlobRef(persisted.content_ref, "content")
+        ? persisted.content_ref
+        : undefined
+      const reasoningRef = isSubagentTranscriptBlobRef(persisted.reasoning_ref, "reasoning")
+        ? persisted.reasoning_ref
+        : undefined
+      const toolCallsRef = isSubagentTranscriptBlobRef(
+        persisted.tool_calls_ref,
+        "tool_calls"
+      )
+        ? persisted.tool_calls_ref
+        : undefined
+      const canAttachContentRef =
+        !!contentRef && transcriptFieldEquals(message.content, sentMessage.content)
+      const canAttachReasoningRef =
+        !!reasoningRef && transcriptFieldEquals(message.reasoning, sentMessage.reasoning)
+      const canAttachToolCallsRef =
+        !!toolCallsRef && transcriptFieldEquals(message.tool_calls, sentMessage.tool_calls)
+      if (
+        (!canAttachContentRef || message.content_ref?.sha256 === contentRef.sha256) &&
+        (!canAttachReasoningRef || message.reasoning_ref?.sha256 === reasoningRef.sha256) &&
+        (!canAttachToolCallsRef || message.tool_calls_ref?.sha256 === toolCallsRef.sha256)
+      ) {
+        return message
+      }
+      bucketChanged = true
+      return {
+        ...message,
+        ...(canAttachContentRef && { content_ref: contentRef }),
+        ...(canAttachReasoningRef && { reasoning_ref: reasoningRef }),
+        ...(canAttachToolCallsRef && { tool_calls_ref: toolCallsRef })
+      }
     })
     if (bucketChanged) {
-      next ??= { ...current }
       next[subagentId] = updatedMessages
+      changed = true
     }
   }
-  return next ?? current
+  return changed ? next : current
 }

@@ -300,7 +300,6 @@ export function GitPanelView({
 }): React.JSX.Element {
   const metaRequestIdRef = useRef(0)
   const diffRequestIdRef = useRef(0)
-  const fileDiffRequestIdRef = useRef(0)
   const activeThreadIdRef = useRef(threadId)
   const rejectInFlightRef = useRef(false)
   const suppressFileChangeRefreshUntilRef = useRef(0)
@@ -359,7 +358,6 @@ export function GitPanelView({
     activeThreadIdRef.current = threadId
     metaRequestIdRef.current += 1
     diffRequestIdRef.current += 1
-    fileDiffRequestIdRef.current += 1
     setMetaState(initialMetaState)
     setDiffState(null)
     setMetaLoading(true)
@@ -398,19 +396,6 @@ export function GitPanelView({
     setPushMetaState(null)
     setPushMetaLoading(false)
   }, [threadId, initialMetaState])
-
-  useEffect(
-    () => () => {
-      metaRequestIdRef.current += 1
-      diffRequestIdRef.current += 1
-      fileDiffRequestIdRef.current += 1
-      rejectDialogRequestIdRef.current += 1
-      pushMetaRequestIdRef.current += 1
-      commitMetaRequestIdRef.current += 1
-      void window.api.workspace.cancelGitPanelReads("panel").catch(() => {})
-    },
-    [threadId]
-  )
 
   const showToast = useCallback((text: string, variant: "success" | "error" = "success"): void => {
     const displayText = variant === "error" ? formatGitPanelErrorMessage(text) : text
@@ -816,12 +801,7 @@ export function GitPanelView({
     async (filePath: string): Promise<void> => {
       if (!threadId || !filePath || diffLoadingPath === filePath) return
       const requestDiffId = diffRequestIdRef.current
-      const requestFileDiffId = ++fileDiffRequestIdRef.current
       const requestThreadId = threadId
-      const isLatestFileRequest = (): boolean =>
-        requestDiffId === diffRequestIdRef.current &&
-        requestFileDiffId === fileDiffRequestIdRef.current &&
-        requestThreadId === activeThreadIdRef.current
 
       if (isDiffUnsupportedFile(filePath)) {
         setCurrentFileDiff(null)
@@ -846,19 +826,19 @@ export function GitPanelView({
           requestFilePath,
           repo ? { worktreePath: repo.path } : undefined
         )
-        if (!isLatestFileRequest() || result.taskId !== activeThreadIdRef.current) return
+        if (requestDiffId !== diffRequestIdRef.current || result.taskId !== activeThreadIdRef.current) return
         if (!result.success || !result.file) {
           throw new Error(result.error || "加载文件 diff 失败")
         }
-        if (isLatestFileRequest()) {
+        if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
           setCurrentFileDiff(result.file.diff ?? "")
           loadedDiffPathRef.current = filePath
         }
       } catch (e) {
-        if (!isLatestFileRequest()) return
+        if (requestDiffId !== diffRequestIdRef.current || requestThreadId !== activeThreadIdRef.current) return
         setDiffFileError(e instanceof Error ? e.message : "加载文件 diff 失败")
       } finally {
-        if (isLatestFileRequest()) {
+        if (requestDiffId === diffRequestIdRef.current && requestThreadId === activeThreadIdRef.current) {
           if (diffLoadingPathRef.current === filePath) {
             diffLoadingPathRef.current = null
             setDiffLoadingPath(null)
@@ -941,7 +921,7 @@ export function GitPanelView({
     if (!threadId) return
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (!data.threadIds.includes(threadId)) return
+      if (data.threadId !== threadId) return
       if (rejectInFlightRef.current || Date.now() < suppressFileChangeRefreshUntilRef.current) {
         return
       }

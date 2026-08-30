@@ -1,12 +1,6 @@
 export interface OpenResourcePreviewDetail {
   threadId: string
   filePath: string
-  /** Main-issued capability for a trusted non-workspace file. */
-  externalPreviewGrant?: string
-  /** Expiry and authoritative run identity used for operation-triggered renewal. */
-  externalPreviewGrantExpiresAt?: number
-  externalPreviewProjectId?: string
-  externalPreviewSlug?: string
 }
 
 const RESOURCE_PREVIEW_OPEN_EVENT = "resource-preview:open"

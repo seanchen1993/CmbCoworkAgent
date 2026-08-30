@@ -54,7 +54,6 @@ export interface IPCStreamEvent {
   mode: "messages" | "values"
   data: unknown
   workerTurn?: number
-  valuesSnapshotKind?: "full" | "append" | "tail"
 }
 
 export interface IPCDoneEvent {

@@ -1,18 +1,18 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto"
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import {
-  appendFile,
-  chmod,
-  lstat,
-  mkdir,
-  opendir,
-  readFile,
-  rename,
-  stat,
-  unlink,
-  utimes,
-  writeFile
-} from "fs/promises"
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync
+} from "fs"
+import type { Dirent } from "fs"
 import { basename, dirname, join } from "path"
 
 export type TraceStorageMode = "encrypted" | "off" | "plaintext"
@@ -88,23 +88,9 @@ export interface TraceLocalStorageOptions {
 const TRACE_STORAGE_MODE_ENV = "CMB_COWORK_TRACE_STORAGE_MODE"
 const KEY_FILE_NAME = ".trace-key-v1.json"
 const MIGRATION_MARKER_FILE_NAME = ".trace-migration-v1.complete"
-const MIGRATION_IN_PROGRESS_FILE_NAME = ".trace-migration-v1.in-progress"
 const TRACE_AAD = Buffer.from("cmbcowork.trace/v1", "utf8")
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
-const TRACE_INVENTORY_MAX_ENTRIES = 4_096
-const TRACE_INVENTORY_MAX_DIRECTORIES = 2_048
-const TRACE_INVENTORY_MAX_FILES = 4_096
-const TRACE_MIGRATION_MAX_FILE_BYTES = 8 * 1024 * 1024
-const TRACE_MIGRATION_MAX_TOTAL_BYTES = 64 * 1024 * 1024
-const TRACE_MIGRATION_MAX_LINE_CHARS = 1536 * 1024
-const TRACE_MIGRATION_YIELD_INTERVAL = 128
-const TRACE_STORAGE_CACHE_MAX_ENTRIES = 32
-const TRACE_APPEND_MAX_PLAINTEXT_BYTES = 1024 * 1024
-
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve))
-}
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error
@@ -234,7 +220,7 @@ function sameSnapshot(left: TraceMigrationSnapshot, right: TraceMigrationSnapsho
   )
 }
 
-async function collectTraceStorageInventory(rootDir: string): Promise<TraceStorageInventory> {
+function collectTraceStorageInventory(rootDir: string): TraceStorageInventory {
   const snapshot: TraceMigrationSnapshot = {
     directories: Object.create(null) as Record<string, number>,
     rootFiles: Object.create(null) as Record<string, TraceFileFingerprint>
@@ -242,22 +228,19 @@ async function collectTraceStorageInventory(rootDir: string): Promise<TraceStora
   const directories = new Map<string, TraceInventoryDirectory>()
   const rootTraceFiles = new Map<string, { filePath: string; fingerprint: TraceFileFingerprint }>()
   let failedPaths = 0
+  if (!existsSync(rootDir)) return { snapshot, directories, rootTraceFiles, failedPaths }
+
   const pending: Array<{ fullPath: string; relativePath: string }> = [
     { fullPath: rootDir, relativePath: "" }
   ]
-  let scannedEntries = 0
-  let traceFileCount = 0
 
   while (pending.length > 0) {
     const current = pending.pop()
     if (!current) continue
-    let directory
+    let entries: Dirent[]
     try {
-      directory = await opendir(current.fullPath)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" && current.relativePath === "") {
-        return { snapshot, directories, rootTraceFiles, failedPaths }
-      }
+      entries = readdirSync(current.fullPath, { withFileTypes: true })
+    } catch {
       failedPaths += 1
       continue
     }
@@ -265,24 +248,14 @@ async function collectTraceStorageInventory(rootDir: string): Promise<TraceStora
     const currentDirectory = current.relativePath
       ? directories.get(current.relativePath)
       : undefined
-    for await (const entry of directory) {
-      scannedEntries += 1
-      if (scannedEntries > TRACE_INVENTORY_MAX_ENTRIES) {
-        failedPaths += 1
-        return { snapshot, directories, rootTraceFiles, failedPaths }
-      }
-      if (scannedEntries % TRACE_MIGRATION_YIELD_INTERVAL === 0) await yieldToEventLoop()
+    for (const entry of entries) {
       const fullPath = join(current.fullPath, entry.name)
       if (entry.isDirectory()) {
-        if (directories.size >= TRACE_INVENTORY_MAX_DIRECTORIES) {
-          failedPaths += 1
-          continue
-        }
         try {
           const relativePath = normalizeRelativePath(
             current.relativePath ? join(current.relativePath, entry.name) : entry.name
           )
-          const mtimeMs = (await stat(fullPath)).mtimeMs
+          const mtimeMs = statSync(fullPath).mtimeMs
           snapshot.directories[relativePath] = mtimeMs
           directories.set(relativePath, { mtimeMs, traceFiles: [] })
           pending.push({ fullPath, relativePath })
@@ -292,11 +265,6 @@ async function collectTraceStorageInventory(rootDir: string): Promise<TraceStora
         continue
       }
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue
-      if (traceFileCount >= TRACE_INVENTORY_MAX_FILES) {
-        failedPaths += 1
-        continue
-      }
-      traceFileCount += 1
 
       if (currentDirectory) {
         currentDirectory.traceFiles.push(fullPath)
@@ -304,8 +272,8 @@ async function collectTraceStorageInventory(rootDir: string): Promise<TraceStora
       }
 
       try {
-        const fileStat = await stat(fullPath)
-        const fingerprint = { mtimeMs: fileStat.mtimeMs, size: fileStat.size }
+        const stat = statSync(fullPath)
+        const fingerprint = { mtimeMs: stat.mtimeMs, size: stat.size }
         snapshot.rootFiles[entry.name] = fingerprint
         rootTraceFiles.set(entry.name, { filePath: fullPath, fingerprint })
       } catch {
@@ -360,8 +328,6 @@ export class TraceLocalStorage {
   private readonly platform: NodeJS.Platform
   private readonly protector: TraceKeyProtector | undefined
   private dataKey: Buffer | undefined
-  private readonly fileOperations = new Map<string, Promise<void>>()
-  private initializationPromise: Promise<TraceStorageInitializationResult> | undefined
 
   constructor(
     readonly rootDir: string,
@@ -373,19 +339,16 @@ export class TraceLocalStorage {
   }
 
   /** Append one trace JSON document according to the configured storage mode. */
-  async appendJsonLine(filePath: string, plaintext: string): Promise<boolean> {
-    if (Buffer.byteLength(plaintext, "utf8") > TRACE_APPEND_MAX_PLAINTEXT_BYTES) return false
-    if (this.mode === "plaintext") await this.invalidateMigrationMarkers()
+  appendJsonLine(filePath: string, plaintext: string): boolean {
     const storedLine = this.encodeLineForStorage(plaintext)
     if (storedLine === undefined) return false
-    await this.runFileOperation(filePath, async () => {
-      await this.ensurePrivateDirectory(dirname(filePath))
-      await appendFile(filePath, `${storedLine}\n`, {
-        encoding: "utf8",
-        mode: PRIVATE_FILE_MODE
-      })
-      await this.ensurePrivateFile(filePath)
+
+    this.ensurePrivateDirectory(dirname(filePath))
+    appendFileSync(filePath, `${storedLine}\n`, {
+      encoding: "utf8",
+      mode: PRIVATE_FILE_MODE
     })
+    this.ensurePrivateFile(filePath)
     return true
   }
 
@@ -410,16 +373,7 @@ export class TraceLocalStorage {
    * directories whose metadata changed. If OS key protection is unavailable,
    * encrypted mode is fail-closed: new traces are not written as plaintext.
    */
-  async initialize(): Promise<TraceStorageInitializationResult> {
-    if (!this.initializationPromise) {
-      this.initializationPromise = this.initializeOnce().finally(() => {
-        this.initializationPromise = undefined
-      })
-    }
-    return this.initializationPromise
-  }
-
-  private async initializeOnce(): Promise<TraceStorageInitializationResult> {
+  initialize(): TraceStorageInitializationResult {
     const result: TraceStorageInitializationResult = {
       mode: this.mode,
       ready: this.mode !== "encrypted",
@@ -429,20 +383,15 @@ export class TraceLocalStorage {
       migrationSkipped: false
     }
 
-    if (this.mode === "off") {
-      try {
-        await lstat(this.rootDir)
-      } catch (error) {
-        if (isNodeError(error) && error.code === "ENOENT") return result
-        throw error
-      }
+    if (this.mode === "off" && !existsSync(this.rootDir)) {
+      return result
     }
 
-    await this.ensurePrivateDirectory(this.rootDir)
+    this.ensurePrivateDirectory(this.rootDir)
     if (this.mode === "plaintext") {
       // A later encrypted-mode launch must not trust a marker created before
       // this explicitly unsafe mode had a chance to add plaintext lines.
-      await this.invalidateMigrationMarkers()
+      this.invalidateMigrationMarker()
       result.ready = true
       return result
     }
@@ -461,8 +410,8 @@ export class TraceLocalStorage {
     }
 
     result.ready = true
-    const marker = await this.readMigrationMarker()
-    const inventory = await collectTraceStorageInventory(this.rootDir)
+    const marker = this.readMigrationMarker()
+    const inventory = collectTraceStorageInventory(this.rootDir)
     if (inventory.failedPaths > 0) {
       result.failedFiles += inventory.failedPaths
       result.reason = `Trace inventory scan failed for ${inventory.failedPaths} path(s)`
@@ -478,89 +427,40 @@ export class TraceLocalStorage {
       return result
     }
 
-    try {
-      await this.writeMigrationInProgressMarker()
-    } catch (error) {
-      result.failedFiles += 1
-      result.reason = `Trace migration progress marker write failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-      return result
-    }
-
-    let migratedBytes = 0
-    for (let fileIndex = 0; fileIndex < selection.filePaths.length; fileIndex += 1) {
-      const filePath = selection.filePaths[fileIndex]
+    for (const filePath of selection.filePaths) {
       try {
-        await this.runFileOperation(filePath, async () => {
-          const fileStat = await lstat(filePath)
-          if (
-            !fileStat.isFile() ||
-            fileStat.size > TRACE_MIGRATION_MAX_FILE_BYTES ||
-            migratedBytes + fileStat.size > TRACE_MIGRATION_MAX_TOTAL_BYTES
-          ) {
-            throw new Error("Trace migration byte budget exceeded")
-          }
-          migratedBytes += fileStat.size
-          await this.ensurePrivateDirectory(dirname(filePath))
-          await this.ensurePrivateFile(filePath)
-          const raw = await readFile(filePath, "utf8")
-          let changed = false
-          const protectedLines: string[] = []
-          let cursor = 0
-          let lineIndex = 0
-          while (cursor <= raw.length) {
-            const newline = raw.indexOf("\n", cursor)
-            const end = newline < 0 ? raw.length : newline
-            const line = raw.slice(cursor, end).replace(/\r$/, "")
-            protectedLines.push(
-              !line.trim()
-                ? line
-                : line.length > TRACE_MIGRATION_MAX_LINE_CHARS
-                  ? (() => {
-                      changed = true
-                      return this.encryptLine(
-                        JSON.stringify({
-                          traceStorageNotice: "oversized legacy trace omitted during migration",
-                          originalChars: line.length
-                        })
-                      )
-                    })()
-                  : parseEncryptedEnvelope(line)
-                    ? line
-                    : (() => {
-                    changed = true
-                    return this.encryptLine(line)
-                      })()
-            )
-            lineIndex += 1
-            if (lineIndex % TRACE_MIGRATION_YIELD_INTERVAL === 0) await yieldToEventLoop()
-            if (newline < 0) break
-            cursor = newline + 1
-          }
-          const protectedContent = protectedLines.join("\n")
-          if (changed) {
-            await this.atomicPrivateWrite(filePath, protectedContent)
-            result.migratedFiles += 1
-          } else {
-            result.protectedFiles += 1
-          }
-        })
+        this.ensurePrivateDirectory(dirname(filePath))
+        this.ensurePrivateFile(filePath)
+        const raw = readFileSync(filePath, "utf8")
+        let changed = false
+        const protectedContent = raw
+          .split(/\r?\n/)
+          .map((line) => {
+            if (!line.trim() || parseEncryptedEnvelope(line)) return line
+            changed = true
+            return this.encryptLine(line)
+          })
+          .join("\n")
+
+        if (changed) {
+          this.atomicPrivateWrite(filePath, protectedContent)
+          result.migratedFiles += 1
+        } else {
+          result.protectedFiles += 1
+        }
       } catch {
         result.failedFiles += 1
       }
-      if (fileIndex % TRACE_MIGRATION_YIELD_INTERVAL === 0) await yieldToEventLoop()
     }
 
     if (result.failedFiles === 0) {
-      const finalInventory = await collectTraceStorageInventory(this.rootDir)
+      const finalInventory = collectTraceStorageInventory(this.rootDir)
       if (finalInventory.failedPaths > 0) {
         result.failedFiles += finalInventory.failedPaths
         result.reason = `Trace inventory verification failed for ${finalInventory.failedPaths} path(s)`
       } else {
         try {
-          await this.writeMigrationMarker(finalInventory.snapshot)
-          await this.removeMigrationInProgressMarker()
+          this.writeMigrationMarker(finalInventory.snapshot)
         } catch (error) {
           result.failedFiles += 1
           result.reason = `Trace migration marker write failed: ${error instanceof Error ? error.message : String(error)}`
@@ -574,6 +474,7 @@ export class TraceLocalStorage {
   private encodeLineForStorage(plaintext: string): string | undefined {
     if (this.mode === "off") return undefined
     if (this.mode === "plaintext") {
+      this.invalidateMigrationMarker()
       return plaintext
     }
     return this.encryptLine(plaintext)
@@ -637,7 +538,7 @@ export class TraceLocalStorage {
     }
 
     const keyPath = join(this.rootDir, KEY_FILE_NAME)
-    this.ensurePrivateDirectoryForKey(this.rootDir)
+    this.ensurePrivateDirectory(this.rootDir)
     if (existsSync(keyPath)) {
       this.dataKey = this.readWrappedKey(keyPath, this.protector)
       return this.dataKey
@@ -660,7 +561,7 @@ export class TraceLocalStorage {
         mode: PRIVATE_FILE_MODE,
         flag: "wx"
       })
-      this.ensurePrivateFileForKey(keyPath)
+      this.ensurePrivateFile(keyPath)
       this.dataKey = generatedKey
     } catch (error) {
       if (!isNodeError(error) || error.code !== "EEXIST") throw error
@@ -670,7 +571,7 @@ export class TraceLocalStorage {
   }
 
   private readWrappedKey(keyPath: string, protector: TraceKeyProtector): Buffer {
-    this.ensurePrivateFileForKey(keyPath)
+    this.ensurePrivateFile(keyPath)
     const parsed = JSON.parse(readFileSync(keyPath, "utf8")) as Partial<WrappedTraceKey>
     if (
       parsed.format !== "cmbcowork.trace-key" ||
@@ -687,21 +588,12 @@ export class TraceLocalStorage {
     return key
   }
 
-  private async ensurePrivateDirectory(dirPath: string): Promise<void> {
-    await mkdir(dirPath, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
-    if (this.platform !== "win32") await chmod(dirPath, PRIVATE_DIRECTORY_MODE)
-  }
-
-  private async ensurePrivateFile(filePath: string): Promise<void> {
-    if (this.platform !== "win32") await chmod(filePath, PRIVATE_FILE_MODE)
-  }
-
-  private ensurePrivateDirectoryForKey(dirPath: string): void {
+  private ensurePrivateDirectory(dirPath: string): void {
     mkdirSync(dirPath, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
     if (this.platform !== "win32") chmodSync(dirPath, PRIVATE_DIRECTORY_MODE)
   }
 
-  private ensurePrivateFileForKey(filePath: string): void {
+  private ensurePrivateFile(filePath: string): void {
     if (this.platform !== "win32") chmodSync(filePath, PRIVATE_FILE_MODE)
   }
 
@@ -709,52 +601,27 @@ export class TraceLocalStorage {
     return join(this.rootDir, MIGRATION_MARKER_FILE_NAME)
   }
 
-  private migrationInProgressPath(): string {
-    return join(this.rootDir, MIGRATION_IN_PROGRESS_FILE_NAME)
-  }
-
-  private async readMigrationMarker(): Promise<TraceMigrationMarker | undefined> {
-    try {
-      await lstat(this.migrationInProgressPath())
-      return undefined
-    } catch (error) {
-      if (!isNodeError(error) || error.code !== "ENOENT") return undefined
-    }
+  private readMigrationMarker(): TraceMigrationMarker | undefined {
     const markerPath = this.migrationMarkerPath()
+    if (!existsSync(markerPath)) return undefined
     try {
-      await this.ensurePrivateFile(markerPath)
-      return parseMigrationMarker(await readFile(markerPath, "utf8"))
+      this.ensurePrivateFile(markerPath)
+      return parseMigrationMarker(readFileSync(markerPath, "utf8"))
     } catch {
       return undefined
     }
   }
 
-  private async invalidateMigrationMarkers(): Promise<void> {
-    for (const markerPath of [this.migrationMarkerPath(), this.migrationInProgressPath()]) {
-      try {
-        await unlink(markerPath)
-      } catch (error) {
-        if (!isNodeError(error) || error.code !== "ENOENT") throw error
-      }
-    }
-  }
-
-  private async writeMigrationInProgressMarker(): Promise<void> {
-    await this.atomicMarkerWrite(
-      this.migrationInProgressPath(),
-      `${JSON.stringify({ version: 1, startedAt: new Date().toISOString() })}\n`
-    )
-  }
-
-  private async removeMigrationInProgressMarker(): Promise<void> {
+  private invalidateMigrationMarker(): void {
+    const markerPath = this.migrationMarkerPath()
     try {
-      await unlink(this.migrationInProgressPath())
+      unlinkSync(markerPath)
     } catch (error) {
       if (!isNodeError(error) || error.code !== "ENOENT") throw error
     }
   }
 
-  private async writeMigrationMarker(snapshot: TraceMigrationSnapshot): Promise<void> {
+  private writeMigrationMarker(snapshot: TraceMigrationSnapshot): void {
     const markerPath = this.migrationMarkerPath()
     const marker: TraceMigrationMarker = {
       format: "cmbcowork.trace-migration",
@@ -762,59 +629,45 @@ export class TraceLocalStorage {
       completedAt: new Date().toISOString(),
       snapshot
     }
-    await this.atomicMarkerWrite(markerPath, `${JSON.stringify(marker)}\n`)
-  }
-
-  private async atomicMarkerWrite(markerPath: string, content: string): Promise<void> {
     const tempPath = join(
       this.rootDir,
-      `.${basename(markerPath)}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`
+      `.${MIGRATION_MARKER_FILE_NAME}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`
     )
     try {
-      await writeFile(tempPath, content, { encoding: "utf8", mode: PRIVATE_FILE_MODE })
-      await this.ensurePrivateFile(tempPath)
-      await rename(tempPath, markerPath)
-      await this.ensurePrivateFile(markerPath)
+      writeFileSync(tempPath, `${JSON.stringify(marker)}\n`, {
+        encoding: "utf8",
+        mode: PRIVATE_FILE_MODE
+      })
+      this.ensurePrivateFile(tempPath)
+      renameSync(tempPath, markerPath)
+      this.ensurePrivateFile(markerPath)
     } finally {
-      await unlink(tempPath).catch(() => undefined)
+      try {
+        if (existsSync(tempPath)) unlinkSync(tempPath)
+      } catch {
+        // Best effort only; the temporary marker contains no trace payload.
+      }
     }
   }
 
-  private async atomicPrivateWrite(filePath: string, content: string): Promise<void> {
-    const originalTimes = await stat(filePath)
+  private atomicPrivateWrite(filePath: string, content: string): void {
+    const originalTimes = statSync(filePath)
     const tempPath = join(
       dirname(filePath),
       `.${basename(filePath)}.secure-${process.pid}-${randomBytes(6).toString("hex")}`
     )
     try {
-      await writeFile(tempPath, content, { encoding: "utf8", mode: PRIVATE_FILE_MODE })
-      await this.ensurePrivateFile(tempPath)
-      await rename(tempPath, filePath)
-      await utimes(filePath, originalTimes.atime, originalTimes.mtime)
-      await this.ensurePrivateFile(filePath)
+      writeFileSync(tempPath, content, { encoding: "utf8", mode: PRIVATE_FILE_MODE })
+      this.ensurePrivateFile(tempPath)
+      renameSync(tempPath, filePath)
+      utimesSync(filePath, originalTimes.atime, originalTimes.mtime)
+      this.ensurePrivateFile(filePath)
     } finally {
       try {
-        await unlink(tempPath)
+        if (existsSync(tempPath)) unlinkSync(tempPath)
       } catch {
         // Best effort only; the temporary file contains encrypted content.
       }
-    }
-  }
-
-  /** Serialize append/migration/prune/delete work touching the same trace file. */
-  async runFileOperation<T>(filePath: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.fileOperations.get(filePath) ?? Promise.resolve()
-    let resolveCurrent!: () => void
-    const current = new Promise<void>((resolve) => {
-      resolveCurrent = resolve
-    })
-    this.fileOperations.set(filePath, current)
-    await previous.catch(() => undefined)
-    try {
-      return await operation()
-    } finally {
-      resolveCurrent()
-      if (this.fileOperations.get(filePath) === current) this.fileOperations.delete(filePath)
     }
   }
 }
@@ -828,21 +681,8 @@ export function getTraceLocalStorage(
   const mode = resolveTraceStorageMode()
   const cacheKey = `${mode}\u0000${rootDir}`
   const cached = storageCache.get(cacheKey)
-  if (cached) {
-    storageCache.delete(cacheKey)
-    storageCache.set(cacheKey, cached)
-    return cached
-  }
+  if (cached) return cached
   const storage = new TraceLocalStorage(rootDir, { mode, protector })
   storageCache.set(cacheKey, storage)
-  while (storageCache.size > TRACE_STORAGE_CACHE_MAX_ENTRIES) {
-    const oldest = storageCache.keys().next().value as string | undefined
-    if (oldest === undefined) break
-    storageCache.delete(oldest)
-  }
   return storage
-}
-
-export function getTraceStorageCacheDiagnostics(): { size: number; maxEntries: number } {
-  return { size: storageCache.size, maxEntries: TRACE_STORAGE_CACHE_MAX_ENTRIES }
 }

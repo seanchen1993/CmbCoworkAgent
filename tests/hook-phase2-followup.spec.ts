@@ -698,7 +698,7 @@ const runnerSrc = _read(
   "utf-8"
 )
 assert(
-  /hook\.async === true\s*&&\s*event !== "Setup"/.test(runnerSrc),
+  /hook\.async === true && event !== "Setup"/.test(runnerSrc),
   "P3c runner does not return async placeholder for Setup"
 )
 

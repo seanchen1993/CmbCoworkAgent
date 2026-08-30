@@ -10,7 +10,6 @@ import {
   isPathInsideDir,
   isPluginEditable
 } from "./plugin-file-gates"
-import { bumpHookCatalogGlobalRevision } from "../hook-catalog/revision"
 
 /**
  * Plugin file-editing IPC.
@@ -159,7 +158,6 @@ function notifySkillsChanged(reason: string): void {
   // already emits for skill-evolution writes so any future renderer
   // subscription gets a uniform refresh signal.
   const payload = { reason }
-  bumpHookCatalogGlobalRevision()
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed() || win.webContents.isDestroyed()) continue
     win.webContents.send("skills:changed", payload)
@@ -237,7 +235,7 @@ export function registerPluginFileHandlers(ipcMain: IpcMain): void {
         // README locally on the same machine almost always use utf-8. The
         // skills.ts decoder handles legacy GBK files but those don't show
         // up inside our local-uploaded plugins.
-        const content = buf.toString("utf-8").replace(/^\uFEFF/, "")
+        const content = buf.toString("utf-8").replace(/^﻿/, "")
         return { success: true, content, editable: isEditableExtension(realFile) }
       } catch (e) {
         return { success: false, error: e instanceof Error ? e.message : "读取失败" }

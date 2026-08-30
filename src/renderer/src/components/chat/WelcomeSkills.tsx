@@ -33,15 +33,12 @@ import {
 } from "@/components/customize/MarketPanel/MarketUpdateBadge"
 import { DEFAULT_SCENE_CATEGORY, SCENE_CATEGORY_OPTIONS } from "@/lib/skill-data-service"
 import { getSkillMetadataId, normalizeSkillId } from "@/lib/skill-ids"
-import { readSkillCatalogCache } from "@/lib/app-catalog-cache"
 import { groupWelcomeSkills } from "./skill-grouping"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 
 const MARKET_SKILLS_CACHE_TTL_MS = 10 * 60 * 1000
 const FEATURED_INSTALL_RETRY_MS = 10 * 60 * 1000
-export const FEATURED_AUTO_INSTALL_LIMIT = 4
-export const FEATURED_AUTO_INSTALL_MAX_BYTES = 16 * 1024 * 1024
 const GOOD_SKILLS_PREVIEW_LIMIT = 4
 const PROGRAMMING_SKILL_IDS = new Set([
   "security-review",
@@ -66,35 +63,20 @@ interface MarketSkillsSnapshot {
 }
 
 let marketSkillsSnapshot: MarketSkillsSnapshot | null = null
-let marketSkillsRequest:
-  | {
-      promise: Promise<MarketSkillsSnapshot>
-      controller: AbortController
-      consumers: Set<symbol>
-    }
-  | null = null
-let featuredSkillsInstallRequest:
-  | {
-      promise: Promise<boolean>
-      controller: AbortController
-      consumers: Set<symbol>
-    }
-  | null = null
+let marketSkillsRequest: Promise<MarketSkillsSnapshot> | null = null
+let featuredSkillsInstallRequest: Promise<boolean> | null = null
 // Re-check market versions periodically without re-downloading on every mount.
 let lastFeaturedInstallAttemptAt = 0
 
-async function loadMarketSkillsSnapshot(signal: AbortSignal): Promise<MarketSkillsSnapshot> {
+async function loadMarketSkillsSnapshot(): Promise<MarketSkillsSnapshot> {
   const now = Date.now()
   if (marketSkillsSnapshot && now - marketSkillsSnapshot.fetchedAt < MARKET_SKILLS_CACHE_TTL_MS) {
     return marketSkillsSnapshot
   }
 
-  if (marketSkillsRequest?.controller.signal.aborted) marketSkillsRequest = null
   if (!marketSkillsRequest) {
-    const controller = new AbortController()
-    const consumers = new Set<symbol>()
-    const promise = marketApi
-      .getSkills({ signal: controller.signal })
+    marketSkillsRequest = marketApi
+      .getSkills()
       .then((res) => {
         const allSkills = res?.data || []
         const snapshot = {
@@ -106,61 +88,34 @@ async function loadMarketSkillsSnapshot(signal: AbortSignal): Promise<MarketSkil
         return snapshot
       })
       .finally(() => {
-        if (marketSkillsRequest?.controller === controller) marketSkillsRequest = null
+        marketSkillsRequest = null
       })
-    marketSkillsRequest = { controller, consumers, promise }
   }
 
-  const request = marketSkillsRequest
-  const consumer = Symbol("welcome-market-skills")
-  request.consumers.add(consumer)
-  const release = (): void => {
-    request.consumers.delete(consumer)
-    if (request.consumers.size === 0 && marketSkillsRequest === request) {
-      request.controller.abort()
-    }
-  }
-  signal.addEventListener("abort", release, { once: true })
-  if (signal.aborted) {
-    release()
-    throw signal.reason ?? new DOMException("Aborted", "AbortError")
-  }
-  try {
-    return await request.promise
-  } finally {
-    signal.removeEventListener("abort", release)
-    release()
-  }
+  return marketSkillsRequest
 }
 
 async function installFeaturedSkills(
-  goodSkills: MarketItem[],
-  initialSkillsMetadata: SkillMetadata[],
-  signal: AbortSignal
+  goodSkills: MarketItem[]
 ): Promise<{ changed: boolean; hadFailure: boolean }> {
   if (goodSkills.length === 0) return { changed: false, hadFailure: false }
 
   console.log("Starting automatic installation of good skills...")
-  let skillsMetadata = [...initialSkillsMetadata]
-  const skillsByName = new Map(skillsMetadata.map((skill) => [skill.name, skill]))
-  const processedNames = new Set<string>()
+  let skillsMetadata = await window.api.skills.list()
   let changed = false
   let hadFailure = false
-  let attemptedInstallCount = 0
 
   for (const skill of goodSkills) {
-    if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
     try {
       const skillName = skill.name || skill.id || ""
 
-      if (!skillName || processedNames.has(skillName)) {
+      if (!skillName) {
         console.error("Skill name is required for installation:", skill)
         continue
       }
-      processedNames.add(skillName)
 
       console.log(`Installing skill: ${skillName}`)
-      const existingSkill = skillsByName.get(skillName)
+      const existingSkill = skillsMetadata.find((item) => item.name === skillName)
 
       // Install when missing, untracked, or out of date; otherwise preserve the
       // existing directory and avoid downloading on every session entry.
@@ -175,23 +130,11 @@ async function installFeaturedSkills(
         continue
       }
 
-      // An empty conversation must never turn a large marketplace response into hundreds of
-      // background downloads. Later retry windows continue with the next missing/outdated items.
-      if (attemptedInstallCount >= FEATURED_AUTO_INSTALL_LIMIT) break
-      attemptedInstallCount += 1
-
-      const installFile = await marketApi.fetchInstallBytes(skillName, "skill", {
-        signal,
-        maxBytes: FEATURED_AUTO_INSTALL_MAX_BYTES
-      })
-      if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
-
       if (existingSkill) {
         console.log(`Deleting existing skill: ${existingSkill.path}`)
         try {
           await window.api.skills.delete(existingSkill.path)
           skillsMetadata = skillsMetadata.filter((item) => item.path !== existingSkill.path)
-          skillsByName.delete(skillName)
         } catch (deleteError) {
           console.warn(
             `Failed to delete existing skill ${skillName}, continuing with install:`,
@@ -200,10 +143,7 @@ async function installFeaturedSkills(
         }
       }
 
-      const response =
-        typeof window.api?.skills?.upload === "function"
-          ? await window.api.skills.upload(installFile.buffer, installFile.filename)
-          : { success: false, error: "Skill upload API is not available" }
+      const response = await marketApi.downloadItem(skillName, "skill", false)
 
       if (response.success) {
         marketInstalledVersionStorage.setVersion(skillName, "skill", skill.version)
@@ -214,12 +154,6 @@ async function installFeaturedSkills(
         console.error(`Failed to install skill ${skillName}:`, response.error)
       }
     } catch (error) {
-      if (
-        signal.aborted ||
-        (error instanceof DOMException && error.name === "AbortError")
-      ) {
-        throw error
-      }
       hadFailure = true
       console.error(`Failed to install skill ${skill.name}:`, error)
     }
@@ -229,63 +163,26 @@ async function installFeaturedSkills(
   return { changed, hadFailure }
 }
 
-async function installFeaturedSkillsOnce(
-  goodSkills: MarketItem[],
-  skillsMetadata: SkillMetadata[],
-  signal: AbortSignal
-): Promise<boolean> {
+async function installFeaturedSkillsOnce(goodSkills: MarketItem[]): Promise<boolean> {
   if (goodSkills.length === 0) return false
-  if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
-  if (featuredSkillsInstallRequest?.controller.signal.aborted) {
-    featuredSkillsInstallRequest = null
-  }
+  if (featuredSkillsInstallRequest) return featuredSkillsInstallRequest
 
-  if (!featuredSkillsInstallRequest) {
-    const now = Date.now()
-    if (
-      lastFeaturedInstallAttemptAt !== 0 &&
-      now - lastFeaturedInstallAttemptAt < FEATURED_INSTALL_RETRY_MS
-    ) {
-      return false
-    }
-    lastFeaturedInstallAttemptAt = now
+  const now = Date.now()
+  if (
+    lastFeaturedInstallAttemptAt !== 0 &&
+    now - lastFeaturedInstallAttemptAt < FEATURED_INSTALL_RETRY_MS
+  ) {
+    return false
+  }
+  lastFeaturedInstallAttemptAt = now
 
-    const controller = new AbortController()
-    const consumers = new Set<symbol>()
-    const request = {
-      controller,
-      consumers,
-      promise: Promise.resolve(false)
-    }
-    request.promise = installFeaturedSkills(goodSkills, skillsMetadata, controller.signal)
-      .then(({ changed }) => changed)
-      .catch((error) => {
-        if (controller.signal.aborted) lastFeaturedInstallAttemptAt = 0
-        throw error
-      })
-      .finally(() => {
-        if (featuredSkillsInstallRequest === request) featuredSkillsInstallRequest = null
-      })
-    featuredSkillsInstallRequest = request
-  }
+  featuredSkillsInstallRequest = installFeaturedSkills(goodSkills)
+    .then(({ changed }) => changed)
+    .finally(() => {
+      featuredSkillsInstallRequest = null
+    })
 
-  const request = featuredSkillsInstallRequest
-  const consumer = Symbol("welcome-featured-skills")
-  request.consumers.add(consumer)
-  const release = (): void => {
-    request.consumers.delete(consumer)
-    if (request.consumers.size === 0 && featuredSkillsInstallRequest === request) {
-      request.controller.abort()
-    }
-  }
-  signal.addEventListener("abort", release, { once: true })
-  if (signal.aborted) release()
-  try {
-    return await request.promise
-  } finally {
-    signal.removeEventListener("abort", release)
-    release()
-  }
+  return featuredSkillsInstallRequest
 }
 
 type WelcomeSkillCard = {
@@ -714,49 +611,29 @@ export function WelcomeSkills({
     [getTargetRemoteSkill, onUseSkillPrompt]
   )
 
-  const queryRemoteSkills = useCallback(async (signal: AbortSignal): Promise<void> => {
+  const queryRemoteSkills = useCallback(async (): Promise<void> => {
     try {
-      const { allSkills, goodSkills } = await loadMarketSkillsSnapshot(signal)
-      if (signal.aborted) return
+      const { allSkills, goodSkills } = await loadMarketSkillsSnapshot()
       setMarketSkillsData(allSkills)
       setGoodSkillsData(goodSkills)
+
+      const installed = await installFeaturedSkillsOnce(goodSkills)
+      if (installed) {
+        await onSkillsInstalled()
+      }
     } catch (error) {
-      if (signal.aborted) return
       console.error("Failed to query remote skills:", error)
     }
-  }, [])
+  }, [onSkillsInstalled])
 
   useEffect(() => {
-    const controller = new AbortController()
     const timeoutId = window.setTimeout(() => {
-      void queryRemoteSkills(controller.signal)
+      void queryRemoteSkills()
     }, 0)
     return () => {
       window.clearTimeout(timeoutId)
-      controller.abort()
     }
   }, [queryRemoteSkills])
-
-  useEffect(() => {
-    if (skillsLoading || goodSkillsData.length === 0) return
-
-    const controller = new AbortController()
-    const localSkills = readSkillCatalogCache()?.localSkills ?? skills
-    void installFeaturedSkillsOnce(goodSkillsData, localSkills, controller.signal)
-      .then(async (installed) => {
-        if (installed && !controller.signal.aborted) {
-          await onSkillsInstalled()
-        }
-      })
-      .catch((error) => {
-        if (controller.signal.aborted) return
-        console.error("Failed to install featured skills:", error)
-      })
-
-    return () => {
-      controller.abort()
-    }
-  }, [goodSkillsData, onSkillsInstalled, skills, skillsLoading])
 
   const marketSkillCategoryByName = useMemo(() => {
     const categoryByName = new Map<string, string>()

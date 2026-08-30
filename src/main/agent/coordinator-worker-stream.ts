@@ -8,53 +8,11 @@ import { extractVisibleReasoning, TRACE_REASONING_MAX_CHARS } from "../../shared
 const TRANSCRIPT_FIELD_MAX_CHARS = 8_000
 
 export interface WorkerValuesSnapshotContext {
-  readonly messages: unknown[]
-  readonly skillsMetadata: Array<{
+  messages: unknown[]
+  skillsMetadata: Array<{
     name?: string
     path?: string
   }>
-  /** Stateful accumulators expose only observations not already handled by the caller. */
-  readonly skillReadPathsToObserve: readonly string[]
-  readonly workerState?: WorkerValuesDerivedState
-}
-
-interface WorkerValuesDerivedState {
-  finalText: string
-  visibleReasoning?: { text: string; isDelta: false }
-  clearFinalText: boolean
-  usage?: CoordinatorWorkerTokenUsage
-  progressObservationsToEmit: readonly WorkerProgressObservation[]
-}
-
-interface WorkerProgressObservation {
-  key: string
-  event: CoordinatorWorkerProgressEvent
-}
-
-interface WorkerValuesSnapshotScan {
-  skillReadPaths: string[]
-  workerState?: WorkerValuesDerivedState
-  latestReasoningIndex?: number
-  stableMessageIdCounts: Map<string, number>
-  stableUsageById: Map<string, CoordinatorWorkerTokenUsage>
-  stableUsage?: CoordinatorWorkerTokenUsage
-  unstableUsage?: CoordinatorWorkerTokenUsage
-}
-
-interface WorkerValuesSnapshotCache extends WorkerValuesSnapshotScan {
-  messages: unknown[]
-  messageCount: number
-  currentTurnStart: number
-  tailIndex: number
-  tailStableId?: string
-  tailContent?: string
-  tailUsage?: CoordinatorWorkerTokenUsage
-  tailUsageMessageId?: string
-}
-
-export interface WorkerValuesSnapshotAccumulatorOptions {
-  /** Workflow subagents only need Skill observations, not worker presentation state. */
-  deriveWorkerState?: boolean
 }
 
 export function extractTextFromUnknownContent(content: unknown): string {
@@ -93,7 +51,19 @@ export function extractWorkerFinalText(
   }
 
   if (mode === "values") {
-    return resolveWorkerValuesState(payload, currentTurnPrompt, valuesContext)?.finalText ?? ""
+    const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+    if (!messages) return ""
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]
+      const data = getSerializedObject(message)
+      if (!data) continue
+      const className = getMessageClassName(data)
+      if (className.includes("Tool")) return ""
+      if (!className.includes("AI")) continue
+      if (getWorkerToolCalls(data).length > 0) return ""
+      const kwargs = getSerializedObject(data.kwargs) ?? {}
+      return extractTextFromUnknownContent(kwargs.content ?? data?.content).trim()
+    }
   }
 
   return ""
@@ -115,7 +85,14 @@ export function extractWorkerVisibleReasoning(
   }
 
   if (mode === "values") {
-    return resolveWorkerValuesState(payload, currentTurnPrompt, valuesContext)?.visibleReasoning
+    const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+    if (!messages) return undefined
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const data = getSerializedObject(messages[index])
+      if (!data || !getMessageClassName(data).includes("AI")) continue
+      const text = extractVisibleReasoning(data, TRACE_REASONING_MAX_CHARS + 1).trim()
+      if (text) return { text, isDelta: false }
+    }
   }
   return undefined
 }
@@ -157,7 +134,17 @@ export function shouldClearWorkerFinalText(
   }
 
   if (mode !== "values") return false
-  return resolveWorkerValuesState(payload, currentTurnPrompt, valuesContext)?.clearFinalText ?? false
+  const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+  if (!messages) return false
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const data = getSerializedObject(messages[index])
+    if (!data) continue
+    const className = getMessageClassName(data)
+    if (className.includes("Tool")) return true
+    if (!className.includes("AI")) continue
+    return getWorkerToolCalls(data).length > 0
+  }
+  return false
 }
 
 export function summarizeWorkerText(text: string): string {
@@ -263,18 +250,6 @@ function getMessageContent(message: unknown): unknown {
   return kwargs.content ?? data.content
 }
 
-function getStableMessageId(data: Record<string, unknown>): string | undefined {
-  const kwargs = getSerializedObject(data.kwargs) ?? {}
-  const rawId = kwargs.id ?? data.id
-  return typeof rawId === "string" && rawId.trim() ? rawId.trim() : undefined
-}
-
-function getStableUsageMessageId(data: Record<string, unknown>): string | undefined {
-  const kwargs = getSerializedObject(data.kwargs) ?? {}
-  const rawId = kwargs.id
-  return typeof rawId === "string" && rawId ? rawId : undefined
-}
-
 function isHumanMessage(message: unknown): boolean {
   const data = getSerializedObject(message)
   if (!data) return false
@@ -289,18 +264,18 @@ function isHumanMessage(message: unknown): boolean {
   )
 }
 
-function currentTurnStartIndex(messages: unknown[], currentTurnPrompt?: string): number {
+function messagesForCurrentTurn<T>(messages: T[], currentTurnPrompt?: string): T[] {
   const prompt = normalizeTextForMatch(currentTurnPrompt ?? "")
-  if (!prompt) return 0
+  if (!prompt) return messages
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]
     if (!isHumanMessage(message)) continue
     const content = normalizeTextForMatch(extractTextFromUnknownContent(getMessageContent(message)))
     if (content === prompt) {
-      return index + 1
+      return messages.slice(index + 1)
     }
   }
-  return 0
+  return messages
 }
 
 export function createWorkerValuesSnapshotContext(
@@ -308,7 +283,18 @@ export function createWorkerValuesSnapshotContext(
   payload: unknown,
   currentTurnPrompt?: string
 ): WorkerValuesSnapshotContext | undefined {
-  return new WorkerValuesSnapshotAccumulator(currentTurnPrompt).createContext(mode, payload)
+  if (mode !== "values") return undefined
+  const state = getSerializedObject(payload)
+  if (!state) return undefined
+  const allMessages = state.messages
+  return {
+    messages: Array.isArray(allMessages)
+      ? messagesForCurrentTurn(allMessages, currentTurnPrompt)
+      : [],
+    skillsMetadata: Array.isArray(state.skillsMetadata)
+      ? (state.skillsMetadata as Array<{ name?: string; path?: string }>)
+      : []
+  }
 }
 
 /** Observe Skill reads from either messages- or values-mode agent streams.
@@ -349,9 +335,7 @@ export function observeSkillUsageFromStream(
         if (resolvedContext.skillsMetadata.length > 0) {
           detector.onSkillsMetadata(resolvedContext.skillsMetadata)
         }
-        resolvedContext.skillReadPathsToObserve.forEach((readPath) => {
-          detector.onReadFilePath(readPath)
-        })
+        resolvedContext.messages.forEach(observeMessage)
       }
     }
 
@@ -364,6 +348,15 @@ export function observeSkillUsageFromStream(
     console.warn("[SkillUsage] stream observation failed; continuing without attribution:", error)
     return false
   }
+}
+
+function resolveWorkerValuesMessages(
+  payload: unknown,
+  currentTurnPrompt?: string,
+  valuesContext?: WorkerValuesSnapshotContext
+): unknown[] | undefined {
+  if (valuesContext) return valuesContext.messages
+  return createWorkerValuesSnapshotContext("values", payload, currentTurnPrompt)?.messages
 }
 
 function extractToolCallName(call: unknown): string | null {
@@ -511,371 +504,34 @@ function addUsage(
   return Object.keys(merged).length > 0 ? merged : undefined
 }
 
-function usageFromMessage(message: unknown): CoordinatorWorkerTokenUsage | undefined {
-  const data = getSerializedObject(message)
-  if (!data) return undefined
-  const kwargs = getSerializedObject(data.kwargs) ?? {}
-  const responseMetadata =
-    getSerializedObject(kwargs.response_metadata) ?? getSerializedObject(data.response_metadata)
-  const additionalKwargs =
-    getSerializedObject(kwargs.additional_kwargs) ?? getSerializedObject(data.additional_kwargs)
-  const candidates = [
-    getSerializedObject(kwargs.usage_metadata) ?? getSerializedObject(data.usage_metadata),
-    getSerializedObject(responseMetadata?.usage_metadata),
-    getSerializedObject(responseMetadata?.token_usage),
-    getSerializedObject(responseMetadata?.usage),
-    getSerializedObject(responseMetadata?.tokenUsage),
-    getSerializedObject(additionalKwargs?.usage_metadata)
-  ]
-  return candidates.reduce<CoordinatorWorkerTokenUsage | undefined>(
-    (merged, candidate) => mergeUsage(merged, normalizedUsageFromRecord(candidate)),
-    undefined
-  )
-}
-
-function replaceUsageContribution(
-  total: CoordinatorWorkerTokenUsage | undefined,
-  previous: CoordinatorWorkerTokenUsage | undefined,
-  next: CoordinatorWorkerTokenUsage | undefined
-): CoordinatorWorkerTokenUsage | undefined {
-  const replaced: CoordinatorWorkerTokenUsage = {}
-  for (const key of [
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
-    "cache_read_tokens",
-    "cache_creation_tokens"
-  ] as const) {
-    const hadValue =
-      total?.[key] !== undefined || previous?.[key] !== undefined || next?.[key] !== undefined
-    if (!hadValue) continue
-    const value = (total?.[key] ?? 0) - (previous?.[key] ?? 0) + (next?.[key] ?? 0)
-    if (value > 0 || next?.[key] === 0 || (total?.[key] === 0 && previous?.[key] === undefined)) {
-      replaced[key] = Math.max(0, value)
-    }
-  }
-  return Object.keys(replaced).length > 0 ? replaced : undefined
-}
-
-function scanWorkerValuesSnapshot(
-  messages: unknown[],
-  currentTurnStart: number,
-  deriveWorkerState: boolean
-): WorkerValuesSnapshotScan {
-  const skillReadPaths: string[] = []
-  const progressObservations: WorkerProgressObservation[] = []
-  const stableMessageIdCounts = new Map<string, number>()
-  const stableUsageById = new Map<string, CoordinatorWorkerTokenUsage>()
-  let stableUsage: CoordinatorWorkerTokenUsage | undefined
-  let unstableUsage: CoordinatorWorkerTokenUsage | undefined
-  let finalText = ""
-  let clearFinalText = false
-  let visibleReasoning: { text: string; isDelta: false } | undefined
-  let latestReasoningIndex: number | undefined
-
-  for (let index = currentTurnStart; index < messages.length; index += 1) {
-    const message = messages[index]
-    const data = getSerializedObject(message)
-    if (!data) continue
-    const className = getMessageClassName(data)
-    const kwargs = getSerializedObject(data.kwargs) ?? {}
-    const toolCalls = getWorkerToolCalls(data)
-    const stableMessageId = getStableMessageId(data)
-    if (stableMessageId) {
-      stableMessageIdCounts.set(
-        stableMessageId,
-        (stableMessageIdCounts.get(stableMessageId) ?? 0) + 1
-      )
-    }
-
-    toolCalls.forEach((call, callIndex) => {
-      if (extractToolCallName(call) === "read_file") {
-        const args = getSerializedObject(extractToolCallArgs(call)) ?? {}
-        const readPath =
-          (typeof args.path === "string" && args.path) ||
-          (typeof args.file_path === "string" && args.file_path) ||
-          ""
-        if (readPath) skillReadPaths.push(readPath)
-      }
-      if (!deriveWorkerState) return
-      const name = extractToolCallName(call)
-      if (!name) return
-      progressObservations.push({
-        key: extractToolCallKey(call, `worker:${callIndex}`),
-        event: { type: "tool_call", toolName: name }
-      })
-    })
-
-    if (!deriveWorkerState) continue
-
-    const usage = usageFromMessage(message)
-    if (usage) {
-      const usageMessageId = getStableUsageMessageId(data)
-      if (!usageMessageId) {
-        unstableUsage = mergeUsage(unstableUsage, usage)
-      } else if (!stableUsageById.has(usageMessageId)) {
-        stableUsageById.set(usageMessageId, usage)
-        stableUsage = addUsage(stableUsage, usage)
-      }
-    }
-
-    if (className.includes("Tool")) {
-      finalText = ""
-      clearFinalText = true
-    } else if (className.includes("AI")) {
-      if (toolCalls.length > 0) {
-        finalText = ""
-        clearFinalText = true
-      } else {
-        finalText = extractTextFromUnknownContent(kwargs.content ?? data.content).trim()
-        clearFinalText = false
-      }
-    }
-
-    if (className.includes("AI")) {
-      const reasoning = extractVisibleReasoning(data, TRACE_REASONING_MAX_CHARS + 1).trim()
-      if (reasoning) {
-        visibleReasoning = { text: reasoning, isDelta: false }
-        latestReasoningIndex = index
-      }
-    }
-
-    if (className.includes("AI") || toolCalls.length > 0) continue
-    if (!className.includes("Tool")) continue
-    const name = typeof kwargs.name === "string" ? kwargs.name : undefined
-    progressObservations.push({
-      key: extractToolMessageKey(data, "worker"),
-      event: {
-        type: "activity",
-        message: name ? `Worker received tool result: ${name}` : "Worker received tool result."
-      }
-    })
-  }
-
-  return {
-    skillReadPaths,
-    workerState: deriveWorkerState
-      ? {
-          finalText,
-          visibleReasoning,
-          clearFinalText,
-          usage: addUsage(stableUsage, unstableUsage),
-          progressObservationsToEmit: progressObservations
-        }
-      : undefined,
-    latestReasoningIndex,
-    stableMessageIdCounts,
-    stableUsageById,
-    stableUsage,
-    unstableUsage
-  }
-}
-
-function ordinaryAssistantTail(
-  message: unknown,
-  deriveWorkerState: boolean
-):
-  | {
-      stableId: string
-      content: string
-      usage?: CoordinatorWorkerTokenUsage
-      usageMessageId?: string
-      reasoning?: string
-    }
-  | undefined {
-  const data = getSerializedObject(message)
-  if (!data || !getMessageClassName(data).includes("AI")) return undefined
-  if (getWorkerToolCalls(data).length > 0) return undefined
-  const kwargs = getSerializedObject(data.kwargs) ?? {}
-  const content = kwargs.content ?? data.content
-  const stableId = getStableMessageId(data)
-  if (!stableId || typeof content !== "string") return undefined
-  return {
-    stableId,
-    content,
-    usage: deriveWorkerState ? usageFromMessage(message) : undefined,
-    usageMessageId: deriveWorkerState ? getStableUsageMessageId(data) : undefined,
-    reasoning: deriveWorkerState
-      ? extractVisibleReasoning(data, TRACE_REASONING_MAX_CHARS + 1).trim() || undefined
-      : undefined
-  }
-}
-
-function makeWorkerValuesSnapshotContext(
-  messages: unknown[],
-  currentTurnStart: number,
-  skillsMetadata: Array<{ name?: string; path?: string }>,
-  skillReadPathsToObserve: readonly string[],
-  workerState?: WorkerValuesDerivedState
-): WorkerValuesSnapshotContext {
-  let materializedMessages: unknown[] | undefined
-  return {
-    get messages() {
-      materializedMessages ??= messages.slice(currentTurnStart)
-      return materializedMessages
-    },
-    skillsMetadata,
-    skillReadPathsToObserve,
-    workerState
-  }
-}
-
-/**
- * Keeps one values stream's stable current-turn prefix out of repeated parsing.
- * The fast path intentionally requires the exact messages array. Any replacement
- * (including resume/reorder snapshots) is fully rescanned instead of relying on
- * sampled prefix checks that could miss a semantic boundary.
- */
-export class WorkerValuesSnapshotAccumulator {
-  private readonly deriveWorkerState: boolean
-  private cache?: WorkerValuesSnapshotCache
-
-  constructor(
-    private readonly currentTurnPrompt?: string,
-    options: WorkerValuesSnapshotAccumulatorOptions = {}
-  ) {
-    this.deriveWorkerState = options.deriveWorkerState !== false
-  }
-
-  createContext(mode: string, payload: unknown): WorkerValuesSnapshotContext | undefined {
-    if (mode !== "values") return undefined
-    const state = getSerializedObject(payload)
-    if (!state) return undefined
-    const rawMessages = state.messages
-    const messages = Array.isArray(rawMessages) ? rawMessages : []
-    const skillsMetadata = Array.isArray(state.skillsMetadata)
-      ? (state.skillsMetadata as Array<{ name?: string; path?: string }>)
-      : []
-    const fastContext = this.tryCreateTailContext(messages, skillsMetadata)
-    if (fastContext) return fastContext
-
-    const currentTurnStart = currentTurnStartIndex(messages, this.currentTurnPrompt)
-    const scan = scanWorkerValuesSnapshot(
-      messages,
-      currentTurnStart,
-      this.deriveWorkerState
-    )
-    const tailIndex = messages.length - 1
-    const tail =
-      tailIndex >= currentTurnStart
-        ? ordinaryAssistantTail(messages[tailIndex], this.deriveWorkerState)
-        : undefined
-    this.cache = {
-      ...scan,
-      messages,
-      messageCount: messages.length,
-      currentTurnStart,
-      tailIndex,
-      tailStableId: tail?.stableId,
-      tailContent: tail?.content,
-      tailUsage: tail?.usage,
-      tailUsageMessageId: tail?.usageMessageId
-    }
-    return makeWorkerValuesSnapshotContext(
-      messages,
-      currentTurnStart,
-      skillsMetadata,
-      scan.skillReadPaths,
-      scan.workerState
-    )
-  }
-
-  reset(): void {
-    this.cache = undefined
-  }
-
-  private tryCreateTailContext(
-    messages: unknown[],
-    skillsMetadata: Array<{ name?: string; path?: string }>
-  ): WorkerValuesSnapshotContext | undefined {
-    const previous = this.cache
-    if (
-      !previous ||
-      messages !== previous.messages ||
-      messages.length !== previous.messageCount ||
-      previous.tailIndex < previous.currentTurnStart ||
-      !previous.tailStableId ||
-      previous.tailContent === undefined ||
-      previous.stableMessageIdCounts.get(previous.tailStableId) !== 1
-    ) {
-      return undefined
-    }
-
-    // This is the only message-array element read on the fast path.
-    const tail = ordinaryAssistantTail(messages[previous.tailIndex], this.deriveWorkerState)
-    if (
-      !tail ||
-      tail.stableId !== previous.tailStableId ||
-      !tail.content.startsWith(previous.tailContent)
-    ) {
-      return undefined
-    }
-
-    let workerState = previous.workerState
-    let latestReasoningIndex = previous.latestReasoningIndex
-    let stableUsage = previous.stableUsage
-    if (this.deriveWorkerState) {
-      if (!tail.reasoning && latestReasoningIndex === previous.tailIndex) return undefined
-      if (
-        (previous.tailUsage || tail.usage) &&
-        (!previous.tailUsageMessageId || tail.usageMessageId !== previous.tailUsageMessageId)
-      ) {
-        return undefined
-      }
-      if (previous.tailUsageMessageId) {
-        stableUsage = replaceUsageContribution(stableUsage, previous.tailUsage, tail.usage)
-        if (tail.usage) {
-          previous.stableUsageById.set(previous.tailUsageMessageId, tail.usage)
-        } else {
-          previous.stableUsageById.delete(previous.tailUsageMessageId)
-        }
-      }
-      if (tail.reasoning) latestReasoningIndex = previous.tailIndex
-      workerState = {
-        finalText: tail.content.trim(),
-        visibleReasoning: tail.reasoning
-          ? { text: tail.reasoning, isDelta: false }
-          : previous.workerState?.visibleReasoning,
-        clearFinalText: false,
-        usage: addUsage(stableUsage, previous.unstableUsage),
-        progressObservationsToEmit: []
-      }
-    }
-
-    this.cache = {
-      ...previous,
-      latestReasoningIndex,
-      stableUsage,
-      workerState,
-      tailContent: tail.content,
-      tailUsage: tail.usage,
-      tailUsageMessageId: tail.usageMessageId
-    }
-    return makeWorkerValuesSnapshotContext(
-      messages,
-      previous.currentTurnStart,
-      skillsMetadata,
-      [],
-      workerState
-    )
-  }
-}
-
-function resolveWorkerValuesState(
-  payload: unknown,
-  currentTurnPrompt?: string,
-  valuesContext?: WorkerValuesSnapshotContext
-): WorkerValuesDerivedState | undefined {
-  if (valuesContext?.workerState) return valuesContext.workerState
-  return createWorkerValuesSnapshotContext("values", payload, currentTurnPrompt)?.workerState
-}
-
 export function extractWorkerUsage(
   mode: string,
   payload: unknown,
   currentTurnPrompt?: string,
   valuesContext?: WorkerValuesSnapshotContext
 ): CoordinatorWorkerTokenUsage | undefined {
+  const usageFromMessage = (message: unknown): CoordinatorWorkerTokenUsage | undefined => {
+    const data = getSerializedObject(message)
+    if (!data) return undefined
+    const kwargs = getSerializedObject(data.kwargs) ?? {}
+    const responseMetadata =
+      getSerializedObject(kwargs.response_metadata) ?? getSerializedObject(data.response_metadata)
+    const additionalKwargs =
+      getSerializedObject(kwargs.additional_kwargs) ?? getSerializedObject(data.additional_kwargs)
+    const candidates = [
+      getSerializedObject(kwargs.usage_metadata) ?? getSerializedObject(data.usage_metadata),
+      getSerializedObject(responseMetadata?.usage_metadata),
+      getSerializedObject(responseMetadata?.token_usage),
+      getSerializedObject(responseMetadata?.usage),
+      getSerializedObject(responseMetadata?.tokenUsage),
+      getSerializedObject(additionalKwargs?.usage_metadata)
+    ]
+    return candidates.reduce<CoordinatorWorkerTokenUsage | undefined>(
+      (merged, candidate) => mergeUsage(merged, normalizedUsageFromRecord(candidate)),
+      undefined
+    )
+  }
+
   if (mode === "messages") {
     if (!Array.isArray(payload)) return undefined
     const [message] = payload as [unknown]
@@ -883,9 +539,30 @@ export function extractWorkerUsage(
   }
 
   if (mode === "values") {
+    const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+    if (!messages) return undefined
+    const seenMessageKeys = new Set<string>()
+    let stableUsage: CoordinatorWorkerTokenUsage | undefined
+    let unstableUsage: CoordinatorWorkerTokenUsage | undefined
+    for (const message of messages) {
+      const usage = usageFromMessage(message)
+      if (!usage) continue
+      const data = getSerializedObject(message)
+      const kwargs = getSerializedObject(data?.kwargs) ?? {}
+      const messageId = typeof kwargs.id === "string" && kwargs.id ? kwargs.id : undefined
+      if (!messageId) {
+        // Values-mode chunks are state snapshots. Without a stable message id, summing can
+        // inflate usage across repeated snapshots, so keep the high-water mark instead.
+        unstableUsage = mergeUsage(unstableUsage, usage)
+        continue
+      }
+      if (seenMessageKeys.has(messageId)) continue
+      seenMessageKeys.add(messageId)
+      stableUsage = addUsage(stableUsage, usage)
+    }
     // Values-mode payloads are state snapshots, so callers must merge return values
     // across chunks with a high-water strategy rather than summing them again.
-    return resolveWorkerValuesState(payload, currentTurnPrompt, valuesContext)?.usage
+    return addUsage(stableUsage, unstableUsage)
   }
 
   return undefined
@@ -1011,15 +688,12 @@ export function observeWorkerProgress(
   }
 
   if (mode === "values") {
-    const workerState = resolveWorkerValuesState(payload, currentTurnPrompt, valuesContext)
-    if (!workerState) return
-    if (workerState.usage) {
-      onProgress({ type: "usage", usage: workerState.usage })
+    const messages = resolveWorkerValuesMessages(payload, currentTurnPrompt, valuesContext)
+    if (!messages) return
+    const usage = extractWorkerUsage(mode, payload, currentTurnPrompt, valuesContext)
+    if (usage) {
+      onProgress({ type: "usage", usage })
     }
-    workerState.progressObservationsToEmit.forEach(({ key, event }) => {
-      if (seenToolCallKeys.has(key)) return
-      seenToolCallKeys.add(key)
-      onProgress(event)
-    })
+    messages.forEach((message) => observeMessage(message, "worker", { includeUsage: false }))
   }
 }

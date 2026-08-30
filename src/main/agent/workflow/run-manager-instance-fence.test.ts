@@ -18,8 +18,6 @@ import {
   generateWorkflowRunId,
   loadWorkflowRun,
   markWorkflowRunNotified,
-  WORKFLOW_FLUSH_FAILURE_JOURNAL_RESERVATION_BYTES,
-  WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES,
   workflowThreadDisposalEpoch
 } from "./run-store"
 import type { PersistedWorkflowRun } from "./types"
@@ -55,11 +53,7 @@ describe("recoverFlushFailedRun instance fence", () => {
   // TS `private` is compile-time only; reach the maps to stage the exact race.
   const privates = workflowRunManager as unknown as {
     flushFailedRuns: Map<string, PersistedWorkflowRun>
-    flushFailedJournalSources: Map<string, "memory" | "sidecar">
-    flushFailedReservedBytes: Map<string, number>
     flushFailedEpochs: Map<string, number>
-    inFlightNotifications: Set<string>
-    isLaunchBlockedByFlushFailure: (runId: string, threadId: string) => boolean
   }
 
   const record = (
@@ -88,12 +82,6 @@ describe("recoverFlushFailedRun instance fence", () => {
   const seedFlushFailedSnapshot = (runId: string, startedAt: string): PersistedWorkflowRun => {
     const snapshot = record(runId, startedAt, "completed")
     privates.flushFailedRuns.set(runId, snapshot)
-    privates.flushFailedJournalSources.set(runId, "memory")
-    privates.flushFailedReservedBytes.set(
-      runId,
-      WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES +
-        WORKFLOW_FLUSH_FAILURE_JOURNAL_RESERVATION_BYTES
-    )
     privates.flushFailedEpochs.set(runId, workflowThreadDisposalEpoch(THREAD_ID))
     return snapshot
   }
@@ -117,11 +105,7 @@ describe("recoverFlushFailedRun instance fence", () => {
 
   afterEach(() => {
     privates.flushFailedRuns.clear()
-    privates.flushFailedJournalSources.clear()
-    privates.flushFailedReservedBytes.clear()
     privates.flushFailedEpochs.clear()
-    privates.inFlightNotifications.clear()
-    vi.restoreAllMocks()
     if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
     else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
     rmSync(workspace, { recursive: true, force: true })
@@ -301,103 +285,6 @@ describe("recoverFlushFailedRun instance fence", () => {
     expect(loadWorkflowRun(workspace, THREAD_ID, runId)?.notificationDelivered).toBe(true)
   })
 
-  test("persistent disk failure retains a large journal without a main-thread deep clone and opens launch backpressure", async () => {
-    const runId = generateWorkflowRunId()
-    const snapshot = seedFlushFailedSnapshot(runId, RESUMED_STARTED_AT)
-    snapshot.journal = Array.from({ length: 24 }, (_, index) => ({
-      index,
-      hash: `large-failure-${index}`,
-      result: "j".repeat(950 * 1024)
-    }))
-    const fileAsDataRoot = join(workspace, "persistent-not-a-dir")
-    writeFileSync(fileAsDataRoot, "x")
-    process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
-    const originalStringify = JSON.stringify
-    JSON.stringify = ((
-      value: unknown,
-      replacer?: Parameters<typeof JSON.stringify>[1],
-      space?: Parameters<typeof JSON.stringify>[2]
-    ) => {
-      if (value === snapshot) {
-        throw new Error("flush-failed snapshot was deep-cloned on Electron main")
-      }
-      return originalStringify(value, replacer as never, space)
-    }) as typeof JSON.stringify
-    const gaps: number[] = []
-    let previousTick = performance.now()
-    const ticker = setInterval(() => {
-      const now = performance.now()
-      gaps.push(now - previousTick)
-      previousTick = now
-    }, 2)
-    try {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
-      expect(
-        await workflowRunManager.retryPersistFlushFailedRun(
-          workspace,
-          THREAD_ID,
-          runId
-        )
-      ).toBe(false)
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
-    } finally {
-      clearInterval(ticker)
-      JSON.stringify = originalStringify
-      process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
-    }
-    expect(Math.max(...gaps)).toBeLessThan(250)
-    expect(privates.flushFailedRuns.get(runId)?.journal).toHaveLength(24)
-    expect(workflowRunManager.findPendingNotification(workspace, THREAD_ID)?.runId).toBe(runId)
-    expect(privates.isLaunchBlockedByFlushFailure(runId, THREAD_ID)).toBe(false)
-    expect(privates.isLaunchBlockedByFlushFailure(generateWorkflowRunId(), THREAD_ID)).toBe(true)
-    expect(privates.isLaunchBlockedByFlushFailure(runId, "different-thread")).toBe(true)
-
-    const secondRunId = generateWorkflowRunId()
-    seedFlushFailedSnapshot(secondRunId, "2026-07-08T14:54:00.000Z")
-    const diagnostics = workflowRunManager.getFlushFailureDiagnosticsForTest()
-    expect(diagnostics).toMatchObject({ runs: 2, degraded: true, activeRuns: 0 })
-    expect(diagnostics.reservedBytes).toBeGreaterThan(0)
-    expect(() =>
-      workflowRunManager.launch({
-        threadId: "thread-over-budget",
-        workspacePath: workspace,
-        runId: generateWorkflowRunId()
-      } as never)
-    ).toThrow(/waiting for durable storage/i)
-    expect(privates.flushFailedRuns.has(runId)).toBe(true)
-    expect(privates.flushFailedRuns.has(secondRunId)).toBe(true)
-  })
-
-  test("a compact flush-failed snapshot restores its replay journal from the durable sidecar", async () => {
-    const runId = generateWorkflowRunId()
-    const initial = record(runId, RESUMED_STARTED_AT, "running")
-    initial.journal = [{ index: 0, hash: "durable-sidecar", result: "cached result" }]
-    const store = createWorkflowRunStore({
-      workspacePath: workspace,
-      threadId: THREAD_ID,
-      initial
-    })
-    expect(await store.flush()).toBe(true)
-
-    const compact = record(runId, RESUMED_STARTED_AT, "completed")
-    privates.flushFailedRuns.set(runId, compact)
-    privates.flushFailedJournalSources.set(runId, "sidecar")
-    privates.flushFailedReservedBytes.set(
-      runId,
-      WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES
-    )
-    privates.flushFailedEpochs.set(runId, workflowThreadDisposalEpoch(THREAD_ID))
-
-    const resumed = await workflowRunManager.getFlushFailedRunForResume(
-      workspace,
-      THREAD_ID,
-      runId
-    )
-    expect(resumed?.status).toBe("completed")
-    expect(resumed?.journal).toEqual(initial.journal)
-    expect(privates.flushFailedRuns.get(runId)?.journal).toEqual([])
-  })
-
   // The goal-defer guard's core invariant: exclude ONLY the instance a delivery
   // turn is currently reporting, so a backlog / resumed-instance pending run is
   // still seen and the goal doesn't evaluate on partial evidence.
@@ -425,8 +312,6 @@ describe("recoverFlushFailedRun instance fence", () => {
 
     // With only A pending, excluding A's instance leaves nothing.
     privates.flushFailedRuns.delete(runB)
-    privates.flushFailedJournalSources.delete(runB)
-    privates.flushFailedReservedBytes.delete(runB)
     privates.flushFailedEpochs.delete(runB)
     expect(
       workflowRunManager.hasDeliverablePendingNotificationExcept(workspace, THREAD_ID, {
@@ -458,67 +343,5 @@ describe("recoverFlushFailedRun instance fence", () => {
         startedAt: RESUMED_STARTED_AT
       })
     ).toBe(false)
-  })
-
-  test("concurrent async notification claims can acquire one run only once", async () => {
-    const run = record(generateWorkflowRunId(), RESUMED_STARTED_AT, "completed")
-    let resolveLookup!: (value: PersistedWorkflowRun) => void
-    const deferred = new Promise<PersistedWorkflowRun>((resolvePromise) => {
-      resolveLookup = resolvePromise
-    })
-    vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockImplementation(
-      async () => deferred
-    )
-
-    const first = workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
-    const second = workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
-    resolveLookup(run)
-    const claimed = await Promise.all([first, second])
-
-    expect(claimed.filter((candidate) => candidate?.runId === run.runId)).toHaveLength(1)
-    expect(claimed.filter((candidate) => candidate === null)).toHaveLength(1)
-  })
-
-  test("a failed notification build releases its claim for a later retry", async () => {
-    const run = record(generateWorkflowRunId(), RESUMED_STARTED_AT, "completed")
-    vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockResolvedValue(run)
-
-    const first = await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
-    expect(first?.runId).toBe(run.runId)
-    try {
-      throw new Error("notification build failed")
-    } catch {
-      workflowRunManager.clearNotificationInFlight(run.runId)
-    }
-
-    await expect(
-      workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
-    ).resolves.toMatchObject({ runId: run.runId })
-  })
-
-  test("a queued mode/workspace transition rejects an interleaved synchronous launch", async () => {
-    let releaseTransition!: () => void
-    const transitionGate = new Promise<void>((resolveTransition) => {
-      releaseTransition = resolveTransition
-    })
-    let entered!: () => void
-    const transitionEntered = new Promise<void>((resolveEntered) => {
-      entered = resolveEntered
-    })
-    const transition = workflowRunManager.withThreadTransitionLease(THREAD_ID, async () => {
-      entered()
-      await transitionGate
-    })
-    await transitionEntered
-
-    expect(() =>
-      workflowRunManager.launch({
-        threadId: THREAD_ID,
-        workspacePath: workspace
-      } as Parameters<typeof workflowRunManager.launch>[0])
-    ).toThrow(/changing mode or workspace/)
-
-    releaseTransition()
-    await transition
   })
 })

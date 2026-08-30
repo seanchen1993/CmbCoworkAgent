@@ -165,23 +165,13 @@ async function testStoppedStreamSyncsDurableTranscript(): Promise<void> {
 
   assert.match(
     source,
-    /const applyDurableTranscriptSnapshot[\s\S]*window\.api\.threads\.getMessagesPage\(threadId, \{ limit: 500 \}\)/,
-    "stopped streams should reconcile from the bounded latest durable page"
+    /syncPersistedThreadMessagesAfterStreamStop[\s\S]*window\.api\.threads\.getMessages\(threadId\)/,
+    "stopped streams should reconcile the UI transcript with durable thread_messages"
   )
   assert.match(
     source,
-    /syncPersistedThreadMessagesAfterStreamStop[\s\S]*applyDurableTranscriptSnapshot\(/,
-    "stopped streams should invoke the guarded durable-page reconciler"
-  )
-  assert.doesNotMatch(
-    source,
-    /window\.api\.threads\.getMessages\(threadId\)/,
-    "stopped streams must not reload the lifetime transcript"
-  )
-  assert.match(
-    source,
-    /for \(const delayMs of \[50, 350, 1_000, 2_500\]\)/,
-    "stopped stream durable sync should cover a slow terminal flush window"
+    /for \(const delayMs of \[50, 350\]\)/,
+    "stopped stream durable sync should retry after the main-process terminal flush window"
   )
   assert.match(
     source,
@@ -195,7 +185,7 @@ async function testStoppedStreamSyncsDurableTranscript(): Promise<void> {
   )
   assert.match(
     source,
-    /mergeLatestThreadMessagePage\([\s\S]*state\.messages,[\s\S]*persistedMessages,[\s\S]*liveOrderHint/,
+    /reconcileMessageDisplayOrder\(merged, liveOrderHint\)/,
     "durable sync must use the final stream snapshot to avoid appending late tool calls after final answers"
   )
   assert.match(
@@ -215,17 +205,17 @@ async function testDurableSyncThreadLifecycleBoundaries(): Promise<void> {
   )
   assert.match(
     source,
-    /const applyDurableTranscriptSnapshot[\s\S]*const isCurrentIdleSync[\s\S]*if \(!isCurrentIdleSync\(\)\) return false[\s\S]*window\.api\.threads\.getMessagesPage\(threadId, \{ limit: 500 \}\)[\s\S]*if \(!isCurrentIdleSync\(\)\) return false/,
+    /const applyDurableTranscriptSnapshot[\s\S]*const isCurrentIdleSync[\s\S]*if \(!isCurrentIdleSync\(\)\) return false[\s\S]*window\.api\.threads\.getMessages\(threadId\)[\s\S]*if \(!isCurrentIdleSync\(\)\) return false/,
     "durable transcript sync should fence both before and after async DB reads"
   )
   assert.match(
     source,
-    /updateThreadState\(threadId, \(state\) => \{[\s\S]*initializedThreadsRef\.current\.has\(threadId\)[\s\S]*streamDataRef\.current\[threadId\]\?\.isLoading[\s\S]*return \{\}/,
+    /setThreadStates\(\(prev\) => \{[\s\S]*initializedThreadsRef\.current\.has\(threadId\)[\s\S]*streamDataRef\.current\[threadId\]\?\.isLoading[\s\S]*return prev/,
     "durable transcript sync should re-check lifecycle and loading state inside the state update"
   )
   assert.match(
     source,
-    /updateThreadState\(threadId, \(state\) => \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq[\s\S]*return mergeState\(state\)/,
+    /setThreadStates\(\(prev\) => \{[\s\S]*durableTranscriptSyncSeqRef\.current\[threadId\] !== seq[\s\S]*mergeState\(state\)/,
     "a deferred durable transcript updater should reject superseded sync generations"
   )
   assert.match(

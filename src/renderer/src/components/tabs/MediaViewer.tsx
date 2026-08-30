@@ -3,18 +3,19 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 
 interface MediaViewerProps {
   filePath: string
-  sourceUrl: string
+  base64Content: string
   mimeType: string
   mediaType: "video" | "audio"
 }
 
 export function MediaViewer({
   filePath,
-  sourceUrl,
+  base64Content,
   mimeType,
   mediaType
 }: MediaViewerProps): React.JSX.Element {
   const fileName = filePath.split("/").pop() || filePath
+  const mediaUrl = `data:${mimeType};base64,${base64Content}`
 
   return (
     <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
@@ -36,7 +37,7 @@ export function MediaViewer({
                 className="max-w-full max-h-[70vh] rounded-lg shadow-lg"
                 preload="metadata"
               >
-                <source src={sourceUrl} type={mimeType} />
+                <source src={mediaUrl} type={mimeType} />
                 Your browser does not support the video tag.
               </video>
             </>
@@ -52,7 +53,7 @@ export function MediaViewer({
                 </div>
               </div>
               <audio controls className="w-full max-w-md" preload="metadata">
-                <source src={sourceUrl} type={mimeType} />
+                <source src={mediaUrl} type={mimeType} />
                 Your browser does not support the audio tag.
               </audio>
             </>

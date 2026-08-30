@@ -1,4 +1,3 @@
-import { resolve } from "path"
 import {
   assertWorkflowWorktreeDeliverableDescendsFromBase,
   assertWorkflowWorktreeDeliverablePathsInScope,
@@ -14,11 +13,6 @@ import {
 } from "../../services/git-worktree"
 import type { WorkflowWorktreeRecord, WorkflowWorktreeStatus } from "./types"
 import { getWorkflowWorktreeTimeoutMs } from "../../../shared/agent-runtime-limits"
-
-function worktreeDirectoryKey(directory: string): string {
-  const normalized = resolve(directory).replace(/\\/g, "/").replace(/\/+$/, "")
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized
-}
 
 interface OwnedWorktree {
   info: WorkflowWorktreeInfo
@@ -43,15 +37,6 @@ export class WorkflowWorktreeLedger {
       onRecordDelete?: (record: WorkflowWorktreeRecord) => void
     }
   ) {}
-
-  /** Synchronous in-memory guard used immediately before manual deletion. */
-  ownsWorktreeDirectory(directory: string): boolean {
-    const targetKey = worktreeDirectoryKey(directory)
-    for (const owned of this.pending.values()) {
-      if (worktreeDirectoryKey(owned.info.directory) === targetKey) return true
-    }
-    return false
-  }
 
   /** Freeze the actual source checkout once. All fan-out agents await this same
    * promise, so a later branch switch cannot split one run across baselines. */

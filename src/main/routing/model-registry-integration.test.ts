@@ -62,7 +62,7 @@ vi.mock("../models/registry", () => ({
 }))
 
 vi.mock("../db", () => ({
-  getThreadCore: () => (state.metadata === null ? null : { metadata: state.metadata }),
+  getThread: () => (state.metadata === null ? null : { metadata: state.metadata }),
   updateThread: vi.fn()
 }))
 

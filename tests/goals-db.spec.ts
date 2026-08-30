@@ -214,12 +214,7 @@ async function testGoalEventsRestoreQueryKeepsRequiredEventsAndRecentTail(): Pro
   const restore = db.getThreadGoalEventsForRestore("thread-events-restore-limit", {
     recentLimit: 2
   })
-  const boundedFallback = db.getThreadGoalEventsHydrationFallback(
-    "thread-events-restore-limit",
-    { limit: 2, restore: true, scanLimit: 500 }
-  )
   const restoreMessages = restore.map((event) => event.message)
-  const fallbackMessages = boundedFallback.map((event) => event.message)
 
   assertEqual(full.length, 8, "default goal event query should still return all events")
   assertEqual(restore.length, 4, "restore query should keep required events and recent tail")
@@ -248,75 +243,6 @@ async function testGoalEventsRestoreQueryKeepsRequiredEventsAndRecentTail(): Pro
     restoreMessages.at(-1),
     "Ordinary goal notice 5",
     "restore query should keep the newest retained tail notice"
-  )
-  assert(
-    fallbackMessages.includes(`${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal old objective`),
-    "bounded emergency fallback should keep an older restorable user command"
-  )
-  assert(
-    fallbackMessages.includes(RUNTIME_RESTORED_GOAL_PAUSE_NOTICE),
-    "bounded emergency fallback should keep an older checkpoint boundary"
-  )
-  assert(
-    !fallbackMessages.includes(`${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal status`),
-    "bounded emergency fallback should omit non-transcript controls"
-  )
-
-  await db.closeDatabase()
-}
-
-async function testGoalEventsRestoreQueryCapsItsHistoricalScan(): Promise<void> {
-  const db = await import("../src/main/db/index.ts")
-
-  await db.initializeDatabase()
-  const threadId = "thread-events-restore-scan-cap"
-  db.createThread(threadId, { title: "Goal restore scan cap regression" })
-  const database = db.getDb()
-  database.run("BEGIN")
-  try {
-    database.run(
-      "INSERT INTO thread_goal_events (thread_id, goal_id, active_window_id, message, created_at) VALUES (?, ?, ?, ?, ?)",
-      [
-        threadId,
-        "goal-ancient",
-        "window-ancient",
-        `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal ancient objective`,
-        1
-      ]
-    )
-    database.run(
-      "INSERT INTO thread_goal_events (thread_id, goal_id, active_window_id, message, created_at) VALUES (?, ?, ?, ?, ?)",
-      [threadId, "goal-ancient", "window-ancient", RUNTIME_RESTORED_GOAL_PAUSE_NOTICE, 2]
-    )
-    for (let index = 3; index <= 1_005; index += 1) {
-      database.run(
-        "INSERT INTO thread_goal_events (thread_id, goal_id, active_window_id, message, created_at) VALUES (?, ?, ?, ?, ?)",
-        [threadId, "goal-recent", "window-recent", `Ordinary bounded event ${index}`, index]
-      )
-    }
-    database.run("COMMIT")
-  } catch (error) {
-    database.run("ROLLBACK")
-    throw error
-  }
-
-  const restore = db.getThreadGoalEventsForRestore(threadId, {
-    recentLimit: Number.MAX_SAFE_INTEGER,
-    scanLimit: Number.MAX_SAFE_INTEGER
-  })
-  assertEqual(restore.length, 1_000, "restore scan should enforce the hard message-page cap")
-  assertEqual(
-    restore[0]?.message,
-    "Ordinary bounded event 6",
-    "events outside the bounded tail must not leak back through special-event predicates"
-  )
-  assert(
-    !restore.some((event) => event.message.includes("ancient")),
-    "old goal commands outside the scan window must stay outside hydration"
-  )
-  assert(
-    !restore.some((event) => event.message === RUNTIME_RESTORED_GOAL_PAUSE_NOTICE),
-    "old checkpoint boundaries outside the scan window must stay outside hydration"
   )
 
   await db.closeDatabase()
@@ -722,7 +648,6 @@ async function main(): Promise<void> {
     testGoalEventsPersistAndDeleteWithThread,
     testGoalEventsCanBeLimitedForUi,
     testGoalEventsRestoreQueryKeepsRequiredEventsAndRecentTail,
-    testGoalEventsRestoreQueryCapsItsHistoricalScan,
     testReplacingSqlGoalRefreshesCreatedAt,
     testResumingSqlGoalRefreshesCreatedAtBaseline,
     testResettingActiveSqlGoalRefreshesCreatedAtBaseline,

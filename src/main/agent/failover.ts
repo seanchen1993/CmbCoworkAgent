@@ -13,7 +13,6 @@ export type ApiErrorCode =
   | "rate_limit"
   | "server_error"
   | "network_error"
-  | "local_storage_error"
   | "unknown"
 
 // ─── Gateway status-code dictionary ──────────────────────────────────────────
@@ -104,18 +103,6 @@ type ErrorLike = {
 function asErrorLike(value: unknown): ErrorLike | null {
   if (!value || (typeof value !== "object" && typeof value !== "function")) return null
   return value as ErrorLike
-}
-
-function findErrorWithCode(error: unknown, code: string): unknown | null {
-  const visited = new Set<object>()
-  let current: unknown = error
-  while (true) {
-    const detail = asErrorLike(current)
-    if (!detail || visited.has(detail as object)) return null
-    visited.add(detail as object)
-    if (detail.code === code) return current
-    current = detail.cause
-  }
 }
 
 function isAbortLikeError(error: unknown): boolean {
@@ -438,22 +425,6 @@ export function extractErrorDetail(
   error: unknown,
   fetchDetail?: { status?: number; requestId?: string; rawBody?: string }
 ): ApiErrorDetail {
-  const localStorageError = findErrorWithCode(
-    error,
-    "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"
-  )
-  if (localStorageError) {
-    const localStorageMessage = cleanProviderMessage(localStorageError)
-    return {
-      code: "local_storage_error",
-      statusLabel: "本地会话存储错误",
-      hint: "请先重启应用后重试；如仍失败，请导出日志排查本地 checkpoint。",
-      reason:
-        localStorageMessage ??
-        "本地会话消息索引不完整，自动恢复失败，但已保存的会话消息没有被删除。",
-      providerMessage: localStorageMessage
-    }
-  }
   const status = fetchDetail?.status ?? getStatusCode(error) ?? statusFromMessage(error)
   const info = getStatusInfo(status)
   const code =

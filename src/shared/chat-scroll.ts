@@ -4,10 +4,6 @@ export const CHAT_AUTO_SCROLL_ALWAYS = "always" as const
 export type ChatAutoScrollMessageLimit = number | typeof CHAT_AUTO_SCROLL_ALWAYS
 
 export interface ChatScrollSettings {
-  /**
-   * Legacy persisted preference retained so older profiles and IPC payloads remain readable.
-   * Runtime scrolling now follows user intent and does not use the message count as a cutoff.
-   */
   autoScrollMessageLimit: ChatAutoScrollMessageLimit
 }
 

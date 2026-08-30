@@ -15,14 +15,11 @@ import {
   isWorkerFinalTextDelta,
   isWorkerToolCallMessage,
   isWorkerToolResultMessage,
-  observeSkillUsageFromStream,
   observeWorkerProgress,
   shouldClearWorkerFinalText,
-  summarizeWorkerText,
-  WorkerValuesSnapshotAccumulator
+  summarizeWorkerText
 } from "../src/main/agent/coordinator-worker-stream.ts"
 import type { CoordinatorWorkerProgressEvent } from "../src/main/agent/coordinator-worker-manager.ts"
-import { SkillUsageDetector } from "../src/main/agent/skill-evolution/usage-detector.ts"
 import { AIMessage, HumanMessage, ToolMessage } from "@langchain/core/messages"
 
 function assert(condition: unknown, message: string): void {
@@ -92,15 +89,6 @@ function toolMessage(name?: string): unknown {
       tool_call_id: name ? `${name}-call` : undefined,
       content: "ok"
     }
-  }
-}
-
-class CountingSkillUsageDetector extends SkillUsageDetector {
-  readonly readPaths: string[] = []
-
-  override onReadFilePath(rawPath: string): boolean {
-    this.readPaths.push(rawPath)
-    return false
   }
 }
 
@@ -912,251 +900,6 @@ async function testUsageAndTranscriptExtraction(): Promise<void> {
   )
 }
 
-function cumulativeValuesFixture(stablePrefixSize: number): {
-  rawMessages: unknown[]
-  messages: unknown[]
-  poisonStablePrefix: () => void
-} {
-  const rawMessages: unknown[] = [
-    {
-      id: ["langchain_core", "messages", "HumanMessage"],
-      kwargs: { content: "current prompt" }
-    },
-    ...Array.from({ length: stablePrefixSize }, (_, index) => {
-      if (index === 0) {
-        return {
-          id: ["langchain_core", "messages", "AIMessage"],
-          kwargs: {
-            id: "stable-tool-prefix",
-            content: "",
-            tool_calls: [
-              {
-                id: "stable-read-call",
-                name: "read_file",
-                args: { path: "/tmp/example-skill/SKILL.md" }
-              }
-            ]
-          }
-        }
-      }
-      if (index === 1) {
-        return {
-          id: ["langchain_core", "messages", "AIMessage"],
-          kwargs: {
-            id: "stable-reasoning-prefix",
-            content: "working",
-            additional_kwargs: { reasoning_content: "stable prefix reasoning" }
-          }
-        }
-      }
-      return {
-        id: ["langchain_core", "messages", "AIMessage"],
-        kwargs: { id: `stable-prefix-${index}`, content: `prefix-${index}` }
-      }
-    }),
-    {
-      id: ["langchain_core", "messages", "AIMessage"],
-      kwargs: {
-        id: "stable-tail",
-        content: "first",
-        usage_metadata: { input_tokens: 1, output_tokens: 1, total_tokens: 2 }
-      }
-    }
-  ]
-  let stablePrefixPoisoned = false
-  const messages = new Proxy(rawMessages, {
-    get(target, property, receiver) {
-      if (
-        stablePrefixPoisoned &&
-        typeof property === "string" &&
-        /^\d+$/.test(property) &&
-        Number(property) < target.length - 1
-      ) {
-        throw new Error(`stable values prefix was reread at index ${property}`)
-      }
-      return Reflect.get(target, property, receiver)
-    }
-  })
-  return {
-    rawMessages,
-    messages,
-    poisonStablePrefix: () => {
-      stablePrefixPoisoned = true
-    }
-  }
-}
-
-async function testValuesAccumulatorStableTailFastPath(): Promise<void> {
-  const fixture = cumulativeValuesFixture(10_000)
-  const accumulator = new WorkerValuesSnapshotAccumulator("current prompt")
-  const detector = new CountingSkillUsageDetector()
-  const seen = new Set<string>()
-  const events: CoordinatorWorkerProgressEvent[] = []
-  const firstPayload = { messages: fixture.messages }
-  const firstContext = accumulator.createContext("values", firstPayload)
-  observeSkillUsageFromStream("values", firstPayload, detector, firstContext)
-  observeWorkerProgress(
-    "values",
-    firstPayload,
-    seen,
-    (event) => events.push(event),
-    "current prompt",
-    firstContext
-  )
-  assert(detector.readPaths.length === 1, "the initial scan should observe the Skill read once")
-  assert(
-    events.filter((event) => event.type === "tool_call").length === 1,
-    "the initial scan should emit the stable-prefix tool call once"
-  )
-
-  fixture.rawMessages[fixture.rawMessages.length - 1] = {
-    id: ["langchain_core", "messages", "AIMessage"],
-    kwargs: {
-      id: "stable-tail",
-      content: "first and second",
-      usage_metadata: { input_tokens: 1, output_tokens: 2, total_tokens: 3 }
-    }
-  }
-  fixture.poisonStablePrefix()
-  const secondPayload = { messages: fixture.messages }
-  const secondContext = accumulator.createContext("values", secondPayload)
-  assert(
-    extractWorkerFinalText("values", secondPayload, "current prompt", secondContext) ===
-      "first and second",
-    "a same-identity content tail should update final text without reading the 10k prefix"
-  )
-  assert(
-    extractWorkerVisibleReasoning("values", secondPayload, "current prompt", secondContext)?.text ===
-      "stable prefix reasoning",
-    "the fast path should preserve the latest stable-prefix reasoning"
-  )
-  assert(
-    extractWorkerUsage("values", secondPayload, "current prompt", secondContext)?.total_tokens ===
-      3,
-    "the fast path should replace the stable tail's usage contribution"
-  )
-  assert(
-    !shouldClearWorkerFinalText("values", secondPayload, "current prompt", secondContext),
-    "an ordinary assistant tail should not clear final text"
-  )
-  observeSkillUsageFromStream("values", secondPayload, detector, secondContext)
-  observeWorkerProgress(
-    "values",
-    secondPayload,
-    seen,
-    (event) => events.push(event),
-    "current prompt",
-    secondContext
-  )
-  assert(
-    detector.readPaths.length === 1,
-    "a content-only tail should not replay Skill reads from the poisoned stable prefix"
-  )
-  assert(
-    events.filter((event) => event.type === "tool_call").length === 1,
-    "a content-only tail should not replay tool progress from the poisoned stable prefix"
-  )
-}
-
-async function testWorkflowSkillAccumulatorStableTailFastPath(): Promise<void> {
-  const fixture = cumulativeValuesFixture(2_000)
-  const accumulator = new WorkerValuesSnapshotAccumulator("current prompt", {
-    deriveWorkerState: false
-  })
-  const detector = new CountingSkillUsageDetector()
-  const firstPayload = { messages: fixture.messages }
-  const firstContext = accumulator.createContext("values", firstPayload)
-  observeSkillUsageFromStream("values", firstPayload, detector, firstContext)
-
-  fixture.rawMessages[fixture.rawMessages.length - 1] = {
-    id: ["langchain_core", "messages", "AIMessage"],
-    kwargs: { id: "stable-tail", content: "first and workflow second" }
-  }
-  fixture.poisonStablePrefix()
-  const secondPayload = { messages: fixture.messages }
-  const secondContext = accumulator.createContext("values", secondPayload)
-  observeSkillUsageFromStream("values", secondPayload, detector, secondContext)
-  assert(
-    detector.readPaths.length === 1,
-    "workflow Skill observation should not reread a stable 2k prefix on the second frame"
-  )
-}
-
-async function testValuesAccumulatorBoundaryFallbacks(): Promise<void> {
-  let prefixReads = 0
-  const prefixKwargs = { id: "prefix", content: "prefix" }
-  const prefix = {
-    id: ["langchain_core", "messages", "AIMessage"]
-  } as Record<string, unknown>
-  Object.defineProperty(prefix, "kwargs", {
-    enumerable: true,
-    get() {
-      prefixReads += 1
-      return prefixKwargs
-    }
-  })
-  const prompt = {
-    id: ["langchain_core", "messages", "HumanMessage"],
-    kwargs: { content: "boundary prompt" }
-  }
-  const rawMessages = [
-    prompt,
-    prefix,
-    {
-      id: ["langchain_core", "messages", "AIMessage"],
-      kwargs: { id: "tail-a", content: "answer a" }
-    }
-  ]
-  const accumulator = new WorkerValuesSnapshotAccumulator("boundary prompt")
-  accumulator.createContext("values", { messages: rawMessages })
-
-  prefixReads = 0
-  rawMessages[2] = {
-    id: ["langchain_core", "messages", "AIMessage"],
-    kwargs: { id: "tail-b", content: "answer b" }
-  }
-  const identityContext = accumulator.createContext("values", { messages: rawMessages })
-  assert(prefixReads > 0, "an assistant identity change should force a complete fallback scan")
-  assert(
-    extractWorkerFinalText("values", { messages: rawMessages }, "boundary prompt", identityContext) ===
-      "answer b",
-    "identity fallback should keep the new assistant answer"
-  )
-
-  prefixReads = 0
-  rawMessages[2] = {
-    id: ["langchain_core", "messages", "ToolMessage"],
-    kwargs: { name: "execute", tool_call_id: "boundary-call", content: "ok" }
-  }
-  const toolContext = accumulator.createContext("values", { messages: rawMessages })
-  assert(prefixReads > 0, "a tool boundary should force a complete fallback scan")
-  assert(
-    shouldClearWorkerFinalText("values", { messages: rawMessages }, "boundary prompt", toolContext),
-    "tool-boundary fallback should clear stale assistant text"
-  )
-
-  prefixReads = 0
-  const reorderedMessages = [
-    prompt,
-    {
-      id: ["langchain_core", "messages", "AIMessage"],
-      kwargs: { id: "tail-c", content: "answer c" }
-    },
-    prefix
-  ]
-  const reorderedContext = accumulator.createContext("values", { messages: reorderedMessages })
-  assert(prefixReads > 0, "a replacement/reordered messages array should force a full scan")
-  assert(
-    extractWorkerFinalText(
-      "values",
-      { messages: reorderedMessages },
-      "boundary prompt",
-      reorderedContext
-    ) === "prefix",
-    "reorder fallback should derive final text from the actual new order"
-  )
-}
-
 async function run(): Promise<void> {
   await testFinalTextExtraction()
   console.log("PASS coordinator worker stream final text extraction")
@@ -1166,12 +909,6 @@ async function run(): Promise<void> {
   console.log("PASS coordinator worker stream progress observation")
   await testUsageAndTranscriptExtraction()
   console.log("PASS coordinator worker stream usage and transcript extraction")
-  await testValuesAccumulatorStableTailFastPath()
-  console.log("PASS coordinator worker values 10k stable-tail fast path")
-  await testWorkflowSkillAccumulatorStableTailFastPath()
-  console.log("PASS workflow values 2k stable-tail fast path")
-  await testValuesAccumulatorBoundaryFallbacks()
-  console.log("PASS coordinator worker values boundary fallbacks")
 }
 
 run().catch((error: Error) => {

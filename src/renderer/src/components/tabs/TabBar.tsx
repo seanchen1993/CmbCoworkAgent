@@ -1,11 +1,7 @@
 import { X, FileCode, FileText, FileJson, File } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
-import {
-  useThreadActions,
-  useThreadStateSelector,
-  type OpenFile
-} from "@/lib/thread-context"
+import { useThreadState, type OpenFile } from "@/lib/thread-context"
 
 interface TabBarProps {
   className?: string
@@ -16,17 +12,15 @@ export function TabBar({
   className,
   threadId: propThreadId
 }: TabBarProps): React.JSX.Element | null {
-  const currentThreadId = useAppStore((state) => state.currentThreadId)
+  const { currentThreadId } = useAppStore()
   const threadId = propThreadId ?? currentThreadId
-  const openFiles = useThreadStateSelector(threadId, (state) => state.openFiles) ?? []
-  const activeTab = useThreadStateSelector(threadId, (state) => state.activeTab)
-  const threadActions = useThreadActions(threadId)
+  const threadState = useThreadState(threadId)
 
-  if (!threadId || !threadActions) {
+  if (!threadState) {
     return null
   }
 
-  const { setActiveTab, closeFile } = threadActions
+  const { openFiles, activeTab, setActiveTab, closeFile } = threadState
 
   return (
     <div

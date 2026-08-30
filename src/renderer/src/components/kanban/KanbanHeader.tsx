@@ -1,25 +1,18 @@
 import { Button } from "@/components/ui/button"
-import { useShallow } from "zustand/react/shallow"
 import { useAppStore } from "@/lib/store"
 import { isHarnessProjectModeThread } from "@/lib/thread-classification"
-import { useAllStreamLoadingStates, useThreadStateSummaries } from "@/lib/thread-context"
+import { useAllStreamLoadingStates, useAllThreadStates } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
 
 export function KanbanHeader({ className }: { className?: string }): React.JSX.Element {
-  const { showSubagentsInKanban, setShowSubagentsInKanban, threads } = useAppStore(
-    useShallow((state) => ({
-      showSubagentsInKanban: state.showSubagentsInKanban,
-      setShowSubagentsInKanban: state.setShowSubagentsInKanban,
-      threads: state.threads
-    }))
-  )
+  const { showSubagentsInKanban, setShowSubagentsInKanban, threads } = useAppStore()
   const loadingStates = useAllStreamLoadingStates()
-  const threadStateSummaries = useThreadStateSummaries()
+  const allThreadStates = useAllThreadStates()
 
   const activeCount = threads.filter((t) => {
     if (isHarnessProjectModeThread(t)) return false
     const isLoading = loadingStates[t.thread_id] ?? false
-    const hasPendingApproval = threadStateSummaries[t.thread_id]?.hasPendingApproval ?? false
+    const hasPendingApproval = Boolean(allThreadStates[t.thread_id]?.pendingApproval)
     return isLoading || hasPendingApproval || t.status === "busy" || t.status === "interrupted"
   }).length
 

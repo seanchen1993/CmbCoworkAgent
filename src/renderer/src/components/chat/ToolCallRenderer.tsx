@@ -48,7 +48,6 @@ interface ToolCallRendererProps {
   isError?: boolean
   status?: ToolCallStatus
   needsApproval?: boolean
-  searchableSummary?: string
   showApprovalButtons?: boolean
   onApprovalDecision?: (
     decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
@@ -400,7 +399,6 @@ export function ToolCallRenderer({
   isError,
   status,
   needsApproval,
-  searchableSummary,
   showApprovalButtons = true,
   onApprovalDecision,
   retryReason,
@@ -833,14 +831,9 @@ export function ToolCallRenderer({
           className={cn("size-4 shrink-0", needsApproval ? "text-amber-500" : "text-status-info")}
         />
 
-        <span
-          data-chat-search-text={searchableSummary ? true : undefined}
-          className="text-xs font-medium min-w-0 truncate text-left"
-        >
-          {searchableSummary ?? label}
-        </span>
+        <span className="text-xs font-medium shrink-0">{label}</span>
 
-        {!searchableSummary && displayArg && (
+        {displayArg && (
           <span className="flex-1 truncate text-left text-xs text-muted-foreground font-mono">
             {displayArg}
           </span>

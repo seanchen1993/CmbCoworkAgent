@@ -349,9 +349,9 @@ export class SkillOptimizer {
     // Load traces
     const rawTraces = this.traces
       ? [...this.traces]
-      : await (this.threadId
-          ? readThreadTraces(this.threadId)
-          : readRecentTraces(this.traceLimit))
+      : this.threadId
+        ? readThreadTraces(this.threadId)
+        : readRecentTraces(this.traceLimit)
 
     // Filter interesting traces
     const interesting = this.traces

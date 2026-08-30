@@ -90,7 +90,7 @@ function OutputStyleSwitcherImpl({
   disabled = false
 }: OutputStyleSwitcherProps): JSX.Element {
   const threads = useAppStore((state) => state.threads)
-  const patchThreadMetadata = useAppStore((state) => state.patchThreadMetadata)
+  const updateThread = useAppStore((state) => state.updateThread)
   const [open, setOpen] = useState(false)
   const [pendingStyle, setPendingStyle] = useState<AgentOutputStyle | null>(null)
 
@@ -113,8 +113,12 @@ function OutputStyleSwitcherImpl({
 
       setPendingStyle(nextStyle)
       try {
-        await patchThreadMetadata(threadId, {
-          set: {
+        const latestThread = await window.api.threads.get(threadId)
+        const latestMetadata = latestThread?.metadata ?? currentThread?.metadata ?? {}
+        await updateThread(threadId, {
+          metadata: {
+            ...(currentThread?.metadata ?? {}),
+            ...latestMetadata,
             outputStyle: nextStyle,
             // Preserve compatibility with builds that only understand the old flag.
             conciseModeEnabled: nextStyle === "concise"
@@ -130,7 +134,7 @@ function OutputStyleSwitcherImpl({
         setPendingStyle(null)
       }
     },
-    [currentStyle, disabled, patchThreadMetadata, pendingStyle, threadId]
+    [currentStyle, currentThread?.metadata, disabled, pendingStyle, threadId, updateThread]
   )
 
   return (

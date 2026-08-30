@@ -275,32 +275,6 @@ export function namespaceChatXStreamEventIds(
   }
 
   if (event.type === "custom") {
-    if (
-      event.data.type === "coordinator_ai_snapshot_message" &&
-      isRecord(event.data.assistantMessage)
-    ) {
-      const assistantMessage = event.data.assistantMessage
-      return {
-        ...event,
-        data: {
-          ...event.data,
-          assistantMessage: {
-            ...assistantMessage,
-            ...(typeof assistantMessage.id === "string"
-              ? { id: getChatXAssistantMessageId(currentMsgId, assistantMessage.id) }
-              : {}),
-            ...(Array.isArray(assistantMessage.tool_calls)
-              ? {
-                  tool_calls: namespaceToolCalls(
-                    currentMsgId,
-                    assistantMessage.tool_calls
-                  )
-                }
-              : {})
-          }
-        }
-      }
-    }
     if (event.data.type === "subagents" && Array.isArray(event.data.subagents)) {
       return {
         ...event,
@@ -313,22 +287,13 @@ export function namespaceChatXStreamEventIds(
     if (event.data.type === "subagent_transcript_message") {
       return namespaceSubagentTranscriptEvent(currentMsgId, event)
     }
-    if (event.data.type === "subagent_delta" && typeof event.data.subagentId === "string") {
-      return {
-        ...event,
-        data: {
-          ...event.data,
-          subagentId: getChatXToolCallId(currentMsgId, event.data.subagentId)
-        }
-      }
-    }
     if (event.data.type === "subagent_log_entry") {
       return namespaceSubagentLogEvent(currentMsgId, event)
     }
     return event
   }
 
-  if (event.type !== "full-messages" && event.type !== "turn-messages") return event
+  if (event.type !== "full-messages") return event
 
   let activeTurnId: string | undefined
   return {

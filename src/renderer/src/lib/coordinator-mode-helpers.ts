@@ -1,10 +1,7 @@
-import {
-  resolveAgentModeFromMetadata,
-  resolveThreadExecutionModeFromMetadata
-} from "../../../shared/agent-mode-metadata"
-
-function isMetadataRecord(metadata: unknown): boolean {
-  return metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
+function truthyCoordinatorFlag(value: unknown): boolean {
+  if (typeof value === "boolean") return value
+  if (typeof value !== "string") return false
+  return ["1", "true", "yes", "on", "coordinator"].includes(value.toLowerCase())
 }
 
 export function isExplicitNormalModeMetadata(metadata: unknown): boolean {
@@ -16,13 +13,30 @@ export function isExplicitNormalModeMetadata(metadata: unknown): boolean {
 }
 
 export function isMultiModeMetadata(metadata: unknown): boolean {
-  return isMetadataRecord(metadata) && resolveThreadExecutionModeFromMetadata(metadata) === "multi"
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false
+  }
+  const record = metadata as Record<string, unknown>
+  const isLegacyOrExplicitNormalMode =
+    record.agentMode === "normal" ||
+    (record.agentMode === undefined && !truthyCoordinatorFlag(record.coordinatorMode))
+  return isLegacyOrExplicitNormalMode && record.subagentsEnabled !== false
 }
 
 export function isCoordinatorModeMetadata(metadata: unknown): boolean {
-  return isMetadataRecord(metadata) && resolveAgentModeFromMetadata(metadata) === "coordinator"
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false
+  }
+  const record = metadata as Record<string, unknown>
+  if (isExplicitNormalModeMetadata(record) || isWorkflowModeMetadata(record)) {
+    return false
+  }
+  return record.agentMode === "coordinator" || truthyCoordinatorFlag(record.coordinatorMode)
 }
 
 export function isWorkflowModeMetadata(metadata: unknown): boolean {
-  return isMetadataRecord(metadata) && resolveAgentModeFromMetadata(metadata) === "workflow"
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false
+  }
+  return (metadata as Record<string, unknown>).agentMode === "workflow"
 }

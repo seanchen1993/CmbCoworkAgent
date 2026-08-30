@@ -342,7 +342,6 @@ export interface WorkflowRunSummaryDTO {
   startedAt: string
   completedAt?: string
   agentCount: number
-  notificationDelivered?: boolean
 }
 
 /** Rebuilds the live panel view from a persisted run (renderer reload / app restart). */

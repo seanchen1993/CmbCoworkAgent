@@ -15,16 +15,6 @@ import {
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
-import {
-  boundMemoryRenderWindow,
-  MEMORY_RENDER_WINDOW_SIZE
-} from "../../../../shared/memory-render-window"
-import type {
-  MemoryCatalogFile as MemoryFile,
-  MemoryCatalogProject as MemoryProject,
-  MemoryCatalogStats as MemoryStats,
-  MemoryFileContent
-} from "../../../../shared/memory-catalog"
 
 type MemoryType = "user" | "feedback" | "project" | "reference"
 type MemoryScope = "global" | "project"
@@ -32,6 +22,21 @@ type ProjectScopeStatus = "checking" | "available" | "unavailable"
 
 interface MemoryPanelProps {
   workspacePath?: string | null
+}
+
+interface MemoryFile {
+  name: string
+  size: number
+  modifiedAt: string
+  type: MemoryType | null
+  displayName: string | null
+  description: string | null
+  recallCount: number
+}
+
+interface DreamStateInfo {
+  lastRunAt: number
+  sessionsSinceLastRun: number
 }
 
 const TYPE_META: Record<
@@ -42,6 +47,19 @@ const TYPE_META: Record<
   feedback: { label: "Feedback", icon: MessageSquare, color: "text-amber-500" },
   project: { label: "Project", icon: Folder, color: "text-emerald-500" },
   reference: { label: "Reference", icon: BookOpen, color: "text-purple-500" }
+}
+
+interface MemoryStats {
+  fileCount: number
+  totalSize: number
+  indexSize: number
+  enabled: boolean
+  dreamEnabled: boolean
+  dreamState: DreamStateInfo
+  scope: MemoryScope
+  memoryDir: string
+  projectId?: string
+  gitRoot?: string
 }
 
 function formatDreamAge(lastRunAt: number): string {
@@ -157,23 +175,21 @@ interface DreamResult {
   skipped: number
 }
 
-const PROJECTS_REQUEST_SCOPE = "customize-memory-projects"
-const FILES_REQUEST_SCOPE = "customize-memory-files"
-const FILE_DETAIL_REQUEST_SCOPE = "customize-memory-file-detail"
-
-function isCatalogCancellation(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    (error.name.includes("Cancelled") ||
-      error.name.includes("Aborted") ||
-      error.message.toLowerCase().includes("cancel"))
-  )
+interface MemoryProject {
+  projectId: string
+  displayName: string
+  memoryDir: string
+  gitRoot?: string
+  fileCount: number
+  totalSize: number
+  indexSize: number
+  isCurrent: boolean
 }
 
 export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Element {
   const [files, setFiles] = useState<MemoryFile[]>([])
   const [selectedFile, setSelectedFile] = useState<MemoryFile | null>(null)
-  const [fileContent, setFileContent] = useState<MemoryFileContent | null>(null)
+  const [fileContent, setFileContent] = useState("")
   const [stats, setStats] = useState<MemoryStats | null>(null)
   const [enabled, setEnabled] = useState(false)
   const [dreamEnabled, setDreamEnabled] = useState(false)
@@ -183,19 +199,7 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
   const [projectScopeStatus, setProjectScopeStatus] = useState<ProjectScopeStatus>("unavailable")
   const [projects, setProjects] = useState<MemoryProject[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [projectNextCursor, setProjectNextCursor] = useState<string | null>(null)
-  const [projectCurrentCursor, setProjectCurrentCursor] = useState<string | null>(null)
-  const [projectBackStack, setProjectBackStack] = useState<Array<string | null>>([])
-  const [projectLoading, setProjectLoading] = useState(false)
-  const [fileNextCursor, setFileNextCursor] = useState<string | null>(null)
-  const [fileCurrentCursor, setFileCurrentCursor] = useState<string | null>(null)
-  const [fileBackStack, setFileBackStack] = useState<Array<string | null>>([])
-  const [fileLoading, setFileLoading] = useState(false)
-  const [catalogTruncated, setCatalogTruncated] = useState(false)
   const mountedRef = useRef(true)
-  const projectGenerationRef = useRef(0)
-  const fileGenerationRef = useRef(0)
-  const detailGenerationRef = useRef(0)
   const grouped = useMemo(() => groupFiles(files), [files])
   const hasProjectScope = projects.length > 0
   const selectedProject = useMemo(
@@ -207,15 +211,13 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
     selectedProject?.displayName || workspacePath
       ? (selectedProject?.displayName ?? lastPathSegment(workspacePath))
       : "未关联工作区"
-  const scopedWorkspacePath = activeScope === "project" ? (workspacePath ?? null) : null
-  const scopedProjectId = activeScope === "project" ? selectedProjectId : null
   const scopeRequest = useMemo(
     () => ({
       scope: activeScope,
-      workspacePath: scopedWorkspacePath,
-      projectId: scopedProjectId
+      workspacePath: workspacePath ?? null,
+      projectId: activeScope === "project" ? selectedProjectId : null
     }),
-    [activeScope, scopedProjectId, scopedWorkspacePath]
+    [activeScope, selectedProjectId, workspacePath]
   )
 
   useEffect(() => {
@@ -224,24 +226,14 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
     }
   }, [activeScope, hasProjectScope])
 
-  const loadProjects = useCallback(
-    async (cursor: string | null = null) => {
-      const generation = ++projectGenerationRef.current
-      setProjectLoading(true)
-      setProjectScopeStatus("checking")
-      if (!cursor) setProjectNextCursor(null)
-      try {
-        const page = await window.api.memory.listProjects({
-          workspacePath: workspacePath ?? null,
-          requestScope: PROJECTS_REQUEST_SCOPE,
-          ...(cursor ? { cursor } : {}),
-          limit: MEMORY_RENDER_WINDOW_SIZE
-        })
-        if (!mountedRef.current || generation !== projectGenerationRef.current) return
-        const projectList = boundMemoryRenderWindow(page.items)
+  useEffect(() => {
+    let cancelled = false
+    setProjectScopeStatus("checking")
+    window.api.memory
+      .listProjects({ workspacePath: workspacePath ?? null })
+      .then((projectList) => {
+        if (cancelled || !mountedRef.current) return
         setProjects(projectList)
-        setProjectCurrentCursor(cursor)
-        setProjectNextCursor(page.nextCursor ?? null)
         setSelectedProjectId((prev) => {
           if (prev && projectList.some((project) => project.projectId === prev)) return prev
           return (
@@ -254,124 +246,68 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
         if (workspacePath?.trim() && projectList.some((project) => project.isCurrent)) {
           setActiveScope((scope) => (scope === "global" ? "project" : scope))
         }
-      } catch (error) {
-        if (!isCatalogCancellation(error)) console.error(error)
-        if (mountedRef.current && generation === projectGenerationRef.current) {
+      })
+      .catch((e) => {
+        console.error(e)
+        if (!cancelled && mountedRef.current) {
           setProjects([])
           setSelectedProjectId(null)
           setProjectScopeStatus("unavailable")
         }
-      } finally {
-        if (mountedRef.current && generation === projectGenerationRef.current) {
-          setProjectLoading(false)
-        }
-      }
-    },
-    [workspacePath]
-  )
-
-  useEffect(() => {
-    setProjectBackStack([])
-    setProjectCurrentCursor(null)
-    setProjectNextCursor(null)
-    // Let the visible global/project file page enter the worker queue first. Project discovery is
-    // supplementary and must not delay the first useful Memory content.
-    const timer = window.setTimeout(() => void loadProjects(), 0)
+      })
     return () => {
-      window.clearTimeout(timer)
-      projectGenerationRef.current += 1
-      void window.api.memory.cancelCatalog(PROJECTS_REQUEST_SCOPE)
+      cancelled = true
     }
-  }, [loadProjects])
+  }, [workspacePath])
 
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      projectGenerationRef.current += 1
-      fileGenerationRef.current += 1
-      detailGenerationRef.current += 1
-      void window.api.memory.cancelCatalog(PROJECTS_REQUEST_SCOPE)
-      void window.api.memory.cancelCatalog(FILES_REQUEST_SCOPE)
-      void window.api.memory.cancelCatalog(FILE_DETAIL_REQUEST_SCOPE)
     }
   }, [])
 
-  const loadData = useCallback(async (cursor: string | null = null) => {
-    const generation = ++fileGenerationRef.current
-    setFileLoading(true)
-    if (!cursor) setFileNextCursor(null)
+  const loadData = useCallback(async () => {
     try {
-      const page = await window.api.memory.listFiles({
-        ...scopeRequest,
-        requestScope: FILES_REQUEST_SCOPE,
-        ...(cursor ? { cursor } : {}),
-        limit: MEMORY_RENDER_WINDOW_SIZE
-      })
-      if (!mountedRef.current || generation !== fileGenerationRef.current) return
-      const fileList = boundMemoryRenderWindow(page.items)
-      const memStats = page.stats
+      const [fileList, memStats] = await Promise.all([
+        window.api.memory.listFiles(scopeRequest),
+        window.api.memory.getStats(scopeRequest)
+      ])
+      if (!mountedRef.current) return
       setFiles(fileList)
-      setFileCurrentCursor(cursor)
-      setFileNextCursor(page.nextCursor ?? null)
-      setCatalogTruncated(page.truncated)
       setStats(memStats)
       setEnabled(memStats.enabled)
       setDreamEnabled(memStats.dreamEnabled)
       setSelectedFile((prev) => {
         if (!prev) return null
-        return fileList.find((f) => f.name === prev.name) ?? prev
+        return fileList.find((f) => f.name === prev.name) ?? null
       })
-    } catch (error) {
-      if (!isCatalogCancellation(error)) console.error(error)
-    } finally {
-      if (mountedRef.current && generation === fileGenerationRef.current) setFileLoading(false)
+    } catch (e) {
+      console.error(e)
     }
   }, [scopeRequest])
 
   useEffect(() => {
-    setFileBackStack([])
-    setFileCurrentCursor(null)
-    setFileNextCursor(null)
-    void loadData()
-    return () => {
-      fileGenerationRef.current += 1
-      void window.api.memory.cancelCatalog(FILES_REQUEST_SCOPE)
-    }
+    loadData()
   }, [loadData])
 
   useEffect(() => {
     return window.api.memory.onChanged(() => {
-      setFileBackStack([])
-      setFileNextCursor(null)
-      void loadData()
+      loadData()
     })
   }, [loadData])
 
   useEffect(() => {
-    const generation = ++detailGenerationRef.current
     if (!selectedFile) {
-      setFileContent(null)
+      setFileContent("")
       return
     }
-    setFileContent(null)
     window.api.memory
-      .readFile(selectedFile.name, {
-        ...scopeRequest,
-        requestScope: FILE_DETAIL_REQUEST_SCOPE
+      .readFile(selectedFile.name, scopeRequest)
+      .then((content) => {
+        if (mountedRef.current) setFileContent(content)
       })
-      .then((result) => {
-        if (mountedRef.current && generation === detailGenerationRef.current) {
-          setFileContent(result)
-        }
-      })
-      .catch((error) => {
-        if (!isCatalogCancellation(error)) console.error(error)
-      })
-    return () => {
-      detailGenerationRef.current += 1
-      void window.api.memory.cancelCatalog(FILE_DETAIL_REQUEST_SCOPE)
-    }
+      .catch(console.error)
     // Re-read when name OR modifiedAt changes — this catches background
     // rewrites by the summarizer (which fires memory:changed → loadData →
     // setSelectedFile with the fresh metadata).
@@ -379,35 +315,9 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
 
   useEffect(() => {
     setSelectedFile(null)
-    setFileContent(null)
+    setFileContent("")
     setDreamResult(null)
   }, [activeScope, selectedProjectId, workspacePath])
-
-  const handleNextProjects = useCallback(() => {
-    if (!projectNextCursor || projectLoading) return
-    setProjectBackStack((previous) => [...previous, projectCurrentCursor])
-    void loadProjects(projectNextCursor)
-  }, [loadProjects, projectCurrentCursor, projectLoading, projectNextCursor])
-
-  const handlePreviousProjects = useCallback(() => {
-    if (projectLoading || projectBackStack.length === 0) return
-    const previousCursor = projectBackStack[projectBackStack.length - 1]
-    setProjectBackStack((previous) => previous.slice(0, -1))
-    void loadProjects(previousCursor)
-  }, [loadProjects, projectBackStack, projectLoading])
-
-  const handleNextFiles = useCallback(() => {
-    if (!fileNextCursor || fileLoading) return
-    setFileBackStack((previous) => [...previous, fileCurrentCursor])
-    void loadData(fileNextCursor)
-  }, [fileCurrentCursor, fileLoading, fileNextCursor, loadData])
-
-  const handlePreviousFiles = useCallback(() => {
-    if (fileLoading || fileBackStack.length === 0) return
-    const previousCursor = fileBackStack[fileBackStack.length - 1]
-    setFileBackStack((previous) => previous.slice(0, -1))
-    void loadData(previousCursor)
-  }, [fileBackStack, fileLoading, loadData])
 
   const handleToggleEnabled = useCallback(async () => {
     try {
@@ -512,39 +422,19 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
             </button>
           </div>
           {activeScope === "project" && hasProjectScope && (
-            <div className="space-y-1">
-              <select
-                className="h-7 w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
-                value={selectedProjectId ?? ""}
-                onChange={(event) => setSelectedProjectId(event.target.value || null)}
-                title="选择要查看和管理的项目记忆"
-              >
-                {projects.map((project) => (
-                  <option key={project.projectId} value={project.projectId}>
-                    {project.isCurrent ? "当前项目 · " : ""}
-                    {project.displayName} · {project.projectId}
-                  </option>
-                ))}
-              </select>
-              {(projectBackStack.length > 0 || projectNextCursor) && (
-                <div className="flex items-center justify-end gap-1">
-                  <button
-                    className="rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground disabled:opacity-40"
-                    onClick={handlePreviousProjects}
-                    disabled={projectLoading || projectBackStack.length === 0}
-                  >
-                    上一页
-                  </button>
-                  <button
-                    className="rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground disabled:opacity-40"
-                    onClick={handleNextProjects}
-                    disabled={projectLoading || !projectNextCursor}
-                  >
-                    加载更多项目
-                  </button>
-                </div>
-              )}
-            </div>
+            <select
+              className="h-7 w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
+              value={selectedProjectId ?? ""}
+              onChange={(event) => setSelectedProjectId(event.target.value || null)}
+              title="选择要查看和管理的项目记忆"
+            >
+              {projects.map((project) => (
+                <option key={project.projectId} value={project.projectId}>
+                  {project.isCurrent ? "当前项目 · " : ""}
+                  {project.displayName} · {project.projectId}
+                </option>
+              ))}
+            </select>
           )}
           <div className="rounded-md border border-border/70 bg-muted/30 px-2 py-1.5 text-[11px] text-muted-foreground">
             {activeScope === "project" ? (
@@ -700,17 +590,9 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
             )}
             {files.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                {fileLoading ? (
-                  <Loader2 className="size-8 opacity-40 mb-2 animate-spin" />
-                ) : (
-                  <Brain className="size-8 opacity-40 mb-2" />
-                )}
+                <Brain className="size-8 opacity-40 mb-2" />
                 <p className="text-xs">
-                  {fileLoading
-                    ? "正在加载记忆…"
-                    : activeScope === "project"
-                      ? "当前项目暂无记忆文件"
-                      : "暂无记忆文件"}
+                  {activeScope === "project" ? "当前项目暂无记忆文件" : "暂无记忆文件"}
                 </p>
               </div>
             ) : (
@@ -789,29 +671,6 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
                 )}
               </>
             )}
-            {catalogTruncated && (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-[10px] text-amber-600 dark:text-amber-400">
-                记忆目录超过安全扫描预算，当前只显示已安全读取的部分内容。
-              </div>
-            )}
-            {(fileBackStack.length > 0 || fileNextCursor) && (
-              <div className="sticky bottom-0 flex items-center justify-end gap-1 bg-background/95 py-2 backdrop-blur">
-                <button
-                  className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground disabled:opacity-40"
-                  onClick={handlePreviousFiles}
-                  disabled={fileLoading || fileBackStack.length === 0}
-                >
-                  上一页
-                </button>
-                <button
-                  className="rounded border border-border px-2 py-1 text-[11px] text-muted-foreground disabled:opacity-40"
-                  onClick={handleNextFiles}
-                  disabled={fileLoading || !fileNextCursor}
-                >
-                  加载更多
-                </button>
-              </div>
-            )}
           </div>
         </ScrollArea>
       </div>
@@ -837,15 +696,8 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
             )}
           </div>
           <ScrollArea className="flex-1">
-            {fileContent?.truncated && (
-              <div className="m-4 mb-0 rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-600 dark:text-amber-400">
-                {fileContent.truncatedReason === "file-size"
-                  ? "该文件超过 2 MB 安全读取上限，未加载正文。"
-                  : `正文较大，仅显示前 ${formatSize(fileContent.bytesRead)}。`}
-              </div>
-            )}
             <pre className="p-4 text-sm whitespace-pre-wrap font-mono leading-relaxed text-foreground/90">
-              {fileContent ? fileContent.content || "(空文件)" : "正在加载…"}
+              {fileContent || "(空文件)"}
             </pre>
           </ScrollArea>
         </div>

@@ -14,7 +14,6 @@ import {
   TraceCollector,
   createTraceCollectorSafely,
   finishTraceInBackground,
-  flushTraceWriteQueue,
   runTraceSideEffect,
   setTraceReporter
 } from "../src/main/agent/trace/collector.ts"
@@ -325,7 +324,6 @@ async function testTraceCollectorReportsVersionedSkills(): Promise<void> {
 
     const trace = await tracer.finish("success")
     await waitFor(() => reportedTrace !== undefined)
-    await flushTraceWriteQueue()
 
     assert(trace.threadId === "thread-telemetry-unit", "trace should keep thread id")
     assert(trace.modelId === "model-a", "trace should keep model id")
@@ -605,7 +603,6 @@ async function testTraceCollectorSanitizesLargeFields(): Promise<void> {
       makeLongText("ERROR_HEAD_", "e", "_ERROR_TAIL", 4000)
     )
     await waitFor(() => reportedTrace !== undefined)
-    await flushTraceWriteQueue()
 
     assert(
       trace.userMessage === userMessage,
@@ -704,7 +701,6 @@ async function testTraceCollectorPreservesUnknownOutcomeNodes(): Promise<void> {
 
     const reason = "Goal paused: needs user input"
     const trace = await tracer.finish("unknown", reason)
-    await flushTraceWriteQueue()
     const nodes = trace.nodes ?? []
     const root = nodes.find((node) => node.type === "trace")
     const llmNode = nodes.find((node) => node.id === llmNodeId)

@@ -102,7 +102,6 @@ async function testTransportCountsHiddenSubagentTools(): Promise<void> {
 
 async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
-  const threadHydration = await readProjectFile("src/renderer/src/lib/thread-hydration.ts")
   const threadStateHelpers = await readProjectFile("src/renderer/src/lib/thread-state-helpers.ts")
   const subagentTranscripts = await readProjectFile("src/renderer/src/lib/subagent-transcripts.ts")
   const subagentTranscriptStorage = await readProjectFile(
@@ -242,7 +241,7 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration, foregroundToken)",
+    "scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration)",
     "thread context retries failed transcript hydration instead of treating it as empty"
   )
   assertIncludes(
@@ -277,18 +276,8 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "getSubagentTranscriptPersistRetrySchedule(retryCount)",
-    "transcript persistence delegates retries to the shared bounded policy"
-  )
-  assertIncludes(
-    threadHydration,
-    "Math.min(30_000, 500 * 2 ** Math.min(normalizedCount, 6))",
-    "the shared retry policy caps transcript persistence backoff at 30 seconds"
-  )
-  assertIncludes(
-    threadHydration,
-    "SUBAGENT_TRANSCRIPT_PERSIST_MAX_AUTO_RETRIES = 6",
-    "transcript persistence retries have a finite automatic retry budget"
+    "Math.min(30_000, 500 * 2 ** Math.min(retryCount - 1, 6))",
+    "transcript persistence retries remain rate-limited at a bounded maximum interval"
   )
   assertSourceOrder(
     threadContext,
@@ -323,28 +312,18 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     compactTranscriptHandler,
-    "readSubagentTranscriptStartupInWorker(threadId",
-    "history startup projects the bounded row-backed transcript index off the main thread"
-  )
-  assertIncludes(
-    compactTranscriptHandler,
-    "ensureSubagentTranscriptRows(threadId)",
-    "history startup atomically migrates the one legacy inline sidecar"
+    "return buildSubagentTranscriptStartupManifests(rawTranscripts)",
+    "history startup returns a read-only bounded transcript index"
   )
   assertNotIncludes(
     compactTranscriptHandler,
     "hydrateSubagentTranscriptManifests",
     "history startup must not hydrate every large transcript blob"
   )
-  assertNotIncludes(
-    compactTranscriptHandler,
-    "getThreadSubagentStartupManifests(threadId)",
-    "history startup must not project the complete transcript index on the main thread"
-  )
   assertIncludes(
     threadIpc.slice(focusedTranscriptHandlerStart),
-    "rowBackedSubagentTranscriptPage(threadId, subagentId, before)",
-    "focused transcript IPC selects a bounded row page before hydration"
+    "sliceSubagentTranscriptManifestPage(bucket, before)",
+    "focused transcript IPC selects a bounded page before hydration"
   )
   assertIncludes(
     threadIpc.slice(focusedTranscriptHandlerStart),
@@ -363,13 +342,13 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "const subagentKeys = schedulerSubagentStreamKeysRef.current[threadId]",
-    "thread context targets its registered subagent accumulator keys during cleanup"
+    "const subagentPrefix = `${threadId}:subagent:`",
+    "thread context targets subagent accumulator keys during cleanup"
   )
   assertIncludes(
     threadContext,
-    "for (const key of subagentKeys) delete schedulerStreamingRef.current[key]",
-    "thread context removes registered subagent accumulator keys during cleanup"
+    "key.startsWith(subagentPrefix)",
+    "thread context removes subagent accumulator keys during cleanup"
   )
   assertIncludes(
     threadContext,
@@ -428,13 +407,8 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "requestCoordinatorWorkers(threadId, false)",
+    "getCoordinatorWorkers(threadId, { subscribeUpdates: false })",
     "thread context refreshes coordinator workers outside the active stream without registering stale update callbacks"
-  )
-  assertIncludes(
-    threadContext,
-    "window.api.agent.getCoordinatorWorkers(threadId, { subscribeUpdates: subscribe })",
-    "the shared worker request cache must preserve snapshot versus subscription semantics"
   )
   assertIncludes(
     threadContext,
@@ -443,17 +417,17 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "requestCoordinatorWorkers(currentThreadId, true)",
+    "getCoordinatorWorkers(currentThreadId, { subscribeUpdates: true })",
     "thread context subscribes worker updates only for the active thread"
   )
   assertIncludes(
     threadContext,
-    "Failed to restore coordinator workers:",
+    "Failed to load coordinator workers",
     "thread context restores coordinator workers when loading a thread"
   )
   assertIncludes(
     threadContext,
-    "const hasRunningWorker = workers.some(",
+    "const hasRunningWorker = state.coordinatorWorkers.some(",
     "thread context polls unresolved coordinator threads, not just strictly running workers"
   )
   assertIncludes(
@@ -463,17 +437,17 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "worker.notification_acknowledged === false &&",
+    "worker.notification_acknowledged === false &&\n            worker.suppress_notification_auto_run !== true",
     "thread context treats only unsuppressed unacknowledged terminal coordinator notifications as unresolved from running workers"
   )
   assertIncludes(
     threadContext,
-    "initializedThreadsRef.current.has(threadId)",
+    "if (!initializedThreadsRef.current.has(threadId)) return false",
     "thread context does not keep background polling alive for cold unresolved coordinator threads that cannot auto-run yet"
   )
   assertIncludes(
     threadContext,
-    "!isThreadMetadataExplicitNormalMode(threadId) ||",
+    "if (isThreadMetadataExplicitNormalMode(threadId) && !isEnvironmentCoordinatorMode)",
     "thread context drops unresolved terminal notifications out of background polling when explicit normal mode suppresses coordinator auto-runs"
   )
   assertIncludes(
@@ -483,12 +457,12 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "updateKeys.length === 0 ||",
+    "if (updateKeys.length === 0) return prev",
     "thread context should not allocate a new thread state for empty updates"
   )
   assertIncludes(
     threadContext,
-    "!updateKeys.some((key) => !Object.is(current[key], updates[key]))",
+    "Object.is(currentState[key], updates[key])",
     "thread context should skip state updates when values are unchanged"
   )
   assertIncludes(
@@ -741,7 +715,7 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   )
   assertIncludes(
     subagentStreamPanel,
-    "const parentIsRunning = focusedStream.isLoading || scheduledTaskLoading",
+    "const parentIsRunning = focusedStream.isLoading || threadState?.scheduledTaskLoading === true",
     "subagent transcript panel checks the parent run before showing a live status"
   )
   assertIncludes(
@@ -783,9 +757,6 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
 
 async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   const sidebar = await readProjectFile("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
-  const deletionHelper = await readProjectFile(
-    "src/renderer/src/lib/thread-group-deletion.ts"
-  )
   const harnessBoard = await readProjectFile(
     "src/renderer/src/components/harness-board/HarnessBoardView.tsx"
   )
@@ -797,34 +768,24 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   )
   assertIncludes(
     sidebar,
-    "threadSummary?.hasRunningCoordinatorWorker",
-    "sidebar reads the O(1) coordinator-worker summary instead of scanning workers"
+    'worker.status === "running"',
+    "sidebar checks for running coordinator workers"
   )
   assertMatches(
     sidebar,
-    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*hasRunningCoordinatorWorker\s*\|\|\s*Boolean\(threadSummary\?\.workflowRunning\)/u,
+    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*hasRunningCoordinatorWorker/u,
     "sidebar keeps spinner active after main stream completes while worker is running"
   )
   assertMatches(
     harnessBoard,
-    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*threadState\?\.workflowRunning\s*===\s*true/u,
+    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*threadState\?\.workflowRun\?\.status\s*===\s*"running"/u,
     "project-mode sidebar keeps spinner active while a dynamic workflow is running"
   )
-  assertMatches(
-    harnessBoard,
-    /const\s+hasRunningFeatureSession\s*=\s*featureSessionThreadIds\.some\([\s\S]*?allStreamLoadingStates\[threadId\]\s*===\s*true[\s\S]*?allThreadStates\[threadId\]\?\.workflowRunning\s*===\s*true/u,
-    "project-mode stage animation remains active while a dynamic workflow is running"
-  )
-  assertIncludes(
-    sidebar,
-    "deleteThreadGroupSequentially([threadToDelete.thread_id]",
-    "sidebar routes single deletion through the shared committed-deletion helper"
-  )
   assertSourceOrder(
-    deletionHelper,
-    "await handlers.deleteThread(threadId)",
-    "handlers.cleanupThread(threadId)",
-    "the shared deletion helper tears down renderer state only after backend deletion succeeds"
+    sidebar,
+    "await deleteThread(thread.thread_id)",
+    "cleanupThread(thread.thread_id)",
+    "sidebar only tears down thread context after backend deletion succeeds"
   )
 }
 

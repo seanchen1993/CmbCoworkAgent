@@ -30,7 +30,6 @@ const ScrollBar = React.forwardRef<
 >(({ className, orientation = "vertical", ...props }, ref) => (
   <ScrollAreaPrimitive.ScrollAreaScrollbar
     ref={ref}
-    data-scroll-area-scrollbar
     orientation={orientation}
     className={cn(
       "flex touch-none select-none transition-colors",

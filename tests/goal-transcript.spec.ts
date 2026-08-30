@@ -738,7 +738,6 @@ function testUnmatchedGoalContinuationPromptStaysHidden(): void {
 
 function testPersistedGoalControlEventsStayOutOfMainTranscript(): void {
   const baseMessages = [
-    message("assistant-before", "assistant", "开始。", new Date("2026-05-22T10:00:00.000Z")),
     message("assistant", "assistant", "当前状态已在 Goal 面板展示。", new Date("2026-05-22T10:00:10.000Z"))
   ]
   const events = goalNoticeEventsToGoalUiEvents("thread-1", [
@@ -783,82 +782,8 @@ function testPersistedGoalControlEventsStayOutOfMainTranscript(): void {
   const visible = mergeGoalUserEventsIntoTranscript(baseMessages, events)
   assertArrayEqual(
     visible.map((item) => item.content as string),
-    ["开始。", "/goal resume", "/goal 新目标", "当前状态已在 Goal 面板展示。"],
+    ["/goal resume", "/goal 新目标", "当前状态已在 Goal 面板展示。"],
     "restored side-channel goal controls should stay out of the main transcript"
-  )
-}
-
-function testGoalMergeDoesNotPrependEventsBeforeLoadedPage(): void {
-  const baseMessages = [
-    message("page-first", "assistant", "页首", new Date("2026-05-22T10:00:10.000Z")),
-    message("page-last", "assistant", "页尾", new Date("2026-05-22T10:00:20.000Z"))
-  ]
-  const events = goalNoticeEventsToGoalUiEvents("thread-1", [
-    {
-      event_id: 1,
-      goal_id: "goal-old",
-      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 页外旧目标`,
-      created_at: "2026-05-22T10:00:09.999Z"
-    },
-    {
-      event_id: 2,
-      goal_id: "goal-visible",
-      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 页内目标`,
-      created_at: "2026-05-22T10:00:15.000Z"
-    },
-    {
-      event_id: 3,
-      goal_id: "goal-new",
-      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal 页后目标`,
-      created_at: "2026-05-22T10:00:21.000Z"
-    }
-  ])
-
-  const visible = mergeGoalUserEventsIntoTranscript(baseMessages, events)
-  assertArrayEqual(
-    visible.map((item) => item.id),
-    ["page-first", "goal-user-event-2", "page-last", "goal-user-event-3"],
-    "goal restore must not prepend synthetic rows older than the loaded durable page"
-  )
-}
-
-function testGoalMergeScalesLinearlyWithPageAndEvents(): void {
-  const count = 2_000
-  let checkpointRoleReads = 0
-  const pageStart = Date.parse("2026-05-22T10:00:00.000Z")
-  const baseMessages = Array.from({ length: count }, (_, index) => {
-    const checkpoint = message(
-      `checkpoint-${index}`,
-      "assistant",
-      `assistant-${index}`,
-      new Date(pageStart + index * 2_000)
-    )
-    Object.defineProperty(checkpoint, "role", {
-      configurable: true,
-      enumerable: true,
-      get: () => {
-        checkpointRoleReads += 1
-        return "assistant"
-      }
-    })
-    return checkpoint
-  })
-  const events = goalNoticeEventsToGoalUiEvents(
-    "thread-linear",
-    Array.from({ length: count }, (_, index) => ({
-      event_id: index + 1,
-      goal_id: `goal-${index}`,
-      active_window_id: `window-${index}`,
-      message: `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal objective-${index}`,
-      created_at: pageStart + index * 2_000 + 1_000
-    }))
-  )
-
-  const visible = mergeGoalUserEventsIntoTranscript(baseMessages, events)
-  assertEqual(visible.length, count * 2, "all in-page goal events should merge")
-  assert(
-    checkpointRoleReads <= count * 2,
-    `goal merge should index each checkpoint a constant number of times, got ${checkpointRoleReads} role reads`
   )
 }
 
@@ -1042,8 +967,6 @@ function run(): void {
     testGoalResumePromptDoesNotMatchWrongActiveWindowEvent,
     testUnmatchedGoalContinuationPromptStaysHidden,
     testPersistedGoalControlEventsStayOutOfMainTranscript,
-    testGoalMergeDoesNotPrependEventsBeforeLoadedPage,
-    testGoalMergeScalesLinearlyWithPageAndEvents,
     testPersistedGoalUserEventsDoNotDuplicateCheckpointUserMessages,
     testGoalUserEventDedupesWhenCheckpointMessageLacksActiveWindow,
     testGoalEventsStayInGoalUiState,

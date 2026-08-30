@@ -14,9 +14,9 @@ type GlobalWithPlatform = {
 
 function getPlatform(): string {
   const g = globalThis as GlobalWithPlatform
-  // Prefer the explicit renderer bridge when a window exists. Node-based renderer
-  // tests still expose the host process, which may not match the platform being simulated.
-  return g.window?.electron?.process?.platform ?? g.process?.platform ?? ""
+  // Main process / Node exposes process.platform; the sandboxed renderer only has
+  // the platform bridged onto window.electron.process by the preload script.
+  return g.process?.platform ?? g.window?.electron?.process?.platform ?? ""
 }
 
 export function normalizeWorkspacePathKey(workspacePath: string | null | undefined): string {

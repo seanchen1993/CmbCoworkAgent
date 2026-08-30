@@ -5,11 +5,7 @@
  *   npx -y tsx tests/async-keyed-lock.spec.ts
  */
 
-import {
-  ASYNC_KEYED_LOCK_CAPACITY_ERROR_CODE,
-  AsyncKeyedLock,
-  AsyncKeyedLockCapacityError
-} from "../src/main/ipc/async-keyed-lock.ts"
+import { AsyncKeyedLock } from "../src/main/ipc/async-keyed-lock.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -116,69 +112,6 @@ async function testDifferentKeysDoNotSerializeEachOther(): Promise<void> {
   await Promise.all([first, second])
 }
 
-async function testPerKeyWaiterCapacityAndRecovery(): Promise<void> {
-  const lock = new AsyncKeyedLock({ maxWaitersPerKey: 2, maxWaitersTotal: 8 })
-  const release = deferred<void>()
-  const first = lock.withKey("thread-cap", async () => release.promise)
-  const second = lock.withKey("thread-cap", async () => undefined)
-  const third = lock.withKey("thread-cap", async () => {
-    throw new Error("queued failure")
-  })
-
-  assert(lock.waitingCount === 2, "two same-key callers should be counted as waiters")
-  assert(
-    lock.waitingCountForKey("thread-cap") === 2,
-    "per-key diagnostics should exclude the active holder"
-  )
-  let overflow: unknown
-  try {
-    await lock.withKey("thread-cap", async () => undefined)
-  } catch (error) {
-    overflow = error
-  }
-  assert(overflow instanceof AsyncKeyedLockCapacityError, "overflow should be recognizable")
-  assert(
-    (overflow as AsyncKeyedLockCapacityError).code ===
-      ASYNC_KEYED_LOCK_CAPACITY_ERROR_CODE,
-    "overflow should expose a stable error code"
-  )
-  assert(
-    (overflow as AsyncKeyedLockCapacityError).scope === "key",
-    "same-key overflow should identify its scope"
-  )
-
-  release.resolve()
-  await Promise.allSettled([first, second, third])
-  assert(lock.waitingCount === 0, "all waiter capacity should be released after settle")
-  assert(!lock.has("thread-cap"), "a failed queued operation must not leak the key")
-  await lock.withKey("thread-cap", async () => undefined)
-}
-
-async function testGlobalWaiterCapacityAcrossKeys(): Promise<void> {
-  const lock = new AsyncKeyedLock({ maxWaitersPerKey: 4, maxWaitersTotal: 2 })
-  const releases = [deferred<void>(), deferred<void>(), deferred<void>()]
-  const holders = releases.map((release, index) =>
-    lock.withKey(`thread-${index}`, async () => release.promise)
-  )
-  const firstWaiter = lock.withKey("thread-0", async () => undefined)
-  const secondWaiter = lock.withKey("thread-1", async () => undefined)
-
-  let overflow: unknown
-  try {
-    await lock.withKey("thread-2", async () => undefined)
-  } catch (error) {
-    overflow = error
-  }
-  assert(
-    overflow instanceof AsyncKeyedLockCapacityError && overflow.scope === "global",
-    "cross-key overflow should be rejected by the global waiter budget"
-  )
-
-  for (const release of releases) release.resolve()
-  await Promise.all([...holders, firstWaiter, secondWaiter])
-  assert(lock.waitingCount === 0, "global waiter accounting should return to zero")
-}
-
 async function run(): Promise<void> {
   await testSerializesConcurrentWorkPerKey()
   console.log("PASS async keyed lock serializes same-key work")
@@ -186,10 +119,6 @@ async function run(): Promise<void> {
   console.log("PASS async keyed lock survives rejected work")
   await testDifferentKeysDoNotSerializeEachOther()
   console.log("PASS async keyed lock keeps different keys independent")
-  await testPerKeyWaiterCapacityAndRecovery()
-  console.log("PASS async keyed lock bounds same-key waiters and recovers capacity")
-  await testGlobalWaiterCapacityAcrossKeys()
-  console.log("PASS async keyed lock bounds global waiters across keys")
 }
 
 run().catch((error) => {

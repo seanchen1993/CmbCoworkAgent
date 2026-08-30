@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef } from "react"
-import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
+import { useCurrentThread } from "@/lib/thread-context"
 import { TabBar } from "./TabBar"
 import { ChatContainer, type ChatSurface } from "@/components/chat/ChatContainer"
 import { ArrowLeft, Loader2 } from "lucide-react"
@@ -31,10 +31,7 @@ export function TabbedPanel({
   onThreadGitStatusChange,
   onHarnessSessionCreated
 }: TabbedPanelProps): React.JSX.Element {
-  const activeTab = useThreadStateSelector(threadId, (state) => state.activeTab) ?? "agent"
-  const openFiles = useThreadStateSelector(threadId, (state) => state.openFiles) ?? []
-  const pendingApproval = useThreadStateSelector(threadId, (state) => state.pendingApproval)
-  const setActiveTab = useThreadActions(threadId)?.setActiveTab
+  const { activeTab, openFiles, pendingApproval, setActiveTab } = useCurrentThread(threadId)
   const lastAutoFocusedApprovalIdRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -45,7 +42,7 @@ export function TabbedPanel({
     if (lastAutoFocusedApprovalIdRef.current === pendingApproval.id) return
 
     lastAutoFocusedApprovalIdRef.current = pendingApproval.id
-    if (activeTab !== "agent" && setActiveTab) {
+    if (activeTab !== "agent") {
       setActiveTab("agent")
     }
   }, [activeTab, pendingApproval, setActiveTab])
@@ -82,7 +79,7 @@ export function TabbedPanel({
             <div className="flex h-10 shrink-0 items-center border-b border-border/60 px-3">
               <button
                 type="button"
-                onClick={() => setActiveTab?.("agent")}
+                onClick={() => setActiveTab("agent")}
                 className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
               >
                 <ArrowLeft className="size-3.5" />
@@ -98,12 +95,7 @@ export function TabbedPanel({
                 </div>
               }
             >
-              <FileViewer
-                key={activeFile.path}
-                filePath={activeFile.path}
-                threadId={threadId}
-                requestLane="active-file-tab"
-              />
+              <FileViewer key={activeFile.path} filePath={activeFile.path} threadId={threadId} />
             </Suspense>
           </div>
         ) : (

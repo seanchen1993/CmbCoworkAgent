@@ -28,7 +28,6 @@ import {
   readRecentTraces,
   readThreadTraces,
   readTraceById,
-  readTracesByIds,
   deleteTraces
 } from "../agent/trace/collector"
 import { buildTraceTree } from "../agent/trace/tree-builder"
@@ -49,7 +48,6 @@ import {
 } from "../storage"
 import { getDefaultModelConfig } from "../models/registry"
 import { trackEvent } from "../services/event-reporter"
-import { bumpHookCatalogGlobalRevision } from "../hook-catalog/revision"
 
 function notifyRenderer(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -171,7 +169,6 @@ function applyCandidate(
     }
     mkdirSync(skillDir, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), ensureEvolvedSkillMarker(content), "utf-8")
-    bumpHookCatalogGlobalRevision()
     if (action === "create") clearDisabledSkillsForSkillDir(skillDir)
     invalidateEnabledSkillsCache()
     notifyRenderer("skills:changed")
@@ -239,7 +236,9 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
 
       if (runMode === "selected") {
         const selectedIds = [...new Set(opts?.traceIds ?? [])]
-        const selectedTraces = await readTracesByIds(selectedIds)
+        const selectedTraces = selectedIds
+          .map((traceId) => readTraceById(traceId))
+          .filter((trace): trace is AgentTrace => !!trace)
 
         if (selectedTraces.length === 0) {
           notifyRenderer("optimizer:streamEnd", {
@@ -488,9 +487,9 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         triggerSource: string
       }>
     > => {
-      const traces = await (opts?.threadId
+      const traces = opts?.threadId
         ? readThreadTraces(opts.threadId)
-        : readRecentTraces(opts?.limit ?? 20))
+        : readRecentTraces(opts?.limit ?? 20)
 
       return traces.map((trace) => {
         const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(
@@ -519,7 +518,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "optimizer:traceDetail",
     async (_event, { traceId }: { traceId: string }): Promise<AgentTrace | null> => {
-      const found = await readTraceById(traceId)
+      const found = readTraceById(traceId)
       if (!found) return null
       return {
         ...found,
@@ -534,7 +533,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
       _event,
       { traceIds }: { traceIds: string[] }
     ): Promise<{ deletedIds: string[]; failed: Array<{ traceId: string; error: string }> }> => {
-      const result = await deleteTraces(traceIds ?? [])
+      const result = deleteTraces(traceIds ?? [])
       if (result.deletedIds.length > 0) {
         notifyRenderer("optimizer:tracesDeleted", { deletedIds: result.deletedIds })
       }

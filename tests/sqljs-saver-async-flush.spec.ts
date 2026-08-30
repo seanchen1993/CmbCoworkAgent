@@ -1,17 +1,20 @@
 /**
- * Regression tests for native SQLite WAL durability, explicit checkpoints,
- * recovery candidates, retention and close/retire race handling.
+ * Regression tests for the async/atomic save + flush race handling in
+ * SqlJsSaver (perf/p0-batch2). Verifies that a checkpoint persists across a
+ * reopen for each ordering of save vs. flush:
+ *   1. flush() before the debounce timer fires (synchronous write path)
+ *   2. flush()/close() while an async save is in flight (drain, no clobber)
+ *   3. data written, left for the debounce to flush asynchronously
  *
  * Run:
  *   npx tsx tests/sqljs-saver-async-flush.spec.ts
  */
 
-import { copyFile, mkdtemp, readFile, readdir, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import assert from "assert"
 import initSqlJs from "sql.js"
-import { DatabaseSync } from "node:sqlite"
 import { SqlJsSaver } from "../src/main/checkpointer/sqljs-saver"
 import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkpoint"
 import type { RunnableConfig } from "@langchain/core/runnables"
@@ -88,41 +91,43 @@ async function testFlushBeforeDebounce(dir: string): Promise<void> {
   const dbPath = join(dir, "before-debounce.sqlite")
   const saver = new SqlJsSaver(dbPath)
   await putCheckpoint(saver, "t1", "cp-1")
-  // A FULL WAL checkpoint must preserve the already-committed mutation.
+  // No wait: debounce (300ms) has NOT fired, so flush takes the synchronous path.
   await saver.flush()
   await saver.close()
 
   const id = await readBackLatestId(dbPath, "t1")
   assert(id === "cp-1", `expected cp-1 persisted via sync flush, got ${id}`)
-  console.log("PASS explicit WAL checkpoint preserves committed data")
+  console.log("PASS flush before debounce persists synchronously")
 }
 
 async function testCloseWhileSaveInFlight(dir: string): Promise<void> {
   const dbPath = join(dir, "in-flight.sqlite")
   const saver = new SqlJsSaver(dbPath)
   await putCheckpoint(saver, "t1", "cp-1")
-  // Waiting no longer schedules a whole-database export; a later mutation must
-  // remain authoritative when close performs its final checkpoint.
+  // Let the debounce timer fire so an async save loop starts and is mid-write.
   await new Promise((r) => setTimeout(r, 320))
+  // Now write a NEWER checkpoint and immediately close (flush drains the
+  // in-flight save, then writes the authoritative latest snapshot).
   await putCheckpoint(saver, "t1", "cp-2")
   await saver.close()
 
   const id = await readBackLatestId(dbPath, "t1")
   assert(id === "cp-2", `expected cp-2 (no stale clobber from in-flight save), got ${id}`)
-  console.log("PASS close checkpoints the latest committed mutation")
+  console.log("PASS close while save in flight keeps the latest snapshot")
 }
 
 async function testAsyncDebouncedPersist(dir: string): Promise<void> {
   const dbPath = join(dir, "async.sqlite")
   const saver = new SqlJsSaver(dbPath)
   await putCheckpoint(saver, "t1", "cp-1")
-  // WAL commits are durable without waiting for the former export debounce.
+  // Wait past the debounce so the async atomic write completes on its own,
+  // WITHOUT calling flush/close.
   await new Promise((r) => setTimeout(r, 450))
 
   const id = await readBackLatestId(dbPath, "t1")
   assert(id === "cp-1", `expected cp-1 persisted by async debounced save, got ${id}`)
   await saver.close()
-  console.log("PASS WAL commit is visible without export or explicit flush")
+  console.log("PASS async debounced save persists without flush")
 }
 
 async function testFlushRemainsReusable(dir: string): Promise<void> {
@@ -139,95 +144,11 @@ async function testFlushRemainsReusable(dir: string): Promise<void> {
   console.log("PASS flush remains reusable and coalesces concurrent callers")
 }
 
-async function testWalWritesAvoidWholeDatabaseSnapshots(dir: string): Promise<void> {
-  const dbPath = join(dir, "wal-no-export.sqlite")
-  const saver = new SqlJsSaver(dbPath)
-  const largeValue = "x".repeat(2 * 1024 * 1024)
-  for (let index = 1; index <= 4; index += 1) {
-    const checkpoint = makeCheckpoint(`wal-${index}`)
-    ;(checkpoint.channel_values as Record<string, unknown>).largeValue = `${index}:${largeValue}`
-    await saver.put(
-      config("t-wal-no-export", index > 1 ? `wal-${index - 1}` : undefined),
-      checkpoint,
-      {
-        source: "input",
-        step: index,
-        writes: {},
-        parents: {}
-      } as CheckpointMetadata
-    )
-  }
-  await saver.flushStrict()
-
-  const openFiles = (await readdir(dir)).filter((file) => file.startsWith("wal-no-export.sqlite"))
-  assert(
-    !openFiles.some((file) => /\.(?:tmp|bak)(?:\.|$)/.test(file)),
-    `WAL writes unexpectedly created a full snapshot candidate: ${openFiles.join(", ")}`
-  )
-  await saver.close()
-  console.log("PASS large checkpoint updates avoid whole-database snapshot files")
-}
-
-async function testForkBoundaryByteBudgetIncludesExternalMessages(dir: string): Promise<void> {
-  const dbPath = join(dir, "fork-boundary-external-bytes.sqlite")
-  const threadId = "t-fork-boundary-external-bytes"
-  const saver = new SqlJsSaver(dbPath, undefined, {
-    maxRootCheckpoints: 1,
-    maxRootForkBoundaryCheckpoints: 10,
-    maxRootForkBoundaryBytes: 1_024
-  })
-  let parentCheckpointId: string | undefined
-  for (let index = 1; index <= 3; index += 1) {
-    const checkpoint = makeCheckpoint(`boundary-bytes-${index}`)
-    ;(checkpoint.channel_values as Record<string, unknown>).messages = [
-      { id: `message-${index}`, type: "ai", content: "m".repeat(4_096) }
-    ]
-    await saver.put(
-      config(threadId, parentCheckpointId),
-      checkpoint,
-      {
-        source: "loop",
-        step: index,
-        writes: {},
-        parents: {},
-        cmb_fork_boundary: {
-          version: 1,
-          kind: "turn_complete",
-          boundaryId: `turn_complete:${threadId}:${index}`,
-          completedAt: new Date().toISOString(),
-          source: "agent_run_complete"
-        }
-      } as CheckpointMetadata
-    )
-    parentCheckpointId = checkpoint.id
-  }
-
-  const retainedIds: string[] = []
-  for await (const tuple of saver.list(config(threadId))) retainedIds.push(tuple.checkpoint.id)
-  await saver.close()
-
-  assert.deepEqual(
-    retainedIds,
-    ["boundary-bytes-3"],
-    "external transcript bytes must remain part of the fork-boundary retention budget"
-  )
-  console.log("PASS fork boundary byte budget includes external transcript snapshots")
-}
-
 async function testFlushStrictReportsPersistenceFailure(dir: string): Promise<void> {
-  const dbPath = join(dir, "strict-checkpoint-failure.sqlite")
+  const dbPath = join(dir, "strict-target-is-directory.sqlite")
+  await mkdir(dbPath)
   const saver = new SqlJsSaver(dbPath)
   await putCheckpoint(saver, "t-strict", "strict-1")
-
-  const target = saver as unknown as {
-    db: { flush: (mode?: "FULL" | "TRUNCATE") => void } | null
-  }
-  const database = target.db
-  assert(database, "native database should be initialized")
-  const originalFlush = database.flush.bind(database)
-  database.flush = () => {
-    throw new Error("injected WAL checkpoint failure")
-  }
 
   let failed = false
   const originalWarn = console.warn
@@ -238,8 +159,7 @@ async function testFlushStrictReportsPersistenceFailure(dir: string): Promise<vo
     failed = true
   } finally {
     console.warn = originalWarn
-    database.flush = originalFlush
-    await saver.close()
+    await saver.retire()
   }
 
   assert(failed, "flushStrict should reject when the checkpoint file cannot be persisted")
@@ -330,9 +250,6 @@ async function testRecoverFromBackupWhenLiveFileIsCorrupt(dir: string): Promise<
   await saver.flush()
   await saver.close()
 
-  // Native SQLite deliberately avoids writing whole-database backups on each
-  // checkpoint. Seed a legacy .bak candidate to verify recovery compatibility.
-  await copyFile(dbPath, `${dbPath}.bak`)
   await writeFile(dbPath, Buffer.from("not a sqlite database"))
 
   const id = await readBackLatestId(dbPath, "t1")
@@ -383,12 +300,9 @@ async function testOversizedLiveStillRecoversNewerTempSnapshot(dir: string): Pro
     maxDatabaseBytes: 1,
     maxRootCheckpoints: 1
   })
-  const maintenance = await recovered.runMaintenance()
   const tuple = await recovered.getTuple(config("t-oversized-temp"))
   await recovered.close()
 
-  assert.equal(maintenance.attempted, true, "explicit maintenance should detect the tiny threshold")
-  assert.equal(maintenance.compacted, true, "explicit maintenance should compact the recovered DB")
   assert.equal(
     tuple?.checkpoint.id,
     "cp-new",
@@ -397,7 +311,7 @@ async function testOversizedLiveStillRecoversNewerTempSnapshot(dir: string): Pro
   console.log("PASS oversized live database still recovers newer temp snapshot first")
 }
 
-async function testOversizedDatabaseCompactsOnlyDuringMaintenance(dir: string): Promise<void> {
+async function testOversizedDatabaseCompactsInsteadOfStartingFresh(dir: string): Promise<void> {
   const dbPath = join(dir, "oversized-compact.sqlite")
   const original = new SqlJsSaver(dbPath, undefined, { maxCheckpointsPerNamespace: 3 })
   await putCheckpoint(original, "t-oversized", "root-1")
@@ -414,33 +328,6 @@ async function testOversizedDatabaseCompactsOnlyDuringMaintenance(dir: string): 
     maxNonRootCheckpoints: 1,
     maxDatabaseBytes: 1
   })
-  await compacted.initialize()
-  const beforeMaintenance = new DatabaseSync(dbPath, { readOnly: true })
-  const rootCountBefore = beforeMaintenance
-    .prepare(
-      "SELECT COUNT(*) AS count FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ''"
-    )
-    .get("t-oversized") as { count: number }
-  const toolCountBefore = beforeMaintenance
-    .prepare(
-      "SELECT COUNT(*) AS count FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?"
-    )
-    .get("t-oversized", "tools:fanout") as { count: number }
-  beforeMaintenance.close()
-  assert.equal(
-    Number(rootCountBefore.count),
-    3,
-    "initialize must not prune oversized root checkpoints on the hydration path"
-  )
-  assert.equal(
-    Number(toolCountBefore.count),
-    3,
-    "initialize must not prune oversized non-root checkpoints on the hydration path"
-  )
-
-  const maintenance = await compacted.runMaintenance()
-  assert.equal(maintenance.attempted, true)
-  assert.equal(maintenance.compacted, true)
   const rootIds: string[] = []
   for await (const tuple of compacted.list(config("t-oversized"))) {
     rootIds.push(tuple.checkpoint.id)
@@ -458,7 +345,7 @@ async function testOversizedDatabaseCompactsOnlyDuringMaintenance(dir: string): 
     !files.some((file) => file.startsWith("oversized-compact.sqlite.bak.")),
     "oversized but healthy database should be compacted, not quarantined into a timestamped backup"
   )
-  console.log("PASS oversized healthy database compacts only during explicit maintenance")
+  console.log("PASS oversized healthy database compacts instead of starting fresh")
 }
 
 async function testListEarlyBreakLeavesSaverReusable(dir: string): Promise<void> {
@@ -500,7 +387,6 @@ async function testForkBoundaryMarkerColumnBackfillsSerializedMetadata(dir: stri
   const SQL = await initSqlJs()
   const raw = new SQL.Database(await readFile(dbPath))
   raw.run(`UPDATE checkpoints SET fork_boundary_marker = 0`)
-  raw.run(`DELETE FROM checkpoint_schema_migrations`)
   await writeFile(dbPath, Buffer.from(raw.export()))
   raw.close()
 
@@ -525,8 +411,8 @@ async function testRetirePoisonsLateWriters(dir: string): Promise<void> {
   await putCheckpoint(saver, "t1", "cp-1")
   await saver.flush()
 
-  // WAL mutations commit immediately; retire still must not recreate the file
-  // after the thread's backing artifacts are swept.
+  // A newer mutation is still pending (debounce not fired) when the thread is
+  // deleted: retire must not flush it — the file is about to be swept.
   await putCheckpoint(saver, "t1", "cp-2")
   await saver.retire()
   for (const suffix of ["", ".bak", ".tmp"]) {
@@ -544,7 +430,7 @@ async function testRetirePoisonsLateWriters(dir: string): Promise<void> {
   assert(lateWriteRefused, "late put on a retired saver must be refused")
 
   await saver.flush() // must be a silent no-op, not a write
-  await new Promise((r) => setTimeout(r, 450))
+  await new Promise((r) => setTimeout(r, 450)) // past any debounced save
   const resurrected = (await readdir(dir)).filter((file) => file.startsWith("retire.sqlite"))
   assert(
     resurrected.length === 0,
@@ -560,8 +446,6 @@ async function main(): Promise<void> {
     await testCloseWhileSaveInFlight(dir)
     await testAsyncDebouncedPersist(dir)
     await testFlushRemainsReusable(dir)
-    await testWalWritesAvoidWholeDatabaseSnapshots(dir)
-    await testForkBoundaryByteBudgetIncludesExternalMessages(dir)
     await testFlushStrictReportsPersistenceFailure(dir)
     await testConcurrentFlushStrictSerializesWithClose(dir)
     await testMutationBurstSurvivesConcurrentFlushStrictStorm(dir)
@@ -569,7 +453,7 @@ async function main(): Promise<void> {
     await testRecoverFromBackupWhenLiveFileIsCorrupt(dir)
     await testRecoverFromNewerTempSnapshot(dir)
     await testOversizedLiveStillRecoversNewerTempSnapshot(dir)
-    await testOversizedDatabaseCompactsOnlyDuringMaintenance(dir)
+    await testOversizedDatabaseCompactsInsteadOfStartingFresh(dir)
     await testListEarlyBreakLeavesSaverReusable(dir)
     await testForkBoundaryMarkerColumnBackfillsSerializedMetadata(dir)
     await testRetirePoisonsLateWriters(dir)

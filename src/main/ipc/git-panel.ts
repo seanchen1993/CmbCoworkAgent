@@ -4,19 +4,11 @@ import { execFile } from "child_process"
 import { lstat, mkdir, readFile, rename, writeFile, rm, stat } from "fs/promises"
 import * as path from "path"
 import { promisify } from "util"
-import { getThreadCore } from "../db"
-import {
-  mutateLatestThreadMetadata,
-  parseThreadMetadata
-} from "../services/thread-metadata"
+import { getThread, updateThread } from "../db"
 import { getOpenworkDir } from "../storage"
 import { CMBDEVCLAW_INTERNAL_GIT_ENV } from "../services/git-hook-service"
 import { resolveGitOperationPath } from "../services/git-repository-discovery"
 import type { GitCommitHistoryRecord } from "../../shared/git-commit-history"
-import {
-  captureThreadIncarnation,
-  matchesThreadIncarnation
-} from "../services/thread-incarnation"
 
 const execFileAsync = promisify(execFile)
 const GIT_COMMIT_HISTORY_LIMIT_PER_PROJECT = 80
@@ -1067,7 +1059,7 @@ async function getThreadWorkspaceContext(threadId: string): Promise<{
   metadata: Record<string, unknown>
   workspacePath: string | null
 }> {
-  const thread = getThreadCore(threadId)
+  const thread = getThread(threadId)
   let metadata: Record<string, unknown> = {}
   try {
     metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
@@ -1080,43 +1072,10 @@ async function getThreadWorkspaceContext(threadId: string): Promise<{
   }
 }
 
-interface GitMetadataIdentity {
-  workspacePath: string | null
-  gitRoot: string | null
-  isWorktree: boolean
-  worktreeBranch: string | null
-}
-
-function getGitMetadataIdentity(metadata: Record<string, unknown>): GitMetadataIdentity {
-  return {
-    workspacePath: typeof metadata.workspacePath === "string" ? metadata.workspacePath : null,
-    gitRoot: typeof metadata.gitRoot === "string" ? metadata.gitRoot : null,
-    isWorktree: metadata.isWorktree === true,
-    worktreeBranch:
-      typeof metadata.worktreeBranch === "string" ? metadata.worktreeBranch : null
-  }
-}
-
-function gitMetadataIdentityEquals(
-  left: GitMetadataIdentity,
-  right: GitMetadataIdentity
-): boolean {
-  return (
-    left.workspacePath === right.workspacePath &&
-    left.gitRoot === right.gitRoot &&
-    left.isWorktree === right.isWorktree &&
-    left.worktreeBranch === right.worktreeBranch
-  )
-}
-
 function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
-      win.webContents.send("workspace:files-changed", {
-        threadIds: [threadId],
-        workspacePath,
-        changeType: "file"
-      })
+      win.webContents.send("workspace:files-changed", { threadId, workspacePath })
     }
   }
 }
@@ -1141,18 +1100,11 @@ async function rejectWorktreePaths(params: {
   const { threadId, filePaths, options } = params
   const startedAt = Date.now()
   const hasExplicitSelection = Array.isArray(filePaths)
-  const entryThread = getThreadCore(threadId)
-  if (!entryThread) return { success: false, error: "任务不存在" }
-  const expectedThreadIncarnation = captureThreadIncarnation(entryThread)
   const context = await getThreadWorkspaceContext(threadId)
-  if (!matchesThreadIncarnation(getThreadCore(threadId), expectedThreadIncarnation)) {
-    return { success: false, error: "任务已被替换，忽略过期的回退请求" }
-  }
   if (!context.workspacePath) {
     return { success: false, error: "当前任务不在 Git 仓库中" }
   }
   const workspacePath = context.workspacePath
-  const capturedGitMetadataIdentity = getGitMetadataIdentity(context.metadata)
 
   const target = await resolveGitOperationPath(workspacePath, options?.worktreePath)
   if ("error" in target) return { success: false, error: target.error }
@@ -1272,19 +1224,8 @@ async function rejectWorktreePaths(params: {
   const metadataTouchedTargets = convertedTouchedTargets.length > 0
     ? convertedTouchedTargets
     : touchedTargets
-  const latestThread = getThreadCore(threadId)
-  const latestMetadata = parseThreadMetadata(latestThread?.metadata)
-  const latestGitMetadataIdentity = getGitMetadataIdentity(latestMetadata)
-  if (
-    matchesThreadIncarnation(latestThread, expectedThreadIncarnation) &&
-    gitMetadataIdentityEquals(latestGitMetadataIdentity, capturedGitMetadataIdentity)
-  ) {
-    mutateLatestThreadMetadata(threadId, (current) => {
-      cleanupRejectedFileMetadata(current, workspacePath, worktreePath, metadataTouchedTargets)
-    })
-  } else {
-    logGitStep(threadId, "reject_all", "任务 Git 上下文已变化，跳过旧操作的元数据清理")
-  }
+  cleanupRejectedFileMetadata(context.metadata, workspacePath, worktreePath, metadataTouchedTargets)
+  updateThread(threadId, { metadata: JSON.stringify(context.metadata) })
 
   notifyWorkspaceFilesChanged(threadId, worktreePath)
   if (path.resolve(workspacePath) !== path.resolve(worktreePath)) {
@@ -1447,7 +1388,7 @@ async function getGitCommitHistoryForWorkspace(workspacePath: string): Promise<{
 }
 
 function getThreadWorkspacePath(threadId: string): string | null {
-  const thread = getThreadCore(threadId)
+  const thread = getThread(threadId)
   let metadata: Record<string, unknown> = {}
   try {
     metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}

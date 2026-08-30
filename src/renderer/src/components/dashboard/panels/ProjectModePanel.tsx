@@ -2015,7 +2015,9 @@ const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
 }
 
 /**
- * 用 item.user_id（上传者 SAP id）按需解析 {负责人, 部门}，只查询当前列表涉及的候选 ID。
+ * 用 item.user_id（上传者 SAP id）到全量用户目录解析 {负责人, 部门}。
+ * 负责人/部门并不在插件列表响应里——应用市场与 Harness 看板都是靠 user_id 二次查
+ * queryAllUser 拿到的，这里复用同一口径（queryAllUser + buildUploaderIdCandidates）。
  */
 async function resolvePluginUploaderProfiles(
   items: MarketItem[]
@@ -2025,14 +2027,9 @@ async function resolvePluginUploaderProfiles(
     new Set(items.map((item) => item.user_id?.trim() || "").filter(Boolean))
   )
   if (rawUserIds.length === 0) return result
-  if (typeof window.api?.dashboard?.userProfiles !== "function") return result
+  if (typeof window.api?.dashboard?.queryAllUser !== "function") return result
   try {
-    const requestedSapIds = Array.from(
-      new Set(rawUserIds.flatMap((rawUserId) => buildUploaderIdCandidates(rawUserId)))
-    )
-    const response = await window.api.dashboard.userProfiles(requestedSapIds, {
-      family: "project-mode-market"
-    })
+    const response = await window.api.dashboard.queryAllUser()
     if (!response.success || !response.data) return result
     const allUsers = response.data.filter((user) => user.sapId?.trim())
     for (const rawUserId of rawUserIds) {

@@ -175,8 +175,8 @@ describe("dynamic-workflow worktree shell isolation", () => {
 
   it("applies the same worktree violations inside visible shell wrappers", () => {
     for (const command of [
-      `bash -lc 'git -C "${SOURCE_ROOT}" reset --hard'`,
-      `bash -lc 'cd "${SOURCE_ROOT}" && touch escaped.txt'`,
+      `bash -lc 'git -C ${SOURCE_ROOT} reset --hard'`,
+      `bash -lc 'cd ${SOURCE_ROOT} && touch escaped.txt'`,
       `bash -lc 'git worktree remove --force /other/worktree'`
     ]) {
       expect(
@@ -227,25 +227,13 @@ describe("dynamic-workflow worktree shell isolation", () => {
       nestedPush = `sh -c ${JSON.stringify(nestedPush)}`
     }
 
-    expect(containsIndirectGitPush(nestedRead, "posix")).toBe(false)
-    expect(containsIndirectGitPush(nestedPush, "posix")).toBe(false)
+    expect(containsIndirectGitPush(nestedRead)).toBe(false)
+    expect(containsIndirectGitPush(nestedPush)).toBe(false)
     expect(
-      getWorktreeShellIsolationViolation(
-        nestedRead,
-        WORKTREE_ROOT,
-        WORKTREE_BOUNDARY,
-        [],
-        "posix"
-      )
+      getWorktreeShellIsolationViolation(nestedRead, WORKTREE_ROOT, WORKTREE_BOUNDARY)
     ).toContain("too deep to verify")
     expect(
-      getWorktreeShellIsolationViolation(
-        nestedPush,
-        WORKTREE_ROOT,
-        WORKTREE_BOUNDARY,
-        [],
-        "posix"
-      )
+      getWorktreeShellIsolationViolation(nestedPush, WORKTREE_ROOT, WORKTREE_BOUNDARY)
     ).toContain("too deep to verify")
   })
 
@@ -281,11 +269,7 @@ describe("dynamic-workflow worktree shell isolation", () => {
       const outside = path.join(root, "outside")
       mkdirSync(worktree)
       mkdirSync(outside)
-      symlinkSync(
-        outside,
-        path.join(worktree, "escape"),
-        process.platform === "win32" ? "junction" : "dir"
-      )
+      symlinkSync(outside, path.join(worktree, "escape"), "dir")
       const boundary = { ...WORKTREE_BOUNDARY, workspaceRoot: worktree, worktreeRoot: worktree }
 
       expect(getWorktreeShellIsolationViolation("cd escape && pwd", worktree, boundary)).toMatch(

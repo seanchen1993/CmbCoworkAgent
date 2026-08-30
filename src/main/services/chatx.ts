@@ -13,8 +13,8 @@ import { purgeThreadCheckpointArtifacts } from "../storage"
 import {
   createThread as dbCreateThread,
   deleteThread as dbDeleteThread,
-  getAllThreadSummaries,
-  getThreadCore
+  getAllThreads,
+  getThread
 } from "../db/index"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
@@ -24,7 +24,6 @@ import type { ChatXRobotConfig } from "../types"
 import { emitAppAttention } from "../app-attention-events"
 import { getChatXUserMessageId, namespaceChatXStreamEventIds } from "./chatx-stream-ids"
 import { getAvailableModelConfigOrDefault, toModelRef } from "../models/registry"
-import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -98,16 +97,6 @@ const threadIdToChatKey = new Map<string, string>()
 const messageQueues = new Map<string, ChatXInboundMessage[]>()
 let shuttingDown = false
 
-/**
- * Read-only per-thread run ownership check used by destructive-operation guards.
- * Keep the chat key private: callers only need to know whether this exact durable
- * thread still has a ChatX handler that owns its runtime/checkpointer cleanup.
- */
-export function isChatXThreadRunning(threadId: string): boolean {
-  const chatKey = threadIdToChatKey.get(threadId)
-  return chatKey !== undefined && runningChats.has(chatKey)
-}
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function notifyRenderer(channel: string): void {
@@ -137,7 +126,7 @@ function dedup(msgId: string): boolean {
  * Thread metadata stores `chatxChatId` and `chatxSender`.
  */
 function findChatXThread(chatId: string, sender: string): string | null {
-  const threads = getAllThreadSummaries()
+  const threads = getAllThreads()
   for (const t of threads) {
     if (!t.metadata) continue
     try {
@@ -345,7 +334,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
   let repliedWithContent = false
 
   try {
-    const thread = getThreadCore(threadId)
+    const thread = getThread(threadId)
     const metadata = thread?.metadata ? JSON.parse(thread.metadata) : {}
     const workspacePath = metadata.workspacePath as string
 
@@ -372,7 +361,6 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
 
     const currentTurnUserMessageId = getChatXUserMessageId(msg.msgId)
     const converter = new StreamConverter(`chatx:${msg.msgId}`, currentTurnUserMessageId)
-    const serializeForRun = createStreamDataSerializer()
 
     const stream = await agent.stream(
       {
@@ -390,28 +378,20 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     for await (const chunk of stream) {
       if (abortController.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
-      const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } =
-        serializeForRun(mode, data)
-      const events = converter.processChunk(mode, serialized, {
-        valuesMessageIndexOffset,
-        valuesSnapshotScope: "turn",
-        valuesSnapshotKind
-      })
+      const serialized = JSON.parse(JSON.stringify(data))
+      const events = converter.processChunk(mode, serialized)
       for (const evt of events) {
         const chatxEvent = namespaceChatXStreamEventIds(evt, msg.msgId)
         broadcastToChannel(channel, chatxEvent)
-        if (chatxEvent.type === "full-messages" || chatxEvent.type === "turn-messages") {
+        if (chatxEvent.type === "full-messages") {
           // 只取最后一条没有 tool_calls 的 assistant 消息（即最终回复，不含中间工具推理）
-          for (let index = chatxEvent.messages.length - 1; index >= 0; index -= 1) {
-            const candidate = chatxEvent.messages[index]
-            if (
-              candidate.role === "assistant" &&
-              (!Array.isArray(candidate.tool_calls) || candidate.tool_calls.length === 0)
-            ) {
-              if (candidate.content.trim()) lastAssistantText = candidate.content.trim()
-              break
-            }
-          }
+          const finalMsgs = chatxEvent.messages.filter(
+            (m) =>
+              m.role === "assistant" &&
+              (!m.tool_calls || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0)
+          )
+          const last = finalMsgs[finalMsgs.length - 1]
+          if (last?.content?.trim()) lastAssistantText = last.content.trim()
         }
       }
       hasStreamedContent = true
@@ -533,6 +513,7 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     }
     activeAbortControllers.delete(chatKey)
     inFlightMsgIds.delete(chatKey)
+    threadIdToChatKey.delete(threadId)
     releaseCheckpointerPin()
     // Close BEFORE dropping the runningChats gate (mirrors heartbeat's finally):
     // ChatX reuses one threadId per (chatId, sender), and an inbound landing in
@@ -542,10 +523,6 @@ async function handleInbound(msg: ChatXInboundMessage, requeued = false): Promis
     // the newcomer queue instead; the queue drain below runs after the gate
     // clears, so queued messages are not starved.
     await closeCheckpointer(threadId).catch(() => {})
-    // Commit owner release only after physical checkpointer close settles. The
-    // delete guard resolves thread ownership through this mapping; clearing it
-    // earlier would expose a false-idle window while the old saver still flushes.
-    threadIdToChatKey.delete(threadId)
     runningChats.delete(chatKey)
     notifyRenderer("threads:changed")
 

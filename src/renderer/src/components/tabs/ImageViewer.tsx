@@ -5,10 +5,15 @@ import { Button } from "@/components/ui/button"
 
 interface ImageViewerProps {
   filePath: string
-  sourceUrl: string
+  base64Content: string
+  mimeType: string
 }
 
-export function ImageViewer({ filePath, sourceUrl }: ImageViewerProps): React.JSX.Element {
+export function ImageViewer({
+  filePath,
+  base64Content,
+  mimeType
+}: ImageViewerProps): React.JSX.Element {
   const [zoom, setZoom] = useState(100)
   const [rotation, setRotation] = useState(0)
   const [isPanning, setIsPanning] = useState(false)
@@ -19,6 +24,7 @@ export function ImageViewer({ filePath, sourceUrl }: ImageViewerProps): React.JS
   const pendingPanOffsetRef = useRef<{ x: number; y: number } | null>(null)
 
   const fileName = filePath.split("/").pop() || filePath
+  const imageUrl = `data:${mimeType};base64,${base64Content}`
 
   const handleZoomIn = (): void => {
     const newZoom = Math.min(zoom + 25, 400)
@@ -163,7 +169,7 @@ export function ImageViewer({ filePath, sourceUrl }: ImageViewerProps): React.JS
           }}
         >
           <img
-            src={sourceUrl}
+            src={imageUrl}
             alt={fileName}
             className={`max-w-full h-auto ${isPanning ? "" : "transition-transform duration-200"}`}
             style={{

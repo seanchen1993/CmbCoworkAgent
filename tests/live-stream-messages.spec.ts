@@ -7,24 +7,16 @@
 
 import {
   applyLiveStreamMessageIdAliases,
-  createLiveStreamCumulativeFrameProjector,
-  createLiveStreamMessageIdNormalizer,
-  createLiveStreamMessageMerger,
-  createLiveStreamTranscriptIndexCache,
-  createTimedLiveStreamMessageProjector,
   liveStreamMessageRole,
   mergeLiveStreamCommitMessages,
-  mergeLiveStreamCommitMessagesDetailed,
   mergeLiveStreamMessages,
   normalizeAppendedLiveStreamMessageIds,
   normalizeLiveStreamMessageEntries,
   normalizeLiveStreamMessageContent,
   replaceLiveStreamMessageId,
-  resolveCommittedLiveStreamMessages,
   stringifyMessageContentForReport
 } from "../src/renderer/src/lib/live-stream-messages.ts"
 import {
-  indexDurableTranscriptRequirements,
   liveStreamMessageToStoreMessage,
   mergeDurableTranscriptSnapshot,
   resolveLiveStreamMessageEndAt,
@@ -41,7 +33,6 @@ import {
 } from "../src/renderer/src/lib/chat-report-upload-cache.ts"
 import {
   buildMessageSameRoleDuplicateId,
-  getMessageProviderOccurrenceIdentity,
   normalizeAppendedMessageIds
 } from "../src/shared/message-role-collision.ts"
 import { mergeCheckpointAuthorityTranscriptMessages } from "../src/shared/checkpoint-transcript.ts"
@@ -50,294 +41,6 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, got ${String(actual)}`)
   }
-}
-
-function testStableLiveIdentitySkipsRepeatedBaselineNormalization(): void {
-  let poisonHistoryReads = false
-  const rawTranscript = Array.from({ length: 10_000 }, (_, index): Message => ({
-    id: index === 9_999 ? "stable-render-id" : `history-${index}`,
-    ...(index === 9_999
-      ? { provider_source_id: "stream-provider-id", provider_occurrence: 1 }
-      : {}),
-    role: "assistant",
-    content: `persisted-${index}`,
-    created_at: new Date("2026-01-01T00:00:00.000Z")
-  }))
-  const transcript = new Proxy(rawTranscript, {
-    get(target, property, receiver) {
-      if (poisonHistoryReads && typeof property === "string" && /^\d+$/.test(property)) {
-        throw new Error(`stable transcript was rescanned at index ${property}`)
-      }
-      return Reflect.get(target, property, receiver)
-    }
-  })
-  const getTranscriptIndex = createLiveStreamTranscriptIndexCache()
-  const transcriptIndex = getTranscriptIndex(transcript)
-  assertEqual(
-    transcriptIndex.messageRoleIds.has("assistant\u0000stable-render-id"),
-    true,
-    "the cached transcript index should expose role-scoped render ids"
-  )
-  const normalize = createLiveStreamMessageIdNormalizer()
-  let baselineBuilds = 0
-  const getBaseline = () => {
-    baselineBuilds += 1
-    return transcriptIndex.messageIdentities
-  }
-
-  const first = normalize(
-    getBaseline,
-    [
-      {
-        id: "stream-provider-id",
-        provider_source_id: "stream-provider-id",
-        provider_occurrence: 1,
-        type: "ai",
-        content: "first token"
-      }
-    ],
-    transcriptIndex
-  )
-  assertEqual(first[0]?.id, "stable-render-id", "the first frame should rebase to the stable id")
-  assertEqual(baselineBuilds, 1, "the first frame should build the normalization baseline")
-
-  poisonHistoryReads = true
-  assertEqual(
-    getTranscriptIndex(transcript),
-    transcriptIndex,
-    "the immutable transcript reference should reuse its cached indexes"
-  )
-  const second = normalize(
-    getBaseline,
-    [
-      {
-        id: "stream-provider-id",
-        provider_source_id: "stream-provider-id",
-        provider_occurrence: 1,
-        type: "ai",
-        content: "second token"
-      }
-    ],
-    transcriptIndex
-  )
-  assertEqual(second[0]?.id, "stable-render-id", "content-only frames should keep the render id")
-  assertEqual(second[0]?.content, "second token", "content-only frames should keep fresh content")
-  assertEqual(
-    baselineBuilds,
-    1,
-    "content-only frames should not traverse the cached 10k normalization baseline"
-  )
-
-  for (let index = 0; index < 100; index += 1) {
-    const snapshot = normalize(
-      getBaseline,
-      [
-        {
-          id: "stream-provider-id",
-          provider_source_id: "stream-provider-id",
-          provider_occurrence: 1,
-          type: "ai",
-          reasoning: `reasoning-${index}`
-        }
-      ],
-      transcriptIndex
-    )
-    assertEqual(snapshot[0]?.id, "stable-render-id", "reasoning snapshots should keep the id")
-  }
-  assertEqual(
-    baselineBuilds,
-    1,
-    "repeated coordinator reasoning snapshots should not revisit stable history"
-  )
-
-  normalize(
-    getBaseline,
-    [
-      {
-        id: "stream-provider-id",
-        provider_source_id: "stream-provider-id",
-        provider_occurrence: 2,
-        type: "ai",
-        content: "new occurrence"
-      }
-    ],
-    transcriptIndex
-  )
-  assertEqual(baselineBuilds, 2, "identity changes should use complete normalization")
-
-  const ambiguousNormalize = createLiveStreamMessageIdNormalizer()
-  let ambiguousBaselineBuilds = 0
-  const getAmbiguousBaseline = () => {
-    ambiguousBaselineBuilds += 1
-    return [
-      {
-        id: "legacy-tool",
-        provider_source_id: "legacy-tool",
-        type: "tool",
-        tool_call_id: "legacy-call",
-        content: "old result"
-      }
-    ]
-  }
-  const ambiguousIncoming = (content: string) => [
-    {
-      id: "legacy-tool",
-      provider_source_id: "legacy-tool",
-      type: "tool",
-      tool_call_id: "legacy-call",
-      content
-    }
-  ]
-  const ambiguousKey = {}
-  ambiguousNormalize(getAmbiguousBaseline, ambiguousIncoming("first result"), ambiguousKey)
-  ambiguousNormalize(getAmbiguousBaseline, ambiguousIncoming("changed result"), ambiguousKey)
-  assertEqual(
-    ambiguousBaselineBuilds,
-    2,
-    "legacy ambiguous tool frames must retain the complete compatibility fallback"
-  )
-}
-
-function testStableCumulativeTurnMergeDoesNotReadTwoThousandMessagePrefix(): void {
-  let poisonPrefixReads = false
-  const initial = Array.from({ length: 2_000 }, (_, index) => {
-    const message = {
-      id: `turn-${index}`,
-      provider_source_id: `provider-${index}`,
-      provider_occurrence: 1,
-      type: index % 2 === 0 ? "ai" : "tool",
-      ...(index % 2 === 0 ? {} : { tool_call_id: `call-${index}` }),
-      content: `content-${index}`
-    }
-    if (index === 1_999) return message
-    return new Proxy(message, {
-      get(target, property, receiver) {
-        if (poisonPrefixReads) {
-          throw new Error(`stable current-turn prefix was read at ${String(property)}`)
-        }
-        return Reflect.get(target, property, receiver)
-      }
-    })
-  })
-  const merge = createLiveStreamMessageMerger()
-  let merged = merge([], initial)
-
-  poisonPrefixReads = true
-  for (let frame = 0; frame < 100; frame += 1) {
-    const snapshot = initial.slice()
-    snapshot[1_999] = {
-      ...snapshot[1_999],
-      content: `tail-${frame}`
-    }
-    merged = merge(merged, snapshot)
-    initial[1_999] = snapshot[1_999]
-  }
-
-  assertEqual(merged.length, 2_000, "the stable cumulative turn should retain every message")
-  assertEqual(merged[1_999]?.content, "tail-99", "the latest tail content should win")
-
-  poisonPrefixReads = false
-  const withBoundary = [
-    ...initial,
-    {
-      id: "turn-2000",
-      provider_source_id: "provider-2000",
-      provider_occurrence: 1,
-      type: "tool",
-      tool_call_id: "call-2000",
-      content: "new boundary"
-    }
-  ]
-  merged = merge(merged, withBoundary)
-  assertEqual(merged.length, 2_001, "a structure change should use the canonical append path")
-  assertEqual(merged[2_000]?.id, "turn-2000", "the appended boundary should keep its order")
-}
-
-function testCumulativeFrameAndTimingProjectionReuseStablePrefix(): void {
-  let poisonPrefixReads = false
-  const raw = Array.from({ length: 2_000 }, (_, index) => {
-    const message = {
-      id: `frame-${index}`,
-      provider_source_id: `provider-${index}`,
-      provider_occurrence: 1,
-      type: index % 2 === 0 ? "ai" : "tool",
-      ...(index % 2 === 0 ? {} : { tool_call_id: `call-${index}` }),
-      content: `content-${index}`
-    }
-    if (index === 1_999) return message
-    return new Proxy(message, {
-      get(target, property, receiver) {
-        if (poisonPrefixReads) {
-          throw new Error(`stable cumulative frame prefix was read at ${String(property)}`)
-        }
-        return Reflect.get(target, property, receiver)
-      }
-    })
-  })
-  const baselineKey = {}
-  const projectFrame = createLiveStreamCumulativeFrameProjector()
-  let fullNormalizations = 0
-  let frame = projectFrame(
-    raw,
-    () => {
-      fullNormalizations += 1
-      return raw
-    },
-    baselineKey
-  )
-  const projectTimes = createTimedLiveStreamMessageProjector()
-  const messageTimes = Object.fromEntries(
-    raw.map((_, index) => [
-      `frame-${index}`,
-      { start_at: new Date(1_700_000_000_000 + index) }
-    ])
-  )
-  let timed = projectTimes(frame.messages, messageTimes)
-  const stableTimedPrefix = timed[0]
-
-  poisonPrefixReads = true
-  for (let index = 0; index < 100; index += 1) {
-    const next = raw.slice()
-    next[1_999] = { ...next[1_999], content: `tail-${index}` }
-    frame = projectFrame(
-      next,
-      () => {
-        fullNormalizations += 1
-        return next
-      },
-      baselineKey
-    )
-    assertEqual(frame.completeReconcile, false, "content-only frames should stay incremental")
-    assertEqual(frame.changedMessages.length, 1, "only the replaced tail should be projected")
-    timed = projectTimes(frame.messages, messageTimes)
-    assertEqual(timed[0], stableTimedPrefix, "timed prefix objects should retain their identity")
-    raw[1_999] = next[1_999]
-  }
-  assertEqual(fullNormalizations, 1, "stable frames should normalize the complete turn once")
-  assertEqual(timed[1_999]?.content, "tail-99", "the timed projection should keep fresh content")
-
-  poisonPrefixReads = false
-  const appended = [
-    ...raw,
-    {
-      id: "frame-2000",
-      provider_source_id: "provider-2000",
-      provider_occurrence: 1,
-      type: "tool",
-      tool_call_id: "call-2000",
-      content: "boundary"
-    }
-  ]
-  frame = projectFrame(
-    appended,
-    () => {
-      fullNormalizations += 1
-      return appended
-    },
-    baselineKey
-  )
-  assertEqual(frame.completeReconcile, true, "an append boundary should fully reconcile")
-  assertEqual(fullNormalizations, 2, "the append boundary should invoke canonical normalization")
 }
 
 function testLaterSnapshotDoesNotDropEarlierToolMessage(): void {
@@ -2137,167 +1840,6 @@ function testResolveLiveStreamMessageEndAtDoesNotMoveBackwards(): void {
   )
 }
 
-function testLargeCompletionBatchUsesIndexedDisjointPath(): void {
-  let fieldReads = 0
-  const observed = <T extends object>(value: T): T =>
-    new Proxy(value, {
-      get(target, property, receiver) {
-        if (
-          property === "id" ||
-          property === "role" ||
-          property === "type" ||
-          property === "provider_source_id" ||
-          property === "provider_occurrence"
-        ) {
-          fieldReads += 1
-        }
-        return Reflect.get(target, property, receiver)
-      }
-    })
-
-  const previous = Array.from({ length: 2_000 }, (_, index): Message =>
-    observed({
-      id: `completion-baseline-${index}`,
-      role: index % 2 === 0 ? "assistant" : "tool",
-      content: `baseline ${index}`,
-      ...(index % 2 === 1 ? { tool_call_id: `baseline-call-${index}` } : {}),
-      created_at: new Date(1_700_000_000_000 + index)
-    })
-  )
-  const incoming = Array.from({ length: 2_000 }, (_, index): Message =>
-    observed({
-      id: `completion-incoming-${index}`,
-      role: index % 2 === 0 ? "assistant" : "tool",
-      content: `incoming ${index}`,
-      ...(index % 2 === 0
-        ? { tool_calls: [{ id: `incoming-call-${index}`, name: "read_file", args: {} }] }
-        : { tool_call_id: `incoming-call-${index - 1}` }),
-      created_at: new Date(1_700_100_000_000 + index)
-    })
-  )
-
-  const result = mergeLiveStreamCommitMessagesDetailed(previous, incoming)
-  assertEqual(result.messages.length, 4_000, "the completion batch must retain every row")
-  assertEqual(
-    result.resolvedIncoming.length,
-    incoming.length,
-    "the merge must return one canonical row for every ordinary incoming row"
-  )
-  assertEqual(
-    result.resolvedIncoming[1],
-    incoming[1],
-    "disjoint canonical rows should preserve their source references"
-  )
-  assertEqual(
-    result.messages[2_000]?.id,
-    "completion-incoming-0",
-    "ordinary current-turn rows must remain after the durable baseline"
-  )
-  assertEqual(
-    fieldReads < 250_000,
-    true,
-    `a 2k + 2k completion must stay linear (observed ${fieldReads} identity reads)`
-  )
-
-  fieldReads = 0
-  const livePrevious = previous.map((message) =>
-    observed({
-      id: message.id,
-      type: message.role === "tool" ? "tool" : "ai",
-      content: message.content
-    })
-  )
-  const liveIncoming = incoming.map((message) =>
-    observed({
-      id: message.id,
-      type: message.role === "tool" ? "tool" : "ai",
-      content: message.content
-    })
-  )
-  const entries = normalizeLiveStreamMessageEntries(livePrevious, liveIncoming)
-  assertEqual(entries.length, 2_000, "flush normalization must retain all current-turn rows")
-  assertEqual(entries[1]?.message, liveIncoming[1], "flush normalization should reuse source rows")
-  assertEqual(
-    fieldReads < 150_000,
-    true,
-    `flush normalization must not rescan history per row (observed ${fieldReads} identity reads)`
-  )
-
-  fieldReads = 0
-  const retained = mergeLiveStreamMessages(livePrevious, liveIncoming)
-  assertEqual(retained.length, 4_000, "the transitional live bridge must retain both batches")
-  assertEqual(
-    fieldReads < 250_000,
-    true,
-    `the transitional bridge must not find every new row linearly (observed ${fieldReads} reads)`
-  )
-}
-
-function testCanonicalCompletionResolutionUsesProviderOccurrenceIndex(): void {
-  const committed: Message[] = [
-    {
-      id: "shared-resolution-id",
-      role: "user",
-      content: "question",
-      created_at: new Date()
-    },
-    {
-      id: "shared-resolution-id::cmb-id-collision:assistant",
-      provider_source_id: "shared-resolution-id",
-      provider_occurrence: 1,
-      role: "assistant",
-      content: "answer",
-      created_at: new Date()
-    }
-  ]
-  const pending: Message[] = [
-    {
-      id: "shared-resolution-id",
-      role: "assistant",
-      content: "answer",
-      created_at: new Date()
-    }
-  ]
-  const resolution = resolveCommittedLiveStreamMessages(committed, pending)
-  assertEqual(resolution.unresolved.length, 0, "a role-collision rekey must remain resolvable")
-  assertEqual(
-    resolution.resolved[0],
-    committed[1],
-    "provider occurrence identity must select the final canonical state row"
-  )
-}
-
-function testSlowDurablePageCannotAcknowledgeTransitionalLiveRows(): void {
-  const oldPage: Message[] = [
-    {
-      id: "old-assistant",
-      role: "assistant",
-      content: "old",
-      created_at: new Date("2026-08-21T00:00:00.000Z")
-    }
-  ]
-  const flushed: Message = {
-    id: "render-assistant",
-    provider_source_id: "provider-assistant",
-    provider_occurrence: 1,
-    role: "assistant",
-    content: "new",
-    created_at: new Date("2026-08-21T00:00:01.000Z")
-  }
-  const requiredIdentity = getMessageProviderOccurrenceIdentity(flushed)
-
-  assertEqual(
-    indexDurableTranscriptRequirements(oldPage, [], [requiredIdentity]).satisfied,
-    false,
-    "a DB page read before append completion must not acknowledge the live bridge"
-  )
-  assertEqual(
-    indexDurableTranscriptRequirements([...oldPage, flushed], [], [requiredIdentity]).satisfied,
-    true,
-    "the retry may acknowledge the bridge after the flushed provider occurrence is durable"
-  )
-}
-
 function testChatReportUploadCacheReservesInFlightIds(): void {
   const threadId = "upload-cache-thread"
   clearChatReportUploadState(threadId)
@@ -2429,27 +1971,10 @@ function testDurableTranscriptSnapshotPreservesRendererReasoning(): void {
 
 const tests: Array<[string, () => void]> = [
   [
-    "testStableLiveIdentitySkipsRepeatedBaselineNormalization",
-    testStableLiveIdentitySkipsRepeatedBaselineNormalization
-  ],
-  [
-    "testStableCumulativeTurnMergeDoesNotReadTwoThousandMessagePrefix",
-    testStableCumulativeTurnMergeDoesNotReadTwoThousandMessagePrefix
-  ],
-  [
-    "testCumulativeFrameAndTimingProjectionReuseStablePrefix",
-    testCumulativeFrameAndTimingProjectionReuseStablePrefix
-  ],
-  [
     "testSameRoleProviderIdCollisionStaysVisibleDuringStreaming",
     testSameRoleProviderIdCollisionStaysVisibleDuringStreaming
   ],
   ["testSameRoleProviderIdCollisionSurvivesCommit", testSameRoleProviderIdCollisionSurvivesCommit],
-  ["testLargeCompletionBatchUsesIndexedDisjointPath", testLargeCompletionBatchUsesIndexedDisjointPath],
-  [
-    "testCanonicalCompletionResolutionUsesProviderOccurrenceIndex",
-    testCanonicalCompletionResolutionUsesProviderOccurrenceIndex
-  ],
   [
     "testCrossRoleProviderIdCollisionStaysVisibleDuringStreaming",
     testCrossRoleProviderIdCollisionStaysVisibleDuringStreaming
@@ -2589,10 +2114,6 @@ const tests: Array<[string, () => void]> = [
   [
     "testResolveLiveStreamMessageEndAtDoesNotMoveBackwards",
     testResolveLiveStreamMessageEndAtDoesNotMoveBackwards
-  ],
-  [
-    "testSlowDurablePageCannotAcknowledgeTransitionalLiveRows",
-    testSlowDurablePageCannotAcknowledgeTransitionalLiveRows
   ],
   ["testChatReportUploadCacheReservesInFlightIds", testChatReportUploadCacheReservesInFlightIds],
   [

@@ -393,7 +393,7 @@ async function testCompactionIsIdempotentAndManifestRowsStaySmall(
   )
 }
 
-function testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store: ContentStore): void {
+function testStartupIndexNeverDropsBuckets(store: ContentStore): void {
   const transcripts = Object.fromEntries(
     Array.from({ length: 40 }, (_, index) => {
       const id = `startup-task-${index}`
@@ -421,11 +421,11 @@ function testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store: Content
       ]
     })
   )
-  const startup = store.buildSubagentTranscriptStartupManifests(transcripts)
+  const startup = store.buildSubagentTranscriptStartupManifests(transcripts, 2)
   assert.deepEqual(
     Object.keys(startup),
-    Object.keys(transcripts).reverse(),
-    "the bounded recent-first startup page must return its card rows in chronological order"
+    Object.keys(transcripts),
+    "an exhausted preview budget must still return identity/card rows for every bucket"
   )
   for (const [id, rawMessages] of Object.entries(startup)) {
     assert(Array.isArray(rawMessages) && rawMessages.length === 2)
@@ -449,11 +449,6 @@ function testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store: Content
       "startup must fingerprint the full legacy final before projection"
     )
   }
-  assert.deepEqual(
-    store.buildSubagentTranscriptStartupManifests(transcripts, 2),
-    {},
-    "the startup projection must honor an explicit hard byte ceiling"
-  )
 }
 
 function testStartupProjectionMergePreservesDurableFields(store: ContentStore): void {
@@ -493,7 +488,7 @@ function testStartupProjectionMergePreservesDurableFields(store: ContentStore): 
       subagent_reasoning_fingerprint: "full-reasoning-fp"
     }
   ]
-  const startup = store.buildSubagentTranscriptStartupManifests({ [id]: durable })[
+  const startup = store.buildSubagentTranscriptStartupManifests({ [id]: durable }, 2)[
     id
   ] as UnknownRecord[]
   const correction = {
@@ -636,7 +631,7 @@ async function main(): Promise<void> {
     await testCorruptSameHashBlobSelfHeals(store, root, retainedHashes)
     await testGarbageCollection(store, root, retainedHashes)
     await testCompactionIsIdempotentAndManifestRowsStaySmall(store)
-    testStartupIndexUsesRecentChronologicalOrderAndHardLimit(store)
+    testStartupIndexNeverDropsBuckets(store)
     testStartupProjectionMergePreservesDurableFields(store)
     testManifestPagingIsBounded(store)
     await testManifestPagingHonorsHydrationByteBudget(store)

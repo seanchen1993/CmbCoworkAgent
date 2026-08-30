@@ -544,8 +544,6 @@ export interface WorkflowRunSummary {
   startedAt: string
   completedAt?: string
   agentCount: number
-  /** Internal history-index hint; renderer callers may ignore it. */
-  notificationDelivered?: boolean
 }
 
 export class WorkflowScriptError extends Error {

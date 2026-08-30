@@ -1,16 +1,12 @@
-import { File } from "lucide-react"
+import { File, Download } from "lucide-react"
+import { Button } from "@/components/ui/button"
 
 interface BinaryFileViewerProps {
   filePath: string
   size?: number
-  reason?: string
 }
 
-export function BinaryFileViewer({
-  filePath,
-  size,
-  reason
-}: BinaryFileViewerProps): React.JSX.Element {
+export function BinaryFileViewer({ filePath, size }: BinaryFileViewerProps): React.JSX.Element {
   const fileName = filePath.split("/").pop() || filePath
   const ext = fileName.includes(".") ? fileName.split(".").pop()?.toUpperCase() : "FILE"
 
@@ -49,10 +45,15 @@ export function BinaryFileViewer({
             {ext} file • {formatSize(size)}
           </div>
           <div className="text-xs text-muted-foreground max-w-md">
-            {reason ??
-              "This file type cannot be previewed safely in the viewer."}
+            This file type cannot be previewed in the viewer. You can open it with an external
+            application.
           </div>
         </div>
+
+        <Button variant="outline" className="gap-2">
+          <Download className="size-4" />
+          Open Externally
+        </Button>
       </div>
     </div>
   )

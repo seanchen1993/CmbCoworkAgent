@@ -39,7 +39,6 @@ import {
   buildGitPanelFileDiffState,
   buildGitPanelMetaState,
   buildGitPanelState,
-  collectChangedFileEntriesFromStatus,
   pathExistsForGitAdd,
   resolveSelectedChangedFilesForGitOps,
   shouldUseDefaultGitPush
@@ -488,51 +487,6 @@ describe("buildGitPanelState — lazy mode (includeDiffs:false)", () => {
       }
     }
   )
-})
-
-describe("Git status path projection", () => {
-  it("keeps the event loop responsive while projecting 10k status entries", async () => {
-    // Warm the request-scoped git-root cache so this specifically measures the
-    // cooperative parser/path projection rather than the child git process.
-    await collectChangedFileEntriesFromStatus(repo, "?? warm.txt\0", [])
-    const statusOutput = `${Array.from(
-      { length: 10_000 },
-      (_, index) => `?? bulk/file-${index}.txt`
-    ).join("\0")}\0`
-    let ticks = 0
-    const ticker = setInterval(() => {
-      ticks += 1
-    }, 1)
-
-    try {
-      const files = await collectChangedFileEntriesFromStatus(repo, statusOutput, [])
-      expect(files).toHaveLength(10_000)
-      expect(ticks).toBeGreaterThan(0)
-    } finally {
-      clearInterval(ticker)
-    }
-  })
-
-  it("cancels a superseded large projection and preserves containment checks", async () => {
-    const statusOutput = `${Array.from(
-      { length: 10_000 },
-      (_, index) => `?? bulk/file-${index}.txt`
-    ).join("\0")}\0?? ../outside.txt\0`
-    const controller = new AbortController()
-    const projection = collectChangedFileEntriesFromStatus(repo, statusOutput, [], {
-      signal: controller.signal
-    })
-    setTimeout(() => controller.abort(), 0)
-
-    await expect(projection).rejects.toMatchObject({ name: "AbortError" })
-
-    const safe = await collectChangedFileEntriesFromStatus(
-      repo,
-      "?? inside.txt\0?? ../outside.txt\0",
-      []
-    )
-    expect(safe.map((entry) => entry.path)).toEqual(["inside.txt"])
-  })
 })
 
 describe("Agent commit path staging", () => {

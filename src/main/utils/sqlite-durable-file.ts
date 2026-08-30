@@ -2,7 +2,7 @@ import type initSqlJs from "sql.js"
 import { type Database as SqlJsDatabase } from "sql.js"
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync } from "fs"
 import { mkdir, open, rename, stat } from "fs/promises"
-import { dirname, resolve } from "path"
+import { dirname } from "path"
 
 type SqlJsModule = Awaited<ReturnType<typeof initSqlJs>>
 
@@ -18,73 +18,7 @@ interface Candidate {
   mtimeMs: number
 }
 
-// Timestamped quarantine files cannot be reconstructed from a fixed suffix.
-// Keep a process-local registry for archives created after a consumer has built
-// a directory index. Existing files are still discovered by that index's one
-// startup scan; this registry closes the later create-after-scan race.
-const sqliteQuarantineArtifactsByDatabase = new Map<string, Set<string>>()
-const sqliteQuarantineArtifactListeners = new Set<
-  (databasePath: string, artifactPath: string) => void
->()
-
-function sqliteArtifactRegistryKey(path: string): string {
-  return resolve(path)
-}
-
-export function registerSqliteQuarantineArtifact(
-  databasePath: string,
-  artifactPath: string
-): void {
-  const key = sqliteArtifactRegistryKey(databasePath)
-  const normalizedArtifactPath = sqliteArtifactRegistryKey(artifactPath)
-  const artifacts = sqliteQuarantineArtifactsByDatabase.get(key) ?? new Set<string>()
-  if (artifacts.has(normalizedArtifactPath)) return
-  artifacts.add(normalizedArtifactPath)
-  sqliteQuarantineArtifactsByDatabase.set(key, artifacts)
-  for (const listener of sqliteQuarantineArtifactListeners) {
-    try {
-      listener(key, normalizedArtifactPath)
-    } catch (error) {
-      // Archiving succeeded before registration. A secondary consumer must not
-      // turn that successful recovery action into a false archive failure or
-      // prevent native sqlite from moving the remaining WAL/SHM sidecars.
-      console.warn("[SQLite] Quarantine artifact listener failed:", error)
-    }
-  }
-}
-
-/** Subscribe to successful quarantine creation. The callback runs in the same
- * synchronous turn as registration, allowing directory indexes to close the
- * create-after-scan race without rescanning the filesystem. */
-export function subscribeSqliteQuarantineArtifacts(
-  listener: (databasePath: string, artifactPath: string) => void
-): () => void {
-  sqliteQuarantineArtifactListeners.add(listener)
-  return () => sqliteQuarantineArtifactListeners.delete(listener)
-}
-
-export function listRegisteredSqliteQuarantineArtifacts(databasePath: string): string[] {
-  return Array.from(
-    sqliteQuarantineArtifactsByDatabase.get(sqliteArtifactRegistryKey(databasePath)) ?? []
-  )
-}
-
-export function forgetRegisteredSqliteQuarantineArtifact(
-  databasePath: string,
-  artifactPath: string
-): void {
-  const key = sqliteArtifactRegistryKey(databasePath)
-  const artifacts = sqliteQuarantineArtifactsByDatabase.get(key)
-  if (!artifacts) return
-  artifacts.delete(sqliteArtifactRegistryKey(artifactPath))
-  if (artifacts.size === 0) sqliteQuarantineArtifactsByDatabase.delete(key)
-}
-
 const RECOVERY_SUFFIXES = ["", ".flush.tmp", ".tmp", ".bak", ".bak.tmp"]
-const NATIVE_SQLITE_SIDECAR_SUFFIXES = ["-wal", "-shm"]
-const RECOVERY_SIDECAR_SUFFIXES = RECOVERY_SUFFIXES.flatMap((recoverySuffix) =>
-  NATIVE_SQLITE_SIDECAR_SUFFIXES.map((sidecarSuffix) => `${recoverySuffix}${sidecarSuffix}`)
-)
 
 /** Every fixed-suffix variant a durable sqlite file can leave on disk: the
  * recovery candidates plus the transient `.recovery.tmp` used while restoring.
@@ -93,13 +27,7 @@ const RECOVERY_SIDECAR_SUFFIXES = RECOVERY_SUFFIXES.flatMap((recoverySuffix) =>
  * (that resurrection is exactly the workflow-resume thread-collision bug).
  * Timestamped `.corrupt.<ts>` / `.bak.<ts>` quarantine files are intentionally
  * NOT listed: they are never recovery candidates, and are kept for forensics. */
-const DURABLE_FILE_SUFFIXES = [
-  ...RECOVERY_SUFFIXES,
-  ".recovery.tmp",
-  ...RECOVERY_SIDECAR_SUFFIXES,
-  ".recovery.tmp-wal",
-  ".recovery.tmp-shm"
-]
+const DURABLE_FILE_SUFFIXES = [...RECOVERY_SUFFIXES, ".recovery.tmp"]
 
 // Deletion order: sidecars FIRST, live file LAST. If the process crashes between
 // unlinks, the leftover state is "live present, some sidecars gone" — safe, the
@@ -115,7 +43,7 @@ const VARIANT_MATCH_ORDER = [...DURABLE_FILE_SUFFIXES].sort((a, b) => b.length -
  * recovery candidates, but they can hold a full checkpoint transcript — thread
  * deletion must remove them too: "delete" means the data is gone, not merely
  * unrecoverable. */
-const QUARANTINE_RE = /\.sqlite\.(?:corrupt|bak)\.\d+(?:-(?:wal|shm))?$/
+const QUARANTINE_RE = /\.sqlite\.(?:corrupt|bak)\.\d+$/
 
 /** If `filename` is a quarantine archive of a durable sqlite file, return the
  * base name (without `.sqlite.corrupt.<ts>` / `.sqlite.bak.<ts>`); else null. */
@@ -228,7 +156,6 @@ function archiveInvalidLiveFile(dbPath: string, label: string): void {
   const archivePath = `${dbPath}.corrupt.${Date.now()}`
   try {
     renameSync(dbPath, archivePath)
-    registerSqliteQuarantineArtifact(dbPath, archivePath)
     console.warn(`[${label}] Archived invalid database: ${archivePath}`)
   } catch (error) {
     console.warn(`[${label}] Failed to archive invalid database:`, error)
@@ -312,13 +239,7 @@ export async function openRecoveredSqliteDatabase(
 
 export function sqliteFileSize(path: string): number | null {
   try {
-    let size = statSync(path).size
-    try {
-      size += statSync(`${path}-wal`).size
-    } catch {
-      // WAL absent or already checkpointed.
-    }
-    return size
+    return statSync(path).size
   } catch {
     return null
   }

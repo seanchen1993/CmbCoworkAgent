@@ -1,6 +1,5 @@
 import { BrowserWindow } from "electron"
 import type { HookLoggingConfig } from "../types"
-import { bumpHookCatalogGlobalRevision } from "../hook-catalog/revision"
 
 export interface HooksChangedPayload {
   reason?: string
@@ -13,7 +12,6 @@ export interface HookLoggingChangedPayload {
 }
 
 export function notifyHooksChanged(reason?: string): void {
-  bumpHookCatalogGlobalRevision()
   const payload: HooksChangedPayload = {
     reason,
     at: new Date().toISOString()

@@ -3,8 +3,6 @@
  * 同时收口这类文件专用的去重、扩展名过滤、数量/字符上限控制和路径转换。
  */
 import type { FileAttachment, FileInfo } from "@/types"
-import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
-import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
   isSupportedWorkspaceMentionFilePath,
   extractAtFileMentions,
@@ -16,18 +14,14 @@ interface WorkspaceReadFileResult {
   success: boolean
   content?: string
   size?: number
-  truncated?: boolean
 }
 
 const MENTION_READ_TIMEOUT_MS = 3000
-const MENTION_MAX_PREVIEW_PAGES = 64
 
 // 输入框里已经选中的 @文件项。相比 suggestion，多带一个绝对路径，
 // 方便在“显式添加的 @文件”和“用户直接输入的 @路径”之间统一去重。
 export type MentionedWorkspaceFile = AtFileSuggestion & {
   absolutePath: string
-  /** Normalized identity of the workspace that produced this chip. */
-  workspaceKey: string
   contentChars?: number
 }
 
@@ -39,11 +33,7 @@ interface ResolveAtFileAttachmentsParams {
   workspaceFiles: readonly FileInfo[]
   maxAttachments: number
   maxTotalChars: number
-  readWorkspaceFile: (
-    filePath: string,
-    maxChars: number
-  ) => Promise<WorkspaceReadFileResult>
-  cancelWorkspaceFileReads?: () => void
+  readWorkspaceFile: (filePath: string) => Promise<WorkspaceReadFileResult>
 }
 
 interface ResolveAtFileAttachmentsResult {
@@ -79,40 +69,8 @@ export function toMentionedWorkspaceFile(
 ): MentionedWorkspaceFile {
   return {
     ...file,
-    absolutePath: resolveWorkspaceMentionAbsolutePath(workspacePath, file.workspaceFilePath),
-    workspaceKey: normalizeWorkspacePathKey(workspacePath)
+    absolutePath: resolveWorkspaceMentionAbsolutePath(workspacePath, file.workspaceFilePath)
   }
-}
-
-/**
- * A selected @file chip is meaningful only inside the workspace that produced it.
- * Check both the bound workspace identity and the derived absolute path so stale
- * state can never read a same-named relative file from a different workspace and
- * then label that content with the old absolute path.
- */
-export function isMentionedWorkspaceFileForWorkspace(
-  file: MentionedWorkspaceFile,
-  workspacePath: string | null | undefined
-): boolean {
-  if (!workspacePath) return false
-  const workspaceKey = normalizeWorkspacePathKey(workspacePath)
-  if (!workspaceKey || file.workspaceKey !== workspaceKey) return false
-  const expectedAbsolutePath = resolveWorkspaceMentionAbsolutePath(
-    workspacePath,
-    file.workspaceFilePath
-  )
-  return (
-    normalizeWorkspacePathKey(file.absolutePath) ===
-    normalizeWorkspacePathKey(expectedAbsolutePath)
-  )
-}
-
-export function retainMentionedWorkspaceFilesForWorkspace(
-  files: readonly MentionedWorkspaceFile[],
-  workspacePath: string | null | undefined
-): MentionedWorkspaceFile[] {
-  if (!workspacePath) return []
-  return files.filter((file) => isMentionedWorkspaceFileForWorkspace(file, workspacePath))
 }
 
 // 选择 @文件时的校验也统一放到这里：
@@ -148,72 +106,18 @@ export function resolveAtFileSelection(params: {
 }
 
 function readWorkspaceFileWithTimeout(
-  readWorkspaceFile: (
-    filePath: string,
-    maxChars: number
-  ) => Promise<WorkspaceReadFileResult>,
-  filePath: string,
-  maxChars: number,
-  cancelWorkspaceFileReads?: () => void
+  readWorkspaceFile: (filePath: string) => Promise<WorkspaceReadFileResult>,
+  filePath: string
 ): Promise<WorkspaceReadFileResult> {
-  // 超时时显式取消底层 worker 请求，不能只丢弃 renderer Promise。
-  return new Promise((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(() => {
-      if (settled) return
-      settled = true
-      cancelWorkspaceFileReads?.()
-      resolve({ success: false })
-    }, MENTION_READ_TIMEOUT_MS)
-    void readWorkspaceFile(filePath, maxChars).then(
-      (result) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve(result)
-      },
-      (error) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        reject(error)
-      }
-    )
-  })
-}
-
-export async function readBoundedWorkspaceMentionFile(params: {
-  maxChars: number
-  readPage: (offset: number) => Promise<WorkspaceFilePreviewReadResult>
-}): Promise<WorkspaceReadFileResult> {
-  const maxChars = Math.max(0, Math.floor(params.maxChars))
-  if (maxChars === 0) return { success: false }
-  let offset = 0
-  let content = ""
-  let size = 0
-  let truncated = false
-  let finished = false
-
-  for (let page = 0; page < MENTION_MAX_PREVIEW_PAGES; page += 1) {
-    const result = await params.readPage(offset)
-    if (!result.success) return { success: false }
-    size = result.size
-    const remaining = maxChars - content.length
-    content += result.content.slice(0, remaining)
-    if (result.content.length > remaining || content.length >= maxChars) {
-      truncated = result.hasMore || result.content.length > remaining
-      finished = true
-      break
-    }
-    if (!result.hasMore || result.nextOffset === null) {
-      finished = true
-      break
-    }
-    if (result.nextOffset <= offset) return { success: false }
-    offset = result.nextOffset
-  }
-
-  return { success: true, content, size, truncated: truncated || !finished }
+  // 这里故意给读文件加硬超时：@文件是“增强能力”，不能因为某个文件 IO 卡住而拖死整次发送。
+  return Promise.race([
+    readWorkspaceFile(filePath),
+    new Promise<WorkspaceReadFileResult>((resolve) => {
+      setTimeout(() => {
+        resolve({ success: false })
+      }, MENTION_READ_TIMEOUT_MS)
+    })
+  ])
 }
 
 // 发送前把 @文件语法替换回普通路径文本：
@@ -249,8 +153,7 @@ export async function resolveAtFileAttachments(
     workspaceFiles,
     maxAttachments,
     maxTotalChars,
-    readWorkspaceFile,
-    cancelWorkspaceFileReads
+    readWorkspaceFile
   } = params
   const fallbackAttachments = attachments.length > 0 ? [...attachments] : []
 
@@ -296,10 +199,6 @@ export async function resolveAtFileAttachments(
 
     // 先纳入输入框里已经通过 popover 选中过的 @文件，保证它们优先参与去重和带入。
     for (const mentionFile of mentionedFiles) {
-      if (!isMentionedWorkspaceFileForWorkspace(mentionFile, workspacePath)) {
-        warningMessage = "@文件所属工作区已变更，旧工作区引用未被发送。"
-        continue
-      }
       addMentionCandidate(mentionFile)
     }
 
@@ -318,18 +217,16 @@ export async function resolveAtFileAttachments(
         if (!isSupportedWorkspaceMentionFilePath(workspaceFile.path)) continue
 
         addMentionCandidate(
-          toMentionedWorkspaceFile(
-            {
-              id: workspaceFile.path,
-              displayPath: normalizeAtFileMentionPath(workspaceFile.path),
-              workspaceFilePath: workspaceFile.path.startsWith("/")
-                ? workspaceFile.path
-                : `/${normalizeAtFileMentionPath(workspaceFile.path)}`,
-              filename: workspaceFile.path.split("/").pop() || workspaceFile.path,
-              size: workspaceFile.size
-            },
-            workspacePath
-          ),
+          {
+            id: workspaceFile.path,
+            displayPath: normalizeAtFileMentionPath(workspaceFile.path),
+            workspaceFilePath: workspaceFile.path.startsWith("/")
+              ? workspaceFile.path
+              : `/${normalizeAtFileMentionPath(workspaceFile.path)}`,
+            filename: workspaceFile.path.split("/").pop() || workspaceFile.path,
+            size: workspaceFile.size,
+            absolutePath: resolveWorkspaceMentionAbsolutePath(workspacePath, workspaceFile.path)
+          },
           normalizedMention
         )
       }
@@ -361,9 +258,7 @@ export async function resolveAtFileAttachments(
         try {
           readResult = await readWorkspaceFileWithTimeout(
             readWorkspaceFile,
-            mentionFile.workspaceFilePath,
-            remaining,
-            cancelWorkspaceFileReads
+            mentionFile.workspaceFilePath
           )
         } catch {
           // 任何异常都只降级成提示，不让 @文件 阻塞正常发送。
@@ -378,7 +273,7 @@ export async function resolveAtFileAttachments(
         if (!readResult.content.trim()) continue
 
         // 超过剩余额度时只截断内容，不丢掉这个附件，尽量保留用户意图。
-        const truncated = Boolean(readResult.truncated) || readResult.content.length > remaining
+        const truncated = readResult.content.length > remaining
         const content = truncated
           ? `${readResult.content.slice(0, remaining)}\n\n... [内容已截取：显示前 ${remaining.toLocaleString()} 个字符]`
           : readResult.content

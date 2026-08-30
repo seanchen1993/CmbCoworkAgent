@@ -19,10 +19,7 @@ import {
   normalizeHookLogTurnId,
   resolveHookLogUserMessage
 } from "../src/renderer/src/lib/hook-log-turn-id.ts"
-import {
-  mergeSchedulerTurnMessageSnapshot,
-  normalizeSchedulerMessageSnapshot
-} from "../src/renderer/src/lib/scheduler-message-snapshot.ts"
+import { normalizeSchedulerMessageSnapshot } from "../src/renderer/src/lib/scheduler-message-snapshot.ts"
 import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
@@ -1131,100 +1128,6 @@ function testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas(): void {
   )
 }
 
-function testSchedulerTurnSnapshotMergesWithoutReplacingHistory(): void {
-  const createdAt = new Date("2026-07-20T00:00:00.000Z")
-  const historicalMessages: Message[] = [
-    {
-      id: "historical-user",
-      role: "user",
-      content: "older question",
-      created_at: createdAt
-    },
-    {
-      id: "historical-assistant",
-      role: "assistant",
-      content: "older answer",
-      created_at: createdAt
-    }
-  ]
-  const first = mergeSchedulerTurnMessageSnapshot(
-    historicalMessages,
-    [
-      { id: "scheduled-user", role: "user", content: "scheduled question" },
-      {
-        id: "scheduled-assistant",
-        role: "assistant",
-        content: "scheduled answer",
-        tool_calls: [{ id: "scheduled-call", name: "read_file", args: { path: "README.md" } }]
-      },
-      {
-        id: "scheduled-tool",
-        role: "tool",
-        content: "file contents",
-        tool_call_id: "scheduled-call",
-        name: "read_file"
-      }
-    ],
-    createdAt
-  )
-
-  assertEqual(first.messages.length, 5, "the current-turn snapshot must append to durable history")
-  assertEqual(
-    first.messages[0],
-    historicalMessages[0],
-    "the current-turn merge must preserve stable history references"
-  )
-  assertEqual(first.turnMessages.length, 3, "tool-state updates should receive current-turn rows only")
-
-  const replay = mergeSchedulerTurnMessageSnapshot(
-    first.messages,
-    [
-      { id: "scheduled-user", role: "user", content: "scheduled question" },
-      {
-        id: "scheduled-assistant",
-        role: "assistant",
-        content: "scheduled answer updated",
-        tool_calls: [{ id: "scheduled-call", name: "read_file", args: { path: "README.md" } }]
-      },
-      {
-        id: "scheduled-tool",
-        role: "tool",
-        content: "file contents",
-        tool_call_id: "scheduled-call",
-        name: "read_file"
-      }
-    ],
-    createdAt
-  )
-  assertEqual(replay.messages.length, 5, "a repeated turn snapshot must remain idempotent")
-  assertEqual(
-    replay.messages.find((message) => message.id === "scheduled-assistant")?.content,
-    "scheduled answer updated",
-    "a repeated turn snapshot must update the current turn in place"
-  )
-
-  const absoluteFallbackIds = mergeSchedulerTurnMessageSnapshot(
-    [
-      {
-        id: "msg-5",
-        role: "assistant",
-        content: "older idless provider row",
-        created_at: createdAt
-      }
-    ],
-    [
-      { id: "msg-100", role: "user", content: "new idless provider turn" },
-      { id: "msg-101", role: "assistant", content: "new idless provider answer" }
-    ],
-    createdAt
-  )
-  assertEqual(
-    absoluteFallbackIds.messages.map((message) => message.id).join(","),
-    "msg-5,msg-100,msg-101",
-    "absolute fallback ids from different projected turns must not replace historical rows"
-  )
-}
-
 function testHookLogTurnIdFollowsUserRoleCollisionId(): void {
   const providerId = "shared-user-assistant-id"
   const assistantBaseline = [{ id: providerId, role: "assistant" }]
@@ -1486,10 +1389,6 @@ const tests: Array<[string, () => void]> = [
   [
     "testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas",
     testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas
-  ],
-  [
-    "testSchedulerTurnSnapshotMergesWithoutReplacingHistory",
-    testSchedulerTurnSnapshotMergesWithoutReplacingHistory
   ],
   ["testHookLogTurnIdFollowsUserRoleCollisionId", testHookLogTurnIdFollowsUserRoleCollisionId],
   [

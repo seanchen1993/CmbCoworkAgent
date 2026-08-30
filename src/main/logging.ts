@@ -1,16 +1,15 @@
+import { appendFile, rename } from "fs/promises"
 import {
-  appendFile,
-  chmod,
-  lstat,
-  opendir,
-  readFile,
-  rename,
-  stat,
-  unlink,
-  utimes,
-  writeFile
-} from "fs/promises"
-import { appendFileSync } from "fs"
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  utimesSync,
+  writeFileSync
+} from "fs"
 import { app } from "electron"
 import { join } from "path"
 import { getLogsDir, getMainLogPath, getRendererLogPath, resolveHookLogDir } from "./storage"
@@ -20,11 +19,6 @@ const MAX_LOG_BYTES = 5 * 1024 * 1024
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
 const REDACTION_MIGRATION_MARKER = ".redaction-v1"
-const LOG_MIGRATION_MAX_FILES = 4_096
-const LOG_MIGRATION_MAX_FILE_BYTES = 8 * 1024 * 1024
-const LOG_MIGRATION_MAX_TOTAL_BYTES = 64 * 1024 * 1024
-const LOG_MIGRATION_YIELD_INTERVAL = 128
-const LOG_MIGRATION_MAX_LINE_CHARS = 64 * 1024
 
 export interface LogRedactionInitializationResult {
   alreadyComplete: boolean
@@ -33,47 +27,15 @@ export interface LogRedactionInitializationResult {
   failedFiles: number
 }
 
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve))
-}
-
-async function redactHistoricalLog(raw: string): Promise<string> {
-  const output: string[] = []
-  let cursor = 0
-  let processedChars = 0
-  while (cursor < raw.length) {
-    const newline = raw.indexOf("\n", cursor)
-    const end = newline < 0 ? raw.length : newline + 1
-    const line = raw.slice(cursor, end)
-    output.push(
-      line.length > LOG_MIGRATION_MAX_LINE_CHARS
-        ? `[historical log line omitted: ${line.length} chars]\n`
-        : redactSensitiveText(line)
-    )
-    processedChars += line.length
-    cursor = end
-    if (processedChars >= 512 * 1024) {
-      processedChars = 0
-      await yieldToEventLoop()
-    }
-  }
-  return output.join("")
-}
-
-async function getHistoricalLogPaths(): Promise<{ paths: string[]; discoveryFailures: number }> {
+function getHistoricalLogPaths(): { paths: string[]; discoveryFailures: number } {
   const mainPath = getMainLogPath()
   const rendererPath = getRendererLogPath()
   const paths = [mainPath, `${mainPath}.1`, rendererPath, `${rendererPath}.1`]
   const hookDir = resolveHookLogDir()
-  let directory
+  if (!existsSync(hookDir)) return { paths, discoveryFailures: 0 }
+
   try {
-    directory = await opendir(hookDir)
-    let scannedEntries = 0
-    for await (const entry of directory) {
-      scannedEntries += 1
-      if (scannedEntries > LOG_MIGRATION_MAX_FILES) {
-        return { paths, discoveryFailures: 1 }
-      }
+    for (const entry of readdirSync(hookDir, { withFileTypes: true })) {
       if (
         (entry.isFile() || entry.isSymbolicLink()) &&
         entry.name.startsWith("hooks.") &&
@@ -81,33 +43,31 @@ async function getHistoricalLogPaths(): Promise<{ paths: string[]; discoveryFail
       ) {
         paths.push(join(hookDir, entry.name))
       }
-      if (scannedEntries % LOG_MIGRATION_YIELD_INTERVAL === 0) await yieldToEventLoop()
     }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { paths, discoveryFailures: 0 }
-    }
+  } catch {
     return { paths, discoveryFailures: 1 }
   }
   return { paths, discoveryFailures: 0 }
 }
 
-async function tightenLogPermissions(paths: readonly string[]): Promise<void> {
+function tightenLogPermissions(paths: readonly string[]): void {
   if (process.platform === "win32") return
   try {
-    await chmod(getLogsDir(), PRIVATE_DIRECTORY_MODE)
+    chmodSync(getLogsDir(), PRIVATE_DIRECTORY_MODE)
   } catch {
     // Best effort; content redaction remains the primary control.
   }
   const hookDir = resolveHookLogDir()
-  try {
-    await chmod(hookDir, PRIVATE_DIRECTORY_MODE)
-  } catch {
-    // Best effort.
+  if (existsSync(hookDir)) {
+    try {
+      chmodSync(hookDir, PRIVATE_DIRECTORY_MODE)
+    } catch {
+      // Best effort.
+    }
   }
   for (const filePath of paths) {
     try {
-      if ((await lstat(filePath)).isFile()) await chmod(filePath, PRIVATE_FILE_MODE)
+      if (lstatSync(filePath).isFile()) chmodSync(filePath, PRIVATE_FILE_MODE)
     } catch {
       // Best effort.
     }
@@ -118,69 +78,51 @@ async function tightenLogPermissions(paths: readonly string[]): Promise<void> {
  * One-time in-place migration for logs created by versions that wrote raw
  * console values. New writes are always redacted at enqueue time.
  */
-export async function initializeLogRedaction(): Promise<LogRedactionInitializationResult> {
-  const { paths, discoveryFailures } = await getHistoricalLogPaths()
+export function initializeLogRedaction(): LogRedactionInitializationResult {
+  const { paths, discoveryFailures } = getHistoricalLogPaths()
   const markerPath = join(getLogsDir(), REDACTION_MIGRATION_MARKER)
   let migrationComplete = false
   try {
     migrationComplete =
-      (await lstat(markerPath)).isFile() && (await readFile(markerPath, "utf8")) === "version=1\n"
+      lstatSync(markerPath).isFile() && readFileSync(markerPath, "utf8") === "version=1\n"
   } catch {
     // No valid completion marker yet.
   }
   if (migrationComplete) {
-    await tightenLogPermissions([...paths, markerPath])
+    tightenLogPermissions([...paths, markerPath])
     return { alreadyComplete: true, scannedFiles: 0, redactedFiles: 0, failedFiles: 0 }
   }
 
   let scannedFiles = 0
   let redactedFiles = 0
   let failedFiles = discoveryFailures
-  let totalBytes = 0
   for (const filePath of paths) {
+    if (!existsSync(filePath)) continue
     try {
       // Never follow a user-created symlink while rewriting historical data.
-      if (!(await lstat(filePath)).isFile()) {
+      if (!lstatSync(filePath).isFile()) {
         failedFiles += 1
         continue
       }
-      const fileStat = await stat(filePath)
-      if (
-        fileStat.size > LOG_MIGRATION_MAX_FILE_BYTES ||
-        totalBytes + fileStat.size > LOG_MIGRATION_MAX_TOTAL_BYTES
-      ) {
-        failedFiles += 1
-        continue
+      const fileStat = statSync(filePath)
+      const raw = readFileSync(filePath, "utf8")
+      const redacted = redactSensitiveText(raw)
+      scannedFiles += 1
+      if (redacted !== raw) {
+        writeFileSync(filePath, redacted, { encoding: "utf8", mode: PRIVATE_FILE_MODE })
+        utimesSync(filePath, fileStat.atime, fileStat.mtime)
+        redactedFiles += 1
       }
-      totalBytes += fileStat.size
-      await withLogFileMaintenance(filePath, async () => {
-        const raw = await readFile(filePath, "utf8")
-        const redacted = await redactHistoricalLog(raw)
-        scannedFiles += 1
-        if (redacted !== raw) {
-          const tempPath = `${filePath}.redaction-${process.pid}-${Date.now()}`
-          try {
-            await writeFile(tempPath, redacted, { encoding: "utf8", mode: PRIVATE_FILE_MODE })
-            await rename(tempPath, filePath)
-            await utimes(filePath, fileStat.atime, fileStat.mtime)
-            redactedFiles += 1
-          } finally {
-            await unlink(tempPath).catch(() => undefined)
-          }
-        }
-        if (process.platform !== "win32") await chmod(filePath, PRIVATE_FILE_MODE)
-      })
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
+      if (process.platform !== "win32") chmodSync(filePath, PRIVATE_FILE_MODE)
+    } catch {
       failedFiles += 1
     }
-    if (scannedFiles % LOG_MIGRATION_YIELD_INTERVAL === 0) await yieldToEventLoop()
   }
 
-  await tightenLogPermissions(paths)
+  tightenLogPermissions(paths)
   if (failedFiles === 0) {
     try {
-      await writeFile(markerPath, "version=1\n", {
+      writeFileSync(markerPath, "version=1\n", {
         encoding: "utf8",
         mode: PRIVATE_FILE_MODE
       })
@@ -270,10 +212,7 @@ interface LogFileState {
   buffer: string[]
   knownSize: number
   sizeSeeded: boolean
-  sizeSeedPromise: Promise<void> | null
   flushPromise: Promise<void> | null
-  maintenancePromise: Promise<void> | null
-  bufferBytes: number
 }
 
 const fileStates = new Map<string, LogFileState>()
@@ -289,52 +228,19 @@ function resetKnownLogSizes(): void {
 function getFileState(filePath: string): LogFileState {
   let state = fileStates.get(filePath)
   if (!state) {
-    state = {
-      buffer: [],
-      knownSize: 0,
-      sizeSeeded: false,
-      sizeSeedPromise: null,
-      flushPromise: null,
-      maintenancePromise: null,
-      bufferBytes: 0
-    }
+    state = { buffer: [], knownSize: 0, sizeSeeded: false, flushPromise: null }
     fileStates.set(filePath, state)
   }
   return state
 }
 
-async function seedSizeOnce(filePath: string, state: LogFileState): Promise<void> {
-  if (state.sizeSeeded) return state.sizeSeedPromise ?? Promise.resolve()
+function seedSizeOnce(filePath: string, state: LogFileState): void {
+  if (state.sizeSeeded) return
   state.sizeSeeded = true
-  state.sizeSeedPromise = stat(filePath)
-    .then((value) => {
-      state.knownSize = value.size
-    })
-    .catch(() => {
-      state.knownSize = 0
-    })
-    .finally(() => {
-      state.sizeSeedPromise = null
-    })
-  return state.sizeSeedPromise
-}
-
-async function withLogFileMaintenance(filePath: string, operation: () => Promise<void>): Promise<void> {
-  const state = getFileState(filePath)
-  while (state.maintenancePromise || state.flushPromise) {
-    await (state.maintenancePromise ?? state.flushPromise)
-  }
-  let release!: () => void
-  const gate = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  state.maintenancePromise = gate
   try {
-    await operation()
-  } finally {
-    release()
-    if (state.maintenancePromise === gate) state.maintenancePromise = null
-    if (state.buffer.length > 0) scheduleFlush()
+    state.knownSize = existsSync(filePath) ? statSync(filePath).size : 0
+  } catch {
+    state.knownSize = 0
   }
 }
 
@@ -352,12 +258,10 @@ async function flushFile(filePath: string, state: LogFileState): Promise<void> {
   if (state.buffer.length === 0) return
 
   state.flushPromise = (async () => {
-    if (state.maintenancePromise) await state.maintenancePromise
     while (state.buffer.length > 0) {
-      await seedSizeOnce(filePath, state)
+      seedSizeOnce(filePath, state)
       const chunk = state.buffer.join("")
       state.buffer.length = 0
-      state.bufferBytes = 0
 
       // Rotate before appending if this chunk would push us past the cap.
       if (state.knownSize + Buffer.byteLength(chunk) >= MAX_LOG_BYTES) {
@@ -423,7 +327,6 @@ export function flushLogsSync(): void {
         mode: PRIVATE_FILE_MODE
       })
       state.buffer.length = 0
-      state.bufferBytes = 0
     } catch {
       // Best effort on shutdown.
     }
@@ -437,205 +340,79 @@ function ensureExitHandler(): void {
   process.once("exit", flushLogsSync)
 }
 
-function enqueueLine(
-  filePath: string,
-  level: string,
-  message: string,
-  alreadyRedacted = false
-): void {
+function enqueueLine(filePath: string, level: string, message: string): void {
   const state = getFileState(filePath)
   const timestamp = new Date().toISOString()
-  const boundedMessage = message.slice(0, LOG_LINE_MAX_CHARS)
-  const line = `[${timestamp}] [${level}] ${
-    alreadyRedacted ? boundedMessage : redactSensitiveText(boundedMessage)
-  }\n`
-  state.buffer.push(line)
-  state.bufferBytes += Buffer.byteLength(line)
+  state.buffer.push(`[${timestamp}] [${level}] ${redactSensitiveText(message)}\n`)
   // Bound memory if a flush can't keep up (e.g. disk stall): drop oldest lines.
   if (state.buffer.length > MAX_BUFFER_LINES) {
-    const removed = state.buffer.splice(0, state.buffer.length - MAX_BUFFER_LINES)
-    for (const item of removed) state.bufferBytes -= Buffer.byteLength(item)
-  }
-  const maxBufferBytes = 1024 * 1024
-  while (state.bufferBytes > maxBufferBytes && state.buffer.length > 1) {
-    state.bufferBytes -= Buffer.byteLength(state.buffer.shift() ?? "")
+    state.buffer.splice(0, state.buffer.length - MAX_BUFFER_LINES)
   }
   ensureExitHandler()
   scheduleFlush()
 }
 
-const LOG_VALUE_MAX_DEPTH = 5
-const LOG_VALUE_MAX_ENTRIES = 64
-const LOG_VALUE_MAX_STRING_CHARS = 2 * 1024
-const LOG_ARGUMENT_MAX_CHARS = 8 * 1024
-const LOG_LINE_MAX_CHARS = 16 * 1024
-const LOG_ARGUMENT_MAX_COUNT = 32
-
-function boundedString(value: string, limit = LOG_VALUE_MAX_STRING_CHARS): string {
-  // Bound the raw input before any replacement. Replacing first would scan and
-  // duplicate an arbitrarily large Error/message on Electron's main isolate,
-  // even though only a tiny prefix can ever reach the log.
-  const rawPrefix = value.length > limit ? value.slice(0, limit) : value
-  const singleLine = rawPrefix.replace(/\r/g, "\\r").replace(/\n/g, "\\n")
-  if (value.length <= limit && singleLine.length <= limit) return singleLine
-  const truncatedChars =
-    value.length > rawPrefix.length
-      ? value.length - rawPrefix.length
-      : Math.max(0, singleLine.length - limit)
-  return `${singleLine.slice(0, limit)}…[truncated ${truncatedChars} chars]`
-}
-
-export function getLogQueueDiagnosticsForTest(): {
-  bufferedLines: number
-  bufferedBytes: number
-  maxBufferedLinesPerFile: number
-  maxBufferedBytesPerFile: number
-} {
-  let bufferedLines = 0
-  let bufferedBytes = 0
-  for (const state of fileStates.values()) {
-    bufferedLines += state.buffer.length
-    bufferedBytes += state.bufferBytes
+function safeStringify(value: unknown, seen = new WeakSet<object>()): string {
+  if (value instanceof Error) {
+    return value.stack || `${value.name}: ${value.message}`
   }
-  return {
-    bufferedLines,
-    bufferedBytes,
-    maxBufferedLinesPerFile: MAX_BUFFER_LINES,
-    maxBufferedBytesPerFile: 1024 * 1024
+  if (typeof value === "bigint") {
+    return `${value.toString()}n`
   }
-}
-
-function projectLogValue(
-  value: unknown,
-  depth: number,
-  seen: WeakSet<object>
-): unknown {
-  if (typeof value === "string") return boundedString(value)
-  if (typeof value === "bigint") return `${value.toString()}n`
+  if (typeof value === "string") {
+    return value
+  }
   if (
     value === null ||
     value === undefined ||
     typeof value === "number" ||
     typeof value === "boolean"
   ) {
-    return value
+    return String(value)
   }
-  if (typeof value === "function") return `[Function ${boundedString(value.name || "anonymous")}]`
-  if (typeof value === "symbol") return boundedString(value.toString())
-  if (typeof value !== "object") return boundedString(String(value))
-  if (seen.has(value)) return "[Circular]"
-  if (depth >= LOG_VALUE_MAX_DEPTH) return `[${value.constructor?.name || "Object"} depth-limit]`
-  seen.add(value)
-
-  if (value instanceof Error) {
-    return {
-      name: boundedString(value.name),
-      message: boundedString(value.message),
-      stack: boundedString(value.stack || "")
-    }
+  if (typeof value === "function") {
+    return `[Function ${value.name || "anonymous"}]`
   }
-  if (value instanceof Date) return value.toISOString()
-  if (value instanceof RegExp || value instanceof URL) return boundedString(value.toString())
-  if (value instanceof ArrayBuffer) return `[ArrayBuffer ${value.byteLength} bytes]`
-  if (ArrayBuffer.isView(value)) return `[${value.constructor.name} ${value.byteLength} bytes]`
-  if (Array.isArray(value)) {
-    const count = Math.min(value.length, LOG_VALUE_MAX_ENTRIES)
-    const output = new Array<unknown>(count)
-    for (let index = 0; index < count; index += 1) {
-      output[index] = projectLogValue(value[index], depth + 1, seen)
-    }
-    if (value.length > count) output.push(`[+${value.length - count} entries]`)
-    return output
+  if (typeof value === "symbol") {
+    return value.toString()
   }
-  if (value instanceof Map) {
-    const output: unknown[] = []
-    let index = 0
-    for (const [key, nested] of value) {
-      if (index >= LOG_VALUE_MAX_ENTRIES) break
-      output.push([
-        projectLogValue(key, depth + 1, seen),
-        projectLogValue(nested, depth + 1, seen)
-      ])
-      index += 1
-    }
-    if (value.size > index) output.push(`[+${value.size - index} entries]`)
-    return { map: output }
-  }
-  if (value instanceof Set) {
-    const output: unknown[] = []
-    let index = 0
-    for (const nested of value) {
-      if (index >= LOG_VALUE_MAX_ENTRIES) break
-      output.push(projectLogValue(nested, depth + 1, seen))
-      index += 1
-    }
-    if (value.size > index) output.push(`[+${value.size - index} entries]`)
-    return { set: output }
+  if (typeof value !== "object") {
+    return String(value)
   }
 
-  const output: Record<string, unknown> = {}
-  let included = 0
   try {
-    for (const key in value) {
-      if (!Object.prototype.hasOwnProperty.call(value, key)) continue
-      if (included >= LOG_VALUE_MAX_ENTRIES) {
-        output["…"] = `[entry-limit ${LOG_VALUE_MAX_ENTRIES}]`
-        break
-      }
-      const descriptor = Object.getOwnPropertyDescriptor(value, key)
-      output[boundedString(key, 256)] =
-        descriptor && "value" in descriptor
-          ? projectLogValue(descriptor.value, depth + 1, seen)
-          : "[Getter]"
-      included += 1
-    }
+    return JSON.stringify(
+      value,
+      (_key, nestedValue) => {
+        if (typeof nestedValue === "bigint") return `${nestedValue.toString()}n`
+        if (nestedValue instanceof Error) {
+          return {
+            name: nestedValue.name,
+            message: nestedValue.message,
+            stack: nestedValue.stack
+          }
+        }
+        if (typeof nestedValue === "function") {
+          return `[Function ${nestedValue.name || "anonymous"}]`
+        }
+        if (typeof nestedValue === "symbol") {
+          return nestedValue.toString()
+        }
+        if (nestedValue && typeof nestedValue === "object") {
+          if (seen.has(nestedValue)) return "[Circular]"
+          seen.add(nestedValue)
+        }
+        return nestedValue
+      },
+      2
+    )
   } catch {
-    return "[Unserializable Object]"
+    return Object.prototype.toString.call(value)
   }
-  return output
-}
-
-function projectLogValueSafely(value: unknown): unknown {
-  try {
-    return projectLogValue(value, 0, new WeakSet<object>())
-  } catch {
-    return "[Unserializable Object]"
-  }
-}
-
-function safeStringify(value: unknown): string {
-  const projected = projectLogValueSafely(value)
-  let serialized: string
-  try {
-    if (typeof projected === "string") {
-      serialized = projected
-    } else {
-      // JSON.stringify intentionally returns undefined for top-level undefined.
-      // console.log accepts that value, so the file logger must preserve it as
-      // text instead of letting its own length bound crash the business call.
-      serialized = JSON.stringify(projected) ?? String(projected)
-    }
-  } catch {
-    serialized = "[Unserializable Object]"
-  }
-  return serialized.length <= LOG_ARGUMENT_MAX_CHARS
-    ? serialized
-    : `${serialized.slice(0, LOG_ARGUMENT_MAX_CHARS)}…[argument-truncated]`
 }
 
 function joinArgs(args: unknown[]): string {
-  let output = ""
-  const count = Math.min(args.length, LOG_ARGUMENT_MAX_COUNT)
-  for (let index = 0; index < count; index += 1) {
-    const separator = output ? " " : ""
-    const remaining = LOG_LINE_MAX_CHARS - output.length - separator.length
-    if (remaining <= 0) break
-    output += `${separator}${safeStringify(args[index]).slice(0, remaining)}`
-  }
-  if (args.length > count && output.length < LOG_LINE_MAX_CHARS) {
-    output += ` [+${args.length - count} args]`
-  }
-  return output.slice(0, LOG_LINE_MAX_CHARS)
+  return args.map((arg) => safeStringify(arg)).join(" ")
 }
 
 /**
@@ -643,13 +420,9 @@ function joinArgs(args: unknown[]): string {
  * safe to reuse for stdout/stderr and renderer forwarding.
  */
 export function writeMainLog(level: string, args: unknown[]): unknown[] {
-  const boundedArgs = args
-    .slice(0, LOG_ARGUMENT_MAX_COUNT)
-    .map((value) => projectLogValueSafely(value))
-  if (args.length > boundedArgs.length) boundedArgs.push(`[+${args.length - boundedArgs.length} args]`)
-  const redactedArgs = redactLogValues(boundedArgs)
+  const redactedArgs = redactLogValues(args)
   if (isLevelEnabled(level)) {
-    enqueueLine(getMainLogPath(), level, joinArgs(redactedArgs), true)
+    enqueueLine(getMainLogPath(), level, joinArgs(redactedArgs))
   }
   return redactedArgs
 }
@@ -662,7 +435,7 @@ export function writeRendererLog(
   if (!isLevelEnabled(level)) return
   const suffix =
     meta?.sourceId || typeof meta?.line === "number"
-      ? ` (${redactSensitiveText((meta?.sourceId || "unknown").slice(0, 512))}:${meta?.line ?? 0})`
+      ? ` (${redactSensitiveText(meta?.sourceId || "unknown")}:${meta?.line ?? 0})`
       : ""
-  enqueueLine(getRendererLogPath(), level, `${message.slice(0, LOG_LINE_MAX_CHARS)}${suffix}`)
+  enqueueLine(getRendererLogPath(), level, `${message}${suffix}`)
 }

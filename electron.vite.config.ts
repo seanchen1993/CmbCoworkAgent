@@ -3,7 +3,6 @@ import { readFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSyn
 import { defineConfig } from "electron-vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
-import { mirrorRequiredDirectorySync } from "./src/main/build/directory-mirror"
 // import {app} from "electron"
 
 const pkg = JSON.parse(readFileSync("./package.json", "utf-8"))
@@ -27,7 +26,9 @@ function copyResources(): { name: string; closeBundle: () => void } {
       // Copy skills directory
       const srcSkills = resolve("skills")
       const destSkills = resolve("out/skills")
-      mirrorRequiredDirectorySync(srcSkills, destSkills)
+      if (existsSync(srcSkills)) {
+        copyDirRecursive(srcSkills, destSkills)
+      }
 
       // Playwright vendored 录制器生成文件在主进程 bundle 中仍通过
       // require("./generated/*.js") 加载，因此这里把源码副本同步到

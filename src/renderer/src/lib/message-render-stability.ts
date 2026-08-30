@@ -63,16 +63,13 @@ export function areMessageRenderFieldsEqual(
  * Reasoning-only and ordinary assistant-content updates intentionally disappear from
  * this projection so their high-frequency stream snapshots cannot invalidate tool maps.
  */
-export function isToolDerivationMessage(message: Message): boolean {
-  return (
-    message.role === "user" ||
-    (message.role === "assistant" && Boolean(message.tool_calls?.length)) ||
-    (message.role === "tool" && Boolean(message.tool_call_id))
-  )
-}
-
 export function selectToolDerivationMessages(messages: readonly Message[]): Message[] {
-  return messages.filter(isToolDerivationMessage)
+  return messages.filter(
+    (message) =>
+      message.role === "user" ||
+      (message.role === "assistant" && Boolean(message.tool_calls?.length)) ||
+      (message.role === "tool" && Boolean(message.tool_call_id))
+  )
 }
 
 export function areToolDerivationMessagesEqual(
@@ -109,57 +106,6 @@ export function createToolDerivationMessageSelector(): (
       stableMessages = candidate
     }
     return stableMessages
-  }
-}
-
-export interface IncrementalToolDerivationProjection {
-  messages: readonly Message[]
-  version: number
-}
-
-/**
- * Updates tool-relevant slots without filtering the complete transcript on an
- * ordinary assistant content frame. Structural changes use the canonical full
- * projection; tool-result content changes replace only their existing slot.
- */
-export function createIncrementalToolDerivationProjector(): (
-  messages: readonly Message[],
-  changedMessages: readonly Message[],
-  structureVersion: number
-) => IncrementalToolDerivationProjection {
-  let previousStructureVersion = -1
-  let projected: Message[] = []
-  let indexById = new Map<string, number>()
-  let version = 0
-
-  const rebuild = (messages: readonly Message[]): IncrementalToolDerivationProjection => {
-    projected = selectToolDerivationMessages(messages)
-    indexById = new Map(projected.map((message, index) => [message.id, index]))
-    version += 1
-    return { messages: projected, version }
-  }
-
-  return (messages, changedMessages, structureVersion) => {
-    if (structureVersion !== previousStructureVersion) {
-      previousStructureVersion = structureVersion
-      return rebuild(messages)
-    }
-
-    let changed = false
-    for (const message of changedMessages) {
-      const projectedIndex = indexById.get(message.id)
-      const relevant = isToolDerivationMessage(message)
-      if (relevant !== (projectedIndex !== undefined)) {
-        return rebuild(messages)
-      }
-      if (!relevant || projectedIndex === undefined || projected[projectedIndex] === message) {
-        continue
-      }
-      projected[projectedIndex] = message
-      changed = true
-    }
-    if (changed) version += 1
-    return { messages: projected, version }
   }
 }
 

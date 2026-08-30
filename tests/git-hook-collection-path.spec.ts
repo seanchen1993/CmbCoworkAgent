@@ -8,26 +8,23 @@
 import { execFile } from "child_process"
 import { createHash } from "crypto"
 import { existsSync } from "fs"
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "fs/promises"
-import { tmpdir } from "os"
+import { mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from "fs/promises"
+import { homedir, tmpdir } from "os"
 import { join } from "path"
 import { promisify } from "util"
-
-type AdoptionTrackerModule = typeof import("../src/main/services/adoption-tracker.ts")
-type AdoptionIndexModule = typeof import("../src/main/services/adoption-index.ts")
-type GitHookServiceModule = typeof import("../src/main/services/git-hook-service.ts")
-
-let testDataRoot = ""
-let captureStagedSnapshotsForCommit!: AdoptionTrackerModule["captureStagedSnapshotsForCommit"]
-let initializeAdoptionTracker!: AdoptionTrackerModule["initializeAdoptionTracker"]
-let recordGen!: AdoptionTrackerModule["recordGen"]
-let shutdownAdoptionTracker!: AdoptionTrackerModule["shutdownAdoptionTracker"]
-let waitForAdoptionRecordGenIdleForTest!: AdoptionTrackerModule["waitForAdoptionRecordGenIdleForTest"]
-let findPendingGensForFile!: AdoptionIndexModule["findPendingGensForFile"]
-let CMBDEVCLAW_INTERNAL_GIT_ENV!: GitHookServiceModule["CMBDEVCLAW_INTERNAL_GIT_ENV"]
-let installGitHooks!: GitHookServiceModule["installGitHooks"]
-let syncGitHookEvents!: GitHookServiceModule["syncGitHookEvents"]
-let uninstallGitHooks!: GitHookServiceModule["uninstallGitHooks"]
+import {
+  captureStagedSnapshotsForCommit,
+  initializeAdoptionTracker,
+  recordGen,
+  shutdownAdoptionTracker
+} from "../src/main/services/adoption-tracker.ts"
+import {
+  CMBDEVCLAW_INTERNAL_GIT_ENV,
+  installGitHooks,
+  syncGitHookEvents,
+  uninstallGitHooks
+} from "../src/main/services/git-hook-service.ts"
+import { findPendingGensForFile } from "../src/main/services/adoption-index.ts"
 
 const execFileAsync = promisify(execFile)
 
@@ -98,27 +95,46 @@ function normalizePathForAssert(value: string): string {
 }
 
 function repoEventsDir(repo: string): string {
-  return join(testDataRoot, "git-hooks", "events", repoKey(repo))
+  return join(homedir(), ".cmbcoworkagent", "git-hooks", "events", repoKey(repo))
 }
 
 function adoptionStorePath(name: string): string {
-  return join(testDataRoot, name)
+  return join(homedir(), ".cmbcoworkagent", name)
+}
+
+async function moveIfExists(from: string, to: string): Promise<boolean> {
+  if (!existsSync(from)) return false
+  await rm(to, { recursive: true, force: true })
+  await rename(from, to)
+  return true
+}
+
+async function restorePath(path: string, backupPath: string, hadOriginal: boolean): Promise<void> {
+  await rm(path, { recursive: true, force: true })
+  if (hadOriginal) {
+    await rename(backupPath, path)
+  } else {
+    await rm(backupPath, { recursive: true, force: true })
+  }
 }
 
 async function withIsolatedAdoptionStore<T>(fn: () => Promise<T>): Promise<T> {
   shutdownAdoptionTracker()
+  const backupRoot = await mkdtemp(join(tmpdir(), "git-hook-adoption-backup-"))
   const adoptionDir = adoptionStorePath("adoption")
   const adoptionIndex = adoptionStorePath("adoption-index.sqlite")
-  await rm(adoptionDir, { recursive: true, force: true })
-  await rm(adoptionIndex, { force: true })
+  const adoptionDirBackup = join(backupRoot, "adoption")
+  const adoptionIndexBackup = join(backupRoot, "adoption-index.sqlite")
+  const hadAdoptionDir = await moveIfExists(adoptionDir, adoptionDirBackup)
+  const hadAdoptionIndex = await moveIfExists(adoptionIndex, adoptionIndexBackup)
 
   try {
     return await fn()
   } finally {
-    await waitForAdoptionRecordGenIdleForTest()
     shutdownAdoptionTracker()
-    await rm(adoptionDir, { recursive: true, force: true })
-    await rm(adoptionIndex, { force: true })
+    await restorePath(adoptionDir, adoptionDirBackup, hadAdoptionDir)
+    await restorePath(adoptionIndex, adoptionIndexBackup, hadAdoptionIndex)
+    await rm(backupRoot, { recursive: true, force: true })
   }
 }
 
@@ -348,42 +364,16 @@ async function testExternalCommitReconciledWithoutHook(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  testDataRoot = await mkdtemp(join(tmpdir(), "git-hook-collection-data-"))
-  process.env.CMB_COWORK_AGENT_HOME = testDataRoot
-  try {
-    const adoptionTracker = await import("../src/main/services/adoption-tracker.ts")
-    const adoptionIndex = await import("../src/main/services/adoption-index.ts")
-    const gitHookService = await import("../src/main/services/git-hook-service.ts")
-    ;({
-      captureStagedSnapshotsForCommit,
-      initializeAdoptionTracker,
-      recordGen,
-      shutdownAdoptionTracker,
-      waitForAdoptionRecordGenIdleForTest
-    } = adoptionTracker)
-    ;({ findPendingGensForFile } = adoptionIndex)
-    ;({
-      CMBDEVCLAW_INTERNAL_GIT_ENV,
-      installGitHooks,
-      syncGitHookEvents,
-      uninstallGitHooks
-    } = gitHookService)
-
-    await testExternalCommandCommitWithoutCodeGenIsSkipped()
-    console.log("PASS external command commit without code_gen is skipped")
-    await testExternalCommandCommitWithCodeGenIsCollectedByHook()
-    console.log("PASS external command commit with code_gen is collected through Git hook")
-    await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
-    console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
-    await testCoreHooksPathInWorkspaceIsNotModified()
-    console.log("PASS workspace core.hooksPath is skipped without modifying .husky")
-    await testExternalCommitReconciledWithoutHook()
-    console.log("PASS external commit without hook is reconciled and measured")
-  } finally {
-    await waitForAdoptionRecordGenIdleForTest?.()
-    shutdownAdoptionTracker?.()
-    await rm(testDataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
-  }
+  await testExternalCommandCommitWithoutCodeGenIsSkipped()
+  console.log("PASS external command commit without code_gen is skipped")
+  await testExternalCommandCommitWithCodeGenIsCollectedByHook()
+  console.log("PASS external command commit with code_gen is collected through Git hook")
+  await testGitPanelPathSkipsHookAndUsesDirectStagedCapture()
+  console.log("PASS Git Panel collection path skips hook and uses direct staged capture")
+  await testCoreHooksPathInWorkspaceIsNotModified()
+  console.log("PASS workspace core.hooksPath is skipped without modifying .husky")
+  await testExternalCommitReconciledWithoutHook()
+  console.log("PASS external commit without hook is reconciled and measured")
 }
 
 run().catch((error) => {

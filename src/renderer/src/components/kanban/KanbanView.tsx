@@ -1,8 +1,7 @@
 import { useMemo } from "react"
-import { useShallow } from "zustand/react/shallow"
 import { useAppStore } from "@/lib/store"
 import { isHarnessProjectModeThread } from "@/lib/thread-classification"
-import { useAllStreamLoadingStates, useThreadStateSummaries } from "@/lib/thread-context"
+import { useAllThreadStates, useAllStreamLoadingStates } from "@/lib/thread-context"
 import { KanbanColumn } from "./KanbanColumn"
 import { KanbanHeader } from "./KanbanHeader"
 import { ThreadKanbanCard, SubagentKanbanCard } from "./KanbanCard"
@@ -16,7 +15,7 @@ interface ThreadWithStatus {
 }
 
 interface SubagentWithParent {
-  subagent: Pick<Subagent, "id" | "name" | "description" | "status">
+  subagent: Subagent
   parentThread: Thread
   status: KanbanStatus
 }
@@ -34,14 +33,8 @@ function getThreadKanbanStatus(
 }
 
 export function KanbanView(): React.JSX.Element {
-  const { threads, selectThread, showSubagentsInKanban } = useAppStore(
-    useShallow((state) => ({
-      threads: state.threads,
-      selectThread: state.selectThread,
-      showSubagentsInKanban: state.showSubagentsInKanban
-    }))
-  )
-  const threadStateSummaries = useThreadStateSummaries()
+  const { threads, selectThread, showSubagentsInKanban } = useAppStore()
+  const allThreadStates = useAllThreadStates()
   const loadingStates = useAllStreamLoadingStates()
 
   const handleCardClick = (threadId: string): void => {
@@ -62,17 +55,17 @@ export function KanbanView(): React.JSX.Element {
     }
 
     for (const thread of chatThreads) {
-      const threadState = threadStateSummaries[thread.thread_id]
+      const threadState = allThreadStates[thread.thread_id]
       const isLoading =
         (loadingStates[thread.thread_id] ?? false) || Boolean(threadState?.scheduledTaskLoading)
-      const hasDraft = threadState?.hasDraft ?? false
-      const hasPendingApproval = threadState?.hasPendingApproval ?? false
+      const hasDraft = Boolean(threadState?.draftInput?.trim())
+      const hasPendingApproval = Boolean(threadState?.pendingApproval)
       const status = getThreadKanbanStatus(thread, isLoading, hasDraft, hasPendingApproval)
       result[status].push({ thread, status })
     }
 
     return result
-  }, [chatThreads, loadingStates, threadStateSummaries])
+  }, [chatThreads, loadingStates, allThreadStates])
 
   const categorizedSubagents = useMemo(() => {
     if (!showSubagentsInKanban) {
@@ -88,11 +81,11 @@ export function KanbanView(): React.JSX.Element {
 
     const threadMap = new Map(chatThreads.map((t) => [t.thread_id, t]))
 
-    for (const [threadId, state] of Object.entries(threadStateSummaries)) {
+    for (const [threadId, state] of Object.entries(allThreadStates)) {
       const parentThread = threadMap.get(threadId)
-      if (!parentThread) continue
+      if (!parentThread || !state.subagents) continue
 
-      for (const subagent of state.kanbanSubagents) {
+      for (const subagent of state.subagents) {
         let status: KanbanStatus
         switch (subagent.status) {
           case "pending":
@@ -119,7 +112,7 @@ export function KanbanView(): React.JSX.Element {
     }
 
     return result
-  }, [chatThreads, showSubagentsInKanban, threadStateSummaries])
+  }, [chatThreads, allThreadStates, showSubagentsInKanban])
 
   const columnData: { status: KanbanStatus; title: string }[] = [
     { status: "pending", title: "待处理" },
