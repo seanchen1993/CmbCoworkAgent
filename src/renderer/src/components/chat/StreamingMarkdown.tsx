@@ -61,7 +61,7 @@ function MarkdownCodeBlock({
 
   return (
     <div className="streaming-markdown-code-block">
-      <div className="streaming-markdown-code-header">
+      <div data-chat-search-ignore className="streaming-markdown-code-header">
         <span className="streaming-markdown-code-language">{language || "text"}</span>
         <button
           type="button"
@@ -183,13 +183,15 @@ const MarkdownFragment = memo(function MarkdownFragment({
   isStreaming: boolean
 }): React.JSX.Element {
   return (
-    <ReactMarkdown
-      remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
-      components={MARKDOWN_COMPONENTS}
-    >
-      {text}
-    </ReactMarkdown>
+    <div data-chat-search-text>
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={isStreaming ? NO_REHYPE_PLUGINS : REHYPE_PLUGINS}
+        components={MARKDOWN_COMPONENTS}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
   )
 })
 
@@ -213,6 +215,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
           <>
             {!isStreaming && isExpanded && (
               <button
+                data-chat-search-ignore
                 type="button"
                 className="mb-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground hover:bg-muted/70"
                 onClick={() => setExpandedText(null)}
@@ -229,6 +232,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
         <>
           <MarkdownFragment text={plan.head} isStreaming={isStreaming} />
           <div
+            data-chat-search-ignore
             className="my-3 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
             role="status"
           >

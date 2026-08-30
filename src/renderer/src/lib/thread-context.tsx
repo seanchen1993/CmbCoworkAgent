@@ -148,6 +148,7 @@ import {
   markWorkspaceFilesStale,
   normalizeWorkspaceFileKey,
   registerWorkspaceFilePathIndex,
+  retainWorkspaceFilesForPathChange,
   refreshWorkspaceFilesFromChangeBatch,
   subscribeWorkspaceFileResults
 } from "./workspace-file-load"
@@ -5284,13 +5285,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
             messageWindowIntentCoordinator.isCurrent(intent)
           updateThreadState(threadId, () => ({ historyPageLoading: true }))
           try {
-            const canAdvanceOrdinal = target.ordinal < Number.MAX_SAFE_INTEGER
-            const requestCursor = {
-              beforeOrdinal: canAdvanceOrdinal ? target.ordinal + 1 : target.ordinal,
-              beforeMessageId: canAdvanceOrdinal ? target.messageId : `${target.messageId}\uffff`
-            }
             const page = await window.api.threads.getMessagesPage(threadId, {
-              ...requestCursor,
+              targetMessageId: target.messageId,
               limit: TARGETED_THREAD_MESSAGE_PAGE_LIMIT
             })
             if (!isCurrentLoad()) return false
@@ -5323,7 +5319,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               )
               const targetPageWindow = createThreadMessagePageWindow(
                 targetMessages,
-                requestCursor
+                { targetMessageId: target.messageId }
               )
               const forwardPageWindow = createForwardThreadMessagePageWindow(
                 target.messageId
@@ -5384,6 +5380,8 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           const reloadCursor =
             gap.reloadAnchorMessageId
               ? { anchorMessageId: gap.reloadAnchorMessageId }
+              : gap.reloadExactMessageId
+                ? { targetMessageId: gap.reloadExactMessageId }
               : gap.reloadBeforeOrdinal !== null && gap.reloadBeforeMessageId !== null
               ? {
                   beforeOrdinal: gap.reloadBeforeOrdinal,
@@ -5449,6 +5447,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
                 currentGap.reloadBeforeMessageId !==
                   (reloadCursor && "beforeMessageId" in reloadCursor
                     ? reloadCursor.beforeMessageId
+                    : null) ||
+                currentGap.reloadExactMessageId !==
+                  (reloadCursor && "targetMessageId" in reloadCursor
+                    ? reloadCursor.targetMessageId
                     : null) ||
                 currentGap.reloadAnchorMessageId !==
                   (reloadCursor && "anchorMessageId" in reloadCursor
@@ -5691,11 +5693,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           })
         },
         setWorkspacePath: (path: string | null) => {
-          updateThreadState(threadId, (state) =>
-            state.workspacePath === path
-              ? { workspacePath: path }
-              : { workspacePath: path, coordinatorWorkers: [] }
-          )
+          updateThreadState(threadId, (state) => {
+            if (state.workspacePath === path) return { workspacePath: path }
+            return {
+              workspacePath: path,
+              workspaceFiles: retainWorkspaceFilesForPathChange(
+                state.workspaceFiles,
+                state.workspacePath,
+                path
+              ),
+              coordinatorWorkers: []
+            }
+          })
         },
         setGitContext: (context: ThreadGitContext | null) => {
           updateThreadState(threadId, () => ({ gitContext: context }))

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  isMentionedWorkspaceFileForWorkspace,
   readBoundedWorkspaceMentionFile,
+  retainMentionedWorkspaceFilesForWorkspace,
   resolveAtFileAttachments,
-  type MentionedWorkspaceFile
+  toMentionedWorkspaceFile
 } from "./atFileAttachments"
 
 afterEach(() => {
@@ -74,14 +76,16 @@ describe("bounded @file attachment reads", () => {
   it("cancels the underlying worker when the 3-second enhancement timeout expires", async () => {
     vi.useFakeTimers()
     const cancel = vi.fn()
-    const mentionedFile: MentionedWorkspaceFile = {
-      id: "/notes.md",
-      displayPath: "notes.md",
-      workspaceFilePath: "/notes.md",
-      filename: "notes.md",
-      size: 20,
-      absolutePath: "C:/workspace/notes.md"
-    }
+    const mentionedFile = toMentionedWorkspaceFile(
+      {
+        id: "/notes.md",
+        displayPath: "notes.md",
+        workspaceFilePath: "/notes.md",
+        filename: "notes.md",
+        size: 20
+      },
+      "C:/workspace"
+    )
     const pending = resolveAtFileAttachments({
       rawMessage: "",
       attachments: [],
@@ -100,5 +104,52 @@ describe("bounded @file attachment reads", () => {
       warningMessage: "@文件部分处理失败，已按普通消息继续发送。"
     })
     expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it("binds a selected chip to its normalized workspace and removes it after A -> B", () => {
+    const selectedInA = toMentionedWorkspaceFile(
+      {
+        id: "/same.md",
+        displayPath: "same.md",
+        workspaceFilePath: "/same.md",
+        filename: "same.md"
+      },
+      "C:\\Workspace-A\\"
+    )
+
+    expect(isMentionedWorkspaceFileForWorkspace(selectedInA, "c:/workspace-a")).toBe(true)
+    expect(isMentionedWorkspaceFileForWorkspace(selectedInA, "C:/workspace-b")).toBe(false)
+    expect(retainMentionedWorkspaceFilesForWorkspace([selectedInA], "C:/workspace-b")).toEqual([])
+  })
+
+  it("never reads B/same.md or labels it as A/same.md when an A chip is stale", async () => {
+    const selectedInA = toMentionedWorkspaceFile(
+      {
+        id: "/same.md",
+        displayPath: "same.md",
+        workspaceFilePath: "/same.md",
+        filename: "same.md"
+      },
+      "C:/workspace-a"
+    )
+    const readWorkspaceFile = vi.fn().mockResolvedValue({
+      success: true,
+      content: "content from workspace B"
+    })
+
+    const result = await resolveAtFileAttachments({
+      rawMessage: "",
+      attachments: [],
+      mentionedFiles: [selectedInA],
+      workspacePath: "C:/workspace-b",
+      workspaceFiles: [{ path: "/same.md", is_dir: false }],
+      maxAttachments: 3,
+      maxTotalChars: 24_000,
+      readWorkspaceFile
+    })
+
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
+    expect(result.attachments).toEqual([])
+    expect(result.warningMessage).toBe("@文件所属工作区已变更，旧工作区引用未被发送。")
   })
 })

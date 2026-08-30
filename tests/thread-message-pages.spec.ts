@@ -69,6 +69,7 @@ assert.deepEqual(bounded.gap, {
   evictedMessageCount: 200,
   reloadBeforeOrdinal: null,
   reloadBeforeMessageId: null,
+  reloadExactMessageId: null,
   reloadAnchorMessageId: null,
   reloadTargetMessageId: null
 })

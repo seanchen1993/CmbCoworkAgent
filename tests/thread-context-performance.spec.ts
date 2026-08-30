@@ -623,7 +623,7 @@ async function main(): Promise<void> {
   )
   assert.match(
     source,
-    /loadMessageWindowAround: async[\s\S]*beforeOrdinal:[\s\S]*createTargetedThreadMessageWindow[\s\S]*restoreLatestMessageWindow: async/,
+    /loadMessageWindowAround: async[\s\S]*targetMessageId: target\.messageId[\s\S]*createTargetedThreadMessageWindow[\s\S]*restoreLatestMessageWindow: async/,
     "durable search results and evicted latest pages must be rehydratable without a full transcript read"
   )
   assert.match(

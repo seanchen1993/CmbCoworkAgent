@@ -36,6 +36,7 @@ export interface DurableChatSearchMatch {
   createdAt: number
   occurrenceCount: number
   preview: string
+  occurrenceOffset?: number
 }
 
 export interface DurableChatSearchPage {
@@ -116,7 +117,7 @@ interface ScanDurableChatSearchOptions {
   pageLimit?: number
   maxPages?: number
   shouldContinue?: () => boolean
-  shouldExcludeMessageId?: (messageId: string) => boolean
+  getLocalCoverage?: (messageId: string) => { occurrenceCount: number; authoritative: boolean }
   yieldControl?: () => Promise<void>
   onProgress?: (progress: DurableChatSearchProgress) => void
 }
@@ -125,6 +126,30 @@ export interface LeadingTrailingThrottle<T> {
   schedule(value: T): void
   cancel(): void
   flush(): void
+}
+
+/**
+ * Expand a clipped user body before collecting DOM ranges. A freshly mounted bubble may not have
+ * completed its overflow effect yet; in that case the data threshold plus scrollHeight requests
+ * another animation frame without adding a subscription to every message row.
+ */
+export function prepareUserContentForSearchHighlight(row: HTMLElement): boolean {
+  const content = row.querySelector<HTMLElement>(
+    "[data-chat-search-user-content-collapse-threshold]"
+  )
+  if (content) {
+    const button = row.querySelector<HTMLButtonElement>(
+      "[data-chat-search-expand-user-content]"
+    )
+    if (button?.getAttribute("aria-expanded") === "false") {
+      button.click()
+      return true
+    }
+    if (button) return false
+    const threshold = Number(content.dataset.chatSearchUserContentCollapseThreshold)
+    return Number.isFinite(threshold) && content.scrollHeight > threshold + 8
+  }
+  return false
 }
 
 /**
@@ -215,7 +240,7 @@ export async function scanDurableChatSearch({
   pageLimit = DURABLE_SEARCH_PAGE_LIMIT,
   maxPages = DURABLE_SEARCH_MAX_PAGES,
   shouldContinue = () => true,
-  shouldExcludeMessageId = () => false,
+  getLocalCoverage = () => ({ occurrenceCount: 0, authoritative: false }),
   yieldControl = defaultYieldControl,
   onProgress
 }: ScanDurableChatSearchOptions): Promise<DurableChatSearchScanResult> {
@@ -261,27 +286,32 @@ export async function scanDurableChatSearch({
       const match = page.matches[matchIndex]
       if (!match.messageId || seenMessageIds.has(match.messageId)) continue
       seenMessageIds.add(match.messageId)
-      // Loaded/live rows are searched locally. They must not consume the durable
-      // occurrence budget, or a hit-heavy latest page could hide older history.
-      if (shouldExcludeMessageId(match.messageId)) continue
-
       const requestedOccurrences = Math.max(1, Math.floor(match.occurrenceCount || 1))
+      const localCoverage = getLocalCoverage(match.messageId)
+      const localOccurrenceCount = Math.max(
+        0,
+        Math.floor(localCoverage.occurrenceCount || 0)
+      )
+      if (localCoverage.authoritative) continue
+      const missingOccurrences = Math.max(0, requestedOccurrences - localOccurrenceCount)
+      if (missingOccurrences === 0) continue
       const remaining = occurrenceLimit - retainedOccurrenceCount
       if (remaining <= 0) {
         truncated = true
         break
       }
-      const retainedOccurrences = Math.min(requestedOccurrences, remaining)
+      const retainedOccurrences = Math.min(missingOccurrences, remaining)
       const boundedMatch: DurableChatSearchMatch = {
         ...match,
         occurrenceCount: retainedOccurrences,
+        occurrenceOffset: localOccurrenceCount,
         preview: boundDurableSearchPreview(match.preview)
       }
       retained.push(boundedMatch)
       addedMatches.push(boundedMatch)
       retainedOccurrenceCount += retainedOccurrences
 
-      if (retainedOccurrences < requestedOccurrences) truncated = true
+      if (retainedOccurrences < missingOccurrences) truncated = true
       if (retainedOccurrenceCount >= occurrenceLimit) {
         if (matchIndex < page.matches.length - 1 || page.hasMore) truncated = true
         break
@@ -328,6 +358,7 @@ export function mergeChatSearchResults(
   const boundedLocal = localMatches.slice(0, boundedLimit)
   const durableCapacity = Math.max(0, boundedLimit - boundedLocal.length)
   const matches: OverlayChatSearchMatch[] = []
+  const loadedExtras = new Map<string, DurableChatSearchMatch>()
   let truncated = localMatches.length > boundedLimit
 
   // Durable results which are not loaded are older than the locally loaded tail.
@@ -338,16 +369,22 @@ export function mergeChatSearchResults(
   })
   const seenDurableIds = new Set<string>()
   for (const durableMatch of orderedDurable) {
+    if (localMessageIds.has(durableMatch.messageId)) {
+      if (durableMatch.occurrenceOffset !== undefined) {
+        loadedExtras.set(durableMatch.messageId, durableMatch)
+      }
+      continue
+    }
     if (
       matches.length >= durableCapacity ||
-      localMessageIds.has(durableMatch.messageId) ||
       seenDurableIds.has(durableMatch.messageId)
     ) {
-      if (!localMessageIds.has(durableMatch.messageId)) truncated = true
+      truncated = true
       continue
     }
     seenDurableIds.add(durableMatch.messageId)
     const occurrenceCount = Math.max(1, Math.floor(durableMatch.occurrenceCount || 1))
+    const occurrenceOffset = Math.max(0, Math.floor(durableMatch.occurrenceOffset || 0))
     for (let occurrenceIndex = 0; occurrenceIndex < occurrenceCount; occurrenceIndex += 1) {
       if (matches.length >= durableCapacity) {
         truncated = true
@@ -355,19 +392,38 @@ export function mergeChatSearchResults(
       }
       matches.push({
         messageId: durableMatch.messageId,
-        occurrenceIndex,
+        occurrenceIndex: occurrenceOffset + occurrenceIndex,
         sortIndex: durableMatch.ordinal,
         durableMatch
       })
     }
   }
 
-  for (const localMatch of boundedLocal) {
+  const lastLocalIndex = new Map<string, number>()
+  boundedLocal.forEach((match, index) => lastLocalIndex.set(match.messageId, index))
+  for (let localIndex = 0; localIndex < boundedLocal.length; localIndex += 1) {
+    const localMatch = boundedLocal[localIndex]
     if (matches.length >= boundedLimit) {
       truncated = true
       break
     }
     matches.push(localMatch)
+    if (lastLocalIndex.get(localMatch.messageId) !== localIndex) continue
+    const extra = loadedExtras.get(localMatch.messageId)
+    if (!extra) continue
+    const occurrenceCount = Math.max(0, Math.floor(extra.occurrenceCount || 0))
+    const occurrenceOffset = Math.max(0, Math.floor(extra.occurrenceOffset || 0))
+    for (let extraIndex = 0; extraIndex < occurrenceCount; extraIndex += 1) {
+      if (matches.length >= boundedLimit) {
+        truncated = true
+        break
+      }
+      matches.push({
+        messageId: localMatch.messageId,
+        occurrenceIndex: occurrenceOffset + extraIndex,
+        sortIndex: localMatch.sortIndex
+      })
+    }
   }
   return { matches, truncated }
 }
@@ -439,24 +495,30 @@ function clearHighlights(): void {
   registry.delete(ACTIVE_HIGHLIGHT_NAME)
 }
 
+/** Keep the DOM Range corpus identical to the text projection used by the data index. */
+export function isSearchableChatTextNode(node: Node, row: HTMLElement): boolean {
+  const value = node.nodeValue
+  if (!value || !value.trim()) return false
+  const parent = (node as Text).parentElement
+  if (!parent) return false
+  const searchArea = parent.closest<HTMLElement>("[data-chat-search-text]")
+  if (!searchArea || !row.contains(searchArea)) return false
+  const ignoredArea = parent.closest<HTMLElement>("[data-chat-search-ignore]")
+  if (ignoredArea && ignoredArea !== searchArea && row.contains(ignoredArea)) return false
+  const tag = parent.tagName
+  return tag !== "SCRIPT" && tag !== "STYLE" && tag !== "NOSCRIPT"
+}
+
 /** Walk the mounted active row and collect paint ranges matching `query`. */
-function collectMatchRanges(viewport: HTMLElement, query: string): Range[] {
+export function collectMatchRanges(viewport: HTMLElement, query: string): Range[] {
   const needle = query.toLocaleLowerCase()
   if (!needle) return []
 
   const walker = document.createTreeWalker(viewport, NodeFilter.SHOW_TEXT, {
     acceptNode(node: Node): number {
-      const value = node.nodeValue
-      if (!value || !value.trim()) return NodeFilter.FILTER_REJECT
-      const parent = (node as Text).parentElement
-      if (!parent) return NodeFilter.FILTER_REJECT
-      // Skip our own overlay UI and non-rendered nodes.
-      if (parent.closest("[data-chat-search-overlay]")) return NodeFilter.FILTER_REJECT
-      const tag = parent.tagName
-      if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") {
-        return NodeFilter.FILTER_REJECT
-      }
-      return NodeFilter.FILTER_ACCEPT
+      return isSearchableChatTextNode(node, viewport)
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT
     }
   })
 
@@ -509,14 +571,14 @@ export function ChatSearchOverlay({
   const [query, setQuery] = useState("")
   const [matchCount, setMatchCount] = useState(0)
   const [activeIndex, setActiveIndex] = useState(0)
-  const [activePreview, setActivePreview] = useState("")
   const [durableScanning, setDurableScanning] = useState(false)
   const [searchTruncated, setSearchTruncated] = useState(false)
   const [durableSearchFailed, setDurableSearchFailed] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const matchesRef = useRef<OverlayChatSearchMatch[]>([])
   const localMatchesRef = useRef<ChatSearchMatch[]>([])
-  const localMessageIdsRef = useRef<ReadonlySet<string>>(new Set())
+  const localOccurrenceCountsRef = useRef<ReadonlyMap<string, number>>(new Map())
+  const localDocumentCoverageRef = useRef<ReadonlyMap<string, boolean>>(new Map())
   const durableMatchesRef = useRef<DurableChatSearchMatch[]>([])
   const durableScanStateRef = useRef({ scanning: false, truncated: false, failed: false })
   const highlightFrameRef = useRef<number | null>(null)
@@ -601,8 +663,17 @@ export function ChatSearchOverlay({
           return
         }
 
-        highlightFrameRef.current = null
+        if (prepareUserContentForSearchHighlight(row)) {
+          if (attempt >= SEARCH_REVEAL_MAX_FRAMES) {
+            highlightFrameRef.current = null
+            return
+          }
+          highlightFrameRef.current = requestAnimationFrame(() => tryHighlight(attempt + 1))
+          return
+        }
+
         const ranges = collectMatchRanges(row, rawQuery.trim())
+        highlightFrameRef.current = null
         if (apiSupported && ranges.length > 0) {
           applyHighlights(ranges, Math.min(match.occurrenceIndex, ranges.length - 1))
         } else {
@@ -680,7 +751,6 @@ export function ChatSearchOverlay({
       setDurableSearchFailed(scanState.failed)
 
       const activeMatch = merged.matches[nextIndex]
-      setActivePreview(activeMatch?.durableMatch?.preview ?? "")
       if (!activeMatch) {
         clearHighlights()
         return
@@ -706,12 +776,29 @@ export function ChatSearchOverlay({
     const throttle = createLeadingTrailingThrottle<{ generation: number; query: string }>(
       (task) => {
         if (searchGenerationRef.current !== task.generation) return
-        const matches = searchMatcherRef.current(getSearchCorpusRef.current(), task.query)
+        const corpus = getSearchCorpusRef.current()
+        const matches = searchMatcherRef.current(corpus, task.query)
         // Keep one sentinel past the cap so the UI can report truncation.
         localMatchesRef.current = matches.slice(0, CHAT_SEARCH_RESULT_LIMIT + 1)
-        localMessageIdsRef.current = new Set(
-          localMatchesRef.current.map((match) => match.messageId)
-        )
+        const occurrenceCounts = new Map<string, number>()
+        for (const match of localMatchesRef.current) {
+          occurrenceCounts.set(match.messageId, (occurrenceCounts.get(match.messageId) ?? 0) + 1)
+        }
+        localOccurrenceCountsRef.current = occurrenceCounts
+        const coverage = new Map<string, boolean>()
+        for (const document of corpus.stableDocuments) {
+          coverage.set(
+            document.messageId,
+            Boolean(document.durableAuthoritative) || !document.truncated
+          )
+        }
+        for (const document of corpus.dynamicDocuments) {
+          coverage.set(
+            document.messageId,
+            Boolean(document.durableAuthoritative) || !document.truncated
+          )
+        }
+        localDocumentCoverageRef.current = coverage
         publishMatchesRef.current(task.query, true, true)
       }
     )
@@ -743,7 +830,8 @@ export function ChatSearchOverlay({
     highlightGenerationRef.current += 1
     autoRevealedQueryRef.current = ""
     localMatchesRef.current = []
-    localMessageIdsRef.current = new Set()
+    localOccurrenceCountsRef.current = new Map()
+    localDocumentCoverageRef.current = new Map()
     durableMatchesRef.current = []
     durableScanStateRef.current = { scanning: false, truncated: false, failed: false }
     searchMatcherRef.current = createChatSearchMatcher(CHAT_SEARCH_RESULT_LIMIT + 1)
@@ -769,7 +857,10 @@ export function ChatSearchOverlay({
             Math.min(localMatchesRef.current.length, CHAT_SEARCH_RESULT_LIMIT)
         ),
         shouldContinue: () => active && searchGenerationRef.current === generation,
-        shouldExcludeMessageId: (messageId) => localMessageIdsRef.current.has(messageId),
+        getLocalCoverage: (messageId) => ({
+          occurrenceCount: localOccurrenceCountsRef.current.get(messageId) ?? 0,
+          authoritative: localDocumentCoverageRef.current.get(messageId) ?? false
+        }),
         onProgress: ({ addedMatches }) => {
           if (!active || searchGenerationRef.current !== generation) return
           if (addedMatches.length === 0) return
@@ -855,7 +946,6 @@ export function ChatSearchOverlay({
       const next = (activeIndexRef.current + direction + matches.length) % matches.length
       setActive(next)
       const match = matches[next]
-      setActivePreview(match.durableMatch?.preview ?? "")
       revealAndHighlight(match, query, true)
     },
     [query, revealAndHighlight, setActive]
@@ -940,15 +1030,6 @@ export function ChatSearchOverlay({
           <X className="size-4" />
         </button>
       </div>
-      {activePreview && (
-        <div
-          data-chat-search-durable-preview
-          className="max-w-[32rem] truncate px-1 pb-0.5 pt-1 text-xs text-muted-foreground"
-          title={activePreview}
-        >
-          历史消息：{activePreview}
-        </div>
-      )}
     </div>
   )
 }

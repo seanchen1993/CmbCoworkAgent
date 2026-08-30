@@ -2743,8 +2743,8 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   // in inFlightNotifications and it can never be re-reported this process.
   assert.match(
     agentIpcSource,
-    /workflowRunManager\.clearNotificationInFlight\(settleRunId\)\s*\n\s*if \(!isAbortError\) \{\s*\n\s*workflowRunManager\.renotify\(threadId, settleRunId\)/,
-    "abort still clears in-flight; only renotify is gated on genuine failure"
+    /releaseWorkflowNotification\(settleRunId, ownerRunToken\)\s*\n\s*if \(!isAbortError\) \{\s*\n\s*workflowRunManager\.renotify\(threadId, settleRunId\)/,
+    "abort still releases its owned in-flight claim; only renotify is gated on genuine failure"
   )
   // run-manager excludes in-flight runs from discovery so a concurrent invoke
   // can't double-report the same run.

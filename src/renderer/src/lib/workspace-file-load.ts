@@ -97,7 +97,10 @@ const workspaceUpdateQueues = new Map<string, Promise<unknown>>()
 const FOLLOW_UP_RESCAN_DELAY_MS = 100
 const MAX_CACHED_WORKSPACE_BYTES = 32 * 1024 * 1024
 const CONTINUATION_IDLE_TIMEOUT_MS = 2 * 60 * 1_000
+const DEFAULT_WORKSPACE_FILE_SCAN_TIMEOUT_MS = 30_000
+const DEFAULT_WORKSPACE_METADATA_READ_TIMEOUT_MS = 3_000
 let workspaceCacheByteLimit = MAX_CACHED_WORKSPACE_BYTES
+let workspaceFileScanTimeoutMs = DEFAULT_WORKSPACE_FILE_SCAN_TIMEOUT_MS
 
 interface WorkspaceContinuationState {
   scanId: string
@@ -138,6 +141,23 @@ export function normalizeWorkspaceFileKey(workspacePath: string): string {
   return normalizeWorkspacePathKey(workspacePath) || "/"
 }
 
+/**
+ * A file array is valid only for the workspace key that produced it. Clear it
+ * synchronously when the path moves to another physical workspace so the Files
+ * panel and @ suggestions cannot consume A while B is still hydrating.
+ */
+export function retainWorkspaceFilesForPathChange<T>(
+  files: T[],
+  previousWorkspacePath: string | null | undefined,
+  nextWorkspacePath: string | null | undefined
+): T[] {
+  const previousKey = previousWorkspacePath
+    ? normalizeWorkspaceFileKey(previousWorkspacePath)
+    : ""
+  const nextKey = nextWorkspacePath ? normalizeWorkspaceFileKey(nextWorkspacePath) : ""
+  return previousKey === nextKey ? files : []
+}
+
 function getWorkspaceApi(): WorkspaceLoadApi {
   const workspaceApi = (
     window as unknown as Window & {
@@ -165,7 +185,80 @@ function abortError(): Error {
 }
 
 function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw abortError()
+  if (signal.aborted) {
+    if (signal.reason instanceof Error) throw signal.reason
+    throw abortError()
+  }
+}
+
+function awaitWorkspaceScanCall<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? abortError())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort)
+      reject(signal.reason ?? abortError())
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort)
+        reject(error)
+      }
+    )
+  })
+}
+
+export interface WorkspacePathReadOptions {
+  read: () => Promise<string | null>
+  getFallback: () => string | null
+  signal: AbortSignal
+  timeoutMs?: number
+  retryDelayMs?: number
+}
+
+/** Read persisted workspace metadata without letting a wedged IPC block file hydration. */
+export async function readWorkspacePathWithFallback(
+  options: WorkspacePathReadOptions
+): Promise<string | null> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    throwIfAborted(options.signal)
+    const attemptController = new AbortController()
+    const forwardAbort = (): void => attemptController.abort(options.signal.reason)
+    options.signal.addEventListener("abort", forwardAbort, { once: true })
+    const timeout = setTimeout(() => {
+      const error = new Error("Workspace metadata read timed out")
+      error.name = "TimeoutError"
+      attemptController.abort(error)
+    }, Math.max(1, options.timeoutMs ?? DEFAULT_WORKSPACE_METADATA_READ_TIMEOUT_MS))
+    ;(timeout as unknown as { unref?: () => void }).unref?.()
+    try {
+      return await awaitWorkspaceScanCall(options.read(), attemptController.signal)
+    } catch (error) {
+      if (options.signal.aborted) throwIfAborted(options.signal)
+      lastError = error
+      // A pending IPC may never settle. Prefer the already-hydrated ThreadState
+      // path immediately instead of issuing another request and blocking @file.
+      if (error instanceof Error && error.name === "TimeoutError") {
+        const fallback = options.getFallback()
+        if (fallback) return fallback
+      }
+    } finally {
+      clearTimeout(timeout)
+      options.signal.removeEventListener("abort", forwardAbort)
+    }
+    if (attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs ?? 250))
+    }
+  }
+  const fallback = options.getFallback()
+  if (fallback) return fallback
+  if (lastError) throw lastError
+  return null
 }
 
 function pageByteLength(files: readonly WorkspaceFile[]): number {
@@ -296,7 +389,20 @@ async function loadFromDiskProgressively(
 
   if (api.fileScanOpen && api.fileScanNext && api.fileScanCancel) {
     throwIfAborted(signal)
-    const opened = await api.fileScanOpen(threadId, workspacePath)
+    const openPromise = api.fileScanOpen(threadId, workspacePath)
+    let opened: Awaited<ReturnType<NonNullable<WorkspaceLoadApi["fileScanOpen"]>>>
+    try {
+      opened = await awaitWorkspaceScanCall(openPromise, signal)
+    } catch (error) {
+      // IPC itself cannot be aborted. If the renderer moved on while main was
+      // still opening the worker scan, reclaim the late scanId as soon as it arrives.
+      void openPromise.then((late) => {
+        if (late.success && late.scanId) {
+          void api.fileScanCancel?.(late.scanId).catch(() => undefined)
+        }
+      }).catch(() => undefined)
+      throw error
+    }
     if (!opened.success || !opened.scanId) {
       return {
         result: {
@@ -320,7 +426,10 @@ async function loadFromDiskProgressively(
     try {
       while (!completed && !pausedAtBudget) {
         throwIfAborted(signal)
-        const page = await api.fileScanNext(opened.scanId, threadId, undefined)
+        const page = await awaitWorkspaceScanCall(
+          api.fileScanNext(opened.scanId, threadId, undefined),
+          signal
+        )
         throwIfAborted(signal)
         if (!page.success) throw new Error(page.error || "Workspace file scan failed")
         const pageBytes = pageByteLength(page.files)
@@ -371,7 +480,9 @@ async function loadFromDiskProgressively(
     } finally {
       signal.removeEventListener("abort", cancelOnAbort)
       if ((!completed && !pausedAtBudget) || signal.aborted) {
-        await api.fileScanCancel(opened.scanId).catch(() => undefined)
+        // Cancellation is cleanup, not part of the load result. A wedged IPC
+        // bridge must not defeat the scan timeout and permanently block retry.
+        void api.fileScanCancel(opened.scanId).catch(() => undefined)
       }
     }
   }
@@ -379,7 +490,7 @@ async function loadFromDiskProgressively(
   // Compatibility path for tests and older preload bundles. Even when the
   // legacy call resolves one large array, projection/index work is split into
   // bounded renderer tasks instead of one 50k-entry Map/sort.
-  const result = await api.loadFromDisk(threadId, workspacePath)
+  const result = await awaitWorkspaceScanCall(api.loadFromDisk(threadId, workspacePath), signal)
   let offset = 0
   let retentionTruncated = false
   while (offset < result.files.length) {
@@ -471,6 +582,10 @@ export function registerWorkspaceFilePathIndex<T extends { path: string }>(
 export function setWorkspaceFileCacheByteLimitForTests(byteLimit: number): void {
   workspaceCacheByteLimit = Math.max(1, Math.floor(byteLimit))
   enforceWorkspaceCacheByteBudget()
+}
+
+export function setWorkspaceFileScanTimeoutForTests(timeoutMs?: number): void {
+  workspaceFileScanTimeoutMs = timeoutMs ?? DEFAULT_WORKSPACE_FILE_SCAN_TIMEOUT_MS
 }
 
 export function getWorkspaceFileCacheDiagnosticsForTests(): {
@@ -673,6 +788,12 @@ function runScan(
   }
 
   entry.promise = (async () => {
+    const timeout = setTimeout(() => {
+      const error = new Error("Workspace file scan timed out")
+      error.name = "TimeoutError"
+      entry.abortController.abort(error)
+    }, workspaceFileScanTimeoutMs)
+    ;(timeout as unknown as { unref?: () => void }).unref?.()
     try {
       let scanVersion = entry.invalidationVersion
       let prepared = await loadFromDiskProgressively(
@@ -736,6 +857,7 @@ function runScan(
       }
       return result
     } finally {
+      clearTimeout(timeout)
       // IPC can reject (renderer teardown, preload failure, etc.). Never leave a
       // rejected promise cached forever. The identity guard prevents an older
       // request from deleting a newer entry for the same thread/path.
@@ -754,6 +876,49 @@ export interface WorkspaceLoadOptions {
   requestTrailingRescan?: boolean
   signal?: AbortSignal
   onProgress?: (loadedCount: number) => void
+}
+
+export interface WorkspaceInitialHydrationOptions {
+  signal: AbortSignal
+  isCurrentWorkspace: () => boolean
+  setWorkspaceFiles: (files: WorkspaceLoadResult["files"]) => void
+  retryDelayMs?: number
+}
+
+/** Hydrate the file index used by both the Files panel and @file suggestions. */
+export async function hydrateInitialWorkspaceFiles(
+  threadId: string,
+  workspacePath: string,
+  options: WorkspaceInitialHydrationOptions
+): Promise<boolean> {
+  let lastError: unknown
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    throwIfAborted(options.signal)
+    if (!options.isCurrentWorkspace()) return false
+    try {
+      const result = await loadWorkspaceFilesDeduped(threadId, workspacePath, {
+        signal: options.signal
+      })
+      if (!options.isCurrentWorkspace()) return false
+      if (
+        result.success &&
+        result.workspacePath &&
+        normalizeWorkspaceFileKey(result.workspacePath) ===
+          normalizeWorkspaceFileKey(workspacePath)
+      ) {
+        options.setWorkspaceFiles(result.files)
+        return true
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error
+      lastError = error
+    }
+    if (attempt === 0) {
+      await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs ?? 250))
+    }
+  }
+  if (lastError) throw lastError
+  return false
 }
 
 function maybeAbortUnobservedScan(entry: InFlightScan): void {
@@ -881,8 +1046,8 @@ export function continueWorkspaceFilesDeduped(
   if (existing) return existing
 
   const operation = enqueueWorkspaceUpdate(key, async () => {
-    const signal = options.signal ?? new AbortController().signal
-    throwIfAborted(signal)
+    const callerSignal = options.signal ?? new AbortController().signal
+    throwIfAborted(callerSignal)
     const cached = cachedResults.get(key)
     const state = continuationsByWorkspace.get(key)
     if (!cached || !state) {
@@ -906,6 +1071,17 @@ export function continueWorkspaceFilesDeduped(
       return cached.result
     }
 
+    const operationController = new AbortController()
+    const forwardCallerAbort = (): void => operationController.abort(callerSignal.reason)
+    if (callerSignal.aborted) forwardCallerAbort()
+    else callerSignal.addEventListener("abort", forwardCallerAbort, { once: true })
+    const timeout = setTimeout(() => {
+      const error = new Error("Workspace file continuation timed out")
+      error.name = "TimeoutError"
+      operationController.abort(error)
+    }, workspaceFileScanTimeoutMs)
+    ;(timeout as unknown as { unref?: () => void }).unref?.()
+    const signal = operationController.signal
     clearContinuationTimer(state)
     const segmentFiles: WorkspaceFile[] = []
     let segmentBytes = 2
@@ -935,10 +1111,9 @@ export function continueWorkspaceFilesDeduped(
     try {
       while (!completed && !pausedAtBudget) {
         throwIfAborted(signal)
-        const page = await api.fileScanNext(
-          state.scanId,
-          threadId,
-          continuationToken
+        const page = await awaitWorkspaceScanCall(
+          api.fileScanNext(state.scanId, threadId, continuationToken),
+          signal
         )
         continuationToken = undefined
         throwIfAborted(signal)
@@ -1047,6 +1222,8 @@ export function continueWorkspaceFilesDeduped(
       throw error
     } finally {
       signal.removeEventListener("abort", cancelOnAbort)
+      callerSignal.removeEventListener("abort", forwardCallerAbort)
+      clearTimeout(timeout)
     }
   })
   const tracked = operation.finally(() => {

@@ -365,8 +365,10 @@ export interface LocalSandboxOptions {
    *  When signalled, any in-flight execute() will kill its child process immediately
    *  (SIGTERM → 200ms → SIGKILL), matching OpenCode/Codex abort behaviour. */
   abortSignal?: AbortSignal
-  /** Unique run/thread identifier used for ACL ref-counting across concurrent runs. */
+  /** Logical thread/run owner used for background-task cancellation and hook/session identity. */
   runId?: string
+  /** Physical run owner used only for Windows ACL ref-counting and cleanup. */
+  aclOwnerId?: string
   /** Absolute app-managed directory backing DeepAgents' logical /large_tool_results path. */
   largeToolResultsDir?: string
   /**
@@ -517,8 +519,10 @@ export class LocalSandbox
 {
   /** Unique identifier for this sandbox instance */
   readonly id: string
-  /** Run/thread identifier for ACL ref-counting (falls back to this.id). */
+  /** Logical run/thread identifier for background-task cancellation and hooks. */
   readonly runId: string
+  /** Physical ACL owner; distinct from logical runId during foreground replacement. */
+  readonly aclOwnerId: string
 
   private readonly timeout: number
   private readonly maxOutputBytes: number
@@ -1812,6 +1816,7 @@ export class LocalSandbox
 
     this.id = `local-sandbox-${randomUUID().slice(0, 8)}`
     this.runId = options.runId ?? this.id
+    this.aclOwnerId = options.aclOwnerId ?? this.runId
     this.timeout = options.timeout ?? 60_000 // 1 minute default
     this.maxOutputBytes = options.maxOutputBytes ?? 100_000 // ~100KB default
     const inheritedEnv = options.env ?? ({ ...process.env } as Record<string, string>)
@@ -5567,8 +5572,33 @@ export class LocalSandbox
   private static readonly _grantedAclRefCount = new Map<string, number>()
   /** Per-run tracking: which dirs each runId has granted (for correct decrement on cleanup). */
   private static readonly _runAclDirs = new Map<string, Set<string>>()
+  /** Serializes OS-level grant/revoke mutations per directory. */
+  private static readonly _aclOsOperationTails = new Map<string, Promise<void>>()
   /** Directories that should never be revoked (e.g. TEMP — public dir, safe to leave open). */
   private static readonly _permanentAclDirs = new Set<string>()
+
+  private static queueAclOsOperation(
+    key: string,
+    operation: () => Promise<void>
+  ): Promise<void> {
+    const previous = LocalSandbox._aclOsOperationTails.get(key) ?? Promise.resolve()
+    const task = previous.catch(() => {}).then(operation)
+    LocalSandbox._aclOsOperationTails.set(key, task)
+    void task
+      .finally(() => {
+        if (LocalSandbox._aclOsOperationTails.get(key) === task) {
+          LocalSandbox._aclOsOperationTails.delete(key)
+        }
+      })
+      .catch(() => {
+        // The caller observes task; this branch only observes the cleanup chain.
+      })
+    return task
+  }
+
+  private static waitForAclOsOperation(key: string): Promise<void> {
+    return (LocalSandbox._aclOsOperationTails.get(key) ?? Promise.resolve()).catch(() => {})
+  }
 
   /** Grant Everyone access on a sandbox path (for WRITE_RESTRICTED tokens). Returns when done.
    *  @param runId — identifies the agent run requesting the grant (for ref-counting). */
@@ -5586,54 +5616,57 @@ export class LocalSandbox
       runDirs.add(key)
       const prevCount = LocalSandbox._grantedAclRefCount.get(key) ?? 0
       LocalSandbox._grantedAclRefCount.set(key, prevCount + 1)
-      // If already granted by another run, skip the icacls call.
+      // If another owner registered first, its OS grant may still be running.
+      // The restricted command must not start until that shared grant settles.
       if (prevCount > 0) {
-        return
+        return LocalSandbox.waitForAclOsOperation(key)
       }
     } else {
-      // Same run already granted this dir — skip entirely.
-      return
+      // Concurrent commands in the same physical run share the grant too.
+      return LocalSandbox.waitForAclOsOperation(key)
     }
-    let isDirectory = true
-    try {
-      isDirectory = (await fs.stat(dir)).isDirectory()
-    } catch {
-      isDirectory = true
-    }
-    // (OI)(CI) = inherit to files & subdirs so the restricted token can
-    // read/write/delete at any depth. Uses async spawn to avoid blocking
-    // the event loop on large repos (NTFS propagates inherited ACEs to
-    // all existing descendants, which can take tens of seconds).
-    return new Promise<void>((resolve) => {
-      const grant = isDirectory
-        ? `${LocalSandbox.EVERYONE_SID}:(OI)(CI)(M)`
-        : `${LocalSandbox.EVERYONE_SID}:RX`
-      const proc = spawn("icacls", [dir, "/grant", grant], {
-        stdio: "ignore",
-        windowsHide: true
-      })
-      const timeoutId = setTimeout(() => {
-        console.warn(
-          `[LocalSandbox] icacls grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`
-        )
-        try {
-          proc.kill()
-        } catch {
-          /* already exited */
-        }
-        resolve()
-      }, LocalSandbox.ICACLS_TIMEOUT_MS)
-      proc.on("exit", (code) => {
-        clearTimeout(timeoutId)
-        if (code !== 0) {
-          console.warn(`[LocalSandbox] icacls grant exited ${code} on ${dir}`)
-        }
-        resolve()
-      })
-      proc.on("error", (err) => {
-        clearTimeout(timeoutId)
-        console.warn(`[LocalSandbox] icacls grant error on ${dir}:`, err.message)
-        resolve()
+    return LocalSandbox.queueAclOsOperation(key, async () => {
+      let isDirectory = true
+      try {
+        isDirectory = (await fs.stat(dir)).isDirectory()
+      } catch {
+        isDirectory = true
+      }
+      // (OI)(CI) = inherit to files & subdirs so the restricted token can
+      // read/write/delete at any depth. Uses async spawn to avoid blocking
+      // the event loop on large repos (NTFS propagates inherited ACEs to
+      // all existing descendants, which can take tens of seconds).
+      await new Promise<void>((resolve) => {
+        const grant = isDirectory
+          ? `${LocalSandbox.EVERYONE_SID}:(OI)(CI)(M)`
+          : `${LocalSandbox.EVERYONE_SID}:RX`
+        const proc = spawn("icacls", [dir, "/grant", grant], {
+          stdio: "ignore",
+          windowsHide: true
+        })
+        const timeoutId = setTimeout(() => {
+          console.warn(
+            `[LocalSandbox] icacls grant timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`
+          )
+          try {
+            proc.kill()
+          } catch {
+            /* already exited */
+          }
+          resolve()
+        }, LocalSandbox.ICACLS_TIMEOUT_MS)
+        proc.on("exit", (code) => {
+          clearTimeout(timeoutId)
+          if (code !== 0) {
+            console.warn(`[LocalSandbox] icacls grant exited ${code} on ${dir}`)
+          }
+          resolve()
+        })
+        proc.on("error", (err) => {
+          clearTimeout(timeoutId)
+          console.warn(`[LocalSandbox] icacls grant error on ${dir}:`, err.message)
+          resolve()
+        })
       })
     })
   }
@@ -5656,33 +5689,37 @@ export class LocalSandbox
     }
     // count === 1 → last user, attempt the best-effort revoke
     LocalSandbox._grantedAclRefCount.delete(key)
-    return new Promise<void>((resolve) => {
-      const proc = spawn("icacls", [dir, "/remove:g", LocalSandbox.EVERYONE_SID], {
-        stdio: "ignore",
-        windowsHide: true
-      })
-      const timeoutId = setTimeout(() => {
-        console.warn(
-          `[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`
-        )
-        try {
-          proc.kill()
-        } catch {
-          /* already exited */
-        }
-        resolve()
-      }, LocalSandbox.ICACLS_TIMEOUT_MS)
-      proc.on("exit", (code) => {
-        clearTimeout(timeoutId)
-        if (code !== 0) console.warn(`[LocalSandbox] icacls revoke exited ${code} on ${dir}`)
-        resolve()
-      })
-      proc.on("error", (err) => {
-        clearTimeout(timeoutId)
-        console.warn(`[LocalSandbox] icacls revoke error on ${dir}:`, err.message)
-        resolve()
-      })
-    })
+    return LocalSandbox.queueAclOsOperation(
+      key,
+      () =>
+        new Promise<void>((resolve) => {
+          const proc = spawn("icacls", [dir, "/remove:g", LocalSandbox.EVERYONE_SID], {
+            stdio: "ignore",
+            windowsHide: true
+          })
+          const timeoutId = setTimeout(() => {
+            console.warn(
+              `[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${dir}, killing`
+            )
+            try {
+              proc.kill()
+            } catch {
+              /* already exited */
+            }
+            resolve()
+          }, LocalSandbox.ICACLS_TIMEOUT_MS)
+          proc.on("exit", (code) => {
+            clearTimeout(timeoutId)
+            if (code !== 0) console.warn(`[LocalSandbox] icacls revoke exited ${code} on ${dir}`)
+            resolve()
+          })
+          proc.on("error", (err) => {
+            clearTimeout(timeoutId)
+            console.warn(`[LocalSandbox] icacls revoke error on ${dir}:`, err.message)
+            resolve()
+          })
+        })
+    )
   }
 
   /**
@@ -7395,7 +7432,7 @@ export class LocalSandbox
       }
       const aclGrantStart = Date.now()
       await mapLimit(aclDirs, LocalSandbox.ACL_OPERATION_CONCURRENCY, (dir) =>
-        LocalSandbox.grantSandboxWriteAcl(dir, this.runId)
+        LocalSandbox.grantSandboxWriteAcl(dir, this.aclOwnerId)
       )
       console.log(
         `[LocalSandbox] ACL grant took ${Date.now() - aclGrantStart}ms for ${aclDirs.length} dirs`

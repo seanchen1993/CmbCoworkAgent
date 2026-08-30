@@ -25,7 +25,14 @@ import {
   getMessageRoleCollisionSourceId,
   normalizeCompleteSnapshotMessageIds
 } from "../../shared/message-role-collision"
-import { isRestorableConversationTranscriptMessage } from "../../shared/checkpoint-transcript"
+import {
+  isRestorableConversationTranscriptMessage,
+  isVisibleTranscriptMessage
+} from "../../shared/checkpoint-transcript"
+import { projectCoordinatorTranscriptNoise } from "../../shared/internal-notification-turn"
+import { cleanUserAttachmentContentForDisplay } from "../../shared/user-attachment-display"
+import { getCollapsedToolCallSummary } from "../../shared/tool-call-summary"
+import { projectVisibleChatSearchContentWithMetadata } from "../../shared/chat-search-visible-content"
 import type {
   Message,
   ThreadMessageSearchMatch,
@@ -1415,8 +1422,9 @@ function normalizeThreadMessagesPageByteBudget(byteBudget: number | undefined): 
 
 /**
  * Read one durable transcript page without materializing or parsing the stable prefix. Backward
- * reads use a compound cursor. Forward reads first resolve an exact durable id, then return
- * strictly newer composite rows so sparse/repeated ordinals and oversized anchors cannot stall.
+ * reads use a compound cursor. Targeted reads resolve an exact durable id before selecting it and
+ * older rows. Forward reads return strictly newer composite rows so sparse/repeated ordinals and
+ * oversized anchors cannot stall.
  */
 export function getThreadMessagesPage(
   threadId: string,
@@ -1429,6 +1437,8 @@ export function getThreadMessagesPage(
     Number.isSafeInteger(options.beforeOrdinal) && (options.beforeOrdinal ?? -1) >= 0
   const normalizedBeforeMessageId = options.beforeMessageId?.trim() ?? ""
   const hasBeforeMessageId = normalizedBeforeMessageId.length > 0
+  const normalizedTargetMessageId = options.targetMessageId?.trim() ?? ""
+  const hasTargetMessageId = normalizedTargetMessageId.length > 0
   const normalizedAnchorMessageId = options.anchorMessageId?.trim() ?? ""
   const hasAnchorMessageId = normalizedAnchorMessageId.length > 0
   if (hasBeforeOrdinal !== hasBeforeMessageId) {
@@ -1441,6 +1451,16 @@ export function getThreadMessagesPage(
       "Thread message page anchorMessageId is mutually exclusive with the backward cursor"
     )
   }
+  if (hasTargetMessageId && hasBeforeOrdinal) {
+    throw new Error(
+      "Thread message page targetMessageId is mutually exclusive with the backward cursor"
+    )
+  }
+  if (hasTargetMessageId && hasAnchorMessageId) {
+    throw new Error(
+      "Thread message page targetMessageId is mutually exclusive with anchorMessageId"
+    )
+  }
 
   const bucket = getThreadMessageBucketRow(database, threadId)
   const total = bucket ? Math.max(0, Number(bucket.message_count) || 0) : 0
@@ -1448,25 +1468,36 @@ export function getThreadMessagesPage(
     ? getLegacyCheckpointMigrationStatus(threadId)
     : undefined
 
-  let anchorOrdinal: number | null = null
-  if (hasAnchorMessageId) {
-    const anchorStmt = database.prepare(
+  const exactMessageId = hasTargetMessageId
+    ? normalizedTargetMessageId
+    : normalizedAnchorMessageId
+  let exactMessageOrdinal: number | null = null
+  if (hasTargetMessageId || hasAnchorMessageId) {
+    const exactMessageStmt = database.prepare(
       `SELECT ordinal
        FROM thread_messages
        WHERE thread_id = ? AND message_id = ?`
     )
-    anchorStmt.bind([threadId, normalizedAnchorMessageId])
+    exactMessageStmt.bind([threadId, exactMessageId])
     try {
-      if (!anchorStmt.step()) {
-        throw new Error("Thread message forward-page anchor was not found")
+      if (!exactMessageStmt.step()) {
+        throw new Error(
+          hasTargetMessageId
+            ? "Thread message target-window message was not found"
+            : "Thread message forward-page anchor was not found"
+        )
       }
-      const row = anchorStmt.getAsObject() as { ordinal?: unknown }
-      anchorOrdinal = Number(row.ordinal)
-      if (!Number.isSafeInteger(anchorOrdinal) || (anchorOrdinal ?? -1) < 0) {
-        throw new Error("Thread message forward-page anchor has an invalid ordinal")
+      const row = exactMessageStmt.getAsObject() as { ordinal?: unknown }
+      exactMessageOrdinal = Number(row.ordinal)
+      if (!Number.isSafeInteger(exactMessageOrdinal) || (exactMessageOrdinal ?? -1) < 0) {
+        throw new Error(
+          hasTargetMessageId
+            ? "Thread message target-window message has an invalid ordinal"
+            : "Thread message forward-page anchor has an invalid ordinal"
+        )
       }
     } finally {
-      anchorStmt.free()
+      exactMessageStmt.free()
     }
   }
 
@@ -1488,7 +1519,25 @@ export function getThreadMessagesPage(
          ORDER BY m.ordinal ASC, m.message_id ASC
          LIMIT ?`
       )
-    : hasBeforeOrdinal
+    : hasTargetMessageId
+      ? database.prepare(
+        `SELECT m.message_id, m.ordinal,
+                1024 +
+                CASE
+                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
+                  ELSE length(CAST(m.content_json AS BLOB))
+                END +
+                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
+                  AS estimated_bytes
+         FROM thread_messages AS m
+         LEFT JOIN thread_message_fragment_states AS fragments
+           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+         WHERE m.thread_id = ?
+           AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id <= ?))
+         ORDER BY m.ordinal DESC, m.message_id DESC
+         LIMIT ?`
+        )
+      : hasBeforeOrdinal
       ? database.prepare(
         `SELECT m.message_id, m.ordinal,
                 1024 +
@@ -1526,11 +1575,19 @@ export function getThreadMessagesPage(
     hasAnchorMessageId
       ? [
           threadId,
-          anchorOrdinal,
-          anchorOrdinal,
+          exactMessageOrdinal,
+          exactMessageOrdinal,
           normalizedAnchorMessageId,
           limit + 1
         ]
+      : hasTargetMessageId
+        ? [
+            threadId,
+            exactMessageOrdinal,
+            exactMessageOrdinal,
+            normalizedTargetMessageId,
+            limit + 1
+          ]
       : hasBeforeOrdinal
       ? [
           threadId,
@@ -1628,6 +1685,7 @@ interface ThreadMessageSearchCandidate {
   createdAt: number
   contentJson: string
   toolCallsJson: string | null
+  toolCallsTruncated: boolean
 }
 
 interface ThreadMessageSearchTextResult {
@@ -1660,35 +1718,24 @@ function threadMessageSearchJsonScalar(value: unknown): string {
 
 /** Reproduce the searchable projection without SQLite building group_concat copies. */
 function buildThreadMessageSearchDocument(
-  contentJson: string,
-  toolCallsJson: string | null
+  contentText: string,
+  toolCalls: readonly { name?: unknown; args?: unknown }[] | undefined
 ): string {
-  const content = parseThreadMessageSearchJson(contentJson)
-  let searchText = ""
-  if (content.valid && typeof content.value === "string") {
-    searchText = content.value
-  } else if (content.valid && Array.isArray(content.value)) {
-    searchText = content.value
-      .map((block) => {
-        if (!block || typeof block !== "object") return ""
-        const record = block as Record<string, unknown>
-        if (record.type === "text" && typeof record.text === "string") return record.text
-        return typeof record.content === "string" ? record.content : ""
-      })
-      .join("\n")
-  }
-
-  const toolCalls = parseThreadMessageSearchJson(toolCallsJson)
-  if (!toolCalls.valid || !Array.isArray(toolCalls.value)) return searchText
-  const toolText = toolCalls.value
+  if (!toolCalls) return contentText
+  const toolText = toolCalls
     .map((toolCall) => {
-      if (!toolCall || typeof toolCall !== "object") return "\n"
-      const record = toolCall as Record<string, unknown>
-      return `${threadMessageSearchJsonScalar(record.name)}\n${threadMessageSearchJsonScalar(record.args)}`
+      return getCollapsedToolCallSummary({
+        name: threadMessageSearchJsonScalar(toolCall.name),
+        args:
+          toolCall.args && typeof toolCall.args === "object" && !Array.isArray(toolCall.args)
+            ? (toolCall.args as Record<string, unknown>)
+            : undefined
+      })
     })
     .join("\n")
-  return `${searchText}\n${toolText}`
+  return `${contentText}\n${toolText}`
 }
+
 
 /** Find and count non-overlapping occurrences while allocating one normalized copy. */
 function inspectThreadMessageSearchText(
@@ -1776,7 +1823,10 @@ export function searchThreadMessages(
        1024
          + length(CAST(m.content_json AS BLOB))
          + length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
-         + COALESCE(fragments.total_chars * 4, 0) AS estimated_bytes
+         + COALESCE(fragments.total_chars * 4, 0) AS estimated_bytes,
+       1024
+         + length(CAST(m.content_json AS BLOB))
+         + COALESCE(fragments.total_chars * 4, 0) AS content_estimated_bytes
      FROM thread_messages AS m
      LEFT JOIN thread_message_fragment_states AS fragments
        ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
@@ -1790,6 +1840,7 @@ export function searchThreadMessages(
     messageId: string
     ordinal: number
     estimatedBytes: number
+    contentEstimatedBytes: number
   }> = []
   try {
     while (candidateStatement.step()) {
@@ -1797,12 +1848,14 @@ export function searchThreadMessages(
         message_id?: unknown
         ordinal?: unknown
         estimated_bytes?: unknown
+        content_estimated_bytes?: unknown
       }
       if (typeof row.message_id !== "string") continue
       candidateHeaders.push({
         messageId: row.message_id,
         ordinal: Number(row.ordinal) || 0,
-        estimatedBytes: Math.max(0, Number(row.estimated_bytes) || 0)
+        estimatedBytes: Math.max(0, Number(row.estimated_bytes) || 0),
+        contentEstimatedBytes: Math.max(0, Number(row.content_estimated_bytes) || 0)
       })
     }
   } finally {
@@ -1812,7 +1865,8 @@ export function searchThreadMessages(
   const firstCandidate = candidateHeaders[0]
   if (
     firstCandidate &&
-    firstCandidate.estimatedBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
+    firstCandidate.estimatedBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET &&
+    firstCandidate.contentEstimatedBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
   ) {
     // A single legal structured message can be larger than the per-call budget. Parsing it would
     // put an unbounded synchronous burst on Electron's main thread. Skip this row transparently
@@ -1832,15 +1886,20 @@ export function searchThreadMessages(
   let selectedCandidateBytes = 0
   for (const candidate of candidateHeaders) {
     if (selectedCandidates.length >= THREAD_MESSAGE_SEARCH_SCAN_LIMIT) break
+    const searchableCandidateBytes =
+      candidate.estimatedBytes <= THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
+        ? candidate.estimatedBytes
+        : candidate.contentEstimatedBytes
+    if (searchableCandidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
     if (
       selectedCandidates.length > 0 &&
-      selectedCandidateBytes + candidate.estimatedBytes >
+      selectedCandidateBytes + searchableCandidateBytes >
         THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET
     ) {
       break
     }
     selectedCandidates.push(candidate)
-    selectedCandidateBytes += candidate.estimatedBytes
+    selectedCandidateBytes += searchableCandidateBytes
   }
   if (selectedCandidates.length === 0) {
     return {
@@ -1861,14 +1920,36 @@ export function searchThreadMessages(
        m.role,
        m.created_at,
        m.content_json,
-       m.tool_calls_json
+       CASE
+         WHEN 1024
+           + length(CAST(m.content_json AS BLOB))
+           + length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB))
+           + COALESCE(fragments.total_chars * 4, 0) <= ?
+         THEN m.tool_calls_json
+         ELSE NULL
+       END AS tool_calls_json,
+       CASE
+         WHEN m.tool_calls_json IS NOT NULL AND 1024
+           + length(CAST(m.content_json AS BLOB))
+           + length(CAST(m.tool_calls_json AS BLOB))
+           + COALESCE(fragments.total_chars * 4, 0) > ?
+         THEN 1
+         ELSE 0
+       END AS tool_calls_truncated
      FROM thread_messages AS m
+     LEFT JOIN thread_message_fragment_states AS fragments
+       ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
      WHERE m.thread_id = ?
        ${cursorPredicate}
      ORDER BY m.ordinal DESC, m.message_id DESC
      LIMIT ?`
   )
-  candidateRowsStatement.bind([...cursorBindings, selectedCandidates.length])
+  candidateRowsStatement.bind([
+    THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET,
+    THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET,
+    ...cursorBindings,
+    selectedCandidates.length
+  ])
   const candidates: ThreadMessageSearchCandidate[] = []
   try {
     while (candidateRowsStatement.step()) {
@@ -1879,6 +1960,7 @@ export function searchThreadMessages(
         created_at?: unknown
         content_json?: unknown
         tool_calls_json?: unknown
+        tool_calls_truncated?: unknown
       }
       if (
         typeof row.message_id !== "string" ||
@@ -1893,7 +1975,8 @@ export function searchThreadMessages(
         role: row.role,
         createdAt: Number(row.created_at) || 0,
         contentJson: row.content_json,
-        toolCallsJson: typeof row.tool_calls_json === "string" ? row.tool_calls_json : null
+        toolCallsJson: typeof row.tool_calls_json === "string" ? row.tool_calls_json : null,
+        toolCallsTruncated: Number(row.tool_calls_truncated) === 1
       })
     }
   } finally {
@@ -1922,6 +2005,8 @@ export function searchThreadMessages(
         1024 +
         Buffer.byteLength(candidate.contentJson, "utf8") +
         Buffer.byteLength(candidate.toolCallsJson ?? "", "utf8")
+      if (candidate.toolCallsTruncated) truncatedRows = true
+
       if (baseBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
         truncatedRows = true
         advancedCandidateCount = header.index + 1
@@ -1929,15 +2014,27 @@ export function searchThreadMessages(
         continue
       }
 
+      const parsedContent = parseThreadMessageSearchJson(candidate.contentJson)
+      if (candidate.role === "tool") {
+        // Completed tool details are folded and have no independent message row in the DOM.
+        advancedCandidateCount = header.index + 1
+        lastAdvancedCandidate = header.candidate
+        continue
+      }
+
       const fragments: string[] = []
       let candidateBytes = baseBytes
-      fragmentStatement.bind([normalizedThreadId, candidate.messageId])
-      while (fragmentStatement.step()) {
-        const row = fragmentStatement.getAsObject() as { content_text?: unknown }
-        if (typeof row.content_text !== "string") continue
-        candidateBytes += Buffer.byteLength(row.content_text, "utf8")
-        if (candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
-        fragments.push(row.content_text)
+      // Hydration appends fragments only to string content. Rebuild that same bounded value before
+      // applying display filters so a split attachment/internal marker cannot leak into search.
+      if (parsedContent.valid && typeof parsedContent.value === "string") {
+        fragmentStatement.bind([normalizedThreadId, candidate.messageId])
+        while (fragmentStatement.step()) {
+          const row = fragmentStatement.getAsObject() as { content_text?: unknown }
+          if (typeof row.content_text !== "string") continue
+          candidateBytes += Buffer.byteLength(row.content_text, "utf8")
+          if (candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
+          fragments.push(row.content_text)
+        }
       }
 
       if (candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) {
@@ -1946,33 +2043,59 @@ export function searchThreadMessages(
         lastAdvancedCandidate = header.candidate
         continue
       }
+
+      const storedContent = parsedContent.valid ? normalizeMessageContent(parsedContent.value) : ""
+      const appendedContent =
+        typeof storedContent === "string" && fragments.length > 0
+          ? `${storedContent}${fragments.join("")}`
+          : storedContent
+      const hydratedContent =
+        fragments.length > 0 ? normalizeMessageContent(appendedContent) : storedContent
+      if (parsedContent.valid && !isVisibleTranscriptMessage(candidate.role, hydratedContent)) {
+        // Search and targeted hydration must use the same transcript visibility boundary.
+        // Otherwise an internal goal/workflow row can be returned as a match and then be
+        // discarded by the renderer, leaving the viewport on an unrelated message.
+        advancedCandidateCount = header.index + 1
+        lastAdvancedCandidate = header.candidate
+        continue
+      }
+
+      const toolCalls = parseToolCalls(candidate.toolCallsJson)
+      const displayCandidateContent =
+        candidate.role === "user" && typeof hydratedContent === "string"
+          ? cleanUserAttachmentContentForDisplay(hydratedContent)
+          : hydratedContent
+      const coordinatorProjection = projectCoordinatorTranscriptNoise(
+        candidate.role,
+        displayCandidateContent,
+        toolCalls
+      )
+      if (coordinatorProjection.hidden) {
+        advancedCandidateCount = header.index + 1
+        lastAdvancedCandidate = header.candidate
+        continue
+      }
+
       if (inspectedBytes + candidateBytes > THREAD_MESSAGE_SEARCH_SCAN_BYTE_BUDGET) break
       inspectedBytes += candidateBytes
 
+      const visibleProjection = projectVisibleChatSearchContentWithMetadata(
+          candidate.role,
+          coordinatorProjection.contentChanged
+            ? coordinatorProjection.contentText
+            : displayCandidateContent
+        )
+      if (visibleProjection.truncated) truncatedRows = true
       const documentText = buildThreadMessageSearchDocument(
-        candidate.contentJson,
-        candidate.toolCallsJson
+        visibleProjection.text,
+        coordinatorProjection.visibleToolCalls
       )
       const documentMatch = inspectThreadMessageSearchText(documentText, query)
-      let occurrenceCount = documentMatch.occurrenceCount
-      let preview =
+      const occurrenceCount = documentMatch.occurrenceCount
+      const preview =
         documentMatch.matchPosition >= 0
           ? threadMessageSearchPreview(documentText, documentMatch.matchPosition)
           : ""
-      let previousText = documentText
-      for (const fragment of fragments) {
-        const boundary =
-          query.length > 1
-            ? previousText.slice(Math.max(0, previousText.length - query.length + 1))
-            : ""
-        const fragmentWindow = `${boundary}${fragment}`
-        const fragmentMatch = inspectThreadMessageSearchText(fragmentWindow, query)
-        occurrenceCount += fragmentMatch.occurrenceCount
-        if (!preview && fragmentMatch.matchPosition >= 0) {
-          preview = threadMessageSearchPreview(fragmentWindow, fragmentMatch.matchPosition)
-        }
-        previousText = fragment
-      }
 
       advancedCandidateCount = header.index + 1
       lastAdvancedCandidate = header.candidate

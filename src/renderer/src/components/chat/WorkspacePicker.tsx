@@ -18,7 +18,13 @@ import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
-import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
+import {
+  loadWorkspaceFilesDeduped,
+  hydrateInitialWorkspaceFiles,
+  markWorkspaceFilesStale,
+  normalizeWorkspaceFileKey,
+  readWorkspacePathWithFallback
+} from "@/lib/workspace-file-load"
 import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 
 interface WorkspacePickerProps {
@@ -118,6 +124,15 @@ function WorkspacePickerImpl({
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const worktreeCreateInFlightRef = useRef(false)
+  const workspacePathRef = useRef(workspacePath)
+  const setWorkspaceFilesRef = useRef(setWorkspaceFiles)
+  const workspaceHydrationEpochRef = useRef(0)
+  workspacePathRef.current = workspacePath
+  setWorkspaceFilesRef.current = setWorkspaceFiles
+  const workspaceHydrationKey = workspacePath
+    ? normalizeWorkspaceFileKey(workspacePath)
+    : ""
+  const workspaceHydrationReady = Boolean(setWorkspaceFiles)
 
   // Git detection state
   const [isGit, setIsGit] = useState(false)
@@ -169,7 +184,52 @@ function WorkspacePickerImpl({
   }
 
   useEffect(() => {
+    const requestedWorkspacePath = workspacePathRef.current
+    const setCurrentWorkspaceFiles = setWorkspaceFilesRef.current
+    if (!requestedWorkspacePath || !setCurrentWorkspaceFiles || !workspaceHydrationKey) return
+
+    const hydrationEpoch = workspaceHydrationEpochRef.current + 1
+    workspaceHydrationEpochRef.current = hydrationEpoch
+    const scanController = new AbortController()
+
+    // ThreadState can still be empty on the first render while its persisted
+    // metadata is loading. Key this effect by the normalized path so the later
+    // null -> path transition starts exactly one hydration without subscribing
+    // to the large workspaceFiles array or restarting on file-state updates.
+    void hydrateInitialWorkspaceFiles(threadId, requestedWorkspacePath, {
+      signal: scanController.signal,
+      isCurrentWorkspace: () =>
+        workspaceHydrationEpochRef.current === hydrationEpoch &&
+        normalizeWorkspaceFileKey(workspacePathRef.current ?? "") === workspaceHydrationKey,
+      setWorkspaceFiles: setCurrentWorkspaceFiles
+    }).catch((error) => {
+      if (
+        workspaceHydrationEpochRef.current === hydrationEpoch &&
+        (!(error instanceof Error) || error.name !== "AbortError")
+      ) {
+        console.error("[WorkspacePicker] Failed to load workspace files:", error)
+      }
+    })
+
+    return () => {
+      if (workspaceHydrationEpochRef.current === hydrationEpoch) {
+        workspaceHydrationEpochRef.current += 1
+      }
+      scanController.abort()
+    }
+  }, [threadId, workspaceHydrationKey, workspaceHydrationReady])
+
+  useEffect(() => {
     let cancelled = false
+    const scanController = new AbortController()
+    const requestedWorkspacePath = workspacePathRef.current
+
+    const readWorkspacePath = (): Promise<string | null> =>
+      readWorkspacePathWithFallback({
+        read: () => window.api.workspace.get(threadId),
+        getFallback: () => workspacePathRef.current ?? requestedWorkspacePath,
+        signal: scanController.signal
+      })
 
     async function loadWorkspace(): Promise<void> {
       if (!threadId) return
@@ -186,12 +246,27 @@ function WorkspacePickerImpl({
       setWorktreeError(null)
       setWorktreeList([])
 
-      const p = await window.api.workspace.get(threadId)
+      const loadedPath = await readWorkspacePath()
       if (cancelled) return
-      setWorkspacePath?.(p)
+      const workspaceChangedWhileReading =
+        normalizeWorkspaceFileKey(workspacePathRef.current ?? "") !==
+        normalizeWorkspaceFileKey(requestedWorkspacePath ?? "")
+      // Folder/worktree selection can finish while the initial metadata read is in flight.
+      // Never let that older response replace the newer choice; hydrate the current path instead.
+      const p = workspaceChangedWhileReading ? workspacePathRef.current : loadedPath
+      if (!workspaceChangedWhileReading) {
+        workspacePathRef.current = p
+        setWorkspacePath?.(p)
+      }
       if (p) {
         const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false, threadId })
-        if (cancelled) return
+        if (
+          cancelled ||
+          normalizeWorkspaceFileKey(workspacePathRef.current ?? "") !==
+            normalizeWorkspaceFileKey(p)
+        ) {
+          return
+        }
         setIsGit(gitInfo.isGit)
         setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
         setIsWorktreePath(gitInfo.isWorktreePath)
@@ -213,12 +288,13 @@ function WorkspacePickerImpl({
       }
     }
     void loadWorkspace().catch((error) => {
-      if (cancelled || (error instanceof DOMException && error.name === "AbortError")) return
+      if (cancelled || (error instanceof Error && error.name === "AbortError")) return
       console.error("[WorkspacePicker] Failed to load workspace:", error)
     })
 
     return () => {
       cancelled = true
+      scanController.abort()
       void window.api.workspace.cancelGitPanelReads("workspace-probe").catch(() => undefined)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -241,7 +317,10 @@ function WorkspacePickerImpl({
     if (!setWorkspacePath || !setWorkspaceFiles) return
     const selection = await selectWorkspaceFolder(
       threadId,
-      setWorkspacePath,
+      (path) => {
+        workspacePathRef.current = path
+        setWorkspacePath(path)
+      },
       setWorkspaceFiles,
       setLoading,
       setOpen
@@ -286,6 +365,7 @@ function WorkspacePickerImpl({
         return
       }
       setWorkspacePath?.(result.path)
+      workspacePathRef.current = result.path
       setIsWorktree(true)
       setWorktreeBranch(result.branch)
       setWorktreeBaseBranch(result.baseBranch ?? null)

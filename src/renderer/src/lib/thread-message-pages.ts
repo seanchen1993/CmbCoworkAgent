@@ -11,8 +11,13 @@ export interface ThreadMessageForwardPageCursor {
   anchorMessageId: string
 }
 
+export interface ThreadMessageTargetPageCursor {
+  targetMessageId: string
+}
+
 export type ThreadMessagePageReloadCursor =
   | ThreadMessagePageCursor
+  | ThreadMessageTargetPageCursor
   | ThreadMessageForwardPageCursor
 
 export interface ThreadMessageWindowGap {
@@ -21,6 +26,7 @@ export interface ThreadMessageWindowGap {
   evictedMessageCount: number
   reloadBeforeOrdinal: number | null
   reloadBeforeMessageId: string | null
+  reloadExactMessageId: string | null
   reloadAnchorMessageId: string | null
   reloadTargetMessageId: string | null
 }
@@ -174,12 +180,17 @@ export function attachThreadMessageGapReload(
     reloadCursor && "anchorMessageId" in reloadCursor
       ? reloadCursor.anchorMessageId
       : null
+  const exactTarget =
+    reloadCursor && "targetMessageId" in reloadCursor
+      ? reloadCursor.targetMessageId
+      : null
   const backwardCursor =
     reloadCursor && "beforeOrdinal" in reloadCursor ? reloadCursor : null
   return {
     ...gap,
     reloadBeforeOrdinal: backwardCursor?.beforeOrdinal ?? null,
     reloadBeforeMessageId: backwardCursor?.beforeMessageId ?? null,
+    reloadExactMessageId: exactTarget,
     reloadAnchorMessageId: forwardAnchor,
     // A null cursor on a known latest-page descriptor means "reload the latest page", not
     // "unavailable". `reloadTargetMessageId` is therefore the availability discriminator.
@@ -331,6 +342,7 @@ export function prependBoundedThreadMessagePage(
           : merged.length - messages.length),
       reloadBeforeOrdinal: null,
       reloadBeforeMessageId: null,
+      reloadExactMessageId: null,
       reloadAnchorMessageId: null,
       reloadTargetMessageId: null
     }
@@ -378,6 +390,7 @@ export function advanceThreadMessageWindowAcrossGap(
             ),
             reloadBeforeOrdinal: null,
             reloadBeforeMessageId: null,
+            reloadExactMessageId: null,
             reloadAnchorMessageId: null,
             reloadTargetMessageId: null
           }
@@ -434,6 +447,7 @@ export function createTargetedThreadMessageWindow(
             evictedMessageCount: Math.max(1, existing.length - retainedTail.length),
             reloadBeforeOrdinal: null,
             reloadBeforeMessageId: null,
+            reloadExactMessageId: null,
             reloadAnchorMessageId: null,
             reloadTargetMessageId: null
           }

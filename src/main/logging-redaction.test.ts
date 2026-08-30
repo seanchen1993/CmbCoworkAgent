@@ -14,6 +14,36 @@ afterEach(() => {
 })
 
 describe("logging redaction integration", () => {
+  it("keeps undefined console arguments from crashing the caller", async () => {
+    const root = mkdtempSync(join(tmpdir(), "logging-undefined-"))
+    tempRoots.push(root)
+    const logsDir = join(root, "logs")
+    const hooksDir = join(root, "hooks", "log")
+    const mainLog = join(logsDir, "main.log")
+    const rendererLog = join(logsDir, "renderer.log")
+    mkdirSync(logsDir, { recursive: true })
+    mkdirSync(hooksDir, { recursive: true })
+
+    vi.doMock("electron", () => ({ app: { isPackaged: false } }))
+    vi.doMock("./storage", () => ({
+      getLogsDir: () => logsDir,
+      getMainLogPath: () => mainLog,
+      getRendererLogPath: () => rendererLog,
+      resolveHookLogDir: () => hooksDir
+    }))
+
+    const { flushLogs, writeMainLog } = await import("./logging")
+
+    expect(() =>
+      writeMainLog("INFO", ["[Runtime] Agent created with skills parameter:", undefined])
+    ).not.toThrow()
+    await flushLogs()
+
+    expect(readFileSync(mainLog, "utf8")).toContain(
+      "[Runtime] Agent created with skills parameter: undefined"
+    )
+  })
+
   it("migrates historical logs and redacts new main and renderer writes", async () => {
     const root = mkdtempSync(join(tmpdir(), "logging-redaction-"))
     tempRoots.push(root)

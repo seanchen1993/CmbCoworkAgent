@@ -241,6 +241,13 @@ export interface ThreadMessagesPageOptions {
   beforeOrdinal?: number
   beforeMessageId?: string
   /**
+   * Read a backward window that is guaranteed to contain this exact durable
+   * message. This is mutually exclusive with every other page cursor and is
+   * used for virtualized search reveals where repeated ordinals make a guessed
+   * 500-row page unsafe.
+   */
+  targetMessageId?: string
+  /**
    * Read forward from this exact durable message (inclusive). This is mutually
    * exclusive with the backward compound cursor and is used to close a released
    * renderer window without guessing ordinals.

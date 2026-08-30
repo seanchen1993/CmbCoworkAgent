@@ -4,6 +4,7 @@
  */
 import type { FileAttachment, FileInfo } from "@/types"
 import type { WorkspaceFilePreviewReadResult } from "../../../../shared/workspace-file-preview"
+import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
   isSupportedWorkspaceMentionFilePath,
   extractAtFileMentions,
@@ -25,6 +26,8 @@ const MENTION_MAX_PREVIEW_PAGES = 64
 // 方便在“显式添加的 @文件”和“用户直接输入的 @路径”之间统一去重。
 export type MentionedWorkspaceFile = AtFileSuggestion & {
   absolutePath: string
+  /** Normalized identity of the workspace that produced this chip. */
+  workspaceKey: string
   contentChars?: number
 }
 
@@ -76,8 +79,40 @@ export function toMentionedWorkspaceFile(
 ): MentionedWorkspaceFile {
   return {
     ...file,
-    absolutePath: resolveWorkspaceMentionAbsolutePath(workspacePath, file.workspaceFilePath)
+    absolutePath: resolveWorkspaceMentionAbsolutePath(workspacePath, file.workspaceFilePath),
+    workspaceKey: normalizeWorkspacePathKey(workspacePath)
   }
+}
+
+/**
+ * A selected @file chip is meaningful only inside the workspace that produced it.
+ * Check both the bound workspace identity and the derived absolute path so stale
+ * state can never read a same-named relative file from a different workspace and
+ * then label that content with the old absolute path.
+ */
+export function isMentionedWorkspaceFileForWorkspace(
+  file: MentionedWorkspaceFile,
+  workspacePath: string | null | undefined
+): boolean {
+  if (!workspacePath) return false
+  const workspaceKey = normalizeWorkspacePathKey(workspacePath)
+  if (!workspaceKey || file.workspaceKey !== workspaceKey) return false
+  const expectedAbsolutePath = resolveWorkspaceMentionAbsolutePath(
+    workspacePath,
+    file.workspaceFilePath
+  )
+  return (
+    normalizeWorkspacePathKey(file.absolutePath) ===
+    normalizeWorkspacePathKey(expectedAbsolutePath)
+  )
+}
+
+export function retainMentionedWorkspaceFilesForWorkspace(
+  files: readonly MentionedWorkspaceFile[],
+  workspacePath: string | null | undefined
+): MentionedWorkspaceFile[] {
+  if (!workspacePath) return []
+  return files.filter((file) => isMentionedWorkspaceFileForWorkspace(file, workspacePath))
 }
 
 // 选择 @文件时的校验也统一放到这里：
@@ -261,6 +296,10 @@ export async function resolveAtFileAttachments(
 
     // 先纳入输入框里已经通过 popover 选中过的 @文件，保证它们优先参与去重和带入。
     for (const mentionFile of mentionedFiles) {
+      if (!isMentionedWorkspaceFileForWorkspace(mentionFile, workspacePath)) {
+        warningMessage = "@文件所属工作区已变更，旧工作区引用未被发送。"
+        continue
+      }
       addMentionCandidate(mentionFile)
     }
 
@@ -279,16 +318,18 @@ export async function resolveAtFileAttachments(
         if (!isSupportedWorkspaceMentionFilePath(workspaceFile.path)) continue
 
         addMentionCandidate(
-          {
-            id: workspaceFile.path,
-            displayPath: normalizeAtFileMentionPath(workspaceFile.path),
-            workspaceFilePath: workspaceFile.path.startsWith("/")
-              ? workspaceFile.path
-              : `/${normalizeAtFileMentionPath(workspaceFile.path)}`,
-            filename: workspaceFile.path.split("/").pop() || workspaceFile.path,
-            size: workspaceFile.size,
-            absolutePath: resolveWorkspaceMentionAbsolutePath(workspacePath, workspaceFile.path)
-          },
+          toMentionedWorkspaceFile(
+            {
+              id: workspaceFile.path,
+              displayPath: normalizeAtFileMentionPath(workspaceFile.path),
+              workspaceFilePath: workspaceFile.path.startsWith("/")
+                ? workspaceFile.path
+                : `/${normalizeAtFileMentionPath(workspaceFile.path)}`,
+              filename: workspaceFile.path.split("/").pop() || workspaceFile.path,
+              size: workspaceFile.size
+            },
+            workspacePath
+          ),
           normalizedMention
         )
       }

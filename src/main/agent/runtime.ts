@@ -4642,6 +4642,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
+    // Foreground turns on the same thread can overlap briefly during bounded
+    // replacement. Keep background-task ownership logical, but scope ACL
+    // ownership to the physical run so predecessor cleanup cannot revoke a
+    // successor's ref-counted grant.
+    aclOwnerId: options.currentRunMessageQueueOwnerToken ?? threadId,
     largeToolResultsDir,
     workflowScriptsDir,
     internalArtifactRoots: [conversationHistoryPathPrefix, largeToolResultsDir],

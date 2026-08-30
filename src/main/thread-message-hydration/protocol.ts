@@ -18,6 +18,7 @@ export interface ThreadMessageHydrationReadRequest {
     ThreadMessagesPageOptions,
     | "beforeOrdinal"
     | "beforeMessageId"
+    | "targetMessageId"
     | "anchorMessageId"
     | "limit"
     | "byteBudget"

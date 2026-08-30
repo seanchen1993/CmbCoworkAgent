@@ -60,15 +60,16 @@ import { getFileType } from "@/lib/file-types"
 import { getToolLabel } from "@/lib/tool-labels"
 import {
   hasLoadedWorkspaceFiles,
-  cancelWorkspaceFileContinuation,
   continueWorkspaceFilesDeduped,
   getWorkspaceFilePathRevision,
   loadWorkspaceFilesDeduped,
   markWorkspaceFilesStale,
   normalizeWorkspaceFileKey,
+  readWorkspacePathWithFallback,
   subscribeWorkspaceFilePathChanges,
   subscribeWorkspaceFileResults
 } from "@/lib/workspace-file-load"
+import { WorkspaceFileRequestFence } from "@/lib/workspace-file-request-fence"
 import {
   buildWorkspaceFileTreeProjection,
   getWorkspaceFileTreeProjection,
@@ -2439,28 +2440,44 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
   } | null>(null)
   const [continuationLoading, setContinuationLoading] = useState(false)
   const continuationControllerRef = useRef<AbortController | null>(null)
+  const requestFenceRef = useRef(new WorkspaceFileRequestFence())
+  const workspaceKey = workspacePath ? normalizeWorkspaceFileKey(workspacePath) : ""
+  requestFenceRef.current.observe(threadId, workspacePath)
   const scanProgress = scanState?.threadId === threadId ? scanState.count : null
 
   // Load workspace path and files for current thread
   useEffect(() => {
     let cancelled = false
-    let resolvedWorkspacePath: string | null = null
     const scanController = new AbortController()
+    const requestToken = requestFenceRef.current.begin(threadId, workspacePath)
+    const isCurrentRequest = (): boolean =>
+      !cancelled && requestFenceRef.current.isCurrent(requestToken)
 
     async function loadWorkspace(): Promise<void> {
       if (threadId && setWorkspacePath && setWorkspaceFiles) {
-        const path = await window.api.workspace.get(threadId)
-        if (cancelled) return
-        resolvedWorkspacePath = path
-        setWorkspacePath(path)
+        const path =
+          workspacePath ??
+          (await readWorkspacePathWithFallback({
+            read: () => window.api.workspace.get(threadId),
+            getFallback: () => workspacePath,
+            signal: scanController.signal
+          }))
+        if (!isCurrentRequest()) return
 
         if (!path) return
+        if (!workspacePath) {
+          // Publishing the resolved path changes the normalized request key.
+          // Let the next keyed effect own the scan instead of continuing under
+          // the pathless epoch and racing a later workspace selection.
+          setWorkspacePath(path)
+          return
+        }
 
         if (hasLoadedWorkspaceFiles(threadId, path)) {
           // A cached tree may have missed changes while its watcher was evicted.
           // Re-arm the watcher and refresh once only when it had to be recreated.
           const watcherResult = await window.api.workspace.ensureWatching(threadId)
-          if (cancelled) return
+          if (!isCurrentRequest()) return
           if (watcherResult.success && watcherResult.restarted) {
             markWorkspaceFilesStale(threadId, path)
           }
@@ -2473,17 +2490,17 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
         const result = await loadWorkspaceFilesDeduped(threadId, path, {
           signal: scanController.signal,
           onProgress: (loadedCount) => {
-            if (!cancelled) setScanState({ threadId, count: loadedCount })
+            if (isCurrentRequest()) setScanState({ threadId, count: loadedCount })
           }
         })
-        if (cancelled) return
+        if (!isCurrentRequest()) return
         // Guard against writing a stale scan (workspace switched mid-load):
         // only accept results that match the path we resolved.
         if (
           result.success &&
           result.files &&
           result.workspacePath &&
-          normalizeWorkspaceFileKey(result.workspacePath) === normalizeWorkspaceFileKey(path)
+          normalizeWorkspaceFileKey(result.workspacePath) === requestToken.workspaceKey
         ) {
           setWorkspaceFiles(result.files)
           setLoadBoundary({
@@ -2497,26 +2514,25 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
       }
     }
     void loadWorkspace().catch((error) => {
-      if (!cancelled && (!(error instanceof Error) || error.name !== "AbortError")) {
+      if (isCurrentRequest() && (!(error instanceof Error) || error.name !== "AbortError")) {
         console.error("[FilesContent] Failed to load workspace files:", error)
       }
-      if (!cancelled) setScanState(null)
+      if (isCurrentRequest()) setScanState(null)
     })
 
     return () => {
       cancelled = true
+      requestFenceRef.current.invalidate(requestToken)
       scanController.abort()
       continuationControllerRef.current?.abort()
       continuationControllerRef.current = null
-      if (threadId && resolvedWorkspacePath) {
-        cancelWorkspaceFileContinuation(threadId, resolvedWorkspacePath)
-      }
+      setContinuationLoading(false)
+      setScanState(null)
     }
-    // The effect intentionally initializes once per thread. Successful scan
-    // state is tracked by threadId + workspacePath instead of array length, so
-    // an empty workspace is still considered loaded.
+    // The normalized workspace key is part of the lifecycle: switching A -> B
+    // within one thread invalidates every late A read/scan/continuation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId])
+  }, [threadId, workspaceKey])
 
   useEffect(() => {
     if (!threadId || !workspacePath) return
@@ -2541,16 +2557,28 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
   const handleContinueWorkspace = useCallback(async (): Promise<void> => {
     if (!threadId || !workspacePath || !setWorkspaceFiles || continuationLoading) return
     const controller = new AbortController()
+    const requestToken = requestFenceRef.current.begin(threadId, workspacePath)
     continuationControllerRef.current?.abort()
     continuationControllerRef.current = controller
     setContinuationLoading(true)
     setScanState({ threadId, count: workspaceFiles.length })
     try {
       const result = await continueWorkspaceFilesDeduped(threadId, workspacePath, {
-        signal: controller.signal,
-        onProgress: (count) => setScanState({ threadId, count })
+        onProgress: (count) => {
+          if (
+            !controller.signal.aborted &&
+            requestFenceRef.current.isCurrent(requestToken)
+          ) {
+            setScanState({ threadId, count })
+          }
+        }
       })
-      if (controller.signal.aborted) return
+      if (
+        controller.signal.aborted ||
+        !requestFenceRef.current.isCurrent(requestToken)
+      ) {
+        return
+      }
       if (result.success) {
         setWorkspaceFiles(result.files)
         setLoadBoundary({
@@ -2566,6 +2594,7 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
       }
     } finally {
       if (continuationControllerRef.current === controller) {
+        requestFenceRef.current.invalidate(requestToken)
         continuationControllerRef.current = null
         setContinuationLoading(false)
         setScanState(null)

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { ChatSearchMatch } from "@/lib/chat-search-matches"
 import {
@@ -7,7 +8,9 @@ import {
   collectNeedleOffsets,
   createLeadingTrailingThrottle,
   formatChatSearchStatus,
+  isSearchableChatTextNode,
   mergeChatSearchResults,
+  prepareUserContentForSearchHighlight,
   scanDurableChatSearch,
   type DurableChatSearchMatch,
   type DurableChatSearchPage
@@ -112,7 +115,10 @@ describe("durable chat search scanning", () => {
       query: "needle",
       search,
       maxOccurrences: 3,
-      shouldExcludeMessageId: (messageId) => messageId === "already-loaded",
+      getLocalCoverage: (messageId) => ({
+        occurrenceCount: messageId === "already-loaded" ? 500 : 0,
+        authoritative: messageId === "already-loaded"
+      }),
       yieldControl,
       onProgress: progress
     })
@@ -207,6 +213,116 @@ describe("durable chat search scanning", () => {
 })
 
 describe("bounded renderer search results", () => {
+  it("collects only indexed body and folded-tool text regions", () => {
+    const bodyArea = { kind: "body" }
+    const toolArea = { kind: "tool" }
+    const row = {
+      contains: (area: unknown) => area === bodyArea || area === toolArea
+    } as unknown as HTMLElement
+    const node = (area: unknown): Node =>
+      ({
+        nodeValue: "needle",
+        parentElement: {
+          tagName: "SPAN",
+          closest: () => area
+        }
+      }) as unknown as Node
+
+    expect(isSearchableChatTextNode(node(null), row)).toBe(false) // CMBDevClaw heading
+    expect(isSearchableChatTextNode(node(null), row)).toBe(false) // reasoning button
+    expect(isSearchableChatTextNode(node(bodyArea), row)).toBe(true)
+    expect(isSearchableChatTextNode(node(toolArea), row)).toBe(true)
+    expect(isSearchableChatTextNode(node(null), row)).toBe(false) // expanded raw details
+    expect(isSearchableChatTextNode(node(null), row)).toBe(false) // tool status
+  })
+
+  it("does not restore a durable false hit for an authoritative loaded zero-match row", async () => {
+    const result = await scanDurableChatSearch({
+      query: "secret",
+      search: async () => ({
+        matches: [durableMatch("loaded-reasoning", 10, 1)],
+        beforeOrdinal: null,
+        beforeMessageId: null,
+        hasMore: false
+      }),
+      getLocalCoverage: () => ({ occurrenceCount: 0, authoritative: true })
+    })
+    expect(result.matches).toEqual([])
+  })
+
+  it("excludes user chips while keeping user body and system notice text searchable", () => {
+    const userBodyArea = { kind: "user-body" }
+    const systemNoticeArea = { kind: "system-notice" }
+    const row = {
+      contains: (area: unknown) => area === userBodyArea || area === systemNoticeArea
+    } as unknown as HTMLElement
+    const node = (area: unknown): Node =>
+      ({
+        nodeValue: "same-name",
+        parentElement: { tagName: "SPAN", closest: () => area }
+      }) as unknown as Node
+
+    expect(isSearchableChatTextNode(node(null), row)).toBe(false) // Skill/browser chip
+    expect(isSearchableChatTextNode(node(userBodyArea), row)).toBe(true)
+    expect(isSearchableChatTextNode(node(systemNoticeArea), row)).toBe(true)
+  })
+
+  it("ignores Markdown controls without exposing them as searchable ranges", () => {
+    const bodyArea = { kind: "markdown" }
+    const ignoredArea = { kind: "copy-button" }
+    const searchableRow = {
+      contains: (area: unknown) => area === bodyArea || area === ignoredArea
+    } as unknown as HTMLElement
+    const ignoredNode = {
+      parentElement: {
+        tagName: "SPAN",
+        closest: (selector: string) =>
+          selector === "[data-chat-search-text]" ? bodyArea : ignoredArea
+      }
+    } as unknown as Node
+    expect(isSearchableChatTextNode(ignoredNode, searchableRow)).toBe(false)
+  })
+
+  it("expands a clipped user body before collecting highlight ranges", () => {
+    const click = vi.fn()
+    const content = {
+      dataset: { chatSearchUserContentCollapseThreshold: "260" },
+      scrollHeight: 700
+    }
+    const collapsedButton = {
+      getAttribute: () => "false",
+      click
+    }
+    const row = {
+      querySelector: (selector: string) =>
+        selector.includes("collapse-threshold") ? content : collapsedButton
+    } as unknown as HTMLElement
+
+    expect(prepareUserContentForSearchHighlight(row)).toBe(true)
+    expect(click).toHaveBeenCalledOnce()
+
+    const measuringRow = {
+      querySelector: (selector: string) =>
+        selector.includes("collapse-threshold") ? content : null
+    } as unknown as HTMLElement
+    expect(prepareUserContentForSearchHighlight(measuringRow)).toBe(true)
+
+    const expandedRow = {
+      querySelector: (selector: string) =>
+        selector.includes("collapse-threshold")
+          ? content
+          : { getAttribute: () => "true", click }
+    } as unknown as HTMLElement
+    expect(prepareUserContentForSearchHighlight(expandedRow)).toBe(false)
+  })
+
+  it("does not render a duplicate durable-history preview row below the search controls", () => {
+    const source = readFileSync(new URL("./ChatSearchOverlay.tsx", import.meta.url), "utf8")
+
+    expect(source).not.toContain("data-chat-search-durable-preview")
+    expect(source).not.toContain("历史消息：")
+  })
+
   it("preserves local/live matches, de-duplicates durable message ids, and caps expansion", () => {
     const localMatches: ChatSearchMatch[] = [
       { messageId: "loaded", occurrenceIndex: 0, sortIndex: 10 },
@@ -229,6 +345,15 @@ describe("bounded renderer search results", () => {
       "dynamic"
     ])
     expect(merged.matches.filter((match) => match.messageId === "loaded")).toHaveLength(1)
+  })
+
+  it("retains durable occurrences beyond a truncated local document", () => {
+    const merged = mergeChatSearchResults(
+      [{ messageId: "large", occurrenceIndex: 0, sortIndex: 10 }],
+      [{ ...durableMatch("large", 10, 1), occurrenceOffset: 1 }],
+      10
+    )
+    expect(merged.matches.map((match) => match.occurrenceIndex)).toEqual([0, 1])
   })
 
   it("caps CSS match offsets and durable preview allocation", () => {

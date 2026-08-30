@@ -58,12 +58,15 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
 const physicalStreamRunSetup = read("src/main/agent/physical-stream-run-setup.ts")
+const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
+const localSandbox = read("src/main/agent/local-sandbox.ts")
 const agentIpc = read("src/main/ipc/agent.ts")
 const streamTranscriptFlush = read("src/main/ipc/stream-transcript-flush.ts")
 const threadsIpc = read("src/main/ipc/threads.ts")
 const preload = read("src/preload/index.ts")
 const threadContext = read("src/renderer/src/lib/thread-context.tsx")
 const chat = read("src/renderer/src/components/chat/ChatContainer.tsx")
+const submitInFlightLock = read("src/renderer/src/lib/submit-in-flight-lock.ts")
 const electronTransport = read("src/renderer/src/lib/electron-transport.ts")
 const store = read("src/renderer/src/lib/store.ts")
 const queuedMessageContent = read("src/renderer/src/lib/queued-message-content.ts")
@@ -233,8 +236,8 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
   assertOccurrences(
     agentIpc,
     "invalidateCurrentRunMessagePreparer(threadId",
-    9,
-    "replacement, setup release, terminal cleanup, and thread deletion invalidate steer preparation"
+    7,
+    "replacement, setup release, shared terminal cleanup, and thread deletion invalidate steer preparation"
   )
   assertIncludes(
     agentIpc,
@@ -296,8 +299,8 @@ function testClearOnEveryRunExit(): void {
   assertOccurrences(
     agentIpc,
     "clearCurrentRunMessageQueue(threadId, runToken)",
-    4,
-    "terminal and abandoned-setup cleanup only clear the queue token they own"
+    2,
+    "shared terminal and abandoned-setup cleanup only clear the queue token they own"
   )
   const replacementStart = agentIpc.indexOf("const replacement = await withThreadRunMutationLock")
   assert(replacementStart >= 0, "new invoke replacement block exists")
@@ -449,21 +452,37 @@ function testClearOnEveryRunExit(): void {
       `${continuationMarker} does not discard same-turn handoffs`
     )
   }
-  // Finally cleanup remains guarded so an old run cannot wipe a new run's queue.
-  assertMatches(
-    agentIpc,
-    /revokeGrantedAclsForRun\(threadId\)[\s\S]{0,500}clearCurrentRunMessageQueue\(threadId, runToken\)/,
-    "token-scoped clear sits under the same !replacedByNewRun guard as the ACL revoke"
+  // Shared finalizer cleanup remains guarded so an old run cannot wipe a new run's queue.
+  const settlementHelperStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  assert(settlementHelperStart >= 0, "shared physical settlement helper exists")
+  const settlementHelperBody = agentIpc.slice(settlementHelperStart, settlementHelperStart + 9000)
+  assertIncludes(
+    settlementHelperBody,
+    "const terminalRunOwnsSharedResources = (): boolean =>\n    !physicalRunHasSuccessor(threadId, runToken, controller)",
+    "terminal cleanup recognizes a reserved logical-turn successor"
   )
-  assertOccurrences(
-    agentIpc,
-    "const replacedByNewRun = physicalRunHasSuccessor(",
-    3,
-    "invoke, resume, and interrupt cleanup recognize a reserved logical-turn successor"
+  assertIncludes(
+    settlementHelperBody,
+    "run: () => clearCurrentRunMessageQueue(threadId, runToken)",
+    "terminal queue cleanup is scoped to the physical run token"
+  )
+  assertIncludes(
+    settlementHelperBody,
+    "run: () => revokeSandboxAclsForRun(runToken)",
+    "terminal ACL cleanup is scoped to the physical run token"
+  )
+  const aclCleanupPhase = settlementHelperBody.slice(
+    settlementHelperBody.indexOf('name: "revoke-terminal-sandbox-acls"'),
+    settlementHelperBody.indexOf('name: "release-settlement-registration"')
+  )
+  assertNotIncludes(
+    aclCleanupPhase,
+    "shouldRun: terminalRunOwnsSharedResources",
+    "a predecessor always releases its own physical ACL token after successor publication"
   )
   const continuationReleaseCleanups =
     agentIpc.match(
-      /if \(!wasOwner\) return\s+revokeSandboxAclsForRun\(threadId\)\s+discardAgentAutoCommitTracking\(threadId\)\s+releaseAbandonedContinuationTurnState\(/g
+      /if \(!wasOwner\) return\s+revokeSandboxAclsForRun\(runToken\)\s+discardAgentAutoCommitTracking\(threadId\)\s+releaseAbandonedContinuationTurnState\(/g
     )?.length ?? 0
   assert(
     continuationReleaseCleanups === 2,
@@ -606,7 +625,7 @@ function testClearOnEveryRunExit(): void {
   )
   assertIncludes(
     agentIpc,
-    "revokeSandboxAclsForRun(threadId)\n        discardAgentAutoCommitTracking(threadId)",
+    "revokeSandboxAclsForRun(runToken)\n        discardAgentAutoCommitTracking(threadId)",
     "a failed new-invoke setup reclaims inherited ACL and auto-commit tracking"
   )
   assertOccurrences(
@@ -625,6 +644,264 @@ function testClearOnEveryRunExit(): void {
     "currentRunMessageQueueOwnerToken: runToken",
     7,
     "invoke, resume, interrupt, and failover runtimes all receive the owner token"
+  )
+}
+
+function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
+  assertIncludes(
+    runSettlementFence,
+    "} finally {\n    try {\n      resolveSettlement()",
+    "the settlement resolver runs from the helper's outermost finally"
+  )
+  assertIncludes(
+    runSettlementFence,
+    "reportSettlementPhaseError(onPhaseError, phase.name, error)",
+    "one failed cleanup phase is reported without blocking later phases"
+  )
+  assertIncludes(
+    runSettlementFence,
+    'reportSettlementPhaseError(onPhaseError, "resolve-settlement", error)',
+    "even a diagnostic callback failure cannot escape settlement"
+  )
+  assertIncludes(
+    runSettlementFence,
+    "void operation.catch(() => {})",
+    "a timed-out notification persistence cannot reject without an observer later"
+  )
+
+  assertIncludes(
+    agentIpc,
+    "const RUN_SETTLEMENT_NOTIFICATION_TIMEOUT_MS = 1_000",
+    "only asynchronous notification settlement gets a short explicit bound"
+  )
+  assertIncludes(
+    agentIpc,
+    "const FORK_BOUNDARY_TIMEOUT_MS = 1_000",
+    "best-effort fork metadata cannot indefinitely delay a terminal event"
+  )
+  assertOccurrences(
+    agentIpc,
+    "await settlePhysicalAgentRun({",
+    3,
+    "invoke, resume, and interrupt share guaranteed physical settlement"
+  )
+  for (const kind of ["invoke", "resume", "interrupt"]) {
+    assertIncludes(agentIpc, `kind: "${kind}"`, `${kind} uses the shared settlement helper`)
+  }
+  assertIncludes(
+    agentIpc,
+    'name: "finish-solo-task-traces"',
+    "invoke trace cleanup cannot prevent settlement"
+  )
+  assertIncludes(
+    agentIpc,
+    'name: "release-workflow-notification-claim"',
+    "invoke workflow-notification claims are released by the settlement fence"
+  )
+  assertIncludes(
+    agentIpc,
+    'name: "remove-window-listener"',
+    "window listener cleanup cannot prevent settlement"
+  )
+  assertIncludes(
+    agentIpc,
+    "flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })",
+    "terminal transcript flush reports failure while its buffer restoration boundary retains data"
+  )
+  assertIncludes(
+    agentIpc,
+    "shouldRun: () => transcriptFlushSucceeded",
+    "a failed transcript flush also retains tool-call accumulator retry state"
+  )
+  assertIncludes(
+    agentIpc,
+    "!physicalRunHasSuccessor(threadId, runToken, controller)",
+    "terminal-only cleanup rechecks physical successor ownership"
+  )
+  assertIncludes(
+    agentIpc,
+    "if (activeRuns.get(threadId) === controller) activeRuns.delete(threadId)",
+    "controller release is compare-and-delete and cannot remove a successor controller"
+  )
+  const settlementHelperStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  assert(settlementHelperStart >= 0, "physical settlement helper exists")
+  const settlementHelperBody = agentIpc.slice(settlementHelperStart, settlementHelperStart + 9000)
+  assertSourceOrder(
+    settlementHelperBody,
+    'name: "flush-stream-transcript"',
+    'name: "release-active-controller"',
+    "strict transcript persistence precedes controller release"
+  )
+  assertSourceOrder(
+    settlementHelperBody,
+    "...criticalBeforeReleasePhases",
+    'name: "release-active-controller"',
+    "ownership-critical workflow claims release before successor publication"
+  )
+  const workflowClaimPhaseStart = agentIpc.indexOf(
+    'name: "release-workflow-notification-claim"'
+  )
+  assert(workflowClaimPhaseStart >= 0, "workflow claim release phase exists")
+  const workflowClaimPhaseBody = agentIpc.slice(workflowClaimPhaseStart, workflowClaimPhaseStart + 700)
+  assertIncludes(
+    workflowClaimPhaseBody,
+    "workflowNotificationToSettle?.ownerRunToken === runToken",
+    "a predecessor can release only the workflow claim captured by its physical run"
+  )
+  assertIncludes(
+    agentIpc,
+    "workflowNotificationClaimFence.release(runId, runToken",
+    "workflow notification cleanup uses compare-and-release ownership"
+  )
+  assertNotIncludes(
+    agentIpc.slice(agentIpc.indexOf("const activeRuns")),
+    "workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)",
+    "terminal paths cannot bypass workflow claim ownership fencing"
+  )
+  assertSourceOrder(
+    settlementHelperBody,
+    'name: "release-active-controller"',
+    'name: "release-settlement-registration"',
+    "controller CAS cleanup precedes settlement release"
+  )
+  assertSourceOrder(
+    settlementHelperBody,
+    "resolveSettlement,\n    onPhaseError: reportSettlementError\n  })",
+    "runPostRunMaintenanceInBackground(`${kind} settlement maintenance`",
+    "notification, metadata, and telemetry maintenance starts only after settlement release"
+  )
+  assertNotIncludes(
+    agentIpc,
+    'await settleDrainedCoordinatorNotifications("restore")',
+    "invoke errors rely on detached finalizer restoration instead of blocking before finally"
+  )
+  assertNotIncludes(
+    agentIpc,
+    'await settleResumeDrainedCoordinatorNotifications("restore")',
+    "resume restoration starts in the finalizer without blocking its terminal event"
+  )
+  assertNotIncludes(
+    agentIpc,
+    'await settleInterruptDrainedCoordinatorNotifications("restore")',
+    "interrupt restoration starts in the finalizer without blocking its terminal event"
+  )
+  assertNotIncludes(
+    agentIpc,
+    'await settleDrainedCoordinatorNotifications("ack")',
+    "invoke never awaits the durable notification fallback before its terminal event"
+  )
+
+  assertNotIncludes(
+    agentIpc,
+    "await tracer.finish(",
+    "foreground trace persistence never delays a terminal result"
+  )
+  assertNotIncludes(
+    agentIpc,
+    "tracer.finish(",
+    "foreground trace finish is fully deferred, including its synchronous prefix"
+  )
+  assertIncludes(
+    agentIpc,
+    "const memoryMaintenanceCoalescer = new SingleFlightBatchCoalescer<",
+    "memory routing and summarization use a scope-scoped single-flight worker"
+  )
+  assertIncludes(
+    agentIpc,
+    "mergeMemoryMaintenanceBatches",
+    "queued memory maintenance aggregates intermediate turns instead of replacing them"
+  )
+  assertIncludes(
+    agentIpc,
+    "const MAX_PENDING_MEMORY_TURNS = 12",
+    "queued memory aggregation has an explicit turn bound"
+  )
+  assertIncludes(
+    agentIpc,
+    "const MAX_PENDING_MEMORY_CHARACTERS = 80_000",
+    "queued memory aggregation has an explicit character bound"
+  )
+  assertIncludes(
+    agentIpc,
+    "formatMemoryMaintenanceConversation(memoryBatch)",
+    "bounded memory batches explicitly report omitted burst context"
+  )
+  assertIncludes(
+    agentIpc,
+    "function memoryMaintenanceScopeKey(input:",
+    "memory batches derive a stable workspace and feature scope"
+  )
+  assertIncludes(
+    agentIpc,
+    "normalizedWorkspace,\n    input.featureId ?? \"<no-feature>\"",
+    "same-thread workspace or memory-scope changes cannot merge pending batches"
+  )
+  assertIncludes(
+    agentIpc,
+    "interface MemoryMaintenanceTurn {\n  conversation: string\n  fileWritePaths: string[]",
+    "each coalesced conversation retains its own file-write evidence"
+  )
+  assertIncludes(
+    agentIpc,
+    "const turnsToSummarize = memoryBatch.turns.filter(",
+    "direct memory writes filter only their originating turns"
+  )
+  assertIncludes(
+    agentIpc,
+    "isPathInsideAnyDirectory(filePath, memoryDirectoryPaths, workspacePath)",
+    "memory-write evidence uses absolute normalized directory-boundary matching"
+  )
+  assertNotIncludes(
+    agentIpc,
+    "filePath.startsWith(dir",
+    "memory-write evidence cannot confuse prefix sibling directories"
+  )
+  assertIncludes(
+    agentIpc,
+    "const skillProposalInFlightThreads = new Set<string>()",
+    "long-lived skill confirmation is deduplicated per thread"
+  )
+  assertSourceOrder(
+    agentIpc,
+    "skillProposalInFlightThreads.add(threadId)",
+    "skillProposalInFlightThreads.delete(threadId)",
+    "the skill proposal lease is always released by its detached finally"
+  )
+  assertIncludes(
+    agentIpc,
+    "proposalWindowMatchesContext(threadId, proposalContext)",
+    "delayed skill confirmation cannot reset a newer turn's proposal window"
+  )
+
+  assertIncludes(
+    runtime,
+    "runId: threadId,",
+    "foreground background commands remain owned by the logical thread"
+  )
+  assertIncludes(
+    runtime,
+    "aclOwnerId: options.currentRunMessageQueueOwnerToken ?? threadId,",
+    "foreground ACL ownership uses the physical run token"
+  )
+  assertIncludes(
+    localSandbox,
+    "threadId: this.runId,",
+    "background task cancellation continues to index logical thread ownership"
+  )
+  assertIncludes(
+    localSandbox,
+    "LocalSandbox.grantSandboxWriteAcl(dir, this.aclOwnerId)",
+    "Windows ACL ref-counting is isolated by physical run ownership"
+  )
+  assertIncludes(
+    localSandbox,
+    "private static queueAclOsOperation(",
+    "Windows ACL mutations are serialized per normalized directory"
+  )
+  assertIncludes(
+    localSandbox,
+    "return LocalSandbox.waitForAclOsOperation(key)",
+    "shared ACL owners wait for the first OS grant before executing"
   )
 }
 
@@ -683,6 +960,23 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     agentIpc,
     "discardPendingStreamTranscriptMessages(threadId, runToken)",
     "a failed attempt discards only its own physical-run buffer"
+  )
+  const threadFlushStart = agentIpc.indexOf(
+    "function flushPendingStreamTranscriptMessagesForThread("
+  )
+  assert(threadFlushStart >= 0, "thread-wide transcript retry helper exists")
+  const threadFlushBody = agentIpc.slice(threadFlushStart, threadFlushStart + 2600)
+  assertSourceOrder(
+    threadFlushBody,
+    "const remainingOwners = new Set(",
+    "if (!remainingOwners.has(runToken))",
+    "thread-wide retry only releases accumulator owners whose transcript actually flushed"
+  )
+  assertSourceOrder(
+    threadFlushBody,
+    "if (options.throwOnError) throw firstError",
+    "return remainingOwners.size === 0",
+    "non-strict shutdown flush reports remaining evidence without discarding it"
   )
   const resetStart = agentIpc.indexOf("function resetFailedStreamAttempt(")
   const resetBody = agentIpc.slice(resetStart, resetStart + 1200)
@@ -902,11 +1196,27 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "retry UI clearing happens only after owner revalidation"
   )
 
+  const notificationCleanupPhase = agentIpc.slice(
+    agentIpc.indexOf('name: "cleanup-notification-skills"'),
+    agentIpc.indexOf('name: "release-active-controller"') + 200
+  )
+  assertSourceOrder(
+    notificationCleanupPhase,
+    "shouldRun: terminalRunOwnsSharedResources",
+    "run: cleanupNotificationSkills",
+    "notification metadata cleanup uses the current physical ownership guard"
+  )
+  assertSourceOrder(
+    notificationCleanupPhase,
+    'name: "cleanup-notification-skills"',
+    'name: "release-active-controller"',
+    "notification metadata is pruned before a successor can acquire the released controller"
+  )
   assertOccurrences(
     agentIpc,
-    "const stillOwnsPhysicalRun =",
+    "cleanupNotificationSkills: () => {",
     3,
-    "invoke, resume, and interrupt finally blocks recompute their lease after restore"
+    "invoke, resume, and interrupt provide ownership-guarded notification cleanup"
   )
   for (const clearFlag of [
     "clearCoordinatorNotificationSelectedSkillsOnExit",
@@ -915,7 +1225,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   ]) {
     assertIncludes(
       agentIpc,
-      `if (stillOwnsPhysicalRun && ${clearFlag})`,
+      `if (!${clearFlag}) return`,
       `${clearFlag} cannot overwrite replacement metadata`
     )
   }
@@ -1062,7 +1372,20 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "checkpointer.updateCheckpointMetadata(tuple.config",
     "fork metadata targets only the tuple read under the same lease"
   )
-  const forkBoundaryCallMarker = "await markLatestForkBoundary({"
+  const forkBoundaryWrapperStart = agentIpc.indexOf(
+    "async function markLatestForkBoundaryBestEffort("
+  )
+  assert(forkBoundaryWrapperStart >= 0, "bounded fork-boundary wrapper exists")
+  const forkBoundaryWrapperBody = agentIpc.slice(
+    forkBoundaryWrapperStart,
+    forkBoundaryWrapperStart + 1400
+  )
+  assertIncludes(
+    forkBoundaryWrapperBody,
+    "timeoutMs: FORK_BOUNDARY_TIMEOUT_MS",
+    "fork-boundary checkpointer IO uses the explicit best-effort timeout"
+  )
+  const forkBoundaryCallMarker = "await markLatestForkBoundaryBestEffort({"
   const forkBoundaryCallIndexes: number[] = []
   let forkBoundaryCallIndex = agentIpc.indexOf(forkBoundaryCallMarker)
   while (forkBoundaryCallIndex >= 0) {
@@ -1105,7 +1428,10 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     `invoke, resume, and interrupt each have one completed boundary: got ${completionBoundaryIndexes.length}`
   )
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
-    const body = agentIpc.slice(completionBoundaryIndexes[index], completionBoundaryIndexes[index] + 1000)
+    const body = agentIpc.slice(
+      completionBoundaryIndexes[index],
+      completionBoundaryIndexes[index] + (label === "invoke" ? 18_000 : 1_800)
+    )
     const fence =
       label === "invoke"
         ? "throwIfInvokeAborted()"
@@ -1599,7 +1925,9 @@ function testWillEnqueueDistinguishesLivePreparationFromPumpInFlight(): void {
     "if (shouldLockSubmit) liveSubmitPreparingThreads.add(threadId)"
   )
   assert(liveSubmitStart >= 0, "live submit preparation marker not found")
-  const liveSubmitBody = chat.slice(liveSubmitStart, liveSubmitStart + 16000)
+  const liveSubmitEnd = chat.indexOf("const startEditingQueuedMessage", liveSubmitStart)
+  assert(liveSubmitEnd > liveSubmitStart, "live submit handler end marker not found")
+  const liveSubmitBody = chat.slice(liveSubmitStart, liveSubmitEnd)
   assertSourceOrder(
     liveSubmitBody,
     "if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)",
@@ -2180,7 +2508,7 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
   )
   assertIncludes(
     pumpEffectBody,
-    "releaseSubmitInFlightLock(submitInFlightRef, true, threadId)",
+    "releaseSubmitInFlightLock(",
     "pump releases the shared lock once its submit settles"
   )
   assertSourceOrder(
@@ -2193,6 +2521,44 @@ function testPumpHoldsSharedSubmitInFlightLock(): void {
     chat,
     "submitInFlightRef,\n    threadError,\n    threadId",
     "pump effect tracks its thread and shared lock dependencies explicitly"
+  )
+}
+
+function testLiveSubmitReleasePublishesQueuePumpWake(): void {
+  const liveSubmitStart = chat.indexOf("const handleSubmit = async")
+  const liveSubmitEnd = chat.indexOf("const startEditingQueuedMessage", liveSubmitStart)
+  assert(liveSubmitStart >= 0 && liveSubmitEnd > liveSubmitStart, "live submit body not found")
+  const liveSubmitBody = chat.slice(liveSubmitStart, liveSubmitEnd)
+  assertIncludes(
+    liveSubmitBody,
+    "releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)",
+    "live-run finally releases the shared submit lock"
+  )
+  assertIncludes(
+    chat,
+    "const submitReleaseVersion = useSyncExternalStore(",
+    "the queue observes releases through a remount-safe external store"
+  )
+  assertIncludes(
+    chat,
+    "subscribeSubmitInFlightRelease(submitInFlightRef, threadId, listener)",
+    "the release subscription is scoped to the current thread key"
+  )
+  assertIncludes(
+    chat,
+    "submitReleaseVersion,\n    submitQueuedMessage",
+    "the queue pump re-runs when the shared release version changes"
+  )
+  assertIncludes(
+    submitInFlightLock,
+    "if (!shouldUseLock || !lockRef.current.delete(lockKey)) return false",
+    "only a release that owns and clears the lock can publish a wake"
+  )
+  assertSourceOrder(
+    submitInFlightLock,
+    "lockRef.current.delete(lockKey)",
+    "publishSubmitInFlightRelease(lockRef, lockKey)",
+    "the external wake is published only after the lock is actually clear"
   )
 }
 
@@ -2374,6 +2740,7 @@ function main(): void {
     testGuideRespectsActiveGoal,
     testGuideUsesCurrentRunPromptPipeline,
     testClearOnEveryRunExit,
+    testPhysicalRunSettlementCannotStrandQueuedReplacements,
     testStreamTranscriptBuffersArePhysicalRunScoped,
     testPreparingGuidesParticipateInReconciliation,
     testPreloadExposesApi,
@@ -2407,6 +2774,7 @@ function main(): void {
     testGuideClaimsLocalOwnershipBeforeIpc,
     testDisabledSliderModesRemainVisibleAndExplained,
     testPumpHoldsSharedSubmitInFlightLock,
+    testLiveSubmitReleasePublishesQueuePumpWake,
     testSteerPathsGuardCoordinatorMarker,
     testEditLengthErrorDoesNotPolluteThreadError,
     testGuidedEditReconcilesBeforeDowngrading,

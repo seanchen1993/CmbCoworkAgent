@@ -9,6 +9,17 @@ export interface AtFileSuggestion {
   size?: number
 }
 
+export interface WorkspaceMentionSearchPage {
+  files: FileInfo[]
+  continuationAvailable?: boolean
+}
+
+export interface ProgressiveWorkspaceMentionSearchResult {
+  files: FileInfo[]
+  suggestions: AtFileSuggestion[]
+  continuationAvailable: boolean
+}
+
 interface IndexedSuggestion {
   suggestion: AtFileSuggestion
   lowerPath: string
@@ -17,6 +28,8 @@ interface IndexedSuggestion {
 
 const INDEX_BATCH_SIZE = 256
 const SEARCH_BATCH_SIZE = 512
+const MAX_PROGRESSIVE_FILE_COUNT = 50_000
+const MAX_PROGRESSIVE_LOADS = 4
 const indexes = new WeakMap<FileInfo[], Promise<IndexedSuggestion[]>>()
 const yieldResolvers: Array<() => void> = []
 let cooperativeYieldCount = 0
@@ -166,4 +179,81 @@ export async function searchWorkspaceMentionFiles(
   }
   throwIfAborted(options.signal)
   return top.map((entry) => entry.suggestion)
+}
+
+/**
+ * Searches the already-hydrated workspace first, then fetches a bounded number
+ * of additional scan segments for a real query. Scan pages are not ordered by
+ * match quality, so a full first-page result set cannot prove that a later page
+ * has no exact filename/path match. This keeps a bare `@` cheap while selecting
+ * the global top-N across as many as 50k retained files.
+ */
+export async function searchWorkspaceMentionFilesProgressively(
+  initialFiles: FileInfo[],
+  rawQuery: string,
+  options: {
+    limit?: number
+    signal?: AbortSignal
+    loadMore?: (signal: AbortSignal) => Promise<WorkspaceMentionSearchPage | null>
+    maxAdditionalLoads?: number
+    maxFileCount?: number
+    onUpdate?: (result: ProgressiveWorkspaceMentionSearchResult) => void
+  } = {}
+): Promise<ProgressiveWorkspaceMentionSearchResult> {
+  const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 15)))
+  const maxAdditionalLoads = Math.max(
+    0,
+    Math.min(
+      MAX_PROGRESSIVE_LOADS,
+      Math.floor(options.maxAdditionalLoads ?? MAX_PROGRESSIVE_LOADS)
+    )
+  )
+  const maxFileCount = Math.max(
+    initialFiles.length,
+    Math.min(
+      MAX_PROGRESSIVE_FILE_COUNT,
+      Math.floor(options.maxFileCount ?? MAX_PROGRESSIVE_FILE_COUNT)
+    )
+  )
+  const fallbackController = new AbortController()
+  const signal = options.signal ?? fallbackController.signal
+  let files = initialFiles
+  let continuationAvailable = options.loadMore !== undefined
+  let suggestions = await searchWorkspaceMentionFiles(files, rawQuery, { limit, signal })
+  let result: ProgressiveWorkspaceMentionSearchResult = {
+    files,
+    suggestions,
+    continuationAvailable
+  }
+  options.onUpdate?.(result)
+
+  // Loading more for an empty query would enumerate a large repository merely
+  // because the popover opened. Once there is a real query, however, a full
+  // local top-N is not a safe stopping condition: the worker deliberately does
+  // not sort scan pages, and a later segment can still contain a better match.
+  if (!rawQuery || !options.loadMore) return result
+
+  for (let loadIndex = 0; loadIndex < maxAdditionalLoads; loadIndex += 1) {
+    throwIfAborted(signal)
+    if (!continuationAvailable || files.length >= maxFileCount) break
+    const previousFiles = files
+    const page = await options.loadMore(signal)
+    throwIfAborted(signal)
+    if (!page) {
+      continuationAvailable = false
+      break
+    }
+    files =
+      page.files.length > maxFileCount ? page.files.slice(0, maxFileCount) : page.files
+    continuationAvailable =
+      page.continuationAvailable === true && files.length < maxFileCount
+    // A shared loader may return its current cache while another consumer is
+    // settling. Do not spin on the same immutable array.
+    if (files === previousFiles) break
+    suggestions = await searchWorkspaceMentionFiles(files, rawQuery, { limit, signal })
+    result = { files, suggestions, continuationAvailable }
+    options.onUpdate?.(result)
+  }
+
+  return { files, suggestions, continuationAvailable }
 }

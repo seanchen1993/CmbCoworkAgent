@@ -202,7 +202,7 @@ export class ThreadMessageHydrationClient {
     }
     if (
       threadId.length > 32_768 ||
-      [options.beforeMessageId, options.anchorMessageId].some(
+      [options.beforeMessageId, options.targetMessageId, options.anchorMessageId].some(
         (value) => typeof value === "string" && value.length > 32_768
       )
     ) {
@@ -262,6 +262,7 @@ export class ThreadMessageHydrationClient {
             options: {
               beforeOrdinal: options.beforeOrdinal,
               beforeMessageId: options.beforeMessageId,
+              targetMessageId: options.targetMessageId,
               anchorMessageId: options.anchorMessageId,
               limit: options.limit,
               byteBudget: options.byteBudget,

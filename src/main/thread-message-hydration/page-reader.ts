@@ -451,9 +451,11 @@ function readCandidates(
 ): CandidateRow[] {
   const beforeOrdinal = request.options.beforeOrdinal
   const beforeMessageId = request.options.beforeMessageId?.trim() ?? ""
+  const targetMessageId = request.options.targetMessageId?.trim() ?? ""
   const anchorMessageId = request.options.anchorMessageId?.trim() ?? ""
   const hasBeforeOrdinal = Number.isSafeInteger(beforeOrdinal) && (beforeOrdinal ?? -1) >= 0
   const hasBeforeMessageId = beforeMessageId.length > 0
+  const hasTargetMessageId = targetMessageId.length > 0
   const hasAnchorMessageId = anchorMessageId.length > 0
   const notAfterCreatedAt = normalizeTimestamp(request.options.notAfterCreatedAt)
   const recoveryCheckpointId = request.options.recoveryCheckpointId?.trim() ?? ""
@@ -489,10 +491,22 @@ function readCandidates(
       "Thread message page anchorMessageId is mutually exclusive with the backward cursor"
     )
   }
+  if (hasTargetMessageId && hasBeforeOrdinal) {
+    throw new Error(
+      "Thread message page targetMessageId is mutually exclusive with the backward cursor"
+    )
+  }
+  if (hasTargetMessageId && hasAnchorMessageId) {
+    throw new Error(
+      "Thread message page targetMessageId is mutually exclusive with anchorMessageId"
+    )
+  }
 
-  // Resolve the exact durable anchor separately, then exclude its body from the page. This
-  // prevents an oversized anchor preview from consuming every forward retry's byte budget.
-  const anchor = hasAnchorMessageId
+  // Resolve exact ids separately. Forward reads exclude the anchor body, while targeted reads
+  // use the resolved composite tuple to make the target the first candidate regardless of how
+  // many legacy rows share its ordinal.
+  const exactMessageId = hasTargetMessageId ? targetMessageId : anchorMessageId
+  const exactMessage = hasTargetMessageId || hasAnchorMessageId
     ? database
         .prepare(
           `SELECT m.ordinal
@@ -501,19 +515,28 @@ function readCandidates(
         )
         .get(
           request.threadId,
-          anchorMessageId,
+          exactMessageId,
           ...boundaryBindings
         )
     : undefined
-  if (hasAnchorMessageId && !anchor) {
-    throw new Error("Thread message forward-page anchor was not found")
+  if ((hasTargetMessageId || hasAnchorMessageId) && !exactMessage) {
+    throw new Error(
+      hasTargetMessageId
+        ? "Thread message target-window message was not found"
+        : "Thread message forward-page anchor was not found"
+    )
   }
-  const anchorOrdinal = hasAnchorMessageId ? Number(anchor?.ordinal) : null
+  const exactMessageOrdinal =
+    hasTargetMessageId || hasAnchorMessageId ? Number(exactMessage?.ordinal) : null
   if (
-    hasAnchorMessageId &&
-    (!Number.isSafeInteger(anchorOrdinal) || (anchorOrdinal ?? -1) < 0)
+    (hasTargetMessageId || hasAnchorMessageId) &&
+    (!Number.isSafeInteger(exactMessageOrdinal) || (exactMessageOrdinal ?? -1) < 0)
   ) {
-    throw new Error("Thread message forward-page anchor has an invalid ordinal")
+    throw new Error(
+      hasTargetMessageId
+        ? "Thread message target-window message has an invalid ordinal"
+        : "Thread message forward-page anchor has an invalid ordinal"
+    )
   }
 
   const statement = database.prepare(
@@ -533,7 +556,23 @@ function readCandidates(
            ${createdAtBoundarySql}
          ORDER BY m.ordinal ASC, m.message_id ASC
          LIMIT ?`
-      : hasBeforeOrdinal
+      : hasTargetMessageId
+        ? `SELECT m.message_id, m.ordinal,
+                1024 +
+                CASE
+                  WHEN fragments.total_chars IS NOT NULL THEN fragments.total_chars * 4
+                  ELSE length(CAST(m.content_json AS BLOB))
+                END +
+                length(CAST(COALESCE(m.tool_calls_json, '') AS BLOB)) AS estimated_bytes
+         FROM thread_messages AS m
+         LEFT JOIN thread_message_fragment_states AS fragments
+           ON fragments.thread_id = m.thread_id AND fragments.message_id = m.message_id
+         WHERE m.thread_id = ?
+           AND (m.ordinal < ? OR (m.ordinal = ? AND m.message_id <= ?))
+           ${createdAtBoundarySql}
+         ORDER BY m.ordinal DESC, m.message_id DESC
+         LIMIT ?`
+        : hasBeforeOrdinal
       ? `SELECT m.message_id, m.ordinal,
                 1024 +
                 CASE
@@ -564,24 +603,33 @@ function readCandidates(
          ORDER BY m.ordinal DESC, m.message_id DESC
          LIMIT ?`
   )
-  const bindings: Array<string | number> = hasBeforeOrdinal
-    ? [
-        request.threadId,
-        beforeOrdinal as number,
-        beforeOrdinal as number,
-        beforeMessageId,
-        ...boundaryBindings,
-        limit + 1
-      ]
-    : hasAnchorMessageId
+  const bindings: Array<string | number> = hasAnchorMessageId
       ? [
           request.threadId,
-          anchorOrdinal as number,
-          anchorOrdinal as number,
+          exactMessageOrdinal as number,
+          exactMessageOrdinal as number,
           anchorMessageId,
           ...boundaryBindings,
           limit + 1
         ]
+      : hasTargetMessageId
+        ? [
+            request.threadId,
+            exactMessageOrdinal as number,
+            exactMessageOrdinal as number,
+            targetMessageId,
+            ...boundaryBindings,
+            limit + 1
+          ]
+      : hasBeforeOrdinal
+        ? [
+            request.threadId,
+            beforeOrdinal as number,
+            beforeOrdinal as number,
+            beforeMessageId,
+            ...boundaryBindings,
+            limit + 1
+          ]
       : [request.threadId, ...boundaryBindings, limit + 1]
   const rows: CandidateRow[] = []
   for (const raw of statement.iterate(...bindings)) {

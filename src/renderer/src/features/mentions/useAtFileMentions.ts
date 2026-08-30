@@ -5,7 +5,8 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { isBinaryFile } from "@/lib/file-types"
 import type { FileInfo } from "@/types"
 import {
-  searchWorkspaceMentionFiles,
+  searchWorkspaceMentionFilesProgressively,
+  type WorkspaceMentionSearchPage,
   type AtFileSuggestion
 } from "./at-file-mention-index"
 
@@ -36,6 +37,29 @@ type ActiveAtFileToken =
 const MAX_SUGGESTIONS = 15
 const QUOTED_AT_RE = /(?:^|\s)@"([^"]*)"?$/u
 const PLAIN_AT_RE = /(?:^|\s)@([^\s"]*)$/u
+const PROGRESSIVE_SEARCH_DEBOUNCE_MS = 120
+
+function waitForProgressiveSearchIntent(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    const error = new Error("Workspace mention search was cancelled")
+    error.name = "AbortError"
+    return Promise.reject(error)
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, PROGRESSIVE_SEARCH_DEBOUNCE_MS)
+    const onAbort = (): void => {
+      clearTimeout(timeout)
+      signal.removeEventListener("abort", onAbort)
+      const error = new Error("Workspace mention search was cancelled")
+      error.name = "AbortError"
+      reject(error)
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
+}
 
 // @文件统一复用共享的文本/二进制文件识别，避免和预览侧扩展名列表漂移。
 export function isSupportedWorkspaceMentionFilePath(filePath: string): boolean {
@@ -156,9 +180,18 @@ export function useAtFileMentions(params: {
   input: string
   cursorOffset: number
   workspaceFiles: FileInfo[]
+  loadMoreWorkspaceFiles?: (
+    signal: AbortSignal
+  ) => Promise<WorkspaceMentionSearchPage | null>
   disabled?: boolean
 }) {
-  const { input, cursorOffset, workspaceFiles, disabled = false } = params
+  const {
+    input,
+    cursorOffset,
+    workspaceFiles,
+    loadMoreWorkspaceFiles,
+    disabled = false
+  } = params
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [dismissedKey, setDismissedKey] = useState<string | null>(null)
 
@@ -190,22 +223,35 @@ export function useAtFileMentions(params: {
   useEffect(() => {
     if (activeToken.kind !== "at-file") return
     const controller = new AbortController()
-    void searchWorkspaceMentionFiles(workspaceFiles, activeToken.query, {
+    let delayedContinuation = true
+    void searchWorkspaceMentionFilesProgressively(workspaceFiles, activeToken.query, {
       limit: MAX_SUGGESTIONS,
-      signal: controller.signal
-    }).then(
-      (suggestions) => {
-        if (controller.signal.aborted) return
-        setSuggestionResult({ key: activeToken.key, files: workspaceFiles, suggestions })
-      },
-      (error) => {
+      signal: controller.signal,
+      loadMore: loadMoreWorkspaceFiles
+        ? async (signal) => {
+            if (delayedContinuation) {
+              delayedContinuation = false
+              await waitForProgressiveSearchIntent(signal)
+            }
+            return loadMoreWorkspaceFiles(signal)
+          }
+        : undefined,
+      onUpdate: ({ suggestions }) => {
         if (!controller.signal.aborted) {
-          console.warn("[AtFileMentions] Failed to build suggestions:", error)
+          setSuggestionResult({ key: activeToken.key, files: workspaceFiles, suggestions })
         }
       }
+    }).then(
+      () => undefined,
+      (error) => {
+        if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+          return
+        }
+        console.warn("[AtFileMentions] Failed to build suggestions:", error)
+      },
     )
     return () => controller.abort()
-  }, [activeToken, workspaceFiles])
+  }, [activeToken, loadMoreWorkspaceFiles, workspaceFiles])
 
   // 文件索引与 top-N 匹配都在可取消的分片任务中完成；输入渲染只消费结果。
   const mode = useMemo<AtFilePopoverMode>(() => {

@@ -13,6 +13,11 @@ import {
 } from "../../shared/workspace-file-scan"
 import type { WorkspaceFileScanWorkerRequest, WorkspaceFileScanWorkerResponse } from "./protocol"
 import { WORKSPACE_FILE_SCAN_CANCELLED } from "./protocol"
+import {
+  openWorkspaceFileScanDirectory,
+  readWorkspaceFileScanDirectoryEntry,
+  statWorkspaceFileScanCandidate
+} from "./workspace-file-scan-tolerance"
 
 interface GitignoreRule {
   pattern: string
@@ -185,14 +190,34 @@ function entryBytes(entry: WorkspaceFileScanEntry): number {
   return Buffer.byteLength(JSON.stringify(entry), "utf8") + 1
 }
 
-async function ensureFrameDirectory(scan: ScanState, frame: DirectoryFrame): Promise<boolean> {
-  if (frame.directory) return true
-  if (scan.segmentDirectories >= WORKSPACE_FILE_SCAN_SEGMENT_MAX_DIRECTORIES) return false
+type FrameDirectoryStatus = "ready" | "limited" | "skipped"
+
+async function ensureFrameDirectory(
+  scan: ScanState,
+  frame: DirectoryFrame
+): Promise<FrameDirectoryStatus> {
+  if (frame.directory) return "ready"
+  if (scan.segmentDirectories >= WORKSPACE_FILE_SCAN_SEGMENT_MAX_DIRECTORIES) return "limited"
   throwIfCancelled(scan)
-  frame.directory = await fs.opendir(frame.fullPath, { bufferSize: 128 })
+  frame.directory = await openWorkspaceFileScanDirectory(
+    frame.fullPath,
+    frame.relativePath.length === 0
+  )
+  if (!frame.directory) return "skipped"
   scan.segmentDirectories += 1
   throwIfCancelled(scan)
-  return true
+  return "ready"
+}
+
+function advanceFrame(scan: ScanState): void {
+  scan.frameIndex += 1
+  // Drop closed traversal frames with amortized compaction. A deep tree
+  // should not retain every ancestor path until the final page, while a
+  // wide tree still keeps the not-yet-visited queue intact.
+  if (scan.frameIndex >= 1_024 && scan.frameIndex * 2 >= scan.frames.length) {
+    scan.frames.splice(0, scan.frameIndex)
+    scan.frameIndex = 0
+  }
 }
 
 function shouldSkipEntry(
@@ -229,23 +254,21 @@ async function fillPending(
       break
     }
     const frame = scan.frames[scan.frameIndex]
-    if (!(await ensureFrameDirectory(scan, frame))) {
+    const frameStatus = await ensureFrameDirectory(scan, frame)
+    if (frameStatus === "limited") {
       segmentLimited = true
       break
     }
-    const entry = await frame.directory?.read()
+    if (frameStatus === "skipped") {
+      advanceFrame(scan)
+      continue
+    }
+    const entry = await readWorkspaceFileScanDirectoryEntry(() => frame.directory!.read())
     throwIfCancelled(scan)
     if (!entry) {
       await frame.directory?.close().catch(() => undefined)
       frame.directory = null
-      scan.frameIndex += 1
-      // Drop closed traversal frames with amortized compaction. A deep tree
-      // should not retain every ancestor path until the final page, while a
-      // wide tree still keeps the not-yet-visited queue intact.
-      if (scan.frameIndex >= 1_024 && scan.frameIndex * 2 >= scan.frames.length) {
-        scan.frames.splice(0, scan.frameIndex)
-        scan.frameIndex = 0
-      }
+      advanceFrame(scan)
       continue
     }
 
@@ -265,18 +288,14 @@ async function fillPending(
 
   if (fileCandidates.length > 0) {
     const statResults = await Promise.all(
-      fileCandidates.map(async ({ fullPath, relativePath }) => {
-        const stat = await fs.stat(fullPath)
-        return {
-          path: `/${relativePath}`,
-          is_dir: false,
-          size: stat.size,
-          modified_at: stat.mtime.toISOString()
-        } satisfies WorkspaceFileScanEntry
-      })
+      fileCandidates.map(({ fullPath, relativePath }) =>
+        statWorkspaceFileScanCandidate(fullPath, relativePath)
+      )
     )
     throwIfCancelled(scan)
-    scan.pending.push(...statResults)
+    scan.pending.push(
+      ...statResults.filter((entry): entry is WorkspaceFileScanEntry => entry !== null)
+    )
   }
   return segmentLimited
 }

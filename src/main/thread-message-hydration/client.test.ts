@@ -298,6 +298,13 @@ describe("thread message hydration worker", () => {
         ordinal: 599
       }))
     ])
+    insertFixture(
+      "target-repeated",
+      Array.from({ length: 1_200 }, (_, index) => ({
+        id: `target-repeated-${index.toString().padStart(4, "0")}`,
+        ordinal: 777
+      }))
+    )
     insertFixture("forward-sparse", [
       { id: "sparse-boundary", ordinal: 100 },
       { id: "sparse-0150", ordinal: 150 },
@@ -361,6 +368,19 @@ describe("thread message hydration worker", () => {
         ...repeatedSecond.messages.map((message) => message.id)
       ]).size
     ).toBe(502)
+
+    const exactTarget = await client.readPage("target-repeated", {
+      targetMessageId: "target-repeated-0500",
+      limit: 500
+    })
+    expect(exactTarget.messages).toHaveLength(500)
+    expect(exactTarget.messages[0]?.id).toBe("target-repeated-0001")
+    expect(exactTarget.messages.at(-1)?.id).toBe("target-repeated-0500")
+    expect(exactTarget).toMatchObject({
+      beforeOrdinal: 777,
+      beforeMessageId: "target-repeated-0001",
+      hasMore: true
+    })
 
     const sparseFirst = await readForward("forward-sparse", "sparse-boundary")
     const sparseAnchor = sparseFirst.messages.at(-1)?.id ?? "missing-sparse-tail"

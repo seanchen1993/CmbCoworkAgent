@@ -414,9 +414,19 @@ async function testRendererSendsAgentMode(): Promise<void> {
     /state\.workspacePath === data\.path\s*\?\s*\{ workspacePath: data\.path \}\s*:\s*\{ workspacePath: data\.path, coordinatorWorkers: \[\] \}/,
     "ThreadContext clears stale coordinator workers when a backend workspace path change arrives"
   )
-  assertMatches(
+  const setWorkspacePathBlock = sliceBetween(
     threadContextSource,
-    /state\.workspacePath === path\s*\?\s*\{ workspacePath: path \}\s*:\s*\{ workspacePath: path, coordinatorWorkers: \[\] \}/,
+    "setWorkspacePath: (path: string | null) => {",
+    "setGitContext:"
+  )
+  assertIncludes(
+    setWorkspacePathBlock,
+    "workspaceFiles: retainWorkspaceFilesForPathChange(",
+    "ThreadContext clears stale workspace files when the current thread switches workspace locally"
+  )
+  assertIncludes(
+    setWorkspacePathBlock,
+    "coordinatorWorkers: []",
     "ThreadContext clears stale coordinator workers when the current thread switches workspace locally"
   )
   assertIncludes(
@@ -1822,8 +1832,13 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'await settleDrainedCoordinatorNotifications("restore")',
-    "agent IPC restores notifications only if a turn exits before delivery-acknowledgement, while HITL paths restore unconsumed peeked notifications"
+    'settleNotifications: () => settleDrainedCoordinatorNotifications("restore")',
+    "agent IPC routes pre-acknowledgement notification restoration through the physical-run finalizer"
+  )
+  assertIncludes(
+    agentIpc,
+    'name: "start-coordinator-notification-settlement"',
+    "agent IPC starts notification restoration before releasing the next queued physical run"
   )
   assertIncludes(
     agentIpc,
@@ -2093,8 +2108,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'await settleDrainedCoordinatorNotifications("ack")',
-    "agent IPC still finalizes delivered task-notifications after a successful turn"
+    'void settleDrainedCoordinatorNotifications("ack").catch(',
+    "agent IPC starts delivered task-notification acknowledgement after a successful turn without delaying the terminal event"
   )
   assertIncludes(
     agentIpc,
@@ -2123,8 +2138,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    "replacedByNewRun",
-    "agent IPC defers shared sandbox cleanup when a newer run owns the same thread"
+    "physicalRunHasSuccessor(threadId, runToken, controller)",
+    "agent IPC defers shared terminal cleanup when a newer physical run owns the same thread"
   )
   assertIncludes(
     agentIpc,

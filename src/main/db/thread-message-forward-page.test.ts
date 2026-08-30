@@ -75,6 +75,34 @@ function readWindow(threadId: string, boundaryId: string) {
 }
 
 describe("thread message explicit forward pages", () => {
+  it("includes an exact target beyond the first 500 rows of one repeated ordinal", () => {
+    const threadId = "exact-target-repeated-ordinal"
+    insertOrdinalRows(
+      threadId,
+      Array.from({ length: 1_200 }, (_, index) => ({
+        id: `exact-target-${index.toString().padStart(4, "0")}`,
+        ordinal: 777
+      }))
+    )
+
+    const guessedPage = threadDb.getThreadMessagesPage(threadId, { limit: 500 })
+    expect(guessedPage.messages.some((message) => message.id === "exact-target-0500"))
+      .toBe(false)
+
+    const targetedPage = threadDb.getThreadMessagesPage(threadId, {
+      targetMessageId: "exact-target-0500",
+      limit: 500
+    })
+    expect(targetedPage.messages).toHaveLength(500)
+    expect(targetedPage.messages[0]?.id).toBe("exact-target-0001")
+    expect(targetedPage.messages.at(-1)?.id).toBe("exact-target-0500")
+    expect(targetedPage).toMatchObject({
+      beforeOrdinal: 777,
+      beforeMessageId: "exact-target-0001",
+      hasMore: true
+    })
+  })
+
   it("verifies the dense anchor and returns two strictly newer 500-row steps", () => {
     const threadId = "dense-forward-pages"
     insertOrdinalRows(

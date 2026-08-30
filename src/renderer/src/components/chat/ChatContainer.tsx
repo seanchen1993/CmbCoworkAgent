@@ -89,7 +89,8 @@ import {
   getWorkerToolUiKey
 } from "@/lib/worker-tool-result-key"
 import {
-  messageHasVisibleRow
+  messageHasVisibleRow,
+  normalizeVisibleReasoningText
 } from "@/lib/message-display-visibility"
 import {
   isCoordinatorModeMetadata,
@@ -176,16 +177,23 @@ import {
 import { AtFileMentionPopover } from "@/features/mentions/AtFileMentionPopover"
 import {
   readBoundedWorkspaceMentionFile,
+  retainMentionedWorkspaceFilesForWorkspace,
   resolveAtFileAttachments,
   resolveAtFileSelection,
   type MentionedWorkspaceFile
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
   MAX_ATTACHMENT_FILE_BYTES,
   type SelectedAttachmentFileGrant
 } from "../../../../shared/file-attachment"
+import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
+import { projectVisibleChatSearchContent } from "../../../../shared/chat-search-visible-content"
+import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
+import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
@@ -228,9 +236,11 @@ import {
   shouldClearPendingApprovalAfterGoalControl
 } from "@/lib/goal-control-submit"
 import {
+  getSubmitInFlightReleaseVersion,
   releaseSubmitInFlightLock,
   shouldQueueBehindInFlightSubmit,
   shouldUseSubmitInFlightLock,
+  subscribeSubmitInFlightRelease,
   tryAcquireSubmitInFlightLock,
   type SubmitInFlightLockRef
 } from "@/lib/submit-in-flight-lock"
@@ -238,7 +248,11 @@ import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
 import { HookLogModal } from "./HookLogViews"
-import type { ChatSearchCorpus, ChatSearchDocument } from "@/lib/chat-search-matches"
+import {
+  shouldHydrateDurableSearchMatch,
+  type ChatSearchCorpus,
+  type ChatSearchDocument
+} from "@/lib/chat-search-matches"
 import { createChatMessageProjector } from "@/lib/chat-message-projection"
 import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
 import {
@@ -246,7 +260,15 @@ import {
   classifyChatScrollTailChange,
   shouldMarkChatTailContentGrowth
 } from "@/lib/chat-scroll-tail-change"
-import { buildBoundedChatSearchText } from "@/lib/bounded-chat-search-text"
+import {
+  buildBoundedChatSearchText,
+  CHAT_SEARCH_DOCUMENT_TEXT_LIMIT
+} from "@/lib/bounded-chat-search-text"
+import { buildStreamingMarkdownPreview } from "@/lib/streaming-markdown-schedule"
+import {
+  continueWorkspaceFilesDeduped,
+  loadWorkspaceFilesDeduped
+} from "@/lib/workspace-file-load"
 import {
   createChatScrollState,
   isChatScrollDetached,
@@ -276,6 +298,33 @@ const CHAT_HISTORY_ANCHOR_STABLE_FRAMES = 12
 const CHAT_SESSION_ANCHOR_STABLE_FRAMES = 2
 const CHAT_LOCAL_SEARCH_HISTORY_LIMIT = 500
 const CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT = 4 * 1024 * 1024
+
+function awaitWorkspaceMentionLoad<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    const error = new Error("Workspace mention load was cancelled")
+    error.name = "AbortError"
+    return Promise.reject(error)
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort)
+      const error = new Error("Workspace mention load was cancelled")
+      error.name = "AbortError"
+      reject(error)
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort)
+        reject(error)
+      }
+    )
+  })
+}
 
 interface PendingDurableHistoryAnchor {
   threadId: string
@@ -1002,22 +1051,7 @@ function cleanUserAttachmentMarkupForDisplay(message: Message): Message {
     return message
   }
 
-  const fileNames: string[] = []
-  const textOnly = message.content
-    .replace(
-      /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
-      (_match, name: string) => {
-        const decoded = name
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&quot;/g, '"')
-        fileNames.push(`📎 ${decoded}`)
-        return ""
-      }
-    )
-    .trim()
-  const content = fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
+  const content = cleanUserAttachmentContentForDisplay(message.content)
   return { ...message, content }
 }
 
@@ -1771,14 +1805,27 @@ export function ChatContainer({
   const agentModeChangeRequestRef = useRef(0)
   const agentModeChangeChainRef = useRef<Promise<void>>(Promise.resolve())
   const agentModeSaveRef = useRef<Promise<void>>(Promise.resolve())
-  // Draft-queue UI state: inline edit, drag-reorder, and a pump tick that
-  // re-triggers the auto-drain effect after each queued send settles.
+  // Draft-queue UI state: inline edit, drag-reorder, and a retry tick for
+  // authoritative handoff reconciliation.
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
   const [editingQueueText, setEditingQueueText] = useState("")
   const [draggingQueueId, setDraggingQueueId] = useState<string | null>(null)
   const queuedEditRequestRef = useRef(0)
   const guidingQueuedMessageIdsRef = useRef(new Set<string>())
   const [queuePumpTick, setQueuePumpTick] = useState(0)
+  const subscribeToSubmitRelease = useCallback(
+    (listener: () => void) => subscribeSubmitInFlightRelease(submitInFlightRef, threadId, listener),
+    [submitInFlightRef, threadId]
+  )
+  const getSubmitReleaseVersion = useCallback(
+    () => getSubmitInFlightReleaseVersion(submitInFlightRef, threadId),
+    [submitInFlightRef, threadId]
+  )
+  const submitReleaseVersion = useSyncExternalStore(
+    subscribeToSubmitRelease,
+    getSubmitReleaseVersion,
+    getSubmitReleaseVersion
+  )
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryBatchesRef = useRef<
@@ -2108,6 +2155,8 @@ export function ChatContainer({
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
+  const workspacePathRef = useRef(workspacePath)
+  workspacePathRef.current = workspacePath
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
   const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
@@ -2400,6 +2449,14 @@ export function ChatContainer({
   useEffect(() => {
     mentionedFilesRef.current = mentionedFiles
   }, [mentionedFiles])
+  useEffect(() => {
+    setMentionedFiles((current) => {
+      const retained = retainMentionedWorkspaceFilesForWorkspace(current, workspacePath)
+      if (retained.length === current.length) return current
+      mentionedFilesRef.current = retained
+      return retained
+    })
+  }, [workspacePath])
   useEffect(
     () => () => {
       for (const requestToken of activeAtFilePreviewTokensRef.current) {
@@ -3099,6 +3156,15 @@ export function ChatContainer({
     liveDisplayProjection
   )
   const displayMessages = displayMessageProjection.messages
+  const streamingSearchMessageIdRef = useRef<string | null>(null)
+  streamingSearchMessageIdRef.current = isLoading
+    ? (displayMessages.findLast((message) =>
+        messageHasVisibleRow(
+          message,
+          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+        )
+      )?.id ?? null)
+    : null
   const displayMessagesContentVersion = displayMessageProjection.contentVersion
   const displayMessagesStructureVersion = displayMessageProjection.structureVersion
   const chatScrollQuestionStructureRevision =
@@ -3309,31 +3375,72 @@ export function ChatContainer({
       const hasHookLogChip = Boolean(hookLogBucket?.entries.length)
       if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
-      const parts: unknown[] = [message.content, message.reasoning ?? ""]
-      for (const [toolCallIndex, toolCall] of (message.tool_calls ?? []).entries()) {
-        parts.push(toolCall.name, toolCall.args)
-        const toolResult = toolResults.get(
-          getWorkerToolUiKey(message.id, toolCall.id, toolCallIndex)
-        )
-        if (toolResult) parts.push(toolResult.content)
+      // Reasoning and Hook details are folded into controls/modals and have no highlightable text
+      // in the transcript row. Search only content that reveal can actually expose in this row.
+      let displayContent =
+        message.role === "user" && typeof message.content === "string"
+          ? cleanUserAttachmentContentForDisplay(message.content)
+          : message.content
+      const hasVisibleReasoning =
+        message.role === "assistant" && Boolean(normalizeVisibleReasoningText(message.reasoning))
+      if (hasVisibleReasoning) {
+        if (typeof displayContent === "string") {
+          displayContent = stripThinkBlocksForDisplay(displayContent)
+        } else if (Array.isArray(displayContent)) {
+          displayContent = displayContent.map((block) =>
+            block.type === "text" && block.text
+              ? { ...block, text: stripThinkBlocksForDisplay(block.text) }
+              : block
+          )
+        }
       }
-      if (hookLogBucket?.entries.length) {
-        parts.push(hookLogBucket.entries)
+      let visibleContent: string
+      if (
+        message.role === "assistant" &&
+        message.id === streamingSearchMessageIdRef.current &&
+        (typeof displayContent === "string" || Array.isArray(displayContent))
+      ) {
+        const textBlocks = typeof displayContent === "string"
+          ? [displayContent]
+          : displayContent.flatMap((block) =>
+              block.type === "text" && block.text ? [block.text] : []
+            )
+        visibleContent = textBlocks
+          .flatMap((block) => {
+            const preview = buildStreamingMarkdownPreview(block)
+            return [preview.head, preview.tail].filter(Boolean)
+          })
+          .map((part) => projectVisibleChatSearchContent(message.role, part))
+          .join("\n")
+      } else {
+        visibleContent = projectVisibleChatSearchContent(message.role, displayContent)
       }
+      const parts: unknown[] = [visibleContent]
+      for (const toolCall of message.tool_calls ?? []) {
+        parts.push(getCollapsedToolCallSummary(toolCall))
+      }
+      const text = buildBoundedChatSearchText(parts)
       return {
         messageId: message.id,
-        text: buildBoundedChatSearchText(parts),
+        text,
+        truncated: text.length >= CHAT_SEARCH_DOCUMENT_TEXT_LIMIT,
+        durableAuthoritative: hasVisibleReasoning,
         sortIndex
       }
     },
-    [hookLogBucketByTurnId, hookLogConfig.enabled, toolResults]
+    [hookLogBucketByTurnId, hookLogConfig.enabled]
   )
   const stableSearchDocumentsRef = useRef<{
     baseline: readonly Message[]
+    rawMessages: readonly Message[]
     indexById: ReadonlyMap<string, number>
     buildDocument: typeof buildSearchDocument
     gapBeforeMessageId: string | null
-    documents: readonly ChatSearchDocument[]
+    contentVersion: number
+    startIndex: number
+    textUnits: number
+    documents: ChatSearchDocument[]
+    documentIndexById: Map<string, number>
   } | null>(null)
   const dynamicSearchDocumentsRef = useRef<{
     liveStructureVersion: number
@@ -3344,11 +3451,78 @@ export function ChatContainer({
     documentIndexById: Map<string, number>
   } | null>(null)
   const getSearchCorpus = useCallback((): ChatSearchCorpus => {
-    const cached = stableSearchDocumentsRef.current
+    let cached = stableSearchDocumentsRef.current
     let stableDocuments = cached?.documents
+    const stableIdentityMatches =
+      cached &&
+      cached.baseline === threadDisplayBaseline &&
+      cached.rawMessages === threadMessages &&
+      cached.indexById === displayMessageProjection.indexById &&
+      cached.buildDocument === buildSearchDocument &&
+      cached.gapBeforeMessageId === (historyWindowGap?.beforeMessageId ?? null)
+    if (
+      cached &&
+      stableIdentityMatches &&
+      cached.contentVersion !== messagesContentVersion
+    ) {
+      let requiresRebuild = false
+      let textUnits = cached.textUnits
+      const nextDocuments = [...cached.documents]
+      for (const changedMessage of displayMessageProjection.changedMessages) {
+        const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
+        const baselineIndex = threadDisplayBaseline.findIndex(
+          (message) => message.id === changedMessage.id
+        )
+        const belongsToCachedWindow =
+          baselineIndex >= cached.startIndex &&
+          baselineIndex < threadDisplayBaseline.length
+        if (cachedDocumentIndex === undefined) {
+          if (
+            belongsToCachedWindow &&
+            buildSearchDocument(
+              changedMessage,
+              displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+            )
+          ) {
+            requiresRebuild = true
+            break
+          }
+          continue
+        }
+        const nextDocument = buildSearchDocument(
+          changedMessage,
+          displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+        )
+        if (!nextDocument) {
+          requiresRebuild = true
+          break
+        }
+        textUnits += nextDocument.text.length - nextDocuments[cachedDocumentIndex].text.length
+        nextDocuments[cachedDocumentIndex] = nextDocument
+      }
+      if (requiresRebuild) {
+        stableSearchDocumentsRef.current = null
+        cached = null
+      } else {
+        while (
+          nextDocuments.length > 1 &&
+          textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          textUnits -= nextDocuments.shift()?.text.length ?? 0
+        }
+        cached.documents = nextDocuments
+        cached.documentIndexById = new Map(
+          nextDocuments.map((document, index) => [document.messageId, index] as const)
+        )
+        cached.textUnits = textUnits
+        cached.contentVersion = messagesContentVersion
+        stableDocuments = nextDocuments
+      }
+    }
     if (
       !cached ||
       cached.baseline !== threadDisplayBaseline ||
+      cached.rawMessages !== threadMessages ||
       cached.indexById !== displayMessageProjection.indexById ||
       cached.buildDocument !== buildSearchDocument ||
       cached.gapBeforeMessageId !== (historyWindowGap?.beforeMessageId ?? null)
@@ -3358,15 +3532,14 @@ export function ChatContainer({
       // very long task cannot synchronously stringify and index the entire hydrated history.
       const documents: ChatSearchDocument[] = []
       let textUnits = 0
-      const gapTailStartIndex = historyWindowGap
-        ? threadDisplayBaseline.findIndex(
-            (message) => message.id === historyWindowGap.beforeMessageId
-          )
-        : 0
       // A resident gap makes the in-memory array non-contiguous. Index only the latest side of
       // that gap locally; durable results provide the omitted prefix in database order. Otherwise
       // merging "old resident prefix + durable gap + latest tail" could advertise a false order.
-      const contiguousTailStartIndex = gapTailStartIndex >= 0 ? gapTailStartIndex : 0
+      const contiguousTailStartIndex = resolveChatSearchContiguousTailStart(
+        threadMessages,
+        threadDisplayBaseline,
+        historyWindowGap?.beforeMessageId ?? null
+      )
       const startIndex = Math.max(
         contiguousTailStartIndex,
         threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT
@@ -3396,10 +3569,17 @@ export function ChatContainer({
       )
       stableSearchDocumentsRef.current = {
         baseline: threadDisplayBaseline,
+        rawMessages: threadMessages,
         indexById: displayMessageProjection.indexById,
         buildDocument: buildSearchDocument,
         gapBeforeMessageId: historyWindowGap?.beforeMessageId ?? null,
-        documents: stableDocuments
+        contentVersion: messagesContentVersion,
+        startIndex,
+        textUnits,
+        documents: stableDocuments,
+        documentIndexById: new Map(
+          stableDocuments.map((document, index) => [document.messageId, index] as const)
+        )
       }
     }
     let dynamicCache = dynamicSearchDocumentsRef.current
@@ -3485,6 +3665,8 @@ export function ChatContainer({
     liveDisplayProjection,
     liveDisplayMessages,
     historyWindowGap,
+    messagesContentVersion,
+    threadMessages,
     threadDisplayBaseline
   ])
   const setPendingDurableRevealMessageId = useCallback(
@@ -3826,6 +4008,10 @@ export function ChatContainer({
   )
   const revealDurableMessage = useCallback(
     async (match: DurableChatSearchMatch): Promise<void> => {
+      if (!shouldHydrateDurableSearchMatch(match.messageId, visibleMessageIndexById)) {
+        // The overlay's common reveal path mounts/centers this resident virtual row immediately.
+        return
+      }
       const revealGeneration = durableMessageWindowGenerationRef.current + 1
       durableMessageWindowGenerationRef.current = revealGeneration
       pendingChatSessionAnchorRef.current = null
@@ -3848,6 +4034,7 @@ export function ChatContainer({
       dispatchChatScrollEvent,
       loadMessageWindowAround,
       setPendingDurableRevealMessageId,
+      visibleMessageIndexById,
       waitForTranscriptCommit
     ]
   )
@@ -4552,10 +4739,47 @@ export function ChatContainer({
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser
   })
+  const loadMoreWorkspaceMentionFiles = useCallback(
+    async (signal: AbortSignal) => {
+      if (!workspacePath) return null
+      let result: Awaited<ReturnType<typeof continueWorkspaceFilesDeduped>> | null
+      try {
+        // Do not bind the shared bounded scan to one transient keystroke. A
+        // superseded query stops awaiting it, while the completed segment is
+        // still published for the next query and the Files panel.
+        result = await awaitWorkspaceMentionLoad(
+          continueWorkspaceFilesDeduped(threadId, workspacePath),
+          signal
+        )
+      } catch (error) {
+        if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+          throw error
+        }
+        result = null
+      }
+
+      // Continuation cursors intentionally expire after an idle window. Reopen
+      // one bounded initial scan so @ search can recover without requiring the
+      // user to mount or refresh the Files panel first.
+      if (!result?.success) {
+        result = await awaitWorkspaceMentionLoad(
+          loadWorkspaceFilesDeduped(threadId, workspacePath),
+          signal
+        )
+      }
+      if (!result.success) return null
+      return {
+        files: result.files,
+        continuationAvailable: result.continuationAvailable === true
+      }
+    },
+    [threadId, workspacePath]
+  )
   const atFileMentions = useAtFileMentions({
     input,
     cursorOffset: inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
+    loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
     disabled: slash.mode.kind === "slash" || !workspacePath
   })
   const slashPopoverKind = slash.mode.kind
@@ -5164,6 +5388,7 @@ export function ChatContainer({
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
       const atFileRequestToken = crypto.randomUUID()
+      const atFileWorkspaceKey = normalizeWorkspacePathKey(workspacePath)
       activeAtFilePreviewTokensRef.current.add(atFileRequestToken)
       const cancelAtFileReads = (): void => {
         void window.api.workspace.cancelFilePreview({
@@ -5181,8 +5406,16 @@ export function ChatContainer({
           workspaceFiles,
           maxAttachments: MAX_ATTACHMENTS,
           maxTotalChars: MAX_TOTAL_CHARS,
-          readWorkspaceFile: (filePath, maxChars) =>
-            readBoundedWorkspaceMentionFile({
+          readWorkspaceFile: async (filePath, maxChars) => {
+            // A workspace can still change before the first user turn is
+            // committed. Fence both sides of the async read so content from a
+            // newly selected workspace is never attached under the old chip path.
+            if (
+              normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey
+            ) {
+              return { success: false }
+            }
+            const result = await readBoundedWorkspaceMentionFile({
               maxChars,
               readPage: (offset) =>
                 window.api.workspace.readFilePreview({
@@ -5191,7 +5424,11 @@ export function ChatContainer({
                   lane: AT_FILE_PREVIEW_LANE,
                   requestToken: atFileRequestToken
                 })
-            }),
+            })
+            return normalizeWorkspacePathKey(workspacePathRef.current) === atFileWorkspaceKey
+              ? result
+              : { success: false }
+          },
           cancelWorkspaceFileReads: cancelAtFileReads
         })
       } finally {
@@ -5217,6 +5454,11 @@ export function ChatContainer({
         // 非致命失败只做提示，不中断后面的普通发送流程。
         toast.warning(atFileWarningMessage)
       }
+
+      // A stale chip may have been the only composer payload. Once it is
+      // rejected, do not emit an empty user turn merely because the pre-read
+      // validation originally saw a pending file chip.
+      if (!rawMessage && resolvedAttachments.length === 0 && !skill && !browser) return
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
       const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
@@ -5435,6 +5677,10 @@ export function ChatContainer({
     } finally {
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.delete(threadId)
+      // `done` can flip isLoading to false before stream.submit's promise
+      // continuation releases this mutable lock. The idle-rendered pump then
+      // observes the lock, returns, and otherwise has no reactive reason to
+      // try again. Publish a wake only after the lock is actually gone.
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
@@ -5989,8 +6235,8 @@ export function ChatContainer({
   // queue) could slip in ahead of the pump's own stream.submit and end up silently
   // queued behind it inside the SDK with no visible indication why, while the pump's
   // optimistic UI (bubble already appended, draft already removed from the queue)
-  // sits there looking "sent." Failing fast here avoids that. queuePumpTick forces
-  // a re-check after each settle.
+  // sits there looking "sent." Failing fast here avoids that. The shared release
+  // version forces a re-check after each settle, including across component remounts.
   useEffect(() => {
     if (queueAutoDrainSuppressed) return
     if (submitInFlightRef.current.has(threadId)) return
@@ -6049,7 +6295,6 @@ export function ChatContainer({
       })
       .finally(() => {
         releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
-        setQueuePumpTick((tick) => tick + 1)
       })
   }, [
     contextReminderPending,
@@ -6067,6 +6312,7 @@ export function ChatContainer({
     removeLocalMessage,
     setError,
     stream,
+    submitReleaseVersion,
     submitQueuedMessage,
     submitInFlightRef,
     threadError,

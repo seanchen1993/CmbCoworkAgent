@@ -2,6 +2,10 @@ export interface ChatSearchDocument {
   messageId: string
   text: string
   sortIndex?: number
+  /** The local text hit its bounded index limit and may need durable occurrence supplementation. */
+  truncated?: boolean
+  /** Durable raw content is intentionally different, so it must never supplement this row. */
+  durableAuthoritative?: boolean
 }
 
 export interface ChatSearchMatch {
@@ -16,6 +20,14 @@ export interface ChatSearchCorpus {
   /** The live suffix and any live overrides of persisted rows. */
   dynamicDocuments: readonly ChatSearchDocument[]
   dynamicMessageIds: ReadonlySet<string>
+}
+
+/** A durable hit already resident in the virtual list needs mounting, not another DB window. */
+export function shouldHydrateDurableSearchMatch(
+  messageId: string,
+  visibleMessageIndexById: ReadonlyMap<string, number>
+): boolean {
+  return !visibleMessageIndexById.has(messageId)
 }
 
 export function findChatSearchMatches(
@@ -98,6 +110,7 @@ export function createChatSearchMatcher(
   let previousStableDocuments: readonly ChatSearchDocument[] | null = null
   let previousQuery = ""
   let stableMatches: ChatSearchMatch[] = []
+  let stableDocumentMatches = new WeakMap<ChatSearchDocument, ChatSearchMatch[]>()
   let previousDynamicIdKey = ""
   let visibleStableMatches: readonly ChatSearchMatch[] = stableMatches
 
@@ -109,11 +122,25 @@ export function createChatSearchMatcher(
       corpus.stableDocuments !== previousStableDocuments ||
       normalizedQuery !== previousQuery
     ) {
-      stableMatches = findChatSearchMatches(
-        corpus.stableDocuments,
-        normalizedQuery,
-        boundedMaxMatches
-      )
+      if (normalizedQuery !== previousQuery) {
+        stableDocumentMatches = new WeakMap()
+      }
+      const nextStableMatches: ChatSearchMatch[] = []
+      for (const document of corpus.stableDocuments) {
+        let documentMatches = stableDocumentMatches.get(document)
+        if (!documentMatches) {
+          documentMatches = findChatSearchMatches(
+            [document],
+            normalizedQuery,
+            boundedMaxMatches
+          )
+          stableDocumentMatches.set(document, documentMatches)
+        }
+        const remaining = boundedMaxMatches - nextStableMatches.length
+        if (remaining <= 0) break
+        nextStableMatches.push(...documentMatches.slice(0, remaining))
+      }
+      stableMatches = nextStableMatches
       previousStableDocuments = corpus.stableDocuments
       previousQuery = normalizedQuery
       previousDynamicIdKey = "\u0001"

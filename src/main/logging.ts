@@ -607,7 +607,14 @@ function safeStringify(value: unknown): string {
   const projected = projectLogValueSafely(value)
   let serialized: string
   try {
-    serialized = typeof projected === "string" ? projected : JSON.stringify(projected)
+    if (typeof projected === "string") {
+      serialized = projected
+    } else {
+      // JSON.stringify intentionally returns undefined for top-level undefined.
+      // console.log accepts that value, so the file logger must preserve it as
+      // text instead of letting its own length bound crash the business call.
+      serialized = JSON.stringify(projected) ?? String(projected)
+    }
   } catch {
     serialized = "[Unserializable Object]"
   }
