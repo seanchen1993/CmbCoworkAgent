@@ -67,6 +67,7 @@ interface CodexVariantSeed {
 interface CodexFamilySeed {
   id: string
   label: string
+  source?: string
   lightDescription?: string
   darkDescription?: string
   light?: CodexVariantSeed
@@ -302,16 +303,17 @@ const CODEX_THEME_FAMILIES: readonly CodexFamilySeed[] = [
   {
     id: "codex",
     label: "Codex",
+    source: "Codex Desktop 26.825.51511",
     lightDescription: "纯白配系统蓝，清爽克制",
     darkDescription: "近黑配系统蓝，中性克制",
-    light: light("#ffffff", "#0d0d0d", "#0169cc", "#00a240", "#e02e2a", "#751ed9", [
+    light: light("#ffffff", "#0d0d0d", "#0285ff", "#00a240", "#e02e2a", "#751ed9", [
       "#d53538",
       "#008809",
       "#0071ea",
       "#666666",
       "#751ed9"
     ]),
-    dark: dark("#111111", "#fcfcfc", "#0169cc", "#00a240", "#e02e2a", "#b06dff", [
+    dark: dark("#181818", "#ffffff", "#339cff", "#00a240", "#e02e2a", "#b06dff", [
       "#f67576",
       "#85df7b",
       "#6dcbf4",
@@ -740,14 +742,28 @@ function isFullyTransparent(color: string): boolean {
   return normalized === "transparent" || /^#[0-9a-f]{6}00$/.test(normalized)
 }
 
+function compositeHexOverBackground(color: string, background: string): string {
+  const normalized = color.trim()
+  const foreground = hexToRgb(normalized)
+  const backdrop = hexToRgb(background)
+  const opacity = /^#[0-9a-f]{8}$/i.test(normalized)
+    ? Number.parseInt(normalized.slice(7, 9), 16) / 255
+    : 1
+
+  return `#${foreground
+    .map((channel, index) => toHex(channel * opacity + backdrop[index] * (1 - opacity)))
+    .join("")}`
+}
+
 /**
  * The `text-on-accent` decision used by Codex Desktop's theme runtime.
  * It is used for dark-theme accent surfaces. CMB's filled primary actions
  * intentionally keep a white foreground in light themes, matching the
  * classic CMBDevClaw button treatment instead of turning their glyphs black.
  */
-function codexTextOnAccent(color: string): string {
-  const [red, green, blue] = hexToRgb(color)
+function codexTextOnAccent(color: string, background?: string): string {
+  const resolvedColor = background ? compositeHexOverBackground(color, background) : color
+  const [red, green, blue] = hexToRgb(resolvedColor)
   const linearize = (channel: number) => {
     const srgb = channel / 255
     return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4
@@ -797,7 +813,7 @@ function defineCodexTheme(
   const primaryForeground = isLight ? "#ffffff" : codexTextOnAccent(primary)
   const button = chrome?.button ?? primary
   const buttonForeground =
-    chrome?.buttonForeground ?? (isLight ? "#ffffff" : codexTextOnAccent(button))
+    chrome?.buttonForeground ?? (isLight ? "#ffffff" : codexTextOnAccent(button, seed.surface))
   const border = alpha(seed.ink, 0.06 + contrast * 0.04)
   const borderEmphasis = alpha(seed.ink, (isLight ? 0.09 : 0.12) + contrast * 0.06)
   const backgroundElevated = mix(seed.surface, whiteOrInk, elevatedOpacity)
@@ -820,7 +836,7 @@ function defineCodexTheme(
     familyId: family.id,
     label: family.label,
     description,
-    source: "Codex Desktop 26.818.41509",
+    source: family.source ?? "Codex Desktop 26.818.41509",
     colorScheme,
     palette: {
       background: seed.surface,

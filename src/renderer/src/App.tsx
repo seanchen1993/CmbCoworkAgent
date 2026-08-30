@@ -1,4 +1,13 @@
-import { useEffect, useState, useCallback, useRef, useLayoutEffect, lazy, Suspense } from "react"
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  useLayoutEffect,
+  useSyncExternalStore,
+  lazy,
+  Suspense
+} from "react"
 import {
   Briefcase,
   Eye,
@@ -38,6 +47,8 @@ import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLife
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
+import { getThemeDefinition } from "@/lib/theme-registry"
+import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
 import { initMMJ } from "../js/mmjUtils"
 import { toast, Toaster } from "sonner"
 import { useShallow } from "zustand/react/shallow"
@@ -186,6 +197,12 @@ function AnimatedThreadSidebar({
 }
 
 function App(): React.JSX.Element {
+  const themePreference = useSyncExternalStore(
+    subscribeThemePreference,
+    getThemePreference,
+    getThemePreference
+  )
+  const toastTheme = getThemeDefinition(themePreference).colorScheme
   const {
     currentThreadId,
     loadThreads,
@@ -1282,7 +1299,7 @@ function App(): React.JSX.Element {
         )}
       </div>
       <PetStateBridge />
-      <Toaster position="top-center" richColors duration={2200} />
+      <Toaster position="top-center" richColors duration={2200} theme={toastTheme} />
     </ThreadProvider>
   )
 }

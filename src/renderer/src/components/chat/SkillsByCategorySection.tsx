@@ -338,7 +338,7 @@ export function SkillsByCategorySection({
                             }
                             onUseSkillPrompt(skill, label)
                           }}
-                          className="group relative w-full rounded-xl border border-slate-300/90 dark:border-border bg-slate-50/70 dark:bg-background-elevated px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] dark:shadow-[0_1px_0_rgb(0_0_0_/_18%)] hover:bg-slate-100/95 dark:hover:bg-background-interactive hover:border-slate-400/95 dark:hover:border-border-emphasis hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                          className="group relative w-full rounded-xl border border-border bg-background-elevated px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] dark:shadow-[0_1px_0_rgb(0_0_0_/_18%)] hover:bg-background-interactive hover:border-border-emphasis hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
                         >
                           {tags.length > 0 && (
                             <div className="absolute right-1 top-1 flex flex-col items-end gap-0.5">

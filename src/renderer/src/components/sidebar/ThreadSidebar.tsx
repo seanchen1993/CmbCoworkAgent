@@ -332,7 +332,7 @@ function ThreadListItemImpl({
             )}
           </div>
           {hasContextReminder && !isRunning ? (
-            <span className="size-2 rounded-full bg-status-info shrink-0" />
+            <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
           ) : (
             isUnread &&
             !isRunning && <span className="size-2 rounded-full bg-status-info shrink-0" />
@@ -1295,7 +1295,7 @@ export function ThreadSidebar(): React.JSX.Element {
                                 </span>
                               </button>
                               {hasContextReminderThread ? (
-                                <span className="size-2 rounded-full bg-status-info shrink-0" />
+                                <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
                               ) : (
                                 unreadCount > 0 && (
                                   <span className="size-2 rounded-full bg-status-info shrink-0" />

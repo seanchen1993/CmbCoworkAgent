@@ -3228,7 +3228,7 @@ export function SkillDetail(props: {
                   />
                 </div>
               ) : previewKind === "html" ? (
-                <div className="h-[80vh] min-h-[500px] overflow-hidden rounded-md border border-border bg-background-elevated">
+                <div className="html-preview-light-canvas h-[80vh] min-h-[500px] overflow-hidden rounded-md border border-border">
                   <iframe
                     title={selectedFilePath ?? "html preview"}
                     srcDoc={content ?? ""}

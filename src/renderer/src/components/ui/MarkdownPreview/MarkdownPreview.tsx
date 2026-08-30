@@ -317,7 +317,7 @@ export function MarkdownPreview({
       {isExpanded ? (
         currentViewMode === "preview" ? (
           <div
-            className={`max-w-none p-6 ${whiteBackground ? "bg-background-elevated prose prose-gray dark:prose-invert" : "prose prose-gray dark:prose-invert"}`}
+            className={`markdown-preview max-w-none p-6 ${whiteBackground ? "bg-background-elevated prose prose-gray dark:prose-invert" : "prose prose-gray dark:prose-invert"}`}
           >
             <div className="streaming-markdown text-sm leading-relaxed overflow-auto">
               <ReactMarkdown

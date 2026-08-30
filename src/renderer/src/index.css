@@ -34,6 +34,7 @@
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-tertiary-foreground: var(--tertiary-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
@@ -431,6 +432,11 @@
 
 .dark .text-black {
   color: var(--foreground);
+}
+
+/* Raw HTML files render in an isolated document and keep the browser's light canvas. */
+.html-preview-light-canvas {
+  background-color: #ffffff;
 }
 
 /*

@@ -1,8 +1,13 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
+import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview"
 
 const RENDERER_ROOT = join(process.cwd(), "src/renderer/src")
+const HTML_PREVIEW_LIGHT_CANVAS_RULE =
+  /\.html-preview-light-canvas\s*\{\s*background-color:\s*#ffffff;\s*\}/
 
 function rendererSourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -45,7 +50,7 @@ describe("theme surface policy", () => {
 
   it("keeps component CSS surfaces on semantic theme tokens", () => {
     const violations = rendererStyleFiles(RENDERER_ROOT).flatMap((file) => {
-      const css = readFileSync(file, "utf8")
+      const css = readFileSync(file, "utf8").replace(HTML_PREVIEW_LIGHT_CANVAS_RULE, "")
       const runtimeCss = file.endsWith("index.css")
         ? css.replace(/:root\s*\{[\s\S]*?\n\}/, "")
         : css
@@ -120,6 +125,21 @@ describe("theme surface policy", () => {
     expect(violations).toEqual([])
   })
 
+  it("reserves the fixed light canvas for isolated HTML skill previews", () => {
+    const skillsPanelPath = join(RENDERER_ROOT, "components/customize/SkillsPanel.tsx")
+    const usages = rendererSourceFiles(RENDERER_ROOT).filter((file) =>
+      readFileSync(file, "utf8").includes("html-preview-light-canvas")
+    )
+    const skillsPanel = readFileSync(skillsPanelPath, "utf8")
+    const css = readFileSync(join(RENDERER_ROOT, "index.css"), "utf8")
+
+    expect(usages).toEqual([skillsPanelPath])
+    expect(skillsPanel).toMatch(
+      /previewKind === "html"[\s\S]{0,300}html-preview-light-canvas[\s\S]{0,300}srcDoc=/
+    )
+    expect(css).toMatch(HTML_PREVIEW_LIGHT_CANVAS_RULE)
+  })
+
   it("keeps inline SVG icons inheriting their semantic text color", () => {
     const invalidCurrentColor = /fill=["']curreColor["']/gi
     const violations = rendererSourceFiles(RENDERER_ROOT).flatMap((file) =>
@@ -187,7 +207,17 @@ describe("theme surface policy", () => {
   it("keeps file-preview code blocks block-level and padded", () => {
     const themeCss = readFileSync(join(RENDERER_ROOT, "index.css"), "utf8")
     const rule = themeCss.match(/\.markdown-preview code\.hljs\s*\{([^}]+)\}/)?.[1]
+    const markup = renderToStaticMarkup(
+      createElement(MarkdownPreview, {
+        content: "```ts\nconst answer = 42\n```",
+        showHeader: false,
+        showModeToggle: false
+      })
+    )
 
+    expect(markup).toMatch(
+      /<div class="[^"]*markdown-preview[^"]*">[\s\S]*<code class="[^"]*hljs[^"]*language-ts[^"]*">/
+    )
     expect(rule).toContain("display: block")
     expect(rule).toContain("overflow-x: auto")
     expect(rule).toContain("padding: 0.75rem")
@@ -217,18 +247,29 @@ describe("theme surface policy", () => {
     expect(source).toContain("subscribeThemePreference")
   })
 
-  it("keeps every unread and reminder indicator on the shared info token", () => {
-    const indicatorPattern =
-      /(?:hasContextReminder(?:Thread)?|hasUnread\w*|isUnread|unreadCount\s*>\s*0)[\s\S]{0,180}?<span\s+className="([^"]*\bsize-2\b[^"]*)"/g
-    const indicators = rendererSourceFiles(RENDERER_ROOT).flatMap((file) =>
-      [...readFileSync(file, "utf8").matchAll(indicatorPattern)].map((match) => ({
-        file,
-        className: match[1]
-      }))
-    )
-    const violations = indicators.filter(({ className }) => !className.includes("bg-status-info"))
+  it("keeps the global toaster connected to the active application theme", () => {
+    const source = readFileSync(join(RENDERER_ROOT, "App.tsx"), "utf8")
 
-    expect(indicators.length).toBeGreaterThan(0)
-    expect(violations).toEqual([])
+    expect(source).toContain("subscribeThemePreference")
+    expect(source).toContain("getThemeDefinition(themePreference).colorScheme")
+    expect(source).toContain("theme={toastTheme}")
+    expect(source).not.toContain('theme="system"')
+  })
+
+  it("keeps context reminders distinct from ordinary unread indicators", () => {
+    const source = readFileSync(join(RENDERER_ROOT, "components/sidebar/ThreadSidebar.tsx"), "utf8")
+    const reminderPattern =
+      /hasContextReminder(?:Thread)?[\s\S]{0,180}?<span\s+className="([^"]*\bsize-2\b[^"]*)"/g
+    const unreadPattern =
+      /(?:isUnread|unreadCount\s*>\s*0)[\s\S]{0,180}?<span\s+className="([^"]*\bsize-2\b[^"]*)"/g
+    const reminderClasses = [...source.matchAll(reminderPattern)].map((match) => match[1])
+    const unreadClasses = [...source.matchAll(unreadPattern)].map((match) => match[1])
+
+    expect(reminderClasses).toHaveLength(2)
+    expect(unreadClasses).toHaveLength(2)
+    expect(
+      reminderClasses.every((className) => className.includes("bg-status-warning-foreground"))
+    ).toBe(true)
+    expect(unreadClasses.every((className) => className.includes("bg-status-info"))).toBe(true)
   })
 })

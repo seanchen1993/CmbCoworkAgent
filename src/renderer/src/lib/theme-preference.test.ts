@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   applyThemePreference,
+  getDarkThemePreference,
+  getLightThemePreference,
+  getThemeModePreference,
   getThemePreference,
+  setThemeForColorScheme,
+  setThemeModePreference,
   setThemePreference,
   subscribeThemePreference
 } from "./theme-preference"
@@ -24,6 +29,7 @@ function contrastRatio(left: string, right: string): number {
 function installFakeWindow(): {
   values: Map<string, string>
   variables: Map<string, string>
+  setSystemDark: (enabled: boolean) => void
   root: {
     classList: { contains: (name: string) => boolean }
     style: { colorScheme: string; setProperty: (name: string, value: string) => void }
@@ -33,6 +39,8 @@ function installFakeWindow(): {
   const values = new Map<string, string>()
   const variables = new Map<string, string>()
   const target = new EventTarget()
+  const mediaTarget = new EventTarget()
+  let systemDark = false
   const classes = new Set<string>()
   const root = {
     classList: {
@@ -58,9 +66,29 @@ function installFakeWindow(): {
       removeItem: (key: string) => values.delete(key)
     }
   })
+  Object.defineProperty(target, "matchMedia", {
+    value: (query: string) => ({
+      get matches() {
+        return systemDark
+      },
+      media: query,
+      onchange: null,
+      addEventListener: mediaTarget.addEventListener.bind(mediaTarget),
+      removeEventListener: mediaTarget.removeEventListener.bind(mediaTarget),
+      dispatchEvent: mediaTarget.dispatchEvent.bind(mediaTarget)
+    })
+  })
   vi.stubGlobal("window", target)
   vi.stubGlobal("document", { documentElement: root })
-  return { values, variables, root }
+  return {
+    values,
+    variables,
+    root,
+    setSystemDark: (enabled: boolean): void => {
+      systemDark = enabled
+      mediaTarget.dispatchEvent(new Event("change"))
+    }
+  }
 }
 
 describe("theme preference", () => {
@@ -81,11 +109,15 @@ describe("theme preference", () => {
     setThemePreference("codex-dark")
 
     expect(getThemePreference()).toBe("codex-dark")
-    expect(values.get("cmb:theme-preference")).toBe("codex-dark")
+    expect(JSON.parse(values.get("cmb:theme-settings") ?? "{}")).toEqual({
+      mode: "dark",
+      lightTheme: "cmbdevclaw-white",
+      darkTheme: "codex-dark"
+    })
     expect(root.classList.contains("dark")).toBe(true)
     expect(root.dataset.theme).toBe("codex-dark")
     expect(root.dataset.colorScheme).toBe("dark")
-    expect(variables.get("--background")).toBe("#111111")
+    expect(variables.get("--background")).toBe("#181818")
     expect(listener).toHaveBeenCalledOnce()
     unsubscribe()
   })
@@ -108,12 +140,16 @@ describe("theme preference", () => {
     unsubscribe()
   })
 
-  it("removes the saved preference when returning to the default theme", () => {
+  it("returns to the default light theme without losing the saved dark theme", () => {
     const { values, root } = installFakeWindow()
     setThemePreference("codex-dark")
     setThemePreference(DEFAULT_THEME_ID)
 
-    expect(values.size).toBe(0)
+    expect(JSON.parse(values.get("cmb:theme-settings") ?? "{}")).toEqual({
+      mode: "light",
+      lightTheme: "cmbdevclaw-white",
+      darkTheme: "codex-dark"
+    })
     expect(root.classList.contains("dark")).toBe(false)
     expect(root.style.colorScheme).toBe("light")
     expect(root.dataset.theme).toBe("cmbdevclaw-white")
@@ -127,13 +163,21 @@ describe("theme preference", () => {
   })
 
   it("applies cross-window storage changes before notifying subscribers", () => {
-    const { root, variables } = installFakeWindow()
+    const { values, root, variables } = installFakeWindow()
     const listener = vi.fn()
     const unsubscribe = subscribeThemePreference(listener)
+    values.set(
+      "cmb:theme-settings",
+      JSON.stringify({
+        mode: "dark",
+        lightTheme: "cmbdevclaw-white",
+        darkTheme: "dracula-dark"
+      })
+    )
     const event = new Event("storage")
     Object.defineProperties(event, {
-      key: { value: "cmb:theme-preference" },
-      newValue: { value: "dracula-dark" }
+      key: { value: "cmb:theme-settings" },
+      newValue: { value: values.get("cmb:theme-settings") }
     })
 
     window.dispatchEvent(event)
@@ -149,7 +193,7 @@ describe("theme preference", () => {
     const { values, root } = installFakeWindow()
     setThemePreference("catppuccin-dark")
 
-    expect(values.get("cmb:theme-preference")).toBe("catppuccin-dark")
+    expect(JSON.parse(values.get("cmb:theme-settings") ?? "{}").darkTheme).toBe("catppuccin-dark")
     expect(getThemePreference()).toBe("catppuccin-dark")
     expect(root.dataset.theme).toBe("catppuccin-dark")
     expect(root.classList.contains("dark")).toBe(true)
@@ -160,9 +204,54 @@ describe("theme preference", () => {
 
     values.set("cmb:theme-preference", "catppuccin-mocha")
     expect(getThemePreference()).toBe("catppuccin-dark")
+    expect(getThemeModePreference()).toBe("dark")
+    expect(getDarkThemePreference()).toBe("catppuccin-dark")
 
     values.set("cmb:theme-preference", "light")
     expect(getThemePreference()).toBe("cmbdevclaw-white")
+    expect(getThemeModePreference()).toBe("light")
+    expect(getLightThemePreference()).toBe("cmbdevclaw-white")
+  })
+
+  it("follows the system appearance and remembers separate light and dark themes", () => {
+    const { root, setSystemDark } = installFakeWindow()
+    const listener = vi.fn()
+    const unsubscribe = subscribeThemePreference(listener)
+
+    setThemePreference("github-light")
+    setThemePreference("dracula-dark")
+    setThemeModePreference("system")
+
+    expect(getThemeModePreference()).toBe("system")
+    expect(getLightThemePreference()).toBe("github-light")
+    expect(getDarkThemePreference()).toBe("dracula-dark")
+    expect(getThemePreference()).toBe("github-light")
+    expect(root.dataset.theme).toBe("github-light")
+
+    setSystemDark(true)
+    expect(getThemePreference()).toBe("dracula-dark")
+    expect(root.dataset.theme).toBe("dracula-dark")
+
+    setSystemDark(false)
+    expect(getThemePreference()).toBe("github-light")
+    expect(root.dataset.theme).toBe("github-light")
+    unsubscribe()
+  })
+
+  it("can configure the inactive system theme without changing the current appearance", () => {
+    const { root, setSystemDark } = installFakeWindow()
+    const unsubscribe = subscribeThemePreference(() => undefined)
+    setThemeModePreference("system")
+
+    setThemeForColorScheme("nord-dark")
+    expect(getDarkThemePreference()).toBe("nord-dark")
+    expect(getThemePreference()).toBe("cmbdevclaw-white")
+    expect(root.dataset.theme).toBe("cmbdevclaw-white")
+
+    setSystemDark(true)
+    expect(getThemePreference()).toBe("nord-dark")
+    expect(root.dataset.theme).toBe("nord-dark")
+    unsubscribe()
   })
 
   it("keeps the classic CMBDevClaw white palette intact", () => {
@@ -210,11 +299,17 @@ describe("theme preference", () => {
     const linearDark = THEME_DEFINITIONS.find((theme) => theme.id === "linear-dark")
     const draculaDark = THEME_DEFINITIONS.find((theme) => theme.id === "dracula-dark")
     const catppuccinDark = THEME_DEFINITIONS.find((theme) => theme.id === "catppuccin-dark")
+    const solarizedDark = THEME_DEFINITIONS.find((theme) => theme.id === "solarized-dark")
+    const gruvboxDark = THEME_DEFINITIONS.find((theme) => theme.id === "gruvbox-dark")
 
-    expect(codexDark?.source).toBe("Codex Desktop 26.818.41509")
-    expect(codexDark?.palette.background).toBe("#111111")
-    expect(codexDark?.palette.foreground).toBe("#fcfcfc")
-    expect(codexDark?.palette.primary).toBe("#0169cc")
+    expect(codexLight?.source).toBe("Codex Desktop 26.825.51511")
+    expect(codexLight?.palette.background).toBe("#ffffff")
+    expect(codexLight?.palette.foreground).toBe("#0d0d0d")
+    expect(codexLight?.palette.primary).toBe("#0285ff")
+    expect(codexDark?.source).toBe("Codex Desktop 26.825.51511")
+    expect(codexDark?.palette.background).toBe("#181818")
+    expect(codexDark?.palette.foreground).toBe("#ffffff")
+    expect(codexDark?.palette.primary).toBe("#339cff")
     expect(codexLight?.palette.sidebarHover).toBe("rgb(13 13 13 / 0.05)")
     expect(codexLight?.palette.sidebarAccent).toBe(codexLight?.palette.sidebarHover)
     expect(absolutelyLight?.palette.background).toBe("#f9f9f7")
@@ -230,6 +325,9 @@ describe("theme preference", () => {
     expect(draculaDark?.palette.sidebarHover).toBe("#44475A75")
     expect(draculaDark?.palette.sidebarAccent).toBe(draculaDark?.palette.sidebarHover)
     expect(catppuccinDark?.palette.primary).toBe("#cba6f7")
+    expect(solarizedDark?.palette.button).toBe("#2AA19899")
+    expect(solarizedDark?.palette.buttonForeground).toBe("#ffffff")
+    expect(gruvboxDark?.palette.buttonForeground).toBe("#ebdbb2")
 
     const raycastLight = THEME_DEFINITIONS.find((theme) => theme.id === "raycast-light")
     expect(raycastLight?.palette.primary).toBe("#ff6363")
@@ -285,6 +383,14 @@ describe("theme preference", () => {
     const proof = THEME_DEFINITIONS.find((theme) => theme.id === "proof-light")
     expect(proof?.palette.statusWarning).toBe("#d3b45b")
     expect(proof?.palette.statusWarningForeground).toBe("#E25507")
+  })
+
+  it("keeps context reminder indicators distinct from ordinary unread indicators", () => {
+    for (const theme of THEME_DEFINITIONS) {
+      expect(theme.palette.statusWarningForeground.toLowerCase(), theme.id).not.toBe(
+        theme.palette.statusInfo.toLowerCase()
+      )
+    }
   })
 
   it("keeps solid destructive actions readable in every theme", () => {

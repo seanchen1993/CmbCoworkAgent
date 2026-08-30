@@ -151,7 +151,7 @@ export function OrganizationSkillsSection({
                     }
                     onUseSkillPrompt(skill, label)
                   }}
-                  className="group relative w-full rounded-xl border border-slate-300/90 dark:border-border bg-slate-50/70 dark:bg-background-elevated px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] dark:shadow-[0_1px_0_rgb(0_0_0_/_18%)] hover:bg-slate-100/95 dark:hover:bg-background-interactive hover:border-slate-400/95 dark:hover:border-border-emphasis hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
+                  className="group relative w-full rounded-xl border border-border bg-background-elevated px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] dark:shadow-[0_1px_0_rgb(0_0_0_/_18%)] hover:bg-background-interactive hover:border-border-emphasis hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] transition-all"
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <div className="rounded-md border border-border bg-background-interactive p-1.5 text-muted-foreground transition-colors group-hover:text-foreground">
