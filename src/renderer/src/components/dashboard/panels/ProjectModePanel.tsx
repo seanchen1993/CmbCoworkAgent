@@ -691,7 +691,7 @@ function isStageBucketsEmpty(buckets: DashboardStageBuckets): boolean {
 function StageBucketCaliberHint(): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div>按每轮对话开始时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
+      <div>对话按每轮开始时、代码按实际生成时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
       {STAGE_BUCKET_VIEW.map(({ bucket }) => (
         <div key={bucket}>
           <span className="font-medium">{STAGE_BUCKET_LABELS[bucket]}</span>：
@@ -726,6 +726,56 @@ function StageBucketSplit({
             <span>
               {formatNumber(stat.conversationCount)} 对话 · {formatLineCount(lines)} 行 ·{" "}
               {formatPercent(stat.codeStats?.inclusiveAdoptionRate)} 采纳
+            </span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Harness / VibeCoding total-caliber adoption rates shown directly in each project row. */
+function ProjectStageAdoptionRates({
+  buckets
+}: {
+  buckets: DashboardStageBuckets
+}): React.JSX.Element {
+  const rows: Array<{
+    key: "pluginConstrained" | "vibecoding"
+    bucket: StageBucket
+    shortLabel: string
+    dot: string
+  }> = [
+    {
+      key: "pluginConstrained",
+      bucket: "plugin_constrained",
+      shortLabel: "Harness",
+      dot: "bg-emerald-500"
+    },
+    {
+      key: "vibecoding",
+      bucket: "vibecoding",
+      shortLabel: "VibeCoding",
+      dot: "bg-violet-500"
+    }
+  ]
+  return (
+    <div className="flex flex-col items-end gap-0.5 whitespace-nowrap">
+      {rows.map(({ key, bucket, shortLabel, dot }) => {
+        const stats = buckets[key].codeStats
+        const detail = stats
+          ? `${formatLineCount(stats.adoptedLines)}/${formatLineCount(stats.inclusiveEffectiveGeneratedLines)} 行`
+          : "—"
+        return (
+          <span
+            key={bucket}
+            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"
+            title={`${STAGE_BUCKET_LABELS[bucket]}：总量口径提交采纳率 ${formatPercent(stats?.inclusiveAdoptionRate)}（${detail}）`}
+          >
+            <span className={`size-1.5 rounded-full ${dot}`} />
+            <span>{shortLabel}</span>
+            <span className="font-medium text-foreground">
+              {formatPercent(stats?.inclusiveAdoptionRate)}
             </span>
           </span>
         )
@@ -1033,28 +1083,40 @@ function ProjectRow({
                   {project.name}
                 </span>
               </div>
-              {project.systemName && (
-                <div
-                  className="truncate text-[10px] text-muted-foreground"
-                  title={project.systemName}
-                >
-                  {project.systemName}
+              {(project.systemName || project.systemConstraintEverLoadedSuccessfully) && (
+                <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground">
+                  {project.systemName && (
+                    <span className="min-w-0 truncate" title={project.systemName}>
+                      {project.systemName}
+                    </span>
+                  )}
+                  {project.systemConstraintEverLoadedSuccessfully && (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 border-status-nominal/40 bg-status-nominal/10 px-1.5 py-0 text-[10px] font-medium text-status-nominal normal-case tracking-normal"
+                      title="该项目至少有一次会话完整加载系统约束"
+                    >
+                      约束加载
+                    </Badge>
+                  )}
                 </div>
               )}
             </div>
           </div>
         </td>
-        <td className="px-3 py-2 text-muted-foreground">
+        <td className="min-w-0 overflow-hidden px-3 py-2 text-muted-foreground">
           {project.adapterName ? (
-            <span>
-              {project.adapterName}
+            <div
+              className="min-w-0 max-w-full"
+              title={`${project.adapterName}${project.adapterVersion ? ` ${project.adapterVersion}` : ""}`}
+            >
+              <div className="truncate">{project.adapterName}</div>
               {project.adapterVersion ? (
-                <span className="text-[10px] text-muted-foreground/70">
-                  {" "}
+                <div className="truncate text-[10px] text-muted-foreground/70">
                   {project.adapterVersion}
-                </span>
+                </div>
               ) : null}
-            </span>
+            </div>
           ) : (
             "—"
           )}
@@ -1062,7 +1124,9 @@ function ProjectRow({
         <td className="px-3 py-2 text-muted-foreground">
           {lifecycleLabel(project.lifecycleStatus)}
         </td>
-        <td className="px-3 py-2 text-right tabular-nums">{formatNumber(project.featureCount)}</td>
+        <td className="px-3 py-2 text-right font-medium tabular-nums">
+          {formatNumber(project.featureCount)}
+        </td>
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
@@ -1109,33 +1173,54 @@ function ProjectRow({
             />
           </div>
         </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <div className="flex flex-col items-end gap-0.5">
+            <div>
+              <span className="mr-1 text-muted-foreground">会话</span>
+              <span className="font-medium text-foreground">
+                {formatNumber(project.devStageConversationCount)}
+              </span>
+            </div>
+            <div>
+              <span className="mr-1 text-muted-foreground">关联特性</span>
+              <span className="font-medium text-foreground">
+                {formatNumber(project.devAssociatedFeatureCount)}
+              </span>
+            </div>
+          </div>
+        </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          <ProjectStageAdoptionRates buckets={project.stageBuckets} />
+        </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
           {creatorId && creatorId !== creatorName ? (
             <div className="font-mono text-[10px] text-muted-foreground">{creatorId}</div>
           ) : null}
         </td>
-        <td className="px-3 py-2 text-muted-foreground">{creatorDepartment}</td>
-        <td className="px-3 py-2 text-right text-muted-foreground tabular-nums">{createdAt}</td>
-        <td className="px-3 py-2 text-right">
+        <td className="break-words px-3 py-2 text-muted-foreground">{creatorDepartment}</td>
+        <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground tabular-nums">
+          {createdAt}
+        </td>
+        <td className="whitespace-nowrap px-3 py-2 text-right">
           <button
             type="button"
-            className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+            className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
             disabled={project.conversationCount === 0}
             onClick={(event) => {
               event.stopPropagation()
               onOpenTraces()
             }}
           >
-            <MessagesSquare className="size-3.5" />
+            <MessagesSquare className="size-3.5 shrink-0" />
             查看对话
           </button>
         </td>
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={12} className="px-3 py-3">
-            <div className="space-y-3">
+          <td colSpan={14} className="px-3 py-3">
+            <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 <span className="text-muted-foreground">常用技能：</span>
@@ -1165,11 +1250,16 @@ function ProjectRow({
                   {project.features.map((feature) => (
                     <div
                       key={feature.slug || feature.title}
-                      className="space-y-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
+                      className="min-w-0 space-y-2 overflow-hidden rounded-lg border border-border bg-card px-3 py-2 text-xs"
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-start gap-2">
                         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-                          <span className="font-medium text-foreground">{feature.title}</span>
+                          <span
+                            className="block max-w-[420px] truncate font-medium text-foreground"
+                            title={feature.title}
+                          >
+                            {feature.title}
+                          </span>
                           {feature.statusLabel && (
                             <Badge variant="outline" className="normal-case tracking-normal">
                               {feature.statusLabel}
@@ -1189,7 +1279,7 @@ function ProjectRow({
                             </span>
                           )}
                         </div>
-                        <div className="ml-auto flex shrink-0 items-center gap-3">
+                        <div className="ml-auto flex shrink-0 items-center gap-3 whitespace-nowrap">
                           <button
                             type="button"
                             className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
@@ -1241,12 +1331,19 @@ function ProjectRow({
 function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): React.JSX.Element {
   return (
     <>
-      {skills.map((item) => (
-        <Badge key={item.id ?? item.skill} variant="outline" className="normal-case tracking-normal">
-          {item.skill}
-          {item.isPlugin && item.pluginName ? ` · ${item.pluginName}` : ""} · {formatNumber(item.count)}
-        </Badge>
-      ))}
+      {skills.map((item) => {
+        const label = `${item.skill}${item.isPlugin && item.pluginName ? ` · ${item.pluginName}` : ""} · ${formatNumber(item.count)}`
+        return (
+          <Badge
+            key={item.id ?? item.skill}
+            variant="outline"
+            className="max-w-[360px] truncate normal-case tracking-normal"
+            title={label}
+          >
+            {label}
+          </Badge>
+        )
+      })}
     </>
   )
 }
@@ -1311,7 +1408,7 @@ function SortableTh({
 }): React.JSX.Element {
   if (!enabled) {
     return (
-      <th className="px-3 py-2 text-right font-medium" title={title}>
+      <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title={title}>
         {label}
       </th>
     )
@@ -1319,18 +1416,18 @@ function SortableTh({
   const active = activeKey === sortKey
   const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
-    <th className="px-3 py-2 text-right font-medium">
+    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
       <button
         type="button"
         onClick={() => onSort(sortKey)}
         title={title ?? `按${label}排序`}
         className={cn(
-          "ml-auto inline-flex items-center gap-1 transition-colors hover:text-foreground",
+          "ml-auto inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
           active ? "text-foreground" : "text-muted-foreground"
         )}
       >
         <span>{label}</span>
-        <Icon className={cn("size-3", active ? "opacity-100" : "opacity-40")} />
+        <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
       </button>
     </th>
   )
@@ -1561,8 +1658,9 @@ function ProjectListSection({
         <>
           <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            项目、插件、项目状态、特性数为当前状态；对话数、原始生成行数、提交、总量两口径采纳率，以及展开行的技能、各特性采纳明细与关联
-            Commit 按所选时间范围统计。
+            项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段会话数、DEV
+            关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
+            流程采纳率按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
       )}
@@ -1633,13 +1731,36 @@ function ProjectListSection({
 
       <div
         className={cn(
-          "overflow-hidden rounded-xl border border-border bg-card",
+          "overflow-x-auto rounded-xl border border-border bg-card",
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full text-xs">
+        <table className="w-full min-w-[2080px] table-fixed text-xs">
+          {/*
+           * Keep column allocation deterministic across macOS and Windows.
+           * With table-layout:auto, CJK body text has a one-glyph min-content
+           * width, so Chromium may collapse the department/action columns before
+           * the horizontal scroller is needed. The fixed grid makes overflow land
+           * on the existing scroll container instead of turning text vertical.
+           */}
+          <colgroup>
+            <col className="w-[300px]" />
+            <col className="w-[220px]" />
+            <col className="w-[90px]" />
+            <col className="w-[76px]" />
+            <col className="w-[76px]" />
+            <col className="w-[110px]" />
+            <col className="w-[160px]" />
+            <col className="w-[160px]" />
+            <col className="w-[142px]" />
+            <col className="w-[178px]" />
+            <col className="w-[110px]" />
+            <col className="w-[210px]" />
+            <col className="w-[140px]" />
+            <col className="w-[94px]" />
+          </colgroup>
           <thead>
-            <tr className="border-b border-border bg-muted/30 text-muted-foreground">
+            <tr className="whitespace-nowrap border-b border-border bg-muted/30 text-muted-foreground">
               <th
                 className={cn(
                   PROJECT_LIST_PROJECT_COLUMN_CLASS,
@@ -1654,9 +1775,10 @@ function ProjectListSection({
                 label="特性数"
                 sortKey="featureCount"
                 activeKey={effectiveSortBy}
-                order={sortOrder}
+                order={effectiveSortOrder}
                 enabled
                 onSort={cycleSort}
+                title="项目当前特性数"
               />
               <SortableTh
                 label="对话数"
@@ -1677,6 +1799,19 @@ function ProjectListSection({
               />
               <th className="px-3 py-2 text-right font-medium">提交口径采纳率</th>
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内的 DEV 阶段会话数，以及这些会话关联的去重特性数；未关联特性的 DEV 会话仅计入会话数"
+              >
+                <div>DEV阶段会话数</div>
+                <div>DEV关联特性数</div>
+              </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="按流程阶段归因拆分的总量口径提交采纳率"
+              >
+                Harness / VibeCoding 采纳率
+              </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
               <SortableTh
@@ -1709,7 +1844,7 @@ function ProjectListSection({
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -1719,7 +1854,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={14} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -1727,12 +1862,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={12} className="h-[49px]" />
+                  <td colSpan={14} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={12} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>

@@ -13,7 +13,6 @@ import {
   Star,
   User,
   Edit,
-  FileText,
   X,
   BarChart3,
   Check,
@@ -389,6 +388,7 @@ interface UserInfoLite {
 type MarketExtraJson = {
   skills?: string[]
   grayUserIds?: string[]
+  grayOrgs?: string[]
   updated_at?: string
 }
 
@@ -408,6 +408,19 @@ function getGrayUserIdsFromExtraJson(extraJson?: string): string[] {
   return Array.from(
     new Set(
       parsed.grayUserIds
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  )
+}
+
+function getGrayOrgsFromExtraJson(extraJson?: string): string[] {
+  const parsed = parseMarketExtraJson(extraJson)
+  if (!Array.isArray(parsed.grayOrgs)) return []
+  return Array.from(
+    new Set(
+      parsed.grayOrgs
         .filter((item): item is string => typeof item === "string")
         .map((item) => item.trim())
         .filter(Boolean)
@@ -491,16 +504,30 @@ function doesMarketUserIdMatchCurrentUser(
 function canCurrentUserViewMarketItem(
   item: MarketItem,
   currentUserSapId: string | null | undefined,
-  currentUserIdCandidates: Iterable<string>
+  currentUserIdCandidates: Iterable<string>,
+  currentUserPathName?: string | null | undefined
 ): boolean {
   if (doesMarketUserIdMatchCurrentUser(item.user_id, currentUserIdCandidates, currentUserSapId)) {
     return true
   }
   const grayUserIds = getGrayUserIdsFromExtraJson(item.extra_json)
-  if (grayUserIds.length === 0) return true
-  return grayUserIds.some((userId) =>
+  const grayOrgs = getGrayOrgsFromExtraJson(item.extra_json)
+
+  if (grayUserIds.length === 0 && grayOrgs.length === 0) return true
+
+  if (grayUserIds.length > 0 && grayUserIds.some((userId) =>
     doesMarketUserIdMatchCurrentUser(userId, currentUserIdCandidates, currentUserSapId)
-  )
+  )) {
+    return true
+  }
+
+  if (grayOrgs.length > 0 && currentUserPathName && grayOrgs.some((org) =>
+    currentUserPathName.includes(org)
+  )) {
+    return true
+  }
+
+  return false
 }
 
 type UploadFilterMode = "mine" | "installed" | "featured" | "certified"
@@ -778,15 +805,6 @@ function MarketItemCard({
             <div className="size-4 border-2 border-[#c4956a] border-t-transparent rounded-full animate-spin" />
           ) : (
             <>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 px-3 gap-1 text-xs text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc] hover:border-[#d1cfc5] shadow-[#e8e6dc_0px_0px_0px_0px,#d1cfc5_0px_0px_0px_1px] cursor-pointer rounded-lg"
-                onClick={() => onOpenDetail(item)}
-              >
-                <FileText className="size-3" />
-                详情
-              </Button>
               {isInstalled ? (
                 isFeatured ? (
                   <span className="text-[11px] bg-[#fdf3e7] border border-[#f5d9c4] text-[#c4956a] px-2.5 py-1 rounded-lg inline-flex items-center gap-1">
@@ -805,7 +823,7 @@ function MarketItemCard({
                             disabled
                             aria-disabled="true"
                           >
-                            <Zap className="size-3" />
+                            <Plus className="size-3" />
                             无需安装
                           </Button>
                         </span>
@@ -825,7 +843,7 @@ function MarketItemCard({
                       className="market-update-bounce h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#0f766e] border-[#78d7cb] bg-[#e5fbf7] hover:bg-[#d4f7f0]"
                       onClick={handleUpdateInstall}
                     >
-                      <Zap className="size-3" />
+                      <Plus className="size-3" />
                       更新
                     </Button>
                   </UpdateVersionTooltip>
@@ -836,7 +854,7 @@ function MarketItemCard({
                     className="h-7 px-3 gap-1 text-xs cursor-pointer rounded-lg text-[#5e5d59] border-[#e8e6dc] bg-[#f5f4ed] hover:bg-[#e8e6dc]"
                     onClick={handleUpdateInstall}
                   >
-                    <Zap className="size-3" />
+                    <Plus className="size-3" />
                     重装
                   </Button>
                 )
@@ -852,7 +870,7 @@ function MarketItemCard({
                             disabled
                             aria-disabled="true"
                           >
-                            <Zap className="size-3" />
+                            <Plus className="size-3" />
                             无需安装
                           </Button>
                         </span>
@@ -866,7 +884,7 @@ function MarketItemCard({
                     className="h-7 px-3 gap-1 text-xs bg-[#c4956a] hover:bg-[#b85a3a] text-[#faf9f5] border-0 shadow-[#c4956a_0px_0px_0px_0px,#c4956a_0px_0px_0px_1px] cursor-pointer rounded-lg"
                     onClick={handleInstallDownload}
                   >
-                    <Zap className="size-3" />
+                    <Plus className="size-3" />
                     安装
                   </Button>
                 )
@@ -1025,6 +1043,7 @@ export function MarketPanel(): React.JSX.Element {
   const [uploaderProfiles, setUploaderProfiles] = useState<Record<string, UploaderProfile>>({})
   const [currentUserUploadCandidates, setCurrentUserUploadCandidates] = useState<string[]>([])
   const [currentUserSapId, setCurrentUserSapId] = useState<string | null>(null)
+  const [currentUserPathName, setCurrentUserPathName] = useState<string | null>(null)
   const [isCurrentUserMarketAdmin, setIsCurrentUserMarketAdmin] = useState(false)
   const [adminModeEnabled, setAdminModeEnabled] = useState(false)
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
@@ -1321,6 +1340,7 @@ export function MarketPanel(): React.JSX.Element {
       }
       const userInfo = (await window.api.models.getUserInfo()) as UserInfoLite | null
       setCurrentUserSapId(userInfo?.sapId?.trim() || null)
+      setCurrentUserPathName(userInfo?.pathName?.trim() || null)
       const currentYstId = userInfo?.ystId?.trim() || ""
       const isAdmin = Boolean(currentYstId && MARKET_ADMIN_YST_IDS.has(currentYstId))
       setIsCurrentUserMarketAdmin(isAdmin)
@@ -1336,6 +1356,7 @@ export function MarketPanel(): React.JSX.Element {
       console.warn("[MarketPanel] Failed to load current user upload candidates:", err)
       setCurrentUserUploadCandidates([])
       setCurrentUserSapId(null)
+      setCurrentUserPathName(null)
       setIsCurrentUserMarketAdmin(false)
       setAdminModeEnabled(false)
     }
@@ -2067,7 +2088,7 @@ export function MarketPanel(): React.JSX.Element {
       currentData.filter((item) => {
         if (
           activeTab !== ORG_SKILL_MARKET_TYPE &&
-          !canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
+          !canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet, currentUserPathName)
         ) {
           return false
         }
@@ -2219,7 +2240,7 @@ export function MarketPanel(): React.JSX.Element {
     const targetItem = skillsData.find(
       (item) =>
         item.name === detailName &&
-        canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet)
+        canCurrentUserViewMarketItem(item, currentUserSapId, currentUserCandidateSet, currentUserPathName)
     )
     if (!targetItem) {
       if (skillsData.length > 0) setMarketInitialSkillDetailName(null)
@@ -2929,7 +2950,6 @@ export function MarketPanel(): React.JSX.Element {
                       reloadToken={reloadToken}
                       downloadingItems={downloadingItems}
                       onOpenDetail={openItemDetail}
-                      onDownload={handleDownload}
                       onUninstall={handleUninstall}
                       initialDetailName={pendingOrgSkillDetailName}
                       onInitialDetailReady={(item) => {

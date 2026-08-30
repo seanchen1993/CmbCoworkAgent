@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from "react"
-import { Terminal as TerminalIcon, RotateCcw, Square, FolderOpen, Plus, X, Loader2, TriangleAlert, ChevronDown } from "lucide-react"
+import {
+  Terminal as TerminalIcon,
+  RotateCcw,
+  Square,
+  FolderOpen,
+  Plus,
+  X,
+  Loader2,
+  TriangleAlert,
+  ChevronDown
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { Terminal } from "@xterm/xterm"
@@ -103,19 +113,19 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
   // 加载模型列表（仅打包环境）
   const refreshModels = useCallback((resetSelection = false) => {
     if (!isPackaged) return
-    window.api.models.getCustomConfigs().then((configs) => {
-      const list = configs.map((c) => ({
-        id: c.id,
-        name: c.name,
-        model: c.model
-      }))
-      setModels(list)
-      if (list.length === 0) {
-        setSelectedModelId("")
-      } else if (resetSelection || !selectedModelId || !list.some((m) => m.id === selectedModelId)) {
-        setSelectedModelId(list[0].id)
-      }
-    }).catch(console.error)
+    Promise.all([window.api.models.list(), window.api.models.getDefault()])
+      .then(([configs, defaultModelId]) => {
+        const list = configs
+          .filter((config) => config.available)
+          .map((config) => ({ id: config.id, name: config.name, model: config.model }))
+        setModels(list)
+        if (list.length === 0) {
+          setSelectedModelId("")
+        } else if (resetSelection || !selectedModelId || !list.some((m) => m.id === selectedModelId)) {
+          setSelectedModelId(list.find((model) => model.id === defaultModelId)?.id ?? list.at(0)?.id ?? "")
+        }
+      })
+      .catch(console.error)
   }, [selectedModelId])
 
   useEffect(() => {
@@ -433,17 +443,22 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
     try {
       [dir, resolvedModelId] = await Promise.all([
         window.api.terminal.selectDir(),
-        isPackaged ? window.api.models.getCustomConfigs().then((configs) => {
-          const list = configs.map((c) => ({ id: c.id, name: c.name, model: c.model }))
-          setModels(list)
-          const valid = list.some((m) => m.id === selectedModelId)
-          if (!valid) {
-            const fallback = list.length > 0 ? list[0].id : ""
-            setSelectedModelId(fallback)
-            return fallback
-          }
-          return selectedModelId
-        }).catch((e) => { console.warn("[ClaudeCode] Failed to load model configs:", e); return selectedModelId }) : Promise.resolve(selectedModelId)
+        isPackaged
+          ? Promise.all([window.api.models.list(), window.api.models.getDefault()])
+              .then(([configs, defaultModelId]) => {
+                const list = configs
+                  .filter((config) => config.available)
+                  .map((config) => ({ id: config.id, name: config.name, model: config.model }))
+                setModels(list)
+                if (!list.some((model) => model.id === selectedModelId)) {
+                  const fallback = list.find((model) => model.id === defaultModelId)?.id ?? list.at(0)?.id ?? ""
+                  setSelectedModelId(fallback)
+                  return fallback
+                }
+                return selectedModelId
+              })
+              .catch((e) => { console.warn("[ClaudeCode] Failed to load model configs:", e); return selectedModelId })
+          : Promise.resolve(selectedModelId)
       ])
     } catch (err) {
       console.error("[ClaudeCode] Failed to initialize session:", err)
@@ -451,7 +466,10 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
       setMountError(`启动失败: ${err instanceof Error ? err.message : err}`)
       return
     }
-    if (!dir) { setCreating(false); return } // session 未创建，无 ownsCreatingState，直接重置
+    if (!dir) {
+      setCreating(false)
+      return
+    } // session 未创建，无 ownsCreatingState，直接重置
 
     let id: string
     let session: Session
@@ -467,8 +485,22 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
       container.style.overflow = "hidden"
 
       session = {
-        id, termId: null, xterm, fitAddon, container,
-        running: false, workDir: dir, claudeModelId: resolvedModelId || undefined, syncSkills: syncSkillsRef.current, syncMemory: syncMemoryRef.current, hasContent: false, ownsCreatingState: true, restarting: false, slowStarting: false, domCleanups: [], ptyCleanups: []
+        id,
+        termId: null,
+        xterm,
+        fitAddon,
+        container,
+        running: false,
+        workDir: dir,
+        claudeModelId: resolvedModelId || undefined,
+        syncSkills: syncSkillsRef.current,
+        syncMemory: syncMemoryRef.current,
+        hasContent: false,
+        ownsCreatingState: true,
+        restarting: false,
+        slowStarting: false,
+        domCleanups: [],
+        ptyCleanups: []
       }
     } catch (err) {
       console.error("[ClaudeCode] Failed to create session:", err)
@@ -483,12 +515,17 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
 
     // P3 fix: 用 cancelled flag 防止组件卸载后仍创建 PTY
     let cancelled = false
-    session.domCleanups.push(() => { cancelled = true })
+    session.domCleanups.push(() => {
+      cancelled = true
+    })
 
     // 等 React 渲染完毕且 hostRef 可用后再挂载
     let hostAttempts = 0
     const waitForHost = (): void => {
-      if (cancelled) { releaseCreatingState(session); return }
+      if (cancelled) {
+        releaseCreatingState(session)
+        return
+      }
       hostAttempts++
       if (!hostRef.current) {
         if (hostAttempts > MAX_TRY_OPEN_ATTEMPTS) {
@@ -601,7 +638,10 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
       for (const session of sessionsRef.current.values()) {
         session.ptyCleanups.forEach((fn) => fn())
         session.domCleanups.forEach((fn) => fn())
-        if (session.termId) window.api.terminal.dispose(session.termId).catch((e) => console.warn("[ClaudeCode] dispose failed in unmount", e))
+        if (session.termId)
+          window.api.terminal
+            .dispose(session.termId)
+            .catch((e) => console.warn("[ClaudeCode] dispose failed in unmount", e))
         session.xterm.dispose()
         session.container.remove()
       }
@@ -641,7 +681,9 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
         activeSession.running = false
         activeSession.restarting = false
         activeSession.hasContent = true
-        activeSession.xterm.write(`\r\n\x1b[31m[重启失败: ${err instanceof Error ? err.message : err}]\x1b[0m\r\n`)
+        activeSession.xterm.write(
+          `\r\n\x1b[31m[重启失败: ${err instanceof Error ? err.message : err}]\x1b[0m\r\n`
+        )
         setSessionIds((prev) => [...prev])
       } else {
         activeSession.restarting = false // session 已销毁，仅清标志
@@ -662,10 +704,17 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
       }
       setSessionIds((prev) => [...prev]) // 立即刷新 UI（关闭 loading 遮罩 + 按钮从 Stop 变 Restart），不等 await dispose
       cleanupPty(activeSession) // 先清监听器，防止 dispose 期间 onExit 双写退出信息
-      try { await window.api.terminal.dispose(termId) }
-      catch (e) { console.warn("[ClaudeCode] dispose failed in handleStop, PTY may still be running", e) }
+      try {
+        await window.api.terminal.dispose(termId)
+      } catch (e) {
+        console.warn("[ClaudeCode] dispose failed in handleStop, PTY may still be running", e)
+      }
       // await 期间 session 可能已被 closeSession 销毁或被 Restart 重新启动
-      if (sessionsRef.current.has(activeSession.id) && !activeSession.running && !activeSession.restarting) {
+      if (
+        sessionsRef.current.has(activeSession.id) &&
+        !activeSession.running &&
+        !activeSession.restarting
+      ) {
         activeSession.xterm.write("\r\n\x1b[90m[已停止]\x1b[0m\r\n")
       }
     }
@@ -693,7 +742,8 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
             </svg>
             <h3 className="text-lg font-semibold text-foreground/80">Claude Code</h3>
             <p className="text-sm text-muted-foreground text-center leading-relaxed">
-              点击下方按钮选择项目目录，Claude Code 将在该目录下启动。<br />
+              点击下方按钮选择项目目录，Claude Code 将在该目录下启动。
+              <br />
               你可以通过顶部 Tab 栏新建多个会话，每个会话对应不同的项目目录。
             </p>
             <div className="rounded-xl border border-border/60 divide-y divide-border/60 text-xs text-muted-foreground">
@@ -709,7 +759,10 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
               )}
               <div className="flex items-center gap-2 px-4 py-2">
                 <TriangleAlert className="size-3.5 shrink-0 text-amber-400" />
-                <span>按 {window.electron.process.platform === "win32" ? "Alt+M" : "Shift+Tab"} 切换到 bypass permissions 模式可跳过确认弹窗</span>
+                <span>
+                  按 {window.electron.process.platform === "win32" ? "Alt+M" : "Shift+Tab"} 切换到
+                  bypass permissions 模式可跳过确认弹窗
+                </span>
               </div>
             </div>
           </div>
@@ -727,7 +780,10 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                       className="appearance-none h-7 pl-3 pr-7 rounded-lg border-none bg-transparent text-xs text-foreground/70 focus:outline-none cursor-pointer hover:text-foreground/90 transition-colors"
                     >
                       {models.map((m) => (
-                        <option key={m.id} value={m.id}>{m.name}{m.model !== m.name ? ` · ${m.model}` : ""}</option>
+                        <option key={m.id} value={m.id}>
+                          {m.name}
+                          {m.model !== m.name ? ` · ${m.model}` : ""}
+                        </option>
                       ))}
                     </select>
                     <ChevronDown className="pointer-events-none absolute right-1.5 size-3 text-muted-foreground/40" />
@@ -739,7 +795,13 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                 { label: "注入 CMBDevClaw 技能", checked: syncSkills, onChange: setSyncSkills },
                 { label: "注入 CMBDevClaw 记忆", checked: syncMemory, onChange: setSyncMemory }
               ].map(({ label, checked, onChange }, i, arr) => (
-                <div key={label} className={cn("flex items-center justify-between px-4 py-2.5", i < arr.length - 1 && "border-b border-[rgba(0,0,0,0.04)]")}>
+                <div
+                  key={label}
+                  className={cn(
+                    "flex items-center justify-between px-4 py-2.5",
+                    i < arr.length - 1 && "border-b border-[rgba(0,0,0,0.04)]"
+                  )}
+                >
                   <span className="text-xs text-muted-foreground/60">{label}</span>
                   <button
                     type="button"
@@ -781,11 +843,23 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
             </span>
           )}
           {activeSession?.running && !activeSession.restarting ? (
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleStop} title="停止">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0"
+              onClick={handleStop}
+              title="停止"
+            >
               <Square className="size-3.5" />
             </Button>
           ) : activeSession?.hasContent ? (
-            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={handleRestart} title="重启">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0"
+              onClick={handleRestart}
+              title="重启"
+            >
               <RotateCcw className="size-3.5" />
             </Button>
           ) : null}
@@ -807,11 +881,19 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
               )}
               onClick={() => switchSession(id)}
             >
-              <span className={cn("size-1.5 rounded-full", s?.running ? "bg-green-500" : "bg-muted-foreground/40")} />
+              <span
+                className={cn(
+                  "size-1.5 rounded-full",
+                  s?.running ? "bg-green-500" : "bg-muted-foreground/40"
+                )}
+              />
               <span>{s?.workDir.split(/[\\/]/).pop() || `会话 ${i + 1}`}</span>
               <button
                 className="size-3.5 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-muted"
-                onClick={(e) => { e.stopPropagation(); closeSession(id) }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  closeSession(id)
+                }}
               >
                 <X className="size-2.5" />
               </button>
@@ -820,7 +902,10 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
         })}
         <button
           className="flex items-center justify-center size-5 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
-          onClick={() => { setMountError(null); createSessionWithDir() }}
+          onClick={() => {
+            setMountError(null)
+            createSessionWithDir()
+          }}
           title="新建会话"
           disabled={creating}
         >

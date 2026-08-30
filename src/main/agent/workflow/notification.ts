@@ -1,5 +1,8 @@
 import { toJsonSafe } from "./engine"
-import { WORKFLOW_NOTIFICATION_MARKER_PREFIX } from "../../../shared/checkpoint-transcript"
+import {
+  WORKFLOW_NOTIFICATION_MARKER_PREFIX,
+  WORKFLOW_NOTIFICATION_TURN_PROMPT
+} from "../../../shared/checkpoint-transcript"
 import {
   WORKFLOW_TOOL_RESULT_MAX_CHARS,
   truncateText,
@@ -11,6 +14,24 @@ export {
   WORKFLOW_NOTIFICATION_TURN_PROMPT,
   WORKFLOW_NOTIFICATION_TURN_TRIGGER
 } from "../../../shared/checkpoint-transcript"
+
+/**
+ * True when `message` is EXACTLY the internal workflow completion-notification
+ * turn prompt (full match, not prefix). A completed background workflow delivers
+ * its result via an internal notification turn whose message is verbatim
+ * WORKFLOW_NOTIFICATION_TURN_PROMPT; callers use this to exempt that turn from
+ * user-message handling — notably the goal-preempt guard in agent.ts, which must
+ * NOT pause an active goal when a launched workflow's result arrives (otherwise a
+ * goal that spawned a workflow is paused the instant its result comes back and
+ * never resumes). Full-match — mirroring the renderer's isWorkflowNotificationPrompt
+ * and the main-process recognition — so a user pasting text that merely STARTS
+ * with the trigger is not mistaken for internal plumbing. This is a superset of
+ * the delivery recognition (which also requires workflow agent mode), so every
+ * genuine notification turn is covered.
+ */
+export function isWorkflowNotificationTurnMessage(message: string): boolean {
+  return message.trim() === WORKFLOW_NOTIFICATION_TURN_PROMPT
+}
 
 /**
  * Model-facing completion notification for a background workflow run.
@@ -101,7 +122,7 @@ export function buildWorkflowNotificationMessage(
   } else {
     lines.push(`<error>${escapeAndCap(run.error ?? "unknown error", 2_000)}</error>`)
     lines.push(
-      `<resume>For a TRANSIENT failure, call the workflow tool with {"resumeFromRunId": "${escapeXml(run.runId)}"} alone — the saved script reloads and completed agents replay from the journal. For a SCRIPT BUG, re-send the corrected script: a changed script (or changed args) discards the journal and re-runs from scratch, so it does NOT replay completed agents — do not keep resuming the same buggy script.</resume>`
+      `<resume>For a TRANSIENT failure, call the workflow tool with {"resumeFromRunId": "${escapeXml(run.runId)}"} alone — the saved script reloads and completed non-isolated agents replay from the journal. Isolated worktree agents are not journaled: they run again in fresh worktrees, while any previously retained worktrees remain available for review. For a SCRIPT BUG, re-send the corrected script: a changed script (or changed args) discards the journal and re-runs from scratch, so it does NOT replay completed agents — do not keep resuming the same buggy script.</resume>`
     )
   }
   // Surface WHICH agents failed (label + reason) so the model/user can diagnose a

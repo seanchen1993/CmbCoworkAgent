@@ -33,7 +33,6 @@ import {
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import type { AgentTrace } from "../agent/trace/types"
 import {
-  getDefaultModelConfig,
   getCustomSkillsDir,
   clearDisabledSkillsForSkillDir,
   findExistingSkillById,
@@ -47,6 +46,7 @@ import {
   getSkillEvolutionTurnThreshold,
   setSkillEvolutionTurnThreshold
 } from "../storage"
+import { getDefaultModelConfig } from "../models/registry"
 import { trackEvent } from "../services/event-reporter"
 
 function notifyRenderer(channel: string, payload?: unknown): void {
@@ -80,6 +80,34 @@ function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
     },
     { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
   )
+}
+
+function traceObservabilityFields(trace: AgentTrace): Partial<AgentTrace> {
+  return {
+    observabilitySchemaVersion: trace.observabilitySchemaVersion,
+    traceKind: trace.traceKind,
+    executionMode: trace.executionMode,
+    rootTraceId: trace.rootTraceId,
+    rootThreadId: trace.rootThreadId,
+    parentTraceId: trace.parentTraceId,
+    parentThreadId: trace.parentThreadId,
+    parentSpanId: trace.parentSpanId,
+    linkType: trace.linkType,
+    subagentKind: trace.subagentKind,
+    subagentRunId: trace.subagentRunId,
+    subagentThreadId: trace.subagentThreadId,
+    handoffAction: trace.handoffAction,
+    handoffSourceAgent: trace.handoffSourceAgent,
+    handoffTargetAgent: trace.handoffTargetAgent,
+    coordinatorWorkerId: trace.coordinatorWorkerId,
+    coordinatorWorkerTurn: trace.coordinatorWorkerTurn,
+    coordinatorWorkerRole: trace.coordinatorWorkerRole,
+    coordinatorWorkerWorkload: trace.coordinatorWorkerWorkload,
+    workflowRunId: trace.workflowRunId,
+    workflowAgentIndex: trace.workflowAgentIndex,
+    workflowPhase: trace.workflowPhase,
+    workflowAgentLabel: trace.workflowAgentLabel
+  }
 }
 
 function getDefaultModel(): ChatOpenAI | null {
@@ -157,13 +185,18 @@ function ensureEvolvedSkillMarker(content: string): string {
 
   const yaml = match[1].replace(/\r\n/g, "\n").replace(/\r/g, "\n")
   const lines = yaml.split("\n")
-  const index = lines.findIndex((line) => line.split(":", 1)[0]?.trim().toLowerCase() === "evolved-by")
+  const index = lines.findIndex(
+    (line) => line.split(":", 1)[0]?.trim().toLowerCase() === "evolved-by"
+  )
   if (index >= 0) {
     lines[index] = marker
   } else {
     lines.push(marker)
   }
-  return `---\n${lines.join("\n").trimEnd()}\n---\n\n${content.slice(match[0].length).replace(/^\n+/, "")}`.replace(/\s*$/, "\n")
+  return `---\n${lines.join("\n").trimEnd()}\n---\n\n${content.slice(match[0].length).replace(/^\n+/, "")}`.replace(
+    /\s*$/,
+    "\n"
+  )
 }
 
 export function registerOptimizerHandlers(ipcMain: IpcMain): void {
@@ -361,7 +394,8 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         return { success: false, error: `Candidate ${candidateId} not found` }
       }
 
-      const content = typeof proposedContent === "string" ? proposedContent : candidate.proposedContent
+      const content =
+        typeof proposedContent === "string" ? proposedContent : candidate.proposedContent
       const result = applyCandidate(candidate.action, candidate.skillId, content)
       if (!result.success) {
         updateCandidateStatus(candidateId, "rejected")
@@ -417,6 +451,29 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -441,6 +498,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         return {
           traceId: trace.traceId,
           threadId: trace.threadId,
+          ...traceObservabilityFields(trace),
           startedAt: trace.startedAt,
           durationMs: trace.durationMs,
           userMessage: trace.userMessage,

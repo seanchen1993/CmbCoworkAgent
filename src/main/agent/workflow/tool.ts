@@ -1,19 +1,22 @@
 import { randomUUID } from "crypto"
-import { readFileSync, statSync } from "fs"
+import { readFileSync, realpathSync, statSync } from "fs"
+import { basename, dirname, resolve } from "path"
 import { tool } from "langchain"
 import { z } from "zod"
 import type { DynamicStructuredTool } from "@langchain/core/tools"
 import type { ApprovalStore } from "../approval-store"
 import type { ApprovalDecision, ApprovalRequest } from "../../types"
-import { resolveExistingWorkspacePath } from "./paths"
+import { isPathInside } from "./paths"
 import { WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
 import { loadAgentProfiles } from "../agent-registry"
 import { workflowRunManager } from "./run-manager"
 import {
   clearAllAgentToolStreams,
   generateWorkflowRunId,
+  getWorkflowRunsDir,
   isValidWorkflowRunId,
   isWorkflowRunDirDisposed,
+  loadWorkflowRun,
   loadWorkflowRunForResume,
   sha256Hex
 } from "./run-store"
@@ -21,6 +24,7 @@ import { MAX_WORKFLOW_SCRIPT_BYTES, validateWorkflowScript } from "./script"
 import type { WorkflowSubagentDeps } from "./subagent"
 import {
   resolveResumeArgsAndJournal,
+  WorkflowFatalError,
   WorkflowScriptError,
   type ParsedWorkflowScript,
   type PersistedWorkflowRun
@@ -150,7 +154,13 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // script source when the model passes only resumeFromRunId (self-contained
       // resume — it need not re-send the script).
       const resume = resolveResumeRun(workspacePath, threadId, input.resumeFromRunId)
-      const source = resolveScriptSource(workspacePath, input, resume.run?.script, resume.note)
+      const source = resolveScriptSource(
+        workspacePath,
+        threadId,
+        input,
+        resume.run?.script,
+        resume.note
+      )
       const parsed = validateWorkflowScript(source.script)
       const runId = resume.run?.runId ?? generateWorkflowRunId()
       // script-sha invalidation: when resuming, if the script changed since the
@@ -203,6 +213,24 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // an await, so display I/O can never stall the launch.
       if (invalidatedReason) clearAllAgentToolStreams(workspacePath, threadId, runId)
 
+      // Approval can remain open while another window merges/discards/cleans a
+      // retained deliverable. Re-read the reused run immediately before launch;
+      // carrying the pre-approval snapshot forward would resurrect a terminal
+      // worktree as ready/recoverable in the new run.json and live panel.
+      const recoveredResumeRun = resume.run
+        ? workflowRunManager.getFlushFailedRun(runId)
+        : undefined
+      const latestResumeRun = resume.run
+        ? recoveredResumeRun?.threadId === threadId
+          ? recoveredResumeRun
+          : loadWorkflowRun(workspacePath, threadId, runId)
+        : null
+      if (resume.run && !latestResumeRun) {
+        throw new Error(
+          `Workflow ${runId} changed or disappeared while approval was pending; reload it before resuming.`
+        )
+      }
+
       const launch = workflowRunManager.launch({
         threadId,
         workspacePath,
@@ -213,6 +241,8 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         args: effectiveArgs,
         tokenBudget: input.tokenBudget ?? null,
         resumeJournal: effectiveResumeJournal,
+        existingWorktrees: latestResumeRun?.worktrees,
+        resumed: resume.run !== null,
         resumeNote: effectiveResumeNote,
         subagentDeps,
         runExclusiveFileWrite: options.runExclusiveFileWrite
@@ -221,8 +251,9 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // Make the run durable BEFORE telling the model it launched: the initial
       // snapshot persist is eager but async, so without this a reload/crash right
       // after this turn could find no run file (no panel entry, no resume). A write
-      // fault never BLOCKS the launch (the run is already executing in memory), but
-      // the result tells us whether to warn the user that the run isn't durable.
+      // fault never blocks shared-workspace execution, but isolated worktree calls
+      // fail closed until this durable index exists so they cannot leave a
+      // manifest-only checkout with no history/recovery entry.
       const initialPersisted = await launch.whenInitialPersisted
 
       return JSON.stringify(
@@ -237,7 +268,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
             ? {}
             : {
                 warning:
-                  "Could not write the initial run state to disk (disk full / permissions?). The workflow is running, but it may NOT be resumable or appear in history — tell the user."
+                  "Could not write the initial run state to disk (disk full / permissions?). The workflow may not be resumable or appear in history, and isolated worktree agents will fail closed — tell the user."
               }),
           note: "The workflow now runs in the background; live progress is visible to the user in the workflow panel. Its outcome will arrive later as an internal <task-notification> message. Briefly tell the user what was launched and END your turn — do not poll, and do not call the workflow tool again for this task."
         },
@@ -398,6 +429,7 @@ async function ensureWorkflowApproved(
 
 function resolveScriptSource(
   workspacePath: string,
+  threadId: string,
   input: { script?: string; scriptPath?: string },
   resumeScript?: string,
   resumeNote?: string
@@ -405,8 +437,7 @@ function resolveScriptSource(
   // Precedence: scriptPath > inline script > persisted-run script (resume).
   if (input.scriptPath?.trim()) {
     const requested = input.scriptPath.trim()
-    // Realpath-based containment (blocks symlink escapes too).
-    const resolved = resolveExistingWorkspacePath(workspacePath, requested, "scriptPath")
+    const resolved = resolveTopLevelWorkflowScriptPath(workspacePath, threadId, requested)
     try {
       const st = statSync(resolved)
       // Must be a REGULAR file: a FIFO/socket/device under the workspace would
@@ -448,6 +479,50 @@ function resolveScriptSource(
   )
 }
 
+/**
+ * A top-level launch accepts ordinary workspace scripts plus the exact
+ * app-managed script files returned by an earlier launch in this thread. Keep
+ * the exception deliberately narrow: another thread's script, run sidecars,
+ * nested files, and symlink escapes remain outside the executable boundary.
+ */
+function resolveTopLevelWorkflowScriptPath(
+  workspacePath: string,
+  threadId: string,
+  requested: string
+): string {
+  const requestedPath = resolve(workspacePath, requested)
+  let workspaceRoot: string
+  let resolved: string
+  try {
+    workspaceRoot = realpathSync(resolve(workspacePath))
+    resolved = realpathSync(requestedPath)
+  } catch {
+    throw new WorkflowScriptError(`scriptPath not found at ${requestedPath}`)
+  }
+
+  if (isPathInside(workspaceRoot, resolved)) return resolved
+
+  let workflowRunsRoot: string
+  try {
+    workflowRunsRoot = realpathSync(getWorkflowRunsDir(workspacePath, threadId))
+  } catch {
+    throw new WorkflowFatalError(
+      `scriptPath must stay inside the workspace or reference a workflow script previously returned for this thread (got "${requested}")`
+    )
+  }
+
+  const fileName = basename(resolved)
+  const suffix = ".workflow.js"
+  const runId = fileName.endsWith(suffix) ? fileName.slice(0, -suffix.length) : ""
+  if (dirname(resolved) === workflowRunsRoot && isValidWorkflowRunId(runId)) {
+    return resolved
+  }
+
+  throw new WorkflowFatalError(
+    `scriptPath must stay inside the workspace or reference a workflow script previously returned for this thread (got "${requested}")`
+  )
+}
+
 function resolveResumeRun(
   workspacePath: string,
   threadId: string,
@@ -461,7 +536,16 @@ function resolveResumeRun(
       note: `resumeFromRunId "${requested}" is not a valid run id (expected wf_…)`
     }
   }
-  const run = loadWorkflowRunForResume(workspacePath, threadId, requested)
+  // A final disk flush can fail after the journal has advanced. In that narrow,
+  // same-process recovery window, the manager's snapshot is the authoritative
+  // complete run; reading the older run.json/journal pair would re-run agents that
+  // already completed. After restart no such snapshot exists, so disk remains the
+  // recovery source as before.
+  const snapshot = workflowRunManager.getFlushFailedRun(requested)
+  const run =
+    snapshot?.threadId === threadId
+      ? snapshot
+      : loadWorkflowRunForResume(workspacePath, threadId, requested)
   if (!run) {
     return {
       run: null,

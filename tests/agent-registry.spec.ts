@@ -603,7 +603,7 @@ function testLevel1ToolPlumbing(): void {
   // (explicit) — so a removed tool's docs never contradict the tool list. Only
   // the unrestricted main agent (filesystemAccess undefined) keeps the full docs.
   assert(
-    RUNTIME_SRC.includes("filesystemSystemPrompt && filesystemAccess") &&
+    RUNTIME_SRC.includes("fsSystemPrompt && filesystemAccess") &&
       RUNTIME_SRC.includes("blockedToolNamesForAccess(filesystemAccess)"),
     "Level-1 cleans the fs system prompt for any restricted access (coordinator + workflow)"
   )
@@ -651,10 +651,11 @@ function testLevel2MemoryInjection(): void {
   // Mirrors CC's DEFAULT (tengu_moth_copse off): the user's auto-MEMORY.md (AutoMem)
   // rides in userContext.claudeMd alongside CLAUDE.md, so a write-capable subagent
   // inherits the WHOLE claudeMd channel (CLAUDE.md≈AGENTS.md + auto-MEMORY.md) and
-  // only omitClaudeMd roles (Explore/Plan ≈ our read_only) drop BOTH at once. So
-  // write-capable subagents (general-purpose + write/verify registry) GET both
-  // AGENTS.md and MEMORY.md; read-only registry subagents omit both. memory_search/
-  // memory_get TOOLS are inherited via defaultTools regardless of role.
+  // only omitClaudeMd roles (Explore/Plan ≈ our read_only) drop BOTH at once.
+  // Write-capable subagents (general-purpose + write/verify registry) get
+  // MEMORY.md; project-mode AGENTS prompt inheritance is covered behaviorally by
+  // runtime-final-system-prompt.spec.ts. memory_search/memory_get TOOLS are
+  // inherited via defaultTools regardless of role.
   assert(
     RUNTIME_SRC.includes("[...skillsMiddlewareArray, ...memoryMiddlewareArray]"),
     "general-purpose subagent gets MEMORY.md injection (write-capable, mirrors CC claudeMd inheritance)"
@@ -666,10 +667,6 @@ function testLevel2MemoryInjection(): void {
   assert(
     RUNTIME_SRC.includes("...(restrictedRole ? [] : memoryMiddlewareArray)"),
     "registry subagents inject MEMORY.md only for write/verify (full); read_only AND none omit it (mirrors CC omitClaudeMd)"
-  )
-  assert(
-    RUNTIME_SRC.includes("!restrictedRole && subagentExtraSystemPrompt"),
-    "registry write/verify subagents get AGENTS.md (## Project Instructions); read_only AND none omit it — same split as MEMORY.md (CC omitClaudeMd drops the whole claudeMd channel)"
   )
 }
 
@@ -703,7 +700,9 @@ function testRegistryAgentBlockedTools(): void {
 
   const vf = registryAgentBlockedTools(["write_file", "edit_file"], "full") // verify-like
   assert(
-    vf.has("code_exec") && vf.has("manage_scheduler") && vf.has("manage_skill"),
+    vf.has("code_exec") &&
+      vf.has("manage_scheduler") &&
+      vf.has("manage_skill"),
     "verify blocks code-exec + orchestration meta tools"
   )
   assert(!vf.has("execute"), "verify keeps execute (full shell)")
@@ -714,7 +713,9 @@ function testRegistryAgentBlockedTools(): void {
 
   const wr = registryAgentBlockedTools([], "full") // write custom agent
   assert(
-    wr.has("code_exec") && wr.has("manage_scheduler") && wr.has("manage_skill"),
+    wr.has("code_exec") &&
+      wr.has("manage_scheduler") &&
+      wr.has("manage_skill"),
     "even a write subagent blocks code-exec + orchestration meta tools"
   )
   assert(
@@ -758,7 +759,7 @@ function testStripCustomModelPrefix(): void {
     "resolveRegistryModelInstance normalizes the custom: prefix"
   )
   assert(
-    RUNTIME_SRC.includes("not found in custom model configs; inheriting main model"),
+    RUNTIME_SRC.includes("not found in model configs; inheriting main model"),
     "registry model miss warns instead of silently inheriting"
   )
 }
@@ -877,7 +878,7 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
   )
   assert(
     RUNTIME_SRC.includes(
-      "...(mainFilesystemEnabled ? [createFsMiddleware()] : []),\n      ...postFsToolDocStripMiddleware,"
+      '...(mainFilesystemEnabled ? [createFsMiddleware("\\n")] : []),\n      ...postFsToolDocStripMiddleware,'
     ),
     "post-FS strip runs immediately after the deepagents fs middleware"
   )
@@ -1489,7 +1490,7 @@ function testDeferredInventoryGatedOnBridge(): void {
   //     a bridge-less restricted leaf never sees IDs it can't use.
   assert(
     RUNTIME_SRC.includes(
-      "if (hasInvokeDeferredTool) {\n      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"
+      "if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {\n      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"
     ),
     "runtime gates the deferred-tool inventory on the invoke bridge being available"
   )

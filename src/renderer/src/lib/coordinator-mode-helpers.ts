@@ -12,6 +12,17 @@ export function isExplicitNormalModeMetadata(metadata: unknown): boolean {
   return record.agentMode === "normal"
 }
 
+export function isMultiModeMetadata(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false
+  }
+  const record = metadata as Record<string, unknown>
+  const isLegacyOrExplicitNormalMode =
+    record.agentMode === "normal" ||
+    (record.agentMode === undefined && !truthyCoordinatorFlag(record.coordinatorMode))
+  return isLegacyOrExplicitNormalMode && record.subagentsEnabled !== false
+}
+
 export function isCoordinatorModeMetadata(metadata: unknown): boolean {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return false

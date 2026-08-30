@@ -7,6 +7,7 @@ import {
 } from "../../hooks/scope"
 import type { HookConfig, HookEvent, HookResult } from "../../hooks/types"
 import type { SkillUseTracker } from "./tracker"
+import { markHarnessStageAttributionDirty } from "../../services/harness-stage-attribution"
 
 export type StopHookContext = NonNullable<HookContext["stopContext"]>
 
@@ -322,6 +323,7 @@ export async function runCompletionHooksWithRevision({
           onHookResult,
           onHookSkippedFactory
         }))
+    markHarnessStageAttributionDirty(harnessProjectId, featureId)
 
     // continue:false short-circuits — halt the turn immediately, no revision.
     if (postSkillResult && shouldPreventContinuation(postSkillResult)) {
@@ -413,6 +415,7 @@ export async function runCompletionHooksWithRevision({
           console.warn("[Hooks] Stop hook error:", e)
           return null
         }))
+    markHarnessStageAttributionDirty(harnessProjectId, featureId)
 
     if (stopResult && shouldPreventContinuation(stopResult)) {
       if (stopResult.systemMessage) sendNotice(stopResult.systemMessage)

@@ -38,10 +38,12 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "vitest run && npm run test:hooks && npm run test:plugins && npm run test:task-cards && npm run test:merge && npm run test:workflow",
-    "test:workflow": "npx tsx tests/read-only-shell-message.spec.ts && npx tsx tests/workflow-script.spec.ts && npx tsx tests/workflow-engine.spec.ts && npx tsx tests/agent-registry.spec.ts && npx tsx tests/coordinator-worker-access.spec.ts && npx tsx tests/coordinator-mode-plumbing.spec.ts && npx tsx tests/local-sandbox-readonly-hook.spec.ts && npx tsx tests/agent-tool-guard.spec.ts && npx tsx tests/thread-checkpoint-cleanup.spec.ts && npx tsx tests/checkpoint-fork.spec.ts && npx tsx tests/thread-fork-handler.spec.ts && npx tsx tests/thread-messages-db.spec.ts && npx tsx tests/sqlite-durable-delete.spec.ts && npx tsx tests/workflow-harness-dryrun.spec.mjs && npx tsx tests/contract-delivery-dryrun.spec.mjs && npx tsx tests/auto-dev-requirement-dryrun.spec.mjs && npx tsx tests/sandbox-elevated.unit.spec.mjs && npx tsx tests/sqljs-saver-async-flush.spec.ts && npx tsx tests/checkpointer-lru.spec.ts",
+    "test": "vitest run && npm run test:adoption && npm run test:messages && npm run test:hooks && npm run test:plugins && npm run test:task-cards && npm run test:merge && npm run test:workflow",
+    "test:adoption": "npx tsx tests/adoption-tracker-line-baseline.spec.ts",
+    "test:messages": "npx tsx tests/message-display-order.spec.ts && npx tsx tests/checkpoint-message-times.spec.ts && npx tsx tests/live-stream-messages.spec.ts && npx tsx tests/electron-transport-subagent.spec.ts && npx tsx tests/stream-converter-subagent.spec.ts && npx tsx tests/subagent-transcripts.spec.ts && npx tsx tests/subagent-transcript-content-store.spec.ts && npx tsx tests/subagent-observability.spec.ts",
+    "test:workflow": "npx vitest run src/main/agent/context-history-path.test.ts src/main/agent/workflow/run-store-location.test.ts src/main/agent/workflow/run-manager-worktree-fallback.test.ts && npx tsx tests/read-only-shell-message.spec.ts && npx tsx tests/workflow-script.spec.ts && npx tsx tests/workflow-engine.spec.ts && npx tsx tests/workflow-worktree.spec.ts && npx tsx tests/local-sandbox-worktree-isolation.spec.ts && npx tsx tests/expert-agent-library.spec.ts && npx tsx tests/coordinator-worker-watchdog.spec.ts && npx tsx tests/goals.spec.ts && npx tsx tests/goals-runtime-harness.spec.ts && npx tsx tests/coordinator-worker-access.spec.ts && npx tsx tests/runtime-final-system-prompt.spec.ts && npx tsx tests/agent-registry.spec.ts && npx tsx tests/coordinator-mode-plumbing.spec.ts && npx tsx tests/local-sandbox-readonly-hook.spec.ts && npx tsx tests/agent-tool-guard.spec.ts && npx tsx tests/thread-checkpoint-cleanup.spec.ts && npx tsx tests/checkpoint-fork.spec.ts && npx tsx tests/thread-fork-handler.spec.ts && npx tsx tests/thread-messages-db.spec.ts && npx tsx tests/sqlite-durable-delete.spec.ts && npx tsx tests/workflow-harness-dryrun.spec.mjs && npx tsx tests/contract-delivery-dryrun.spec.mjs && npx tsx tests/auto-dev-requirement-dryrun.spec.mjs && npx tsx tests/sandbox-elevated.unit.spec.mjs && npx tsx tests/sqljs-saver-async-flush.spec.ts && npx tsx tests/checkpointer-lru.spec.ts && npx tsx tests/submit-in-flight-lock.spec.ts && npx tsx tests/message-queue-runtime.spec.ts && npx tsx tests/queued-message-content.spec.ts && npx tsx tests/message-queue-plumbing.spec.ts",
     "test:merge": "npx tsx tests/skill-bundle-merge.spec.ts && npx tsx tests/skill-bundle-version.spec.ts",
-    "test:hooks": "npx tsx tests/hook-cc-field-alignment.spec.ts && npx tsx tests/hook-timeout-bounds.spec.ts && npx tsx tests/hook-phase2-spec.spec.ts && npx tsx tests/hook-phase2-followup.spec.ts && npx tsx tests/git-hook-collection-path.spec.ts",
+    "test:hooks": "npx tsx tests/hook-cc-field-alignment.spec.ts && npx tsx tests/hook-timeout-bounds.spec.ts && npx tsx tests/hook-phase2-spec.spec.ts && npx tsx tests/hook-phase2-followup.spec.ts && npx tsx tests/agent-hook-context-integration.spec.ts && npx tsx tests/tool-hook-regression.spec.ts && npx tsx tests/git-hook-collection-path.spec.ts && npx tsx tests/adoption-file-policy.spec.ts && npx tsx tests/adoption-outbox.spec.ts",
     "test:plugins": "npx tsx tests/plugin-inspect-zip.spec.ts && npx tsx tests/plugin-market-version.spec.ts && npx tsx tests/plugin-skill-evolution-match.spec.ts && npx vitest run src/main/ipc/plugins-market-sim.test.ts",
     "test:task-cards": "npx tsx tests/task-cards.spec.ts",
     "test:watch": "vitest",
@@ -49,6 +51,7 @@
     "test:goal:integration": "npx tsx tests/goal-ipc-e2e.spec.ts",
     "test:goal": "npm run test:goal:unit && npm run test:goal:integration",
     "test:goal:e2e": "RUN_GOAL_E2E_REAL_MODEL=1 npx tsx tests/goal-ipc-e2e.spec.ts",
+    "test:git:e2e": "npm run build && node --experimental-strip-types tests/git-multi-repo-commit-e2e.spec.ts",
     "start": "electron-vite preview",
     "dev": "electron-vite dev",
     "dev:mock-task-cards": "node -e \"const { spawnSync } = require('child_process'); process.env.CMB_TASK_CARDS_MOCK = '1'; const result = spawnSync('electron-vite', ['dev'], { stdio: 'inherit', shell: true, env: process.env }); process.exit(result.status ?? 1)\"",
@@ -84,9 +87,7 @@
     ],
     "asarUnpack": [
       "out/main/pty-host.js",
-      "node_modules/.bin/claude*",
-      "node_modules/node-pty/**",
-      "node_modules/@anthropic-ai/claude-code/**"
+      "node_modules/node-pty/**"
     ],
     "mac": {
       "target": "dmg"
@@ -130,11 +131,8 @@
     "electronVersion": "39.8.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^2.1.92",
-    "acorn": "^8.16.0",
     "@fontsource/inter": "^5.2.8",
     "@fontsource/rajdhani": "^5.2.7",
-    "@langchain/anthropic": "^1.3.21",
     "@langchain/core": "^1.1.29",
     "@langchain/google-genai": "^2.1.22",
     "@langchain/langgraph": "^1.2.0",
@@ -159,6 +157,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
+    "acorn": "^8.16.0",
     "adm-zip": "^0.5.16",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

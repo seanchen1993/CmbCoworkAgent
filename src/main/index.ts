@@ -1,4 +1,21 @@
-import { app, BrowserWindow, ipcMain, nativeImage, powerSaveBlocker, shell } from "electron"
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, shell } from "electron"
+import {
+  isBrowserNativeMessagingHostLaunch,
+  runBrowserNativeMessagingHost
+} from "./browser/chrome/browser-native-messaging-host"
+import { configureBrowserCdpEndpoint } from "./browser/cdp/browser-cdp"
+import { BUILTIN_BROWSER_LOG_PREFIX } from "../shared/browser-types"
+
+const MAIN_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[Main]`
+const RENDERER_BROWSER_LOG_PREFIX = `${BUILTIN_BROWSER_LOG_PREFIX}[RendererBrowser]`
+const browserNativeMessagingHostLaunch = isBrowserNativeMessagingHostLaunch()
+
+const browserCdpPort = configureBrowserCdpEndpoint(app.commandLine)
+if (browserCdpPort !== null) {
+  console.info(
+    `${MAIN_BROWSER_LOG_PREFIX} Browser CDP endpoint enabled on http://127.0.0.1:${browserCdpPort}.`
+  )
+}
 
 // Fix Linux sandbox error: "The setuid sandbox is not running as root"
 // On Linux the chrome-sandbox binary often lacks setuid permissions in packaged apps.
@@ -8,7 +25,13 @@ if (process.platform === "linux") {
 
 import { join } from "path"
 import { existsSync, rmSync } from "fs"
-import { writeMainLog, writeRendererLog, flushLogs, flushLogsSync } from "./logging"
+import {
+  writeMainLog,
+  writeRendererLog,
+  flushLogs,
+  flushLogsSync,
+  initializeLogRedaction
+} from "./logging"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import {
@@ -19,23 +42,46 @@ import {
   isAppTrayAvailable,
   requestAppAttention,
   setAppQuitting,
-  showPendingAppAttention,
-  shouldHideMainWindowOnClose
+  showPendingAppAttention
 } from "./app-tray"
 import { setAppAttentionHandler } from "./app-attention-events"
+import { APP_ATTENTION_CHANNEL, isRendererAppAttentionPayload } from "../shared/app-attention"
 import {
-  APP_ATTENTION_CHANNEL,
-  isRendererAppAttentionPayload
-} from "../shared/app-attention"
-import type {
-  CloseToTrayPromptAction,
-  CloseToTrayPromptEvent
+  closePromptActionToBehavior,
+  isCloseToTrayPromptResponse,
+  isWindowCloseBehavior,
+  resolveWindowCloseRequest,
+  type CloseToTrayPromptReason,
+  type CloseToTrayPromptEvent,
+  type WindowCloseBehavior
 } from "../shared/close-to-tray"
+import {
+  configureAgentGraphRecursionLimit,
+  configureWorkflowWorktreeRemoveTimeoutMinutes,
+  configureWorkflowWorktreeTimeoutMinutes,
+  getAgentGraphRecursionLimit,
+  getWorkflowWorktreeRemoveTimeoutMinutes,
+  getWorkflowWorktreeTimeoutMinutes,
+  isAgentGraphRecursionLimit,
+  isWorkflowWorktreeRemoveTimeoutMinutes,
+  isWorkflowWorktreeTimeoutMinutes,
+  type AgentRuntimeSettings
+} from "../shared/agent-runtime-limits"
 
 const MAIN_LOG_EVENT_CHANNEL = "debug:main-console-log"
 const MAIN_LOG_TOGGLE_CHANNEL = "debug:set-main-console-forwarding"
 const CLOSE_TO_TRAY_PROMPT_CHANNEL = "app:close-to-tray-prompt"
 const CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL = "app:close-to-tray-prompt-response"
+const WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL = "app:get-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL = "app:set-window-close-behavior"
+const WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL = "app:window-close-behavior-changed"
+const CHAT_SCROLL_SETTINGS_GET_CHANNEL = "app:get-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_SET_CHANNEL = "app:set-chat-scroll-settings"
+const CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL = "app:chat-scroll-settings-changed"
+const AGENT_RUNTIME_SETTINGS_GET_CHANNEL = "app:get-agent-runtime-settings"
+const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursion-limit"
+const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
+const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
 let mainLogForwardingEnabled = false
 const EVENT_CATEGORIES = new Set<EventCategory>([
@@ -49,21 +95,6 @@ const EVENT_CATEGORIES = new Set<EventCategory>([
   "chatx",
   "workspace"
 ])
-
-function isCloseToTrayPromptResponse(
-  payload: unknown
-): payload is { requestId: number; action: CloseToTrayPromptAction } {
-  if (!payload || typeof payload !== "object") return false
-  // 使用 in 操作符进行属性存在性检查，比 as 断言更安全
-  if (!("requestId" in payload) || !("action" in payload)) return false
-  const record = payload as Record<string, unknown>
-  return (
-    typeof record.requestId === "number" &&
-    (record.action === "minimize-to-tray" ||
-      record.action === "direct-close" ||
-      record.action === "cancel")
-  )
-}
 
 function isTrackEventPayload(payload: unknown): payload is {
   eventName: string
@@ -103,6 +134,17 @@ function getConsoleLevelName(level: number): string {
   }
 }
 
+function shouldMirrorRendererBrowserLog(message: string): boolean {
+  return message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+}
+
+function formatMirroredRendererBrowserLog(message: string): string {
+  const suffix = message.startsWith(BUILTIN_BROWSER_LOG_PREFIX)
+    ? message.slice(BUILTIN_BROWSER_LOG_PREFIX.length)
+    : ` ${message}`
+  return `${RENDERER_BROWSER_LOG_PREFIX}${suffix}`
+}
+
 function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): string {
   if (value instanceof Error) return value.stack || `${value.name}: ${value.message}`
   if (typeof value === "string") return value
@@ -132,7 +174,8 @@ function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): strin
           }
         }
         if (typeof nestedValue === "symbol") return nestedValue.toString()
-        if (typeof nestedValue === "function") return `[Function ${nestedValue.name || "anonymous"}]`
+        if (typeof nestedValue === "function")
+          return `[Function ${nestedValue.name || "anonymous"}]`
         if (nestedValue && typeof nestedValue === "object") {
           if (seen.has(nestedValue)) return "[Circular]"
           seen.add(nestedValue)
@@ -169,50 +212,58 @@ function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
 
 function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
   return ((...args: Parameters<T>) => {
-    writeMainLog(level, args)
-    forwardMainLogToRenderer(level, args)
-    fn(...args)
+    const redactedArgs = writeMainLog(level, args)
+    forwardMainLogToRenderer(level, redactedArgs)
+    fn(...(redactedArgs as Parameters<T>))
   }) as T
 }
 
-// Guard console writes so broken stdout/stderr pipes don't crash main process.
-console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
-console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
-console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
-console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
-console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
+if (!browserNativeMessagingHostLaunch) {
+  // Native messaging reserves stdout exclusively for length-prefixed protocol frames.
+  console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
+  console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
+  console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
+  console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
+  console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
+  console.trace = withEpipeGuard(withMainFileLogging("DEBUG", console.trace.bind(console)))
 
-// Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
-// or when the renderer window is destroyed while the main process is still logging).
-process.stdout.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  console.error("[Main] stdout error:", err)
-})
-process.stderr.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return
-  // Don't re-log to stderr here to avoid infinite loop
-})
-process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE") return // silently ignore broken pipe
-  console.error("[Main] Uncaught exception:", err)
-  // Persist the buffered tail (incl. this error) in case the process dies next.
-  flushLogsSync()
-})
-process.on("unhandledRejection", (reason) => {
-  console.error("[Main] Unhandled rejection:", reason)
-})
+  // Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
+  // or when the renderer window is destroyed while the main process is still logging).
+  process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return
+    console.error("[Main] stdout error:", err)
+  })
+  process.stderr.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return
+    // Don't re-log to stderr here to avoid infinite loop
+  })
+  process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EPIPE") return // silently ignore broken pipe
+    console.error("[Main] Uncaught exception:", err)
+    // Persist the buffered tail (incl. this error) in case the process dies next.
+    flushLogsSync()
+  })
+  process.on("unhandledRejection", (reason) => {
+    console.error("[Main] Unhandled rejection:", reason)
+  })
 
-// Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
-// does not fire Node's `exit` event, so flush the log tail before quitting.
-// `once` lets a second signal fall through to default force-kill if quit hangs.
-const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
-  console.warn(`[Main] received ${signal}, flushing logs and quitting`)
-  flushLogsSync()
-  app.quit()
+  // Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
+  // does not fire Node's `exit` event, so flush the log tail before quitting.
+  // `once` lets a second signal fall through to default force-kill if quit hangs.
+  const flushAndQuitOnSignal = (signal: NodeJS.Signals): void => {
+    console.warn(`[Main] received ${signal}, flushing logs and quitting`)
+    flushLogsSync()
+    app.quit()
+  }
+  process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
+  process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
 }
-process.once("SIGINT", () => flushAndQuitOnSignal("SIGINT"))
-process.once("SIGTERM", () => flushAndQuitOnSignal("SIGTERM"))
-import { disposeAllAgentThreadStates, registerAgentHandlers } from "./ipc/agent"
+import {
+  disposeAllAgentThreadStates,
+  hasAnyActiveAgentTasks,
+  registerAgentHandlers,
+  shutdownAllAgentTasks
+} from "./ipc/agent"
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
@@ -239,11 +290,18 @@ import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
+import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
+import { registerManagedLinkHandlers } from "./ipc/managed-links"
 import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
 import { registerUserInputHandlers } from "./ipc/user-input"
+import { registerBuiltinBrowserIpc } from "./ipc/browser"
+import {
+  beginBuiltinBrowserAppQuitCleanup,
+  disposeBuiltinBrowserForMainWindowEvent,
+} from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
-import { setTraceReporter } from "./agent/trace/collector"
+import { initializeTraceStorageSecurity, setTraceReporter } from "./agent/trace/collector"
 import { CloudTraceReporter } from "./agent/trace/cloud-reporter"
 import { setEventReporter, HttpEventReporter } from "./services/event-reporter"
 import { startHarnessStatusReporter } from "./services/harness-status-reporter"
@@ -253,17 +311,42 @@ import {
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
 import { getAllThreads, initializeDatabase, flush } from "./db"
-import { startScheduler, stopScheduler } from "./services/scheduler"
-import { startHeartbeat, stopHeartbeat } from "./services/heartbeat"
-import { startChatX, stopChatX } from "./services/chatx"
+import {
+  hasActiveScheduledTaskRuns,
+  startScheduler,
+  stopScheduler,
+  stopSchedulerAndWait
+} from "./services/scheduler"
+import {
+  isHeartbeatRunning,
+  startHeartbeat,
+  stopHeartbeat,
+  stopHeartbeatAndWait
+} from "./services/heartbeat"
+import { hasActiveChatXRuns, startChatX, stopChatX, stopChatXAndWait } from "./services/chatx"
 import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
 import { makeBroadcastHookResultCallback } from "./hooks/result-callback"
 import { fireSessionEndAll, hasActiveSessions } from "./hooks/session-lifecycle"
 import { registerUpdaterHandlers, startUpdateChecker, stopUpdateChecker } from "./updater"
+import { startBuiltinModelCatalogRefresh, stopBuiltinModelCatalogRefresh } from "./models/registry"
 import { markFullBackupCleanupReady, runStartupSelfCheck } from "./updater/rollback"
-import { getOpenworkDir, isKeepAwakeEnabled, setKeepAwakeEnabled } from "./storage"
+import {
+  getChatScrollSettings,
+  getOpenworkDir,
+  getStoredAgentGraphRecursionLimit,
+  getStoredWorkflowWorktreeRemoveTimeoutMinutes,
+  getStoredWorkflowWorktreeTimeoutMinutes,
+  getWindowCloseBehavior,
+  isKeepAwakeEnabled,
+  setChatScrollSettings,
+  setStoredAgentGraphRecursionLimit,
+  setStoredWorkflowWorktreeRemoveTimeoutMinutes,
+  setStoredWorkflowWorktreeTimeoutMinutes,
+  setKeepAwakeEnabled,
+  setWindowCloseBehavior
+} from "./storage"
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
@@ -271,20 +354,51 @@ import {
   configurePetWindow,
   createPetWindow,
   getPetWindowDebugInfo,
+  markPetStartupReady,
   registerPetHandlers
 } from "./pet"
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
+let browserService: ReturnType<typeof registerBuiltinBrowserIpc> | null = null
 let closeToTrayPromptOpen = false
 let closeToTrayPromptRequestId = 0
 let closeToTrayPromptTimer: NodeJS.Timeout | null = null
+let closeToTrayPromptReason: CloseToTrayPromptReason | null = null
+let closeToTrayPromptRememberChoiceAllowed = false
 const STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT = 5
+const PET_STARTUP_DELAY_MS = 750
+let petStartupTimer: NodeJS.Timeout | null = null
+
+function cancelDelayedPetStartup(): void {
+  if (!petStartupTimer) return
+  clearTimeout(petStartupTimer)
+  petStartupTimer = null
+}
+
+function schedulePetStartupAfterMainLoad(window: BrowserWindow): void {
+  cancelDelayedPetStartup()
+  petStartupTimer = setTimeout(() => {
+    petStartupTimer = null
+    if (mainWindow !== window || window.isDestroyed() || window.webContents.isDestroyed()) return
+    markPetStartupReady()
+  }, PET_STARTUP_DELAY_MS)
+  petStartupTimer.unref?.()
+}
+
+function disposeBrowserServiceForMainWindow(reason: string): void {
+  disposeBuiltinBrowserForMainWindowEvent({
+    browserService,
+    isAppQuitting: isAppQuitting(),
+    logPrefix: MAIN_BROWSER_LOG_PREFIX,
+    reason
+  })
+}
 
 function cleanupLegacySkillEvalRecords(): void {
   const roots = new Set(
-    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter(
-      (value): value is string => Boolean(value)
+    [getOpenworkDir(), process.env.CMB_COWORK_AGENT_HOME?.trim()].filter((value): value is string =>
+      Boolean(value)
     )
   )
 
@@ -391,25 +505,58 @@ function hideMainWindowToTray(window: BrowserWindow): void {
 
 function clearCloseToTrayPromptState(): void {
   closeToTrayPromptOpen = false
+  closeToTrayPromptReason = null
+  closeToTrayPromptRememberChoiceAllowed = false
   if (closeToTrayPromptTimer) {
     clearTimeout(closeToTrayPromptTimer)
     closeToTrayPromptTimer = null
   }
 }
 
-function requestHideMainWindowToTray(window: BrowserWindow): void {
+function hasActiveForegroundRuns(): boolean {
+  return (
+    hasAnyActiveAgentTasks() ||
+    hasActiveChatXRuns() ||
+    hasActiveScheduledTaskRuns() ||
+    isHeartbeatRunning()
+  )
+}
+
+function saveWindowCloseBehavior(behavior: WindowCloseBehavior): WindowCloseBehavior {
+  const savedBehavior = setWindowCloseBehavior(behavior)
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(WINDOW_CLOSE_BEHAVIOR_CHANGED_CHANNEL, savedBehavior)
+  }
+  return savedBehavior
+}
+
+function saveChatScrollSettings(
+  settings: Parameters<typeof setChatScrollSettings>[0]
+): ReturnType<typeof setChatScrollSettings> {
+  const savedSettings = setChatScrollSettings(settings)
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(CHAT_SCROLL_SETTINGS_CHANGED_CHANNEL, savedSettings)
+  }
+  return savedSettings
+}
+
+function requestWindowCloseChoice(window: BrowserWindow, reason: CloseToTrayPromptReason): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return
   if (closeToTrayPromptOpen) {
-    if (!window.isDestroyed()) window.focus()
+    window.focus()
     return
   }
 
+  const trayAvailable = isAppTrayAvailable()
   closeToTrayPromptOpen = true
+  closeToTrayPromptReason = reason
+  closeToTrayPromptRememberChoiceAllowed = reason !== "active-runs"
   closeToTrayPromptRequestId += 1
   const requestId = closeToTrayPromptRequestId
   closeToTrayPromptTimer = setTimeout(() => {
     if (closeToTrayPromptRequestId === requestId) {
       console.warn("[Main] Close-to-tray prompt timed out")
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
         const event: CloseToTrayPromptEvent = {
           type: "dismiss",
           requestId,
@@ -424,7 +571,10 @@ function requestHideMainWindowToTray(window: BrowserWindow): void {
   const event: CloseToTrayPromptEvent = {
     type: "open",
     requestId,
-    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘"
+    trayAreaName: process.platform === "darwin" ? "菜单栏" : "系统托盘",
+    reason,
+    canMinimizeToTray: trayAvailable,
+    rememberChoiceAllowed: closeToTrayPromptRememberChoiceAllowed
   }
   window.webContents.send(CLOSE_TO_TRAY_PROMPT_CHANNEL, event)
 }
@@ -446,7 +596,9 @@ function createWindow(): void {
       sandbox: false
     },
     ...(devWindowIcon ? { icon: devWindowIcon } : {}),
-    autoHideMenuBar: !['.166','.147','.216','.215','.225', '201.99'].some(ip => getLocalIP().includes(ip)) // 自动隐藏菜单栏
+    autoHideMenuBar: ![".166", ".147", ".216", ".215", ".225", "201.99"].some((ip) =>
+      getLocalIP().includes(ip)
+    ) // 自动隐藏菜单栏
   })
 
   mainWindow.on("ready-to-show", () => {
@@ -470,8 +622,39 @@ function createWindow(): void {
     return { action: "deny" }
   })
 
+  // Electron does not provide an application context menu automatically.
+  // Use native edit roles so labels, clipboard behavior, shortcuts, and
+  // enabled states follow the OS for editable fields and selected read-only text.
+  mainWindow.webContents.on("context-menu", (_event, params) => {
+    const window = mainWindow
+    const hasSelectedText = params.selectionText.trim().length > 0
+    if ((!params.isEditable && !hasSelectedText) || !window || window.isDestroyed()) return
+
+    Menu.buildFromTemplate([
+      { role: "cut", enabled: params.editFlags.canCut },
+      { role: "copy", enabled: params.editFlags.canCopy },
+      { role: "paste", enabled: params.editFlags.canPaste },
+      { type: "separator" },
+      { role: "selectAll", enabled: params.editFlags.canSelectAll }
+    ]).popup({ window })
+  })
+
+  // A renderer reload destroys the in-flight stream consumer while the agent
+  // continues in the main process. This application intentionally has no
+  // mid-turn reload/reconnect contract, so block browser refresh shortcuts.
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const isRefreshShortcut =
+      input.key === "F5" ||
+      ((input.meta || input.control) && input.key.toLowerCase() === "r")
+    if (isRefreshShortcut) event.preventDefault()
+  })
+
   mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
     writeRendererLog(getConsoleLevelName(level), message, { sourceId, line })
+    if (shouldMirrorRendererBrowserLog(message)) {
+      const location = sourceId ? `${sourceId}:${line}` : `line:${line}`
+      console.log(`${formatMirroredRendererBrowserLog(message)} (${location})`)
+    }
   })
 
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
@@ -489,25 +672,27 @@ function createWindow(): void {
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     clearCloseToTrayPromptState()
+    disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
   })
 
-  mainWindow.webContents.on('did-finish-load', () => {
+  mainWindow.webContents.on("did-finish-load", () => {
     const version = app.getVersion()
-    console.log('version---------------', version)
-    console.log('getLocalIP', getLocalIP())
+    console.log("version---------------", version)
+    console.log("getLocalIP", getLocalIP())
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('version', version)
-      mainWindow.webContents.send('ip', getLocalIP())
+      mainWindow.webContents.send("version", version)
+      mainWindow.webContents.send("ip", getLocalIP())
+      schedulePetStartupAfterMainLoad(mainWindow)
     }
   })
 
   // HMR for renderer based on electron-vite cli
   if (isDev && process.env["ELECTRON_RENDERER_URL"]) {
-    console.log('local render')
+    console.log("local render")
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"])
   } else {
-    console.log('url render')
+    console.log("url render")
     // mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
@@ -521,11 +706,23 @@ function createWindow(): void {
     console.warn("[Main] Main window close requested", {
       pet: getPetWindowDebugInfo()
     })
-    if (shouldHideMainWindowOnClose(isAppQuitting(), isAppTrayAvailable())) {
-      event.preventDefault()
-      if (mainWindow) {
-        requestHideMainWindowToTray(mainWindow)
-      }
+    const trayAvailable = isAppTrayAvailable()
+    const decision = resolveWindowCloseRequest({
+      behavior: getWindowCloseBehavior(),
+      isAppQuitting: isAppQuitting(),
+      trayAvailable,
+      hasActiveForegroundRuns: hasActiveForegroundRuns()
+    })
+    if (decision.action === "allow-close") return
+
+    event.preventDefault()
+    if (!mainWindow) return
+    if (decision.action === "minimize-to-tray") {
+      hideMainWindowToTray(mainWindow)
+    } else if (decision.action === "quit") {
+      app.quit()
+    } else {
+      requestWindowCloseChoice(mainWindow, decision.reason)
     }
   })
 
@@ -534,6 +731,8 @@ function createWindow(): void {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
     })
+    disposeBrowserServiceForMainWindow("the main window closed")
+    cancelDelayedPetStartup()
     clearCloseToTrayPromptState()
     mainWindow = null
     if (process.platform !== "darwin") {
@@ -571,7 +770,8 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
-      const workspacePath = typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
+      const workspacePath =
+        typeof metadata.workspacePath === "string" ? metadata.workspacePath.trim() : ""
       if (!workspacePath) continue
       const key = workspacePath.toLowerCase()
       if (seen.has(key)) continue
@@ -593,9 +793,19 @@ function prewarmRecentSandboxWorkspaces(): void {
   LocalSandbox.prewarmForWorkspaces(workspaces)
 }
 
-// Ensure only a single instance is running (prevents duplicate schedulers on Windows)
-const gotTheLock = app.requestSingleInstanceLock()
-if (!gotTheLock) {
+// Native hosts must not participate in the desktop app's single-instance lifecycle.
+const gotTheLock = browserNativeMessagingHostLaunch ? false : app.requestSingleInstanceLock()
+if (browserNativeMessagingHostLaunch) {
+  void runBrowserNativeMessagingHost().then(
+    () => app.exit(typeof process.exitCode === "number" ? process.exitCode : 0),
+    (error) => {
+      process.stderr.write(
+        `[CmbBrowserNativeHost] ${error instanceof Error ? error.message : String(error)}\n`
+      )
+      app.exit(1)
+    }
+  )
+} else if (!gotTheLock) {
   app.quit()
 } else {
   app.on("second-instance", () => {
@@ -603,6 +813,12 @@ if (!gotTheLock) {
   })
 
   app.whenReady().then(async () => {
+    configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
+    configureWorkflowWorktreeTimeoutMinutes(getStoredWorkflowWorktreeTimeoutMinutes())
+    configureWorkflowWorktreeRemoveTimeoutMinutes(
+      getStoredWorkflowWorktreeRemoveTimeoutMinutes()
+    )
+
     // Set app user model id for windows
     if (process.platform === "win32") {
       app.setAppUserModelId("CMBDevClaw")
@@ -614,6 +830,53 @@ if (!gotTheLock) {
       ensureMainWindowVisible,
       applyMacDockIcon
     })
+
+    try {
+      await flushLogs()
+      const logRedaction = initializeLogRedaction()
+      if (logRedaction.failedFiles > 0) {
+        console.warn(
+          `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+        )
+      } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
+        console.log(
+          `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
+        )
+      }
+    } catch (error) {
+      console.warn(
+        `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+
+    try {
+      const traceStorage = initializeTraceStorageSecurity()
+      if (!traceStorage.ready) {
+        console.warn(
+          `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+        )
+      } else if (traceStorage.mode === "plaintext") {
+        console.warn(
+          "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
+        )
+      } else if (traceStorage.migrationSkipped) {
+        console.log(
+          `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
+        )
+      } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
+        console.warn(
+          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
+        )
+      } else {
+        console.log(
+          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
+        )
+      }
+    } catch (error) {
+      console.warn(
+        `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
 
     // Default open or close DevTools by F12 in development
     if (isDev) {
@@ -687,21 +950,155 @@ if (!gotTheLock) {
     registerPathOpenersHandlers(ipcMain)
     prewarmRecentSandboxWorkspaces()
     registerAutoCommitHandlers(ipcMain)
+    registerExpertAgentsHandlers(ipcMain)
     registerTaskCardHandlers(ipcMain)
+    registerManagedLinkHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+    browserService = registerBuiltinBrowserIpc(ipcMain, () => mainWindow, browserCdpPort)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
-      if (
-        event.sender.id !== mainWindow.webContents.id ||
-        !isRendererAppAttentionPayload(payload)
-      )
+      if (event.sender.id !== mainWindow.webContents.id || !isRendererAppAttentionPayload(payload))
         return
       // Main-process sources own persistent state and keys. Strip renderer keys so
       // a compromised renderer cannot overwrite or resolve an approval/input entry.
       requestAppAttention({ kind: payload.kind, threadId: payload.threadId })
     })
+
+    ipcMain.handle(WINDOW_CLOSE_BEHAVIOR_GET_CHANNEL, (event) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Window close settings are only available to the main window")
+      }
+      return getWindowCloseBehavior()
+    })
+
+    ipcMain.handle(WINDOW_CLOSE_BEHAVIOR_SET_CHANNEL, (event, behavior: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Window close settings are only available to the main window")
+      }
+      if (!isWindowCloseBehavior(behavior)) {
+        throw new Error("Invalid window close behavior")
+      }
+      return saveWindowCloseBehavior(behavior)
+    })
+
+    ipcMain.handle(CHAT_SCROLL_SETTINGS_GET_CHANNEL, (event) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Chat scroll settings are only available to the main window")
+      }
+      return getChatScrollSettings()
+    })
+
+    ipcMain.handle(CHAT_SCROLL_SETTINGS_SET_CHANNEL, (event, settings: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Chat scroll settings are only available to the main window")
+      }
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+        throw new Error("Invalid chat scroll settings")
+      }
+      return saveChatScrollSettings(settings as Parameters<typeof setChatScrollSettings>[0])
+    })
+
+    ipcMain.handle(AGENT_RUNTIME_SETTINGS_GET_CHANNEL, (event): AgentRuntimeSettings => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id
+      ) {
+        throw new Error("Agent runtime settings are only available to the main window")
+      }
+      return {
+        recursionLimit: getAgentGraphRecursionLimit(),
+        workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+        workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+      }
+    })
+
+    ipcMain.handle(
+      AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isAgentGraphRecursionLimit(value)) {
+          throw new Error("Agent graph recursion limit must be an integer between 25 and 100000")
+        }
+        const persisted = setStoredAgentGraphRecursionLimit(value)
+        return {
+          recursionLimit: configureAgentGraphRecursionLimit(persisted),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+        }
+      }
+    )
+
+    ipcMain.handle(
+      WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isWorkflowWorktreeTimeoutMinutes(value)) {
+          throw new Error("Workflow worktree timeout must be an integer between 1 and 120 minutes")
+        }
+        const persisted = setStoredWorkflowWorktreeTimeoutMinutes(value)
+        return {
+          recursionLimit: getAgentGraphRecursionLimit(),
+          workflowWorktreeTimeoutMinutes: configureWorkflowWorktreeTimeoutMinutes(persisted),
+          workflowWorktreeRemoveTimeoutMinutes: getWorkflowWorktreeRemoveTimeoutMinutes()
+        }
+      }
+    )
+
+    ipcMain.handle(
+      WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL,
+      (event, value: unknown): AgentRuntimeSettings => {
+        if (
+          !mainWindow ||
+          mainWindow.isDestroyed() ||
+          event.sender.id !== mainWindow.webContents.id
+        ) {
+          throw new Error("Agent runtime settings are only available to the main window")
+        }
+        if (!isWorkflowWorktreeRemoveTimeoutMinutes(value)) {
+          throw new Error(
+            "Workflow worktree removal timeout must be an integer between 1 and 10 minutes"
+          )
+        }
+        const persisted = setStoredWorkflowWorktreeRemoveTimeoutMinutes(value)
+        return {
+          recursionLimit: getAgentGraphRecursionLimit(),
+          workflowWorktreeTimeoutMinutes: getWorkflowWorktreeTimeoutMinutes(),
+          workflowWorktreeRemoveTimeoutMinutes:
+            configureWorkflowWorktreeRemoveTimeoutMinutes(persisted)
+        }
+      }
+    )
 
     ipcMain.on(CLOSE_TO_TRAY_PROMPT_RESPONSE_CHANNEL, (event, payload: unknown) => {
       if (!mainWindow || mainWindow.isDestroyed()) return
@@ -709,15 +1106,81 @@ if (!gotTheLock) {
       if (!isCloseToTrayPromptResponse(payload)) return
       if (!closeToTrayPromptOpen || payload.requestId !== closeToTrayPromptRequestId) return
 
-      clearCloseToTrayPromptState()
-      if (payload.action === "minimize-to-tray") {
-        hideMainWindowToTray(mainWindow)
-      } else if (payload.action === "direct-close") {
-        // app.quit() 会触发 before-quit → will-quit 事件链，
-        // 其中会执行 fireSessionEndAll（中断活跃 agent 运行）、
-        // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
-        app.quit()
+      const promptWindow = mainWindow
+      const promptReason = closeToTrayPromptReason
+      const rememberChoiceAllowed = closeToTrayPromptRememberChoiceAllowed
+      const needsActiveRunConfirmation = (): boolean =>
+        payload.action === "direct-close" &&
+        promptReason !== "active-runs" &&
+        hasActiveForegroundRuns()
+
+      if (payload.action === "minimize-to-tray" && !isAppTrayAvailable()) {
+        clearCloseToTrayPromptState()
+        requestWindowCloseChoice(promptWindow, "tray-unavailable")
+        return
       }
+
+      // A background ChatX message can start while the ordinary close prompt is
+      // open. Upgrade to the non-suppressible safety prompt before quitting.
+      if (needsActiveRunConfirmation()) {
+        clearCloseToTrayPromptState()
+        requestWindowCloseChoice(promptWindow, "active-runs")
+        return
+      }
+
+      let rememberError: unknown = null
+      const rememberedBehavior = closePromptActionToBehavior(payload.action)
+      if (rememberChoiceAllowed && payload.rememberChoice && rememberedBehavior) {
+        try {
+          saveWindowCloseBehavior(rememberedBehavior)
+        } catch (error) {
+          console.warn("[Main] Failed to remember window close behavior:", error)
+          rememberError = error
+        }
+      }
+
+      clearCloseToTrayPromptState()
+
+      const performAction = (): void => {
+        if (payload.action === "minimize-to-tray") {
+          // The native save-failure warning may outlive the tray. Never hide
+          // the only main window after its recovery entry point disappeared.
+          if (!isAppTrayAvailable() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "tray-unavailable")
+            return
+          }
+          if (!promptWindow.isDestroyed()) hideMainWindowToTray(promptWindow)
+        } else if (payload.action === "direct-close") {
+          // The save-failure warning is asynchronous. A task can start while it
+          // is open, so repeat the safety check immediately before the real quit.
+          if (needsActiveRunConfirmation() && !promptWindow.isDestroyed()) {
+            requestWindowCloseChoice(promptWindow, "active-runs")
+            return
+          }
+          // app.quit() 会触发 before-quit → will-quit 事件链，
+          // 其中会先中断并等待活跃任务，再执行 fireSessionEndAll，
+          // flush()（持久化待写入数据）等清理操作，确保数据安全退出。
+          app.quit()
+        }
+      }
+
+      if (rememberError && !promptWindow.isDestroyed()) {
+        void dialog
+          .showMessageBox(promptWindow, {
+            type: "warning",
+            title: "设置未保存",
+            message: "无法记住本次关闭窗口的选择",
+            detail: "本次操作仍会执行，原关闭窗口设置保持不变。",
+            buttons: ["知道了"],
+            defaultId: 0,
+            noLink: true
+          })
+          .catch((error) => console.warn("[Main] Failed to show close setting warning:", error))
+          .finally(performAction)
+        return
+      }
+
+      performAction()
     })
 
     ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
@@ -750,6 +1213,14 @@ if (!gotTheLock) {
 
     ipcMain.handle("get-version", async () => {
       return app.getVersion()
+    })
+
+    ipcMain.handle("app:restart", async () => {
+      // Mark the app as quitting first so the main window doesn't collapse into
+      // the tray when we intentionally relaunch from the renderer.
+      setAppQuitting(true)
+      app.relaunch()
+      app.quit()
     })
 
     ipcMain.handle("open-login-window", async () => {
@@ -804,6 +1275,7 @@ if (!gotTheLock) {
     // Expose result to renderer — renderer polls this on mount to show update toast
     ipcMain.handle("update:get-startup-result", () => selfCheckResult)
 
+    const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
@@ -813,7 +1285,10 @@ if (!gotTheLock) {
         applyMacDockIcon()
       }
     })
-    createPetWindow()
+    // Background services can execute immediately on startup. Wait for the
+    // initial catalog request so due work never runs against a temporary
+    // fallback merely because the remote manifest was still loading.
+    await initialModelCatalogLoad
 
     // Start scheduled task scheduler and heartbeat service
     startScheduler()
@@ -833,9 +1308,11 @@ if (!gotTheLock) {
     })
 
     app.on("activate", () => {
-      ensureMainWindowVisible()
+      const activatedWindow = ensureMainWindowVisible()
       applyMacDockIcon()
-      createPetWindow()
+      if (activatedWindow && !activatedWindow.webContents.isLoadingMainFrame()) {
+        createPetWindow()
+      }
     })
   })
 
@@ -853,34 +1330,76 @@ if (!gotTheLock) {
   // then re-issue app.quit(). will-quit fires during teardown — async hook spawns
   // queued there have no guarantee of completing before the process exits.
   let sessionEndDone = false
+  let sessionEndInProgress = false
   app.on("before-quit", (event) => {
-    setAppQuitting(true)
+    const activeSessions = hasActiveSessions()
+    const activeTasks = hasActiveForegroundRuns()
     console.warn("[Main] before-quit", {
       sessionEndDone,
-      hasActiveSessions: hasActiveSessions(),
+      sessionEndInProgress,
+      hasActiveSessions: activeSessions,
+      hasActiveTasks: activeTasks,
       pet: getPetWindowDebugInfo()
     })
-    if (sessionEndDone) return
-    if (!hasActiveSessions()) {
+    if (sessionEndDone) {
+      setAppQuitting(true)
+      return
+    }
+    if (sessionEndInProgress) {
+      // fireSessionEndAll clears its session map before awaiting hooks. A second
+      // quit request must not observe the empty map and bypass the in-flight drain.
+      event.preventDefault()
+      return
+    }
+    if (!activeSessions && !activeTasks) {
       sessionEndDone = true
+      setAppQuitting(true)
       return
     }
     event.preventDefault()
-    fireSessionEndAll(5000, (threadId) => makeBroadcastHookResultCallback(`agent:stream:${threadId}`))
-      .catch((e) => console.warn("[Main] SessionEnd hooks error:", e))
-      .finally(() => disposeAllAgentThreadStates())
-      .finally(() => {
+    sessionEndInProgress = true
+    void (async () => {
+      try {
+        const shutdownResults = await Promise.allSettled([
+          shutdownAllAgentTasks(5_000),
+          stopChatXAndWait(5_000),
+          stopSchedulerAndWait(5_000),
+          stopHeartbeatAndWait(5_000)
+        ])
+        for (const result of shutdownResults) {
+          if (result.status === "rejected") {
+            console.warn("[Main] Active task shutdown error:", result.reason)
+          }
+        }
+        await fireSessionEndAll(5_000, (threadId) =>
+          makeBroadcastHookResultCallback(`agent:stream:${threadId}`)
+        )
+      } catch (error) {
+        console.warn("[Main] SessionEnd hooks error:", error)
+      } finally {
+        disposeAllAgentThreadStates()
         sessionEndDone = true
+        sessionEndInProgress = false
+        setAppQuitting(true)
         app.quit()
-      })
+      }
+    })()
   })
 
   let quitting = false
+  let quitCleanupDone = false
   app.on("will-quit", (e) => {
     console.warn("[Main] will-quit", {
       quitting,
+      quitCleanupDone,
       pet: getPetWindowDebugInfo()
     })
+    if (quitCleanupDone) {
+      // Cleanup already finished during a previous will-quit cycle.
+      // Let Electron quit naturally — this gives Chromium time to properly
+      // release the CDP debug socket, preventing zombie sockets on Windows.
+      return
+    }
     if (quitting) {
       // Re-entry: user pressed Cmd+Q again while cleanup is running. Just block.
       e.preventDefault()
@@ -891,6 +1410,11 @@ if (!gotTheLock) {
     setAppAttentionHandler(null)
     disposeAppTray()
     applyKeepAwake(false)
+    const disposeBuiltinBrowserAfterAppCleanup = beginBuiltinBrowserAppQuitCleanup(
+      browserService,
+      MAIN_BROWSER_LOG_PREFIX
+    )
+    browserService = null
     disposeAllTerminals()
     LocalSandbox.killAll()
     stopScheduler()
@@ -899,6 +1423,7 @@ if (!gotTheLock) {
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopRegisteredGitHookEventSync()
+    stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
     try {
       shutdownAdoptionTracker()
@@ -910,16 +1435,38 @@ if (!gotTheLock) {
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
-    ])
+    ]).finally(() => {
+      disposeBuiltinBrowserAfterAppCleanup()
+    })
 
     const CLEANUP_TIMEOUT_MS = 10_000
     const FORCE_FLUSH_GRACE_MS = 2_000
     const HARD_EXIT_TIMEOUT_MS = CLEANUP_TIMEOUT_MS + FORCE_FLUSH_GRACE_MS + 500
+    const NATURAL_EXIT_TIMEOUT_MS = 5_000
 
     let exitStarted = false
     let cancelHardExit: (() => void) | null = null
 
-    const exitImmediately = (): void => {
+    const armHardExitDeadline = (timeoutMs: number, reason: string): void => {
+      if (cancelHardExit) {
+        cancelHardExit()
+      }
+      cancelHardExit = scheduleHardDeadline(() => {
+        console.error(reason)
+        flushLogsSync()
+        hardExit()
+      }, timeoutMs)
+    }
+
+    const gracefulExit = (): void => {
+      quitCleanupDone = true
+      // Give Electron/Chromium a short bounded window to quit naturally so the
+      // CDP socket can be released cleanly, but never wait forever here.
+      armHardExitDeadline(NATURAL_EXIT_TIMEOUT_MS, "[Main] Natural quit deadline reached")
+      app.quit()
+    }
+
+    const hardExit = (): void => {
       if (cancelHardExit) {
         cancelHardExit()
         cancelHardExit = null
@@ -938,20 +1485,17 @@ if (!gotTheLock) {
           waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
           waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
         ])
+        hardExit()
       } else {
         await flush()
         await flushLogs()
+        gracefulExit()
       }
-      exitImmediately()
     }
 
     // Independent hard deadline: even if cleanup finishes just before its timer
     // and the normal async flush then stalls, the process still exits.
-    cancelHardExit = scheduleHardDeadline(() => {
-      console.error("[Main] Hard exit deadline reached")
-      flushLogsSync()
-      exitImmediately()
-    }, HARD_EXIT_TIMEOUT_MS)
+    armHardExitDeadline(HARD_EXIT_TIMEOUT_MS, "[Main] Hard exit deadline reached")
 
     // Give async cleanup up to 10s, then switch to bounded best-effort flushes.
     const forceTimer = setTimeout(() => {

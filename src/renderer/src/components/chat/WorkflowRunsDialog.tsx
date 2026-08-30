@@ -16,7 +16,13 @@ import { toast } from "sonner"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
-import type { PersistedWorkflowRunDTO, WorkflowRunSummaryDTO } from "@/lib/workflow-run-view"
+import {
+  newerWorkflowWorktree,
+  toWorktreeView,
+  type PersistedWorkflowRunDTO,
+  type WorkflowRunSummaryDTO
+} from "@/lib/workflow-run-view"
+import { WorkflowWorktreeList } from "./WorkflowWorktreeList"
 
 /**
  * Runs-history management dialog — the desktop counterpart of Claude Code's
@@ -254,6 +260,59 @@ function RunDetail({
     void load()
   }, [load])
 
+  // Keep an already-open history detail in sync when another window performs
+  // merge/discard/cleanup. The event already contains the durable record, so
+  // apply it directly instead of reloading and reconciling the whole run.
+  useEffect(() => {
+    return window.api.workflows.onWorkflowEvents(threadId, (payload) => {
+      const envelope =
+        payload && typeof payload === "object"
+          ? (payload as { workflowEvent?: unknown }).workflowEvent
+          : undefined
+      const event =
+        envelope && typeof envelope === "object"
+          ? (envelope as {
+              kind?: unknown
+              runId?: unknown
+              worktree?: unknown
+              worktreeId?: unknown
+            })
+          : payload && typeof payload === "object"
+            ? (payload as {
+                kind?: unknown
+                runId?: unknown
+                worktree?: unknown
+                worktreeId?: unknown
+              })
+            : undefined
+      if (event?.runId !== runId) return
+      if (event.kind === "worktree_update") {
+        const worktree = toWorktreeView(event.worktree)
+        if (!worktree) return
+        setRun((current) => {
+          if (!current) return current
+          const worktrees = current.worktrees ?? []
+          const index = worktrees.findIndex((candidate) => candidate.id === worktree.id)
+          if (index < 0) return { ...current, worktrees: [...worktrees, worktree] }
+          const next = [...worktrees]
+          next[index] = newerWorkflowWorktree(next[index], worktree)
+          return { ...current, worktrees: next }
+        })
+      } else if (event.kind === "worktree_remove" && typeof event.worktreeId === "string") {
+        setRun((current) =>
+          current
+            ? {
+                ...current,
+                worktrees: (current.worktrees ?? []).filter(
+                  (candidate) => candidate.id !== event.worktreeId
+                )
+              }
+            : current
+        )
+      }
+    })
+  }, [runId, threadId])
+
   if (loading) {
     return (
       <div className="flex h-48 items-center justify-center text-muted-foreground">
@@ -354,10 +413,35 @@ function RunDetail({
       {run.status !== "completed" && run.status !== "running" && (
         <div className="flex items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 text-[11px] text-sky-800 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-200">
           <span className="min-w-0 flex-1">
-            已完成的子代理结果保留在 journal,可让模型续跑该任务。
+            普通子代理可从 journal 回放；worktree 子代理会在新 worktree 重跑，原交付物仍保留。
           </span>
           <CopyButton text={resumeCommand} label="续跑指引" />
         </div>
+      )}
+
+      {(run.worktrees?.length ?? 0) > 0 && (
+        <Section title={`Worktree 交付物(${run.worktrees?.length ?? 0})`} defaultOpen>
+          <WorkflowWorktreeList
+            threadId={threadId}
+            runId={run.runId}
+            worktrees={run.worktrees ?? []}
+            manageAllowed={run.status !== "running"}
+            onRecordChange={(record) => {
+              setRun((current) =>
+                current
+                  ? {
+                      ...current,
+                      worktrees: (current.worktrees ?? []).map((candidate) =>
+                        candidate.id === record.id
+                          ? newerWorkflowWorktree(candidate, record)
+                          : candidate
+                      )
+                    }
+                  : current
+              )
+            }}
+          />
+        </Section>
       )}
 
       <div className="space-y-1.5">

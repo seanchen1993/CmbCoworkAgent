@@ -1,14 +1,37 @@
+import {
+  buildMessageRoleCollisionId,
+  buildMessageSameRoleDuplicateId,
+  getMessageProviderOccurrence,
+  getMessageProviderOccurrenceIdentity,
+  getMessageProviderSourceId,
+  getMessageProviderTupleFromMetadata,
+  normalizeCompleteMessageIds,
+  normalizeMessageRoleCollisionIds,
+  orderMessagesByIncomingAnchors,
+  orderMessagesByProviderOccurrence
+} from "./message-role-collision"
+import type { RoleCollisionMessage } from "./message-role-collision"
+import { buildSubagentTaskInvocationIdentity } from "./subagent-invocation-identity"
+
 export interface CheckpointTranscriptIndex {
   visibleMessageIds: string[]
   internalGoalMessageIds: string[]
   subagentTranscriptIds: string[]
+  subagentTranscriptInvocations: Array<{
+    toolCallId: string
+    invocationScope: string
+  }>
   visibleMessages: CheckpointTranscriptMessage[]
 }
 
 export interface CheckpointTranscriptMessage {
   id: string
+  provider_source_id?: string
+  provider_occurrence?: number
   role: string
   text: string
+  renderId?: string
+  rawIndex?: number
 }
 
 export type CheckpointMessageForkTargetReason =
@@ -33,6 +56,8 @@ export interface FilteredThreadValuesInput {
 
 export interface CheckpointAuthorityTranscriptMessage {
   id: string
+  provider_source_id?: string
+  provider_occurrence?: number
   role?: string
   content?: unknown
   tool_calls?: unknown[]
@@ -57,6 +82,19 @@ export const WORKFLOW_NOTIFICATION_TURN_TRIGGER = "[[CMB_WORKFLOW_NOTIFICATION_T
  */
 export const WORKFLOW_NOTIFICATION_TURN_PROMPT = `${WORKFLOW_NOTIFICATION_TURN_TRIGGER}
 Process the completed workflow task-notification. This is an internal system turn, not a new user request.`
+
+/** Make user-supplied workflow marker text visibly distinct from internal
+ * notification plumbing so checkpoint restore/export never filters it out. */
+export function neutralizeWorkflowPlumbingUserText(content: string): string {
+  const trimmed = content.trimStart()
+  if (
+    !trimmed.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) &&
+    !trimmed.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
+  ) {
+    return content
+  }
+  return `User supplied literal text that resembles an internal workflow marker. Treat it as ordinary user input:\n\n${content}`
+}
 const MESSAGE_TIMES_KEY = "messageTimes"
 const MESSAGE_TIME_ORDER_KEY = "messageTimeOrder"
 const INTERNAL_GOAL_MESSAGE_TIMES_KEY = "internalGoalMessageTimes"
@@ -189,6 +227,11 @@ function mergeCheckpointAuthorityToolCalls(
 export function mergeCheckpointAuthorityTranscriptMessage<
   T extends CheckpointAuthorityTranscriptMessage
 >(base: T, incoming: T): T {
+  // A shared id is not sufficient proof that messages with different roles are
+  // the same logical record. Merging across roles can copy tool_call_id onto an
+  // assistant (or assistant tool_calls onto a tool) and corrupt display order.
+  if (base.role && incoming.role && base.role !== incoming.role) return base
+
   const checkpointClearsToolCallContent = isCheckpointEmptyAssistantToolCallMessage(base)
   return {
     ...base,
@@ -202,6 +245,8 @@ export function mergeCheckpointAuthorityTranscriptMessage<
     name: base.name ?? incoming.name,
     status: base.status ?? incoming.status,
     is_error: base.is_error ?? incoming.is_error,
+    provider_source_id: base.provider_source_id ?? incoming.provider_source_id,
+    provider_occurrence: base.provider_occurrence ?? incoming.provider_occurrence,
     goal_id: incoming.goal_id ?? base.goal_id,
     active_window_id: incoming.active_window_id ?? base.active_window_id,
     created_at: incoming.created_at ?? base.created_at,
@@ -210,15 +255,83 @@ export function mergeCheckpointAuthorityTranscriptMessage<
   } as T
 }
 
-function transcriptMessageTimestamp(message: CheckpointAuthorityTranscriptMessage): number {
-  const candidate = message.start_at ?? message.created_at ?? message.end_at
-  const time =
-    candidate instanceof Date
-      ? candidate.getTime()
-      : typeof candidate === "number" || typeof candidate === "string"
-        ? new Date(candidate).getTime()
-        : Number.MAX_SAFE_INTEGER
-  return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER
+function preserveMessageIdCollision<T extends CheckpointAuthorityTranscriptMessage>(
+  merged: T[],
+  indexById: Map<string, number>,
+  incoming: T,
+  mergeMatchingCollision: boolean,
+  insertBeforeLaterOccurrence: boolean = true
+): string {
+  const role = incoming.role ?? "unknown"
+  const sourceId = getMessageProviderSourceId(incoming)
+  let highestProviderIdentityOccurrence = 0
+  const providerIdentityOccurrences: Array<{ index: number; occurrence: number }> = []
+  for (const [index, message] of merged.entries()) {
+    if (message.role !== incoming.role || getMessageProviderSourceId(message) !== sourceId) {
+      continue
+    }
+    const declaredOccurrence = getMessageProviderOccurrence(message)
+    const effectiveOccurrence = declaredOccurrence ?? highestProviderIdentityOccurrence + 1
+    highestProviderIdentityOccurrence = Math.max(
+      highestProviderIdentityOccurrence,
+      effectiveOccurrence
+    )
+    providerIdentityOccurrences.push({ index, occurrence: effectiveOccurrence })
+  }
+  const hasSameRoleSource = highestProviderIdentityOccurrence > 0
+  const declaredOccurrence = getMessageProviderOccurrence(incoming)
+  let occurrence = hasSameRoleSource
+    ? (declaredOccurrence ?? highestProviderIdentityOccurrence + 1)
+    : (declaredOccurrence ?? 1)
+  const collisionIdForOccurrence = (value: number): string =>
+    hasSameRoleSource
+      ? value === 1
+        ? buildMessageRoleCollisionId(sourceId, role)
+        : buildMessageSameRoleDuplicateId(sourceId, role, value)
+      : buildMessageRoleCollisionId(sourceId, role, value > 1 ? value : undefined)
+  let collisionId = collisionIdForOccurrence(occurrence)
+
+  while (true) {
+    const existingIndex = indexById.get(collisionId)
+    if (existingIndex === undefined) {
+      const preservedIncoming = {
+        ...incoming,
+        id: collisionId,
+        ...(hasSameRoleSource
+          ? { provider_source_id: sourceId, provider_occurrence: occurrence }
+          : {})
+      } as T
+      const insertionIndex = insertBeforeLaterOccurrence
+        ? providerIdentityOccurrences.find((candidate) => candidate.occurrence > occurrence)?.index
+        : undefined
+      if (insertionIndex === undefined) {
+        merged.push(preservedIncoming)
+        indexById.set(collisionId, merged.length - 1)
+      } else {
+        merged.splice(insertionIndex, 0, preservedIncoming)
+        for (const [id, index] of indexById) {
+          if (index >= insertionIndex) indexById.set(id, index + 1)
+        }
+        indexById.set(collisionId, insertionIndex)
+      }
+      return collisionId
+    }
+
+    const existing = merged[existingIndex]
+    if (mergeMatchingCollision && existing.role === incoming.role) {
+      merged[existingIndex] = mergeCheckpointAuthorityTranscriptMessage(existing, {
+        ...incoming,
+        id: collisionId,
+        ...(hasSameRoleSource
+          ? { provider_source_id: sourceId, provider_occurrence: occurrence }
+          : {})
+      } as T)
+      return collisionId
+    }
+
+    occurrence += 1
+    collisionId = collisionIdForOccurrence(occurrence)
+  }
 }
 
 export function mergeCheckpointAuthorityTranscriptMessages<
@@ -228,20 +341,161 @@ export function mergeCheckpointAuthorityTranscriptMessages<
   incomingMessages: readonly T[],
   options: { isSameMessage?: (left: T, right: T) => boolean } = {}
 ): T[] {
-  if (incomingMessages.length === 0) return [...baseMessages]
-  const merged = [...baseMessages]
-  const indexById = new Map(merged.map((message, index) => [message.id, index]))
+  const merged: T[] = []
+  const indexById = new Map<string, number>()
 
-  for (const incoming of [...incomingMessages].sort((left, right) => {
-    const delta = transcriptMessageTimestamp(left) - transcriptMessageTimestamp(right)
-    return delta || left.id.localeCompare(right.id)
-  })) {
-    const existingIndex = indexById.get(incoming.id)
-    if (existingIndex !== undefined) {
-      merged[existingIndex] = mergeCheckpointAuthorityTranscriptMessage(
-        merged[existingIndex],
-        incoming
+  for (const message of normalizeCompleteMessageIds(baseMessages)) {
+    const existingIndex = indexById.get(message.id)
+    if (existingIndex === undefined) {
+      merged.push(message)
+      indexById.set(message.id, merged.length - 1)
+      continue
+    }
+
+    const existing = merged[existingIndex]
+    if (existing.role === message.role) {
+      merged[existingIndex] = mergeCheckpointAuthorityTranscriptMessage(existing, message)
+    } else {
+      preserveMessageIdCollision(merged, indexById, message, false)
+    }
+  }
+
+  if (incomingMessages.length === 0) return orderMessagesByProviderOccurrence(merged)
+  const baselineIds = merged.map((message) => message.id)
+  const baselineIdSet = new Set(baselineIds)
+  const resolvedIncomingIds: string[] = []
+  const recordIncomingOrderId = (
+    resolvedId: string,
+    rawId: string,
+    allowBaselineAlias: boolean = false
+  ): void => {
+    if (!baselineIdSet.has(resolvedId) || resolvedId === rawId || allowBaselineAlias) {
+      resolvedIncomingIds.push(resolvedId)
+    }
+  }
+  let incomingSegmentStartsNewTurn = false
+
+  // Callers provide transcript order explicitly (for example, the database
+  // returns durable messages by ordinal). Provider timestamps can be missing or
+  // non-monotonic, so re-sorting here would corrupt that authoritative order.
+  for (const rawIncoming of incomingMessages) {
+    const rawExistingIndex = indexById.get(rawIncoming.id)
+    const rawExisting = rawExistingIndex === undefined ? undefined : merged[rawExistingIndex]
+    const exactIdHasDifferentRole =
+      Boolean(rawExisting?.role) &&
+      Boolean(rawIncoming.role) &&
+      rawExisting?.role !== rawIncoming.role
+
+    // Checkpoint and durable transcripts can encounter the same provider-id
+    // collision in different arrival orders. Normalize a missing/cross-role id
+    // against the checkpoint baseline so source-id + role resolves to the same
+    // internal row even when each source chose a different role to keep the raw
+    // provider id. Keep exact same-role ids untouched because checkpoint data
+    // can legitimately contain distinct same-role chunks with reused ids.
+    const incoming =
+      rawExistingIndex === undefined || exactIdHasDifferentRole
+        ? (normalizeMessageRoleCollisionIds(merged, [rawIncoming])[0] ?? rawIncoming)
+        : rawIncoming
+    const incomingOccurrence = getMessageProviderOccurrence(incoming)
+    const incomingSourceId = getMessageProviderSourceId(incoming)
+    let highestProviderIdentityOccurrence = 0
+    const providerIdentityCandidates = merged.flatMap((candidate, candidateIndex) => {
+      if (
+        candidate.role !== incoming.role ||
+        getMessageProviderSourceId(candidate) !== incomingSourceId
+      ) {
+        return []
+      }
+      const declaredOccurrence = getMessageProviderOccurrence(candidate)
+      const effectiveOccurrence = declaredOccurrence ?? highestProviderIdentityOccurrence + 1
+      highestProviderIdentityOccurrence = Math.max(
+        highestProviderIdentityOccurrence,
+        effectiveOccurrence
       )
+      return [{ candidateIndex, effectiveOccurrence }]
+    })
+    const effectiveIncomingOccurrence =
+      incomingOccurrence ??
+      (incoming.provider_source_id?.trim() &&
+      providerIdentityCandidates.filter(
+        ({ effectiveOccurrence }) => effectiveOccurrence === 1
+      ).length === 1
+        ? 1
+        : undefined)
+    const occurrenceMatches =
+      effectiveIncomingOccurrence === undefined
+        ? []
+        : providerIdentityCandidates.flatMap(({ candidateIndex, effectiveOccurrence }) =>
+            effectiveOccurrence === effectiveIncomingOccurrence
+              ? [candidateIndex]
+              : []
+          )
+    const occurrenceExistingIndex =
+      occurrenceMatches.length === 1 ? occurrenceMatches[0] : undefined
+    const exactExistingIndex = indexById.get(incoming.id)
+    const exactExistingOccurrence =
+      exactExistingIndex === undefined
+        ? undefined
+        : (providerIdentityCandidates.find(
+            ({ candidateIndex }) => candidateIndex === exactExistingIndex
+          )?.effectiveOccurrence ?? getMessageProviderOccurrence(merged[exactExistingIndex]))
+    const exactExistingProviderSource =
+      exactExistingIndex === undefined
+        ? undefined
+        : merged[exactExistingIndex].provider_source_id?.trim()
+    const incomingExplicitProviderSource = incoming.provider_source_id?.trim()
+    const exactIdHasSourceConflict =
+      exactExistingIndex !== undefined &&
+      Boolean(exactExistingProviderSource) &&
+      Boolean(incomingExplicitProviderSource) &&
+      exactExistingProviderSource !== incomingExplicitProviderSource
+    const exactIdHasOccurrenceConflict =
+      exactExistingIndex !== undefined &&
+      exactExistingOccurrence !== undefined &&
+      incomingOccurrence !== undefined &&
+      exactExistingOccurrence !== incomingOccurrence
+    const exactIdHasIdentityConflict =
+      exactIdHasSourceConflict || exactIdHasOccurrenceConflict
+    const existingIndex =
+      (exactIdHasIdentityConflict ? undefined : exactExistingIndex) ??
+      occurrenceExistingIndex
+    if (incoming.role === "user") incomingSegmentStartsNewTurn = existingIndex === undefined
+    if (existingIndex !== undefined) {
+      const existing = merged[existingIndex]
+      if (existing.role && incoming.role && existing.role !== incoming.role) {
+        // The checkpoint record keeps its provider id because checkpoint
+        // boundaries reference it. Preserve the conflicting durable record
+        // under a stable internal id so it still renders and repeated durable
+        // syncs merge into the same row instead of duplicating it.
+        const collisionId = preserveMessageIdCollision(
+          merged,
+          indexById,
+          incoming,
+          true,
+          !incomingSegmentStartsNewTurn
+        )
+        recordIncomingOrderId(collisionId, rawIncoming.id)
+        continue
+      }
+      merged[existingIndex] = mergeCheckpointAuthorityTranscriptMessage(existing, incoming)
+      indexById.set(incoming.id, existingIndex)
+      const hasUniqueExplicitTupleAnchor =
+        existing.role === incoming.role &&
+        Boolean(rawIncoming.provider_source_id?.trim()) &&
+        getMessageProviderOccurrence(rawIncoming) !== undefined &&
+        occurrenceMatches.length === 1
+      recordIncomingOrderId(existing.id, rawIncoming.id, hasUniqueExplicitTupleAnchor)
+      continue
+    }
+    if (exactIdHasIdentityConflict) {
+      const collisionId = preserveMessageIdCollision(
+        merged,
+        indexById,
+        incoming,
+        false,
+        !incomingSegmentStartsNewTurn
+      )
+      recordIncomingOrderId(collisionId, rawIncoming.id)
       continue
     }
     if (
@@ -250,11 +504,28 @@ export function mergeCheckpointAuthorityTranscriptMessages<
     ) {
       continue
     }
-    merged.push(incoming)
-    indexById.set(incoming.id, merged.length - 1)
+    const laterProviderOccurrenceIndex =
+      incomingOccurrence === undefined || incomingSegmentStartsNewTurn
+        ? undefined
+        : providerIdentityCandidates.find(
+            ({ effectiveOccurrence }) => effectiveOccurrence > incomingOccurrence
+          )?.candidateIndex
+    if (laterProviderOccurrenceIndex === undefined) {
+      merged.push(incoming)
+      indexById.set(incoming.id, merged.length - 1)
+    } else {
+      merged.splice(laterProviderOccurrenceIndex, 0, incoming)
+      for (const [id, index] of indexById) {
+        if (index >= laterProviderOccurrenceIndex) indexById.set(id, index + 1)
+      }
+      indexById.set(incoming.id, laterProviderOccurrenceIndex)
+    }
+    recordIncomingOrderId(incoming.id, rawIncoming.id)
   }
 
-  return merged
+  return orderMessagesByProviderOccurrence(
+    orderMessagesByIncomingAnchors(baselineIds, merged, resolvedIncomingIds)
+  )
 }
 
 function getAdditionalKwargs(
@@ -287,6 +558,15 @@ function getReferencedToolCallIds(message: Record<string, unknown>): string[] {
   if (directToolCallId) ids.add(directToolCallId)
 
   return [...ids]
+}
+
+function getMessageToolCalls(message: Record<string, unknown>): unknown[] {
+  const kwargs = isRecord(message.kwargs) ? message.kwargs : undefined
+  const additionalKwargs = getAdditionalKwargs(message)
+  if (Array.isArray(kwargs?.tool_calls)) return kwargs.tool_calls
+  if (Array.isArray(message.tool_calls)) return message.tool_calls
+  if (Array.isArray(additionalKwargs?.tool_calls)) return additionalKwargs.tool_calls
+  return []
 }
 
 function isInternalGoalPrompt(role: string, content: unknown): boolean {
@@ -350,9 +630,14 @@ export function truncateCheckpointMessagesAfter(checkpoint: unknown, messageId: 
   const messages = Array.isArray(channelValues.messages) ? channelValues.messages : undefined
   if (!messages) return false
 
-  const targetIndex = messages.findIndex((raw, index) => {
-    return isRecord(raw) && getMessageId(raw, index) === targetMessageId
-  })
+  const transcriptTarget = deriveCheckpointTranscriptIndex(checkpoint).visibleMessages.find(
+    (message) => (message.renderId ?? message.id) === targetMessageId
+  )
+  const targetIndex =
+    transcriptTarget?.rawIndex ??
+    messages.findIndex((raw, index) => {
+      return isRecord(raw) && getMessageId(raw, index) === targetMessageId
+    })
   if (targetIndex < 0) return false
 
   channelValues.messages = messages.slice(0, targetIndex + 1)
@@ -372,6 +657,13 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
   const subagentTranscriptIds: string[] = []
   const seenSubagentTranscriptIds = new Set<string>()
   const visibleMessages: CheckpointTranscriptMessage[] = []
+  const subagentTranscriptInvocations: Array<{
+    toolCallId: string
+    invocationScope: string
+  }> = []
+  const seenInvocations = new Set<string>()
+  const parentOccurrenceCounts = new Map<string, number>()
+  let idlessParentOccurrence = 0
 
   getCheckpointMessages(checkpoint).forEach((raw, index) => {
     if (!isRecord(raw)) return
@@ -387,6 +679,43 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
     const role = getMessageRole(raw)
     const checkpointContent = getMessageContent(raw)
     const messageId = getMessageId(raw, index)
+    if (role === "assistant") {
+      const kwargs = isRecord(raw.kwargs) ? raw.kwargs : undefined
+      const parentMessageId = readString(kwargs?.id) ?? readString(raw.id)
+      const providerOccurrence = getMessageProviderTupleFromMetadata(
+        additionalKwargs
+      )?.provider_occurrence
+      let parentOccurrence: number
+      if (providerOccurrence) {
+        parentOccurrence = providerOccurrence
+      } else if (parentMessageId) {
+        parentOccurrence = (parentOccurrenceCounts.get(parentMessageId) ?? 0) + 1
+        parentOccurrenceCounts.set(parentMessageId, parentOccurrence)
+      } else {
+        idlessParentOccurrence += 1
+        parentOccurrence = idlessParentOccurrence
+      }
+      const toolCalls = getMessageToolCalls(raw)
+      for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex += 1) {
+        const toolCall = toolCalls[toolIndex]
+        if (!isRecord(toolCall) || readString(toolCall.name) !== "task") continue
+        const toolCallId = readString(toolCall.id)
+        if (!toolCallId) continue
+        const invocationScope = buildSubagentTaskInvocationIdentity({
+          parentMessageId,
+          parentOccurrence,
+          parentContent: kwargs?.content ?? raw.content,
+          parentToolCalls: toolCalls,
+          taskToolCallId: toolCallId,
+          taskToolCallIndex: toolIndex,
+          taskArgs: toolCall.args
+        })
+        const invocationKey = JSON.stringify([toolCallId, invocationScope])
+        if (seenInvocations.has(invocationKey)) continue
+        seenInvocations.add(invocationKey)
+        subagentTranscriptInvocations.push({ toolCallId, invocationScope })
+      }
+    }
     const rawInternalGoalPrompt = isInternalGoalPrompt(role, checkpointContent)
     if (rawInternalGoalPrompt) {
       internalGoalMessageIds.push(messageId)
@@ -399,16 +728,33 @@ export function deriveCheckpointTranscriptIndex(checkpoint: unknown): Checkpoint
         : checkpointContent
 
     if (isVisibleTranscriptMessage(role, effectiveContent)) {
+      const providerTuple =
+        role === "assistant"
+          ? getMessageProviderTupleFromMetadata(additionalKwargs)
+          : undefined
       visibleMessageIds.push(messageId)
       visibleMessages.push({
         id: messageId,
+        ...providerTuple,
         role,
-        text: stringifyContent(effectiveContent)
+        text: stringifyContent(effectiveContent),
+        rawIndex: index
       })
     }
   })
 
-  return { visibleMessageIds, internalGoalMessageIds, subagentTranscriptIds, visibleMessages }
+  const normalizedVisibleMessages = mergeCheckpointAuthorityTranscriptMessages(visibleMessages, [])
+  const indexedVisibleMessages = visibleMessages.map((message, index) => ({
+    ...message,
+    renderId: normalizedVisibleMessages[index]?.id ?? message.id
+  }))
+  return {
+    visibleMessageIds,
+    internalGoalMessageIds,
+    subagentTranscriptIds,
+    subagentTranscriptInvocations,
+    visibleMessages: indexedVisibleMessages
+  }
 }
 
 export function describeCheckpointMessageForkTarget(
@@ -426,7 +772,9 @@ export function describeCheckpointMessageForkTarget(
   })
   if (!targetMessageId) return missing("missing_message")
 
-  const target = transcript.visibleMessages.find((message) => message.id === targetMessageId)
+  const target = transcript.visibleMessages.find(
+    (message) => (message.renderId ?? message.id) === targetMessageId
+  )
   if (!target) return missing("missing_message")
   if (target.role !== "assistant") {
     return {
@@ -436,7 +784,8 @@ export function describeCheckpointMessageForkTarget(
       transcript
     }
   }
-  if (transcript.visibleMessageIds.at(-1) !== targetMessageId) {
+  const lastVisibleMessage = transcript.visibleMessages.at(-1)
+  if ((lastVisibleMessage?.renderId ?? lastVisibleMessage?.id) !== targetMessageId) {
     return {
       isForkableMessageBoundary: false,
       reason: "not_visible_boundary",
@@ -446,9 +795,11 @@ export function describeCheckpointMessageForkTarget(
   }
 
   const rawMessages = getCheckpointMessages(checkpoint)
-  const targetRawIndex = rawMessages.findIndex((raw, index) => {
-    return isRecord(raw) && getMessageId(raw, index) === targetMessageId
-  })
+  const targetRawIndex =
+    target.rawIndex ??
+    rawMessages.findIndex((raw, index) => {
+      return isRecord(raw) && getMessageId(raw, index) === target.id
+    })
   const hasRawMessagesAfterTarget = targetRawIndex < 0 || targetRawIndex < rawMessages.length - 1
   if (hasRawMessagesAfterTarget) {
     return {
@@ -476,18 +827,61 @@ export function filterMessagesToCheckpointVisibleIds<T extends { id?: string }>(
   return messages.filter((message) => typeof message.id === "string" && allowedIds.has(message.id))
 }
 
-export function findMessagesAfterCheckpointVisibleIds<T extends { id?: string }>(
+type CheckpointVisibleMessageBoundary = string | (RoleCollisionMessage & { renderId?: string })
+
+function partitionMessageBoundaries(boundaries: readonly CheckpointVisibleMessageBoundary[]): {
+  ids: Set<string>
+  identities: Set<string>
+} {
+  const ids = new Set<string>()
+  const identities = new Set<string>()
+
+  for (const boundary of boundaries) {
+    if (typeof boundary === "string") {
+      if (boundary) ids.add(boundary)
+      continue
+    }
+    const boundaryId = boundary.renderId || boundary.id
+    if (!boundaryId) continue
+    if (boundary.role || boundary.type) {
+      identities.add(getMessageProviderOccurrenceIdentity({ ...boundary, id: boundaryId }))
+    } else {
+      ids.add(boundaryId)
+    }
+  }
+
+  return { ids, identities }
+}
+
+export function findMessagesAfterCheckpointVisibleIds<
+  T extends { id?: string; role?: string; type?: string }
+>(
   messages: readonly T[],
-  checkpointVisibleMessageIds: readonly string[],
-  options: { excludeMessageIds?: readonly string[] } = {}
+  checkpointVisibleMessages: readonly CheckpointVisibleMessageBoundary[],
+  options: {
+    excludeMessageIds?: readonly string[]
+    excludeMessages?: readonly RoleCollisionMessage[]
+  } = {}
 ): T[] {
-  if (checkpointVisibleMessageIds.length === 0) return []
-  const checkpointIds = new Set(checkpointVisibleMessageIds)
+  if (checkpointVisibleMessages.length === 0) return []
+  const checkpoint = partitionMessageBoundaries(checkpointVisibleMessages)
   const excluded = new Set(options.excludeMessageIds ?? [])
+  const excludedIdentities = new Set(
+    (options.excludeMessages ?? []).map(getMessageProviderOccurrenceIdentity)
+  )
   let lastCheckpointMessageIndex = -1
 
+  const hasCheckpointMessage = (message: T): boolean => {
+    if (typeof message.id !== "string") return false
+    if (checkpoint.ids.has(message.id)) return true
+    if (checkpoint.identities.size === 0 || (!message.role && !message.type)) return false
+    return checkpoint.identities.has(
+      getMessageProviderOccurrenceIdentity(message as RoleCollisionMessage)
+    )
+  }
+
   messages.forEach((message, index) => {
-    if (typeof message.id === "string" && checkpointIds.has(message.id)) {
+    if (hasCheckpointMessage(message)) {
       lastCheckpointMessageIndex = index
     }
   })
@@ -495,7 +889,16 @@ export function findMessagesAfterCheckpointVisibleIds<T extends { id?: string }>
   return messages.filter((message, index) => {
     if (typeof message.id !== "string") return false
     if (excluded.has(message.id)) return false
-    if (checkpointIds.has(message.id)) return false
+    if (
+      excludedIdentities.size > 0 &&
+      (message.role || message.type) &&
+      excludedIdentities.has(
+        getMessageProviderOccurrenceIdentity(message as RoleCollisionMessage)
+      )
+    ) {
+      return false
+    }
+    if (hasCheckpointMessage(message)) return false
     return lastCheckpointMessageIndex < 0 || index > lastCheckpointMessageIndex
   })
 }
@@ -551,13 +954,54 @@ function buildOrder(
 
 function filterSubagentTranscripts(
   value: unknown,
-  ids: readonly string[]
+  ids: readonly string[],
+  invocations: readonly { toolCallId: string; invocationScope: string }[]
 ): Record<string, unknown> | undefined {
   if (!isRecord(value) || ids.length === 0) return undefined
   const next: Record<string, unknown> = {}
-  for (const id of ids) {
-    const transcript = value[id]
-    if (Array.isArray(transcript)) next[id] = cloneJsonValue(transcript)
+  const rawIds = new Set(ids)
+  const invocationKeys = new Set(
+    invocations.map((invocation) =>
+      JSON.stringify([invocation.toolCallId, invocation.invocationScope])
+    )
+  )
+  for (const [executionId, transcript] of Object.entries(value)) {
+    if (!Array.isArray(transcript)) continue
+    const prompt = transcript.find(
+      (message) =>
+        isRecord(message) &&
+        typeof message.subagent_tool_call_id === "string" &&
+        typeof message.subagent_invocation_scope === "string"
+    )
+    if (isRecord(prompt)) {
+      const key = JSON.stringify([
+        prompt.subagent_tool_call_id,
+        prompt.subagent_invocation_scope
+      ])
+      if (invocationKeys.has(key)) {
+        next[executionId] = cloneJsonValue(transcript)
+        continue
+      }
+      // Pre-v1 metadata stored a mutable UI render ID. It cannot be compared to
+      // the shared checkpoint identity, so retain its raw family conservatively.
+      if (
+        typeof prompt.subagent_invocation_scope === "string" &&
+        prompt.subagent_invocation_scope.startsWith("task-v1-")
+      ) {
+        continue
+      }
+    }
+
+    // Legacy buckets have no parent identity. Preserve the matching raw-ID
+    // family rather than silently dropping scoped historical records; new
+    // records use the exact invocation path above and do not leak past a fork.
+    const scopedMatch = /^(.*)::(?:execution-\d+|invocation-[a-z0-9-]+)$/.exec(executionId)
+    const promptToolCallId =
+      isRecord(prompt) && typeof prompt.subagent_tool_call_id === "string"
+        ? prompt.subagent_tool_call_id
+        : undefined
+    const rawToolCallId = promptToolCallId ?? scopedMatch?.[1] ?? executionId
+    if (rawIds.has(rawToolCallId)) next[executionId] = cloneJsonValue(transcript)
   }
   return Object.keys(next).length > 0 ? next : undefined
 }
@@ -569,16 +1013,16 @@ export function buildFilteredThreadValues(
   if (!isRecord(sourceThreadValues)) return {}
 
   const next: Record<string, unknown> = {}
-  const messageTimes = filterTimeMap(
-    sourceThreadValues[MESSAGE_TIMES_KEY],
-    transcriptIndex.visibleMessageIds
+  const visibleRenderMessageIds = transcriptIndex.visibleMessages.map(
+    (message) => message.renderId ?? message.id
   )
+  const messageTimes = filterTimeMap(sourceThreadValues[MESSAGE_TIMES_KEY], visibleRenderMessageIds)
   const internalGoalMessageTimes = filterTimeMap(
     sourceThreadValues[INTERNAL_GOAL_MESSAGE_TIMES_KEY],
     transcriptIndex.internalGoalMessageIds
   )
   const messageTimeOrder = buildOrder(
-    transcriptIndex.visibleMessageIds,
+    visibleRenderMessageIds,
     sourceThreadValues[MESSAGE_TIMES_KEY],
     sourceThreadValues[MESSAGE_TIME_ORDER_KEY]
   )
@@ -589,7 +1033,8 @@ export function buildFilteredThreadValues(
   )
   const subagentTranscripts = filterSubagentTranscripts(
     sourceThreadValues[SUBAGENT_TRANSCRIPTS_KEY],
-    transcriptIndex.subagentTranscriptIds
+    transcriptIndex.subagentTranscriptIds,
+    transcriptIndex.subagentTranscriptInvocations
   )
 
   if (messageTimes) next[MESSAGE_TIMES_KEY] = messageTimes

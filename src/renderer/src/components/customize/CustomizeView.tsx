@@ -18,6 +18,8 @@ import {
   Cpu,
   CircleUser,
   PawPrint,
+  Settings2,
+  Users,
   Webhook,
   Wrench,
   type LucideIcon
@@ -27,6 +29,7 @@ import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 
 const SkillsPanel = lazy(() => import("./SkillsPanel").then((m) => ({ default: m.SkillsPanel })))
+const GeneralPanel = lazy(() => import("./GeneralPanel").then((m) => ({ default: m.GeneralPanel })))
 const McpPanel = lazy(() => import("./McpPanel").then((m) => ({ default: m.McpPanel })))
 const ScheduledPanel = lazy(() =>
   import("./ScheduledPanel").then((m) => ({ default: m.ScheduledPanel }))
@@ -52,8 +55,12 @@ const CodeExecToolsPanel = lazy(() =>
   import("./CodeExecToolsPanel").then((m) => ({ default: m.CodeExecToolsPanel }))
 )
 const PetPanel = lazy(() => import("./PetPanel").then((m) => ({ default: m.PetPanel })))
+const ExpertTeamPanel = lazy(() =>
+  import("./ExpertTeamPanel").then((m) => ({ default: m.ExpertTeamPanel }))
+)
 
 type CustomizeTab =
+  | "general"
   | "skills"
   | "connectors"
   | "plugins"
@@ -70,6 +77,7 @@ type CustomizeTab =
   | "hooks"
   | "lsp"
   | "codeExecTools"
+  | "expertTeam"
 
 type MenuGroupId = "basic" | "advanced" | "profile"
 
@@ -77,7 +85,6 @@ type MenuItem = {
   tab: CustomizeTab
   label: string
   icon: LucideIcon
-  beta?: boolean
   truncate?: boolean
 }
 
@@ -92,23 +99,25 @@ const MENU_GROUPS: MenuGroup[] = [
     id: "basic",
     label: "基础功能",
     items: [
+      { tab: "general", label: "通用", icon: Settings2 },
       { tab: "skills", label: "技能", icon: Sparkles },
       { tab: "connectors", label: "MCP 连接器", icon: Plug },
       { tab: "plugins", label: "插件", icon: Puzzle },
       { tab: "scheduled", label: "定时任务", icon: Clock },
       { tab: "market", label: "应用市场", icon: ShoppingBag },
-      { tab: "sandbox", label: "沙盒环境", icon: Shield, beta: true }
+      { tab: "sandbox", label: "沙盒环境", icon: Shield }
     ]
   },
   {
     id: "advanced",
     label: "高级特性",
     items: [
+      { tab: "expertTeam", label: "专家团", icon: Users },
       { tab: "heartbeat", label: "心跳监控", icon: HeartPulse },
       { tab: "memory", label: "记忆管理", icon: Brain },
-      { tab: "taskMmd", label: "任务画布", icon: Network, beta: true },
-      { tab: "lsp", label: "Java LSP", icon: Code2, beta: true },
-      { tab: "evolution", label: "自优化", icon: GitBranch, beta: true },
+      { tab: "taskMmd", label: "任务画布", icon: Network },
+      { tab: "lsp", label: "Java LSP", icon: Code2 },
+      { tab: "evolution", label: "自优化", icon: GitBranch },
       { tab: "chatx", label: "机器人管理", icon: Cpu },
       { tab: "hooks", label: "钩子", icon: Webhook },
       { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true }
@@ -151,7 +160,9 @@ export function CustomizeView(): React.JSX.Element {
   const { setShowCustomizeView, customizeInitialTab, pendingEvolution, currentThreadId, threads } =
     useAppStore()
   const [activeTab, setActiveTab] = useState<CustomizeTab>(
-    customizeInitialTab === "commitPolicy" ? "skills" : (customizeInitialTab as CustomizeTab) || "skills"
+    customizeInitialTab === "commitPolicy"
+      ? "skills"
+      : (customizeInitialTab as CustomizeTab) || "general"
   )
   const [expandedGroups, setExpandedGroups] = useState<Record<MenuGroupId, boolean>>({
     basic: true,
@@ -171,7 +182,9 @@ export function CustomizeView(): React.JSX.Element {
     let cancelled = false
     queueMicrotask(() => {
       if (!cancelled) {
-        setActiveTab(customizeInitialTab === "commitPolicy" ? "skills" : customizeInitialTab as CustomizeTab)
+        setActiveTab(
+          customizeInitialTab === "commitPolicy" ? "skills" : (customizeInitialTab as CustomizeTab)
+        )
       }
     })
     return () => {
@@ -198,20 +211,9 @@ export function CustomizeView(): React.JSX.Element {
       >
         <Icon className="size-3 shrink-0" />
         <span className="min-w-0 flex-1 truncate whitespace-nowrap text-left">{item.label}</span>
-        {item.tab === "evolution" ? (
-          <div className="ml-auto flex items-center gap-1.5 shrink-0">
-            {pendingEvolution && <span className="size-2 rounded-full bg-orange-500 shrink-0" />}
-            {item.beta && (
-              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-                Beta
-              </span>
-            )}
-          </div>
-        ) : item.beta ? (
-          <span className="ml-auto shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
-            Beta
-          </span>
-        ) : null}
+        {item.tab === "evolution" && pendingEvolution && (
+          <span className="ml-auto size-2 shrink-0 rounded-full bg-orange-500" />
+        )}
       </button>
     )
   }
@@ -265,7 +267,9 @@ export function CustomizeView(): React.JSX.Element {
       </div>
 
       <Suspense fallback={<CustomizePanelFallback />}>
-        {activeTab === "skills" ? (
+        {activeTab === "general" ? (
+          <GeneralPanel />
+        ) : activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "connectors" ? (
           <McpPanel />
@@ -301,6 +305,8 @@ export function CustomizeView(): React.JSX.Element {
           </div>
         ) : activeTab === "pet" ? (
           <PetPanel />
+        ) : activeTab === "expertTeam" ? (
+          <ExpertTeamPanel />
         ) : null}
       </Suspense>
     </div>

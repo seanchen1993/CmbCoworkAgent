@@ -1,5 +1,9 @@
 import type { UpdateSourceInfo } from "../main/updater/channel-config"
 import type {
+  WorkflowWorktreeAction,
+  WorkflowWorktreeActionResponse
+} from "../main/ipc/workflow-worktree-payload"
+import type {
   Thread,
   Message,
   ModelConfig,
@@ -43,7 +47,10 @@ import type {
   ForkableCheckpoint,
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
-  ThreadForkResponse
+  ThreadForkResponse,
+  SubagentTranscriptPage,
+  SubagentTranscriptBlobExportResult,
+  SubagentTranscriptBlobField
 } from "../main/types"
 import { UserInfoConfig } from "../main/storage"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
@@ -57,10 +64,16 @@ import type {
 } from "../main/ipc/code-exec-tools"
 import type { CoordinatorWorkerSnapshot } from "../main/agent/coordinator-worker-manager"
 import type {
+  HarnessDeployUnitSearchInput,
+  HarnessDeployUnitSearchResult,
   HarnessEnterpriseProjectDetailInput,
   HarnessEnterpriseProjectDetailResult,
   HarnessEnterpriseProjectSearchInput,
   HarnessEnterpriseProjectSearchResult,
+  HarnessPipelineLabelQueryInput,
+  HarnessPipelineLabelQueryResult,
+  HarnessPipelineQueryInput,
+  HarnessPipelineQueryResult,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
   HarnessKnowledgePreviewResult,
@@ -68,6 +81,8 @@ import type {
   HarnessProjectReviewResult,
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult,
+  HarnessFeatureDeployUnitBinding,
+  HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
   HarnessProjectMetadata,
@@ -93,16 +108,60 @@ import type {
 } from "../main/agent/task-mmd/types"
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
-import type { CloseToTrayPromptAction, CloseToTrayPromptEvent } from "../shared/close-to-tray"
+import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
+import type {
+  BrowserRecordingSession,
+  BrowserAttachOptions,
+  BrowserBounds,
+  BrowserCdpConfig,
+  BrowserScriptLibraryDeleteInput,
+  BrowserNavigateOptions,
+  BrowserPanelRequest,
+  BrowserProfileImportOptions,
+  BrowserProfileImportResult,
+  BrowserScriptExecutionInput,
+  BrowserScriptExecutionState,
+  BrowserRecordingDraftUpdateInput,
+  BrowserScreenshotResult,
+  ScriptRecordingStartOptions,
+  BrowserScriptLibraryEntry,
+  BrowserScriptLibraryListOptions,
+  BrowserScriptLibraryReadInput,
+  BrowserScriptLibrarySaveInput,
+  BrowserScriptLibraryUpdateInput,
+  BrowserState
+} from "../shared/browser-types"
+import type {
+  CloseToTrayPromptAction,
+  CloseToTrayPromptEvent,
+  WindowCloseBehavior
+} from "../shared/close-to-tray"
+import type { ChatScrollSettings } from "../shared/chat-scroll"
+import type { AgentRuntimeSettings } from "../shared/agent-runtime-limits"
 
 interface ElectronAPI {
   openExternal: (url: string) => Promise<void>
+  openManagedLink: (id: "skillEvalDoc" | "knowledgeGuide") => Promise<void>
   openLoginWindow: () => void
   closeLoginWindow: () => void
   openLoginPage: () => void
   closeLoginPage: () => void
   onCloseToTrayPrompt: (callback: (request: CloseToTrayPromptEvent) => void) => () => void
-  respondCloseToTrayPrompt: (requestId: number, action: CloseToTrayPromptAction) => void
+  respondCloseToTrayPrompt: (
+    requestId: number,
+    action: CloseToTrayPromptAction,
+    rememberChoice?: boolean
+  ) => void
+  getWindowCloseBehavior: () => Promise<WindowCloseBehavior>
+  setWindowCloseBehavior: (behavior: WindowCloseBehavior) => Promise<WindowCloseBehavior>
+  onWindowCloseBehaviorChanged: (callback: (behavior: WindowCloseBehavior) => void) => () => void
+  getChatScrollSettings: () => Promise<ChatScrollSettings>
+  setChatScrollSettings: (settings: Partial<ChatScrollSettings>) => Promise<ChatScrollSettings>
+  onChatScrollSettingsChanged: (callback: (settings: ChatScrollSettings) => void) => () => void
+  getAgentRuntimeSettings: () => Promise<AgentRuntimeSettings>
+  setAgentRuntimeRecursionLimit: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
+  setWorkflowWorktreeRemoveTimeoutMinutes: (value: number) => Promise<AgentRuntimeSettings>
   onNotifyMsg: (callback: (msg: string) => void) => void
   ipcRenderer: {
     send: (channel: string, ...args: unknown[]) => void
@@ -179,6 +238,33 @@ interface DashboardTraceDetail {
   userIp?: string
   modelId?: string
   modelName?: string
+  observabilitySchemaVersion?: number
+  traceKind?: string
+  executionMode?: string
+  rootTraceId?: string
+  rootThreadId?: string
+  parentTraceId?: string
+  parentThreadId?: string
+  parentSpanId?: string
+  linkType?: string
+  subagentKind?: string
+  subagentRunId?: string
+  subagentThreadId?: string
+  handoffAction?: string
+  handoffSourceAgent?: string
+  handoffTargetAgent?: string
+  coordinatorWorkerId?: string
+  coordinatorWorkerTurn?: number
+  coordinatorWorkerRole?: string
+  coordinatorWorkerWorkload?: string
+  workflowRunId?: string
+  workflowAgentIndex?: number
+  workflowPhase?: string
+  workflowAgentLabel?: string
+  harnessProjectId?: string
+  harnessFeatureSlug?: string
+  harnessNodeName?: string
+  harnessNodeStatus?: string
   outcome: string
   totalToolCalls: number
   modelCallCount: number
@@ -321,23 +407,6 @@ interface DashboardCommitAdoptionEvents {
     sumAdopted: number
     rate: number | null
   }
-}
-
-interface LocalAdoptionLine {
-  lineNumber: number
-  text: string
-  adopted: boolean
-}
-
-interface LocalGenAdoptionLines {
-  genEventId: string
-  available: boolean
-  reason?: string
-  relPath?: string
-  generatedLineCount?: number
-  matchedLineCount?: number
-  truncated?: boolean
-  lines?: LocalAdoptionLine[]
 }
 
 interface DashboardSkillEvalOptions {
@@ -589,13 +658,26 @@ interface DashboardProjectModeProject {
   lifecycleCreatedAt?: string
   compatible?: boolean
   compatibilityStatus?: string
+  systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  devStageConversationCount: number
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
+}
+
+interface DashboardProjectModeExportData {
+  users: DashboardProjectModeTopUser[]
+  projects: DashboardProjectModeProject[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -795,6 +877,22 @@ interface CustomAPI {
       }
     }>
     cancel: (threadId: string, options?: { cancelWorkers?: boolean }) => Promise<void>
+    queueCurrentRunMessage: (
+      threadId: string,
+      message: { id: string; content: string; displayContent?: string }
+    ) => Promise<{ queued: boolean; reason?: string; message?: string }>
+    deleteCurrentRunQueuedMessage: (threadId: string, messageId: string) => Promise<void>
+    reconcileCurrentRunQueuedMessages: (
+      threadId: string,
+      messageIds: string[]
+    ) => Promise<{ pendingIds: string[]; injectedIds: string[]; durableIds: string[] }>
+    onQueuedMessagesInjected: (
+      threadId: string,
+      callback: (payload: {
+        messages: Array<{ id: string; content: string }>
+        assistantIdAlias?: { sourceId: string; id: string }
+      }) => void
+    ) => () => void
     getCoordinatorWorkers: (
       threadId: string,
       options?: { subscribeUpdates?: boolean }
@@ -830,6 +928,12 @@ interface CustomAPI {
     listRuns: (threadId: string) => Promise<unknown[]>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
+    worktreeAction: (
+      threadId: string,
+      runId: string,
+      worktreeId: string,
+      action: WorkflowWorktreeAction
+    ) => Promise<WorkflowWorktreeActionResponse>
     /** Register/deregister per-agent "viewing interest" (the focus panel is showing this
      * running agent) so the display-only live tap only serializes/broadcasts that agent. */
     setAgentStreamInterest: (
@@ -863,6 +967,23 @@ interface CustomAPI {
     ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
+    getSubagentTranscripts: (threadId: string) => Promise<Record<string, unknown>>
+    getSubagentTranscript: (
+      threadId: string,
+      subagentId: string,
+      before?: number
+    ) => Promise<SubagentTranscriptPage>
+    exportSubagentTranscriptBlob: (
+      threadId: string,
+      subagentId: string,
+      messageIndex: number,
+      expectedMessageId: string,
+      field: SubagentTranscriptBlobField
+    ) => Promise<SubagentTranscriptBlobExportResult>
+    persistSubagentTranscripts: (
+      threadId: string,
+      transcripts: Record<string, unknown>
+    ) => Promise<Record<string, unknown>>
     delete: (threadId: string) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
@@ -989,6 +1110,47 @@ interface CustomAPI {
       thinkingEffort?: "high" | "max"
       tier?: "premium" | "economy"
     } | null>
+    getBuiltinConfigs: () => Promise<
+      Array<{
+        id: string
+        ref: `builtin:${string}`
+        source: "builtin"
+        origin: "remote" | "fallback"
+        name: string
+        baseUrl: string
+        model: string
+        hasApiKey: boolean
+        maxTokens: number
+        maxOutputTokens: number
+        temperature: number
+        topP: number
+        topK: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+        lockedFields: Array<"baseUrl" | "model" | "apiKey">
+      }>
+    >
+    updateBuiltinConfig: (
+      id: string,
+      config: {
+        name?: string
+        maxTokens?: number
+        maxOutputTokens?: number
+        temperature?: number
+        topP?: number
+        topK?: number
+        interleavedThinking?: boolean
+        enableThinking?: boolean
+        enableThinkingEffort?: boolean
+        thinkingEffort?: "high" | "max"
+        tier?: "premium" | "economy"
+      }
+    ) => Promise<void>
+    resetBuiltinConfig: (id: string) => Promise<void>
+    onChanged: (callback: () => void) => () => void
     setCustomConfig: (config: {
       id: string
       name: string
@@ -1090,18 +1252,24 @@ interface CustomAPI {
       modified_at?: string
       error?: string
     }>
-    readExternalFile: (filePath: string) => Promise<{
+    readExternalFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
       error?: string
     }>
-    readExternalBinaryFile: (filePath: string) => Promise<{
+    readExternalBinaryFile: (token: string) => Promise<{
       success: boolean
       content?: string
       size?: number
       modified_at?: string
+      error?: string
+    }>
+    requestExternalFileRead: (filePath: string) => Promise<{
+      success: boolean
+      token?: string
+      fileName?: string
       error?: string
     }>
     clearWorktreeContext: (threadId: string) => Promise<void>
@@ -1149,7 +1317,11 @@ interface CustomAPI {
     }>
     getGitPanelMeta: (
       threadId: string,
-      options?: { worktreePath?: string }
+      options?: {
+        worktreePath?: string
+        includeSummary?: boolean
+        includePushability?: boolean
+      }
     ) => Promise<{
       success: boolean
       isWorktree: boolean
@@ -1250,7 +1422,7 @@ interface CustomAPI {
       gitRoot: string
     ) => Promise<Array<{ path: string; branch: string; isMain: boolean; createdAt?: Date }>>
     removeWorktree: (
-      gitRoot: string,
+      threadId: string,
       worktreePath: string
     ) => Promise<{
       success: boolean
@@ -1271,7 +1443,7 @@ interface CustomAPI {
       threadId: string,
       message: string,
       filePaths?: string[],
-      options?: { worktreePath?: string }
+      options?: { worktreePath?: string; agentInitiated?: boolean }
     ) => Promise<{
       success: boolean
       error?: string
@@ -1315,22 +1487,23 @@ interface CustomAPI {
       error?: string
     }>
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string }) => void
+      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
     ) => () => void
   }
   pet: {
     // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
     list: () => Promise<PetManifest[]>
-    getSpriteDataUrl: (
+    getSpriteBytes: (
       directoryId: string,
       source?: "builtin" | "custom"
-    ) => Promise<{ success: boolean; dataUrl?: string; error?: string }>
+    ) => Promise<{ success: boolean; bytes?: Uint8Array; mimeType?: string; error?: string }>
     // 将业务状态同步到独立宠物窗口；动画渲染不在 renderer 主 UI 中执行。
     setState: (state: PetState) => void
     // 告知主进程主应用已打开/获得焦点，用于清空宠物完成任务提醒队列。
     clearCompletedTasks: () => void
     getSettings: () => Promise<PetSettings>
     updateSettings: (settings: Partial<PetSettings>) => Promise<PetSettings>
+    onSettingsChanged: (callback: (settings: PetSettings) => void) => () => void
     uploadCustomFolder: () => Promise<{ success: boolean; pet?: PetManifest; error?: string }>
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
@@ -1533,8 +1706,55 @@ interface CustomAPI {
       cardNumber?: string
     ) => Promise<AgentAutoCommitWorkspaceCard>
   }
+  expertAgents: {
+    list: () => Promise<import("../shared/expert-agent-types").ExpertAgentEntry[]>
+    setEnabled: (name: string, enabled: boolean) => Promise<string[]>
+  }
   taskCards: {
     list: (query?: TaskCardsQuery) => Promise<TaskCardsListResult>
+  }
+  browser: {
+    attach: (options?: BrowserAttachOptions) => Promise<BrowserState>
+    detach: () => Promise<BrowserState>
+    setBounds: (bounds: BrowserBounds, visible?: boolean) => Promise<BrowserState>
+    navigate: (url: string, options?: BrowserNavigateOptions) => Promise<BrowserState>
+    goBack: () => Promise<BrowserState>
+    goForward: () => Promise<BrowserState>
+    reload: () => Promise<BrowserState>
+    stop: () => Promise<BrowserState>
+    clearConsole: () => Promise<BrowserState>
+    getState: () => Promise<BrowserState>
+    startScriptRecording: (
+      options?: ScriptRecordingStartOptions
+    ) => Promise<BrowserRecordingSession>
+    pauseScriptRecording: () => Promise<BrowserRecordingSession>
+    updateScriptRecordingDraft: (
+      input: BrowserRecordingDraftUpdateInput
+    ) => Promise<BrowserRecordingSession>
+    resumeScriptRecording: () => Promise<BrowserRecordingSession>
+    stopScriptRecording: () => Promise<BrowserRecordingSession>
+    getScriptRecording: () => Promise<BrowserRecordingSession>
+    saveScriptLibraryEntry: (
+      input: BrowserScriptLibrarySaveInput
+    ) => Promise<BrowserScriptLibraryEntry>
+    listScriptLibraryEntries: (
+      options?: BrowserScriptLibraryListOptions
+    ) => Promise<BrowserScriptLibraryEntry[]>
+    readScriptLibraryScript: (input: BrowserScriptLibraryReadInput) => Promise<string>
+    updateScriptLibraryEntry: (input: BrowserScriptLibraryUpdateInput) => Promise<void>
+    deleteScriptLibraryEntry: (input: BrowserScriptLibraryDeleteInput) => Promise<void>
+    executeRecordingScript: (input: BrowserScriptExecutionInput) => Promise<void>
+    getScriptExecutionState: () => Promise<BrowserScriptExecutionState>
+    cancelRecordingScriptExecution: () => Promise<boolean>
+    getCdpConfig: () => Promise<BrowserCdpConfig>
+    isProfileImportRuntimeEnabled: () => Promise<boolean>
+    saveCdpConfig: (updates: Partial<BrowserCdpConfig>) => Promise<BrowserCdpConfig>
+    captureScreenshot: () => Promise<BrowserScreenshotResult>
+    importProfileData: (options: BrowserProfileImportOptions) => Promise<BrowserProfileImportResult>
+    disposeAllForRendererUnload: () => void
+    onState: (callback: (state: BrowserState) => void) => () => void
+    onPanelRequest: (callback: (request: BrowserPanelRequest) => void) => () => void
+    onScriptExecutionState: (callback: (state: BrowserScriptExecutionState) => void) => () => void
   }
   lsp: {
     getConfig: () => Promise<LspConfig>
@@ -1865,6 +2085,29 @@ interface CustomAPI {
       Array<{
         traceId: string
         threadId: string
+        observabilitySchemaVersion?: number
+        traceKind?: string
+        executionMode?: string
+        rootTraceId?: string
+        rootThreadId?: string
+        parentTraceId?: string
+        parentThreadId?: string
+        parentSpanId?: string
+        linkType?: string
+        subagentKind?: string
+        subagentRunId?: string
+        subagentThreadId?: string
+        handoffAction?: string
+        handoffSourceAgent?: string
+        handoffTargetAgent?: string
+        coordinatorWorkerId?: string
+        coordinatorWorkerTurn?: number
+        coordinatorWorkerRole?: string
+        coordinatorWorkerWorkload?: string
+        workflowRunId?: string
+        workflowAgentIndex?: number
+        workflowPhase?: string
+        workflowAgentLabel?: string
         startedAt: string
         durationMs: number
         userMessage: string
@@ -1884,6 +2127,29 @@ interface CustomAPI {
     getTraceDetail: (traceId: string) => Promise<{
       traceId: string
       threadId: string
+      observabilitySchemaVersion?: number
+      traceKind?: string
+      executionMode?: string
+      rootTraceId?: string
+      rootThreadId?: string
+      parentTraceId?: string
+      parentThreadId?: string
+      parentSpanId?: string
+      linkType?: string
+      subagentKind?: string
+      subagentRunId?: string
+      subagentThreadId?: string
+      handoffAction?: string
+      handoffSourceAgent?: string
+      handoffTargetAgent?: string
+      coordinatorWorkerId?: string
+      coordinatorWorkerTurn?: number
+      coordinatorWorkerRole?: string
+      coordinatorWorkerWorkload?: string
+      workflowRunId?: string
+      workflowAgentIndex?: number
+      workflowPhase?: string
+      workflowAgentLabel?: string
       startedAt: string
       endedAt: string
       durationMs: number
@@ -2022,6 +2288,7 @@ interface CustomAPI {
     isTraceEvolverReviewAdmin: () => Promise<boolean>
     isUncommittedAnalysisAllowed: () => Promise<boolean>
     isAwardsAdmin: () => Promise<boolean>
+    isSkillEvalAllowed: () => Promise<boolean>
     awardsSkillContributions: (
       range: { from: string; to: string },
       skillNames: string[]
@@ -2079,6 +2346,10 @@ interface CustomAPI {
       range: { from: string; to: string },
       options?: DashboardProjectModeProjectPageOptions
     ) => Promise<{ success: boolean; data?: DashboardProjectModeProjectPageData; error?: string }>
+    projectModeExportData: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null; fromLeanOnly?: boolean | null }
+    ) => Promise<{ success: boolean; data?: DashboardProjectModeExportData; error?: string }>
     projectModeTraces: (
       projectId: string,
       range: { from: string; to: string },
@@ -2276,8 +2547,26 @@ interface CustomAPI {
       totalTraces: number
       traces: DashboardTraceDetail[]
     }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
+    exportUserTraces: (payload: {
+      sapId: string
+      ystId?: string
+      userName: string
+      range: { from: string; to: string }
+      page: number
+      pageSize: number
+      totalItems: number
+      viewMode: DashboardTraceViewMode
+      triggerScope: DashboardTraceTriggerScope
+      projectMode: boolean
+      traces: DashboardTraceDetail[]
+    }) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     exportExcel: (
-      sheets: Array<{ name: string; header: string[]; rows: (string | number)[][] }>,
+      sheets: Array<{
+        name: string
+        header: string[]
+        rows: (string | number)[][]
+        summaryRows?: (string | number)[][]
+      }>,
       options?: { fileName?: string }
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
   }
@@ -2302,11 +2591,21 @@ interface CustomAPI {
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
     ) => Promise<HarnessEnterpriseProjectSearchResult>
+    searchDeployUnits: (
+      input: HarnessDeployUnitSearchInput
+    ) => Promise<HarnessDeployUnitSearchResult>
+    queryPipelines: (input: HarnessPipelineQueryInput) => Promise<HarnessPipelineQueryResult>
+    queryPipelineLabels: (
+      input: HarnessPipelineLabelQueryInput
+    ) => Promise<HarnessPipelineLabelQueryResult>
     getEnterpriseProjectDetails: (
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
     getProjectReviews: (input: HarnessProjectReviewInput) => Promise<HarnessProjectReviewResult>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
+    updateFeatureDeployUnits: (
+      input: HarnessFeatureDeployUnitUpdateInput
+    ) => Promise<HarnessFeatureDeployUnitBinding>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
@@ -2325,6 +2624,9 @@ interface CustomAPI {
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
+  }
+  app: {
+    restart: () => Promise<void>
   }
   update: {
     check: () => Promise<

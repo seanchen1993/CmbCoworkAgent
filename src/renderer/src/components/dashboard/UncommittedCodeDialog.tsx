@@ -634,9 +634,8 @@ export function UncommittedCodeAnalysisPanel({
           </div>
 
           <p className="text-[10px] leading-relaxed text-muted-foreground">
-            未提交 = 生成行数 − 已测量（进 commit
-            的有效生成）行数，时间口径同上方事件筛选框；若所选范围包含当天，会自动排除最近 2
-            小时的在途生成（刚生成还没来得及提交）。称「近似」是因为它按行数聚合归人，而非逐条
+            仅统计生产代码流（不含单独上报的测试生成）。未提交 = 生成行数 − 已测量（进 commit
+            的有效生成）行数，时间口径同上方事件筛选框。称「近似」是因为它按行数聚合归人，而非逐条
             genEventId
             反查——少数生成的提交若落在所选时间窗口外会被误记为未提交。点击某用户进入二级详情即用
             genEventId 精确反查，定位其「为什么没提交」。
@@ -712,7 +711,7 @@ export function UncommittedCodeDialog({
                 </span>
               ) : null}
             </span>
-            <HeaderHint hint="第一层「全部生成 → 已 Commit」缺口的下钻。时间口径同外部事件筛选框；范围含当天时自动排除最近 2 小时的在途生成。榜单为聚合近似（生成行数 − 已测量行数）；点击某人进入二级详情，用 genEventId 精确反查其未提交的生成并按维度归因。" />
+            <HeaderHint hint="第一层「全部生成 → 已 Commit」缺口的下钻。时间口径同外部事件筛选框。榜单为聚合近似（生成行数 − 已测量行数）；点击某人进入二级详情，用 genEventId 精确反查其未提交的生成并按维度归因。" />
           </DialogTitle>
           <DialogDescription className="sr-only">生成但未提交代码分析</DialogDescription>
         </DialogHeader>

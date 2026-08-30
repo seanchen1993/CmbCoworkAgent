@@ -58,8 +58,8 @@ async function testTransportCountsHiddenSubagentTools(): Promise<void> {
   )
   assertIncludes(
     transport,
-    "processSubagentToolCalls(kwargs.tool_calls, kwargs.tool_call_chunks)",
-    "transport counts hidden subagent tool calls"
+    "this.processSubagentToolCalls(\n              subagentToolCallId,",
+    "transport counts hidden subagent tools with execution-scoped ownership"
   )
   assertIncludes(transport, 'type: "subagent_tool_count"', "transport emits aggregate count event")
   assertIncludes(transport, 'type: "subagent_log_reset"', "transport resets subagent logs per run")
@@ -90,8 +90,8 @@ async function testTransportCountsHiddenSubagentTools(): Promise<void> {
   )
   assertIncludes(
     transport,
-    "this.subagentToolLogEntryIds.has(kwargs.tool_call_id)",
-    "transport matches late tool results by known subagent tool call ID"
+    "this.subagentToolLogEntryIds.has(scopedToolCallId)",
+    "transport matches late tool results by execution-scoped tool call identity"
   )
   assertIncludes(
     transport,
@@ -104,8 +104,13 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   const threadStateHelpers = await readProjectFile("src/renderer/src/lib/thread-state-helpers.ts")
   const subagentTranscripts = await readProjectFile("src/renderer/src/lib/subagent-transcripts.ts")
+  const subagentTranscriptStorage = await readProjectFile(
+    "src/shared/subagent-transcript-storage.ts"
+  )
   const subagentState = await readProjectFile("src/renderer/src/lib/subagent-state.ts")
   const streamConverter = await readProjectFile("src/main/agent/stream-converter.ts")
+  const threadIpc = await readProjectFile("src/main/ipc/threads.ts")
+  const preload = await readProjectFile("src/preload/index.ts")
 
   assertIncludes(
     threadContext,
@@ -179,9 +184,9 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     "thread context keeps a synchronous subagent transcript ref to avoid batched update loss"
   )
   assertIncludes(
-    subagentTranscripts,
+    subagentTranscriptStorage,
     'SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY = "subagentTranscripts"',
-    "subagent transcript helper stores transcripts in thread values"
+    "shared transcript storage defines the compact manifest key"
   )
   assertIncludes(
     subagentTranscripts,
@@ -205,8 +210,8 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "[SUBAGENT_TRANSCRIPTS_THREAD_VALUE_KEY]: serializeSubagentTranscripts(subset)",
-    "thread context persists transcript snapshots through thread values"
+    "window.api.threads.persistSubagentTranscripts(",
+    "thread context persists transcript snapshots through the dedicated sidecar API"
   )
   assertIncludes(
     threadContext,
@@ -217,6 +222,118 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     threadContext,
     "persistedSubagentTranscripts = getSubagentTranscriptsFromThreadValues(",
     "thread context reads persisted transcripts while loading history"
+  )
+  assertIncludes(
+    threadContext,
+    "subagentTranscriptBaselineReady: false",
+    "thread state starts with transcript baseline conversion disabled"
+  )
+  assertIncludes(
+    threadContext,
+    "if (!state?.subagentTranscriptBaselineReady) return null",
+    "thread context mounts the stream transport only after transcript hydration"
+  )
+  assertSourceOrder(
+    threadContext,
+    "seededTransport.seedSubagentTranscriptBaseline",
+    "const stream = useStream<DeepAgent>",
+    "thread stream holder seeds the baseline before subscribing to live events"
+  )
+  assertIncludes(
+    threadContext,
+    "scheduleSubagentTranscriptHydrationRetry(threadId, loadGeneration)",
+    "thread context retries failed transcript hydration instead of treating it as empty"
+  )
+  assertIncludes(
+    threadContext,
+    "if (!threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return",
+    "thread context refuses live-only transcript persistence before hydration succeeds"
+  )
+  assertIncludes(
+    threadContext,
+    "threadHistoryLoadGenerationRef.current[threadId] === loadGeneration",
+    "thread history and hydration commits are fenced by a per-thread request generation"
+  )
+  assertIncludes(
+    threadContext,
+    "subagentTranscriptPersistChainsRef.current[threadId]",
+    "thread context keeps at most one transcript write in flight"
+  )
+  assertIncludes(
+    threadContext,
+    "subagentTranscriptPendingMessagesRef.current[threadId]",
+    "thread context coalesces message-level transcript deltas behind the write chain"
+  )
+  assertIncludes(
+    threadContext,
+    "selectSubagentTranscriptPersistFollowUp({",
+    "failed writes cannot be restarted by the success-only follow-up drain"
+  )
+  assertNotIncludes(
+    threadContext,
+    "retryCount > 3",
+    "terminal transcript persistence must not become permanently stranded after four failures"
+  )
+  assertIncludes(
+    threadContext,
+    "Math.min(30_000, 500 * 2 ** Math.min(retryCount - 1, 6))",
+    "transcript persistence retries remain rate-limited at a bounded maximum interval"
+  )
+  assertSourceOrder(
+    threadContext,
+    "if (!threadStatesRef.current[threadId]?.subagentTranscriptBaselineReady) return",
+    "delete subagentTranscriptDirtyIdsRef.current[threadId]",
+    "debounce must not consume dirty transcript ids before hydration is ready"
+  )
+  assertIncludes(
+    threadContext,
+    "restoreSubagentsFromTranscripts(",
+    "hydrated transcript buckets rebuild historical subagent cards"
+  )
+  assertIncludes(
+    threadIpc,
+    "thread_values: threadValuesWithoutSubagentTranscripts(row.thread_values)",
+    "generic thread mutation responses do not clone transcript manifests"
+  )
+  const compactTranscriptHandlerStart = threadIpc.indexOf(
+    'ipcMain.handle("threads:getSubagentTranscripts"'
+  )
+  const focusedTranscriptHandlerStart = threadIpc.indexOf(
+    '"threads:getSubagentTranscript"',
+    compactTranscriptHandlerStart + 1
+  )
+  assert(
+    compactTranscriptHandlerStart >= 0 && focusedTranscriptHandlerStart > compactTranscriptHandlerStart,
+    "thread IPC should expose separate compact and focused transcript handlers"
+  )
+  const compactTranscriptHandler = threadIpc.slice(
+    compactTranscriptHandlerStart,
+    focusedTranscriptHandlerStart
+  )
+  assertIncludes(
+    compactTranscriptHandler,
+    "return buildSubagentTranscriptStartupManifests(rawTranscripts)",
+    "history startup returns a read-only bounded transcript index"
+  )
+  assertNotIncludes(
+    compactTranscriptHandler,
+    "hydrateSubagentTranscriptManifests",
+    "history startup must not hydrate every large transcript blob"
+  )
+  assertIncludes(
+    threadIpc.slice(focusedTranscriptHandlerStart),
+    "sliceSubagentTranscriptManifestPage(bucket, before)",
+    "focused transcript IPC selects a bounded page before hydration"
+  )
+  assertIncludes(
+    threadIpc.slice(focusedTranscriptHandlerStart),
+    "hydrateSubagentTranscriptManifestPage(page)",
+    "focused transcript IPC hydrates only the selected bounded page"
+  )
+  assertIncludes(
+    preload,
+    'ipcRenderer.invoke("threads:getSubagentTranscript", { threadId, subagentId, before })',
+    "preload exposes the focused transcript hydration channel"
   )
   assertIncludes(
     threadContext,
@@ -245,8 +362,13 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
   )
   assertIncludes(
     threadContext,
-    "resolveIncomingSubagentStatus",
-    "thread context prevents late stale subagent snapshots from restoring running"
+    "mergeSubagentSnapshotWithHistory(",
+    "thread context routes incoming snapshots through terminal-state reconciliation"
+  )
+  assertIncludes(
+    subagentState,
+    "resolveIncomingSubagentStatus({",
+    "subagent state prevents late stale snapshots from restoring running"
   )
   assertIncludes(
     subagentState,
@@ -578,6 +700,16 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   )
   assertIncludes(
     subagentStreamPanel,
+    ".getSubagentTranscript(focus.threadId, focus.subagentId)",
+    "subagent transcript panel lazily hydrates only the opened record"
+  )
+  assertIncludes(
+    subagentStreamPanel,
+    "hydratedTranscript?.focusKey !== focusedSubagentKey",
+    "subagent transcript panel ignores a stale focused hydration response"
+  )
+  assertIncludes(
+    subagentStreamPanel,
     "currentSubagent?.status ??",
     "subagent transcript panel prefers live subagent status over the opening snapshot"
   )
@@ -625,6 +757,9 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
 
 async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   const sidebar = await readProjectFile("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
+  const harnessBoard = await readProjectFile(
+    "src/renderer/src/components/harness-board/HarnessBoardView.tsx"
+  )
 
   assertIncludes(
     sidebar,
@@ -641,6 +776,11 @@ async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
     /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*hasRunningCoordinatorWorker/u,
     "sidebar keeps spinner active after main stream completes while worker is running"
   )
+  assertMatches(
+    harnessBoard,
+    /const\s+isLoading\s*=\s*\(allStreamLoadingStates\[thread\.thread_id\]\s*\?\?\s*false\)\s*\|\|\s*threadState\?\.workflowRun\?\.status\s*===\s*"running"/u,
+    "project-mode sidebar keeps spinner active while a dynamic workflow is running"
+  )
   assertSourceOrder(
     sidebar,
     "await deleteThread(thread.thread_id)",
@@ -653,6 +793,9 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
   const transport = await readProjectFile("src/renderer/src/lib/electron-transport.ts")
   const workerStreamPanel = await readProjectFile(
     "src/renderer/src/components/chat/WorkerStreamPanel.tsx"
+  )
+  const workerCheckpointHistory = await readProjectFile(
+    "src/renderer/src/lib/worker-checkpoint-history.ts"
   )
   const rendererTypes = await readProjectFile("src/renderer/src/types.ts")
 
@@ -673,28 +816,33 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
   )
   assertIncludes(
     workerStreamPanel,
-    "status: live.status ?? existing.status",
+    "(live.status ?? existing.status)",
     "worker stream panel preserves tool status while merging live and checkpoint messages"
   )
   assertIncludes(
     workerStreamPanel,
-    "is_error: live.is_error ?? existing.is_error",
+    "(live.is_error ?? existing.is_error)",
     "worker stream panel preserves tool error flags while merging live and checkpoint messages"
   )
   assertIncludes(
-    workerStreamPanel,
-    "const MAX_WORKER_HISTORY_MESSAGES = 500",
-    "worker stream panel bounds checkpoint history restore to a recent message window"
+    workerCheckpointHistory,
+    "export const MAX_WORKER_HISTORY_MESSAGES = 500",
+    "worker checkpoint helper bounds history restore to a recent message window"
   )
   assertIncludes(
-    workerStreamPanel,
-    "rawMessages.slice(startIndex)",
-    "worker stream panel restores only the recent checkpoint message slice when history is large"
+    workerCheckpointHistory,
+    "indexedMessages[index].absoluteIndex >= startIndex",
+    "worker checkpoint helper restores only the recent message window when history is large"
   )
   assertIncludes(
-    workerStreamPanel,
-    'is_error: message.is_error === true || message.status === "error"',
-    "worker stream panel derives tool result errors from either explicit flags or error status"
+    workerCheckpointHistory,
+    'message.is_error === true ||',
+    "worker checkpoint helper preserves explicit tool error flags"
+  )
+  assertIncludes(
+    workerCheckpointHistory,
+    'toolStatus === "error"',
+    "worker checkpoint helper also derives tool errors from provider status"
   )
   assertIncludes(
     rendererTypes,
