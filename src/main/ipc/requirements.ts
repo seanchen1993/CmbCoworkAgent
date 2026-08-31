@@ -129,10 +129,6 @@ const PRD_PREVIEW_FILENAME = "full-prd.md"
 const SOURCE_PREVIEW_FILENAME = "source-preview.md"
 const REQUIREMENT_SETTINGS_FILENAME = "settings.json"
 
-type RequirementSettings = {
-  lastWorkDir?: string
-}
-
 type RequirementsIndexFile = {
   list?: Array<
     RequirementIndexItem & {
@@ -143,6 +139,7 @@ type RequirementsIndexFile = {
     }
   >
   token?: string
+  lastWorkDir?: string
 }
 
 function safeSegment(value: string, fallback: string): string {
@@ -194,10 +191,6 @@ function getRequirementPrdDir(item: RequirementIndexItem): string {
   return path.join(getRequirementRoot(item), PRD_DIRNAME)
 }
 
-function getRequirementSettingsPath(): string {
-  return path.join(getRequirementsRoot(), REQUIREMENT_SETTINGS_FILENAME)
-}
-
 async function readJson<T>(filePath: string, fallback: T): Promise<T> {
   try {
     return JSON.parse(await fs.readFile(filePath, "utf-8")) as T
@@ -230,14 +223,28 @@ async function migrateLegacyRequirementData(): Promise<void> {
     }
   }
 
-  try {
-    await fs.stat(getRequirementSettingsPath())
-  } catch {
+  const indexPath = path.join(requirementsRoot, REQUIREMENTS_INDEX_FILENAME)
+  const currentSettingsPath = path.join(requirementsRoot, REQUIREMENT_SETTINGS_FILENAME)
+  const existingIndex = await readJson<RequirementsIndexFile>(indexPath, {})
+  const settingsPaths = [currentSettingsPath, legacySettingsPath]
+
+  for (const settingsPath of settingsPaths) {
+    let settings: { lastWorkDir?: unknown }
     try {
-      await fs.rename(legacySettingsPath, getRequirementSettingsPath())
+      settings = JSON.parse(await fs.readFile(settingsPath, "utf-8")) as { lastWorkDir?: unknown }
     } catch {
-      // Settings migration is best-effort; a missing setting simply uses defaults.
+      continue
     }
+
+    const lastWorkDir = typeof settings.lastWorkDir === "string" ? settings.lastWorkDir.trim() : ""
+    if (!lastWorkDir || existingIndex.lastWorkDir) {
+      await fs.rm(settingsPath, { force: true })
+      continue
+    }
+
+    await writeJson(indexPath, { ...existingIndex, lastWorkDir, list: existingIndex.list ?? [] })
+    existingIndex.lastWorkDir = lastWorkDir
+    await fs.rm(settingsPath, { force: true })
   }
 }
 
@@ -274,7 +281,11 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
 async function writeRequirementIndex(list: RequirementIndexItem[]): Promise<void> {
   const indexPath = path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME)
   const existing = await readJson<RequirementsIndexFile>(indexPath, {})
-  await writeJson(indexPath, { ...(existing.token ? { token: existing.token } : {}), list })
+  await writeJson(indexPath, {
+    ...(existing.token ? { token: existing.token } : {}),
+    ...(existing.lastWorkDir ? { lastWorkDir: existing.lastWorkDir } : {}),
+    list
+  })
 }
 
 async function readRequirementToken(): Promise<string> {
@@ -296,8 +307,12 @@ async function saveRequirementToken(token: string): Promise<void> {
 }
 
 async function getLastRequirementWorkDir(): Promise<string | null> {
-  const settings = await readJson<RequirementSettings>(getRequirementSettingsPath(), {})
-  const workDir = settings.lastWorkDir?.trim()
+  await ensureRequirementDirs()
+  const index = await readJson<RequirementsIndexFile>(
+    path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME),
+    {}
+  )
+  const workDir = index.lastWorkDir?.trim()
   if (!workDir) return null
   try {
     const resolvedPath = path.resolve(workDir)
@@ -309,7 +324,14 @@ async function getLastRequirementWorkDir(): Promise<string | null> {
 }
 
 async function saveLastRequirementWorkDir(workDir: string): Promise<void> {
-  await writeJson(getRequirementSettingsPath(), { lastWorkDir: workDir })
+  await ensureRequirementDirs()
+  const indexPath = path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME)
+  const existing = await readJson<RequirementsIndexFile>(indexPath, {})
+  await writeJson(indexPath, {
+    ...existing,
+    lastWorkDir: workDir,
+    list: existing.list ?? []
+  })
 }
 
 async function resolveRequirementWorkDir(workDir: unknown): Promise<string> {

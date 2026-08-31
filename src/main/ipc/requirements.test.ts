@@ -104,6 +104,17 @@ describe("requirement source preview", () => {
     )
     expect(await getWorkDir!(null)).toBe(workDir)
 
+    const indexPath = join(tempHome, ".cmbcoworkagent", "requirements", "index.json")
+    const settingsPath = join(tempHome, ".cmbcoworkagent", "requirements", "settings.json")
+    const indexBeforeMigration = JSON.parse(readFileSync(indexPath, "utf-8")) as {
+      list: unknown[]
+    }
+    writeFileSync(indexPath, JSON.stringify({ list: indexBeforeMigration.list }), "utf-8")
+    writeFileSync(settingsPath, JSON.stringify({ lastWorkDir: workDir }), "utf-8")
+    expect(await getWorkDir!(null)).toBe(workDir)
+    expect(existsSync(settingsPath)).toBe(false)
+    expect(JSON.parse(readFileSync(indexPath, "utf-8"))).toMatchObject({ lastWorkDir: workDir })
+
     const archivedSourcePath = join(
       created.requirement!.requirementPath,
       "source",
@@ -274,7 +285,6 @@ describe("requirement source preview", () => {
     expect(history[0]).not.toHaveProperty("moduleCount")
     expect(history[0]).not.toHaveProperty("modules")
 
-    const indexPath = join(tempHome, ".cmbcoworkagent", "requirements", "index.json")
     const index = JSON.parse(readFileSync(indexPath, "utf-8")) as {
       list: Array<{
         requirementPath?: string

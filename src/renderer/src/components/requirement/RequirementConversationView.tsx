@@ -884,7 +884,9 @@ function RequirementConversationSession({
                           ) : (
                             <Loader2 className="size-3" />
                           )}
-                          {requirementSpaceManifest.prd.status || "未发布"}
+                          {isRequirementSpacePublished(requirementSpaceManifest)
+                            ? "已发布到需求空间3.0"
+                            : requirementSpaceManifest.prd.status || "未发布"}
                         </span>
                       </div>
                       <p className="text-sm leading-5 text-muted-foreground">
@@ -900,58 +902,57 @@ function RequirementConversationSession({
                           </span>
                         ) : null}
                       </div>
-                      <div className="mt-4 flex flex-wrap items-center gap-2">
-                        {isRequirementSpacePublished(requirementSpaceManifest) ? (
-                          <div className="inline-flex items-center gap-2 text-sm font-semibold text-status-nominal">
-                            <CheckCircle2 className="size-3.5" />
-                            已发布到需求空间3.0
-                          </div>
-                        ) : (
+                      <div className={"flex justify-between items-center"}>
+                        <div className="mt-4 flex flex-wrap items-center gap-2">
+                          {!isRequirementSpacePublished(requirementSpaceManifest) ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={publishRequestQueued || conversationLoading}
+                              className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
+                              onClick={handlePublishToRequirementSpace}
+                            >
+                              {publishRequestQueued ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <Send className="size-3.5" />
+                              )}
+                              {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
+                            </Button>
+                          ) : null}
+                          {requirementSpaceManifest.prd.prDetailUrl ? (
+                            <button
+                              type="button"
+                              className="mt-3 inline-flex max-w-full items-center gap-1.5 truncate text-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                              title={requirementSpaceManifest.prd.prDetailUrl}
+                              onClick={() => {
+                                const url = requirementSpaceManifest.prd.prDetailUrl
+                                if (url) void window.electron.openExternal(url)
+                              }}
+                            >
+                              <Eye className="size-3.5 shrink-0" />
+                              <span className="truncate">去需求空间3.0查看本需求详情</span>
+                            </button>
+                          ) : null}
+                        </div>
+                        {!isRequirementSpacePublished(requirementSpaceManifest) ? (
                           <Button
                             type="button"
                             size="sm"
-                            disabled={publishRequestQueued || conversationLoading}
+                            variant="outline"
+                            disabled={conversationLoading || tokenSaving}
                             className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
-                            onClick={handlePublishToRequirementSpace}
+                            onClick={() => void handleSendLeanstarToken()}
                           >
-                            {publishRequestQueued ? (
+                            {tokenSaving ? (
                               <Loader2 className="size-3.5 animate-spin" />
                             ) : (
-                              <Send className="size-3.5" />
+                              <KeyRound className="size-3.5" />
                             )}
-                            {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
+                            发送Token身份令牌
                           </Button>
-                        )}
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={conversationLoading || tokenSaving}
-                          className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
-                          onClick={() => void handleSendLeanstarToken()}
-                        >
-                          {tokenSaving ? (
-                            <Loader2 className="size-3.5 animate-spin" />
-                          ) : (
-                            <KeyRound className="size-3.5" />
-                          )}
-                          发送Token身份令牌
-                        </Button>
+                        ) : null}
                       </div>
-                      {requirementSpaceManifest.prd.prDetailUrl ? (
-                        <button
-                          type="button"
-                          className="mt-3 inline-flex max-w-full items-center gap-1.5 truncate text-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
-                          title={requirementSpaceManifest.prd.prDetailUrl}
-                          onClick={() => {
-                            const url = requirementSpaceManifest.prd.prDetailUrl
-                            if (url) void window.electron.openExternal(url)
-                          }}
-                        >
-                          <ExternalLink className="size-3.5 shrink-0" />
-                          <span className="truncate">需求空间3.0详情</span>
-                        </button>
-                      ) : null}
                     </section>
 
                     <section>
