@@ -74,7 +74,13 @@ function Hint({ children }: { children: React.ReactNode }): React.JSX.Element {
             <Info className="size-3.5" />
           </button>
         </TooltipTrigger>
-        <TooltipContent className="max-w-[360px] text-xs leading-relaxed">
+        <TooltipContent
+          side="bottom"
+          align="start"
+          sideOffset={8}
+          collisionPadding={12}
+          className="z-[100] max-h-[calc(100vh-24px)] w-80 max-w-[calc(100vw-24px)] overflow-y-auto whitespace-normal text-xs leading-relaxed"
+        >
           {children}
         </TooltipContent>
       </Tooltip>
@@ -207,12 +213,12 @@ function AdoptionCard({
         <div className="space-y-1.5">
           <div>入库采纳率 = 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。</div>
           <div>
-            新增 / 存量按每次生成的新旧行级差分划分，阈值 0.7：旧内容独有行（删除或被替换）
-            越多越偏存量。分桶信息在生成时算好并随采纳事件一起上报，不是事后按 diff 反推的。
+            新增 / 存量根据每次生成中的新旧代码行差异划分，阈值为 0.7：删除或替换的旧代码越多，
+            越偏向存量迭代。分类结果在代码生成时确定，后续不再重新计算。
           </div>
           <div>
-            分母含 14 天归因窗口外未拿到采纳判定的生成行，这部分只进分母不进分子，
-            所以这里的采纳率是偏保守的下界。
+            统计中包含超过 14 天归因窗口、尚未获得采纳结果的生成代码；这部分只计入有效生成行，
+            因此采纳率是偏保守的参考值。
           </div>
         </div>
       }
@@ -291,10 +297,8 @@ function ComputeCard({
         <div className="space-y-1.5">
           <div>单行入库代码 Token 数 = Σ totalTokens ÷ Σ 已 Push 采纳行。</div>
           <div>
-            输入 token 已包含缓存读取（适配器把 cache_read / cache_creation 折进了 input_tokens），
-            所以缓存命中率越高这个数越大，而实际花费越低。对外引用时务必带上这个口径说明。
+            输入 Token 已包含缓存读取，因此缓存命中率越高，这一数值可能越大，但实际花费反而越低。
           </div>
-          <div>Token 只统计主流程，不含 subagent，避免重复计数。</div>
         </div>
       }
     >
