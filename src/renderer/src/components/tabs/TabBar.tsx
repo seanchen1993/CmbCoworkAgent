@@ -74,8 +74,7 @@ function FileTab({ file, isActive, onSelect, onClose }: FileTabProps): React.JSX
   }
 
   return (
-    <button
-      onClick={onSelect}
+    <div
       onMouseDown={handleMouseDown}
       className={cn(
         "group flex items-center gap-2 px-3 h-full text-sm transition-colors shrink-0 border-r border-border max-w-[200px]",
@@ -85,10 +84,18 @@ function FileTab({ file, isActive, onSelect, onClose }: FileTabProps): React.JSX
       )}
       title={file.path}
     >
-      <FileIcon name={file.name} />
-      <span className="truncate">{file.name}</span>
       <button
+        type="button"
+        onClick={onSelect}
+        className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
+      >
+        <FileIcon name={file.name} />
+        <span className="truncate">{file.name}</span>
+      </button>
+      <button
+        type="button"
         onClick={handleClose}
+        aria-label={`关闭 ${file.name}`}
         className={cn(
           "size-4 flex items-center justify-center rounded-sm hover:bg-background-interactive transition-colors",
           isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"
@@ -96,7 +103,7 @@ function FileTab({ file, isActive, onSelect, onClose }: FileTabProps): React.JSX
       >
         <X className="size-3" />
       </button>
-    </button>
+    </div>
   )
 }
 

@@ -2098,8 +2098,24 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     agentIpc,
-    'window.removeListener("closed", onWindowClosed)',
-    "agent IPC removes window-close listeners after each run"
+    "const removeWindowClosedSubscription = subscribeWindowClosed(window, onWindowClosed)",
+    "agent IPC multiplexes run cleanup through the shared window-close subscription"
+  )
+  assertIncludes(
+    agentIpc,
+    "removeWindowListener: removeWindowClosedSubscription",
+    "agent IPC releases each shared window-close callback after its run settles"
+  )
+  assertIncludes(
+    agentIpc,
+    "Retain the empty per-window map until the shared window-close callback",
+    "coordinator focus/clear cycles reuse one window-lifetime cleanup callback"
+  )
+  assertOccurrenceCount(
+    agentIpc,
+    "focusedCoordinatorWorkerStreamByWindow.delete(window.id)",
+    1,
+    "coordinator focus state is deleted only by the window-lifetime close callback"
   )
   assertIncludes(
     agentIpc,

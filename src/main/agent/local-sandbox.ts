@@ -114,6 +114,7 @@ import {
   READ_FILE_MAX_LIMIT,
   trimReadFileOutputLines
 } from "./read-file-output"
+import { resolveWindowsBackgroundJobControllerPath } from "./windows-background-job-controller-path"
 
 const execFileP = promisify(execFile)
 
@@ -432,9 +433,9 @@ interface ExecuteRawOptions {
   /** Internal background lifecycle hook: receives the process-tree termination promise. */
   onTermination?: (termination: Promise<void>) => void
   /**
-   * Live partial-output callback. Invoked per stdout/stderr chunk while the
-   * command is running so background tasks can expose progress before they
-   * complete. The final authoritative output still uses encoding detection.
+   * Live partial-output callback. Invoked with safely decoded stdout/stderr
+   * text while the command is running so background tasks can expose progress
+   * before they complete.
    */
   onData?: (text: string) => void
 }
@@ -446,6 +447,115 @@ interface ExecuteRawOptions {
  * timeout so it does NOT trigger the sandbox-escape retry path.
  */
 type LocalExecuteResponse = ExecuteResponse & { capReached?: boolean }
+
+type Utf8Inspection =
+  | { kind: "ascii" | "valid" | "invalid" }
+  | { kind: "incomplete"; sequenceStart: number; hasNonAsciiPrefix: boolean }
+
+/**
+ * Validate UTF-8 without treating a split trailing sequence as malformed. The
+ * sequence start lets the streaming decoder emit an arbitrarily long ASCII
+ * prefix immediately while retaining at most the final three bytes.
+ */
+function inspectUtf8(input: Buffer): Utf8Inspection {
+  let hasNonAscii = false
+  for (let index = 0; index < input.length; index += 1) {
+    const first = input[index]
+    if (first <= 0x7f) continue
+
+    let continuationBytes = 0
+    let secondMin = 0x80
+    let secondMax = 0xbf
+    if (first >= 0xc2 && first <= 0xdf) {
+      continuationBytes = 1
+    } else if (first >= 0xe0 && first <= 0xef) {
+      continuationBytes = 2
+      if (first === 0xe0) secondMin = 0xa0
+      if (first === 0xed) secondMax = 0x9f
+    } else if (first >= 0xf0 && first <= 0xf4) {
+      continuationBytes = 3
+      if (first === 0xf0) secondMin = 0x90
+      if (first === 0xf4) secondMax = 0x8f
+    } else {
+      return { kind: "invalid" }
+    }
+
+    const available = input.length - index - 1
+    const bytesToCheck = Math.min(available, continuationBytes)
+    for (let offset = 1; offset <= bytesToCheck; offset += 1) {
+      const continuation = input[index + offset]
+      const min = offset === 1 ? secondMin : 0x80
+      const max = offset === 1 ? secondMax : 0xbf
+      if (continuation < min || continuation > max) return { kind: "invalid" }
+    }
+    if (available < continuationBytes) {
+      return {
+        kind: "incomplete",
+        sequenceStart: index,
+        hasNonAsciiPrefix: hasNonAscii
+      }
+    }
+
+    hasNonAscii = true
+    index += continuationBytes
+  }
+  return { kind: hasNonAscii ? "valid" : "ascii" }
+}
+
+/**
+ * UTF-8-first incremental shell-output decoder. It defers only an incomplete
+ * trailing character, then falls back to the detected Windows code page only
+ * after the bytes prove they are not UTF-8.
+ */
+class SafeShellOutputDecoder {
+  private pending: Buffer = Buffer.alloc(0)
+  private decoder: ReturnType<typeof iconv.getDecoder> | null = null
+  private ended = false
+
+  constructor(private readonly detectLegacyEncoding: (input: Buffer) => string) {}
+
+  write(chunk: Buffer): string {
+    if (this.ended || chunk.length === 0) return ""
+    if (this.decoder) return this.decoder.write(chunk)
+
+    this.pending = this.pending.length > 0 ? Buffer.concat([this.pending, chunk]) : chunk
+    const inspection = inspectUtf8(this.pending)
+    if (inspection.kind === "ascii") {
+      const text = this.pending.toString("ascii")
+      this.pending = Buffer.alloc(0)
+      return text
+    }
+    if (inspection.kind === "incomplete" && !inspection.hasNonAsciiPrefix) {
+      const text = this.pending.subarray(0, inspection.sequenceStart).toString("ascii")
+      this.pending = this.pending.subarray(inspection.sequenceStart)
+      return text
+    }
+
+    const encoding =
+      inspection.kind === "invalid" ? this.detectLegacyEncoding(this.pending) : "utf-8"
+    this.decoder = iconv.getDecoder(encoding)
+    const buffered = this.pending
+    this.pending = Buffer.alloc(0)
+    return this.decoder.write(buffered)
+  }
+
+  end(): string {
+    if (this.ended) return ""
+    this.ended = true
+    if (this.decoder) return this.decoder.end() ?? ""
+    if (this.pending.length === 0) return ""
+
+    const inspection = inspectUtf8(this.pending)
+    const encoding =
+      inspection.kind === "ascii" || inspection.kind === "valid"
+        ? "utf-8"
+        : this.detectLegacyEncoding(this.pending)
+    this.decoder = iconv.getDecoder(encoding)
+    const buffered = this.pending
+    this.pending = Buffer.alloc(0)
+    return this.decoder.write(buffered) + (this.decoder.end() ?? "")
+  }
+}
 
 type WindowsSandboxMode = "none" | "unelevated" | "readonly" | "elevated"
 
@@ -5010,38 +5120,102 @@ export class LocalSandbox
    */
   private static readonly ENCODING_DETECT_HEAD_BYTES = 8 * 1024
 
+  /**
+   * jschardet can return no candidate for very short CP936 output (for example
+   * two Chinese characters). Use the Windows locale only for that ambiguous,
+   * already-proven-non-UTF-8 case; other locales keep the existing UTF-8
+   * fallback instead of guessing a foreign code page.
+   */
+  private static readonly WINDOWS_LOCALE_FALLBACK_ENCODING = (() => {
+    try {
+      const locale = Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase()
+      if (!locale.startsWith("zh")) return "utf-8"
+      return locale.includes("hant") || /^zh-(?:tw|hk|mo)(?:-|$)/.test(locale)
+        ? "big5"
+        : "gb18030"
+    } catch {
+      return "utf-8"
+    }
+  })()
+
   private detectCmdEncoding(buf: Buffer): string {
     if (buf.length === 0) return "utf-8"
     const sample =
       buf.length > LocalSandbox.ENCODING_DETECT_HEAD_BYTES
         ? buf.subarray(0, LocalSandbox.ENCODING_DETECT_HEAD_BYTES)
         : buf
+    // Valid UTF-8 is authoritative. This prevents locale/chardet guesses from
+    // corrupting UTF-8 output on Chinese and non-Chinese Windows installations.
+    if (LocalSandbox.isValidUtf8(sample)) return "utf-8"
+
+    // Short CP936 text is frequently misidentified with high confidence as a
+    // Cyrillic or Western encoding (for example, one Chinese character). Once
+    // UTF-8 is ruled out, the active Chinese Windows code page is authoritative.
+    if (LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING !== "utf-8") {
+      return LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING
+    }
+
     const detected = chardet.detect(sample)
-    if (!detected) return "utf-8"
+    if (!detected) return LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING
     const enc = typeof detected === "string" ? detected : detected.encoding
     const confidence = typeof detected === "object" ? detected.confidence : 1
     if (!enc || enc.toLowerCase() === "ascii" || !iconv.encodingExists(enc)) {
-      return "utf-8"
+      return LocalSandbox.WINDOWS_LOCALE_FALLBACK_ENCODING
     }
     if (confidence >= LocalSandbox.CHARDET_CONFIDENCE_THRESHOLD) {
       return enc
     }
-    // Low confidence but buffer contains invalid UTF-8 — definitely not UTF-8,
-    // trust jschardet's best guess (typically GBK/GB2312 on Chinese Windows)
-    if (!LocalSandbox.isValidUtf8(sample)) {
-      return enc
-    }
-    return "utf-8"
+    // Preserve the previous behavior for non-Chinese locales: once the bytes
+    // are known not to be UTF-8, accept chardet's available legacy candidate.
+    return enc
   }
 
-  /**
-   * Pick the buffer to feed encoding detection. Prefer stdout (more representative of
-   * the program's text output), fall back to stderr. Avoid the third Buffer.concat
-   * the previous implementation paid for on every command — only stdoutBuf and stderrBuf
-   * are already-allocated slices we can reuse directly.
-   */
-  private static encodingDetectionBuffer(stdoutBuf: Buffer, stderrBuf: Buffer): Buffer {
-    return stdoutBuf.length > 0 ? stdoutBuf : stderrBuf
+  private createShellOutputDecoder(isWindows: boolean): SafeShellOutputDecoder {
+    return new SafeShellOutputDecoder((input) =>
+      isWindows ? this.detectCmdEncoding(input) : "utf-8"
+    )
+  }
+
+  private decodeShellOutputChunks(chunks: Buffer[], isWindows: boolean): string {
+    const decoder = this.createShellOutputDecoder(isWindows)
+    const decoded: string[] = []
+    for (const chunk of chunks) {
+      const text = decoder.write(chunk)
+      if (text) decoded.push(text)
+    }
+    const tail = decoder.end()
+    if (tail) decoded.push(tail)
+    return decoded.join("")
+  }
+
+  private emitLiveOutput(
+    decoder: SafeShellOutputDecoder | null,
+    chunk: Buffer,
+    onData: ((text: string) => void) | undefined
+  ): void {
+    if (!decoder || !onData) return
+    try {
+      const text = decoder.write(chunk)
+      if (text) onData(text)
+    } catch {
+      /* never let the live preview interfere with command resolution */
+    }
+  }
+
+  private endLiveOutput(
+    decoders: Array<SafeShellOutputDecoder | null>,
+    onData: ((text: string) => void) | undefined
+  ): void {
+    if (!onData) return
+    for (const decoder of decoders) {
+      if (!decoder) continue
+      try {
+        const tail = decoder.end()
+        if (tail) onData(tail)
+      } catch {
+        /* never let the live preview interfere with command resolution */
+      }
+    }
   }
 
   /** Quick check whether a buffer is valid UTF-8. */
@@ -5487,17 +5661,108 @@ export class LocalSandbox
 
   /** Track all active child processes for cleanup on app quit. */
   private static readonly activeProcesses = new Set<ChildProcess>()
+  private static readonly activeProcessTerminations = new WeakMap<
+    ChildProcess,
+    { promise: Promise<void>; waitForProcessTree: boolean }
+  >()
+  private static applicationShutdownStarted = false
+
+  /** Close the background-start race before the main process takes shutdown snapshots. */
+  static beginApplicationShutdown(): void {
+    LocalSandbox.applicationShutdownStarted = true
+  }
 
   static hasActiveProcesses(): boolean {
     return LocalSandbox.activeProcesses.size > 0
   }
 
-  /** Kill all active child processes. Call from app 'will-quit' hook. */
-  static killAll(): void {
-    for (const proc of LocalSandbox.activeProcesses) {
-      void LocalSandbox.killTree(proc, () => false)
+  /** Include detached ownership records before spawn and during process-tree settlement. */
+  static hasActiveExecutionTasks(): boolean {
+    if (
+      LocalSandbox.activeProcesses.size > 0 ||
+      LocalSandbox.pendingBackgroundTaskStarts.size > 0
+    ) {
+      return true
     }
-    LocalSandbox.activeProcesses.clear()
+    for (const task of LocalSandbox.backgroundTasks.values()) {
+      if (!task.settled) return true
+    }
+    return false
+  }
+
+  private static terminateProcessTree(
+    proc: ChildProcess,
+    exited: () => boolean,
+    waitForProcessTree = false
+  ): Promise<void> {
+    const requireProcessTree = waitForProcessTree || LocalSandbox.applicationShutdownStarted
+    const previous = LocalSandbox.activeProcessTerminations.get(proc)
+    if (previous?.waitForProcessTree || (previous && !requireProcessTree)) {
+      return previous.promise
+    }
+
+    // If a normal timeout already started a leader-only kill, upgrade it after
+    // that attempt settles so application shutdown still fences descendants.
+    const terminationAttempt = previous
+      ? previous.promise
+          .catch(() => undefined)
+          .then(() => LocalSandbox.killTree(proc, exited, true))
+      : LocalSandbox.killTree(proc, exited, requireProcessTree)
+    const promise = terminationAttempt.finally(() => {
+      if (LocalSandbox.activeProcessTerminations.get(proc)?.promise === promise) {
+        LocalSandbox.activeProcessTerminations.delete(proc)
+      }
+    })
+    LocalSandbox.activeProcessTerminations.set(proc, {
+      promise,
+      waitForProcessTree: requireProcessTree
+    })
+    return promise
+  }
+
+  private static async waitForPromisesWithin(
+    promises: Promise<unknown>[],
+    timeoutMs: number
+  ): Promise<boolean> {
+    if (promises.length === 0) return true
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<false>((resolve) => {
+      timeoutId = setTimeout(() => resolve(false), Math.max(0, timeoutMs))
+    })
+    try {
+      return await Promise.race([
+        Promise.allSettled(promises).then(() => true as const),
+        timeout
+      ])
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId)
+    }
+  }
+
+  /** Kill active child process trees and wait for their physical termination, bounded. */
+  static async killAllAndWait(timeoutMs = 5_000): Promise<boolean> {
+    LocalSandbox.beginApplicationShutdown()
+    const terminations = Array.from(LocalSandbox.activeProcesses, (proc) =>
+      LocalSandbox.terminateProcessTree(
+        proc,
+        () => proc.exitCode !== null || proc.signalCode !== null,
+        true
+      )
+    )
+    const settled = await LocalSandbox.waitForPromisesWithin(terminations, timeoutMs)
+    if (!settled) {
+      console.warn(
+        `[LocalSandbox] Timed out waiting for ${terminations.length} process tree(s) during shutdown`
+      )
+    }
+    return settled
+  }
+
+  /** Best-effort final fallback for callers that cannot await (for example will-quit). */
+  static killAll(): void {
+    void LocalSandbox.killAllAndWait().catch((error) => {
+      console.warn("[LocalSandbox] Failed to terminate process trees during shutdown:", error)
+    })
   }
 
   // Use SID *S-1-1-0 instead of "Everyone" to avoid locale issues on non-English Windows.
@@ -6157,7 +6422,10 @@ export class LocalSandbox
     console.log(`[LocalSandbox] killTree: killing pid=${pid}, platform=${process.platform}`)
 
     if (process.platform === "win32") {
-      if (exited()) return
+      // During application shutdown the shell leader may have emitted `exit`
+      // while descendants still own inherited handles. Keep the `/T` attempt
+      // when the caller explicitly requested a process-tree fence.
+      if (exited() && !waitForProcessTree) return
       await new Promise<void>((res) => {
         const killer = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], {
           stdio: "ignore",
@@ -6279,6 +6547,42 @@ export class LocalSandbox
       termination?: Promise<void>
     }
   >()
+  private static readonly pendingBackgroundTaskStarts = new Set<{
+    abortController: AbortController
+    settled: Promise<void>
+  }>()
+
+  private static beginBackgroundTaskStart(): {
+    abortController: AbortController
+    finish: () => void
+  } | null {
+    if (LocalSandbox.applicationShutdownStarted) return null
+
+    const abortController = new AbortController()
+    let resolveSettled!: () => void
+    const pending = {
+      abortController,
+      settled: new Promise<void>((resolve) => {
+        resolveSettled = resolve
+      })
+    }
+    LocalSandbox.pendingBackgroundTaskStarts.add(pending)
+
+    let finished = false
+    return {
+      abortController,
+      finish: () => {
+        if (finished) return
+        finished = true
+        LocalSandbox.pendingBackgroundTaskStarts.delete(pending)
+        resolveSettled()
+      }
+    }
+  }
+
+  private static backgroundStartCancelledMessage(): string {
+    return "Background task was not started because the application is shutting down."
+  }
 
   /**
    * Execute a command in the background — returns immediately with the task-output prompt.
@@ -6286,9 +6590,30 @@ export class LocalSandbox
    * Use `getTaskOutput(taskId)` to retrieve the result or check progress.
    */
   async executeBackground(command: string, cwd?: string): Promise<string> {
+    const pendingStart = LocalSandbox.beginBackgroundTaskStart()
+    if (!pendingStart) return LocalSandbox.backgroundStartCancelledMessage()
+    try {
+      return await this.executeBackgroundAfterStart(
+        command,
+        cwd,
+        pendingStart.abortController
+      )
+    } finally {
+      pendingStart.finish()
+    }
+  }
+
+  private async executeBackgroundAfterStart(
+    command: string,
+    cwd: string | undefined,
+    taskAbortController: AbortController
+  ): Promise<string> {
     const requestedCwd = this.resolveExecutionCwd(cwd)
     const toolArgs = { command, run_in_background: true, cwd: requestedCwd }
     const preResult = await this.runPreToolUseHookForTool("execute", toolArgs)
+    if (taskAbortController.signal.aborted) {
+      return LocalSandbox.backgroundStartCancelledMessage()
+    }
     if (preResult?.blocked || preResult?.decision === "block") {
       return `[Hook blocked] ${preResult.stdout || preResult.reason || "execute was blocked by a hook"}`
     }
@@ -6307,6 +6632,9 @@ export class LocalSandbox
     }
     const shellSyntax = await LocalSandbox.resolveCommandShellSyntax(this.windowsSandbox)
     const outsideShellSyntax = await LocalSandbox.resolveCommandShellSyntax("none")
+    if (taskAbortController.signal.aborted) {
+      return LocalSandbox.backgroundStartCancelledMessage()
+    }
     const worktreeViolation = this.worktreeIsolation
       ? getWorktreeShellIsolationViolation(
           effectiveCommand,
@@ -6383,8 +6711,10 @@ export class LocalSandbox
       return "Command forbidden: isolated worktree pushes must run in the foreground for explicit approval"
     }
 
+    if (taskAbortController.signal.aborted) {
+      return LocalSandbox.backgroundStartCancelledMessage()
+    }
     const taskId = randomUUID().slice(0, 8)
-    const taskAbortController = new AbortController()
     const task = {
       id: taskId,
       threadId: this.runId,
@@ -6614,13 +6944,33 @@ export class LocalSandbox
     await Promise.allSettled(completions)
   }
 
-  private static cancelBackgroundTasksForThread(threadId: string): Promise<void>[] {
+  /** Prevent late background starts, cancel every detached task, and wait bounded. */
+  static async cancelAllBackgroundTasksAndWait(timeoutMs = 5_000): Promise<boolean> {
+    LocalSandbox.beginApplicationShutdown()
+    const pendingStarts = Array.from(LocalSandbox.pendingBackgroundTaskStarts)
+    for (const pending of pendingStarts) {
+      pending.abortController.abort()
+    }
+    const completions = LocalSandbox.cancelBackgroundTasksForThread()
+    const settled = await LocalSandbox.waitForPromisesWithin(
+      [...pendingStarts.map((pending) => pending.settled), ...completions],
+      timeoutMs
+    )
+    if (!settled) {
+      console.warn(
+        `[LocalSandbox] Timed out waiting for ${pendingStarts.length} pending start(s) and detached task cleanup during shutdown`
+      )
+    }
+    return settled
+  }
+
+  private static cancelBackgroundTasksForThread(threadId?: string): Promise<void>[] {
     const completions: Promise<void>[] = []
     for (const [taskId, task] of LocalSandbox.backgroundTasks) {
-      if (task.threadId !== threadId) continue
+      if (threadId !== undefined && task.threadId !== threadId) continue
       if (!task.completed) {
         console.log(
-          `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${threadId}`
+          `[LocalSandbox] cancelling background task ${taskId} (command: ${task.command}) for thread ${task.threadId}`
         )
         task.abortController.abort()
         // Mark as completed immediately to prevent zombie entries if the
@@ -7456,6 +7806,12 @@ export class LocalSandbox
         let timedOut = false
         let aborted = false
         let drainTimerId: ReturnType<typeof setTimeout> | null = null
+        const stdoutLiveDecoder = options?.onData
+          ? this.createShellOutputDecoder(true)
+          : null
+        const stderrLiveDecoder = options?.onData
+          ? this.createShellOutputDecoder(true)
+          : null
 
         if (effectiveAbortSignal?.aborted) {
           resolve(LocalSandbox.createAbortedExecuteResponse())
@@ -7482,7 +7838,7 @@ export class LocalSandbox
         LocalSandbox.activeProcesses.add(proc)
         let termination: Promise<void> | undefined
         const killProc = (): void => {
-          termination ??= LocalSandbox.killTree(
+          termination ??= LocalSandbox.terminateProcessTree(
             proc,
             () => exited,
             options?.waitForProcessTree === true
@@ -7532,13 +7888,7 @@ export class LocalSandbox
             stdoutChunks.push(chunk)
             totalBytes += chunk.length
           }
-          // Live preview: per-chunk utf8 decode is acceptable here; the final
-          // authoritative output still uses detectCmdEncoding below.
-          try {
-            options?.onData?.(chunk.toString("utf8"))
-          } catch {
-            /* never let the live preview interfere with resolution */
-          }
+          this.emitLiveOutput(stdoutLiveDecoder, chunk, options?.onData)
         })
 
         proc.stderr?.on("data", (chunk: Buffer) => {
@@ -7552,11 +7902,7 @@ export class LocalSandbox
             stderrChunks.push(chunk)
             totalBytes += chunk.length
           }
-          try {
-            options?.onData?.(chunk.toString("utf8"))
-          } catch {
-            /* never let the live preview interfere with resolution */
-          }
+          this.emitLiveOutput(stderrLiveDecoder, chunk, options?.onData)
         })
 
         const collectAndResolve = (code: number | null, signal: string | null): void => {
@@ -7581,17 +7927,14 @@ export class LocalSandbox
             if (effectiveAbortSignal)
               effectiveAbortSignal.removeEventListener("abort", abortHandler)
 
-            const stdoutBuf = Buffer.concat(stdoutChunks)
-            const stderrBuf = Buffer.concat(stderrChunks)
-            const enc = this.detectCmdEncoding(
-              LocalSandbox.encodingDetectionBuffer(stdoutBuf, stderrBuf)
-            )
+            this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
+            const stdoutText = this.decodeShellOutputChunks(stdoutChunks, true)
+            const stderrText = this.decodeShellOutputChunks(stderrChunks, true)
 
             let output = ""
-            if (stdoutBuf.length > 0) output += iconv.decode(stdoutBuf, enc)
-            if (stderrBuf.length > 0) {
-              const errText = iconv
-                .decode(stderrBuf, enc)
+            if (stdoutText.length > 0) output += stdoutText
+            if (stderrText.length > 0) {
+              const errText = stderrText
                 .split("\n")
                 .filter((line) => line.length > 0)
                 .map((line) => `[stderr] ${line}`)
@@ -7674,6 +8017,7 @@ export class LocalSandbox
           if (drainTimerId) clearTimeout(drainTimerId)
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
           if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
+          this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
 
           const errno = err as NodeJS.ErrnoException
           if (errno.code === "EPERM" && attempt <= LocalSandbox.SPAWN_RETRY_COUNT) {
@@ -7821,7 +8165,27 @@ export class LocalSandbox
         ? LocalSandbox.buildInteractiveGitEnv(this.env)
         : this.env
 
-      const proc = isBashOnWin
+      const useWindowsBackgroundJob = isWindows && options?.background === true
+      const windowsBackgroundShellKind = isBashOnWin
+        ? "stdin"
+        : ["powershell", "pwsh"].includes(shellBase)
+          ? "powershell"
+          : shellBase === "cmd"
+            ? "cmd"
+            : "stdin"
+      const proc = useWindowsBackgroundJob
+        ? spawn(
+            resolveWindowsBackgroundJobControllerPath(),
+            [shell, windowsBackgroundShellKind],
+            {
+              cwd: effectiveCwd,
+              env: spawnEnv,
+              stdio: ["pipe", "pipe", "pipe"],
+              detached: false,
+              windowsHide: !allowInteractiveGitAuth
+            }
+          )
+        : isBashOnWin
         ? spawn(shell, [], {
             cwd: effectiveCwd,
             env: spawnEnv,
@@ -7838,7 +8202,7 @@ export class LocalSandbox
             windowsHide: !allowInteractiveGitAuth
           })
 
-      if (isBashOnWin && proc.stdin) {
+      if ((isBashOnWin || useWindowsBackgroundJob) && proc.stdin) {
         proc.stdin.on("error", () => {
           /* swallow: proc 'error'/'close' handles it */
         })
@@ -7859,10 +8223,16 @@ export class LocalSandbox
       let aborted = false
       /** After kill, if close doesn't fire within 2s, force-resolve (like Codex IO_DRAIN_TIMEOUT). */
       let drainTimerId: ReturnType<typeof setTimeout> | null = null
+      const stdoutLiveDecoder = options?.onData
+        ? this.createShellOutputDecoder(isWindows)
+        : null
+      const stderrLiveDecoder = options?.onData
+        ? this.createShellOutputDecoder(isWindows)
+        : null
 
       let termination: Promise<void> | undefined
       const killProc = (): void => {
-        termination ??= LocalSandbox.killTree(
+        termination ??= LocalSandbox.terminateProcessTree(
           proc,
           () => exited,
           options?.waitForProcessTree === true
@@ -7902,13 +8272,7 @@ export class LocalSandbox
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
         }
-        // Live preview before the byte-cap short-circuit: per-chunk utf8 decode
-        // is acceptable; the final authoritative output uses encoding detection.
-        try {
-          options?.onData?.(chunk.toString("utf8"))
-        } catch {
-          /* never let the live preview interfere with resolution */
-        }
+        this.emitLiveOutput(stdoutLiveDecoder, chunk, options?.onData)
         if (byteCapReached) return
         stdoutChunks.push(chunk)
         totalBytes += chunk.length
@@ -7922,11 +8286,7 @@ export class LocalSandbox
             `[LocalSandbox] first data at +${firstDataAt - onceStartMs}ms pid=${proc.pid}`
           )
         }
-        try {
-          options?.onData?.(chunk.toString("utf8"))
-        } catch {
-          /* never let the live preview interfere with resolution */
-        }
+        this.emitLiveOutput(stderrLiveDecoder, chunk, options?.onData)
         if (byteCapReached) return
         stderrChunks.push(chunk)
         totalBytes += chunk.length
@@ -7952,24 +8312,13 @@ export class LocalSandbox
           if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
           if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
 
-          const stdoutBuf = Buffer.concat(stdoutChunks)
-          const stderrBuf = Buffer.concat(stderrChunks)
-
-          // On Windows, Git Bash via pipe may convert UTF-8 to the system code
-          // page (e.g. GBK/CP936) despite LANG=C.UTF-8, because MSYS2's
-          // character conversion layer uses the Windows ANSI code page for
-          // non-pty file descriptors. Detect the actual encoding from the
-          // output buffer so CJK characters are decoded correctly.
-          const enc = isWindows
-            ? this.detectCmdEncoding(LocalSandbox.encodingDetectionBuffer(stdoutBuf, stderrBuf))
-            : "utf-8"
+          this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
+          const stdoutText = this.decodeShellOutputChunks(stdoutChunks, isWindows)
+          const stderrText = this.decodeShellOutputChunks(stderrChunks, isWindows)
 
           let output = ""
-          if (stdoutBuf.length > 0) {
-            output += iconv.decode(stdoutBuf, enc)
-          }
-          if (stderrBuf.length > 0) {
-            const stderrText = iconv.decode(stderrBuf, enc)
+          if (stdoutText.length > 0) output += stdoutText
+          if (stderrText.length > 0) {
             const prefixed = stderrText
               .split("\n")
               .filter((line) => line.length > 0)
@@ -8011,7 +8360,7 @@ export class LocalSandbox
             resolve({ output, exitCode: signal ? null : code, truncated })
           }
         } catch (err) {
-          // Encoding detection or iconv.decode can throw on unusual binary output.
+          // Encoding detection or incremental decoding can throw on unusual binary output.
           // Ensure the promise always resolves — a stuck promise means the UI hangs on RUNNING forever.
           console.error(`[LocalSandbox] collectAndResolve error: pid=${proc.pid}`, err)
           resolved = true
@@ -8074,6 +8423,7 @@ export class LocalSandbox
         if (drainTimerId) clearTimeout(drainTimerId)
         if (windowsExitTimerId) clearTimeout(windowsExitTimerId)
         if (effectiveAbortSignal) effectiveAbortSignal.removeEventListener("abort", abortHandler)
+        this.endLiveOutput([stdoutLiveDecoder, stderrLiveDecoder], options?.onData)
         resolve({
           output: `Error: Failed to execute command: ${err.message}`,
           exitCode: 1,

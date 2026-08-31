@@ -4,18 +4,21 @@ import { describe, expect, it } from "vitest"
 const fileViewer = readFileSync(new URL("./FileViewer.tsx", import.meta.url), "utf8")
 const tabbedPanel = readFileSync(new URL("./TabbedPanel.tsx", import.meta.url), "utf8")
 const codeViewer = readFileSync(new URL("./CodeViewer.tsx", import.meta.url), "utf8")
-const highlightWorker = readFileSync(
-  new URL("./code-highlight-worker.ts", import.meta.url),
-  "utf8"
-)
+const highlightWorker = readFileSync(new URL("./code-highlight-worker.ts", import.meta.url), "utf8")
 const previewIpc = readFileSync(
   new URL("../../../../main/ipc/file-preview.ts", import.meta.url),
   "utf8"
 )
-const modelsIpc = readFileSync(
-  new URL("../../../../main/ipc/models.ts", import.meta.url),
+const previewReader = readFileSync(
+  new URL("../../../../main/workspace-file-preview/reader.ts", import.meta.url),
   "utf8"
 )
+const rightPanel = readFileSync(new URL("../panels/RightPanel.tsx", import.meta.url), "utf8")
+const latestCompletedResource = readFileSync(
+  new URL("../../lib/latest-completed-resource.ts", import.meta.url),
+  "utf8"
+)
+const modelsIpc = readFileSync(new URL("../../../../main/ipc/models.ts", import.meta.url), "utf8")
 const preload = readFileSync(new URL("../../../../preload/index.ts", import.meta.url), "utf8")
 const harnessIpc = readFileSync(
   new URL("../../../../main/ipc/harness-board.ts", import.meta.url),
@@ -75,6 +78,21 @@ describe("persisted active file preview isolation", () => {
       expect(modelsIpc).not.toContain(removedChannel)
       expect(preload).not.toContain(removedChannel)
     }
+  })
+
+  it("defers ambiguous POSIX path intent until main applies the authoritative boundary", () => {
+    expect(tabbedPanel).toContain('workspacePathKind="relative"')
+    expect(rightPanel).toContain("workspacePathKind={previewFileSource.workspacePathKind}")
+    expect(rightPanel).toContain("latestResourceEvent.workspacePathKind")
+    expect(latestCompletedResource).toContain("inferWorkspacePreviewPathKind(filePath, platform)")
+    expect(fileViewer).toContain("workspacePathKind")
+    expect(previewIpc).toContain('workspacePathKind: source.workspacePathKind ?? "relative"')
+    expect(previewIpc).toContain('workspacePathKind === "auto"')
+    expect(previewReader).toContain('workspacePathKind === "absolute"')
+    expect(previewReader).toContain('workspacePathKind === "auto"')
+    expect(previewReader.indexOf("pathResolver.isAbsolute(filePath)")).toBeLessThan(
+      previewReader.indexOf("isPathInside(root, candidate, pathResolver)")
+    )
   })
 
   it("supports streaming Range/HEAD and hardens unknown active content", () => {

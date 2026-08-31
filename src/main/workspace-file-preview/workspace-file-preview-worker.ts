@@ -10,8 +10,12 @@ if (!parentPort) throw new Error("Workspace file preview worker requires parentP
 
 function serializeError(error: unknown): { code: string; message: string; stack?: string } {
   if (error instanceof Error) {
+    const nativeCode = (error as NodeJS.ErrnoException).code
     return {
-      code: error.name || "WORKSPACE_FILE_PREVIEW_ERROR",
+      code:
+        typeof nativeCode === "string" && nativeCode
+          ? nativeCode
+          : error.name || "WORKSPACE_FILE_PREVIEW_ERROR",
       message: error.message,
       stack: error.stack
     }

@@ -5,7 +5,10 @@ import type {
   LegacyCheckpointTranscriptMigrationStats,
   CheckpointRuntimeProjectionWorkerResponse
 } from "./runtime-projection-protocol"
-import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "./runtime-projection-protocol"
+import {
+  CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+  CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+} from "./runtime-projection-protocol"
 
 type RuntimeProjectionWorkerFactory = () => Promise<Worker>
 
@@ -46,6 +49,12 @@ export class CheckpointRuntimeProjectionWorkerUnavailableError extends Error {
 
 export function isCheckpointRuntimeProjectionCancelled(error: unknown): boolean {
   return error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
+}
+
+export function isCheckpointRuntimeProjectionSchemaNotReady(error: unknown): boolean {
+  return (
+    error instanceof Error && error.name === CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+  )
 }
 
 async function createBundledWorker(): Promise<Worker> {
@@ -102,7 +111,10 @@ export class CheckpointRuntimeProjectionClient {
       pending.reject(error)
       return
     }
-    if (response.type === "read-latest-tuple-result") {
+    if (
+      response.type === "read-latest-tuple-result" ||
+      response.type === "read-latest-runtime-tuple-result"
+    ) {
       pending.resolve(response.tuple)
     } else if (response.type === "inspect-transcript-presence-result") {
       pending.resolve(response.hasTranscript)
@@ -178,6 +190,12 @@ export class CheckpointRuntimeProjectionClient {
           checkpointNs: string
           messageLimit?: number
           messageByteBudget?: number
+        }
+      | {
+          type: "read-latest-runtime-tuple"
+          databasePath: string
+          threadId: string
+          checkpointNs: string
         }
       | {
           type: "bootstrap-legacy-transcript"
@@ -326,6 +344,25 @@ export class CheckpointRuntimeProjectionClient {
     return request
   }
 
+  readLatestRuntimeTuple(
+    databasePath: string,
+    threadId: string,
+    checkpointNs = "",
+    foregroundKey?: string | number
+  ): Promise<unknown | null> {
+    return this.request(
+      {
+        type: "read-latest-runtime-tuple",
+        databasePath,
+        threadId,
+        checkpointNs
+      },
+      foregroundKey === undefined
+        ? {}
+        : { cancellable: true, foregroundKey: String(foregroundKey) }
+    ).then((value) => value ?? null)
+  }
+
   bootstrapLegacyTranscript(
     databasePath: string,
     messageDatabasePath: string,
@@ -453,6 +490,21 @@ export function readLatestCheckpointTupleInWorker(
   // can distinguish a failed read from an absent checkpoint.
   if (!existsSync(databasePath)) return Promise.resolve(null)
   return getDefaultClient().readLatestTuple(databasePath, threadId, checkpointNs, options)
+}
+
+export function readLatestCheckpointRuntimeTupleInWorker(
+  databasePath: string,
+  threadId: string,
+  checkpointNs = "",
+  foregroundKey?: string | number
+): Promise<unknown | null> {
+  if (!existsSync(databasePath)) return Promise.resolve(null)
+  return getDefaultClient().readLatestRuntimeTuple(
+    databasePath,
+    threadId,
+    checkpointNs,
+    foregroundKey
+  )
 }
 
 export function bootstrapLegacyCheckpointTranscriptInWorker(

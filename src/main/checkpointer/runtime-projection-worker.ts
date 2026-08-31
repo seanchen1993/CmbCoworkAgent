@@ -3,11 +3,15 @@ import type {
   CheckpointRuntimeProjectionWorkerRequest,
   CheckpointRuntimeProjectionWorkerResponse
 } from "./runtime-projection-protocol"
-import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "./runtime-projection-protocol"
+import {
+  CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+  CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+} from "./runtime-projection-protocol"
 import {
   bootstrapLegacyCheckpointTranscript,
   ensureCheckpointRuntimeProjection,
   hasVisibleCheckpointTranscript,
+  readLatestCheckpointRuntimeTuple,
   readLatestCheckpointTuple
 } from "./runtime-projection-store"
 
@@ -21,20 +25,24 @@ function failureResponse(
   const normalized = error instanceof Error ? error : new Error(String(error))
   return {
     type:
-      request.type === "read-latest-tuple"
-        ? "read-latest-tuple-result"
-        : request.type === "bootstrap-legacy-transcript"
-          ? "bootstrap-legacy-transcript-result"
-          : request.type === "inspect-transcript-presence"
-            ? "inspect-transcript-presence-result"
-        : "ensure-runtime-projection-result",
+      request.type === "read-latest-runtime-tuple"
+        ? "read-latest-runtime-tuple-result"
+        : request.type === "read-latest-tuple"
+          ? "read-latest-tuple-result"
+          : request.type === "bootstrap-legacy-transcript"
+            ? "bootstrap-legacy-transcript-result"
+            : request.type === "inspect-transcript-presence"
+              ? "inspect-transcript-presence-result"
+              : "ensure-runtime-projection-result",
     requestId: request.requestId,
     ok: false,
     error: {
       code:
         normalized.name === CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
           ? CHECKPOINT_RUNTIME_PROJECTION_CANCELLED
-          : "CHECKPOINT_RUNTIME_PROJECTION_FAILED",
+          : normalized.name === CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+            ? CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+            : "CHECKPOINT_RUNTIME_PROJECTION_FAILED",
       message: normalized.message,
       ...(normalized.stack ? { stack: normalized.stack } : {})
     }
@@ -93,6 +101,20 @@ workerPort.on("message", (request: CheckpointRuntimeProjectionWorkerRequest) => 
             messageByteBudget: request.messageByteBudget,
             cancellationBuffer: request.cancellationBuffer
           }
+        )
+      } satisfies CheckpointRuntimeProjectionWorkerResponse)
+      return
+    }
+    if (request.type === "read-latest-runtime-tuple") {
+      workerPort.postMessage({
+        type: "read-latest-runtime-tuple-result",
+        requestId: request.requestId,
+        ok: true,
+        tuple: readLatestCheckpointRuntimeTuple(
+          request.databasePath,
+          request.threadId,
+          request.checkpointNs,
+          request.cancellationBuffer
         )
       } satisfies CheckpointRuntimeProjectionWorkerResponse)
       return

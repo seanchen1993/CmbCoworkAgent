@@ -1,4 +1,6 @@
 import { getFileType } from "./file-types"
+import type { WorkspaceFilePreviewWorkspacePathKind } from "../../../shared/workspace-file-preview"
+import { inferWorkspacePreviewPathKind } from "./resource-preview-paths"
 
 export interface ResourceToolCall {
   id?: string
@@ -17,6 +19,7 @@ export interface ResourceMessage {
 export interface PreviewEvent {
   path: string
   key: string
+  workspacePathKind: WorkspaceFilePreviewWorkspacePathKind
   codeDiff?: {
     oldValue: string
     newValue: string
@@ -63,7 +66,8 @@ function getToolCallFilePath(toolCall: ResourceToolCall): string | null {
 function buildPreviewEvent(
   toolCall: ResourceToolCall,
   messageId: string,
-  toolIndex: number
+  toolIndex: number,
+  platform: NodeJS.Platform
 ): PreviewEvent | null {
   const filePath = getToolCallFilePath(toolCall)
   if (!filePath) return null
@@ -76,7 +80,8 @@ function buildPreviewEvent(
   if (!RESOURCE_PREVIEW_EXTENSIONS.has(ext) && !codeLike) return null
 
   const key = `${messageId}:${toolCall.id ?? `t-${toolIndex}`}:${filePath}`
-  if (!codeLike) return { path: filePath, key }
+  const workspacePathKind = inferWorkspacePreviewPathKind(filePath, platform)
+  if (!codeLike) return { path: filePath, key, workspacePathKind }
 
   const args = toolCall.args || {}
   const oldValue = ((args.old_string ?? args.old_str) as string | undefined) || ""
@@ -85,6 +90,7 @@ function buildPreviewEvent(
   return {
     path: filePath,
     key,
+    workspacePathKind,
     codeDiff:
       toolCall.name === "write_file"
         ? { oldValue: "", newValue }
@@ -187,7 +193,8 @@ function createResourceSequenceProjector(): (
 
 function buildCompletedResourceProjection(
   persisted: ResourceSequenceIndex,
-  streaming: ResourceSequenceIndex
+  streaming: ResourceSequenceIndex,
+  platform: NodeJS.Platform
 ): CompletedResourceProjection {
   const all = [
     ...persisted.structures.map((message) => ({ source: "persisted" as const, message })),
@@ -212,7 +219,8 @@ function buildCompletedResourceProjection(
       const event = buildPreviewEvent(
         toolCall,
         current.message.id ?? `m-${messageIndex}`,
-        toolIndex
+        toolIndex,
+        platform
       )
       if (!event) continue
       if (!latestResourceEvent) latestResourceEvent = { ...event, source: current.source }
@@ -233,7 +241,9 @@ function buildCompletedResourceProjection(
   return { latestResourceEvent, latestCompletedLlmBatch }
 }
 
-export function createCompletedResourceProjector(): (
+export function createCompletedResourceProjector(
+  platform: NodeJS.Platform = "linux"
+): (
   persistedMessages: readonly ResourceMessage[],
   streamingMessages: readonly ResourceMessage[]
 ) => CompletedResourceProjection {
@@ -252,7 +262,7 @@ export function createCompletedResourceProjector(): (
     if (persisted === previousPersisted && streaming === previousStreaming) return previousResult
     previousPersisted = persisted
     previousStreaming = streaming
-    previousResult = buildCompletedResourceProjection(persisted, streaming)
+    previousResult = buildCompletedResourceProjection(persisted, streaming, platform)
     return previousResult
   }
 }

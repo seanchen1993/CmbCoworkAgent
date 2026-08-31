@@ -80,6 +80,7 @@ import {
   patchLatestThreadMetadata
 } from "../services/thread-metadata"
 import { readThreadConversationPresenceForMutation } from "../services/thread-conversation-presence"
+import { subscribeWindowClosed } from "../services/window-close-subscriptions"
 import {
   commitGuardedInitialCoordinatorPrefix,
   containsCoordinatorInternalMarker,
@@ -751,7 +752,7 @@ function trackCoordinatorWorkerUpdateBinding(window: BrowserWindow, threadId: st
   if (!boundThreads) {
     boundThreads = new Set()
     coordinatorWorkerUpdateBindingsByWindow.set(window.id, boundThreads)
-    window.once("closed", () => {
+    subscribeWindowClosed(window, () => {
       cancelCoordinatorWorkerRestore(window.id)
       const threads = coordinatorWorkerUpdateBindingsByWindow.get(window.id)
       coordinatorWorkerUpdateBindingsByWindow.delete(window.id)
@@ -771,9 +772,8 @@ function untrackCoordinatorWorkerUpdateBinding(window: BrowserWindow, threadId: 
   const boundThreads = coordinatorWorkerUpdateBindingsByWindow.get(window.id)
   if (!boundThreads) return
   boundThreads.delete(threadId)
-  if (boundThreads.size === 0) {
-    coordinatorWorkerUpdateBindingsByWindow.delete(window.id)
-  }
+  // Retain the empty per-window set until the window closes. Recreating it on
+  // every task switch would also recreate a lifetime close subscription.
 }
 
 function debugCoordinatorWorkerStream(event: string, payload: Record<string, unknown>): void {
@@ -797,7 +797,7 @@ export function hasAnyActiveAgentTasks(): boolean {
     activeRuns.size > 0 ||
     workflowRunManager.hasActiveRuns() ||
     coordinatorWorkerManager.hasRunningWorkers() ||
-    LocalSandbox.hasActiveProcesses()
+    LocalSandbox.hasActiveExecutionTasks()
   )
 }
 
@@ -806,6 +806,7 @@ export function hasAnyActiveAgentTasks(): boolean {
  * a provider or child process does not observe its abort signal. */
 export async function shutdownAllAgentTasks(timeoutMs = 5_000): Promise<void> {
   agentTaskShutdownStarted = true
+  LocalSandbox.beginApplicationShutdown()
   const foregroundRuns = Array.from(activeRuns.entries()).map(([threadId, controller]) => ({
     threadId,
     controller,
@@ -820,7 +821,8 @@ export async function shutdownAllAgentTasks(timeoutMs = 5_000): Promise<void> {
 
   const workflowShutdown = workflowRunManager.cancelAllAndWait(timeoutMs)
   const coordinatorShutdown = coordinatorWorkerManager.cancelAllWorkersAndWait(timeoutMs)
-  LocalSandbox.killAll()
+  const backgroundTaskShutdown = LocalSandbox.cancelAllBackgroundTasksAndWait(timeoutMs)
+  const processTreeShutdown = LocalSandbox.killAllAndWait(timeoutMs)
 
   let foregroundTimeoutTimer: ReturnType<typeof setTimeout> | undefined
   let foregroundTimedOut = false
@@ -841,7 +843,13 @@ export async function shutdownAllAgentTasks(timeoutMs = 5_000): Promise<void> {
           if (foregroundTimeoutTimer) clearTimeout(foregroundTimeoutTimer)
         })
 
-  await Promise.allSettled([foregroundShutdown, workflowShutdown, coordinatorShutdown])
+  await Promise.allSettled([
+    foregroundShutdown,
+    workflowShutdown,
+    coordinatorShutdown,
+    backgroundTaskShutdown,
+    processTreeShutdown
+  ])
   if (foregroundTimedOut) {
     console.warn("[Agent] Timed out waiting for foreground runs to settle during shutdown")
   }
@@ -5793,7 +5801,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (!focusedByThread) {
         focusedByThread = new Map()
         focusedCoordinatorWorkerStreamByWindow.set(window.id, focusedByThread)
-        window.once("closed", () => {
+        subscribeWindowClosed(window, () => {
           focusedCoordinatorWorkerStreamByWindow.delete(window.id)
         })
       }
@@ -5871,9 +5879,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           return
         }
         focusedByThread.delete(threadId)
-        if (focusedByThread.size === 0) {
-          focusedCoordinatorWorkerStreamByWindow.delete(window.id)
-        }
+        // Retain the empty per-window map until the shared window-close callback
+        // runs. Deleting it here would make every focus/clear cycle subscribe a
+        // new lifetime callback to the shared listener registry.
         debugCoordinatorWorkerStream("clear", {
           windowId: window.id,
           threadId,
@@ -6639,9 +6647,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         flushPendingStreamTranscriptMessages(threadId, runToken)
         abortController.abort()
       }
-      window.once("closed", onWindowClosed)
+      const removeWindowClosedSubscription = subscribeWindowClosed(window, onWindowClosed)
       physicalStreamRunSetupGuard.addCleanup(() => {
-        window.removeListener("closed", onWindowClosed)
+        removeWindowClosedSubscription()
       })
 
       // Resolve the Harness Board feature binding (if any) so traces can be
@@ -10095,7 +10103,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 )
             }
           ],
-          removeWindowListener: () => window.removeListener("closed", onWindowClosed),
+          removeWindowListener: removeWindowClosedSubscription,
           settleNotifications: () => settleDrainedCoordinatorNotifications("restore"),
           cleanupNotificationSkills: () => {
             if (!clearCoordinatorNotificationSelectedSkillsOnExit) return
@@ -10801,9 +10809,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         flushPendingStreamTranscriptMessages(threadId, runToken)
         abortController.abort()
       }
-      window.once("closed", onWindowClosed)
+      const removeWindowClosedSubscription = subscribeWindowClosed(window, onWindowClosed)
       physicalStreamRunSetupGuard.addCleanup(() => {
-        window.removeListener("closed", onWindowClosed)
+        removeWindowClosedSubscription()
       })
       sendActiveHookNotice(window, channel, workspacePath)
 
@@ -11385,7 +11393,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           controller: abortController,
           settledPromise: resumeRunSettledPromise,
           resolveSettlement: resolveResumeRunSettled,
-          removeWindowListener: () => window.removeListener("closed", onWindowClosed),
+          removeWindowListener: removeWindowClosedSubscription,
           settleNotifications: () => settleResumeDrainedCoordinatorNotifications("restore"),
           cleanupNotificationSkills: () => {
             if (!clearResumeCoordinatorNotificationSelectedSkillsOnExit) return
@@ -11922,9 +11930,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       flushPendingStreamTranscriptMessages(threadId, runToken)
       abortController.abort()
     }
-    window.once("closed", onWindowClosed)
+    const removeWindowClosedSubscription = subscribeWindowClosed(window, onWindowClosed)
     physicalStreamRunSetupGuard.addCleanup(() => {
-      window.removeListener("closed", onWindowClosed)
+      removeWindowClosedSubscription()
     })
     sendActiveHookNotice(window, channel, workspacePath)
 
@@ -12495,7 +12503,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         controller: abortController,
         settledPromise: interruptRunSettledPromise,
         resolveSettlement: resolveInterruptRunSettled,
-        removeWindowListener: () => window.removeListener("closed", onWindowClosed),
+        removeWindowListener: removeWindowClosedSubscription,
         settleNotifications: () => settleInterruptDrainedCoordinatorNotifications("restore"),
         cleanupNotificationSkills: () => {
           if (!clearInterruptCoordinatorNotificationSelectedSkillsOnExit) return

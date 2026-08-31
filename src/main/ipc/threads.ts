@@ -188,6 +188,7 @@ import {
   bootstrapLegacyCheckpointTranscriptInWorker,
   cancelLegacyCheckpointTranscriptBootstrap,
   isCheckpointRuntimeProjectionCancelled,
+  readLatestCheckpointRuntimeTupleInWorker,
   readLatestCheckpointTupleInWorker
 } from "../checkpointer/runtime-projection-client"
 import {
@@ -4015,9 +4016,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  // Get only a bounded tail of the latest worker checkpoint. The full snapshot
-  // is reconstructed inside the worker, but at most 500 / 1 MiB crosses into
-  // Electron main and the renderer worker panel.
+  // Read only a bounded SQLite tail of the latest worker checkpoint. Neither
+  // the full snapshot nor more than 500 messages / 1 MiB enters Electron main.
   ipcMain.handle("threads:latest-checkpoint", async (event, threadId: string) => {
     try {
       const normalizedThreadId = assertValidCheckpointThreadId(threadId)
@@ -4044,15 +4044,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("threads:latest-checkpoint-runtime-state", async (event, threadId: string) => {
     try {
       const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-      return await readLatestCheckpointTupleInWorker(
+      return await readLatestCheckpointRuntimeTupleInWorker(
         getThreadCheckpointPath(normalizedThreadId),
         normalizedThreadId,
         "",
-        {
-          messageLimit: 0,
-          messageByteBudget: 0,
-          foregroundKey: `thread-hydration:${event.sender.id}`
-        }
+        `thread-hydration:${event.sender.id}`
       )
     } catch (e) {
       if (isCheckpointRuntimeProjectionCancelled(e)) return null

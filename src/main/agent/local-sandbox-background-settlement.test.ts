@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events"
-import { describe, expect, it, vi } from "vitest"
+import type { ChildProcess } from "node:child_process"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
 
@@ -30,6 +31,21 @@ interface BackgroundTaskForTest {
   termination?: Promise<void>
 }
 
+interface PendingBackgroundStartForTest {
+  abortController: AbortController
+  settled: Promise<void>
+}
+
+interface LocalSandboxLifecycleForTest {
+  applicationShutdownStarted: boolean
+  pendingBackgroundTaskStarts: Set<PendingBackgroundStartForTest>
+  activeProcesses: Set<ChildProcess>
+  activeProcessTerminations: WeakMap<
+    ChildProcess,
+    { promise: Promise<void>; waitForProcessTree: boolean }
+  >
+}
+
 interface FakeChildProcess extends EventEmitter {
   kill: ReturnType<typeof vi.fn>
 }
@@ -55,6 +71,17 @@ function getBackgroundTasks(): Map<string, BackgroundTaskForTest> {
     }
   ).backgroundTasks
 }
+
+function getLifecycleState(): LocalSandboxLifecycleForTest {
+  return LocalSandbox as unknown as LocalSandboxLifecycleForTest
+}
+
+afterEach(() => {
+  const lifecycle = getLifecycleState()
+  lifecycle.applicationShutdownStarted = false
+  lifecycle.pendingBackgroundTaskStarts.clear()
+  lifecycle.activeProcesses.clear()
+})
 
 describe("LocalSandbox background-task settlement", () => {
   it("keeps a cancelled task active until execution and physical termination both settle", async () => {
@@ -133,6 +160,74 @@ describe("LocalSandbox background-task settlement", () => {
       execution.resolve({ output: "cancelled", exitCode: 130, truncated: false })
       termination.resolve()
     }
+  })
+
+  it("tracks and cancels a background execute before it can reach process spawn", async () => {
+    const preToolUse = createDeferred<undefined>()
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: `background-pre-spawn-${Date.now()}-${Math.random()}`,
+      windowsSandbox: "none"
+    })
+    const executeRaw = vi.fn()
+    Reflect.set(sandbox, "runPreToolUseHookForTool", vi.fn(() => preToolUse.promise))
+    Reflect.set(sandbox, "executeRaw", executeRaw)
+
+    const started = sandbox.executeBackground("echo must-not-spawn")
+    expect(LocalSandbox.hasActiveProcesses()).toBe(false)
+    expect(LocalSandbox.hasActiveExecutionTasks()).toBe(true)
+
+    const shutdown = LocalSandbox.cancelAllBackgroundTasksAndWait(1_000)
+    preToolUse.resolve(undefined)
+
+    await expect(started).resolves.toContain("application is shutting down")
+    await expect(shutdown).resolves.toBe(true)
+    expect(executeRaw).not.toHaveBeenCalled()
+    expect(LocalSandbox.hasActiveExecutionTasks()).toBe(false)
+  })
+
+  it("bounds shutdown when a pre-spawn hook does not settle", async () => {
+    const preToolUse = createDeferred<undefined>()
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    const sandbox = new LocalSandbox({
+      rootDir: process.cwd(),
+      runId: `background-pre-spawn-timeout-${Date.now()}-${Math.random()}`,
+      windowsSandbox: "none"
+    })
+    Reflect.set(sandbox, "runPreToolUseHookForTool", vi.fn(() => preToolUse.promise))
+    Reflect.set(sandbox, "executeRaw", vi.fn())
+
+    const started = sandbox.executeBackground("echo delayed-hook")
+    await expect(LocalSandbox.cancelAllBackgroundTasksAndWait(20)).resolves.toBe(false)
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("Timed out waiting for 1 pending start(s)")
+    )
+
+    preToolUse.resolve(undefined)
+    await expect(started).resolves.toContain("application is shutting down")
+    warning.mockRestore()
+  })
+
+  it("waits for a tracked physical process-tree termination promise", async () => {
+    const termination = createDeferred<void>()
+    const lifecycle = getLifecycleState()
+    const process = createFakeChildProcess() as unknown as ChildProcess
+    lifecycle.activeProcesses.add(process)
+    lifecycle.activeProcessTerminations.set(process, {
+      promise: termination.promise,
+      waitForProcessTree: true
+    })
+
+    let settled = false
+    const shutdown = LocalSandbox.killAllAndWait(1_000).then((value) => {
+      settled = true
+      return value
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    termination.resolve()
+    await expect(shutdown).resolves.toBe(true)
   })
 
   it("serializes a predecessor revoke before a successor grant for the same directory", async () => {

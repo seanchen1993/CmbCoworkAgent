@@ -1003,25 +1003,28 @@ function MessageBubbleImpl({
                   className="rounded-sm border overflow-hidden border-border bg-background-elevated"
                 >
                   {/* 可折叠的工具标题 */}
-                  <button
-                    onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
-                    className="flex w-full items-center gap-2 px-3 py-2 hover:bg-background-interactive transition-colors"
-                  >
-                    {isExpanded ? (
-                      <ChevronDown className="size-4 text-muted-foreground shrink-0" />
-                    ) : (
-                      <ChevronRight className="size-4 text-muted-foreground shrink-0" />
-                    )}
-
-                    <Wrench className="size-4 shrink-0 text-status-info" />
-
-                    <span
-                      data-chat-search-text
-                      className="text-xs font-medium min-w-0 max-w-[420px] truncate text-left"
+                  <div className="flex w-full items-center hover:bg-background-interactive transition-colors">
+                    <button
+                      type="button"
+                      onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
+                      className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2"
                     >
-                      {summary}
-                    </span>
-                    <div className="ml-auto flex items-center gap-2 shrink-0">
+                      {isExpanded ? (
+                        <ChevronDown className="size-4 text-muted-foreground shrink-0" />
+                      ) : (
+                        <ChevronRight className="size-4 text-muted-foreground shrink-0" />
+                      )}
+
+                      <Wrench className="size-4 shrink-0 text-status-info" />
+
+                      <span
+                        data-chat-search-text
+                        className="text-xs font-medium min-w-0 max-w-[420px] truncate text-left"
+                      >
+                        {summary}
+                      </span>
+                    </button>
+                    <div className="flex items-center gap-2 shrink-0 pr-3">
                       {previewPath && isOk && (
                         <button
                           type="button"
@@ -1044,7 +1047,7 @@ function MessageBubbleImpl({
                         {statusMeta.label}
                       </div>
                     </div>
-                  </button>
+                  </div>
 
                   {/* 展开的详细内容 */}
                   {isExpanded && (

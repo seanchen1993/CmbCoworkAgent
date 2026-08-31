@@ -104,6 +104,11 @@ import {
 } from "@/lib/app-catalog-cache"
 import { getHookCatalogIdentity } from "@/lib/hook-catalog-identity"
 import {
+  resolveResourcePreviewPaths,
+  selectResourcePreviewFileSource
+} from "@/lib/resource-preview-paths"
+import type { WorkspaceFilePreviewWorkspacePathKind } from "../../../../shared/workspace-file-preview"
+import {
   getRightPanelSkillProjection,
   getRightPanelSkillProjectionAsync,
   type RightPanelSkillGroupProjection,
@@ -396,11 +401,17 @@ const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
 }: {
   threadId: string
   moduleMode: RightPanelProps["moduleMode"]
-  onApplyPreview: (path: string, switchToPreview: boolean) => void
+  onApplyPreview: (
+    path: string,
+    workspacePathKind: WorkspaceFilePreviewWorkspacePathKind,
+    switchToPreview: boolean
+  ) => void
 }): null {
   const streamData = useThreadStream(threadId)
   const persistedMessages = useThreadStateSelector(threadId, (state) => state.messages) ?? []
-  const [projectCompletedResources] = useState(() => createCompletedResourceProjector())
+  const [projectCompletedResources] = useState(() =>
+    createCompletedResourceProjector(window.electron.process.platform)
+  )
   const previousLoadingRef = useRef(false)
   const lastAppliedPreviewKeyRef = useRef<string | null>(null)
   const lastRecordedBatchKeyRef = useRef<string | null>(null)
@@ -419,7 +430,11 @@ const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
     const applyPreviewUpdate = (switchToPreview: boolean): void => {
       if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
       lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-      onApplyPreview(latestResourceEvent.path, switchToPreview)
+      onApplyPreview(
+        latestResourceEvent.path,
+        latestResourceEvent.workspacePathKind,
+        switchToPreview
+      )
     }
     if (
       latestCompletedLlmBatch?.files.length &&
@@ -518,6 +533,8 @@ export function RightPanel({
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
+  const [previewWorkspacePathKind, setPreviewWorkspacePathKind] =
+    useState<WorkspaceFilePreviewWorkspacePathKind>("relative")
   const previewThreadIdRef = useRef<string | null>(null)
   const [previewExternalAuthorization, setPreviewExternalAuthorization] =
     useState<PreviewExternalAuthorization | null>(null)
@@ -1201,10 +1218,15 @@ export function RightPanel({
   }, [workspacePath])
 
   const applyStreamPreview = useCallback(
-    (path: string, switchToPreview: boolean): void => {
+    (
+      path: string,
+      workspacePathKind: WorkspaceFilePreviewWorkspacePathKind,
+      switchToPreview: boolean
+    ): void => {
       if (!currentThreadId) return
       previewThreadIdRef.current = currentThreadId
       setPreviewPath(path)
+      setPreviewWorkspacePathKind(workspacePathKind)
       previewExternalGrantRefreshPromiseRef.current = null
       replacePreviewExternalAuthorization(null)
       setPreviewReloadToken((version) => version + 1)
@@ -1228,6 +1250,7 @@ export function RightPanel({
       lastThreadIdRef.current = currentThreadId
       previewThreadIdRef.current = null
       setPreviewPath(null)
+      setPreviewWorkspacePathKind("relative")
       previewExternalGrantRefreshPromiseRef.current = null
       replacePreviewExternalAuthorization(null)
     }
@@ -1248,6 +1271,7 @@ export function RightPanel({
       ({
         threadId,
         filePath,
+        workspacePathKind,
         externalPreviewGrant,
         externalPreviewGrantExpiresAt,
         externalPreviewProjectId,
@@ -1256,6 +1280,7 @@ export function RightPanel({
         if (!currentThreadId || threadId !== currentThreadId) return
         previewThreadIdRef.current = threadId
         setPreviewPath(filePath)
+        setPreviewWorkspacePathKind(workspacePathKind)
         previewExternalGrantRefreshPromiseRef.current = null
         replacePreviewExternalAuthorization(
           externalPreviewGrant
@@ -1825,7 +1850,12 @@ export function RightPanel({
   const handleOpenGitFileFolder = useCallback(
     async (filePath: string): Promise<void> => {
       try {
-        const resolved = resolvePreviewPaths(filePath, workspacePath ?? null)
+        const resolved = resolveResourcePreviewPaths(
+          filePath,
+          workspacePath ?? null,
+          window.electron.process.platform,
+          "relative"
+        )
         const platform = await window.electron.ipcRenderer.invoke("get-platform")
         const normalizedPath =
           platform === "win32" ? resolved.fullPath.replace(/\//g, "\\") : resolved.fullPath
@@ -1902,8 +1932,9 @@ export function RightPanel({
           <div className="bg-background h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
             {previewPathForCurrentThread ? (
               <ResourcePreview
-                key={`${currentThreadId}:${previewPathForCurrentThread}:${previewReloadToken}`}
+                key={`${currentThreadId}:${previewPathForCurrentThread}:${previewWorkspacePathKind}:${previewReloadToken}`}
                 filePath={previewPathForCurrentThread}
+                workspacePathKind={previewWorkspacePathKind}
                 workspacePath={workspacePath ?? null}
                 threadId={currentThreadId ?? ""}
                 externalPreviewGrant={previewExternalGrant ?? undefined}
@@ -2392,37 +2423,9 @@ function isHtmlPreviewPath(filePath: string): boolean {
   const ext = getPathExtension(filePath)
   return ext === "html" || ext === "htm"
 }
+
 function isAbsolutePath(filePath: string): boolean {
-  return /^(?:[a-zA-Z]:[\\/]|\/)/.test(filePath)
-}
-
-function resolvePreviewPaths(
-  filePath: string,
-  workspacePath: string | null
-): {
-  fullPath: string
-  workspaceFilePath: string
-  inWorkspace: boolean
-} {
-  const input = filePath.trim().replace(/\\/g, "/")
-  if (!workspacePath) {
-    return { fullPath: input, workspaceFilePath: input, inWorkspace: false }
-  }
-
-  const ws = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
-  const fullPath = isAbsolutePath(input) ? input : `${ws}/${input.replace(/^\/+/, "")}`
-
-  const inWorkspace = fullPath === ws || fullPath.startsWith(`${ws}/`)
-  if (!inWorkspace) {
-    return { fullPath, workspaceFilePath: input, inWorkspace: false }
-  }
-
-  const rel = fullPath.slice(ws.length).replace(/^\/+/, "")
-  return {
-    fullPath,
-    workspaceFilePath: `/${rel}`,
-    inWorkspace: true
-  }
+  return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|\/)/.test(filePath)
 }
 
 function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Element {
@@ -2863,6 +2866,7 @@ function PluginRunArtifactsContent({
 
 function ResourcePreview({
   filePath,
+  workspacePathKind,
   workspacePath,
   threadId,
   externalPreviewGrant,
@@ -2873,6 +2877,7 @@ function ResourcePreview({
   onHidePreview
 }: {
   filePath: string
+  workspacePathKind: WorkspaceFilePreviewWorkspacePathKind
   workspacePath: string | null
   threadId: string
   externalPreviewGrant?: string
@@ -2894,8 +2899,22 @@ function ResourcePreview({
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
 
   const resolved = useMemo(
-    () => resolvePreviewPaths(filePath, workspacePath),
-    [filePath, workspacePath]
+    () =>
+      resolveResourcePreviewPaths(
+        filePath,
+        workspacePath,
+        window.electron.process.platform,
+        workspacePathKind
+      ),
+    [filePath, workspacePath, workspacePathKind]
+  )
+  const previewFileSource = useMemo(
+    () =>
+      selectResourcePreviewFileSource(
+        resolved,
+        Boolean(externalPreviewGrant || resolveExternalPreviewGrant)
+      ),
+    [externalPreviewGrant, resolveExternalPreviewGrant, resolved]
   )
   const isCopyableText = previewFileType.type === "code" || previewFileType.type === "text"
   const canCopyContent =
@@ -3118,8 +3137,9 @@ function ResourcePreview({
         <Suspense fallback={<LazySectionFallback label="加载文件预览..." />}>
           <FileViewer
             threadId={threadId}
-            filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
-            externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
+            filePath={previewFileSource.filePath}
+            externalFullPath={previewFileSource.externalFullPath}
+            workspacePathKind={previewFileSource.workspacePathKind}
             externalPreviewGrant={externalPreviewGrant}
             resolveExternalPreviewGrant={resolveExternalPreviewGrant}
             htmlFillHeight
@@ -3718,7 +3738,8 @@ function CoordinatorWorkerCard({
       }
       emitOpenResourcePreview({
         threadId,
-        filePath: resolvedPath
+        filePath: resolvedPath,
+        workspacePathKind: "relative"
       })
     },
     [threadId, worker.parent_thread_id]

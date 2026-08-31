@@ -3,13 +3,11 @@ import {
   WORKSPACE_FILE_PREVIEW_CANCELLED,
   WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES,
   WORKSPACE_FILE_PREVIEW_MAX_TEXT_LINES,
+  type WorkspaceFilePreviewWorkspacePathKind,
   type WorkspaceFilePreviewTextResult
 } from "../../shared/workspace-file-preview"
 import type { WorkspaceFilePreviewWorkerSource } from "./protocol"
-import {
-  openStableFileHandle,
-  type StableFileHandle
-} from "../services/stable-file-handle"
+import { openStableFileHandle, type StableFileHandle } from "../services/stable-file-handle"
 
 export interface ResolvedPreviewFile {
   resolvedPath: string
@@ -27,9 +25,56 @@ function throwIfCancelled(cancellation: Int32Array): void {
   if (Atomics.load(cancellation, 0) !== 0) throw cancellationError()
 }
 
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child)
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+export interface WorkspacePreviewPathResolver {
+  resolve(...paths: string[]): string
+  relative(from: string, to: string): string
+  isAbsolute(filePath: string): boolean
+}
+
+function isPathInside(
+  parent: string,
+  child: string,
+  pathResolver: WorkspacePreviewPathResolver = path
+): boolean {
+  const relative = pathResolver.relative(parent, child)
+  return relative === "" || (!relative.startsWith("..") && !pathResolver.isAbsolute(relative))
+}
+
+/**
+ * Resolve a renderer workspace path using the authoritative main-process root.
+ * `auto` first accepts a genuine in-root absolute path; otherwise a leading
+ * slash is treated as the file-tree's workspace-relative convention. The final
+ * boundary check applies to every branch, including paths containing `..`.
+ */
+export function resolveWorkspacePreviewCandidate(
+  filePath: string,
+  workspacePath: string,
+  workspacePathKind: WorkspaceFilePreviewWorkspacePathKind,
+  pathResolver: WorkspacePreviewPathResolver = path
+): { root: string; candidate: string } {
+  const root = pathResolver.resolve(workspacePath)
+  const relativePath = filePath.replace(/^[/\\]+/, "")
+  const relativeCandidate = (): string => pathResolver.resolve(root, relativePath)
+  let candidate: string
+
+  if (workspacePathKind === "absolute") {
+    if (!pathResolver.isAbsolute(filePath)) {
+      throw new Error("Access denied: absolute workspace preview path required")
+    }
+    candidate = pathResolver.resolve(filePath)
+  } else if (workspacePathKind === "auto" && pathResolver.isAbsolute(filePath)) {
+    const absoluteCandidate = pathResolver.resolve(filePath)
+    candidate = isPathInside(root, absoluteCandidate, pathResolver)
+      ? absoluteCandidate
+      : relativeCandidate()
+  } else {
+    candidate = relativeCandidate()
+  }
+
+  if (!isPathInside(root, candidate, pathResolver)) {
+    throw new Error("Access denied: path outside workspace")
+  }
+  return { root, candidate }
 }
 
 const SENSITIVE_EXTERNAL_PATHS = [
@@ -85,14 +130,13 @@ async function openPreviewFile(
     trustedRootPath = path.resolve(source.trustedRootPath)
   } else {
     if (!workspacePath) throw new Error("No workspace folder linked")
-    const root = path.resolve(workspacePath)
-    const relativePath = source.filePath.replace(/^[/\\]+/, "")
-    candidate = path.resolve(root, relativePath)
-    if (!isPathInside(root, candidate)) {
-      throw new Error("Access denied: path outside workspace")
-    }
-
-    trustedRootPath = root
+    const resolved = resolveWorkspacePreviewCandidate(
+      source.filePath,
+      workspacePath,
+      source.workspacePathKind
+    )
+    candidate = resolved.candidate
+    trustedRootPath = resolved.root
   }
 
   const file = await openStableFileHandle(trustedRootPath, candidate)
@@ -185,16 +229,10 @@ export async function readPreviewTextPage(
     const readBudget = Math.min(WORKSPACE_FILE_PREVIEW_MAX_TEXT_BYTES, remaining)
     const buffer = Buffer.allocUnsafe(readBudget)
     const { bytesRead } =
-      readBudget === 0
-        ? { bytesRead: 0 }
-        : await file.handle.read(buffer, 0, readBudget, offset)
+      readBudget === 0 ? { bytesRead: 0 } : await file.handle.read(buffer, 0, readBudget, offset)
     throwIfCancelled(cancellation)
 
-    const { end, lineCount } = boundedTextEnd(
-      buffer,
-      bytesRead,
-      offset + bytesRead < file.size
-    )
+    const { end, lineCount } = boundedTextEnd(buffer, bytesRead, offset + bytesRead < file.size)
     const consumedBytes = end
     const nextOffset = offset + consumedBytes
     const hasMore = nextOffset < file.size

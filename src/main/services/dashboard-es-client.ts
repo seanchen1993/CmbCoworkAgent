@@ -14,7 +14,12 @@ export const DASHBOARD_ES_WORKER_RESOURCE_LIMITS: ResourceLimits = {
   maxYoungGenerationSizeMb: 32,
   stackSizeMb: 4
 }
-export const DASHBOARD_ES_MAX_ACTIVE_REQUESTS = 8
+// The initial dashboard issues nine requests and a quick switch to project mode
+// can retain another eight before the first generation settles. Keep headroom
+// above that real 17-request overlap; only four requests reach the worker at a
+// time, so increasing this retention cap does not increase ES concurrency.
+export const DASHBOARD_ES_MAX_ACTIVE_REQUESTS = 32
+export const DASHBOARD_ES_MAX_DISPATCHED_REQUESTS = 4
 export const DASHBOARD_ES_MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 
 interface PendingRequest {
@@ -23,6 +28,10 @@ interface PendingRequest {
   cancellation: Int32Array
   signal?: AbortSignal
   abortListener?: () => void
+  request: DashboardEsQueryRequest
+  requestId: number
+  state: "queued" | "starting" | "dispatched"
+  callerSettled: boolean
 }
 
 export class DashboardEsWorkerUnavailableError extends Error {
@@ -110,9 +119,11 @@ export class DashboardEsWorkerClient {
   private workerPromise: Promise<Worker> | null = null
   private nextRequestId = 1
   private activeRequestCount = 0
+  private dispatchedRequestCount = 0
   private closing = false
   private shutdownResolve: (() => void) | null = null
   private readonly pending = new Map<number, PendingRequest>()
+  private readonly dispatchQueue: number[] = []
   private completedRequests = 0
   private lastStats: DashboardEsWorkerDiagnostics["lastStats"] = null
 
@@ -124,6 +135,97 @@ export class DashboardEsWorkerClient {
     }
   }
 
+  private settleCaller(
+    pending: PendingRequest,
+    outcome: { value: DashboardEsWorkerResult } | { error: Error }
+  ): void {
+    if (pending.callerSettled) return
+    pending.callerSettled = true
+    this.activeRequestCount = Math.max(0, this.activeRequestCount - 1)
+    this.cleanupPending(pending)
+    if ("value" in outcome) pending.resolve(outcome.value)
+    else pending.reject(outcome.error)
+  }
+
+  private finishWorkerRequest(
+    pending: PendingRequest,
+    outcome?: { value: DashboardEsWorkerResult } | { error: Error }
+  ): void {
+    if (this.pending.get(pending.requestId) !== pending) return
+    this.pending.delete(pending.requestId)
+    if (pending.state !== "queued") {
+      this.dispatchedRequestCount = Math.max(0, this.dispatchedRequestCount - 1)
+    }
+    if (outcome) this.settleCaller(pending, outcome)
+    this.pumpDispatchQueue()
+  }
+
+  private pumpDispatchQueue(): void {
+    if (this.closing) return
+    while (
+      this.dispatchedRequestCount < DASHBOARD_ES_MAX_DISPATCHED_REQUESTS &&
+      this.dispatchQueue.length > 0
+    ) {
+      const requestId = this.dispatchQueue.shift()
+      if (requestId === undefined) break
+      const pending = this.pending.get(requestId)
+      if (!pending || pending.state !== "queued") continue
+      pending.state = "starting"
+      this.dispatchedRequestCount += 1
+      void this.dispatchRequest(pending)
+    }
+  }
+
+  private async dispatchRequest(pending: PendingRequest): Promise<void> {
+    try {
+      const worker = await this.getWorker()
+      if (this.pending.get(pending.requestId) !== pending) return
+      if (this.closing) {
+        this.finishWorkerRequest(pending, {
+          error: new DashboardEsWorkerUnavailableError("Dashboard ES client is closing")
+        })
+        return
+      }
+      if (Atomics.load(pending.cancellation, 0) !== 0) {
+        this.finishWorkerRequest(pending)
+        return
+      }
+
+      const request = pending.request
+      pending.state = "dispatched"
+      worker.postMessage({
+        type: "query",
+        requestId: pending.requestId,
+        nodes: request.nodes,
+        method: request.method,
+        path: request.path,
+        headers: request.headers,
+        bodyText: request.bodyText,
+        projection: request.projection,
+        timeoutMs: request.timeoutMs,
+        inputByteLimit: Math.min(
+          request.inputByteLimit ?? DASHBOARD_ES_INPUT_BYTE_LIMIT,
+          DASHBOARD_ES_INPUT_BYTE_LIMIT
+        ),
+        outputByteLimit: Math.min(
+          request.outputByteLimit ?? DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
+          DASHBOARD_ES_OUTPUT_BYTE_LIMIT
+        ),
+        cancellationBuffer: pending.cancellation.buffer
+      })
+    } catch (error) {
+      this.finishWorkerRequest(pending, {
+        error:
+          error instanceof DashboardEsWorkerUnavailableError
+            ? error
+            : new DashboardEsWorkerUnavailableError(
+                "Unable to dispatch the Dashboard ES request",
+                { cause: error }
+              )
+      })
+    }
+  }
+
   private handleResponse = (response: DashboardEsWorkerResponse): void => {
     if (response.type === "shutdown-complete") {
       this.shutdownResolve?.()
@@ -132,22 +234,22 @@ export class DashboardEsWorkerClient {
     }
     const pending = this.pending.get(response.requestId)
     if (!pending) return
-    this.pending.delete(response.requestId)
-    this.cleanupPending(pending)
     if (response.ok) {
       this.completedRequests += 1
       this.lastStats = response.stats
-      pending.resolve({ value: response.value, stats: response.stats })
+      this.finishWorkerRequest(pending, {
+        value: { value: response.value, stats: response.stats }
+      })
       return
     }
     if (response.error.code === DASHBOARD_ES_REQUEST_CANCELLED) {
-      pending.reject(new DashboardEsRequestCancelledError())
+      this.finishWorkerRequest(pending, { error: new DashboardEsRequestCancelledError() })
       return
     }
     const error = new Error(response.error.message) as Error & { code?: string }
     error.name = response.error.code
     error.code = response.error.code
-    pending.reject(error)
+    this.finishWorkerRequest(pending, { error })
   }
 
   private handleWorkerFailure(worker: Worker, error: Error): void {
@@ -159,10 +261,11 @@ export class DashboardEsWorkerClient {
       { cause: error }
     )
     for (const pending of this.pending.values()) {
-      this.cleanupPending(pending)
-      pending.reject(unavailable)
+      this.settleCaller(pending, { error: unavailable })
     }
     this.pending.clear()
+    this.dispatchQueue.length = 0
+    this.dispatchedRequestCount = 0
   }
 
   private async getWorker(): Promise<Worker> {
@@ -228,68 +331,46 @@ export class DashboardEsWorkerClient {
     ) {
       throw new Error("Dashboard ES request metadata exceeds its hard limit")
     }
+    const requestId = this.nextRequestId++
+    const cancellation = new Int32Array(
+      new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
+    )
     this.activeRequestCount += 1
-    try {
-      const worker = await this.getWorker()
-      if (this.closing) {
-        throw new DashboardEsWorkerUnavailableError("Dashboard ES client is closing")
+    return await new Promise((resolve, reject) => {
+      const pending: PendingRequest = {
+        resolve,
+        reject,
+        cancellation,
+        signal: request.signal,
+        request,
+        requestId,
+        state: "queued",
+        callerSettled: false
       }
-      if (request.signal?.aborted) throw new DashboardEsRequestCancelledError()
-      const requestId = this.nextRequestId++
-      const cancellationBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)
-      const cancellation = new Int32Array(cancellationBuffer)
-
-      return await new Promise((resolve, reject) => {
-        const pending: PendingRequest = {
-          resolve,
-          reject,
-          cancellation,
-          signal: request.signal
-        }
-        if (request.signal) {
-          pending.abortListener = () => {
-            if (!this.pending.delete(requestId)) return
-            Atomics.store(cancellation, 0, 1)
-            this.cleanupPending(pending)
-            reject(new DashboardEsRequestCancelledError())
+      this.pending.set(requestId, pending)
+      if (request.signal) {
+        pending.abortListener = () => {
+          if (this.pending.get(requestId) !== pending) return
+          Atomics.store(cancellation, 0, 1)
+          this.settleCaller(pending, { error: new DashboardEsRequestCancelledError() })
+          if (pending.state === "queued") {
+            this.pending.delete(requestId)
+            const queuedIndex = this.dispatchQueue.indexOf(requestId)
+            if (queuedIndex >= 0) this.dispatchQueue.splice(queuedIndex, 1)
+            this.pumpDispatchQueue()
           }
-          request.signal.addEventListener("abort", pending.abortListener, { once: true })
         }
-        this.pending.set(requestId, pending)
-        try {
-          worker.postMessage({
-            type: "query",
-            requestId,
-            nodes: request.nodes,
-            method: request.method,
-            path: request.path,
-            headers: request.headers,
-            bodyText: request.bodyText,
-            projection: request.projection,
-            timeoutMs: request.timeoutMs,
-            inputByteLimit: Math.min(
-              request.inputByteLimit ?? DASHBOARD_ES_INPUT_BYTE_LIMIT,
-              DASHBOARD_ES_INPUT_BYTE_LIMIT
-            ),
-            outputByteLimit: Math.min(
-              request.outputByteLimit ?? DASHBOARD_ES_OUTPUT_BYTE_LIMIT,
-              DASHBOARD_ES_OUTPUT_BYTE_LIMIT
-            ),
-            cancellationBuffer
-          })
-        } catch (error) {
-          this.pending.delete(requestId)
-          this.cleanupPending(pending)
-          reject(
-            new DashboardEsWorkerUnavailableError("Unable to dispatch the Dashboard ES request", {
-              cause: error
-            })
-          )
+        request.signal.addEventListener("abort", pending.abortListener, { once: true })
+        // Close the check-to-subscribe race: an abort between the method's
+        // initial guard and listener registration must not dispatch stale work.
+        if (request.signal.aborted) {
+          pending.abortListener()
+          return
         }
-      })
-    } finally {
-      this.activeRequestCount = Math.max(0, this.activeRequestCount - 1)
-    }
+      }
+      this.dispatchQueue.push(requestId)
+      this.pumpDispatchQueue()
+    })
   }
 
   getDiagnostics(): DashboardEsWorkerDiagnostics {
@@ -304,10 +385,13 @@ export class DashboardEsWorkerClient {
     this.closing = true
     for (const pending of this.pending.values()) {
       Atomics.store(pending.cancellation, 0, 1)
-      this.cleanupPending(pending)
-      pending.reject(new DashboardEsRequestCancelledError("Dashboard ES worker is shutting down"))
+      this.settleCaller(pending, {
+        error: new DashboardEsRequestCancelledError("Dashboard ES worker is shutting down")
+      })
     }
     this.pending.clear()
+    this.dispatchQueue.length = 0
+    this.dispatchedRequestCount = 0
     const worker = this.worker
     this.worker = null
     this.workerPromise = null

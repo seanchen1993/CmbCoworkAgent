@@ -50,6 +50,17 @@ function createCheckpointDatabase(threadId: string, messages: unknown): string {
       runtime_checkpoint BLOB NOT NULL,
       PRIMARY KEY (thread_id, checkpoint_ns)
     );
+    CREATE TABLE writes (
+      thread_id TEXT NOT NULL,
+      checkpoint_ns TEXT NOT NULL DEFAULT '',
+      checkpoint_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      idx INTEGER NOT NULL,
+      channel TEXT NOT NULL,
+      type TEXT,
+      value TEXT,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+    );
   `)
   database
     .prepare(

@@ -583,7 +583,7 @@ test("LocalSandbox exposes a single sandbox-denial detector modelled on Codex", 
   }
 })
 
-test("output collection caps encoding detection to a small head sample", () => {
+test("output collection keeps encoding detection bounded and incremental", () => {
   // Encoding detection runs on every shell command's main-thread cleanup. chardet is
   // pure JS and linear in the input size — feeding it the full 100KB buffer adds
   // 5-15ms of blocking per cap-hit command. Sample the head (8KB) instead.
@@ -599,8 +599,13 @@ test("output collection caps encoding detection to a small head sample", () => {
   )
   assert.match(
     localSandboxSource,
-    /private static encodingDetectionBuffer\(stdoutBuf: Buffer, stderrBuf: Buffer\): Buffer/,
-    "should expose a helper that picks the encoding-detection buffer without an extra Buffer.concat"
+    /class SafeShellOutputDecoder/,
+    "shell output should use the UTF-8-first incremental decoder"
+  )
+  assert.match(
+    localSandboxSource,
+    /inspection\.kind === "incomplete"[\s\S]*this\.pending\.subarray\(inspection\.sequenceStart\)/,
+    "a split UTF-8 character should retain only its incomplete trailing bytes"
   )
   // Both collectAndResolve sites should use the helper instead of Buffer.concat([stdoutBuf, stderrBuf])
   assert.doesNotMatch(
@@ -608,13 +613,13 @@ test("output collection caps encoding detection to a small head sample", () => {
     /Buffer\.concat\(\[stdoutBuf, stderrBuf\]\)/,
     "neither executeOnce path should allocate a third Buffer.concat just to feed chardet"
   )
-  // Both sites should now use the helper:
-  const helperUseCount = (
-    localSandboxSource.match(/encodingDetectionBuffer\(stdoutBuf, stderrBuf\)/g) || []
+  // Both final-output paths should decode stdout and stderr independently.
+  const chunkDecoderUseCount = (
+    localSandboxSource.match(/decodeShellOutputChunks\((?:stdout|stderr)Chunks,/g) || []
   ).length
   assert.ok(
-    helperUseCount >= 2,
-    `encodingDetectionBuffer should be used by both collectAndResolve paths (got ${helperUseCount})`
+    chunkDecoderUseCount >= 4,
+    `both execution paths should decode stdout/stderr chunks independently (got ${chunkDecoderUseCount})`
   )
 })
 
@@ -2131,9 +2136,7 @@ test("workflow settle reports + retries a failed final persist (no stale notific
     /if \(!finalPersisted\)[\s\S]*?could NOT be persisted/,
     "settle logs loudly when the final persist fails"
   )
-  const fallbackPublishedAt = workflowRunManagerSource.indexOf(
-    "this.captureFlushFailedRun(request"
-  )
+  const fallbackPublishedAt = workflowRunManagerSource.indexOf("this.captureFlushFailedRun(request")
   const lifecycleRemovedAt = workflowRunManagerSource.indexOf(
     "this.active.delete(request.threadId)"
   )

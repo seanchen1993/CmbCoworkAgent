@@ -102,6 +102,7 @@ export function TabbedPanel({
                 key={activeFile.path}
                 filePath={activeFile.path}
                 threadId={threadId}
+                workspacePathKind="relative"
                 requestLane="active-file-tab"
               />
             </Suspense>

@@ -3,7 +3,8 @@ import { AlertCircle, ChevronLeft, ChevronRight, FileCode, Loader2 } from "lucid
 import {
   type WorkspaceFilePreviewMediaResult,
   type WorkspaceFilePreviewSource,
-  type WorkspaceFilePreviewTextResult
+  type WorkspaceFilePreviewTextResult,
+  type WorkspaceFilePreviewWorkspacePathKind
 } from "../../../../shared/workspace-file-preview"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
 import {
@@ -18,11 +19,18 @@ import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
+import {
+  formatFilePreviewError,
+  normalizeFilePreviewError,
+  type FilePreviewErrorState
+} from "@/lib/file-preview-error"
 
 interface FileViewerProps {
   filePath: string
   threadId?: string
   externalFullPath?: string
+  /** How main should interpret an ungranted workspace path. Absolute remains workspace-bounded. */
+  workspacePathKind?: WorkspaceFilePreviewWorkspacePathKind
   /** Opaque capability issued by a trusted main-process source. */
   externalPreviewGrant?: string
   /** Resolve a fresh capability before every external file read. */
@@ -38,36 +46,6 @@ const MAX_HTML_DEPENDENCY_REQUESTS = 8
 const MAX_HTML_DEPENDENCY_BYTES = 256 * 1024
 const MAX_MARKDOWN_IMAGE_REQUESTS = 32
 const MAX_MARKDOWN_IMAGE_SOURCE_BYTES = 32 * 1024 * 1024
-
-function formatFileLoadError(rawError: string): {
-  title: string
-  description: string
-  detail?: string
-  missingPath?: string
-} {
-  const trimmed = rawError.trim()
-  const missingPathMatch = trimmed.match(/'([^']+)'/)
-  if (trimmed.includes("ENOENT") || /no such file or directory/i.test(trimmed)) {
-    return {
-      title: "文件不存在或已被移动",
-      description: "预览文件失败，当前路径下未找到该文件。",
-      detail: "请确认文件仍在原位置，或重新生成后再预览。",
-      missingPath: missingPathMatch?.[1]
-    }
-  }
-  if (/access denied|permission denied|eacces|eperm/i.test(trimmed)) {
-    return {
-      title: "没有文件访问权限",
-      description: "当前进程无权限读取该文件。",
-      detail: "请检查文件权限或将文件移动到可访问目录后重试。"
-    }
-  }
-  return {
-    title: "文件加载失败",
-    description: "预览时发生异常，请稍后重试。",
-    detail: trimmed
-  }
-}
 
 function createRequestToken(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -91,6 +69,7 @@ export function FileViewer({
   filePath,
   threadId,
   externalFullPath,
+  workspacePathKind,
   externalPreviewGrant,
   resolveExternalPreviewGrant,
   htmlFillHeight = true,
@@ -103,7 +82,7 @@ export function FileViewer({
   const displayPath = externalFullPath || filePath
   const sourceCachePrefix = externalFullPath
     ? `external:${externalFullPath}\u0000`
-    : `workspace:${threadId ?? ""}:${filePath}\u0000`
+    : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`
 
   const fileName = displayPath.split(/[/\\]/).pop() || displayPath
   const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() ?? "" : ""
@@ -117,7 +96,7 @@ export function FileViewer({
   const [pageOffsets, setPageOffsets] = useState([0])
   const [pageIndex, setPageIndex] = useState(0)
   const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<FilePreviewErrorState | null>(null)
   const generationRef = useRef(0)
   const requestTokenRef = useRef("")
   const dependencyBudgetRef = useRef({
@@ -138,9 +117,19 @@ export function FileViewer({
         }
         return { externalGrant: grant, filePath: resolvedPath }
       }
-      return { threadId: threadId ?? "", filePath: resolvedPath }
+      return {
+        threadId: threadId ?? "",
+        filePath: resolvedPath,
+        workspacePathKind
+      }
     },
-    [externalFullPath, externalPreviewGrant, resolveExternalPreviewGrant, threadId]
+    [
+      externalFullPath,
+      externalPreviewGrant,
+      resolveExternalPreviewGrant,
+      threadId,
+      workspacePathKind
+    ]
   )
 
   const loadTextPage = useCallback(
@@ -170,7 +159,12 @@ export function FileViewer({
       })
       if (generation !== generationRef.current) return null
       if (!result.success) {
-        if (!result.cancelled) setError(result.error || "Failed to read file")
+        if (!result.cancelled) {
+          setError({
+            message: result.error || "Failed to read file",
+            code: result.errorCode
+          })
+        }
         return null
       }
       writeWorkspaceFilePreviewCache(cacheKey, result)
@@ -204,7 +198,7 @@ export function FileViewer({
     void (async () => {
       try {
         if (!externalFullPath && !threadId) {
-          setError("Missing thread id for workspace file preview")
+          setError({ message: "Missing thread id for workspace file preview" })
           return
         }
         if (isBinary) {
@@ -223,7 +217,12 @@ export function FileViewer({
             return
           }
           if (!result.success) {
-            if (!result.cancelled) setError(result.error || "Failed to read file")
+            if (!result.cancelled) {
+              setError({
+                message: result.error || "Failed to read file",
+                code: result.errorCode
+              })
+            }
             return
           }
           releasedMediaUrl = result.previewUrl
@@ -233,7 +232,7 @@ export function FileViewer({
         }
       } catch (caught) {
         if (generation === generationRef.current) {
-          setError(caught instanceof Error ? caught.message : "Failed to read file")
+          setError(normalizeFilePreviewError(caught))
         }
       } finally {
         if (generation === generationRef.current) setIsLoading(false)
@@ -376,7 +375,7 @@ export function FileViewer({
   }
 
   if (error) {
-    const friendlyError = formatFileLoadError(error)
+    const friendlyError = formatFilePreviewError(error)
     return (
       <div className="flex flex-1 h-full min-h-0 items-center justify-center p-6">
         <div className="w-full max-w-[560px] rounded-2xl border border-border/60 bg-muted/20 px-5 py-4 shadow-sm">
