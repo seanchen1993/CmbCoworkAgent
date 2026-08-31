@@ -18,9 +18,13 @@ import {
   generateWorkflowRunId,
   loadWorkflowRun,
   markWorkflowRunNotified,
+  WORKFLOW_FLUSH_FAILURE_JOURNAL_RESERVATION_BYTES,
+  WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES,
   workflowThreadDisposalEpoch
 } from "./run-store"
 import type { PersistedWorkflowRun } from "./types"
+
+const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
 
 /**
  * recoverFlushFailedRun's instance fence — the sibling of setWorkflowRunNotified's.
@@ -46,11 +50,16 @@ describe("recoverFlushFailedRun instance fence", () => {
   const RESUMED_STARTED_AT = "2026-07-08T14:53:16.267Z"
 
   let workspace: string
+  let workflowDataRoot: string
 
   // TS `private` is compile-time only; reach the maps to stage the exact race.
   const privates = workflowRunManager as unknown as {
     flushFailedRuns: Map<string, PersistedWorkflowRun>
+    flushFailedJournalSources: Map<string, "memory" | "sidecar">
+    flushFailedReservedBytes: Map<string, number>
     flushFailedEpochs: Map<string, number>
+    inFlightNotifications: Set<string>
+    isLaunchBlockedByFlushFailure: (runId: string, threadId: string) => boolean
   }
 
   const record = (
@@ -79,6 +88,12 @@ describe("recoverFlushFailedRun instance fence", () => {
   const seedFlushFailedSnapshot = (runId: string, startedAt: string): PersistedWorkflowRun => {
     const snapshot = record(runId, startedAt, "completed")
     privates.flushFailedRuns.set(runId, snapshot)
+    privates.flushFailedJournalSources.set(runId, "memory")
+    privates.flushFailedReservedBytes.set(
+      runId,
+      WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES +
+        WORKFLOW_FLUSH_FAILURE_JOURNAL_RESERVATION_BYTES
+    )
     privates.flushFailedEpochs.set(runId, workflowThreadDisposalEpoch(THREAD_ID))
     return snapshot
   }
@@ -96,12 +111,21 @@ describe("recoverFlushFailedRun instance fence", () => {
 
   beforeEach(() => {
     workspace = mkdtempSync(join(tmpdir(), "wf-fence-"))
+    workflowDataRoot = mkdtempSync(join(tmpdir(), "cmb-workflow-fence-data-"))
+    process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
   })
 
   afterEach(() => {
     privates.flushFailedRuns.clear()
+    privates.flushFailedJournalSources.clear()
+    privates.flushFailedReservedBytes.clear()
     privates.flushFailedEpochs.clear()
+    privates.inFlightNotifications.clear()
+    vi.restoreAllMocks()
+    if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+    else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
     rmSync(workspace, { recursive: true, force: true })
+    rmSync(workflowDataRoot, { recursive: true, force: true })
   })
 
   test("a stale ack persists the resumed snapshot but never marks it delivered", async () => {
@@ -184,31 +208,34 @@ describe("recoverFlushFailedRun instance fence", () => {
     // memory snapshot is perfectly reportable even while the disk is faulty. Gating the
     // kick on write-back success strands it until the next hydrate/reload.
     const runId = generateWorkflowRunId()
-    const fileAsWorkspace = join(workspace, "not-a-dir")
-    writeFileSync(fileAsWorkspace, "x") // run dir under a regular FILE → mkdir ENOTDIR
+    const fileAsDataRoot = join(workspace, "not-a-dir")
+    writeFileSync(fileAsDataRoot, "x") // managed run dir under a regular FILE → mkdir ENOTDIR
+    process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
     seedFlushFailedSnapshot(runId, RESUMED_STARTED_AT)
 
-    const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
-      fileAsWorkspace,
-      THREAD_ID,
-      runId,
-      FIRST_STARTED_AT
-    )
+    try {
+      const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
+        workspace,
+        THREAD_ID,
+        runId,
+        FIRST_STARTED_AT
+      )
 
-    expect(
-      shouldKickPendingDrain,
-      "REGRESSION: no kick while the drain has a reportable snapshot in memory — the " +
-        "resumed instance's notification waits for a hydrate"
-    ).toBe(true)
-    // And the kick would really find it: memory-first, undelivered, not in flight.
-    expect(workflowRunManager.findPendingNotification(fileAsWorkspace, THREAD_ID)?.runId).toBe(
-      runId
-    )
-    expect(privates.flushFailedRuns.has(runId), "snapshot retained for a later retry").toBe(true)
-    expect(
-      privates.flushFailedRuns.get(runId)?.notificationDelivered,
-      "and still never marked delivered — that flag belongs to its own ack"
-    ).toBeFalsy()
+      expect(
+        shouldKickPendingDrain,
+        "REGRESSION: no kick while the drain has a reportable snapshot in memory — the " +
+          "resumed instance's notification waits for a hydrate"
+      ).toBe(true)
+      // And the kick would really find it: memory-first, undelivered, not in flight.
+      expect(workflowRunManager.findPendingNotification(workspace, THREAD_ID)?.runId).toBe(runId)
+      expect(privates.flushFailedRuns.has(runId), "snapshot retained for a later retry").toBe(true)
+      expect(
+        privates.flushFailedRuns.get(runId)?.notificationDelivered,
+        "and still never marked delivered — that flag belongs to its own ack"
+      ).toBeFalsy()
+    } finally {
+      process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
+    }
   })
 
   test("a matching ack recovers the snapshot and marks it delivered", async () => {
@@ -237,27 +264,32 @@ describe("recoverFlushFailedRun instance fence", () => {
     // free — and the run behind it is drain-ready right now.
     const runId = generateWorkflowRunId()
     const backlogRunId = generateWorkflowRunId()
-    const fileAsWorkspace = join(workspace, "not-a-dir")
-    writeFileSync(fileAsWorkspace, "x")
+    const fileAsDataRoot = join(workspace, "not-a-dir")
+    writeFileSync(fileAsDataRoot, "x")
+    process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
     const acked = seedFlushFailedSnapshot(runId, RESUMED_STARTED_AT)
     seedFlushFailedSnapshot(backlogRunId, RESUMED_STARTED_AT) // a second completed run
 
-    const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
-      fileAsWorkspace,
-      THREAD_ID,
-      runId,
-      RESUMED_STARTED_AT
-    )
+    try {
+      const shouldKickPendingDrain = await workflowRunManager.recoverFlushFailedRun(
+        workspace,
+        THREAD_ID,
+        runId,
+        RESUMED_STARTED_AT
+      )
 
-    expect(
-      shouldKickPendingDrain,
-      "REGRESSION: a failed write-back suppressed the kick and stranded the backlog"
-    ).toBe(true)
-    expect(acked.notificationDelivered, "the acked run is settled in memory").toBe(true)
-    // The drain skips the (delivered) acked run and serves the one behind it.
-    expect(workflowRunManager.findPendingNotification(fileAsWorkspace, THREAD_ID)?.runId).toBe(
-      backlogRunId
-    )
+      expect(
+        shouldKickPendingDrain,
+        "REGRESSION: a failed write-back suppressed the kick and stranded the backlog"
+      ).toBe(true)
+      expect(acked.notificationDelivered, "the acked run is settled in memory").toBe(true)
+      // The drain skips the (delivered) acked run and serves the one behind it.
+      expect(workflowRunManager.findPendingNotification(workspace, THREAD_ID)?.runId).toBe(
+        backlogRunId
+      )
+    } finally {
+      process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
+    }
   })
 
   test("an unfenced ack (cancel path) still recovers and marks delivered", async () => {
@@ -267,6 +299,103 @@ describe("recoverFlushFailedRun instance fence", () => {
 
     expect(await workflowRunManager.recoverFlushFailedRun(workspace, THREAD_ID, runId)).toBe(true)
     expect(loadWorkflowRun(workspace, THREAD_ID, runId)?.notificationDelivered).toBe(true)
+  })
+
+  test("persistent disk failure retains a large journal without a main-thread deep clone and opens launch backpressure", async () => {
+    const runId = generateWorkflowRunId()
+    const snapshot = seedFlushFailedSnapshot(runId, RESUMED_STARTED_AT)
+    snapshot.journal = Array.from({ length: 24 }, (_, index) => ({
+      index,
+      hash: `large-failure-${index}`,
+      result: "j".repeat(950 * 1024)
+    }))
+    const fileAsDataRoot = join(workspace, "persistent-not-a-dir")
+    writeFileSync(fileAsDataRoot, "x")
+    process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
+    const originalStringify = JSON.stringify
+    JSON.stringify = ((
+      value: unknown,
+      replacer?: Parameters<typeof JSON.stringify>[1],
+      space?: Parameters<typeof JSON.stringify>[2]
+    ) => {
+      if (value === snapshot) {
+        throw new Error("flush-failed snapshot was deep-cloned on Electron main")
+      }
+      return originalStringify(value, replacer as never, space)
+    }) as typeof JSON.stringify
+    const gaps: number[] = []
+    let previousTick = performance.now()
+    const ticker = setInterval(() => {
+      const now = performance.now()
+      gaps.push(now - previousTick)
+      previousTick = now
+    }, 2)
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
+      expect(
+        await workflowRunManager.retryPersistFlushFailedRun(
+          workspace,
+          THREAD_ID,
+          runId
+        )
+      ).toBe(false)
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
+    } finally {
+      clearInterval(ticker)
+      JSON.stringify = originalStringify
+      process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
+    }
+    expect(Math.max(...gaps)).toBeLessThan(250)
+    expect(privates.flushFailedRuns.get(runId)?.journal).toHaveLength(24)
+    expect(workflowRunManager.findPendingNotification(workspace, THREAD_ID)?.runId).toBe(runId)
+    expect(privates.isLaunchBlockedByFlushFailure(runId, THREAD_ID)).toBe(false)
+    expect(privates.isLaunchBlockedByFlushFailure(generateWorkflowRunId(), THREAD_ID)).toBe(true)
+    expect(privates.isLaunchBlockedByFlushFailure(runId, "different-thread")).toBe(true)
+
+    const secondRunId = generateWorkflowRunId()
+    seedFlushFailedSnapshot(secondRunId, "2026-07-08T14:54:00.000Z")
+    const diagnostics = workflowRunManager.getFlushFailureDiagnosticsForTest()
+    expect(diagnostics).toMatchObject({ runs: 2, degraded: true, activeRuns: 0 })
+    expect(diagnostics.reservedBytes).toBeGreaterThan(0)
+    expect(() =>
+      workflowRunManager.launch({
+        threadId: "thread-over-budget",
+        workspacePath: workspace,
+        runId: generateWorkflowRunId()
+      } as never)
+    ).toThrow(/waiting for durable storage/i)
+    expect(privates.flushFailedRuns.has(runId)).toBe(true)
+    expect(privates.flushFailedRuns.has(secondRunId)).toBe(true)
+  })
+
+  test("a compact flush-failed snapshot restores its replay journal from the durable sidecar", async () => {
+    const runId = generateWorkflowRunId()
+    const initial = record(runId, RESUMED_STARTED_AT, "running")
+    initial.journal = [{ index: 0, hash: "durable-sidecar", result: "cached result" }]
+    const store = createWorkflowRunStore({
+      workspacePath: workspace,
+      threadId: THREAD_ID,
+      initial
+    })
+    expect(await store.flush()).toBe(true)
+
+    const compact = record(runId, RESUMED_STARTED_AT, "completed")
+    privates.flushFailedRuns.set(runId, compact)
+    privates.flushFailedJournalSources.set(runId, "sidecar")
+    privates.flushFailedReservedBytes.set(
+      runId,
+      WORKFLOW_FLUSH_FAILURE_METADATA_RESERVATION_BYTES
+    )
+    privates.flushFailedEpochs.set(runId, workflowThreadDisposalEpoch(THREAD_ID))
+
+    const resumed = await workflowRunManager.getFlushFailedRunForResume(
+      workspace,
+      THREAD_ID,
+      runId
+    )
+    expect(resumed?.status).toBe("completed")
+    expect(resumed?.journal).toEqual(initial.journal)
+    expect(privates.flushFailedRuns.get(runId)?.journal).toEqual([])
   })
 
   // The goal-defer guard's core invariant: exclude ONLY the instance a delivery
@@ -296,6 +425,8 @@ describe("recoverFlushFailedRun instance fence", () => {
 
     // With only A pending, excluding A's instance leaves nothing.
     privates.flushFailedRuns.delete(runB)
+    privates.flushFailedJournalSources.delete(runB)
+    privates.flushFailedReservedBytes.delete(runB)
     privates.flushFailedEpochs.delete(runB)
     expect(
       workflowRunManager.hasDeliverablePendingNotificationExcept(workspace, THREAD_ID, {
@@ -327,5 +458,67 @@ describe("recoverFlushFailedRun instance fence", () => {
         startedAt: RESUMED_STARTED_AT
       })
     ).toBe(false)
+  })
+
+  test("concurrent async notification claims can acquire one run only once", async () => {
+    const run = record(generateWorkflowRunId(), RESUMED_STARTED_AT, "completed")
+    let resolveLookup!: (value: PersistedWorkflowRun) => void
+    const deferred = new Promise<PersistedWorkflowRun>((resolvePromise) => {
+      resolveLookup = resolvePromise
+    })
+    vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockImplementation(
+      async () => deferred
+    )
+
+    const first = workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
+    const second = workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
+    resolveLookup(run)
+    const claimed = await Promise.all([first, second])
+
+    expect(claimed.filter((candidate) => candidate?.runId === run.runId)).toHaveLength(1)
+    expect(claimed.filter((candidate) => candidate === null)).toHaveLength(1)
+  })
+
+  test("a failed notification build releases its claim for a later retry", async () => {
+    const run = record(generateWorkflowRunId(), RESUMED_STARTED_AT, "completed")
+    vi.spyOn(workflowRunManager, "findPendingNotificationAsync").mockResolvedValue(run)
+
+    const first = await workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
+    expect(first?.runId).toBe(run.runId)
+    try {
+      throw new Error("notification build failed")
+    } catch {
+      workflowRunManager.clearNotificationInFlight(run.runId)
+    }
+
+    await expect(
+      workflowRunManager.claimPendingNotificationAsync(workspace, THREAD_ID)
+    ).resolves.toMatchObject({ runId: run.runId })
+  })
+
+  test("a queued mode/workspace transition rejects an interleaved synchronous launch", async () => {
+    let releaseTransition!: () => void
+    const transitionGate = new Promise<void>((resolveTransition) => {
+      releaseTransition = resolveTransition
+    })
+    let entered!: () => void
+    const transitionEntered = new Promise<void>((resolveEntered) => {
+      entered = resolveEntered
+    })
+    const transition = workflowRunManager.withThreadTransitionLease(THREAD_ID, async () => {
+      entered()
+      await transitionGate
+    })
+    await transitionEntered
+
+    expect(() =>
+      workflowRunManager.launch({
+        threadId: THREAD_ID,
+        workspacePath: workspace
+      } as Parameters<typeof workflowRunManager.launch>[0])
+    ).toThrow(/changing mode or workspace/)
+
+    releaseTransition()
+    await transition
   })
 })

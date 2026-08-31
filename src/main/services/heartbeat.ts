@@ -17,21 +17,27 @@ import {
 import { reviveWorkflowThread } from "../agent/workflow/run-store"
 import {
   createThread as dbCreateThread,
-  getThread as dbGetThread,
+  getThreadCore as dbGetThreadCore,
   updateThread as dbUpdateThread
 } from "../db"
 import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
 import { emitAppAttention } from "../app-attention-events"
 import { trackEvent } from "./event-reporter"
-
-/** Fixed thread ID for heartbeat (aligns with Nanobot session_key="heartbeat"). Resets won't orphan it. */
-const HEARTBEAT_THREAD_ID = "heartbeat"
+import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
+import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
+import { withThreadRunMutationLock } from "../ipc/thread-run-mutation-lock"
+import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 
 let tickTimer: ReturnType<typeof setTimeout> | null = null
+// A cleared timeout may already have a callback queued in the event loop. Each
+// scheduled callback captures this generation so stop/restart can invalidate it
+// permanently instead of relying on clearTimeout alone.
+let tickTimerGeneration = 0
 let running = false
 let abortController: AbortController | null = null
 let shuttingDown = false
+let workspaceResetInProgress = false
 
 function notifyRenderer(channel: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -153,6 +159,7 @@ export function startHeartbeat(): void {
 }
 
 export function stopHeartbeat(): void {
+  tickTimerGeneration += 1
   if (tickTimer) {
     clearTimeout(tickTimer)
     tickTimer = null
@@ -170,6 +177,7 @@ export function stopHeartbeat(): void {
 
 /** Restart the timer without aborting a running execution */
 export function restartHeartbeat(): void {
+  tickTimerGeneration += 1
   if (tickTimer) {
     clearTimeout(tickTimer)
     tickTimer = null
@@ -178,7 +186,7 @@ export function restartHeartbeat(): void {
 }
 
 function scheduleNext(compensate = false): void {
-  if (shuttingDown) return
+  if (shuttingDown || workspaceResetInProgress) return
   const config = getHeartbeatConfig()
   if (!config.enabled) {
     console.log("[Heartbeat] Disabled, not scheduling")
@@ -190,7 +198,9 @@ function scheduleNext(compensate = false): void {
     const elapsed = Date.now() - new Date(config.lastRunAt).getTime()
     delay = Math.max(0, fullMs - elapsed)
   }
+  const scheduledGeneration = ++tickTimerGeneration
   tickTimer = setTimeout(() => {
+    if (scheduledGeneration !== tickTimerGeneration) return
     tickTimer = null
     tick()
   }, delay)
@@ -199,6 +209,9 @@ function scheduleNext(compensate = false): void {
 }
 
 function tick(): void {
+  // A timeout callback may already be queued when stopHeartbeat clears its
+  // handle. The service-level gate closes that last race with workspace reset.
+  if (workspaceResetInProgress) return
   if (running) {
     console.log("[Heartbeat] Already running, skipping this tick")
     scheduleNext()
@@ -210,9 +223,36 @@ function tick(): void {
 }
 
 export async function runHeartbeatNow(): Promise<void> {
-  if (shuttingDown) throw new Error("The application is quitting; heartbeat cannot start.")
-  if (running) throw new Error("Heartbeat is already running")
+  assertHeartbeatCanStart()
   await executeHeartbeat()
+}
+
+/** Synchronous preflight for fire-and-forget heartbeat entry points. */
+export function assertHeartbeatCanStart(): void {
+  if (shuttingDown) throw new Error("The application is quitting; heartbeat cannot start.")
+  if (workspaceResetInProgress) {
+    throw new Error("Heartbeat workspace is being changed; heartbeat cannot start.")
+  }
+  if (running) throw new Error("Heartbeat is already running")
+}
+
+/**
+ * Reserve the fixed heartbeat id while its previous workspace incarnation is
+ * removed. The returned release must be called after cleanup and config persist
+ * finish; direct scheduler-tool wakeups are rejected for the whole interval.
+ */
+export function beginHeartbeatWorkspaceReset(): () => void {
+  if (running) {
+    throw new Error("Heartbeat 正在运行，无法切换工作目录。请等待运行结束或先取消运行。")
+  }
+  if (workspaceResetInProgress) {
+    throw new Error("Heartbeat 工作目录正在切换，请稍后重试。")
+  }
+  workspaceResetInProgress = true
+  stopHeartbeat()
+  return () => {
+    workspaceResetInProgress = false
+  }
 }
 
 export function cancelHeartbeat(): void {
@@ -260,7 +300,7 @@ async function executeHeartbeat(): Promise<void> {
   const runStartedAt = Date.now()
   // Pinned only after the pre-run gates pass; the finally must not close a
   // checkpointer this run never opened.
-  let releaseCheckpointerPin: (() => void) | null = null
+  const checkpointerPin: { release: (() => void) | null } = { release: null }
 
   try {
     const config = getHeartbeatConfig()
@@ -305,52 +345,54 @@ async function executeHeartbeat(): Promise<void> {
       return
     }
 
-    releaseCheckpointerPin = pinCheckpointer(threadId)
+    const { checkpointer, preHeartbeatSnapshot } = await withThreadRunMutationLock(
+      threadId,
+      async () => {
+        // Pin before reviving or publishing the fixed DB id. Once this short critical section
+        // ends, a concurrent delete may enter the same thread lock, but its checkpointer retire
+        // must still wait for this run's finally to release the pin.
+        checkpointerPin.release = pinCheckpointer(threadId)
 
-    // Assert the fixed heartbeat id alive on EVERY beat, not only when the DB
-    // row is missing. Thread deletion tombstones the id (runtime checkpointer +
-    // workflow run-store); a beat racing that deletion can recreate the row
-    // BEFORE the deletion's late retire lands, which re-tombstones the new
-    // incarnation — and with the row now present, a row-missing-only revive
-    // would never run again (stuck until restart). Re-asserting here makes any
-    // such re-kill converge within one beat cycle. Inside try/finally so an
-    // ensure failure still restores `running` and the pin.
-    reviveRetiredThread(threadId)
-    reviveWorkflowThread(threadId)
+        // The delete handler holds this same lock through all context-history/coordinator sweeps.
+        // Keeping revive + row publication + the first checkpoint snapshot in one lease prevents
+        // a fixed-id heartbeat from starting a new incarnation inside an old incarnation's rm.
+        reviveRetiredThread(threadId)
+        reviveWorkflowThread(threadId)
 
-    // Ensure thread exists in DB and metadata stays current. `model` mirrors the
-    // heartbeat's selected model into the thread metadata so ModelSwitcher shows
-    // it on idle open (hydration reads metadata.model); without it currentModel
-    // hydrates empty and the footer falls back to models[0]. The live routing_result
-    // event above covers the running case; this covers the idle case. effectiveModelId
-    // is guaranteed non-empty here by the gate above.
-    const existing = dbGetThread(threadId)
-    if (!existing) {
-      dbCreateThread(threadId, {
-        workspacePath: config.workDir,
-        title: "[Heartbeat] 心跳检查",
-        isHeartbeat: true,
-        model: effectiveModelId
-      })
-      notifyRenderer("threads:changed")
-    } else {
-      const meta = existing.metadata ? JSON.parse(existing.metadata) : {}
-      if (meta.workspacePath !== config.workDir || meta.model !== effectiveModelId) {
-        dbUpdateThread(threadId, {
-          metadata: JSON.stringify({
-            ...meta,
+        // Ensure thread exists in DB and metadata stays current. `model` mirrors the heartbeat's
+        // selected model into metadata so ModelSwitcher shows the actual idle selection.
+        const existing = dbGetThreadCore(threadId)
+        if (!existing) {
+          dbCreateThread(threadId, {
             workspacePath: config.workDir,
+            title: "[Heartbeat] 心跳检查",
+            isHeartbeat: true,
             model: effectiveModelId
           })
-        })
-      }
-    }
+          notifyRenderer("threads:changed")
+        } else {
+          const meta = existing.metadata ? JSON.parse(existing.metadata) : {}
+          if (meta.workspacePath !== config.workDir || meta.model !== effectiveModelId) {
+            dbUpdateThread(threadId, {
+              metadata: JSON.stringify({
+                ...meta,
+                workspacePath: config.workDir,
+                model: effectiveModelId
+              })
+            })
+          }
+        }
 
-    // Snapshot pre-heartbeat checkpoint so we can restore if HEARTBEAT_OK
-    const checkpointer = await getCheckpointer(threadId)
-    const preHeartbeatSnapshot = await checkpointer.getTuple({
-      configurable: { thread_id: threadId }
-    })
+        const initializedCheckpointer = await getCheckpointer(threadId)
+        const initialSnapshot = await initializedCheckpointer.getTuple({
+          configurable: { thread_id: threadId }
+        })
+        return {
+          checkpointer: initializedCheckpointer,
+          preHeartbeatSnapshot: initialSnapshot
+        }
+      }
+    )
 
     const heartbeatGuidelines = [
       "## Heartbeat 行为准则",
@@ -372,13 +414,14 @@ async function executeHeartbeat(): Promise<void> {
     })
 
     const converter = new StreamConverter()
+    const serializeForRun = createStreamDataSerializer()
     const stream = await agent.stream(
       { messages: [new HumanMessage(config.prompt)] },
       {
         configurable: { thread_id: threadId },
         signal: controller.signal,
         streamMode: ["messages", "values"],
-        recursionLimit: 1000
+        recursionLimit: getAgentGraphRecursionLimit()
       }
     )
 
@@ -407,11 +450,24 @@ async function executeHeartbeat(): Promise<void> {
     for await (const chunk of stream) {
       if (controller.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
-      const serialized = JSON.parse(JSON.stringify(data))
-      const events = converter.processChunk(mode, serialized)
+      const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } =
+        serializeForRun(mode, data)
+      const events = converter.processChunk(mode, serialized, {
+        valuesMessageIndexOffset,
+        valuesSnapshotScope: "turn",
+        valuesSnapshotKind
+      })
       for (const evt of events) {
         broadcastToChannel(channel, evt)
-        if ("content" in evt && typeof evt.content === "string") {
+        if (
+          evt.type === "custom" &&
+          evt.data.type === "coordinator_ai_snapshot_message" &&
+          evt.data.assistantMessage &&
+          typeof evt.data.assistantMessage === "object" &&
+          typeof (evt.data.assistantMessage as { content?: unknown }).content === "string"
+        ) {
+          fullReply = (evt.data.assistantMessage as { content: string }).content
+        } else if ("content" in evt && typeof evt.content === "string") {
           fullReply += evt.content
         }
       }
@@ -503,7 +559,7 @@ async function executeHeartbeat(): Promise<void> {
     // Identity-checked: never clobber a NEWER run's controller (defense in
     // depth — the `running` gate should already prevent overlap).
     if (abortController === controller) abortController = null
-    releaseCheckpointerPin?.()
+    checkpointerPin.release?.()
     // Close BEFORE dropping `running`: runHeartbeatNow gates on that flag, and
     // a manual run landing inside this close window would pin first — pinned
     // threads skip the pending-close wait in getCheckpointer — creating a
@@ -511,7 +567,7 @@ async function executeHeartbeat(): Promise<void> {
     // flushing (dual writer). Keeping the flag up until the close settles makes
     // re-entry wait it out instead. Skipped when the pre-run gates bailed —
     // this run never opened a checkpointer, so there is nothing to close.
-    if (releaseCheckpointerPin) {
+    if (checkpointerPin.release) {
       await closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
     }
     running = false

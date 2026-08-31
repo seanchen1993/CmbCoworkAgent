@@ -1,26 +1,40 @@
 import { randomUUID } from "crypto"
-import { readFileSync, statSync } from "fs"
+import { realpath } from "fs/promises"
+import { basename, dirname, resolve } from "path"
 import { tool } from "langchain"
 import { z } from "zod"
 import type { DynamicStructuredTool } from "@langchain/core/tools"
 import type { ApprovalStore } from "../approval-store"
 import type { ApprovalDecision, ApprovalRequest } from "../../types"
-import { resolveExistingWorkspacePath } from "./paths"
+import {
+  openStableFileHandle,
+  readStableFileHandleBounded,
+  StableBoundedReadError,
+  type StableFileHandle
+} from "../../services/stable-file-handle"
+import { isPathInside } from "./paths"
 import { WORKFLOW_TOOL_DESCRIPTION } from "./prompts"
-import { loadAgentProfiles } from "../agent-registry"
+import {
+  loadAgentProfiles,
+  loadAgentProfilesAsync,
+  type AgentProfile
+} from "../agent-registry"
 import { workflowRunManager } from "./run-manager"
 import {
   clearAllAgentToolStreams,
   generateWorkflowRunId,
   isValidWorkflowRunId,
-  isWorkflowRunDirDisposed,
-  loadWorkflowRunForResume,
+  isWorkflowRunDirDisposedAsync,
+  loadWorkflowRunAsync,
+  loadWorkflowRunForResumeAsync,
+  prepareWorkflowRunStorage,
   sha256Hex
 } from "./run-store"
 import { MAX_WORKFLOW_SCRIPT_BYTES, validateWorkflowScript } from "./script"
 import type { WorkflowSubagentDeps } from "./subagent"
 import {
   resolveResumeArgsAndJournal,
+  WorkflowFatalError,
   WorkflowScriptError,
   type ParsedWorkflowScript,
   type PersistedWorkflowRun
@@ -86,6 +100,9 @@ export interface CreateWorkflowToolOptions {
    * keyed on the parent threadId) so script writeFile() and agent() writes serialize
    * together. Threaded to the engine via the launch request. (#2) */
   runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
+  /** Async-loaded registry snapshot supplied by production runtime creation so
+   * building the tool never scans home/workspace directories synchronously. */
+  agentProfiles?: AgentProfile[]
 }
 
 /**
@@ -94,10 +111,13 @@ export interface CreateWorkflowToolOptions {
  * explore/review/plan plus any user files under .cmbcoworkagent/agents/. Built
  * per workspace (not a shared constant) so user-added agents show up.
  */
-function buildWorkflowToolDescription(workspacePath: string): string {
+function buildWorkflowToolDescription(
+  workspacePath: string,
+  suppliedProfiles?: AgentProfile[]
+): string {
   let profiles: ReturnType<typeof loadAgentProfiles>
   try {
-    profiles = loadAgentProfiles(workspacePath)
+    profiles = suppliedProfiles ?? loadAgentProfiles(workspacePath)
   } catch {
     return WORKFLOW_TOOL_DESCRIPTION
   }
@@ -141,7 +161,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // that guard sits after ensureWorkflowApproved): a foreground turn that
       // outlived its thread's deletion would otherwise pop an approval nobody
       // can answer — the thread's UI is gone — and hang this tool call.
-      if (isWorkflowRunDirDisposed(workspacePath, threadId)) {
+      if (await isWorkflowRunDirDisposedAsync(workspacePath, threadId)) {
         throw new Error("This thread has been deleted; a workflow can no longer be launched on it.")
       }
       // No workspace-level lock: concurrent workflows over the same workspace on
@@ -149,8 +169,14 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // Resolve the resume target first so its persisted script can serve as the
       // script source when the model passes only resumeFromRunId (self-contained
       // resume — it need not re-send the script).
-      const resume = resolveResumeRun(workspacePath, threadId, input.resumeFromRunId)
-      const source = resolveScriptSource(workspacePath, input, resume.run?.script, resume.note)
+      const resume = await resolveResumeRun(workspacePath, threadId, input.resumeFromRunId)
+      const source = await resolveScriptSource(
+        workspacePath,
+        threadId,
+        input,
+        resume.run?.script,
+        resume.note
+      )
       const parsed = validateWorkflowScript(source.script)
       const runId = resume.run?.runId ?? generateWorkflowRunId()
       // script-sha invalidation: when resuming, if the script changed since the
@@ -173,6 +199,11 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
             ? `args changed since ${resume.run?.runId} — its journal was discarded; re-running from scratch`
             : resume.note
 
+      // One immutable registry snapshot is both fingerprinted for approval and
+      // executed by the engine. A profile file changed while the approval card
+      // is open therefore cannot silently alter this launch's permissions.
+      const executionProfiles = await loadAgentProfilesAsync(workspacePath)
+
       // Run-before approval gate. Reject → don't launch; return a plain message
       // so the model relays it to the user instead of retrying.
       const approved = await ensureWorkflowApproved(
@@ -181,7 +212,8 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         parsed,
         source.script,
         effectiveArgs,
-        input.tokenBudget ?? null
+        input.tokenBudget ?? null,
+        executionProfiles
       )
       if (!approved) {
         return JSON.stringify(
@@ -199,9 +231,40 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
       // have different callHashes, orphaning the prior run's tool-stream sidecars (the per-agent
       // runner only clears the CURRENT key). Sweep them — AFTER approval (a rejected edit-and-resume
       // must NOT destroy the prior run's history) and BEFORE launch (no new sidecar exists yet to
-      // race). Non-blocking by design: in-flight writes get an ordered delete on their op chain, not
-      // an await, so display I/O can never stall the launch.
-      if (invalidatedReason) clearAllAgentToolStreams(workspacePath, threadId, runId)
+      // race). Await only the async sweep of already-settled files. In-flight writes get an ordered
+      // delete on their op chain and are deliberately not awaited, so hung display I/O cannot stall
+      // the launch while a late old rename still cannot revive an orphan.
+      if (invalidatedReason) {
+        await clearAllAgentToolStreams(workspacePath, threadId, runId)
+      }
+
+      // Approval can remain open while another window merges/discards/cleans a
+      // retained deliverable. Re-read the reused run immediately before launch;
+      // carrying the pre-approval snapshot forward would resurrect a terminal
+      // worktree as ready/recoverable in the new run.json and live panel.
+      const recoveredResumeRun = resume.run
+        ? await workflowRunManager.getFlushFailedRunForResume(
+            workspacePath,
+            threadId,
+            runId
+          )
+        : undefined
+      const latestResumeRun = resume.run
+        ? recoveredResumeRun?.threadId === threadId
+          ? recoveredResumeRun
+          : await loadWorkflowRunAsync(workspacePath, threadId, runId)
+        : null
+      if (resume.run && !latestResumeRun) {
+        throw new Error(
+          `Workflow ${runId} changed or disappeared while approval was pending; reload it before resuming.`
+        )
+      }
+
+      // Canonical workspace identity and all managed/compatibility storage roots
+      // can touch a slow or network filesystem. Resolve them asynchronously
+      // before launch; launch itself remains a synchronous active-map critical
+      // section, so concurrent calls still cannot start two runs on one thread.
+      await workflowRunManager.prepareLaunch(workspacePath, threadId)
 
       const launch = workflowRunManager.launch({
         threadId,
@@ -213,16 +276,18 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         args: effectiveArgs,
         tokenBudget: input.tokenBudget ?? null,
         resumeJournal: effectiveResumeJournal,
+        existingWorktrees: latestResumeRun?.worktrees,
+        resumed: resume.run !== null,
         resumeNote: effectiveResumeNote,
+        agentProfiles: executionProfiles,
         subagentDeps,
         runExclusiveFileWrite: options.runExclusiveFileWrite
       })
 
-      // Make the run durable BEFORE telling the model it launched: the initial
-      // snapshot persist is eager but async, so without this a reload/crash right
-      // after this turn could find no run file (no panel entry, no resume). A write
-      // fault never BLOCKS the launch (the run is already executing in memory), but
-      // the result tells us whether to warn the user that the run isn't durable.
+      // Make the run and editable script durable BEFORE telling the model it
+      // launched. A run-state write fault retains the warning behavior below;
+      // a script write fault rejects and the manager records an error without
+      // starting the engine, because scriptPath would otherwise be unusable.
       const initialPersisted = await launch.whenInitialPersisted
 
       return JSON.stringify(
@@ -237,7 +302,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
             ? {}
             : {
                 warning:
-                  "Could not write the initial run state to disk (disk full / permissions?). The workflow is running, but it may NOT be resumable or appear in history — tell the user."
+                  "Could not write the initial run state to disk (disk full / permissions?). The workflow may not be resumable or appear in history, and isolated worktree agents will fail closed — tell the user."
               }),
           note: "The workflow now runs in the background; live progress is visible to the user in the workflow panel. Its outcome will arrive later as an internal <task-notification> message. Briefly tell the user what was launched and END your turn — do not poll, and do not call the workflow tool again for this task."
         },
@@ -247,7 +312,7 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
     },
     {
       name: "workflow",
-      description: buildWorkflowToolDescription(workspacePath),
+      description: buildWorkflowToolDescription(workspacePath, options.agentProfiles),
       schema: workflowToolSchema
     }
   ) as unknown as DynamicStructuredTool
@@ -265,7 +330,8 @@ async function ensureWorkflowApproved(
   parsed: ParsedWorkflowScript,
   script: string,
   args: unknown,
-  tokenBudget: number | null
+  tokenBudget: number | null,
+  executionProfiles: readonly AgentProfile[]
 ): Promise<boolean> {
   if (options.yoloMode) return true
   const { approvalStore, requestApproval } = options
@@ -291,7 +357,7 @@ async function ensureWorkflowApproved(
   const computeRegistryFingerprint = (): string =>
     sha256Hex(
       JSON.stringify(
-        loadAgentProfiles(workspacePath)
+        executionProfiles
           .map((p) => ({
             name: p.name,
             systemPrompt: p.systemPrompt,
@@ -396,37 +462,21 @@ async function ensureWorkflowApproved(
   return decision !== "denied"
 }
 
-function resolveScriptSource(
+async function resolveScriptSource(
   workspacePath: string,
+  threadId: string,
   input: { script?: string; scriptPath?: string },
   resumeScript?: string,
   resumeNote?: string
-): { script: string } {
+): Promise<{ script: string }> {
   // Precedence: scriptPath > inline script > persisted-run script (resume).
   if (input.scriptPath?.trim()) {
     const requested = input.scriptPath.trim()
-    // Realpath-based containment (blocks symlink escapes too).
-    const resolved = resolveExistingWorkspacePath(workspacePath, requested, "scriptPath")
+    const opened = await openTopLevelWorkflowScript(workspacePath, threadId, requested)
     try {
-      const st = statSync(resolved)
-      // Must be a REGULAR file: a FIFO/socket/device under the workspace would
-      // make the synchronous readFileSync below block the entire main process
-      // (a FIFO read parks until a writer appears). Reject anything non-regular.
-      if (!st.isFile()) {
-        throw new WorkflowScriptError(`scriptPath is not a regular file: ${resolved}`)
-      }
-      // Reject an oversized file BEFORE readFileSync pulls it fully into memory
-      // (a huge synchronous read blocks the main process). validateWorkflowScript
-      // re-checks the byte length post-read as the authoritative gate.
-      if (st.size > MAX_WORKFLOW_SCRIPT_BYTES) {
-        throw new WorkflowScriptError(
-          `scriptPath file is too large: exceeds the ${MAX_WORKFLOW_SCRIPT_BYTES}-byte (512 KiB) limit`
-        )
-      }
-      return { script: readFileSync(resolved, "utf-8") }
-    } catch (error) {
-      if (error instanceof WorkflowScriptError) throw error
-      throw new WorkflowScriptError(`scriptPath not readable: ${resolved}`)
+      return { script: await readBoundedWorkflowScript(opened) }
+    } finally {
+      await opened.handle.close().catch(() => undefined)
     }
   }
   if (input.script?.trim()) {
@@ -448,11 +498,97 @@ function resolveScriptSource(
   )
 }
 
-function resolveResumeRun(
+/**
+ * A top-level launch accepts ordinary workspace scripts plus the exact
+ * app-managed script files returned by an earlier launch in this thread. Keep
+ * the exception deliberately narrow: another thread's script, run sidecars,
+ * nested files, and symlink escapes remain outside the executable boundary.
+ */
+async function openTopLevelWorkflowScript(
+  workspacePath: string,
+  threadId: string,
+  requested: string
+): Promise<StableFileHandle> {
+  const requestedPath = resolve(workspacePath, requested)
+  let resolvedRequested: string
+  try {
+    resolvedRequested = await realpath(requestedPath)
+  } catch {
+    throw new WorkflowScriptError(`scriptPath not found at ${requestedPath}`)
+  }
+
+  let canonicalWorkspace: string | undefined
+  try {
+    canonicalWorkspace = await realpath(workspacePath)
+  } catch {
+    canonicalWorkspace = undefined
+  }
+  if (canonicalWorkspace && isPathInside(canonicalWorkspace, resolvedRequested)) {
+    try {
+      return await openStableFileHandle(workspacePath, requestedPath)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "unknown read failure"
+      throw new WorkflowScriptError(
+        /directory|regular file/i.test(reason)
+          ? `scriptPath is not a regular file: ${resolvedRequested}`
+          : `scriptPath not readable: ${resolvedRequested}`
+      )
+    }
+  }
+
+  const workflowRunsRoot = await prepareWorkflowRunStorage(workspacePath, threadId)
+  let opened: StableFileHandle
+  try {
+    opened = await openStableFileHandle(workflowRunsRoot, requestedPath)
+  } catch {
+    throw new WorkflowFatalError(
+      `scriptPath must stay inside the workspace or reference a workflow script previously returned for this thread (got "${requested}")`
+    )
+  }
+
+  try {
+    const canonicalRunsRoot = await realpath(workflowRunsRoot)
+    const fileName = basename(opened.filePath)
+    const suffix = ".workflow.js"
+    const runId = fileName.endsWith(suffix) ? fileName.slice(0, -suffix.length) : ""
+    if (dirname(opened.filePath) === canonicalRunsRoot && isValidWorkflowRunId(runId)) {
+      return opened
+    }
+  } catch {
+    // Fall through to the single capability-boundary error below.
+  }
+  await opened.handle.close().catch(() => undefined)
+
+  throw new WorkflowFatalError(
+    `scriptPath must stay inside the workspace or reference a workflow script previously returned for this thread (got "${requested}")`
+  )
+}
+
+/** Translate the shared capability reader's structured failures into the
+ * workflow tool's stable, user-facing scriptPath error vocabulary. */
+async function readBoundedWorkflowScript(opened: StableFileHandle): Promise<string> {
+  try {
+    return (await readStableFileHandleBounded(opened, MAX_WORKFLOW_SCRIPT_BYTES)).toString(
+      "utf8"
+    )
+  } catch (error) {
+    if (error instanceof StableBoundedReadError) {
+      if (error.failure === "initial-too-large" || error.failure === "grew-too-large") {
+        throw new WorkflowScriptError(
+          `scriptPath file is too large: exceeds the ${MAX_WORKFLOW_SCRIPT_BYTES}-byte (512 KiB) limit`
+        )
+      }
+      throw new WorkflowScriptError("scriptPath file changed while it was being read")
+    }
+    throw new WorkflowScriptError(`scriptPath file could not be read: ${opened.filePath}`)
+  }
+}
+
+async function resolveResumeRun(
   workspacePath: string,
   threadId: string,
   resumeFromRunId: string | undefined
-): { run: PersistedWorkflowRun | null; note?: string } {
+): Promise<{ run: PersistedWorkflowRun | null; note?: string }> {
   if (!resumeFromRunId) return { run: null }
   const requested = resumeFromRunId.trim()
   if (!isValidWorkflowRunId(requested)) {
@@ -461,7 +597,20 @@ function resolveResumeRun(
       note: `resumeFromRunId "${requested}" is not a valid run id (expected wf_…)`
     }
   }
-  const run = loadWorkflowRunForResume(workspacePath, threadId, requested)
+  // A final disk flush can fail after the journal has advanced. In that narrow,
+  // same-process recovery window, the manager's snapshot is the authoritative
+  // complete run; reading the older run.json/journal pair would re-run agents that
+  // already completed. After restart no such snapshot exists, so disk remains the
+  // recovery source as before.
+  const snapshot = await workflowRunManager.getFlushFailedRunForResume(
+    workspacePath,
+    threadId,
+    requested
+  )
+  const run =
+    snapshot?.threadId === threadId
+      ? snapshot
+      : await loadWorkflowRunForResumeAsync(workspacePath, threadId, requested)
   if (!run) {
     return {
       run: null,

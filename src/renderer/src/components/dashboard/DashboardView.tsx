@@ -105,13 +105,18 @@ import {
   parseUploaderIdentity,
   type UploaderProfileInfo
 } from "../../lib/skill-data-service"
+import {
+  buildProjectModeProjectExportRows,
+  buildProjectModeProjectExportSummaryRows,
+  buildProjectModeUserExportRows,
+  PROJECT_MODE_PROJECT_EXPORT_HEADER,
+  PROJECT_MODE_USER_EXPORT_HEADER
+} from "./project-mode-export"
 
 type UserInfoLite = {
   sapId?: string
   ystId?: string
 }
-
-const SKILL_EVAL_DOC_URL = "https://doc.cmbchina.com/f/v?id=_41lRJE"
 
 // ─────────────────────────────────────────────────────────
 // Time control bar
@@ -142,6 +147,7 @@ type DashboardExcelSheet = {
   name: string
   header: string[]
   rows: (string | number)[][]
+  summaryRows?: (string | number)[][]
 }
 
 type DashboardAnalysisScope = "platform" | "project"
@@ -1588,6 +1594,8 @@ function UserDetailPage({
   onTraceNext,
   onTraceViewModeChange,
   onTraceTriggerScopeChange,
+  onExportPage,
+  exporting,
   loadThreadTraces
 }: {
   data: DashboardUserDetail | null
@@ -1602,6 +1610,8 @@ function UserDetailPage({
   onTraceNext: () => void
   onTraceViewModeChange: (mode: DashboardTraceViewMode) => void
   onTraceTriggerScopeChange: (scope: DashboardTraceTriggerScope) => void
+  onExportPage: () => void
+  exporting: boolean
   loadThreadTraces?: (threadId: string) => Promise<DashboardTraceDetail[]>
 }): React.JSX.Element {
   const tracePageSize = data?.tracePageSize ?? USER_TRACE_PAGE_SIZE
@@ -1750,6 +1760,21 @@ function UserDetailPage({
                     type="button"
                     variant="outline"
                     size="sm"
+                    className="gap-1"
+                    onClick={onExportPage}
+                    disabled={exporting || loading || data.traces.length === 0}
+                  >
+                    {exporting ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    导出本页
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
                     onClick={onTracePrevious}
                     disabled={!canTracePrevious}
                   >
@@ -1784,12 +1809,14 @@ function DashboardTabBar({
   onChange,
   projectModeAllowed,
   awardsAdmin,
+  skillEvalAllowed,
   rightContent
 }: {
   activeTab: DashboardMainTab
   onChange: (tab: DashboardMainTab) => void
   projectModeAllowed: boolean
   awardsAdmin: boolean
+  skillEvalAllowed: boolean
   rightContent?: ReactNode
 }): React.JSX.Element {
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
@@ -1798,9 +1825,9 @@ function DashboardTabBar({
     // 研发效能沿用项目模式的可见性：两者统计范围同源（项目模式 + 精益项目）。
     ...(projectModeAllowed ? ([{ id: "efficiency", label: "研发效能" }] as const) : []),
     // 评奖辅助看板仅对管理员名单可见。
-    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : [])
-    // 技能评估 tab 暂时隐藏（仅移除入口，skill-eval 相关逻辑/内容/类型均保留，需要时取消注释即可恢复）
-    // { id: "skill-eval", label: "技能评估" }
+    ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : []),
+    // 技能评估 tab 仅对 DASHBOARD_SKILL_EVAL 白名单可见。
+    ...(skillEvalAllowed ? ([{ id: "skill-eval", label: "技能评估" }] as const) : [])
   ]
 
   return (
@@ -2624,6 +2651,8 @@ export function DashboardView(): React.JSX.Element {
   const [projectModeAllowed, setProjectModeAllowed] = useState(false)
   // 评奖辅助看板访问门禁（仅 DASHBOARD_AWARDS_ADMIN 名单）。
   const [awardsAdmin, setAwardsAdmin] = useState(false)
+  // 技能评估 tab 访问门禁（仅 DASHBOARD_SKILL_EVAL 白名单）。
+  const [skillEvalAllowed, setSkillEvalAllowed] = useState(false)
   const [awardSkillContribs, setAwardSkillContribs] = useState<
     DashboardAwardSkillContribution[] | null
   >(null)
@@ -2728,6 +2757,21 @@ export function DashboardView(): React.JSX.Element {
       })
 
     window.api.dashboard
+      .isSkillEvalAllowed()
+      .then((allowed) => {
+        if (cancelled) return
+        setSkillEvalAllowed(allowed)
+        if (!allowed) {
+          setActiveMainTab((current) => (current === "skill-eval" ? "overview" : current))
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        setSkillEvalAllowed(false)
+        setActiveMainTab((current) => (current === "skill-eval" ? "overview" : current))
+      })
+
+    window.api.dashboard
       .isAnalysisAgentAllowed()
       .then((allowed) => {
         if (cancelled) return
@@ -2806,6 +2850,7 @@ export function DashboardView(): React.JSX.Element {
     useState<DashboardTraceViewMode>("thread")
   const [userDetailTraceTriggerScope, setUserDetailTraceTriggerScope] =
     useState<DashboardTraceTriggerScope>("active")
+  const [userDetailTraceExporting, setUserDetailTraceExporting] = useState(false)
   const [marketSkillKeys, setMarketSkillKeys] = useState<Set<string>>(new Set())
   const [marketSkillMap, setMarketSkillMap] = useState<Map<string, MarketItem>>(new Map())
   const [skillUploaderProfiles, setSkillUploaderProfiles] = useState<
@@ -3264,9 +3309,7 @@ export function DashboardView(): React.JSX.Element {
     let cancelled = false
 
     async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
-      // 与技能市场（MarketPanel）一致：用全量用户目录 queryAllUser 反查创建人，
-      // 而不是按使用埋点聚合的 userProfiles —— 否则像精品技能这种作者本人无使用记录的，
-      // 聚合里查不到对应 SAP 桶，创建人就会显示 “—”。
+      // 只按当前市场条目的已知上传者 ID 查询，避免挂载看板时加载完整用户目录。
       // 每个 user_id 对应一组候选 SAP，作为 resolveSkillUploaderExportInfo 的查表 key。
       const candidatesByUserId = new Map<string, string[]>()
       for (const item of items) {
@@ -3290,15 +3333,20 @@ export function DashboardView(): React.JSX.Element {
         return map
       }
 
-      if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+      if (typeof window.api?.dashboard?.userProfiles !== "function") {
         if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
         return
       }
 
       try {
-        const response = await window.api.dashboard.queryAllUser()
+        const requestedSapIds = Array.from(
+          new Set(Array.from(candidatesByUserId.values()).flat())
+        )
+        const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+          family: "dashboard-market"
+        })
         if (!response.success || !response.data) {
-          throw new Error(response.error || "获取全量用户信息失败")
+          throw new Error(response.error || "获取上传者信息失败")
         }
 
         const allUsers = response.data.filter((user) => user.sapId?.trim())
@@ -3925,6 +3973,33 @@ export function DashboardView(): React.JSX.Element {
     setUserDetailTracePage(1)
   }, [])
 
+  const handleUserTraceExport = useCallback(async () => {
+    if (!userDetail || userDetail.traces.length === 0) return
+    setUserDetailTraceExporting(true)
+    try {
+      const result = await window.api.dashboard.exportUserTraces({
+        sapId: userDetail.sapId,
+        ystId: userDetail.ystId,
+        userName: userDetail.userName,
+        range,
+        page: userDetail.tracePage,
+        pageSize: userDetail.tracePageSize || USER_TRACE_PAGE_SIZE,
+        totalItems: userDetail.total,
+        viewMode: userDetail.traceViewMode ?? userDetailTraceViewMode,
+        triggerScope: userDetail.traceTriggerScope ?? userDetailTraceTriggerScope,
+        projectMode: subPage.kind === "user-detail" && Boolean(subPage.projectMode),
+        traces: userDetail.traces
+      })
+      if (!result.success && !result.canceled) {
+        window.alert(result.error || "导出用户会话记录失败")
+      }
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "导出用户会话记录失败")
+    } finally {
+      setUserDetailTraceExporting(false)
+    }
+  }, [range, subPage, userDetail, userDetailTraceTriggerScope, userDetailTraceViewMode])
+
   const handleProjectTracePrevious = useCallback(() => {
     setProjectTracePage((prev) => Math.max(1, prev - 1))
   }, [])
@@ -4075,7 +4150,7 @@ export function DashboardView(): React.JSX.Element {
   }, [])
 
   const handleSkillEvalDocOpen = useCallback(() => {
-    void window.electron.openExternal(SKILL_EVAL_DOC_URL)
+    void window.electron.openManagedLink("skillEvalDoc")
   }, [])
 
   const handleCommitTotalClick = useCallback(() => {
@@ -4522,6 +4597,14 @@ export function DashboardView(): React.JSX.Element {
     if (!projectMode) return
     setExporting(true)
     try {
+      const exportDataResult = await window.api.dashboard.projectModeExportData(range, {
+        upperOrgLv1: selectedOrgLv1List,
+        fromLeanOnly: fromLeanProjectsOnly
+      })
+      if (!exportDataResult.success || !exportDataResult.data) {
+        throw new Error(exportDataResult.error ?? "获取项目导出明细失败")
+      }
+      const exportData = exportDataResult.data
       const sheets: DashboardExcelSheet[] = []
       const summary = projectMode.summary
       const codeStats = summary.codeStats
@@ -4553,20 +4636,18 @@ export function DashboardView(): React.JSX.Element {
         })
       }
 
-      if (projectMode.analytics.topUsers.length > 0) {
-        sheets.push({
-          name: "项目用户分析",
-          header: ["排名", "SAP ID", "YST ID", "用户名", "部门", "项目对话数"],
-          rows: projectMode.analytics.topUsers.map((user, index) => [
-            index + 1,
-            user.sapId,
-            user.ystId || "",
-            user.userName,
-            user.orgName || "—",
-            user.count
-          ])
-        })
-      }
+      sheets.push({
+        name: "项目用户分析",
+        header: PROJECT_MODE_USER_EXPORT_HEADER,
+        rows: buildProjectModeUserExportRows(exportData.users)
+      })
+
+      sheets.push({
+        name: "项目列表",
+        header: PROJECT_MODE_PROJECT_EXPORT_HEADER,
+        rows: buildProjectModeProjectExportRows(exportData.projects),
+        summaryRows: buildProjectModeProjectExportSummaryRows(exportData)
+      })
 
       if (projectMode.analytics.byOrg.length > 0) {
         sheets.push({
@@ -4713,10 +4794,20 @@ export function DashboardView(): React.JSX.Element {
       } else if (!result.canceled && result.error) {
         console.error("[Dashboard] Project mode export failed:", result.error)
       }
+    } catch (error) {
+      console.error("[Dashboard] Project mode export failed:", error)
+      window.alert(error instanceof Error ? error.message : "导出项目运营概览失败")
     } finally {
       setExporting(false)
     }
-  }, [projectMode, range, selectedOrgLv1List, marketSkillMap, skillUploaderProfiles])
+  }, [
+    projectMode,
+    range,
+    selectedOrgLv1List,
+    fromLeanProjectsOnly,
+    marketSkillMap,
+    skillUploaderProfiles
+  ])
 
   const projectTraces = projectTraceData?.traces ?? []
   const projectTracePageSize = projectTraceData?.tracePageSize ?? PROJECT_TRACE_PAGE_SIZE
@@ -4798,6 +4889,7 @@ export function DashboardView(): React.JSX.Element {
           onChange={setActiveMainTab}
           projectModeAllowed={projectModeAllowed}
           awardsAdmin={awardsAdmin}
+          skillEvalAllowed={skillEvalAllowed}
           rightContent={
             activeMainTab === "skill-eval" ? (
               <Button
@@ -4884,6 +4976,8 @@ export function DashboardView(): React.JSX.Element {
             onTraceNext={handleUserTraceNext}
             onTraceViewModeChange={handleUserTraceViewModeChange}
             onTraceTriggerScopeChange={handleUserTraceTriggerScopeChange}
+            onExportPage={handleUserTraceExport}
+            exporting={userDetailTraceExporting}
             loadThreadTraces={subPage.projectMode ? loadProjectThreadTraces : undefined}
           />
         </ScrollArea>
@@ -4905,7 +4999,7 @@ export function DashboardView(): React.JSX.Element {
                 exporting={exporting}
               />
             </div>
-          ) : activeMainTab === "skill-eval" ? (
+          ) : activeMainTab === "skill-eval" && skillEvalAllowed ? (
             <div className="space-y-6 p-6">
               <SkillEvalDashboardPanel
                 data={skillEval}

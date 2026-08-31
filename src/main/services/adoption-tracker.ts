@@ -33,7 +33,7 @@ import { appendFile, readdir, readFile, stat, unlink, rename } from "fs/promises
 import { existsSync, mkdirSync, statSync } from "fs"
 import { basename, dirname, extname, join, relative, resolve as resolvePath, sep } from "path"
 import { createHash, randomUUID } from "crypto"
-import { execFile, execFileSync } from "child_process"
+import { execFile } from "child_process"
 import { promisify } from "util"
 import { gzipSync, gunzipSync } from "zlib"
 import * as iconv from "iconv-lite"
@@ -317,6 +317,15 @@ export interface RecordGenInput {
   oldString?: string
   /** Optional: replacement count returned by the edit tool. Defaults to 1. */
   occurrences?: number
+  /**
+   * Point-in-time workflow stage captured immediately before the file mutation.
+   * Presence (including explicit nulls) overrides the turn-start context so a
+   * queued recordGen microtask cannot inherit a stale stage.
+   */
+  harnessStage?: {
+    nodeName: string | null
+    nodeStatus: string | null
+  }
 }
 
 interface JsonlGenEntry {
@@ -366,6 +375,9 @@ let currentShardStartMs = 0
  * subsequent writes.
  */
 let appendChain: Promise<unknown> = Promise.resolve()
+
+/** Accepted recordGen calls that have not finished their asynchronous git/JSONL/index work. */
+const inFlightRecordGenTasks = new Set<Promise<void>>()
 
 /** In-flight measurement dedup keyed by absolute file path. */
 const inFlightFileMeasurements = new Set<string>()
@@ -493,34 +505,39 @@ export function isCodeFile(filePath: string): boolean {
 
 const GIT_WORKTREE_CACHE_MAX = 256
 const gitWorkTreeCache = new Map<string, boolean>()
+const gitWorkTreeRequests = new Map<string, Promise<boolean>>()
 
-function isInsideGitWorkTree(absPath: string): boolean {
-  const dir = dirname(absPath)
-  const cached = gitWorkTreeCache.get(dir)
-  if (cached !== undefined) return cached
-
-  let inside = false
-  try {
-    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd: dir,
-      encoding: "utf-8",
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"]
-    })
-    inside = out.trim() === "true"
-  } catch {
-    // Not a repo / git error / git missing — treat as outside a work tree.
-    inside = false
-  }
-
-  // Bounded cache (Map preserves insertion order → evict oldest first).
+function rememberGitWorkTreeResult(dir: string, inside: boolean): boolean {
+  // Bounded cache (Map preserves insertion order -> evict oldest first).
   if (!gitWorkTreeCache.has(dir) && gitWorkTreeCache.size >= GIT_WORKTREE_CACHE_MAX) {
     const oldest = gitWorkTreeCache.keys().next().value
     if (oldest !== undefined) gitWorkTreeCache.delete(oldest)
   }
   gitWorkTreeCache.set(dir, inside)
   return inside
+}
+
+async function isInsideGitWorkTree(absPath: string): Promise<boolean> {
+  const dir = dirname(absPath)
+  const cached = gitWorkTreeCache.get(dir)
+  if (cached !== undefined) return cached
+  const inFlight = gitWorkTreeRequests.get(dir)
+  if (inFlight) return inFlight
+
+  const request = execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+    cwd: dir,
+    encoding: "utf-8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+    windowsHide: true
+  })
+    .then(({ stdout }) => rememberGitWorkTreeResult(dir, stdout.trim() === "true"))
+    .catch(() => rememberGitWorkTreeResult(dir, false))
+    .finally(() => {
+      if (gitWorkTreeRequests.get(dir) === request) gitWorkTreeRequests.delete(dir)
+    })
+  gitWorkTreeRequests.set(dir, request)
+  return request
 }
 
 // ─────────────────────────────────────────────────────────
@@ -985,6 +1002,18 @@ export function setAdoptionContext(threadId: string, ctx: AdoptionContext): void
   threadContexts.set(threadId, { ...(prior ?? {}), ...ctx })
 }
 
+/** Apply a late asynchronous enrichment only while the originating trace still owns the thread. */
+export function patchAdoptionContextForTrace(
+  threadId: string,
+  expectedTraceId: string,
+  ctx: AdoptionContext
+): boolean {
+  const prior = threadContexts.get(threadId)
+  if (!prior || prior.traceId !== expectedTraceId) return false
+  threadContexts.set(threadId, { ...prior, ...ctx })
+  return true
+}
+
 export function clearAdoptionContext(threadId: string, expectedTraceId?: string): void {
   if (expectedTraceId && threadContexts.get(threadId)?.traceId !== expectedTraceId) return
   threadContexts.delete(threadId)
@@ -1153,11 +1182,26 @@ export function recordGen(input: RecordGenInput): void {
   console.log(
     `[AdoptionTracker] recordGen: tool=${input.tool} file=${input.filePath} threadId=${input.threadId}`
   )
-  queueMicrotask(() => {
-    doRecordGen(input).catch((e) => {
-      console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+  const task = new Promise<void>((resolveTask) => {
+    queueMicrotask(() => {
+      void doRecordGen(input)
+        .catch((e) => {
+          console.warn("[AdoptionTracker] recordGen unexpected error:", e)
+        })
+        .finally(resolveTask)
     })
   })
+  inFlightRecordGenTasks.add(task)
+  void task.then(() => {
+    inFlightRecordGenTasks.delete(task)
+  })
+}
+
+/** @internal Standalone regression seam; production recordGen remains fire-and-forget. */
+export async function waitForAdoptionRecordGenIdleForTest(): Promise<void> {
+  while (inFlightRecordGenTasks.size > 0) {
+    await Promise.all([...inFlightRecordGenTasks])
+  }
 }
 
 function buildCodeGenerationProperties(args: {
@@ -1249,7 +1293,14 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // can run and clearAdoptionContext(threadId) — which would zero out the
     // skill/model/trace fields on both the cloud event and the sqlite row,
     // and in turn strip skill attribution from the downstream code_adopt.
-    const ctx = getContext(input.threadId)
+    const turnContext = getContext(input.threadId)
+    const ctx: AdoptionContext = input.harnessStage
+      ? {
+          ...turnContext,
+          harnessNodeName: input.harnessStage.nodeName ?? undefined,
+          harnessNodeStatus: input.harnessStage.nodeStatus ?? undefined
+        }
+      : turnContext
 
     const absPath = input.workspacePath
       ? resolvePath(input.workspacePath, input.filePath)
@@ -1259,7 +1310,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     // isInsideGitWorkTree). Non-git files never reach a commit and are where
     // external platforms own reporting via their own hook — skipping them here
     // avoids double-counting and removes events that could never close the loop.
-    if (!isInsideGitWorkTree(absPath)) {
+    if (!(await isInsideGitWorkTree(absPath))) {
       console.log(`[AdoptionTracker] recordGen skip — not in a git work tree: ${input.filePath}`)
       return
     }

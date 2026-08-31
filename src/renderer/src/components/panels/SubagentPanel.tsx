@@ -10,12 +10,14 @@ import {
   Code2,
   ChevronRight
 } from "lucide-react"
+import { useShallow } from "zustand/react/shallow"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
+import { getToolLabel } from "@/lib/tool-labels"
 import type { Subagent } from "@/types"
 
 // Icon component for subagent type (avoid creating components during render)
@@ -54,7 +56,7 @@ function getSubagentTypeBadge(subagentType?: string): string {
 }
 
 export function SubagentPanel(): React.JSX.Element {
-  const { currentThreadId } = useAppStore()
+  const currentThreadId = useAppStore((state) => state.currentThreadId)
   const threadState = useThreadState(currentThreadId)
   const subagents = threadState?.subagents ?? []
 
@@ -117,7 +119,12 @@ export function SubagentCard({
   subagent: Subagent
   threadId?: string | null
 }): React.JSX.Element {
-  const { currentThreadId, openSubagentFocusView } = useAppStore()
+  const { currentThreadId, openSubagentFocusView } = useAppStore(
+    useShallow((state) => ({
+      currentThreadId: state.currentThreadId,
+      openSubagentFocusView: state.openSubagentFocusView
+    }))
+  )
   const effectiveThreadId = threadId ?? currentThreadId
   const getStatusConfig = (): {
     icon: React.ElementType
@@ -140,7 +147,9 @@ export function SubagentCard({
 
   const config = getStatusConfig()
   const StatusIcon = config.icon
-  const latestToolLabel = subagent.currentTool || "等待工具调用"
+  const latestToolLabel = subagent.currentTool
+    ? getToolLabel(subagent.currentTool, { showToolName: false })
+    : "等待工具调用"
 
   const getDuration = (): string | null => {
     if (!subagent.startedAt || !subagent.completedAt) return null

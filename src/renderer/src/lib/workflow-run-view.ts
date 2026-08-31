@@ -25,6 +25,42 @@ export interface WorkflowRunStatsView {
   durationMs: number
 }
 
+export type WorkflowWorktreeStatusView =
+  | "provisioning"
+  | "running"
+  | "ready"
+  | "recoverable"
+  | "integrating"
+  | "merged"
+  | "discarded"
+
+export interface WorkflowWorktreeView {
+  id: string
+  branch: string
+  /** Actual linked-worktree root; may differ from the agent's scoped workspace. */
+  directory: string
+  workspaceDirectory: string
+  dirty: boolean
+  status: WorkflowWorktreeStatusView
+  cleanupPending?: boolean
+  error?: string
+  updatedAt: string
+}
+
+export function newerWorkflowWorktree(
+  current: WorkflowWorktreeView,
+  incoming: WorkflowWorktreeView
+): WorkflowWorktreeView {
+  const currentTerminal = current.status === "merged" || current.status === "discarded"
+  const incomingTerminal = incoming.status === "merged" || incoming.status === "discarded"
+  if (currentTerminal) {
+    if (incoming.status !== current.status) return current
+    return incoming.updatedAt >= current.updatedAt ? incoming : current
+  }
+  if (incomingTerminal) return incoming
+  return incoming.updatedAt >= current.updatedAt ? incoming : current
+}
+
 export interface WorkflowRunView {
   runId: string
   name: string
@@ -35,6 +71,7 @@ export interface WorkflowRunView {
   phases: string[]
   currentPhase: string | null
   agents: WorkflowAgentView[]
+  worktrees: WorkflowWorktreeView[]
   logs: string[]
   error?: string
   /** Non-fatal advisory (e.g. completed but ran 0 agents). */
@@ -72,6 +109,11 @@ export function applyWorkflowProgressEvent(
         : [],
       currentPhase: null,
       agents: [],
+      worktrees: Array.isArray(event.worktrees)
+        ? event.worktrees
+            .map((worktree) => toWorktreeView(worktree))
+            .filter((worktree): worktree is WorkflowWorktreeView => worktree !== null)
+        : [],
       logs: [],
       stats: null,
       startedAtMs: Date.now()
@@ -110,6 +152,22 @@ export function applyWorkflowProgressEvent(
       if (!agent) return previous
       return { ...previous, agents: upsertAgent(previous.agents, agent) }
     }
+    case "worktree_update": {
+      const worktree = toWorktreeView(event.worktree)
+      if (!worktree) return previous
+      const index = previous.worktrees.findIndex((candidate) => candidate.id === worktree.id)
+      if (index < 0) return { ...previous, worktrees: [...previous.worktrees, worktree] }
+      const worktrees = [...previous.worktrees]
+      worktrees[index] = newerWorkflowWorktree(worktrees[index], worktree)
+      return { ...previous, worktrees }
+    }
+    case "worktree_remove": {
+      if (typeof event.worktreeId !== "string") return previous
+      return {
+        ...previous,
+        worktrees: previous.worktrees.filter((candidate) => candidate.id !== event.worktreeId)
+      }
+    }
     case "finished": {
       const status =
         event.status === "completed" || event.status === "error" || event.status === "aborted"
@@ -132,6 +190,44 @@ export function applyWorkflowProgressEvent(
     }
     default:
       return previous
+  }
+}
+
+const WORKTREE_STATUSES = new Set<WorkflowWorktreeStatusView>([
+  "provisioning",
+  "running",
+  "ready",
+  "recoverable",
+  "integrating",
+  "merged",
+  "discarded"
+])
+
+export function toWorktreeView(value: unknown): WorkflowWorktreeView | null {
+  if (!value || typeof value !== "object") return null
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.id !== "string" ||
+    typeof record.branch !== "string" ||
+    typeof record.directory !== "string" ||
+    typeof record.workspaceDirectory !== "string" ||
+    typeof record.dirty !== "boolean" ||
+    typeof record.status !== "string" ||
+    !WORKTREE_STATUSES.has(record.status as WorkflowWorktreeStatusView) ||
+    typeof record.updatedAt !== "string"
+  ) {
+    return null
+  }
+  return {
+    id: record.id,
+    branch: record.branch,
+    directory: record.directory,
+    workspaceDirectory: record.workspaceDirectory,
+    dirty: record.dirty,
+    status: record.status as WorkflowWorktreeStatusView,
+    cleanupPending: record.cleanupPending === true,
+    error: typeof record.error === "string" ? record.error : undefined,
+    updatedAt: record.updatedAt
   }
 }
 
@@ -225,6 +321,7 @@ export interface PersistedWorkflowRunDTO {
     promptPreview?: string
     resultPreview?: string
   }>
+  worktrees?: WorkflowWorktreeView[]
   logs: string[]
   result?: unknown
   error?: string
@@ -245,6 +342,7 @@ export interface WorkflowRunSummaryDTO {
   startedAt: string
   completedAt?: string
   agentCount: number
+  notificationDelivered?: boolean
 }
 
 /** Rebuilds the live panel view from a persisted run (renderer reload / app restart). */
@@ -289,6 +387,9 @@ export function workflowRunViewFromPersisted(run: PersistedWorkflowRunDTO): Work
       promptPreview: agent.promptPreview,
       resultPreview: agent.resultPreview
     })),
+    worktrees: (run.worktrees ?? [])
+      .map((worktree) => toWorktreeView(worktree))
+      .filter((worktree): worktree is WorkflowWorktreeView => worktree !== null),
     logs: [...run.logs],
     error: run.error,
     warning: run.warning,

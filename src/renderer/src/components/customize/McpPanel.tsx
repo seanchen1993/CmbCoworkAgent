@@ -16,6 +16,12 @@ import {
 import { readUploadedItemNamesFromStorage } from "./MarketPanel/marketPublishStorage"
 import { toast } from "sonner"
 
+const HIDDEN_MCP_CONNECTOR_NAMES = new Set(["in-app-browser"])
+
+function isHiddenMcpConnector(connector: McpConnectorConfig): boolean {
+  return HIDDEN_MCP_CONNECTOR_NAMES.has(connector.name.trim().toLowerCase())
+}
+
 function makeSafeJsonFileName(rawName: string): string {
   const sanitized = rawName
     .replace(/[\\/:*?"<>|]/g, "-")
@@ -101,16 +107,21 @@ export function McpPanel(): React.JSX.Element {
     return () => clearTimeout(timer)
   }, [loadMarketMcps])
 
+  const visibleMcpConnectors = useMemo(
+    () => mcpConnectors.filter((connector) => !isHiddenMcpConnector(connector)),
+    [mcpConnectors]
+  )
+
   const filteredMcpConnectors = useMemo(() => {
     const q = debouncedQuery.trim().toLowerCase()
-    if (!q) return mcpConnectors
-    return mcpConnectors.filter(
+    if (!q) return visibleMcpConnectors
+    return visibleMcpConnectors.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
         (c.url ?? "").toLowerCase().includes(q) ||
         (c.command ?? "").toLowerCase().includes(q)
     )
-  }, [mcpConnectors, debouncedQuery])
+  }, [visibleMcpConnectors, debouncedQuery])
 
   const handleMcpToggleEnabled = useCallback((id: string, enabled: boolean) => {
     window.api.mcp.setEnabled(id, enabled).catch(console.error)
@@ -146,13 +157,15 @@ export function McpPanel(): React.JSX.Element {
     try {
       const updated = await window.api.mcp.list()
       setMcpConnectors(updated)
+      const visibleUpdated = updated.filter((connector) => !isHiddenMcpConnector(connector))
       setSelectedMcpConnector((prev) => {
         if (preferredConnectorName) {
-          const preferred = updated.find((c) => c.name === preferredConnectorName)
+          const preferred = visibleUpdated.find((c) => c.name === preferredConnectorName)
           if (preferred) return preferred
         }
-        if (!prev) return updated[0] ?? null
-        return updated.find((c) => c.id === prev.id) ?? null
+        if (!prev) return visibleUpdated[0] ?? null
+        const next = visibleUpdated.find((c) => c.id === prev.id) ?? null
+        return next
       })
     } catch (e) {
       console.error(e)
@@ -239,7 +252,7 @@ export function McpPanel(): React.JSX.Element {
           <div className="p-2 space-y-2">
             {filteredMcpConnectors.length === 0 ? (
               <p className="text-xs text-muted-foreground px-1 py-2">
-                {mcpConnectors.length === 0 ? "暂无连接器，点击 + 添加" : "没有匹配的连接器"}
+                {visibleMcpConnectors.length === 0 ? "暂无连接器，点击 + 添加" : "没有匹配的连接器"}
               </p>
             ) : (
               filteredMcpConnectors.map((connector) => (

@@ -691,7 +691,7 @@ function isStageBucketsEmpty(buckets: DashboardStageBuckets): boolean {
 function StageBucketCaliberHint(): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div>按每轮对话开始时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
+      <div>对话按每轮开始时、代码按实际生成时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
       {STAGE_BUCKET_VIEW.map(({ bucket }) => (
         <div key={bucket}>
           <span className="font-medium">{STAGE_BUCKET_LABELS[bucket]}</span>：
@@ -1125,6 +1125,9 @@ function ProjectRow({
           {lifecycleLabel(project.lifecycleStatus)}
         </td>
         <td className="px-3 py-2 text-right font-medium tabular-nums">
+          {formatNumber(project.featureCount)}
+        </td>
+        <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
         <td className="px-3 py-2 text-right font-medium tabular-nums">
@@ -1179,9 +1182,9 @@ function ProjectRow({
               </span>
             </div>
             <div>
-              <span className="mr-1 text-muted-foreground">Feature</span>
+              <span className="mr-1 text-muted-foreground">关联特性</span>
               <span className="font-medium text-foreground">
-                {formatNumber(project.featureCount)}
+                {formatNumber(project.devAssociatedFeatureCount)}
               </span>
             </div>
           </div>
@@ -1216,8 +1219,8 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={13} className="px-3 py-3">
-            <div className="space-y-3">
+          <td colSpan={14} className="px-3 py-3">
+            <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 <span className="text-muted-foreground">常用技能：</span>
@@ -1247,11 +1250,16 @@ function ProjectRow({
                   {project.features.map((feature) => (
                     <div
                       key={feature.slug || feature.title}
-                      className="space-y-2 rounded-lg border border-border bg-card px-3 py-2 text-xs"
+                      className="min-w-0 space-y-2 overflow-hidden rounded-lg border border-border bg-card px-3 py-2 text-xs"
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-start gap-2">
                         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-                          <span className="font-medium text-foreground">{feature.title}</span>
+                          <span
+                            className="block max-w-[420px] truncate font-medium text-foreground"
+                            title={feature.title}
+                          >
+                            {feature.title}
+                          </span>
                           {feature.statusLabel && (
                             <Badge variant="outline" className="normal-case tracking-normal">
                               {feature.statusLabel}
@@ -1271,7 +1279,7 @@ function ProjectRow({
                             </span>
                           )}
                         </div>
-                        <div className="ml-auto flex shrink-0 items-center gap-3">
+                        <div className="ml-auto flex shrink-0 items-center gap-3 whitespace-nowrap">
                           <button
                             type="button"
                             className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
@@ -1323,12 +1331,19 @@ function ProjectRow({
 function SkillChips({ skills }: { skills: DashboardProjectModeSkillCount[] }): React.JSX.Element {
   return (
     <>
-      {skills.map((item) => (
-        <Badge key={item.id ?? item.skill} variant="outline" className="normal-case tracking-normal">
-          {item.skill}
-          {item.isPlugin && item.pluginName ? ` · ${item.pluginName}` : ""} · {formatNumber(item.count)}
-        </Badge>
-      ))}
+      {skills.map((item) => {
+        const label = `${item.skill}${item.isPlugin && item.pluginName ? ` · ${item.pluginName}` : ""} · ${formatNumber(item.count)}`
+        return (
+          <Badge
+            key={item.id ?? item.skill}
+            variant="outline"
+            className="max-w-[360px] truncate normal-case tracking-normal"
+            title={label}
+          >
+            {label}
+          </Badge>
+        )
+      })}
     </>
   )
 }
@@ -1643,8 +1658,8 @@ function ProjectListSection({
         <>
           <h2 className="mb-1 text-sm font-semibold text-foreground">项目列表</h2>
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
-            项目、插件、项目状态、Feature 数为当前状态；对话数、Code
-            阶段会话数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
+            项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段会话数、DEV
+            关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
             流程采纳率按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
@@ -1720,7 +1735,7 @@ function ProjectListSection({
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full min-w-[2000px] table-fixed text-xs">
+        <table className="w-full min-w-[2080px] table-fixed text-xs">
           {/*
            * Keep column allocation deterministic across macOS and Windows.
            * With table-layout:auto, CJK body text has a one-glyph min-content
@@ -1732,6 +1747,7 @@ function ProjectListSection({
             <col className="w-[300px]" />
             <col className="w-[220px]" />
             <col className="w-[90px]" />
+            <col className="w-[76px]" />
             <col className="w-[76px]" />
             <col className="w-[110px]" />
             <col className="w-[160px]" />
@@ -1756,6 +1772,15 @@ function ProjectListSection({
               <th className="px-3 py-2 text-left font-medium">插件</th>
               <th className="px-3 py-2 text-left font-medium">项目状态</th>
               <SortableTh
+                label="特性数"
+                sortKey="featureCount"
+                activeKey={effectiveSortBy}
+                order={effectiveSortOrder}
+                enabled
+                onSort={cycleSort}
+                title="项目当前特性数"
+              />
+              <SortableTh
                 label="对话数"
                 sortKey="conversationCount"
                 activeKey={effectiveSortBy}
@@ -1776,29 +1801,10 @@ function ProjectListSection({
               <th className="px-3 py-2 text-right font-medium">总量口径采纳率</th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                title="DEV 大阶段会话数按所选时间范围统计；Feature 数为项目当前值"
+                title="所选时间范围内的 DEV 阶段会话数，以及这些会话关联的去重特性数；未关联特性的 DEV 会话仅计入会话数"
               >
                 <div>DEV阶段会话数</div>
-                <button
-                  type="button"
-                  onClick={() => cycleSort("featureCount")}
-                  title="按 Feature 数排序"
-                  className={cn(
-                    "ml-auto inline-flex items-center gap-1 transition-colors hover:text-foreground",
-                    effectiveSortBy === "featureCount" ? "text-foreground" : "text-muted-foreground"
-                  )}
-                >
-                  <span>Feature数</span>
-                  {effectiveSortBy === "featureCount" ? (
-                    effectiveSortOrder === "asc" ? (
-                      <ArrowUp className="size-3 shrink-0" />
-                    ) : (
-                      <ArrowDown className="size-3 shrink-0" />
-                    )
-                  ) : (
-                    <ArrowUpDown className="size-3 shrink-0 opacity-40" />
-                  )}
-                </button>
+                <div>DEV关联特性数</div>
               </th>
               <th
                 className="whitespace-nowrap px-3 py-2 text-right font-medium"
@@ -1838,7 +1844,7 @@ function ProjectListSection({
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={13} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -1848,7 +1854,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={13} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={14} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -1856,12 +1862,12 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={13} className="h-[49px]" />
+                  <td colSpan={14} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={13} className="px-3 py-10 text-center text-muted-foreground">
+                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
                   {emptyText}
                 </td>
               </tr>
@@ -2009,9 +2015,7 @@ const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
 }
 
 /**
- * 用 item.user_id（上传者 SAP id）到全量用户目录解析 {负责人, 部门}。
- * 负责人/部门并不在插件列表响应里——应用市场与 Harness 看板都是靠 user_id 二次查
- * queryAllUser 拿到的，这里复用同一口径（queryAllUser + buildUploaderIdCandidates）。
+ * 用 item.user_id（上传者 SAP id）按需解析 {负责人, 部门}，只查询当前列表涉及的候选 ID。
  */
 async function resolvePluginUploaderProfiles(
   items: MarketItem[]
@@ -2021,9 +2025,14 @@ async function resolvePluginUploaderProfiles(
     new Set(items.map((item) => item.user_id?.trim() || "").filter(Boolean))
   )
   if (rawUserIds.length === 0) return result
-  if (typeof window.api?.dashboard?.queryAllUser !== "function") return result
+  if (typeof window.api?.dashboard?.userProfiles !== "function") return result
   try {
-    const response = await window.api.dashboard.queryAllUser()
+    const requestedSapIds = Array.from(
+      new Set(rawUserIds.flatMap((rawUserId) => buildUploaderIdCandidates(rawUserId)))
+    )
+    const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+      family: "project-mode-market"
+    })
     if (!response.success || !response.data) return result
     const allUsers = response.data.filter((user) => user.sapId?.trim())
     for (const rawUserId of rawUserIds) {

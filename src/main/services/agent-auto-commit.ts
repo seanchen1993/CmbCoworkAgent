@@ -14,8 +14,7 @@ import {
 import { trackEvent } from "./event-reporter"
 import { captureStagedSnapshotsForCommit, measureForCommit } from "./adoption-tracker"
 import { markInAppCommitProcessed } from "./git-hook-service"
-import { getTracesDir } from "../agent/trace/collector"
-import type { AgentTrace } from "../agent/trace/types"
+import { getTracesDir, parseStoredTraceLine } from "../agent/trace/collector"
 import {
   discoverWorkspaceGitRepositories,
   type DiscoveredGitRepository
@@ -546,15 +545,21 @@ function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): v
   if (typeof getAllWindows !== "function") return
   for (const win of getAllWindows.call(BrowserWindow)) {
     if (!win.isDestroyed()) {
-      win.webContents.send("workspace:files-changed", { threadId, workspacePath })
+      win.webContents.send("workspace:files-changed", {
+        threadIds: [threadId],
+        workspacePath,
+        // A commit only changes Git metadata. File contents were already
+        // delivered by the watcher as path patches; do not rescan the tree.
+        changeType: "meta"
+      })
     }
   }
 }
 
 async function clearLlmModifiedMetadata(threadId: string): Promise<void> {
   try {
-    const { getThread, updateThread } = await import("../db")
-    const thread = getThread(threadId)
+    const { getThreadCore, updateThread } = await import("../db")
+    const thread = getThreadCore(threadId)
     if (!thread) return
     let metadata: Record<string, unknown> = {}
     try {
@@ -574,8 +579,8 @@ async function clearLlmModifiedMetadata(threadId: string): Promise<void> {
 
 async function readThreadLlmModifiedFileItems(threadId: string): Promise<string[]> {
   try {
-    const { getThread } = await import("../db")
-    const thread = getThread(threadId)
+    const { getThreadCore } = await import("../db")
+    const thread = getThreadCore(threadId)
     if (!thread) return []
     let metadata: Record<string, unknown> = {}
     try {
@@ -668,7 +673,7 @@ async function collectThreadSkillStatsAsync(threadId: string): Promise<string[]>
       for (const line of raw.trim().split("\n")) {
         if (!line.trim()) continue
         try {
-          const trace = JSON.parse(line) as AgentTrace
+          const trace = parseStoredTraceLine(line)
           if (Array.isArray(trace.usedSkills)) {
             for (const skill of trace.usedSkills) skillSet.add(skill)
           }

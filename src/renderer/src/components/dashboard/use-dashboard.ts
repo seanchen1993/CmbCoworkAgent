@@ -613,11 +613,23 @@ export interface DashboardProjectModeProject {
   conversationCount: number
   /** Conversations attributed to a workflow node in the Dev group. */
   devStageConversationCount: number
+  /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
+  devAssociatedFeatureCount: number
   hasError: boolean
   features: DashboardProjectModeFeature[]
   topSkills: DashboardProjectModeSkillCount[]
   codeStats: DashboardCodeStats | null
   stageBuckets: DashboardStageBuckets
+}
+
+export interface DashboardProjectModeExportData {
+  users: DashboardProjectModeTopUser[]
+  projects: DashboardProjectModeProject[]
+  projectTotal: number
+  activeProjectTotal: number
+  archivedProjectTotal: number
+  projectLimit: number
+  projectsTruncated: boolean
 }
 
 export type DashboardProjectModeProjectStatus = "active" | "archived"
@@ -1731,6 +1743,31 @@ function parseAdvancedFeatures(raw: unknown): AdvancedFeaturesData {
   return { cards, source: root.source === "es" ? "es" : "mock" }
 }
 
+function isOverviewViewModel(value: unknown): value is OverviewData {
+  const record = value as Partial<OverviewData> | null
+  return Boolean(record && Array.isArray(record.trend) && Array.isArray(record.bySkillAll))
+}
+
+function isModelStatsViewModel(value: unknown): value is ModelStatsData {
+  const record = value as Partial<ModelStatsData> | null
+  return Boolean(record && Array.isArray(record.byModel) && Array.isArray(record.smartByTier))
+}
+
+function isUserStatsViewModel(value: unknown): value is UserStatsData {
+  const record = value as Partial<UserStatsData> | null
+  return Boolean(record && Array.isArray(record.topUsers) && Array.isArray(record.versionUsers))
+}
+
+function isProductivityViewModel(value: unknown): value is ProductivityData {
+  const record = value as Partial<ProductivityData> | null
+  return Boolean(record && Array.isArray(record.commitTrend) && typeof record.totalCommits === "number")
+}
+
+function isAdvancedFeaturesViewModel(value: unknown): value is AdvancedFeaturesData {
+  const record = value as Partial<AdvancedFeaturesData> | null
+  return Boolean(record && Array.isArray(record.cards))
+}
+
 function parseSkillEvalChecks(raw: any): DashboardSkillEvalRun["checks"] {
   return Array.isArray(raw)
     ? raw.map((item: any) => ({
@@ -2170,6 +2207,35 @@ async function loadSkillEvalSummarySafely(
 // Hook
 // ─────────────────────────────────────────────────────────
 
+const DASHBOARD_SKILL_EVAL_REQUEST_FAMILY = "dashboard:skillEvalSummary"
+const DASHBOARD_HOOK_REQUEST_FAMILIES = [
+  "dashboard:esQuery",
+  "dashboard:overview",
+  "dashboard:modelStats",
+  "dashboard:userStats",
+  "dashboard:productivity",
+  "dashboard:advancedFeatures",
+  "dashboard:orgOptions",
+  "dashboard:projectMode",
+  "dashboard:projectModeCodeStats",
+  "dashboard:projectModeProjects",
+  "dashboard:projectModeTraces",
+  "dashboard:projectModeFeatureNodes",
+  "dashboard:pluginAggregate",
+  "dashboard:userProfiles",
+  "dashboard:queryAllUser",
+  DASHBOARD_SKILL_EVAL_REQUEST_FAMILY
+] as const
+
+function isCancelledDashboardResult(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "cancelled" in value &&
+    value.cancelled === true
+  )
+}
+
 export function useDashboard() {
   const [granularity, setGranularity] = useState<Granularity>("day")
   const [range, setRange] = useState<TimeRange>(() => getDefaultRange("day"))
@@ -2225,42 +2291,85 @@ export function useDashboard() {
     Record<DashboardProjectModeProjectStatus, number>
   >({ active: 0, archived: 0 })
 
+  useEffect(() => {
+    return () => {
+      fetchIdRef.current += 1
+      userStatsFetchIdRef.current += 1
+      skillEvalFetchIdRef.current += 1
+      orgOptionsFetchIdRef.current += 1
+      projectModeFetchIdRef.current += 1
+      projectModeCodeStatsFetchIdRef.current += 1
+      projectModeProjectPageFetchIdRef.current.active += 1
+      projectModeProjectPageFetchIdRef.current.archived += 1
+      if (typeof window.api.dashboard.cancelRequests === "function") {
+        void window.api.dashboard
+          .cancelRequests([...DASHBOARD_HOOK_REQUEST_FAMILIES])
+          .catch(() => undefined)
+      }
+    }
+  }, [])
+
   const fetchAll = useCallback(async (r: TimeRange, g: Granularity, orgList: string[]) => {
     const id = ++fetchIdRef.current
     setLoading(true)
     setError(null)
 
     const orgOpts = { upperOrgLv1: orgList }
-    try {
-      const [ovRes, msRes, usRes, prRes, afRes] = await Promise.all([
-        window.api.dashboard.overview(r, g, orgOpts),
-        window.api.dashboard.modelStats(r, g, orgOpts),
-        window.api.dashboard.userStats(r, g, orgOpts),
-        window.api.dashboard.productivity(r, g, orgOpts),
-        window.api.dashboard.advancedFeatures(r, g, orgOpts)
-      ])
-
-      // Stale check
-      if (id !== fetchIdRef.current) return
-
-      if (!ovRes.success) throw new Error(ovRes.error ?? "获取概览数据失败")
-      if (!msRes.success) throw new Error(msRes.error ?? "获取模型数据失败")
-      if (!usRes.success) throw new Error(usRes.error ?? "获取用户数据失败")
-      if (!prRes.success) throw new Error(prRes.error ?? "获取生产力数据失败")
-      if (!afRes.success) throw new Error(afRes.error ?? "获取高级特性数据失败")
-
-      setOverview(parseOverview(ovRes.data, g))
-      setModelStats(parseModelStats(msRes.data))
-      setProductivity(parseProductivity(prRes.data, g, r))
-      // 仅选中单个组织时 userStats 进入 LV0 下钻视图，否则按 LV1 展示。
-      setUserStats(parseUserStats(usRes.data, orgList.length === 1 ? orgList[0] : null))
-      setAdvancedFeatures(parseAdvancedFeatures(afRes.data))
-    } catch (e) {
-      if (id !== fetchIdRef.current) return
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (id === fetchIdRef.current) setLoading(false)
+    const errors: unknown[] = []
+    const runEndpoint = async (
+      request: Promise<{ success: boolean; data?: unknown; error?: string }>,
+      fallbackError: string,
+      commit: (data: unknown) => void
+    ): Promise<void> => {
+      try {
+        const result = await request
+        if (id !== fetchIdRef.current || isCancelledDashboardResult(result)) return
+        if (!result.success) throw new Error(result.error ?? fallbackError)
+        commit(result.data)
+      } catch (endpointError) {
+        if (id === fetchIdRef.current) errors.push(endpointError)
+      }
     }
+
+    await Promise.all([
+      runEndpoint(window.api.dashboard.overview(r, g, orgOpts), "获取概览数据失败", (data) => {
+        setOverview(isOverviewViewModel(data) ? data : parseOverview(data, g))
+      }),
+      runEndpoint(window.api.dashboard.modelStats(r, g, orgOpts), "获取模型数据失败", (data) => {
+        setModelStats(isModelStatsViewModel(data) ? data : parseModelStats(data))
+      }),
+      runEndpoint(window.api.dashboard.userStats(r, g, orgOpts), "获取用户数据失败", (data) => {
+        const selectedOrg = orgList.length === 1 ? orgList[0] : null
+        setUserStats(
+          isUserStatsViewModel(data) ? data : parseUserStats(data, selectedOrg)
+        )
+      }),
+      runEndpoint(
+        window.api.dashboard.productivity(r, g, orgOpts),
+        "获取生产力数据失败",
+        (data) => {
+          setProductivity(
+            isProductivityViewModel(data) ? data : parseProductivity(data, g, r)
+          )
+        }
+      ),
+      runEndpoint(
+        window.api.dashboard.advancedFeatures(r, g, orgOpts),
+        "获取高级特性数据失败",
+        (data) => {
+          setAdvancedFeatures(
+            isAdvancedFeaturesViewModel(data) ? data : parseAdvancedFeatures(data)
+          )
+        }
+      )
+    ])
+
+    if (id !== fetchIdRef.current) return
+    if (errors.length > 0) {
+      const firstError = errors[0]
+      setError(firstError instanceof Error ? firstError.message : String(firstError))
+    }
+    setLoading(false)
   }, [])
 
   const fetchUserStatsOnly = useCallback(
@@ -2272,8 +2381,11 @@ export function useDashboard() {
       try {
         const result = await window.api.dashboard.userStats(r, g, { upperOrgLv1: orgLv1 })
         if (id !== userStatsFetchIdRef.current) return
+        if (isCancelledDashboardResult(result)) return
         if (!result.success) throw new Error(result.error ?? "获取用户数据失败")
-        setUserStats(parseUserStats(result.data, orgLv1))
+        setUserStats(
+          isUserStatsViewModel(result.data) ? result.data : parseUserStats(result.data, orgLv1)
+        )
       } catch (e) {
         if (id !== userStatsFetchIdRef.current) return
         setError(e instanceof Error ? e.message : String(e))
@@ -2314,6 +2426,15 @@ export function useDashboard() {
       setProjectModeCodeSource(null)
       setProjectModeCodeStatsOverride(null)
       setProjectModeCodeStatsLoading(false)
+      projectModeProjectPageFetchIdRef.current.active += 1
+      projectModeProjectPageFetchIdRef.current.archived += 1
+      setProjectModeProjectPageLoading({ active: false, archived: false })
+      setProjectModeProjectPageError({})
+      if (typeof window.api.dashboard.cancelRequests === "function") {
+        void window.api.dashboard
+          .cancelRequests(["dashboard:projectModeCodeStats", "dashboard:projectModeProjects"])
+          .catch(() => undefined)
+      }
 
       try {
         const result = await window.api.dashboard.projectMode(r, g, {
@@ -2323,8 +2444,6 @@ export function useDashboard() {
         if (id !== projectModeFetchIdRef.current) return
         if (!result.success) throw new Error(result.error ?? "获取项目模式数据失败")
         const nextProjectMode = (result.data as DashboardProjectModeData) ?? null
-        projectModeProjectPageFetchIdRef.current.active += 1
-        projectModeProjectPageFetchIdRef.current.archived += 1
         setProjectMode(nextProjectMode)
         setProjectModeProjectPages(
           nextProjectMode?.projectPage
@@ -2350,6 +2469,11 @@ export function useDashboard() {
       setProjectModeCodeSource(source)
       if (!source) {
         projectModeCodeStatsFetchIdRef.current += 1
+        if (typeof window.api.dashboard.cancelRequests === "function") {
+          void window.api.dashboard
+            .cancelRequests(["dashboard:projectModeCodeStats"])
+            .catch(() => undefined)
+        }
         setProjectModeCodeStatsOverride(null)
         setProjectModeCodeStatsLoading(false)
         return
@@ -2446,6 +2570,12 @@ export function useDashboard() {
       setError(null)
 
       try {
+        if (typeof window.api.dashboard.cancelRequests === "function") {
+          await window.api.dashboard
+            .cancelRequests([DASHBOARD_SKILL_EVAL_REQUEST_FAMILY])
+            .catch(() => undefined)
+          if (id !== skillEvalFetchIdRef.current) return
+        }
         const requestOptions: DashboardSkillEvalOptions = {
           recentPage: page,
           recentPageSize: SKILL_EVAL_RECENT_PAGE_SIZE,
@@ -2622,6 +2752,11 @@ export function useDashboard() {
 
   const clearSkillEval = useCallback(() => {
     ++skillEvalFetchIdRef.current
+    if (typeof window.api.dashboard.cancelRequests === "function") {
+      void window.api.dashboard
+        .cancelRequests([DASHBOARD_SKILL_EVAL_REQUEST_FAMILY])
+        .catch(() => undefined)
+    }
     setSkillEval(null)
     setSkillEvalLoading(false)
   }, [])

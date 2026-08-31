@@ -4,13 +4,25 @@ import {
   buildVisibleMessageLayout,
   messageHasVisibleRow,
   messageRendersNothing,
-  messageVisibleReasoningLength
+  messageVisibleReasoningLength,
+  shouldAutoCollapseReasoning
 } from "../src/renderer/src/lib/message-display-visibility.ts"
+import {
+  areMessageRenderFieldsEqual,
+  areMessageToolRenderInputsEqual,
+  areToolDerivationMessagesEqual,
+  createToolDerivationMessageSelector,
+  selectToolDerivationMessages
+} from "../src/renderer/src/lib/message-render-stability.ts"
+import { getWorkerToolUiKey } from "../src/renderer/src/lib/worker-tool-result-key.ts"
 import {
   normalizeHookLogTurnId,
   resolveHookLogUserMessage
 } from "../src/renderer/src/lib/hook-log-turn-id.ts"
-import { normalizeSchedulerMessageSnapshot } from "../src/renderer/src/lib/scheduler-message-snapshot.ts"
+import {
+  mergeSchedulerTurnMessageSnapshot,
+  normalizeSchedulerMessageSnapshot
+} from "../src/renderer/src/lib/scheduler-message-snapshot.ts"
 import {
   buildMessageRoleCollisionId,
   buildMessageSameRoleDuplicateId,
@@ -253,6 +265,29 @@ function testReasoningGrowthChangesScrollLength(): void {
     messageVisibleReasoningLength({ reasoning: "<think>one two</think>" }),
     7,
     "streamed reasoning growth should change the scroll signature"
+  )
+}
+
+function testStreamingReasoningCollapsesWhenToolCallStarts(): void {
+  assertEqual(
+    shouldAutoCollapseReasoning({
+      isStreaming: true,
+      reasoningText: "thinking",
+      hasVisibleAssistantContent: false,
+      hasToolCalls: false
+    }),
+    false,
+    "reasoning should stay open while it is the only streaming output"
+  )
+  assertEqual(
+    shouldAutoCollapseReasoning({
+      isStreaming: true,
+      reasoningText: "thinking",
+      hasVisibleAssistantContent: false,
+      hasToolCalls: true
+    }),
+    true,
+    "the first tool call should collapse the preceding reasoning"
   )
 }
 
@@ -971,6 +1006,107 @@ function testMessageVisibilityMatchesMessageBubbleBranches(): void {
   )
 }
 
+function testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable(): void {
+  const createdAt = new Date("2026-07-20T00:00:00.000Z")
+  const toolCallMessage: Message = {
+    id: "assistant-tool-call",
+    role: "assistant",
+    content: "",
+    tool_calls: [{ id: "call-1", name: "read_file", args: { path: "README.md" } }],
+    created_at: createdAt
+  }
+  const messages: Message[] = [
+    { id: "user", role: "user", content: "inspect", created_at: createdAt },
+    toolCallMessage,
+    {
+      id: "tool-result",
+      role: "tool",
+      content: { ok: true },
+      tool_call_id: "call-1",
+      created_at: createdAt
+    },
+    {
+      id: "active-reasoning",
+      role: "assistant",
+      content: "",
+      reasoning: "first snapshot",
+      created_at: createdAt
+    }
+  ]
+  const updatedMessages = messages.map((message) => ({
+    ...message,
+    created_at: new Date(message.created_at?.getTime() ?? 0)
+  }))
+  updatedMessages[3] = { ...updatedMessages[3], reasoning: "second snapshot" }
+
+  const selectStableToolMessages = createToolDerivationMessageSelector()
+  const initialToolMessages = selectStableToolMessages(messages)
+  const updatedToolMessages = selectStableToolMessages(updatedMessages)
+
+  assertEqual(
+    areToolDerivationMessagesEqual(
+      selectToolDerivationMessages(messages),
+      selectToolDerivationMessages(updatedMessages)
+    ),
+    true,
+    "reasoning-only updates must not invalidate global tool derivations"
+  )
+  assertEqual(
+    updatedToolMessages === initialToolMessages,
+    true,
+    "the tool derivation selector should preserve its array identity across reasoning updates"
+  )
+  assertEqual(
+    areMessageRenderFieldsEqual(messages[1], updatedMessages[1]),
+    true,
+    "a cloned but unchanged history message should keep its memo boundary"
+  )
+  assertEqual(
+    areMessageRenderFieldsEqual(messages[3], updatedMessages[3]),
+    false,
+    "the actively growing reasoning message must still render"
+  )
+
+  const toolKey = getWorkerToolUiKey(toolCallMessage.id, "call-1", 0)
+  const previousInputs = {
+    toolResults: new Map([[toolKey, { content: { ok: true }, is_error: false }]]),
+    toolCallStates: new Map([
+      [
+        toolKey,
+        {
+          id: "call-1",
+          status: "completed" as const,
+          name: "read_file",
+          args: { path: "README.md" },
+          updatedAt: new Date("2026-07-20T00:00:01.000Z")
+        }
+      ]
+    ]),
+    pendingApprovalToolCallKeys: new Set<string>()
+  }
+  const nextInputs = {
+    toolResults: new Map([[toolKey, { content: { ok: true }, is_error: false }]]),
+    toolCallStates: new Map([
+      [
+        toolKey,
+        {
+          id: "call-1",
+          status: "completed" as const,
+          name: "read_file",
+          args: { path: "README.md" },
+          updatedAt: new Date("2026-07-20T00:00:02.000Z")
+        }
+      ]
+    ]),
+    pendingApprovalToolCallKeys: new Set<string>()
+  }
+  assertEqual(
+    areMessageToolRenderInputsEqual(toolCallMessage, previousInputs, nextInputs),
+    true,
+    "new global map identities must not rerender a history bubble when its own tool state is unchanged"
+  )
+}
+
 function testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas(): void {
   const createdAt = new Date("2026-07-20T00:00:00.000Z")
   const sharedId = "scheduler-shared-id"
@@ -992,6 +1128,100 @@ function testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas(): void {
     ),
     true,
     "a later assistant delta must resolve to the assistant already stored by the snapshot"
+  )
+}
+
+function testSchedulerTurnSnapshotMergesWithoutReplacingHistory(): void {
+  const createdAt = new Date("2026-07-20T00:00:00.000Z")
+  const historicalMessages: Message[] = [
+    {
+      id: "historical-user",
+      role: "user",
+      content: "older question",
+      created_at: createdAt
+    },
+    {
+      id: "historical-assistant",
+      role: "assistant",
+      content: "older answer",
+      created_at: createdAt
+    }
+  ]
+  const first = mergeSchedulerTurnMessageSnapshot(
+    historicalMessages,
+    [
+      { id: "scheduled-user", role: "user", content: "scheduled question" },
+      {
+        id: "scheduled-assistant",
+        role: "assistant",
+        content: "scheduled answer",
+        tool_calls: [{ id: "scheduled-call", name: "read_file", args: { path: "README.md" } }]
+      },
+      {
+        id: "scheduled-tool",
+        role: "tool",
+        content: "file contents",
+        tool_call_id: "scheduled-call",
+        name: "read_file"
+      }
+    ],
+    createdAt
+  )
+
+  assertEqual(first.messages.length, 5, "the current-turn snapshot must append to durable history")
+  assertEqual(
+    first.messages[0],
+    historicalMessages[0],
+    "the current-turn merge must preserve stable history references"
+  )
+  assertEqual(first.turnMessages.length, 3, "tool-state updates should receive current-turn rows only")
+
+  const replay = mergeSchedulerTurnMessageSnapshot(
+    first.messages,
+    [
+      { id: "scheduled-user", role: "user", content: "scheduled question" },
+      {
+        id: "scheduled-assistant",
+        role: "assistant",
+        content: "scheduled answer updated",
+        tool_calls: [{ id: "scheduled-call", name: "read_file", args: { path: "README.md" } }]
+      },
+      {
+        id: "scheduled-tool",
+        role: "tool",
+        content: "file contents",
+        tool_call_id: "scheduled-call",
+        name: "read_file"
+      }
+    ],
+    createdAt
+  )
+  assertEqual(replay.messages.length, 5, "a repeated turn snapshot must remain idempotent")
+  assertEqual(
+    replay.messages.find((message) => message.id === "scheduled-assistant")?.content,
+    "scheduled answer updated",
+    "a repeated turn snapshot must update the current turn in place"
+  )
+
+  const absoluteFallbackIds = mergeSchedulerTurnMessageSnapshot(
+    [
+      {
+        id: "msg-5",
+        role: "assistant",
+        content: "older idless provider row",
+        created_at: createdAt
+      }
+    ],
+    [
+      { id: "msg-100", role: "user", content: "new idless provider turn" },
+      { id: "msg-101", role: "assistant", content: "new idless provider answer" }
+    ],
+    createdAt
+  )
+  assertEqual(
+    absoluteFallbackIds.messages.map((message) => message.id).join(","),
+    "msg-5,msg-100,msg-101",
+    "absolute fallback ids from different projected turns must not replace historical rows"
   )
 }
 
@@ -1183,6 +1413,10 @@ const tests: Array<[string, () => void]> = [
   ],
   ["testReasoningGrowthChangesScrollLength", testReasoningGrowthChangesScrollLength],
   [
+    "testStreamingReasoningCollapsesWhenToolCallStarts",
+    testStreamingReasoningCollapsesWhenToolCallStarts
+  ],
+  [
     "testQueuedCrossRoleUpdatesUsePersistedKeeperOrder",
     testQueuedCrossRoleUpdatesUsePersistedKeeperOrder
   ],
@@ -1246,8 +1480,16 @@ const tests: Array<[string, () => void]> = [
     testMessageVisibilityMatchesMessageBubbleBranches
   ],
   [
+    "testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable",
+    testReasoningUpdatesKeepToolDerivationsAndHistoryBubblesStable
+  ],
+  [
     "testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas",
     testSchedulerSnapshotNormalizesRoleCollisionsBeforeDeltas
+  ],
+  [
+    "testSchedulerTurnSnapshotMergesWithoutReplacingHistory",
+    testSchedulerTurnSnapshotMergesWithoutReplacingHistory
   ],
   ["testHookLogTurnIdFollowsUserRoleCollisionId", testHookLogTurnIdFollowsUserRoleCollisionId],
   [

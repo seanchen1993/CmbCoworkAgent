@@ -385,7 +385,8 @@ export interface TraceSkillEvalExtension {
 /**
  * One complete execution trace for a single agent invocation.
  *
- * Written as a single JSON line to:
+ * Stored as a single encrypted JSON envelope line (legacy plaintext remains
+ * readable and is migrated at startup) under:
  *   ~/.cmbcoworkagent/traces/{threadId}/{traceId}.jsonl
  */
 export interface AgentTrace {

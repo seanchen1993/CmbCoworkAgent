@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -10,6 +11,10 @@ import {
 import { tmpdir } from "os"
 import { basename, dirname, join } from "path"
 import { runWorkflowEngine } from "../src/main/agent/workflow/engine.ts"
+import { createWorkflowTool } from "../src/main/agent/workflow/tool.ts"
+import { workflowRunManager } from "../src/main/agent/workflow/run-manager.ts"
+import { isPathInside } from "../src/main/agent/workflow/paths.ts"
+import { ApprovalStore } from "../src/main/agent/approval-store.ts"
 import {
   validateWorkflowScript,
   MAX_WORKFLOW_SCRIPT_BYTES
@@ -43,7 +48,8 @@ import {
   clearAgentToolStream,
   clearAllAgentToolStreams,
   persistAgentToolStream,
-  readAgentToolStream
+  readAgentToolStream,
+  setBeforeAgentToolStreamReadForTest
 } from "../src/main/agent/workflow/run-store.ts"
 import {
   buildWorkflowNotificationMessage,
@@ -58,15 +64,19 @@ import {
   WORKFLOW_TOOL_RESULT_MAX_CHARS,
   WORKFLOW_RESULT_MAX_CHARS,
   WORKFLOW_RESULT_SIDECAR_MAX_BYTES,
+  WorkflowFatalError,
   WorkflowScriptError
 } from "../src/main/agent/workflow/types.ts"
 import type {
   PersistedWorkflowRun,
   WorkflowProgressEvent,
-  WorkflowSubagentRunner
+  WorkflowSubagentRunner,
+  WorkflowWorktreeIsolationBoundary
 } from "../src/main/agent/workflow/types.ts"
 import {
+  applyWorkflowProgressEvent,
   reconcileHydratedWorkflowRun,
+  toWorktreeView,
   workflowRunViewFromPersisted,
   type PersistedWorkflowRunDTO,
   type WorkflowRunView
@@ -76,6 +86,7 @@ import {
   createRuntimeWithModelFallback,
   extractWorkflowTraceToolDetails,
   isModelUnavailableError,
+  runWorkflowSubagent,
   type WorkflowSubagentDeps
 } from "../src/main/agent/workflow/subagent.ts"
 import {
@@ -84,6 +95,9 @@ import {
   WORKFLOW_AGENT_SNAPSHOT_CONTENT_CAP,
   WORKFLOW_AGENT_SNAPSHOT_TOTAL_CAP
 } from "../src/main/agent/workflow/agent-snapshot.ts"
+
+const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
+let TEST_WORKFLOW_DATA_ROOT = ""
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) throw new Error(msg)
@@ -193,6 +207,7 @@ function testReconcileHydratedRun(): void {
     phases: [],
     currentPhase: null,
     agents: [],
+    worktrees: [],
     logs: [],
     stats: null,
     startedAtMs: 0
@@ -253,6 +268,90 @@ function testResumedFlagPersisted(): void {
   )
 }
 
+function testRendererWorktreeProgressAndHydration(): void {
+  const record = {
+    id: "wt-1",
+    runId: "wf_abc123",
+    agentIndex: 1,
+    label: "writer",
+    branch: "cmbcowork/wf/a/b",
+    directory: "/tmp/wt",
+    workspaceDirectory: "/tmp/wt",
+    baseCommit: "a".repeat(40),
+    dirty: false,
+    status: "ready",
+    updatedAt: new Date().toISOString()
+  }
+  const started = applyWorkflowProgressEvent(null, {
+    kind: "started",
+    runId: "wf_abc123",
+    name: "w",
+    description: "d",
+    phases: [],
+    resumed: true,
+    worktrees: [record]
+  })!
+  assert(started.worktrees[0]?.id === "wt-1", "started should retain inherited worktrees")
+  const withWorktree = applyWorkflowProgressEvent(started, {
+    kind: "worktree_update",
+    runId: "wf_abc123",
+    worktree: record
+  })!
+  assert(withWorktree.worktrees.length === 1, "live worktree update should add a UI record")
+  const merged = applyWorkflowProgressEvent(withWorktree, {
+    kind: "worktree_update",
+    runId: "wf_abc123",
+    worktree: { ...record, status: "merged" }
+  })!
+  assert(
+    merged.worktrees.length === 1 && merged.worktrees[0].status === "merged",
+    "worktree updates should upsert by id"
+  )
+  const removed = applyWorkflowProgressEvent(merged, {
+    kind: "worktree_remove",
+    runId: "wf_abc123",
+    worktreeId: "wt-1"
+  })!
+  assert(removed.worktrees.length === 0, "pristine cleanup should remove the live UI record")
+
+  const persisted = workflowRunViewFromPersisted({
+    runId: "wf_abc123",
+    workflowName: "w",
+    status: "completed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    worktrees: [{ ...record, status: "ready" }],
+    logs: [],
+    stats: {
+      agentsTotal: 1,
+      agentsCached: 0,
+      agentsFailed: 0,
+      outputTokens: 0,
+      durationMs: 1
+    },
+    startedAt: new Date().toISOString()
+  })
+  assert(
+    persisted.worktrees[0]?.id === "wt-1",
+    "persisted worktrees should survive renderer hydrate"
+  )
+
+  const scoped = toWorktreeView({
+    ...record,
+    directory: "/tmp/wt-root",
+    workspaceDirectory: "/tmp/wt-root/packages/a"
+  })
+  assert(
+    scoped?.directory === "/tmp/wt-root",
+    "renderer keeps the actual worktree root for manual recovery"
+  )
+  assert(
+    scoped?.workspaceDirectory === "/tmp/wt-root/packages/a",
+    "renderer keeps the agent's scoped workspace separately"
+  )
+}
+
 const THREAD_ID = "thread-test"
 
 interface Harness {
@@ -269,6 +368,8 @@ interface Harness {
       signal?: AbortSignal
       maxConcurrency?: number
       defaultModelId?: string
+      worktrees?: PersistedWorkflowRun["worktrees"]
+      resumed?: boolean
       runExclusiveFileWrite?: <T>(fn: () => Promise<T>) => Promise<T>
     }
   ) => ReturnType<typeof runWorkflowEngine>
@@ -298,8 +399,10 @@ function createHarness(workspace: string): Harness {
           phases: [],
           currentPhase: null,
           agents: [],
+          worktrees: options.worktrees ?? [],
           logs: [],
           journal: options.journal ?? [],
+          resumed: options.resumed,
           stats: {
             agentsTotal: 0,
             agentsCached: 0,
@@ -334,6 +437,349 @@ const echoRunner: WorkflowSubagentRunner = async (request) => ({
   outputTokens: 10
 })
 
+async function testResumeKeepsDurableWorktrees(workspace: string): Promise<void> {
+  const harness = createHarness(workspace)
+  const now = new Date().toISOString()
+  const record = {
+    id: "retained-worktree",
+    runId: harness.runId,
+    threadId: THREAD_ID,
+    branch: "cmbcowork/wf/resume/retained",
+    directory: join(workspace, ".retained-worktree"),
+    workspaceDirectory: join(workspace, ".retained-worktree"),
+    sourceRoot: workspace,
+    sourceRelativePath: "",
+    sourceBranch: "main",
+    gitRoot: workspace,
+    commonDir: join(workspace, ".git"),
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    dirty: false,
+    status: "ready" as const,
+    updatedAt: now
+  }
+  const result = await harness.run(
+    `export const meta = { name: "resume-worktree", description: "d" }
+return "done"`,
+    echoRunner,
+    { worktrees: [record], resumed: true }
+  )
+  assert(result.status === "completed", `resume fixture should complete, got ${result.status}`)
+
+  const started = harness.events.find((event) => event.kind === "started")
+  assert(
+    started?.kind === "started" &&
+      started.resumed === true &&
+      started.worktrees?.[0]?.id === record.id,
+    "a resumed started event must preserve durable worktrees even with no journal"
+  )
+  const persisted = loadWorkflowRun(workspace, THREAD_ID, harness.runId)!
+  assert(
+    persisted.worktrees?.[0]?.id === record.id,
+    "resume completion must not erase a prior retained worktree from run.json"
+  )
+}
+
+async function testResumeReloadsWorktreesAfterApproval(workspace: string): Promise<void> {
+  const threadId = "thread-approval-worktree-race"
+  const runId = generateWorkflowRunId()
+  const script = `export const meta = { name: "approval-worktree-race", description: "d" }
+return "done"`
+  const startedAt = new Date().toISOString()
+  const ready = {
+    id: "approval-race-worktree",
+    runId,
+    threadId,
+    branch: "cmbcowork/wf/approval/race",
+    directory: join(workspace, ".approval-race-worktree"),
+    workspaceDirectory: join(workspace, ".approval-race-worktree"),
+    sourceRoot: workspace,
+    sourceRelativePath: "",
+    sourceBranch: "main",
+    gitRoot: workspace,
+    commonDir: join(workspace, ".git"),
+    baseCommit: "a".repeat(40),
+    headCommit: "b".repeat(40),
+    dirty: false,
+    status: "ready" as const,
+    updatedAt: startedAt
+  }
+  const prior: PersistedWorkflowRun = {
+    version: 1,
+    runId,
+    threadId,
+    workflowName: "approval-worktree-race",
+    description: "d",
+    script,
+    scriptSha256: sha256Hex(script),
+    status: "failed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    worktrees: [ready],
+    logs: [],
+    journal: [],
+    result: "failed",
+    notificationDelivered: true,
+    stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 1 },
+    startedAt,
+    updatedAt: startedAt,
+    endedAt: startedAt
+  }
+  assert(await persistRecoveredRun(workspace, threadId, prior), "resume fixture should persist")
+
+  let launchedWorktrees: PersistedWorkflowRun["worktrees"] | undefined
+  let recoveredSnapshot: PersistedWorkflowRun | undefined
+  const originalLaunch = workflowRunManager.launch
+  const originalGetFlushFailedRunForResume = workflowRunManager.getFlushFailedRunForResume
+  workflowRunManager.launch = ((request) => {
+    launchedWorktrees = request.existingWorktrees
+    return {
+      runId: request.runId,
+      scriptFilePath: join(workspace, "approval-race.workflow.js"),
+      whenInitialPersisted: Promise.resolve(true)
+    }
+  }) as typeof workflowRunManager.launch
+  workflowRunManager.getFlushFailedRunForResume = (async (
+    candidateWorkspace,
+    candidateThreadId,
+    candidateRunId
+  ) =>
+    candidateRunId === runId
+      ? recoveredSnapshot
+      : originalGetFlushFailedRunForResume.call(
+          workflowRunManager,
+          candidateWorkspace,
+          candidateThreadId,
+          candidateRunId
+        )) as typeof workflowRunManager.getFlushFailedRunForResume
+  const workflowTool = createWorkflowTool({
+    threadId,
+    workspacePath: workspace,
+    approvalStore: new ApprovalStore(),
+    requestApproval: async () => {
+      recoveredSnapshot = {
+        ...prior,
+        worktrees: [
+          {
+            ...ready,
+            status: "merged" as const,
+            cleanupPending: false,
+            updatedAt: new Date(Date.now() + 1_000).toISOString()
+          }
+        ],
+        updatedAt: new Date(Date.now() + 1_000).toISOString()
+      }
+      assert(
+        loadWorkflowRun(workspace, threadId, runId)?.worktrees?.[0]?.status === "ready",
+        "the disk fixture must remain stale while the flush-failed snapshot advances"
+      )
+      return { type: "approve", tool_call_id: "approval-race" }
+    },
+    subagentDeps: {
+      createRuntime: async () => ({
+        stream: async () =>
+          (async function* () {
+            yield { messages: [] }
+          })()
+      }),
+      cleanupThread: async () => undefined,
+      isRetryableApiError: () => false
+    }
+  })
+  try {
+    await workflowTool.invoke({ resumeFromRunId: runId })
+  } finally {
+    workflowRunManager.launch = originalLaunch
+    workflowRunManager.getFlushFailedRunForResume = originalGetFlushFailedRunForResume
+  }
+  assert(
+    launchedWorktrees?.[0]?.status === "merged" && launchedWorktrees[0].cleanupPending === false,
+    "resume launch must inherit the flush-failed terminal record, never resurrect stale disk state"
+  )
+}
+
+async function testResumeUsesFlushFailedSnapshotJournal(workspace: string): Promise<void> {
+  const threadId = "thread-flush-failed-resume-journal"
+  const runId = generateWorkflowRunId()
+  const script = `export const meta = { name: "flush-failed-resume-journal", description: "d" }
+return "done"`
+  const now = new Date().toISOString()
+  const diskJournal = [{ index: 0, hash: "disk-entry", result: "stale", outputTokens: 1 }]
+  const snapshotJournal = [{ index: 0, hash: "snapshot-entry", result: "latest", outputTokens: 2 }]
+  const diskRun: PersistedWorkflowRun = {
+    version: 1,
+    runId,
+    threadId,
+    workflowName: "flush-failed-resume-journal",
+    description: "d",
+    script,
+    scriptSha256: sha256Hex(script),
+    status: "completed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    logs: [],
+    journal: diskJournal,
+    result: "stale",
+    notificationDelivered: true,
+    stats: { agentsTotal: 1, agentsCached: 0, agentsFailed: 0, outputTokens: 1, durationMs: 1 },
+    startedAt: now,
+    updatedAt: now,
+    endedAt: now
+  }
+  assert(
+    await persistRecoveredRun(workspace, threadId, diskRun),
+    "disk resume fixture should persist"
+  )
+
+  const snapshot: PersistedWorkflowRun = {
+    ...diskRun,
+    journal: snapshotJournal,
+    result: "latest",
+    updatedAt: new Date(Date.now() + 1_000).toISOString()
+  }
+  let launchedJournal: PersistedWorkflowRun["journal"] | undefined
+  const originalLaunch = workflowRunManager.launch
+  const originalGetFlushFailedRunForResume = workflowRunManager.getFlushFailedRunForResume
+  workflowRunManager.launch = ((request) => {
+    launchedJournal = request.resumeJournal
+    return {
+      runId: request.runId,
+      scriptFilePath: join(workspace, "flush-failed-resume-journal.workflow.js"),
+      whenInitialPersisted: Promise.resolve(true)
+    }
+  }) as typeof workflowRunManager.launch
+  workflowRunManager.getFlushFailedRunForResume = (async (
+    candidateWorkspace,
+    candidateThreadId,
+    candidateRunId
+  ) =>
+    candidateRunId === runId
+      ? snapshot
+      : originalGetFlushFailedRunForResume.call(
+          workflowRunManager,
+          candidateWorkspace,
+          candidateThreadId,
+          candidateRunId
+        )) as typeof workflowRunManager.getFlushFailedRunForResume
+  const workflowTool = createWorkflowTool({
+    threadId,
+    workspacePath: workspace,
+    approvalStore: new ApprovalStore(),
+    requestApproval: async () => ({ type: "approve", tool_call_id: "flush-failed-resume" }),
+    subagentDeps: {
+      createRuntime: async () => ({
+        stream: async () =>
+          (async function* () {
+            yield { messages: [] }
+          })()
+      }),
+      cleanupThread: async () => undefined,
+      isRetryableApiError: () => false
+    }
+  })
+  try {
+    await workflowTool.invoke({ resumeFromRunId: runId })
+  } finally {
+    workflowRunManager.launch = originalLaunch
+    workflowRunManager.getFlushFailedRunForResume = originalGetFlushFailedRunForResume
+  }
+  assert(
+    JSON.stringify(launchedJournal) === JSON.stringify(snapshotJournal),
+    "resume must seed the journal from the authoritative flush-failed snapshot, not stale disk"
+  )
+}
+
+async function testReturnedManagedScriptPathCanBeEditedAndRelaunched(
+  workspace: string
+): Promise<void> {
+  const threadId = "thread-managed-script-relaunch"
+  const initialScript = `export const meta = { name: "managed-script-before", description: "d" }
+return "before"`
+  const editedScript = `export const meta = { name: "managed-script-after", description: "d" }
+return "after"`
+  const launchedScripts: string[] = []
+  const originalLaunch = workflowRunManager.launch
+  workflowRunManager.launch = ((request) => {
+    launchedScripts.push(request.script)
+    const scriptFilePath = join(
+      getWorkflowRunsDir(request.workspacePath, request.threadId),
+      `${request.runId}.workflow.js`
+    )
+    mkdirSync(dirname(scriptFilePath), { recursive: true })
+    writeFileSync(scriptFilePath, request.script, "utf8")
+    return {
+      runId: request.runId,
+      scriptFilePath,
+      whenInitialPersisted: Promise.resolve(true)
+    }
+  }) as typeof workflowRunManager.launch
+
+  const workflowTool = createWorkflowTool({
+    threadId,
+    workspacePath: workspace,
+    yoloMode: true,
+    subagentDeps: {
+      createRuntime: async () => ({
+        stream: async () =>
+          (async function* () {
+            yield { messages: [] }
+          })()
+      }),
+      cleanupThread: async () => undefined,
+      isRetryableApiError: () => false
+    }
+  })
+
+  try {
+    const first = JSON.parse(String(await workflowTool.invoke({ script: initialScript }))) as {
+      scriptPath: string
+    }
+    assert(
+      !isPathInside(workspace, first.scriptPath),
+      "new workflow scripts should exercise the app-managed path outside the workspace"
+    )
+    writeFileSync(first.scriptPath, editedScript, "utf8")
+
+    await workflowTool.invoke({ scriptPath: first.scriptPath })
+    assert(
+      launchedScripts.length === 2 && launchedScripts[1] === editedScript,
+      "a returned app-managed scriptPath must load the edited script on relaunch"
+    )
+
+    const otherThreadDir = getWorkflowRunsDir(workspace, "thread-managed-script-other")
+    const otherThreadScript = join(otherThreadDir, "wf_other123.workflow.js")
+    mkdirSync(otherThreadDir, { recursive: true })
+    writeFileSync(otherThreadScript, editedScript, "utf8")
+    let crossThreadError: unknown
+    try {
+      await workflowTool.invoke({ scriptPath: otherThreadScript })
+    } catch (error) {
+      crossThreadError = error
+    }
+    assert(
+      crossThreadError instanceof WorkflowFatalError,
+      "an app-managed workflow script belonging to another thread must stay rejected"
+    )
+
+    const arbitraryManagedFile = join(dirname(first.scriptPath), "custom.workflow.js")
+    writeFileSync(arbitraryManagedFile, editedScript, "utf8")
+    let arbitraryFileError: unknown
+    try {
+      await workflowTool.invoke({ scriptPath: arbitraryManagedFile })
+    } catch (error) {
+      arbitraryFileError = error
+    }
+    assert(
+      arbitraryFileError instanceof WorkflowFatalError,
+      "only host-issued runId.workflow.js files may use the managed-path exception"
+    )
+  } finally {
+    workflowRunManager.launch = originalLaunch
+  }
+}
+
 async function testUnawaitedPromiseWarned(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
   const result = await harness.run(
@@ -347,6 +793,28 @@ return { pending: Promise.resolve(42), ok: 1 }`,
     typeof result.warning === "string" && /await/i.test(result.warning),
     `warning must flag the unawaited promise, got: ${result.warning}`
   )
+}
+
+async function testWorkspaceIntegrationLeaseGuards(workspace: string): Promise<void> {
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const action = workflowRunManager.withWorkspaceIntegrationLease(
+    workspace,
+    "ui:lease-owner:run",
+    () => held
+  )
+  assert(
+    !workflowRunManager.isBusyForThread("lease-owner", workspace),
+    "a retained-worktree merge must not change the workflow-mode busy contract"
+  )
+  assert(
+    !workflowRunManager.isBusyForThread("unrelated-thread", workspace),
+    "an integration lease must not pin unrelated threads in the same workspace"
+  )
+  release()
+  await action
 }
 
 async function testFireAndForgetFatalFailsRun(workspace: string): Promise<void> {
@@ -972,7 +1440,7 @@ async function testClearAllAgentToolStreamsSweepsRunIdSidecars(): Promise<void> 
     writeFileSync(join(dir, `${runId}.json`), "{}") // non-toolstream
     writeFileSync(join(dir, `${runId}.journal`), "[]") // non-toolstream
 
-    clearAllAgentToolStreams(ws, threadId, runId)
+    await clearAllAgentToolStreams(ws, threadId, runId)
 
     assert(!existsSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c0")), "swept c0")
     assert(!existsSync(agentToolStreamPath(ws, threadId, runId, "oldhash_c1")), "swept c1")
@@ -1075,7 +1543,7 @@ async function testClearAllAgentToolStreamsHandlesPendingWriteNoRevival(): Promi
     persistAgentToolStream(ws, threadId, runId, key, {
       messages: [{ id: ["AIMessage"], kwargs: { content: "FLOW" } }]
     })
-    clearAllAgentToolStreams(ws, threadId, runId)
+    await clearAllAgentToolStreams(ws, threadId, runId)
     assert(
       (await readAgentToolStream(ws, threadId, runId, key)) === null,
       "an in-flight write does not survive the sweep — the ordered delete runs after it (no orphan revival)"
@@ -1174,6 +1642,56 @@ async function testReadAgentToolStreamDropsCorruptElements(): Promise<void> {
   }
 }
 
+async function testReadAgentToolStreamUsesStableBoundedCapability(): Promise<void> {
+  const ws = mkdtempSync(join(tmpdir(), "cmb-toolstream-stable-"))
+  const threadId = "thread-toolstream-stable"
+  const runId = "wf_streamstable01"
+  const key = "stable_c0"
+  const streamPath = agentToolStreamPath(ws, threadId, runId, key)
+  const valid = JSON.stringify({
+    runId,
+    toolStreamKey: key,
+    snapshotMessages: [{ id: ["AIMessage"], kwargs: { content: "safe" } }]
+  })
+  try {
+    mkdirSync(dirname(streamPath), { recursive: true })
+
+    writeFileSync(streamPath, "x".repeat(8 * 1024 * 1024 + 1))
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, key)) === null,
+      "a pre-existing oversized tool stream is rejected before allocation/parse"
+    )
+
+    writeFileSync(streamPath, valid)
+    setBeforeAgentToolStreamReadForTest((path) => {
+      if (path === streamPath) {
+        writeFileSync(path, "x".repeat(8 * 1024 * 1024 + 1), { flag: "a" })
+      }
+    })
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, key)) === null,
+      "a tool stream that grows after open is rejected by the max+1 capability read"
+    )
+
+    setBeforeAgentToolStreamReadForTest()
+    writeFileSync(streamPath, valid)
+    const displaced = `${streamPath}.displaced`
+    setBeforeAgentToolStreamReadForTest((path) => {
+      if (path === streamPath) {
+        renameSync(path, displaced)
+        writeFileSync(path, valid.replace("safe", "replacement"))
+      }
+    })
+    assert(
+      (await readAgentToolStream(ws, threadId, runId, key)) === null,
+      "path replacement after authorization cannot switch the file read by the UI"
+    )
+  } finally {
+    setBeforeAgentToolStreamReadForTest()
+    rmSync(ws, { recursive: true, force: true })
+  }
+}
+
 function testNotificationFlagsTruncationOnEscapedLength(): void {
   // A result UNDER the char cap raw but OVER it once XML-escaped (lots of `<`) is silently cut by
   // escapeAndCap (escape-then-cap). The notification must STILL mark it "(truncated" — else the model
@@ -1205,6 +1723,36 @@ function testNotificationFlagsTruncationOnEscapedLength(): void {
   )
   const shortMsg = buildWorkflowNotificationMessage({ ...baseRun, result: "ok" })
   assert(!shortMsg.includes("(truncated"), "a small result must NOT be flagged truncated")
+}
+
+async function testLegacySharedAgentHashStillReplays(workspace: string): Promise<void> {
+  const script = `export const meta = { name: "legacy-hash", description: "d" }
+return await agent("task")`
+  const legacyHash = sha256Hex(
+    JSON.stringify({
+      child: null,
+      prompt: "task",
+      schema: null,
+      model: null,
+      agentType: null,
+      agentProfile: null
+    })
+  )
+  let calls = 0
+  const harness = createHarness(workspace)
+  const result = await harness.run(
+    script,
+    async () => {
+      calls += 1
+      return { text: "rerun", structured: undefined, outputTokens: 1 }
+    },
+    {
+      journal: [{ index: 0, hash: legacyHash, result: "legacy-result" }]
+    }
+  )
+  assert(result.status === "completed", `legacy replay completed, got ${result.error}`)
+  assert(calls === 0, "a pre-worktree shared-agent journal entry must replay without re-running")
+  assert(result.result === "legacy-result", "legacy shared-agent replay returns its cached result")
 }
 
 async function testResumeRerunsWhenSessionDefaultModelChanges(workspace: string): Promise<void> {
@@ -1406,15 +1954,18 @@ async function testInitialStatePersistedImmediately(workspace: string): Promise<
 async function testInitialPersistFailureReported(): Promise<void> {
   // #4: when the initial snapshot can't reach disk, whenInitialPersisted must
   // resolve FALSE (never silently true) so launch can warn the run isn't durable
-  // instead of reporting a clean "launched". Force a write fault by rooting the run
-  // dir under a regular FILE (mkdir → ENOTDIR).
+  // instead of reporting a clean "launched". Force a write fault by rooting the
+  // app-managed data tree under a regular FILE (mkdir → ENOTDIR).
   const base = mkdtempSync(join(tmpdir(), "wf-nondir-"))
-  const fileAsWorkspace = join(base, "not-a-dir")
-  writeFileSync(fileAsWorkspace, "x")
+  const workspace = join(base, "workspace")
+  const fileAsDataRoot = join(base, "not-a-dir")
+  mkdirSync(workspace)
+  writeFileSync(fileAsDataRoot, "x")
+  process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
   const now = new Date().toISOString()
   try {
     const store = createWorkflowRunStore({
-      workspacePath: fileAsWorkspace,
+      workspacePath: workspace,
       threadId: THREAD_ID,
       initial: {
         version: 1,
@@ -1440,6 +1991,56 @@ async function testInitialPersistFailureReported(): Promise<void> {
       "an initial persist that can't write to disk resolves whenInitialPersisted=false"
     )
   } finally {
+    process.env.CMB_COWORK_AGENT_HOME = TEST_WORKFLOW_DATA_ROOT
+    rmSync(base, { recursive: true, force: true })
+  }
+}
+
+async function testInitialPersistFailureCanRecover(): Promise<void> {
+  // The launch-time promise intentionally reports only the eager write. A later
+  // successful save must nevertheless make this exact run incarnation eligible
+  // for isolated-worktree provisioning again.
+  const base = mkdtempSync(join(tmpdir(), "wf-initial-recover-"))
+  const workspace = join(base, "workspace")
+  const dataRoot = join(base, "app-data")
+  mkdirSync(workspace)
+  writeFileSync(dataRoot, "blocks mkdir")
+  process.env.CMB_COWORK_AGENT_HOME = dataRoot
+  const runId = generateWorkflowRunId()
+  const now = new Date().toISOString()
+  const store = createWorkflowRunStore({
+    workspacePath: workspace,
+    threadId: THREAD_ID,
+    initial: {
+      version: 1,
+      runId,
+      threadId: THREAD_ID,
+      workflowName: "persist-recover",
+      script: "export const meta = { name: 'x', description: 'd', phases: [] }",
+      scriptSha256: "sha",
+      status: "running",
+      phases: [],
+      currentPhase: null,
+      agents: [],
+      logs: [],
+      journal: [],
+      stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+      startedAt: now,
+      updatedAt: now
+    }
+  })
+  try {
+    assert((await store.whenInitialPersisted) === false, "fixture must fail its eager write")
+    assert(!store.isCurrentSnapshotPersisted(), "a failed eager write is not durable")
+    rmSync(dataRoot)
+    mkdirSync(dataRoot)
+    assert((await store.flush()) === true, "a later save must recover after the path is repaired")
+    assert(
+      store.isCurrentSnapshotPersisted(),
+      "the recovered current run instance must regain worktree eligibility"
+    )
+  } finally {
+    process.env.CMB_COWORK_AGENT_HOME = TEST_WORKFLOW_DATA_ROOT
     rmSync(base, { recursive: true, force: true })
   }
 }
@@ -1566,6 +2167,102 @@ async function testPersistRecoveredRunKeepsJournal(workspace: string): Promise<v
   )
 }
 
+async function testPersistRecoveredRunUpdatesBackup(workspace: string): Promise<void> {
+  const threadId = "thread-recovered-backup"
+  const runId = generateWorkflowRunId()
+  const now = new Date().toISOString()
+  const original: PersistedWorkflowRun = {
+    version: 1,
+    runId,
+    threadId,
+    workflowName: "recover-backup",
+    script: "x",
+    scriptSha256: "sha",
+    status: "completed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    worktrees: [],
+    logs: [],
+    journal: [],
+    result: "old terminal state",
+    stats: { agentsTotal: 0, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+    startedAt: now,
+    updatedAt: now
+  }
+  assert(
+    await persistRecoveredRun(workspace, threadId, original),
+    "original recovery state persists"
+  )
+  const latest: PersistedWorkflowRun = {
+    ...original,
+    result: "latest terminal state",
+    updatedAt: new Date(Date.now() + 1_000).toISOString()
+  }
+  assert(await persistRecoveredRun(workspace, threadId, latest), "latest recovery state persists")
+  const primaryPath = join(getWorkflowRunsDir(workspace, threadId), `${runId}.json`)
+  writeFileSync(primaryPath, "{ damaged primary run file")
+  assert(
+    loadWorkflowRun(workspace, threadId, runId)?.result === latest.result,
+    "a damaged primary run file falls back to the latest recovered backup, not an older terminal state"
+  )
+}
+
+async function testPersistRecoveredRunDoesNotReviveDeletedWorktree(
+  workspace: string
+): Promise<void> {
+  const runId = generateWorkflowRunId()
+  const threadId = "thread-recovered-worktree-delete"
+  const now = new Date().toISOString()
+  const staleWorktree = {
+    id: "pristine-removed",
+    runId,
+    threadId,
+    branch: "cmbcowork/wf/recovered/pristine",
+    directory: join(workspace, ".stale-worktree"),
+    workspaceDirectory: join(workspace, ".stale-worktree"),
+    sourceRoot: workspace,
+    sourceRelativePath: "",
+    sourceBranch: "main",
+    gitRoot: workspace,
+    commonDir: join(workspace, ".git"),
+    baseCommit: "a".repeat(40),
+    headCommit: "a".repeat(40),
+    dirty: false,
+    status: "running" as const,
+    updatedAt: now
+  }
+  const diskRun: PersistedWorkflowRun = {
+    version: 1,
+    runId,
+    threadId,
+    workflowName: "recover-worktree-delete",
+    script: "x",
+    scriptSha256: "sha",
+    status: "completed",
+    phases: [],
+    currentPhase: null,
+    agents: [],
+    worktrees: [staleWorktree],
+    logs: [],
+    journal: [],
+    stats: { agentsTotal: 1, agentsCached: 0, agentsFailed: 0, outputTokens: 0, durationMs: 0 },
+    startedAt: now,
+    updatedAt: now
+  }
+  assert(await persistRecoveredRun(workspace, threadId, diskRun), "stale disk fixture persists")
+
+  const terminalSnapshot: PersistedWorkflowRun = { ...diskRun, worktrees: [] }
+  assert(
+    await persistRecoveredRun(workspace, threadId, terminalSnapshot),
+    "terminal recovery snapshot persists"
+  )
+  assert(
+    loadWorkflowRun(workspace, threadId, runId)?.worktrees?.length === 0,
+    "recovery must not resurrect a pristine worktree deleted from the terminal snapshot"
+  )
+}
+
 async function testPersistRecoveredRunVerifiesAvailableSidecar(workspace: string): Promise<void> {
   const runId = generateWorkflowRunId()
   const now = new Date().toISOString()
@@ -1622,7 +2319,7 @@ async function testPersistRecoveredRunRespectsDisposedTombstone(workspace: strin
   // Thread deletion vs in-flight flush-failed retry: persistRecoveredRun is the
   // one run-store writer that mkdirs, so without the tombstone check a retry
   // that grabbed its snapshot before forgetThread() would rebuild the removed
-  // `.cmbdevclaw/workflows/<threadId>` after the sweep. Dedicated threadId —
+  // selected workflow run directory after the sweep. Dedicated threadId —
   // the tombstone is process-lifetime, so it must not poison other scenarios.
   const threadId = "thread-disposed-recovery"
   const runId = generateWorkflowRunId()
@@ -1673,7 +2370,7 @@ async function testPersistRecoveredRunRespectsDisposedTombstone(workspace: strin
 async function testReviveDoesNotRearmOldStores(): Promise<void> {
   // Deletion → revive (fixed-id recreation, e.g. heartbeat) must NOT re-arm a
   // store created BEFORE the deletion: doWrite mkdirs, so one late flush from
-  // the old incarnation would rebuild the swept `.cmbdevclaw/workflows/<id>`.
+  // the old incarnation would rebuild the swept workflow run directory.
   // The disposal-epoch fence keeps old stores permanently silent while the
   // revived incarnation's NEW stores (born at the new epoch) persist normally.
   const ws = mkdtempSync(join(tmpdir(), "cmb-revive-epoch-"))
@@ -1703,7 +2400,7 @@ async function testReviveDoesNotRearmOldStores(): Promise<void> {
       }
     })
     await store.whenInitialPersisted
-    deleteWorkflowRunsForThread(ws, threadId) // sweep + tombstones + epoch bump
+    await deleteWorkflowRunsForThread(ws, threadId) // sweep + tombstones + epoch bump
     reviveWorkflowThread(threadId) // legitimize the NEXT incarnation
     store.update((run) => {
       run.logs.push("late flush from the dead incarnation")
@@ -1748,7 +2445,7 @@ async function testRecoveredRunRespectsDisposalEpoch(): Promise<void> {
       updatedAt: now
     })
     const staleEpoch = workflowThreadDisposalEpoch(threadId) // captured pre-deletion
-    deleteWorkflowRunsForThread(ws, threadId) // bump epoch + tombstones
+    await deleteWorkflowRunsForThread(ws, threadId) // bump epoch + tombstones
     reviveWorkflowThread(threadId) // set tombstones cleared — epoch is the only fence left
     assert(
       (await persistRecoveredRun(ws, threadId, makeRun(generateWorkflowRunId()), staleEpoch)) ===
@@ -1890,14 +2587,17 @@ async function testUndeliveredScanEligibilityPredicate(): Promise<void> {
 async function testFlushReportsPersistFailure(): Promise<void> {
   // #4: flush() must report whether the FINAL write reached disk, so settle can
   // warn/retry instead of broadcasting a notification over a stale run. Force a
-  // write fault (run dir under a regular FILE → mkdir ENOTDIR).
+  // write fault (app-managed data root under a regular FILE → mkdir ENOTDIR).
   const base = mkdtempSync(join(tmpdir(), "wf-flushfail-"))
-  const fileAsWorkspace = join(base, "not-a-dir")
-  writeFileSync(fileAsWorkspace, "x")
+  const workspace = join(base, "workspace")
+  const fileAsDataRoot = join(base, "not-a-dir")
+  mkdirSync(workspace)
+  writeFileSync(fileAsDataRoot, "x")
+  process.env.CMB_COWORK_AGENT_HOME = fileAsDataRoot
   const now = new Date().toISOString()
   try {
     const store = createWorkflowRunStore({
-      workspacePath: fileAsWorkspace,
+      workspacePath: workspace,
       threadId: THREAD_ID,
       initial: {
         version: 1,
@@ -1930,6 +2630,7 @@ async function testFlushReportsPersistFailure(): Promise<void> {
       "second flush() under a persistent fault still reports false (real retry, not pseudo-true)"
     )
   } finally {
+    process.env.CMB_COWORK_AGENT_HOME = TEST_WORKFLOW_DATA_ROOT
     rmSync(base, { recursive: true, force: true })
   }
 }
@@ -2407,7 +3108,7 @@ async function testZombieRunReconciled(workspace: string): Promise<void> {
 
   // deleteWorkflowRunsForThread removes the thread's run artifacts (disk-litter
   // cleanup on thread delete).
-  deleteWorkflowRunsForThread(workspace, zombieThreadId)
+  await deleteWorkflowRunsForThread(workspace, zombieThreadId)
   assert(
     loadWorkflowRunForResume(workspace, zombieThreadId, runId) === null,
     "run artifacts removed after delete"
@@ -2451,7 +3152,7 @@ async function testDeleteVsLateFlushRace(workspace: string): Promise<void> {
   )
 
   // Thread deleted mid-run → dir removed AND marked disposed.
-  deleteWorkflowRunsForThread(workspace, threadId)
+  await deleteWorkflowRunsForThread(workspace, threadId)
   assert(loadWorkflowRunForResume(workspace, threadId, runId) === null, "run dir removed on delete")
 
   // The still-settling run now does its final update + flush. This must be a
@@ -2540,23 +3241,22 @@ try { while (true) { await agent("w" + n); n++ } } catch (e) { return { n, messa
   assert(invalid.status === "error", "non-string prompt is an error")
   assert(invalid.error?.includes("non-empty prompt string"), "prompt validation message")
 
-  // isolation is unsupported but tolerated (warn + ignore), not a hard error —
-  // a mid-tier model pulling `isolation: 'worktree'` from training must not
-  // crash the whole script; the agent just runs in the shared workspace.
+  // `worktree` is additive. Keep legacy unknown values warning-only so old
+  // model-generated scripts do not become hard failures after the upgrade.
   const isolationHarness = createHarness(workspace)
   const isolation = await isolationHarness.run(
-    `export const meta = { name: "t", description: "d" }\nreturn agent("x", { isolation: "worktree" })`,
+    `export const meta = { name: "t", description: "d" }\nreturn agent("x", { isolation: "remote" })`,
     echoRunner
   )
   assert(
     isolation.status === "completed" && isolation.result === "echo:x",
-    `isolation is ignored, not fatal, got status=${isolation.status} error=${isolation.error}`
+    `an unsupported legacy isolation must retain shared execution, got status=${isolation.status} error=${isolation.error}`
   )
   assert(
     isolationHarness.events.some(
-      (e) => e.kind === "log" && e.message.includes("isolation") && e.message.includes("worktree")
+      (event) => event.kind === "log" && event.message.includes('opts.isolation "remote"')
     ),
-    "isolation emits a warning log"
+    "an unsupported legacy isolation logs actionable compatibility guidance"
   )
 }
 
@@ -3221,8 +3921,66 @@ return workflow({ scriptPath: "child.workflow.js" })`,
   }
 }
 
+async function testSiblingChildWorkflowsCanRunInParallel(workspace: string): Promise<void> {
+  writeFileSync(
+    `${workspace}/parallel-child-a.workflow.js`,
+    `export const meta = { name: "parallel-child-a", description: "d" }
+return await agent("child-a")`
+  )
+  writeFileSync(
+    `${workspace}/parallel-child-b.workflow.js`,
+    `export const meta = { name: "parallel-child-b", description: "d" }
+return await agent("child-b")`
+  )
+  try {
+    const runner: WorkflowSubagentRunner = async (request) => {
+      // Keep the first child suspended while parallel() starts its sibling.
+      await Promise.resolve()
+      return { text: request.prompt, structured: undefined, outputTokens: 1 }
+    }
+    const result = await createHarness(workspace).run(
+      `export const meta = { name: "parallel-children", description: "d" }
+return await parallel([
+  () => workflow({ scriptPath: "parallel-child-a.workflow.js" }),
+  () => workflow({ scriptPath: "parallel-child-b.workflow.js" })
+])`,
+      runner
+    )
+    assert(result.status === "completed", `parallel child workflows complete, got ${result.error}`)
+    assert(
+      JSON.stringify(result.result) === JSON.stringify(["child-a", "child-b"]),
+      `both sibling child results are returned, got ${JSON.stringify(result.result)}`
+    )
+  } finally {
+    rmSync(`${workspace}/parallel-child-a.workflow.js`, { force: true })
+    rmSync(`${workspace}/parallel-child-b.workflow.js`, { force: true })
+  }
+}
+
 async function testChildWorkflowGuards(workspace: string): Promise<void> {
   const harness = createHarness(workspace)
+
+  // Regression: workflow() must never bring synchronous workspace reads back
+  // onto Electron's main thread. Keep this scoped to the child loader so the
+  // unrelated synchronous validation helpers in this large module do not make
+  // the assertion brittle.
+  const engineSource = readFileSync(
+    join(process.cwd(), "src/main/agent/workflow/engine.ts"),
+    "utf8"
+  )
+  const childLoaderSource = engineSource.slice(
+    engineSource.indexOf("async function loadChildWorkflowSource("),
+    engineSource.indexOf("function defaultAgentLabel(")
+  )
+  assert(childLoaderSource.length > 0, "child workflow loader source located")
+  assert(
+    childLoaderSource.includes("await openStableFileHandle(workspacePath, requestedPath)"),
+    "child workflow loader acquires an async stable file handle"
+  )
+  assert(
+    !/\b(?:readFileSync|statSync|realpathSync)\b/.test(childLoaderSource),
+    "child workflow loader contains no synchronous filesystem reads"
+  )
 
   // A real file OUTSIDE the workspace: containment must reject it even though
   // it exists (realpath-based check, so symlinked tmpdirs are handled).
@@ -3246,7 +4004,10 @@ async function testChildWorkflowGuards(workspace: string): Promise<void> {
     `export const meta = { name: "t", description: "d" }\nreturn workflow({ scriptPath: "../../no-such-file.js" })`,
     echoRunner
   )
-  assert(ghost.status === "error" && ghost.error?.includes("not found"), "ghost path rejected")
+  assert(
+    ghost.status === "error" && ghost.error?.includes("not found"),
+    `ghost path rejected, got: ${ghost.status}: ${ghost.error}`
+  )
 
   // workflow() only accepts { scriptPath } — a bare string (the removed by-name
   // form) is a clear type error, not a confusing 404 on a never-written path.
@@ -3259,8 +4020,31 @@ async function testChildWorkflowGuards(workspace: string): Promise<void> {
     `workflow(string) rejected with a scriptPath hint, got: ${badRef.error}`
   )
 
-  // #9: an oversized child script is rejected BY SIZE before the full sync read,
-  // so a path to a huge workspace file can't stall/OOM the main process.
+  // The exact byte limit remains executable; the next byte is rejected. This
+  // guards both sides of the bounded handle read (including a file that grows
+  // beyond the size observed when the capability was acquired).
+  const exactLimitPath = `${workspace}/exact-limit.workflow.js`
+  const exactPrefix =
+    'export const meta = { name: "exact-limit", description: "d" }\nreturn "at-limit"\n/*'
+  const exactSuffix = "*/"
+  const paddingBytes =
+    MAX_WORKFLOW_SCRIPT_BYTES - Buffer.byteLength(exactPrefix) - Buffer.byteLength(exactSuffix)
+  writeFileSync(exactLimitPath, `${exactPrefix}${"x".repeat(paddingBytes)}${exactSuffix}`)
+  try {
+    const exactLimit = await harness.run(
+      `export const meta = { name: "t", description: "d" }\nreturn workflow({ scriptPath: "exact-limit.workflow.js" })`,
+      echoRunner
+    )
+    assert(
+      exactLimit.status === "completed" && exactLimit.result === "at-limit",
+      `child script at the exact byte limit executes, got: ${exactLimit.error}`
+    )
+  } finally {
+    rmSync(exactLimitPath, { force: true })
+  }
+
+  // An oversized child script is rejected before allocating or reading in
+  // proportion to its size, so a huge workspace file cannot stall/OOM main.
   const hugePath = `${workspace}/huge.workflow.js`
   writeFileSync(hugePath, "x".repeat(MAX_WORKFLOW_SCRIPT_BYTES + 1))
   try {
@@ -3276,9 +4060,9 @@ async function testChildWorkflowGuards(workspace: string): Promise<void> {
     rmSync(hugePath, { force: true })
   }
 
-  // #8: a child scriptPath pointing at a NON-regular file (dir/FIFO/socket/device)
-  // is rejected before the synchronous readFileSync — reading a FIFO would freeze
-  // the main process. A directory is the portable stand-in for "exists, not a file".
+  // A child scriptPath pointing at a NON-regular file (dir/FIFO/socket/device)
+  // is rejected during non-blocking capability acquisition. A directory is the
+  // portable stand-in for "exists, not a file" on Windows and Unix.
   mkdirSync(join(workspace, "child-dir"), { recursive: true })
   const dirChild = await harness.run(
     `export const meta = { name: "t", description: "d" }\nreturn workflow({ scriptPath: "child-dir" })`,
@@ -3564,7 +4348,7 @@ return "newer"`,
     // oldest (= the undelivered buried run) past the cap; it must survive while
     // delivered runs past the cap are pruned.
     const before = listWorkflowRuns(buriedWs, THREAD_ID).length
-    pruneWorkflowRuns(buriedWs, THREAD_ID, 3)
+    await pruneWorkflowRuns(buriedWs, THREAD_ID, 3)
     const stillFound = findUndeliveredTerminalRun(buriedWs, THREAD_ID)
     assert(
       stillFound?.runId === buried.runId,
@@ -3996,28 +4780,40 @@ async function testModelFallbackOnlyOnUnavailable(): Promise<void> {
     "a checkpointer fault is NOT model-unavailable"
   )
 
-  const mkDeps = (firstError: Error): WorkflowSubagentDeps =>
+  type RuntimeCall = { agentId: string; modelId?: string }
+  const mkDeps = (firstError: Error, calls: RuntimeCall[] = []): WorkflowSubagentDeps =>
     ({
       defaultModelId: "custom:default",
       cleanupThread: async () => {},
-      createRuntime: async ({ modelId }: { modelId?: string }) => {
+      createRuntime: async ({ agentId, modelId }: { agentId: string; modelId?: string }) => {
+        calls.push({ agentId, modelId })
         if (modelId === "custom:wanted") throw firstError
         return {} as never
       }
     }) as unknown as WorkflowSubagentDeps
   const opts = {
     threadId: "t",
+    agentId: "wf_run:agent:4",
     extraSystemPrompt: "",
     abortSignal: new AbortController().signal,
     label: "L",
     model: "wanted"
   }
 
+  const fallbackCalls: RuntimeCall[] = []
   const fellBack = await createRuntimeWithModelFallback(
-    mkDeps(new Error("Custom model not configured. Please configure a model in Settings.")),
+    mkDeps(
+      new Error("Custom model not configured. Please configure a model in Settings."),
+      fallbackCalls
+    ),
     opts
   )
   assert(fellBack.modelFellBack === true, "an unavailable model falls back to the default")
+  assert(fallbackCalls.length === 2, "model fallback creates the requested and default runtimes")
+  assert(
+    fallbackCalls.every((call) => call.agentId === opts.agentId),
+    "model fallback preserves the workflow agent identity"
+  )
 
   let propagated = false
   try {
@@ -4026,6 +4822,112 @@ async function testModelFallbackOnlyOnUnavailable(): Promise<void> {
     propagated = true
   }
   assert(propagated, "a non-model init fault propagates instead of silently downgrading")
+}
+
+async function testWorkflowAgentIdentityStableAcrossRetry(): Promise<void> {
+  const runtimeCalls: Array<{ threadId: string; agentId: string }> = []
+  const deps = {
+    parentThreadId: "parent",
+    cleanupThread: async () => {},
+    isRetryableApiError: (error: unknown) =>
+      error instanceof Error && error.message === "retryable runtime init",
+    createRuntime: async (options: {
+      threadId: string
+      agentId: string
+    }): Promise<{ stream: () => Promise<AsyncIterable<unknown>> }> => {
+      runtimeCalls.push({ threadId: options.threadId, agentId: options.agentId })
+      if (runtimeCalls.length === 1) throw new Error("retryable runtime init")
+      return {
+        stream: async () =>
+          (async function* (): AsyncIterable<unknown> {
+            yield ["values", { messages: [{ type: "ai", content: "done" }] }]
+          })()
+      }
+    }
+  } as unknown as WorkflowSubagentDeps
+
+  const result = await runWorkflowSubagent(deps, {
+    prompt: "retry identity",
+    agentIndex: 7,
+    label: "retry-agent",
+    runId: "wf_retry_identity",
+    signal: new AbortController().signal
+  })
+
+  assert(result.text === "done", "workflow retry returns the successful second-attempt output")
+  assert(runtimeCalls.length === 2, "retryable runtime failure creates a fresh runtime")
+  assert(
+    runtimeCalls[0]?.threadId !== runtimeCalls[1]?.threadId,
+    "workflow retry uses a fresh checkpoint thread"
+  )
+  assert(
+    runtimeCalls.every((call) => call.agentId === "wf_retry_identity:agent:7"),
+    "workflow retry preserves one stable agent identity across checkpoint threads"
+  )
+}
+
+async function testWorktreeSubagentPromptAndBoundaryPropagation(): Promise<void> {
+  const runtimeCalls: Array<{
+    extraSystemPrompt: string
+    worktreeIsolation?: WorkflowWorktreeIsolationBoundary
+  }> = []
+  const deps = {
+    parentThreadId: "parent",
+    cleanupThread: async () => {},
+    isRetryableApiError: () => false,
+    createRuntime: async (options: {
+      extraSystemPrompt: string
+      worktreeIsolation?: WorkflowWorktreeIsolationBoundary
+    }) => {
+      runtimeCalls.push(options)
+      return {
+        stream: async () =>
+          (async function* (): AsyncIterable<unknown> {
+            yield ["values", { messages: [{ type: "ai", content: "done" }] }]
+          })()
+      }
+    }
+  } as unknown as WorkflowSubagentDeps
+  const boundary: WorkflowWorktreeIsolationBoundary = {
+    workspaceRoot: "/managed/agent/workspace",
+    worktreeRoot: "/managed/agent",
+    commonDir: "/source/.git",
+    branch: "cmbcowork/wf/run/agent"
+  }
+
+  await runWorkflowSubagent(deps, {
+    prompt: "isolated",
+    agentIndex: 8,
+    label: "isolated",
+    runId: "wf_prompt_boundary",
+    signal: new AbortController().signal,
+    worktreeIsolation: boundary
+  })
+  await runWorkflowSubagent(deps, {
+    prompt: "shared",
+    agentIndex: 9,
+    label: "shared",
+    runId: "wf_prompt_boundary",
+    signal: new AbortController().signal
+  })
+
+  assert(runtimeCalls[0]?.worktreeIsolation === boundary, "runtime receives the immutable boundary")
+  assert(
+    runtimeCalls[0]?.extraSystemPrompt.includes(boundary.workspaceRoot) &&
+      runtimeCalls[0]?.extraSystemPrompt.includes(boundary.branch) &&
+      runtimeCalls[0]?.extraSystemPrompt.includes("separate from the source working directory") &&
+      runtimeCalls[0]?.extraSystemPrompt.includes("preserved for review if changed") &&
+      runtimeCalls[0]?.extraSystemPrompt.includes(
+        "these native Git instructions override the ordinary task-card commit workflow"
+      ) &&
+      runtimeCalls[0]?.extraSystemPrompt.includes("use `git add` and `git commit`") &&
+      runtimeCalls[0]?.extraSystemPrompt.includes("Do not push"),
+    "isolated subagent prompt keeps the short reminder plus native Git boundaries"
+  )
+  assert(
+    !runtimeCalls[1]?.extraSystemPrompt.includes("running in an isolated Git worktree"),
+    "shared subagents do not receive worktree-only instructions"
+  )
 }
 
 async function testGlobCapStreamEarlyStop(): Promise<void> {
@@ -4147,21 +5049,32 @@ return "WROTE"`,
     const outsideTarget = join(dirname(dir), `wf-escape-${basename(dir)}.txt`)
     writeFileSync(outsideTarget, "original")
     try {
-      symlinkSync(outsideTarget, join(dir, "link.txt"))
-      const symEscape = await createHarness(dir).run(
-        `export const meta = { name: "js", description: "d" }
+      let symlinkAvailable = true
+      try {
+        symlinkSync(outsideTarget, join(dir, "link.txt"))
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? error.code : undefined
+        if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES")) throw error
+        symlinkAvailable = false
+        console.log("SKIP workflow file-symlink jail check: Windows symlink privilege unavailable")
+      }
+
+      if (symlinkAvailable) {
+        const symEscape = await createHarness(dir).run(
+          `export const meta = { name: "js", description: "d" }
 await writeFile("link.txt", "HACKED")
 return "WROTE"`,
-        echoRunner
-      )
-      assert(
-        symEscape.status === "error" && /workspace/.test(symEscape.error ?? ""),
-        `writeFile via a workspace symlink pointing out must be rejected, got ${symEscape.status}: ${symEscape.error}`
-      )
-      assert(
-        readFileSync(outsideTarget, "utf-8") === "original",
-        "the outside target must be left untouched"
-      )
+          echoRunner
+        )
+        assert(
+          symEscape.status === "error" && /workspace/.test(symEscape.error ?? ""),
+          `writeFile via a workspace symlink pointing out must be rejected, got ${symEscape.status}: ${symEscape.error}`
+        )
+        assert(
+          readFileSync(outsideTarget, "utf-8") === "original",
+          "the outside target must be left untouched"
+        )
+      }
     } finally {
       rmSync(outsideTarget, { force: true })
     }
@@ -4234,6 +5147,8 @@ return await agent("x")`,
 }
 
 async function main(): Promise<void> {
+  TEST_WORKFLOW_DATA_ROOT = mkdtempSync(join(tmpdir(), "cmb-workflow-engine-data-"))
+  process.env.CMB_COWORK_AGENT_HOME = TEST_WORKFLOW_DATA_ROOT
   const workspace = mkdtempSync(join(tmpdir(), "wf-engine-test-"))
   // Isolate HOME so the host's ~/.cmbcoworkagent/agents/ global agents can't leak
   // into agentType-resolution tests (the engine calls loadAgentProfiles internally,
@@ -4272,6 +5187,11 @@ async function main(): Promise<void> {
     await testPhaseModelRouting(workspace)
     await testOversizedStructuredNotJournaled(workspace)
     await testRunStoreListAndNotification(workspace)
+    await testResumeKeepsDurableWorktrees(workspace)
+    await testResumeReloadsWorktreesAfterApproval(workspace)
+    await testResumeUsesFlushFailedSnapshotJournal(workspace)
+    await testReturnedManagedScriptPathCanBeEditedAndRelaunched(workspace)
+    await testWorkspaceIntegrationLeaseGuards(workspace)
     await testSandboxEscapeBlocked(workspace)
     await testParallelInternalResume(workspace)
     await testUnawaitedPromiseWarned(workspace)
@@ -4282,11 +5202,13 @@ async function main(): Promise<void> {
     testWorkflowTraceToolDetails()
     await testWorkflowAgentSnapshotBounding()
     await testAgentToolStreamStaleSidecarKilled()
+    await testReadAgentToolStreamUsesStableBoundedCapability()
     await testClearAllAgentToolStreamsSweepsRunIdSidecars()
     await testClearAllAgentToolStreamsHandlesPendingWriteNoRevival()
     await testAppendJournalPreservesDifferentHashAtSameIndex()
     await testReadAgentToolStreamDropsCorruptElements()
     testNotificationFlagsTruncationOnEscapedLength()
+    await testLegacySharedAgentHashStillReplays(workspace)
     await testResumeRerunsWhenSessionDefaultModelChanges(workspace)
     await testScriptWriteFileRoutesThroughRunLock(workspace)
     await testResumeRefusesWhenJournalLost(workspace)
@@ -4304,6 +5226,7 @@ async function main(): Promise<void> {
     await testAgentFailureReason(workspace)
     await testInitialStatePersistedImmediately(workspace)
     await testInitialPersistFailureReported()
+    await testInitialPersistFailureCanRecover()
     await testPendingNotificationBacklogDrain(workspace)
     await testResumeAckInstanceFence(workspace)
     await testGuestReadFileRejectsNonRegular()
@@ -4311,6 +5234,8 @@ async function main(): Promise<void> {
     await testJournalSidecarSplit(workspace)
     await testFlushReportsPersistFailure()
     await testPersistRecoveredRunKeepsJournal(workspace)
+    await testPersistRecoveredRunUpdatesBackup(workspace)
+    await testPersistRecoveredRunDoesNotReviveDeletedWorktree(workspace)
     await testPersistRecoveredRunVerifiesAvailableSidecar(workspace)
     await testPersistRecoveredRunRespectsDisposedTombstone(workspace)
     await testReviveDoesNotRearmOldStores()
@@ -4319,23 +5244,30 @@ async function main(): Promise<void> {
     await testUndeliveredScanEligibilityPredicate()
     testResumedFlagPersisted()
     testReconcileHydratedRun()
+    testRendererWorktreeProgressAndHydration()
     await testGlobCapStreamEarlyStop()
     await testModelFallbackOnlyOnUnavailable()
+    await testWorkflowAgentIdentityStableAcrossRetry()
+    await testWorktreeSubagentPromptAndBoundaryPropagation()
     testNotificationTurnPromptInSync()
     testRendererNotificationFullMatch()
     testWorkflowNotificationTurnMessageFullMatch()
     testByNewestRunTieBreak()
     await testChildWorkflowPhaseModelInherited(workspace)
+    await testSiblingChildWorkflowsCanRunInParallel(workspace)
     await testLogArgBoxedInVm(workspace)
     await testAgentOptsBoxedAfterAwait(workspace)
-    console.log("PASS workflow-engine (83 tests)")
+    console.log("PASS workflow-engine (96 tests)")
   } finally {
+    if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+    else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
     if (origHome === undefined) delete process.env.HOME
     else process.env.HOME = origHome
     if (origUserProfile === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = origUserProfile
     rmSync(isolatedHome, { recursive: true, force: true })
     rmSync(workspace, { recursive: true, force: true })
+    rmSync(TEST_WORKFLOW_DATA_ROOT, { recursive: true, force: true })
   }
 }
 

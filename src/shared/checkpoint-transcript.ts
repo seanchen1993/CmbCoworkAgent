@@ -606,11 +606,34 @@ export function isWorkflowPlumbingTranscriptContent(content: unknown): boolean {
   )
 }
 
-function isVisibleTranscriptMessage(role: string, content: unknown): boolean {
+/**
+ * Shared definition of a user-visible conversation row. Keep durable-message,
+ * checkpoint and renderer guards on this one predicate so internal goal and
+ * workflow plumbing cannot accidentally lock an otherwise empty task.
+ */
+export function isVisibleTranscriptMessage(role: string, content: unknown): boolean {
   return (
     !isInternalGoalPrompt(role, content) &&
     !isGoalTranscriptArtifact(role, content) &&
     !isWorkflowPlumbingTranscriptContent(content)
+  )
+}
+
+/**
+ * A starting goal prompt is internal transport, but the renderer restores it
+ * as a visible `/goal <objective>` bubble when the sidecar event has not been
+ * persisted yet. Mutation guards therefore count it as conversation state
+ * while display filtering continues to hide the raw prompt itself.
+ */
+export function isRestorableConversationTranscriptMessage(
+  role: string,
+  content: unknown
+): boolean {
+  if (isVisibleTranscriptMessage(role, content)) return true
+  return (
+    isInternalGoalPrompt(role, content) &&
+    typeof content === "string" &&
+    content.trimStart().startsWith("[Starting active goal]")
   )
 }
 

@@ -206,6 +206,71 @@ export interface ParsedWorkflowScript {
   body: string
 }
 
+/** The only isolation mode implemented by this engine. Runtime JavaScript can
+ * still contain legacy/unknown values; those retain the pre-worktree warning +
+ * shared-workspace behavior instead of making this additive feature break an
+ * existing workflow. Typed callers can request only the implemented mode. */
+export type WorkflowAgentIsolation = "worktree"
+
+export type WorkflowWorktreeStatus =
+  | "provisioning"
+  | "running"
+  | "ready"
+  | "recoverable"
+  | "integrating"
+  | "merged"
+  | "discarded"
+
+/** Durable ownership record for one workflow-created worktree. This is persisted
+ * independently of the model result, so a restart can distinguish user work from
+ * disposable checkout residue even when the workflow returns unrelated data. */
+export interface WorkflowWorktreeRecord {
+  id: string
+  runId: string
+  /** Owning thread. Required so recovery never guesses manifest ownership. */
+  threadId: string
+  branch: string
+  directory: string
+  /** Directory exposed to the agent. It may be a repository subdirectory. */
+  workspaceDirectory: string
+  /** Actual checkout from which this run was isolated (primary or linked worktree). */
+  sourceRoot: string
+  sourceRelativePath: string
+  sourceBranch: string
+  gitRoot: string
+  commonDir: string
+  baseCommit: string
+  headCommit?: string
+  /** Exact app-created integration transaction. Recovery may refresh or roll
+   * back only when both hashes still match the target ref; shape/ancestry alone
+   * cannot distinguish a user's manual merge. */
+  integrationParent?: string
+  integrationCommit?: string
+  dirty: boolean
+  status: WorkflowWorktreeStatus
+  /** True while a terminal checkout/branch still needs explicit cleanup. */
+  cleanupPending?: boolean
+  error?: string
+  updatedAt: string
+}
+
+/**
+ * Immutable execution boundary for one isolated workflow agent. It is resolved
+ * from Git's own worktree registry immediately before the agent starts, so the
+ * shell guard never has to trust paths supplied by the workflow script or the
+ * renderer.
+ */
+export interface WorkflowWorktreeIsolationBoundary {
+  /** Repository subdirectory exposed as the agent's file/shell cwd. */
+  workspaceRoot: string
+  /** Root of this agent's linked checkout. */
+  worktreeRoot: string
+  /** Shared object/ref store used by Git validation and host-side commits. */
+  commonDir: string
+  /** The only branch the isolated agent may advance. */
+  branch: string
+}
+
 /** Options accepted by the sandboxed `agent(prompt, opts)` primitive. */
 export interface WorkflowAgentOptions {
   label?: string
@@ -214,6 +279,9 @@ export interface WorkflowAgentOptions {
   schema?: Record<string, unknown>
   /** Configured model id or provider model name; falls back to the session model. */
   model?: string
+  /** Run this agent in its own git worktree on a fresh branch instead of the
+   * shared workspace. Its ownership is managed by the host, not the script result. */
+  isolation?: WorkflowAgentIsolation
 }
 
 export interface WorkflowSubagentResult {
@@ -250,6 +318,10 @@ export type WorkflowSubagentRunner = (request: {
   disallowedTools?: string[]
   /** agentType-resolved shell policy (undefined = full). */
   shellAccess?: AgentShellAccess
+  /** When "worktree", the runner MUST run this agent in a private git worktree and
+   * MUST fail the call if it cannot — degrading to the shared workspace would give
+   * the script less isolation than it asked for while looking like it worked. */
+  isolation?: WorkflowAgentIsolation
 }) => Promise<WorkflowSubagentResult>
 
 export type WorkflowRunStatus = "running" | "completed" | "error" | "aborted"
@@ -275,6 +347,8 @@ export type WorkflowProgressEvent =
       description: string
       phases: string[]
       resumed: boolean
+      /** Durable deliverables inherited when this runId is resumed. */
+      worktrees?: WorkflowWorktreeRecord[]
     }
   | { kind: "phase"; runId: string; title: string }
   | { kind: "log"; runId: string; message: string }
@@ -302,6 +376,8 @@ export type WorkflowProgressEvent =
       /** Truncated final text for live drill-down in the panel. */
       resultPreview?: string
     }
+  | { kind: "worktree_update"; runId: string; worktree: WorkflowWorktreeRecord }
+  | { kind: "worktree_remove"; runId: string; worktreeId: string }
   | {
       kind: "finished"
       runId: string
@@ -383,6 +459,8 @@ export interface PersistedWorkflowRun {
   phases: string[]
   currentPhase: string | null
   agents: WorkflowAgentStateRecord[]
+  /** Durable worktree deliverables/recovery entries. Optional for legacy runs. */
+  worktrees?: WorkflowWorktreeRecord[]
   logs: string[]
   journal: WorkflowJournalEntry[]
   result?: unknown
@@ -466,6 +544,8 @@ export interface WorkflowRunSummary {
   startedAt: string
   completedAt?: string
   agentCount: number
+  /** Internal history-index hint; renderer callers may ignore it. */
+  notificationDelivered?: boolean
 }
 
 export class WorkflowScriptError extends Error {

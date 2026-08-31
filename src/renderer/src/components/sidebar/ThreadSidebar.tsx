@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react"
+import { useShallow } from "zustand/react/shallow"
 import {
   Plus,
   Trash2,
@@ -39,14 +40,27 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog"
+import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
+import { ThreadGroupDeleteDialog } from "./ThreadGroupDeleteDialog"
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
-  useAllThreadStates,
+  useThreadStateSummaries,
   useThreadContext
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
 import { useFeatureGate } from "@/lib/feature-gates"
+import {
+  cleanupDeletedThreadIfResident,
+  deleteThreadGroupSequentially,
+  hasRunningThreadForDeletion,
+  runBestEffortCommittedDeletionCleanups
+} from "@/lib/thread-group-deletion"
+import {
+  haveSameThreadGroupSelection,
+  listCompleteThreadGroupSelection,
+  type ThreadGroupSelectionEntry
+} from "@/lib/thread-group-selection"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
@@ -57,7 +71,8 @@ import {
   ContextMenuTrigger
 } from "@/components/ui/context-menu"
 import { WorkspaceRenameDialog } from "./WorkspaceRenameDialog"
-import type { ForkableCheckpoint, Thread, ThreadForkOverrides } from "@/types"
+import type { Thread } from "@/types"
+import { selectBoundedSidebarWindow } from "./thread-sidebar-window"
 
 const NO_WORKSPACE_PROJECT_KEY = "__no_workspace__"
 const COLLAPSED_PROJECTS_STORAGE_KEY = "threads:collapsedProjects"
@@ -66,8 +81,9 @@ const PROJECT_NAME_OVERRIDES_STORAGE_KEY = "threads:projectNameOverrides"
 /** 工作区展开时默认可见的 thread 条数;点"展开显示"每次追加的条数。 */
 const DEFAULT_VISIBLE_THREADS = 5
 const VISIBLE_THREADS_STEP = 10
+const DEFAULT_VISIBLE_PROJECTS = 60
+const VISIBLE_PROJECTS_STEP = 60
 type SidebarTab = "chat" | "project"
-type ForkDestinationMode = "local" | "workspace"
 
 interface ThreadProject {
   key: string
@@ -78,6 +94,13 @@ interface ThreadProject {
   isPinned: boolean
   hasCustomName: boolean
   sortIndex: number
+}
+
+interface ThreadProjectDeleteTarget {
+  key: string
+  name: string
+  selector: { type: "workspace"; workspacePath: string | null }
+  selection: ThreadGroupSelectionEntry[]
 }
 
 function getThreadWorkspacePath(thread: Thread, statePath?: string | null): string | null {
@@ -135,35 +158,6 @@ function formatCompactTime(date: Date | string): string {
   const day = d.getDate()
   if (d.getFullYear() === now.getFullYear()) return `${month}/${day}`
   return `${String(d.getFullYear()).slice(2)}/${month}/${day}`
-}
-
-function formatCheckpointTime(value?: string): string {
-  if (!value) return "未知时间"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "未知时间"
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date)
-}
-
-function getForkUnstableReasonLabel(reason?: ForkableCheckpoint["unstableReason"]): string {
-  switch (reason) {
-    case "interrupt":
-      return "中断中"
-    case "pending_approval":
-      return "等待审批"
-    case "pending_writes":
-      return "写入未完成"
-    case "in_progress_turn":
-      return "运行中"
-    case "missing_boundary_marker":
-      return "非完成边界"
-    default:
-      return "不可 fork"
-  }
 }
 
 function getDisplayThreadTitle(thread: Thread): string {
@@ -476,10 +470,14 @@ export function ThreadSidebar(): React.JSX.Element {
     currentThreadId,
     createThread,
     forkThread,
-    listForkableCheckpoints,
     selectThread,
     deleteThread,
+    finalizeThreadDeletions,
     updateThread,
+    threadDirectoryHasMore,
+    threadDirectoryLoadingMore,
+    loadMoreThreads,
+    touchThreadSummaries,
     mainView,
     previousThreadId,
     pendingEvolution,
@@ -492,10 +490,38 @@ export function ThreadSidebar(): React.JSX.Element {
     showDashboardView,
     setShowDashboardView,
     dashboardAllowed
-  } = useAppStore()
+  } = useAppStore(
+    useShallow((state) => ({
+      threads: state.threads,
+      currentThreadId: state.currentThreadId,
+      createThread: state.createThread,
+      forkThread: state.forkThread,
+      listForkableCheckpoints: state.listForkableCheckpoints,
+      selectThread: state.selectThread,
+      deleteThread: state.deleteThread,
+      finalizeThreadDeletions: state.finalizeThreadDeletions,
+      updateThread: state.updateThread,
+      threadDirectoryHasMore: state.threadDirectoryHasMore,
+      threadDirectoryLoadingMore: state.threadDirectoryLoadingMore,
+      loadMoreThreads: state.loadMoreThreads,
+      touchThreadSummaries: state.touchThreadSummaries,
+      mainView: state.mainView,
+      previousThreadId: state.previousThreadId,
+      pendingEvolution: state.pendingEvolution,
+      showCustomizeView: state.showCustomizeView,
+      setShowCustomizeView: state.setShowCustomizeView,
+      showKanbanView: state.showKanbanView,
+      setShowKanbanView: state.setShowKanbanView,
+      showHarnessBoardView: state.showHarnessBoardView,
+      setShowHarnessBoardView: state.setShowHarnessBoardView,
+      showDashboardView: state.showDashboardView,
+      setShowDashboardView: state.setShowDashboardView,
+      dashboardAllowed: state.dashboardAllowed
+    }))
+  )
 
   const { cleanupThread } = useThreadContext()
-  const allThreadStates = useAllThreadStates()
+  const threadStateSummaries = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
 
   // FIX: 发送消息后侧边栏线程时间不更新。
@@ -504,39 +530,24 @@ export function ThreadSidebar(): React.JSX.Element {
   useEffect(() => {
     const prev = streamChangeRef.current
     const now = new Date()
-    let changed = false
+    const affectedIds = new Set<string>()
     // 检查当前所有线程的加载状态变化
     for (const threadId of Object.keys(allStreamLoadingStates)) {
       const wasLoading = prev[threadId] === true
       const isLoading = allStreamLoadingStates[threadId] === true
       if (isLoading !== wasLoading) {
-        changed = true
-        break
+        affectedIds.add(threadId)
       }
     }
     // 检查是否有线程从加载状态中移除（流式结束）
-    if (!changed) {
-      for (const threadId of Object.keys(prev)) {
-        if (!(threadId in allStreamLoadingStates)) {
-          changed = true
-          break
-        }
+    for (const threadId of Object.keys(prev)) {
+      if (!(threadId in allStreamLoadingStates)) {
+        affectedIds.add(threadId)
       }
     }
-    if (changed) {
-      // 收集所有受影响的 thread ID（当前 + 之前但已移除的）
-      const affectedIds = new Set([
-        ...Object.keys(allStreamLoadingStates),
-        ...Object.keys(prev)
-      ])
-      useAppStore.setState((state) => ({
-        threads: state.threads.map((t) =>
-          affectedIds.has(t.thread_id) ? { ...t, updated_at: now } : t
-        )
-      }))
-    }
+    touchThreadSummaries(affectedIds, now)
     streamChangeRef.current = { ...allStreamLoadingStates }
-  }, [allStreamLoadingStates])
+  }, [allStreamLoadingStates, touchThreadSummaries])
 
   const [robots, setRobots] = useState<ChatXRobotConfig[]>([])
   const [showRobotPicker, setShowRobotPicker] = useState(false)
@@ -563,6 +574,7 @@ export function ThreadSidebar(): React.JSX.Element {
   // 每个工作区当前可见的 thread 条数(无记录 = 默认 5)。会话级状态:
   // 折叠工作区时清除,重新展开回到默认 5 条;不落盘。
   const [visibleThreadCounts, setVisibleThreadCounts] = useState<Record<string, number>>({})
+  const [visibleProjectCount, setVisibleProjectCount] = useState(DEFAULT_VISIBLE_PROJECTS)
   const [pinnedProjectKeys, setPinnedProjectKeys] = useState<Set<string>>(() =>
     readStoredStringSet(PINNED_PROJECTS_STORAGE_KEY)
   )
@@ -575,19 +587,17 @@ export function ThreadSidebar(): React.JSX.Element {
   const [exportingThreadId, setExportingThreadId] = useState<string | null>(null)
   const [forkingThreadId, setForkingThreadId] = useState<string | null>(null)
   const [forkDialogThread, setForkDialogThread] = useState<Thread | null>(null)
-  const [forkCheckpoints, setForkCheckpoints] = useState<ForkableCheckpoint[]>([])
-  const [selectedForkCheckpoint, setSelectedForkCheckpoint] =
-    useState<ForkableCheckpoint | null>(null)
-  const [forkDestinationMode, setForkDestinationMode] =
-    useState<ForkDestinationMode>("local")
-  const [forkWorkspacePath, setForkWorkspacePath] = useState<string | null>(null)
-  const [selectingForkWorkspace, setSelectingForkWorkspace] = useState(false)
-  const [loadingForkCheckpoints, setLoadingForkCheckpoints] = useState(false)
-  const [projectToDelete, setProjectToDelete] = useState<ThreadProject | null>(null)
+  const [projectToDelete, setProjectToDelete] = useState<ThreadProjectDeleteTarget | null>(null)
+  const [confirmingProjectDeletion, setConfirmingProjectDeletion] = useState(false)
   const [projectToRename, setProjectToRename] = useState<ThreadProject | null>(null)
   const exportingThreadIdRef = useRef<string | null>(null)
   const forkingThreadIdRef = useRef<string | null>(null)
-  const forkCheckpointRequestRef = useRef(0)
+  const projectDeletionInFlightRef = useRef(false)
+  const projectDeletionSelectionInFlightRef = useRef(false)
+  const threadStateSummariesRef = useRef(threadStateSummaries)
+  const streamLoadingStatesRef = useRef(allStreamLoadingStates)
+  threadStateSummariesRef.current = threadStateSummaries
+  streamLoadingStatesRef.current = allStreamLoadingStates
   const activeSidebarTab: SidebarTab =
     showHarnessBoardView || mainView === "harness" ? "project" : "chat"
   const {
@@ -689,12 +699,38 @@ export function ThreadSidebar(): React.JSX.Element {
     [persistUnread]
   )
 
+  const markReadMany = useCallback(
+    (threadIds: Iterable<string>) => {
+      const deletedIds = new Set(threadIds)
+      if (deletedIds.size === 0) return
+      setUnreadIds((prev) => {
+        let changed = false
+        const next = new Set(prev)
+        for (const threadId of deletedIds) {
+          if (next.delete(threadId)) changed = true
+        }
+        if (!changed) return prev
+        try {
+          persistUnread(next)
+        } catch (error) {
+          console.warn("[ThreadSidebar] Failed to persist grouped read state:", error)
+        }
+        return next
+      })
+    },
+    [persistUnread]
+  )
+
   const threadProjects = useMemo<ThreadProject[]>(() => {
     const projectMap = new Map<string, ThreadProject>()
     let sortIndex = 0
 
-    for (const thread of threads.filter((item) => !isHarnessProjectModeThread(item))) {
-      const path = getThreadWorkspacePath(thread, allThreadStates[thread.thread_id]?.workspacePath)
+    for (const thread of threads) {
+      if (isHarnessProjectModeThread(thread)) continue
+      const path = getThreadWorkspacePath(
+        thread,
+        threadStateSummaries[thread.thread_id]?.workspacePath
+      )
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
 
@@ -718,20 +754,74 @@ export function ThreadSidebar(): React.JSX.Element {
       }
     }
 
-    return Array.from(projectMap.values()).sort((a, b) => {
-      if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1
-      return a.sortIndex - b.sortIndex
-    })
-  }, [allThreadStates, pinnedProjectKeys, projectNameOverrides, threads])
+    const pinned: ThreadProject[] = []
+    const regular: ThreadProject[] = []
+    for (const project of projectMap.values()) {
+      if (project.isPinned) pinned.push(project)
+      else regular.push(project)
+    }
+    return [...pinned, ...regular]
+  }, [pinnedProjectKeys, projectNameOverrides, threadStateSummaries, threads])
+
+  const currentThread = useMemo(() => {
+    if (!currentThreadId) return null
+    return threads.find((thread) => thread.thread_id === currentThreadId) ?? null
+  }, [currentThreadId, threads])
 
   const currentThreadWorkspacePath = useMemo(() => {
-    if (!currentThreadId) return null
-
-    const currentThread = threads.find((thread) => thread.thread_id === currentThreadId)
     if (!currentThread || isHarnessFeatureThread(currentThread)) return null
 
-    return getThreadWorkspacePath(currentThread, allThreadStates[currentThreadId]?.workspacePath)
-  }, [allThreadStates, currentThreadId, threads])
+    return getThreadWorkspacePath(
+      currentThread,
+      threadStateSummaries[currentThread.thread_id]?.workspacePath
+    )
+  }, [currentThread, threadStateSummaries])
+
+  const currentProjectKey = currentThread
+    ? currentThreadWorkspacePath || NO_WORKSPACE_PROJECT_KEY
+    : null
+  const selectedProjectIndex = useMemo(
+    () =>
+      currentProjectKey
+        ? threadProjects.findIndex((project) => project.key === currentProjectKey)
+        : -1,
+    [currentProjectKey, threadProjects]
+  )
+  const visibleProjectWindow = useMemo(
+    () => selectBoundedSidebarWindow(threadProjects, visibleProjectCount, selectedProjectIndex),
+    [selectedProjectIndex, threadProjects, visibleProjectCount]
+  )
+
+  const projectStatusByKey = useMemo(() => {
+    const status = new Map<
+      string,
+      { unreadCount: number; hasContextReminderThread: boolean; hasRunningThread: boolean }
+    >()
+    for (const project of threadProjects) {
+      let unreadCount = 0
+      let hasContextReminderThread = false
+      let hasRunningThread = false
+      for (const thread of project.threads) {
+        const summary = threadStateSummaries[thread.thread_id]
+        if (unreadIds.has(thread.thread_id)) unreadCount += 1
+        if (summary?.hasContextReminder) hasContextReminderThread = true
+        if (
+          (allStreamLoadingStates[thread.thread_id] ?? false) ||
+          summary?.hasRunningCoordinatorWorker ||
+          summary?.scheduledTaskLoading ||
+          summary?.workflowRunning
+        ) {
+          hasRunningThread = true
+        }
+      }
+      status.set(project.key, {
+        unreadCount,
+        hasContextReminderThread,
+        hasRunningThread
+      })
+    }
+    return status
+  }, [allStreamLoadingStates, threadProjects, threadStateSummaries, unreadIds])
 
   const toggleProject = useCallback(
     (projectKey: string) => {
@@ -744,8 +834,9 @@ export function ThreadSidebar(): React.JSX.Element {
           // 折叠即丢弃展开进度,下次展开回到默认 5 条。
           setVisibleThreadCounts((counts) => {
             if (!(projectKey in counts)) return counts
-            const { [projectKey]: _dropped, ...rest } = counts
-            return rest
+            const next = { ...counts }
+            delete next[projectKey]
+            return next
           })
         }
         persistCollapsedProjects(next)
@@ -768,9 +859,12 @@ export function ThreadSidebar(): React.JSX.Element {
     [persistCollapsedProjects]
   )
 
-  const allProjectsCollapsed =
-    threadProjects.length > 0 &&
-    threadProjects.every((project) => collapsedProjectKeys.has(project.key))
+  const allProjectsCollapsed = useMemo(
+    () =>
+      threadProjects.length > 0 &&
+      threadProjects.every((project) => collapsedProjectKeys.has(project.key)),
+    [collapsedProjectKeys, threadProjects]
+  )
 
   const toggleAllProjects = useCallback(() => {
     setCollapsedProjectKeys((prev) => {
@@ -941,12 +1035,25 @@ export function ThreadSidebar(): React.JSX.Element {
     if (!threadToDelete) return
 
     try {
-      await deleteThread(threadToDelete.thread_id)
-      cleanupThread(threadToDelete.thread_id)
-      markRead(threadToDelete.thread_id)
+      const result = await deleteThreadGroupSequentially([threadToDelete.thread_id], {
+        deleteThread,
+        cleanupThread: (threadId) =>
+          cleanupDeletedThreadIfResident(
+            threadId,
+            threadStateSummariesRef.current,
+            cleanupThread
+          ),
+        markRead
+      })
+      if (result.remainingIds.length > 0) throw result.error ?? new Error("删除会话失败")
       setThreadToDelete(null)
     } catch (error) {
       console.error("[ThreadSidebar] Failed to delete thread:", error)
+      toast.error(
+        error instanceof Error
+          ? error.message.replace(/^Error invoking remote method '[^']+': Error:\s*/u, "")
+          : "删除会话失败"
+      )
     }
   }, [cleanupThread, deleteThread, markRead, threadToDelete])
 
@@ -993,139 +1100,138 @@ export function ThreadSidebar(): React.JSX.Element {
     [forkThread, markRead]
   )
 
-  const openForkCheckpointDialog = useCallback(
-    async (thread: Thread): Promise<void> => {
-      const requestId = forkCheckpointRequestRef.current + 1
-      forkCheckpointRequestRef.current = requestId
-      setForkDialogThread(thread)
-      setForkCheckpoints([])
-      setSelectedForkCheckpoint(null)
-      setForkDestinationMode("local")
-      setForkWorkspacePath(null)
-      setSelectingForkWorkspace(false)
-      setLoadingForkCheckpoints(true)
-      try {
-        const checkpoints = await listForkableCheckpoints(thread.thread_id)
-        if (forkCheckpointRequestRef.current !== requestId) return
-        setForkCheckpoints(checkpoints)
-        setSelectedForkCheckpoint(
-          checkpoints.find((checkpoint) => checkpoint.isStableTurnBoundary) ?? null
-        )
-      } catch (error) {
-        if (forkCheckpointRequestRef.current !== requestId) return
-        toast.error(error instanceof Error ? error.message : "读取 checkpoint 失败")
-      } finally {
-        if (forkCheckpointRequestRef.current === requestId) {
-          setLoadingForkCheckpoints(false)
-        }
-      }
-    },
-    [listForkableCheckpoints]
-  )
-
-  const handleSelectForkWorkspace = useCallback(async (): Promise<string | null> => {
-    if (selectingForkWorkspace) return forkWorkspacePath
-    setSelectingForkWorkspace(true)
-    try {
-      const path = await window.api.workspace.select()
-      if (path) {
-        setForkDestinationMode("workspace")
-        setForkWorkspacePath(path)
-      }
-      return path
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "选择工作区失败")
-      return null
-    } finally {
-      setSelectingForkWorkspace(false)
-    }
-  }, [forkWorkspacePath, selectingForkWorkspace])
-
-  const resetForkCheckpointDialog = useCallback((): void => {
-    forkCheckpointRequestRef.current += 1
-    setForkDialogThread(null)
-    setForkCheckpoints([])
-    setSelectedForkCheckpoint(null)
-    setForkDestinationMode("local")
-    setForkWorkspacePath(null)
-    setSelectingForkWorkspace(false)
-    setLoadingForkCheckpoints(false)
+  const openForkCheckpointDialog = useCallback((thread: Thread): void => {
+    setForkDialogThread(thread)
   }, [])
 
-  const handleForkCheckpoint = useCallback(
-    async (): Promise<void> => {
+  const handleForkCheckpointBusyChange = useCallback((threadId: string | null): void => {
+    forkingThreadIdRef.current = threadId
+    setForkingThreadId(threadId)
+  }, [])
+
+  const openProjectDeleteDialog = useCallback(async (project: ThreadProject): Promise<void> => {
+    if (projectDeletionSelectionInFlightRef.current || projectDeletionInFlightRef.current) return
+    projectDeletionSelectionInFlightRef.current = true
+    const selector = { type: "workspace", workspacePath: project.path } as const
+    try {
+      const selection = await listCompleteThreadGroupSelection(selector)
+      if (selection.length === 0) {
+        toast.info("该工作区已没有可删除的会话")
+        return
+      }
+      setProjectToDelete({ key: project.key, name: project.name, selector, selection })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法读取完整工作区会话列表")
+    } finally {
+      projectDeletionSelectionInFlightRef.current = false
+    }
+  }, [])
+
+  const confirmDeleteProject = useCallback(async () => {
+    if (!projectToDelete || projectDeletionInFlightRef.current) return
+
+    projectDeletionInFlightRef.current = true
+    setConfirmingProjectDeletion(true)
+    try {
+      let latestSelection: ThreadGroupSelectionEntry[]
+      try {
+        latestSelection = await listCompleteThreadGroupSelection(projectToDelete.selector)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "无法复核完整工作区会话列表")
+        return
+      }
+      if (!haveSameThreadGroupSelection(projectToDelete.selection, latestSelection)) {
+        if (latestSelection.length === 0) {
+          setProjectToDelete(null)
+          toast.info("该工作区已没有可删除的会话")
+          return
+        }
+        setProjectToDelete({ ...projectToDelete, selection: latestSelection })
+        toast.info("工作区会话列表已变化，请核对数量后重新确认")
+        return
+      }
+      const latestIds = latestSelection.map((entry) => entry.threadId)
+      const incarnationById = new Map(
+        latestSelection.map((entry) => [entry.threadId, entry.incarnation] as const)
+      )
       if (
-        !forkDialogThread ||
-        !selectedForkCheckpoint ||
-        forkingThreadIdRef.current ||
-        !selectedForkCheckpoint.isStableTurnBoundary
+        hasRunningThreadForDeletion(
+          latestIds,
+          threadStateSummariesRef.current,
+          streamLoadingStatesRef.current
+        )
       ) {
+        toast.error("工作区内有运行中的任务，已取消删除")
         return
       }
 
-      let selectedWorkspacePath = forkWorkspacePath
-      if (forkDestinationMode === "workspace" && !selectedWorkspacePath) {
-        selectedWorkspacePath = await handleSelectForkWorkspace()
-        if (!selectedWorkspacePath) return
-      }
-
-      const overrides: ThreadForkOverrides | undefined =
-        forkDestinationMode === "workspace"
-          ? { workspacePath: selectedWorkspacePath }
-          : undefined
-
-      const sourceThreadId = forkDialogThread.thread_id
-      forkingThreadIdRef.current = sourceThreadId
-      setForkingThreadId(sourceThreadId)
-      try {
-        const forked = await forkThread({
-          sourceThreadId,
-          checkpointId: selectedForkCheckpoint.checkpointId,
-          overrides
-        })
-        markRead(forked.thread_id)
-        resetForkCheckpointDialog()
-        toast.success("已从历史 checkpoint 创建新会话")
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Fork 会话失败")
-      } finally {
-        if (forkingThreadIdRef.current === sourceThreadId) {
-          forkingThreadIdRef.current = null
-          setForkingThreadId(null)
+      const result = await deleteThreadGroupSequentially(latestIds, {
+        deleteThread: (threadId) =>
+          deleteThread(threadId, {
+            requireIdle: true,
+            deferDirectoryUpdate: true,
+            groupGuard: {
+              selector: projectToDelete.selector,
+              incarnation: incarnationById.get(threadId)!
+            }
+          }),
+        cleanupThread: (threadId) =>
+          cleanupDeletedThreadIfResident(
+            threadId,
+            threadStateSummariesRef.current,
+            cleanupThread
+          ),
+        markRead: () => undefined
+      })
+      runBestEffortCommittedDeletionCleanups([
+        {
+          label: "Failed to finalize grouped thread directory state",
+          run: () => finalizeThreadDeletions(result.deletedIds)
+        },
+        {
+          label: "Failed to persist grouped read state",
+          run: () => markReadMany(result.deletedIds)
         }
+      ])
+      if (result.remainingIds.length > 0) {
+        const remainingIds = new Set(result.remainingIds)
+        setProjectToDelete({
+          ...projectToDelete,
+          selection: projectToDelete.selection.filter((entry) => remainingIds.has(entry.threadId))
+        })
+        const reason = result.error instanceof Error ? result.error.message : "删除失败"
+        toast.error(
+          `已删除 ${result.deletedIds.length}/${latestIds.length} 个会话，剩余项可重试：${reason}`
+        )
+        return
       }
-    },
-    [
-      forkDestinationMode,
-      forkThread,
-      forkWorkspacePath,
-      forkDialogThread,
-      handleSelectForkWorkspace,
-      markRead,
-      resetForkCheckpointDialog,
-      selectedForkCheckpoint
-    ]
-  )
 
-  const confirmDeleteProject = useCallback(async () => {
-    if (!projectToDelete) return
-
-    for (const thread of projectToDelete.threads) {
-      await deleteThread(thread.thread_id)
-      cleanupThread(thread.thread_id)
-      markRead(thread.thread_id)
+      setCollapsedProjectKeys((prev) => {
+        if (!prev.has(projectToDelete.key)) return prev
+        const next = new Set(prev)
+        next.delete(projectToDelete.key)
+        runBestEffortCommittedDeletionCleanups([
+          {
+            label: "Failed to persist grouped workspace collapse state",
+            run: () => persistCollapsedProjects(next)
+          }
+        ])
+        return next
+      })
+      setProjectToDelete(null)
+      setHoveredProjectKey(null)
+    } finally {
+      projectDeletionInFlightRef.current = false
+      setConfirmingProjectDeletion(false)
     }
-
-    setCollapsedProjectKeys((prev) => {
-      if (!prev.has(projectToDelete.key)) return prev
-      const next = new Set(prev)
-      next.delete(projectToDelete.key)
-      persistCollapsedProjects(next)
-      return next
-    })
-    setProjectToDelete(null)
-    setHoveredProjectKey(null)
-  }, [cleanupThread, deleteThread, markRead, persistCollapsedProjects, projectToDelete])
+  }, [
+    cleanupThread,
+    deleteThread,
+    finalizeThreadDeletions,
+    markReadMany,
+    persistCollapsedProjects,
+    projectToDelete
+  ])
 
   const [version, setVersion] = useState("")
 
@@ -1141,14 +1247,6 @@ export function ThreadSidebar(): React.JSX.Element {
         // ignore — version display is non-critical
       })
   }, [])
-
-  const isForkDialogForking = forkDialogThread
-    ? forkingThreadId === forkDialogThread.thread_id
-    : false
-  const forkDialogBusy = isForkDialogForking || selectingForkWorkspace
-  const forkDialogCurrentWorkspacePath = forkDialogThread
-    ? getThreadWorkspacePath(forkDialogThread)
-    : null
 
   return (
     <aside className="flex h-full w-full flex-col border-r border-border bg-sidebar overflow-hidden">
@@ -1363,41 +1461,25 @@ export function ThreadSidebar(): React.JSX.Element {
           {/* Thread List */}
           <ScrollArea className="flex-1 min-h-0">
             <div className="px-2 pb-2 space-y-1 overflow-hidden">
-              {threadProjects.map((project) => {
+              {visibleProjectWindow.items.map((project) => {
                 const isCollapsed = collapsedProjectKeys.has(project.key)
                 const canCustomizeProject = Boolean(project.path)
-                const hasSelectedThread = project.threads.some(
-                  (thread) => thread.thread_id === currentThreadId
-                )
-                // 折叠切片的有效条数:默认 5 / 用户点"展开显示"追加。但当前选中的
-                // thread 必须始终可见——若它排在可见范围之外(如重启恢复上次会话时
-                // 排到第 6+ 位),把切片扩展到刚好包含它,避免选中项被截断藏掉。
+                const hasSelectedThread = project.key === currentProjectKey
                 const requestedVisibleThreads =
                   visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
-                const selectedThreadIndex = currentThreadId
-                  ? project.threads.findIndex((thread) => thread.thread_id === currentThreadId)
-                  : -1
-                const visibleThreadCount =
-                  selectedThreadIndex >= 0
-                    ? Math.max(requestedVisibleThreads, selectedThreadIndex + 1)
-                    : requestedVisibleThreads
-                const unreadCount = project.threads.filter((thread) =>
-                  unreadIds.has(thread.thread_id)
-                ).length
-                const hasContextReminderThread = project.threads.some((thread) =>
-                  Boolean(allThreadStates[thread.thread_id]?.contextReminder?.pending)
+                const selectedThreadIndex =
+                  hasSelectedThread && currentThreadId
+                    ? project.threads.findIndex((thread) => thread.thread_id === currentThreadId)
+                    : -1
+                const visibleThreads = selectBoundedSidebarWindow(
+                  project.threads,
+                  requestedVisibleThreads,
+                  hasSelectedThread ? selectedThreadIndex : -1
                 )
-                const hasRunningThread = project.threads.some((thread) => {
-                  const threadState = allThreadStates[thread.thread_id]
-                  return (
-                    (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                    Boolean(
-                      threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
-                    ) ||
-                    Boolean(threadState?.scheduledTaskLoading) ||
-                    threadState?.workflowRun?.status === "running"
-                  )
-                })
+                const projectStatus = projectStatusByKey.get(project.key)
+                const unreadCount = projectStatus?.unreadCount ?? 0
+                const hasContextReminderThread = projectStatus?.hasContextReminderThread ?? false
+                const hasRunningThread = projectStatus?.hasRunningThread ?? false
 
                 return (
                   <div key={project.key} className="space-y-1">
@@ -1510,7 +1592,7 @@ export function ThreadSidebar(): React.JSX.Element {
                                       "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-destructive/10 hover:text-destructive",
                                       hasRunningThread && "cursor-not-allowed !opacity-30"
                                     )}
-                                    onClick={() => setProjectToDelete(project)}
+                                    onClick={() => void openProjectDeleteDialog(project)}
                                   />
                                 </span>
                               </span>
@@ -1557,7 +1639,7 @@ export function ThreadSidebar(): React.JSX.Element {
                         <ContextMenuSeparator />
                         <ContextMenuItem
                           variant="destructive"
-                          onClick={() => setProjectToDelete(project)}
+                          onClick={() => void openProjectDeleteDialog(project)}
                           disabled={hasRunningThread}
                         >
                           <Trash2 className="size-4 mr-2" />
@@ -1568,23 +1650,19 @@ export function ThreadSidebar(): React.JSX.Element {
 
                     {!isCollapsed && (
                       <div className="ml-4 space-y-1 border-l border-border/70 pl-2">
-                        {project.threads
-                          .slice(0, visibleThreadCount)
-                          .map((thread) => {
-                          const threadState = allThreadStates[thread.thread_id]
+                        {visibleThreads.items.map((thread) => {
+                          const threadSummary = threadStateSummaries[thread.thread_id]
                           const hasRunningCoordinatorWorker = Boolean(
-                            threadState?.coordinatorWorkers.some(
-                              (worker) => worker.status === "running"
-                            )
+                            threadSummary?.hasRunningCoordinatorWorker
                           )
                           const isLoading =
                             (allStreamLoadingStates[thread.thread_id] ?? false) ||
                             hasRunningCoordinatorWorker ||
-                            threadState?.workflowRun?.status === "running"
-                          const scheduledTaskLoading = Boolean(threadState?.scheduledTaskLoading)
-                          const hasPendingApproval = Boolean(threadState?.pendingApproval)
-                          const hasPendingUserInput = Boolean(threadState?.pendingUserInput)
-                          const hasContextReminder = Boolean(threadState?.contextReminder?.pending)
+                            Boolean(threadSummary?.workflowRunning)
+                          const scheduledTaskLoading = Boolean(threadSummary?.scheduledTaskLoading)
+                          const hasPendingApproval = Boolean(threadSummary?.hasPendingApproval)
+                          const hasPendingUserInput = Boolean(threadSummary?.hasPendingUserInput)
+                          const hasContextReminder = Boolean(threadSummary?.hasContextReminder)
 
                           return (
                             <ThreadListItem
@@ -1619,22 +1697,21 @@ export function ThreadSidebar(): React.JSX.Element {
                             />
                           )
                         })}
-                        {project.threads.length > visibleThreadCount && (
+                        {visibleThreads.hiddenCount > 0 && (
                           <button
                             type="button"
                             className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
                             onClick={() =>
                               setVisibleThreadCounts((counts) => ({
                                 ...counts,
-                                // 基于当前实际可见条数追加,确保"选中项撑开切片"时点击仍能继续展开。
-                                [project.key]: visibleThreadCount + VISIBLE_THREADS_STEP
+                                [project.key]: requestedVisibleThreads + VISIBLE_THREADS_STEP
                               }))
                             }
                           >
                             <ChevronDown className="size-3 shrink-0" />
                             展开显示
                             <span className="text-[10px] text-muted-foreground/60">
-                              还有 {project.threads.length - visibleThreadCount} 条
+                              还有 {visibleThreads.hiddenCount} 条
                             </span>
                           </button>
                         )}
@@ -1643,6 +1720,36 @@ export function ThreadSidebar(): React.JSX.Element {
                   </div>
                 )
               })}
+
+              {visibleProjectWindow.hiddenCount > 0 && (
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-sm px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
+                  onClick={() => setVisibleProjectCount((count) => count + VISIBLE_PROJECTS_STEP)}
+                >
+                  <ChevronDown className="size-3 shrink-0" />
+                  展开更多工作区
+                  <span className="text-[10px] text-muted-foreground/60">
+                    还有 {visibleProjectWindow.hiddenCount} 个
+                  </span>
+                </button>
+              )}
+
+              {threadDirectoryHasMore && (
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-center gap-1.5 rounded-sm px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+                  disabled={threadDirectoryLoadingMore}
+                  onClick={() => void loadMoreThreads()}
+                >
+                  {threadDirectoryLoadingMore ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <ChevronDown className="size-3" />
+                  )}
+                  {threadDirectoryLoadingMore ? "正在加载更早任务" : "加载更早任务"}
+                </button>
+              )}
 
               {threadProjects.length === 0 && (
                 <div className="px-3 py-8 text-center text-sm text-muted-foreground">暂无任务</div>
@@ -1698,164 +1805,16 @@ export function ThreadSidebar(): React.JSX.Element {
           <UpdateActionButton variant="tag" className="ml-1" />
         </div>
       </div>
-      <Dialog
-        open={!!forkDialogThread}
-        onOpenChange={(open) => {
-          if (!open && !forkDialogBusy) resetForkCheckpointDialog()
-        }}
-      >
-        <DialogContent className="flex max-h-[80vh] flex-col gap-0 p-0 sm:max-w-lg">
-          <DialogHeader className="border-b border-border px-5 py-4">
-            <DialogTitle className="text-base">从 checkpoint fork</DialogTitle>
-            <DialogDescription className="truncate">
-              {forkDialogThread ? getDisplayThreadTitle(forkDialogThread) : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 space-y-2 overflow-y-auto p-3">
-            {loadingForkCheckpoints ? (
-              <div className="flex h-28 items-center justify-center text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-              </div>
-            ) : forkCheckpoints.length === 0 ? (
-              <div className="px-3 py-8 text-center text-sm text-muted-foreground">
-                暂无可 fork 的 checkpoint
-              </div>
-            ) : (
-              forkCheckpoints.map((checkpoint) => {
-                const selected =
-                  selectedForkCheckpoint?.checkpointId === checkpoint.checkpointId
-                const disabled = !checkpoint.isStableTurnBoundary || forkDialogBusy
-                return (
-                  <button
-                    key={checkpoint.checkpointId}
-                    type="button"
-                    disabled={disabled}
-                    className={cn(
-                      "w-full rounded-sm border border-border px-3 py-2 text-left transition-colors",
-                      disabled
-                        ? "cursor-not-allowed bg-muted/30 opacity-60"
-                        : selected
-                          ? "border-primary bg-primary/10"
-                          : "hover:border-primary/40 hover:bg-accent/60"
-                    )}
-                    onClick={() => setSelectedForkCheckpoint(checkpoint)}
-                  >
-                    <div className="mb-1 flex min-w-0 items-center gap-2 text-xs">
-                      <span className="shrink-0 text-muted-foreground">
-                        {formatCheckpointTime(checkpoint.createdAt)}
-                      </span>
-                      <span className="shrink-0 text-muted-foreground">
-                        {checkpoint.messageCount} 条消息
-                      </span>
-                      <span
-                        className={cn(
-                          "ml-auto shrink-0 rounded-sm px-1.5 py-0.5 text-[10px]",
-                          checkpoint.isStableTurnBoundary
-                            ? "bg-emerald-500/12 text-emerald-700 dark:text-emerald-300"
-                            : "bg-muted text-muted-foreground"
-                        )}
-                      >
-                        {checkpoint.isStableTurnBoundary
-                          ? "可 fork"
-                          : getForkUnstableReasonLabel(checkpoint.unstableReason)}
-                      </span>
-                    </div>
-                    <div className="truncate text-sm text-foreground">
-                      {checkpoint.lastMessagePreview || "无可见消息"}
-                    </div>
-                    {checkpoint.lastUserMessagePreview ? (
-                      <div className="mt-1 truncate text-xs text-muted-foreground">
-                        用户：{checkpoint.lastUserMessagePreview}
-                      </div>
-                    ) : null}
-                  </button>
-                )
-              })
-            )}
-          </div>
-          <div className="space-y-3 border-t border-border p-3">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                disabled={forkDialogBusy}
-                onClick={() => setForkDestinationMode("local")}
-                className={cn(
-                  "rounded-sm border px-3 py-2 text-left transition-colors",
-                  forkDestinationMode === "local"
-                    ? "border-primary bg-primary/10"
-                    : "border-border hover:bg-accent"
-                )}
-              >
-                <div className="text-sm font-medium">派生到本地</div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {getWorkspaceName(forkDialogCurrentWorkspacePath)}
-                </div>
-              </button>
-              <button
-                type="button"
-                disabled={forkDialogBusy}
-                onClick={() => setForkDestinationMode("workspace")}
-                className={cn(
-                  "rounded-sm border px-3 py-2 text-left transition-colors",
-                  forkDestinationMode === "workspace"
-                    ? "border-primary bg-primary/10"
-                    : "border-border hover:bg-accent"
-                )}
-              >
-                <div className="text-sm font-medium">派生到其他工作区</div>
-                <div className="mt-1 truncate text-xs text-muted-foreground">
-                  {forkWorkspacePath ? getWorkspaceName(forkWorkspacePath) : "选择一个本地工作区路径"}
-                </div>
-              </button>
-            </div>
-            {forkDestinationMode === "workspace" ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={forkDialogBusy}
-                onClick={() => void handleSelectForkWorkspace()}
-                className="w-full justify-start"
-              >
-                {selectingForkWorkspace ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <FolderOpen className="size-4" />
-                )}
-                {forkWorkspacePath || "选择工作区文件夹"}
-              </Button>
-            ) : null}
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={forkDialogBusy}
-                onClick={resetForkCheckpointDialog}
-              >
-                取消
-              </Button>
-              <Button
-                type="button"
-                disabled={!selectedForkCheckpoint || forkDialogBusy}
-                onClick={() => void handleForkCheckpoint()}
-              >
-                {forkDialogBusy ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <GitFork className="size-4" />
-                )}
-                {forkDialogBusy
-                  ? selectingForkWorkspace
-                    ? "选择中"
-                    : "正在 fork"
-                  : forkDestinationMode === "workspace" && !forkWorkspacePath
-                    ? "选择工作区并 Fork"
-                    : "Fork"}
-              </Button>
-            </DialogFooter>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {forkDialogThread ? (
+        <ThreadForkCheckpointDialog
+          key={forkDialogThread.thread_id}
+          thread={forkDialogThread}
+          displayTitle={getDisplayThreadTitle(forkDialogThread)}
+          onClose={() => setForkDialogThread(null)}
+          onForked={(forkedThread) => markRead(forkedThread.thread_id)}
+          onForkingChange={handleForkCheckpointBusyChange}
+        />
+      ) : null}
       <Dialog open={!!threadToDelete} onOpenChange={(open) => !open && setThreadToDelete(null)}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -1874,26 +1833,20 @@ export function ThreadSidebar(): React.JSX.Element {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={!!projectToDelete} onOpenChange={(open) => !open && setProjectToDelete(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>确认删除工作区会话</DialogTitle>
-            <DialogDescription>
-              {projectToDelete
-                ? `确定要删除「${projectToDelete.name}」工作区下的全部 ${projectToDelete.threads.length} 个会话吗？删除后不可恢复。`
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setProjectToDelete(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={confirmDeleteProject}>
-              删除全部
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ThreadGroupDeleteDialog
+        open={!!projectToDelete}
+        title="确认删除工作区会话"
+        description={
+          projectToDelete
+            ? `确定要删除「${projectToDelete.name}」工作区下的全部 ${projectToDelete.selection.length} 个会话吗？删除后不可恢复。`
+            : ""
+        }
+        confirming={confirmingProjectDeletion}
+        onOpenChange={(open) => {
+          if (!open && !projectDeletionInFlightRef.current) setProjectToDelete(null)
+        }}
+        onConfirm={() => void confirmDeleteProject()}
+      />
       <WorkspaceRenameDialog
         open={!!projectToRename}
         workspace={projectToRename}

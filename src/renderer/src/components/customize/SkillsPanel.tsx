@@ -8,6 +8,7 @@ import {
   Folder,
   GitBranch,
   Info,
+  Loader2,
   Plus,
   Power,
   Radio,
@@ -35,6 +36,14 @@ import { cn } from "@/lib/utils"
 import type { SkillMetadata } from "@/types"
 import { useAppStore } from "@/lib/store"
 import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import {
+  invalidateSkillCatalog,
+  readSkillCatalogCache,
+  revalidateSkillCatalog,
+  subscribeSkillCatalogInvalidation
+} from "@/lib/app-catalog-cache"
+import { SkillDisabledMutationCoordinator } from "@/lib/skill-disabled-mutation-coordinator"
+import { SKILL_PLUGIN_CATALOG_RENDER_BATCH } from "@/lib/skill-plugin-catalog"
 import { marketApi, type MarketItem } from "../../api/market"
 import { DEFAULT_SCENE_CATEGORY } from "../../lib/skill-data-service"
 import { SkillFileEditor } from "./SkillFileEditor"
@@ -46,6 +55,8 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 
 type FilePreviewKind = "text" | "html" | "image" | "pdf"
+type SkillCatalogLoadState = "loading" | "ready" | "error"
+const recoveredEmptySkillCatalogKeys = new Set<string>()
 type FileTreeNode = {
   id: string
   name: string
@@ -1246,9 +1257,9 @@ function SkillsGuide(): React.JSX.Element {
                 <p>
                   <code className="mx-1 font-mono text-foreground/85">forcedOutcome</code>
                   取值：
-                  <code className="mx-1 font-mono text-foreground/85">"always-revise"</code>
+                  <code className="mx-1 font-mono text-foreground/85">&quot;always-revise&quot;</code>
                   （强制走修订）/
-                  <code className="mx-1 font-mono text-foreground/85">"always-halt"</code>
+                  <code className="mx-1 font-mono text-foreground/85">&quot;always-halt&quot;</code>
                   （强制终止本轮）；不写则跟随 hook stdout 输出。可选
                   <code className="mx-1 font-mono text-foreground/85">forcedReason</code>
                   作为静态原因。
@@ -1369,7 +1380,10 @@ function SkillsGuide(): React.JSX.Element {
                 </p>
                 <p>
                   常用返回包括
-                  <code className="mx-1 font-mono text-foreground/85">decision="block"</code>、
+                  <code className="mx-1 font-mono text-foreground/85">
+                    decision=&quot;block&quot;
+                  </code>
+                  、
                   <code className="mx-1 font-mono text-foreground/85">reason</code>、
                   <code className="mx-1 font-mono text-foreground/85">systemMessage</code>、
                   <code className="mx-1 font-mono text-foreground/85">additionalContext</code>和
@@ -1413,10 +1427,18 @@ function SkillsGuide(): React.JSX.Element {
 }
 
 export function SkillsPanel(): React.JSX.Element {
-  const { setShowCustomizeView, setMarketInitialSkillCategory, setMarketInitialSkillSearchQuery } =
-    useAppStore()
+  const setShowCustomizeView = useAppStore((state) => state.setShowCustomizeView)
+  const setMarketInitialSkillCategory = useAppStore(
+    (state) => state.setMarketInitialSkillCategory
+  )
+  const setMarketInitialSkillSearchQuery = useAppStore(
+    (state) => state.setMarketInitialSkillSearchQuery
+  )
   const recordSkillUrl = import.meta.env.VITE_JUMP_RECORD_SKILL_URL?.trim() || ""
-  const [skills, setSkills] = useState<SkillMetadata[]>([])
+  const [initialSkillSnapshot] = useState(() => readSkillCatalogCache())
+  const [skills, setSkills] = useState<SkillMetadata[]>(
+    () => initialSkillSnapshot?.localSkills ?? []
+  )
   const [expandedSkills, setExpandedSkills] = useState<Set<string>>(new Set())
   const [expandedDirNodes, setExpandedDirNodes] = useState<Set<string>>(new Set())
   const [skillFilesMap, setSkillFilesMap] = useState<Record<string, string[]>>({})
@@ -1431,7 +1453,20 @@ export function SkillsPanel(): React.JSX.Element {
   const [publishDialogOpen, setPublishDialogOpen] = useState(false)
   const [publishSkill, setPublishSkill] = useState<SkillMetadata | null>(null)
   const [publishMode, setPublishMode] = useState<PublishMode>("upload")
-  const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
+  const [disabledSkills, setDisabledSkills] = useState<Set<string>>(
+    () => initialSkillSnapshot?.disabledSkillIds ?? new Set()
+  )
+  const disabledSkillsRef = useRef(disabledSkills)
+  const disabledSkillMutationCoordinatorRef = useRef(
+    new SkillDisabledMutationCoordinator(disabledSkills)
+  )
+  const disabledSkillMutationChainRef = useRef<Promise<void>>(Promise.resolve())
+  const disabledSkillAuthorityRevisionRef = useRef(0)
+  const skillMutationMountedRef = useRef(true)
+  const [skillCatalogLoadState, setSkillCatalogLoadState] = useState<SkillCatalogLoadState>(
+    initialSkillSnapshot ? "ready" : "loading"
+  )
+  const [skillCatalogLoadError, setSkillCatalogLoadError] = useState<string | null>(null)
   const [uploadedSkillNames, setUploadedSkillNames] = useState<Set<string>>(() =>
     readUploadedSkillNamesFromStorage()
   )
@@ -1446,21 +1481,100 @@ export function SkillsPanel(): React.JSX.Element {
   )
   const [searchQuery, setSearchQuery] = useState("")
   const [debouncedQuery, setDebouncedQuery] = useState("")
+  const [visibleSkillLimit, setVisibleSkillLimit] = useState(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const skillRefreshGeneration = useRef(0)
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value)
     clearTimeout(debounceTimer.current)
-    debounceTimer.current = setTimeout(() => setDebouncedQuery(value), 200)
+    debounceTimer.current = setTimeout(() => {
+      setDebouncedQuery(value)
+      setVisibleSkillLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+    }, 200)
   }, [])
 
   useEffect(() => {
-    return () => clearTimeout(debounceTimer.current)
+    skillMutationMountedRef.current = true
+    return () => {
+      skillMutationMountedRef.current = false
+      clearTimeout(debounceTimer.current)
+    }
   }, [])
 
-  useEffect(() => {
-    window.api.skills.list().then(setSkills).catch(console.error)
+  const publishDisabledSkillSnapshot = useCallback((snapshot: Set<string>): void => {
+    disabledSkillsRef.current = snapshot
+    if (skillMutationMountedRef.current) setDisabledSkills(snapshot)
   }, [])
+
+  const refreshSkills = useCallback(async (invalidate = false): Promise<SkillMetadata[]> => {
+    const generation = ++skillRefreshGeneration.current
+    const disabledAuthorityRevision = disabledSkillAuthorityRevisionRef.current
+    setSkillCatalogLoadState("loading")
+    setSkillCatalogLoadError(null)
+    if (invalidate) invalidateSkillCatalog()
+    try {
+      const pluginVersion = useAppStore.getState().pluginVersion
+      const cachedBeforeRefresh = readSkillCatalogCache()
+      let snapshot = await revalidateSkillCatalog(pluginVersion)
+      // Development/HMR or a branch update can change bundled skills without a
+      // skills:changed event, leaving an application-lifetime snapshot with no
+      // project rows. If this refresh only reused that exact stale snapshot,
+      // force one isolated Worker rescan. A legitimately empty fresh result is
+      // not scanned twice on every remount.
+      if (
+        !invalidate &&
+        snapshot === cachedBeforeRefresh &&
+        !snapshot.localSkills.some((skill) => skill.source === "project") &&
+        !recoveredEmptySkillCatalogKeys.has(snapshot.key)
+      ) {
+        recoveredEmptySkillCatalogKeys.add(snapshot.key)
+        invalidateSkillCatalog()
+        snapshot = await revalidateSkillCatalog(pluginVersion)
+        recoveredEmptySkillCatalogKeys.add(snapshot.key)
+      }
+      if (generation === skillRefreshGeneration.current) {
+        setSkills(snapshot.localSkills)
+        if (disabledAuthorityRevision === disabledSkillAuthorityRevisionRef.current) {
+          publishDisabledSkillSnapshot(
+            disabledSkillMutationCoordinatorRef.current.replaceAuthoritative(
+              snapshot.disabledSkillIds
+            )
+          )
+        }
+        setSkillCatalogLoadState("ready")
+      }
+      return snapshot.localSkills
+    } catch (error) {
+      if (generation === skillRefreshGeneration.current) {
+        setSkillCatalogLoadState("error")
+        setSkillCatalogLoadError(error instanceof Error ? error.message : "技能目录加载失败")
+      }
+      throw error
+    }
+  }, [publishDisabledSkillSnapshot])
+
+  useEffect(() => {
+    let active = true
+    const timer = setTimeout(() => {
+      void refreshSkills()
+        .then(() => {
+          if (active) setVisibleSkillLimit(SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+        })
+        .catch(console.error)
+    }, 0)
+    return () => {
+      active = false
+      clearTimeout(timer)
+      skillRefreshGeneration.current += 1
+    }
+  }, [refreshSkills])
+
+  useEffect(() => {
+    return subscribeSkillCatalogInvalidation(() => {
+      void refreshSkills().catch(console.error)
+    })
+  }, [refreshSkills])
 
   const reloadUploadedSkillNames = useCallback(() => {
     setUploadedSkillNames(readUploadedSkillNamesFromStorage())
@@ -1506,13 +1620,6 @@ export function SkillsPanel(): React.JSX.Element {
     }, 0)
     return () => clearTimeout(timer)
   }, [loadMarketSkills])
-
-  useEffect(() => {
-    window.api.skills
-      .getDisabled()
-      .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
-      .catch(console.error)
-  }, [])
 
   const skillFilesMapRef = useRef(skillFilesMap)
   useEffect(() => {
@@ -1646,19 +1753,51 @@ export function SkillsPanel(): React.JSX.Element {
     })
   }, [])
 
-  const toggleSkillEnabled = useCallback((skill: SkillMetadata) => {
-    setDisabledSkills((prev) => {
-      const next = new Set(prev)
+  const toggleSkillEnabled = useCallback(
+    (skill: SkillMetadata) => {
       const skillId = getSkillMetadataId(skill)
-      if (isSkillDisabled(skill, next)) {
-        next.delete(skillId)
-      } else {
-        next.add(skillId)
-      }
-      window.api.skills.setDisabled([...next]).catch(console.error)
-      return next
-    })
-  }, [])
+      if (!skillId) return
+      const disabled = !isSkillDisabled(skill, disabledSkillsRef.current)
+      const { version, snapshot } = disabledSkillMutationCoordinatorRef.current.begin(
+        skillId,
+        disabled
+      )
+      disabledSkillAuthorityRevisionRef.current += 1
+      publishDisabledSkillSnapshot(snapshot)
+
+      disabledSkillMutationChainRef.current = disabledSkillMutationChainRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          try {
+            const authoritative = await window.api.skills.setDisabledState(skillId, disabled)
+            disabledSkillAuthorityRevisionRef.current += 1
+            publishDisabledSkillSnapshot(
+              disabledSkillMutationCoordinatorRef.current.settle(
+                skillId,
+                version,
+                authoritative
+              )
+            )
+          } catch (error) {
+            disabledSkillAuthorityRevisionRef.current += 1
+            publishDisabledSkillSnapshot(
+              disabledSkillMutationCoordinatorRef.current.abandon(skillId, version)
+            )
+            // Roll back immediately from the renderer's last authoritative
+            // snapshot, then revalidate through the isolated catalog Worker.
+            // Never recover a Worker failure by scanning SKILL.md on main.
+            console.error("[SkillsPanel] Failed to update disabled skill:", error)
+            if (skillMutationMountedRef.current) {
+              void refreshSkills(true).catch((refreshError) => {
+                console.error("[SkillsPanel] Failed to refresh disabled skills:", refreshError)
+              })
+              toast.error("技能启用状态保存失败，已恢复到保存前状态")
+            }
+          }
+        })
+    },
+    [publishDisabledSkillSnapshot, refreshSkills]
+  )
 
   const handleDeleteSkill = useCallback(
     async (skill: SkillMetadata) => {
@@ -1686,16 +1825,17 @@ export function SkillsPanel(): React.JSX.Element {
           delete next[getSkillMetadataId(skill)]
           return next
         })
-        window.api.skills.list().then(setSkills).catch(console.error)
-        window.api.skills
-          .getDisabled()
-          .then((list) => setDisabledSkills(new Set(list.map(normalizeSkillId))))
-          .catch(console.error)
+        void refreshSkills(true).catch(console.error)
       } else {
         alert(res.error || "删除失败")
       }
     },
-    [reloadEditedSkillPaths, reloadLocalUploadedSkillPaths, reloadOrgInstalledSkillNames]
+    [
+      refreshSkills,
+      reloadEditedSkillPaths,
+      reloadLocalUploadedSkillPaths,
+      reloadOrgInstalledSkillNames
+    ]
   )
 
   const builtinSkills = useMemo(() => skills.filter((s) => s.source === "project"), [skills])
@@ -1800,10 +1940,8 @@ export function SkillsPanel(): React.JSX.Element {
          * 保存后主动刷新技能列表，保证左侧列表与右侧详情展示的元信息立即一致。
          */
         setSkillFilesMap({})
-        window.api.skills
-          .list()
+        void refreshSkills(true)
           .then((nextSkills) => {
-            setSkills(nextSkills)
             const nextSelected = nextSkills.find((item) => item.path === filePath) || null
             setSelectedSkill(nextSelected)
             if (nextSelected) {
@@ -1815,7 +1953,7 @@ export function SkillsPanel(): React.JSX.Element {
 
       return { success: true }
     },
-    [isSkillUploadedInPanel, selectedFilePath, selectedSkill]
+    [isSkillUploadedInPanel, refreshSkills, selectedFilePath, selectedSkill]
   )
 
   const filterSkillsBySearch = useCallback(
@@ -1889,6 +2027,39 @@ export function SkillsPanel(): React.JSX.Element {
     () => filterSkillsBySearch(orgInstalledCustomSkills),
     [filterSkillsBySearch, orgInstalledCustomSkills]
   )
+
+  const visibleSkillGroups = useMemo(() => {
+    const builtin = filteredBuiltin.slice(0, visibleSkillLimit)
+    const uploaded = filteredUploadedCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length)
+    )
+    const market = filteredMarketInstalledCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length - uploaded.length)
+    )
+    const org = filteredOrgInstalledCustom.slice(
+      0,
+      Math.max(0, visibleSkillLimit - builtin.length - uploaded.length - market.length)
+    )
+    return {
+      builtin,
+      uploaded,
+      market,
+      org
+    }
+  }, [
+    filteredBuiltin,
+    filteredMarketInstalledCustom,
+    filteredOrgInstalledCustom,
+    filteredUploadedCustom,
+    visibleSkillLimit
+  ])
+  const totalFilteredSkills =
+    filteredBuiltin.length +
+    filteredUploadedCustom.length +
+    filteredMarketInstalledCustom.length +
+    filteredOrgInstalledCustom.length
 
   const openMarketWithSkillSearch = useCallback(
     (skillName: string) => {
@@ -2008,25 +2179,71 @@ export function SkillsPanel(): React.JSX.Element {
         </div>
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-3">
-            <SkillSection
-              title="内置技能"
-              skills={filteredBuiltin}
-              marketSkillMap={marketSkillMap}
-              uploadedSkillNames={uploadedSkillNames}
-              editedSkillPaths={editedSkillPaths}
-              expandedSkills={expandedSkills}
-              skillFilesMap={skillFilesMap}
-              selectedSkill={selectedSkill}
-              expandedDirNodes={expandedDirNodes}
-              disabledSkills={disabledSkills}
-              onToggleSkill={onToggleSkill}
-              onToggleDirNode={toggleDirNode}
-              onSelectFile={onSelectFile}
-            />
+            {skillCatalogLoadState === "loading" && (
+              <div
+                className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
+                role="status"
+                aria-live="polite"
+              >
+                <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                <span>{skills.length > 0 ? "正在刷新技能目录…" : "正在加载技能目录…"}</span>
+              </div>
+            )}
+            {skillCatalogLoadState === "error" && (
+              <div
+                className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+                role="alert"
+                title={skillCatalogLoadError ?? undefined}
+              >
+                <AlertCircle className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">
+                  {skills.length > 0 ? "技能目录刷新失败，当前展示上次结果。" : "技能目录加载失败。"}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={() => void refreshSkills(true).catch(console.error)}
+                >
+                  重试
+                </Button>
+              </div>
+            )}
+            {skillCatalogLoadState === "ready" && builtinSkills.length === 0 && (
+              <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <Info className="size-3.5 shrink-0" />
+                <span className="min-w-0 flex-1">当前版本未发现内置技能。</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={() => void refreshSkills(true).catch(console.error)}
+                >
+                  重新扫描
+                </Button>
+              </div>
+            )}
+            {builtinSkills.length > 0 && (
+              <SkillSection
+                title="内置技能"
+                skills={visibleSkillGroups.builtin}
+                marketSkillMap={marketSkillMap}
+                uploadedSkillNames={uploadedSkillNames}
+                editedSkillPaths={editedSkillPaths}
+                expandedSkills={expandedSkills}
+                skillFilesMap={skillFilesMap}
+                selectedSkill={selectedSkill}
+                expandedDirNodes={expandedDirNodes}
+                disabledSkills={disabledSkills}
+                onToggleSkill={onToggleSkill}
+                onToggleDirNode={toggleDirNode}
+                onSelectFile={onSelectFile}
+              />
+            )}
             {uploadedCustomSkills.length > 0 && (
               <SkillSection
                 title="我上传的技能"
-                skills={filteredUploadedCustom}
+                skills={visibleSkillGroups.uploaded}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2043,7 +2260,7 @@ export function SkillsPanel(): React.JSX.Element {
             {marketInstalledCustomSkills.length > 0 && (
               <SkillSection
                 title="我从应用市场安装的技能"
-                skills={filteredMarketInstalledCustom}
+                skills={visibleSkillGroups.market}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2062,7 +2279,7 @@ export function SkillsPanel(): React.JSX.Element {
             {orgInstalledCustomSkills.length > 0 && (
               <SkillSection
                 title="我安装的组织级技能"
-                skills={filteredOrgInstalledCustom}
+                skills={visibleSkillGroups.org}
                 marketSkillMap={marketSkillMap}
                 uploadedSkillNames={uploadedSkillNames}
                 editedSkillPaths={editedSkillPaths}
@@ -2076,6 +2293,18 @@ export function SkillsPanel(): React.JSX.Element {
                 onSelectFile={onSelectFile}
                 hideMarketTag
               />
+            )}
+            {visibleSkillLimit < totalFilteredSkills && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs"
+                onClick={() =>
+                  setVisibleSkillLimit((value) => value + SKILL_PLUGIN_CATALOG_RENDER_BATCH)
+                }
+              >
+                加载更多（剩余 {totalFilteredSkills - visibleSkillLimit}）
+              </Button>
             )}
           </div>
         </ScrollArea>
@@ -2122,10 +2351,8 @@ export function SkillsPanel(): React.JSX.Element {
         onOpenChange={setUploadDialogOpen}
         onSuccess={(uploadedSkillDirName) => {
           setSkillFilesMap({})
-          window.api.skills
-            .list()
+          void refreshSkills(true)
             .then((nextSkills) => {
-              setSkills(nextSkills)
               if (!uploadedSkillDirName) return
               /**
                * 上传成功后把“目录名（upload 返回）”映射回技能 path，并写入“本面板上传”的来源标记。
@@ -2157,7 +2384,7 @@ export function SkillsPanel(): React.JSX.Element {
         onSuccess={({ skillName, mode }) => {
           reloadUploadedSkillNames()
           void loadMarketSkills()
-          window.api.skills.list().then(setSkills).catch(console.error)
+          void refreshSkills(true).catch(console.error)
 
           toast.success(
             mode === "update"

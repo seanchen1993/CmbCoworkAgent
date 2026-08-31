@@ -27,6 +27,8 @@ import {
 } from "../storage"
 import { fetchLatestJson } from "../updater/checker"
 import { resolveUpdateSource } from "../updater/channel-config"
+import { calculateSummarizationTriggerTokens } from "../../shared/model-token-budget"
+import { getHiddenEndpoint } from "../security/hidden-endpoints"
 
 export type ModelSource = "builtin" | "custom"
 export type BuiltinModelOrigin = "remote" | "fallback"
@@ -55,7 +57,7 @@ const FALLBACK_CATALOG: RemoteModelCatalogItem[] = [
   {
     id: "minimax-m2p5-229b-w8a8",
     name: "MiniMax M2.5",
-    baseUrl: "http://open-llm.uat.cmbchina.cn/llm/minimax-m2p5-229b-w8a8/v1",
+    baseUrl: getHiddenEndpoint("modelMinimax"),
     model: "minimax-m2p5-229b-w8a8",
     tier: "premium"
   }
@@ -169,7 +171,7 @@ function normalizeDefinition(
   const apiKey =
     typeof item.apiKey === "string" && item.apiKey.trim() ? item.apiKey.trim() : undefined
 
-  return {
+  const definition: BuiltinModelDefinition = {
     id,
     name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : model,
     baseUrl: requireUrl(item.baseUrl),
@@ -207,6 +209,8 @@ function normalizeDefinition(
     source: "builtin",
     origin
   }
+  calculateSummarizationTriggerTokens(definition.maxTokens!, definition.maxOutputTokens!)
+  return definition
 }
 
 function normalizeCatalog(catalog: unknown): BuiltinModelDefinition[] | null {
@@ -242,7 +246,7 @@ function normalizeOverride(
 ): BuiltinModelOverride {
   if (!override) return {}
   const enableThinking = optionalBoolean(override.enableThinking, base.enableThinking ?? false)
-  return {
+  const normalized: BuiltinModelOverride = {
     ...(typeof override.name === "string" && override.name.trim()
       ? { name: override.name.trim() }
       : {}),
@@ -281,6 +285,8 @@ function normalizeOverride(
     tier:
       override.tier === "economy" ? "economy" : override.tier === "premium" ? "premium" : base.tier
   }
+  calculateSummarizationTriggerTokens(normalized.maxTokens!, normalized.maxOutputTokens!)
+  return normalized
 }
 
 export function getBuiltinModelConfigs(): ResolvedModelConfig[] {

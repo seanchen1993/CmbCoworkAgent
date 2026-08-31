@@ -2,7 +2,6 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
-const modelsSource = readFileSync(new URL("../src/main/ipc/models.ts", import.meta.url), "utf8")
 const localSandboxSource = readFileSync(
   new URL("../src/main/agent/local-sandbox.ts", import.meta.url),
   "utf8"
@@ -46,7 +45,12 @@ const workflowRunManagerSource = readFileSync(
   new URL("../src/main/agent/workflow/run-manager.ts", import.meta.url),
   "utf8"
 )
+const gitWorktreeSource = readFileSync(
+  new URL("../src/main/services/git-worktree.ts", import.meta.url),
+  "utf8"
+)
 const threadsSource = readFileSync(new URL("../src/main/ipc/threads.ts", import.meta.url), "utf8")
+const modelsSource = readFileSync(new URL("../src/main/ipc/models.ts", import.meta.url), "utf8")
 const storageSource = readFileSync(new URL("../src/main/storage.ts", import.meta.url), "utf8")
 const agentIpcSource = readFileSync(new URL("../src/main/ipc/agent.ts", import.meta.url), "utf8")
 const checkpointTranscriptSource = readFileSync(
@@ -108,7 +112,7 @@ test("workspace:set validates elevated sandbox before updating thread metadata",
   const awaitIndex = section.indexOf(
     "const ready = await prepareWorkspaceSelectionSandbox(newPath, parentWindow)"
   )
-  const metadataIndex = section.indexOf("metadata.workspacePath = newPath")
+  const metadataIndex = section.indexOf("bindThreadWorkspace(current, newPath)")
 
   assert.ok(
     awaitIndex !== -1,
@@ -130,7 +134,7 @@ test("workspace:select validates elevated sandbox before committing selected wor
   const awaitIndex = section.indexOf(
     "const ready = await prepareWorkspaceSelectionSandbox(selectedPath, parentWindow)"
   )
-  const metadataIndex = section.indexOf("metadata.workspacePath = selectedPath")
+  const metadataIndex = section.indexOf("bindThreadWorkspace(current, selectedPath)")
   const storeIndex = section.indexOf('store.set("workspacePath", selectedPath)')
 
   assert.ok(awaitIndex !== -1, "workspace:select should await sandbox preparation")
@@ -150,9 +154,9 @@ test("workspace:select validates elevated sandbox before committing selected wor
 })
 
 test("sandbox mode defaults to disabled and first-run elevated NUX stays opt-in", () => {
-  const readSettingsSection = sectionBetween(
+  const sandboxSettingsSection = sectionBetween(
     readFileSync(new URL("../src/main/storage.ts", import.meta.url), "utf8"),
-    "function readSandboxSettings()",
+    "function defaultSandboxSettings()",
     "function updateSandboxSettings("
   )
   const nuxNeededSection = sectionBetween(
@@ -162,12 +166,12 @@ test("sandbox mode defaults to disabled and first-run elevated NUX stays opt-in"
   )
 
   assert.match(
-    readSettingsSection,
+    sandboxSettingsSection,
     /return \{ mode: "none", yolo: false, nuxCompleted: true \}/,
     "missing or unreadable sandbox settings should default to disabled"
   )
   assert.match(
-    readSettingsSection,
+    sandboxSettingsSection,
     /SANDBOX_MODES\.has\(parsed\.mode\) \? parsed\.mode : "none"/,
     "invalid persisted sandbox modes should fall back to disabled"
   )
@@ -743,8 +747,8 @@ test("Windows sandbox execution no longer installs native-helper workarounds", (
 test("orchestrator wraps every sandbox failure in Codex's single retry-without-sandbox prompt", () => {
   const orchestratorSection = sectionBetween(
     toolOrchestratorSource,
-    "async execute(command: string, cwd: string, sandboxMode: string)",
-    "private async approveFileOp("
+    "  async execute(",
+    "  async approveFileOp("
   )
   const bypassSection = sectionBetween(
     toolOrchestratorSource,
@@ -759,12 +763,12 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     orchestratorSection,
-    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    /safety\.level === "safe"[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
     "safe commands should also be eligible for Codex-style sandbox bypass prompts after sandbox failure"
   )
   assert.match(
     orchestratorSection,
-    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(command, cwd, sandboxMode, result\)/,
+    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
     "YOLO mode should skip only the initial command approval; sandbox escape must still require the retry approval prompt"
   )
   assert.match(
@@ -925,7 +929,7 @@ test("background execute() routes results through the orchestrator's bypass chec
 
   assert.match(
     backgroundSection,
-    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult\s*\)/,
+    /this\.orchestrator[\s\S]*maybeRetryOutsideSandbox\(\s*effectiveCommand,\s*effectiveCwd,\s*this\.windowsSandbox,\s*rawResult,\s*outsideShellSyntax\s*\)/,
     "executeBackground must hand the raw result to the orchestrator's bypass check before marking the task complete — otherwise backgrounded `npm run build` skips the approval prompt"
   )
   assert.match(
@@ -976,8 +980,8 @@ test("autoApproveFileEdits waives ONLY file-edit approval, never shell execute",
   // are gated on yoloMode alone, so a workflow subagent still gets a shell prompt.
   const executeSection = sectionBetween(
     toolOrchestratorSource,
-    "async execute(command: string, cwd: string, sandboxMode: string)",
-    "async approveFileOp("
+    "  async execute(",
+    "  async approveFileOp("
   )
   assert.ok(
     !executeSection.includes("autoApproveFileEdits"),
@@ -1155,7 +1159,7 @@ test("pending command approvals can be restored after renderer reload", () => {
   )
   assert.match(
     approvalListenerSection,
-    /getPendingApprovals\(threadId\)[\s\S]*if \(!initializedThreadsRef\.current\.has\(threadId\)\) return/,
+    /getPendingApprovals\(threadId\)[\s\S]*if \(!isCurrentListenerEpoch\(\)\) return/,
     "late pending approval snapshots should not recreate cleaned-up thread state"
   )
 })
@@ -1168,22 +1172,27 @@ test("elevated sandbox preamble injects git safe.directory and openssl backend",
   )
   const unelevatedClearProxySection = sectionBetween(
     localSandboxSource,
-    "    const clearProxyPreamble =",
+    "    const sandboxGitConfigEntries:",
     "    // Unelevated sandbox: set shared tool env vars"
   )
 
   for (const section of [elevatedPreambleSection, unelevatedClearProxySection]) {
     assert.match(
       section,
-      /GIT_CONFIG_COUNT=2/,
-      "GIT_CONFIG_COUNT must be bumped to 2 so both http.sslBackend and safe.directory survive"
+      /\["http\.sslBackend", "openssl"\][\s\S]*\["safe\.directory", "\*"\]/,
+      "both http.sslBackend and safe.directory must survive the generated Git config preamble"
     )
     assert.match(
       section,
-      /GIT_CONFIG_KEY_1=safe\.directory[\s\S]*GIT_CONFIG_VALUE_1=\*/,
-      "git safe.directory=* must be injected so the sandbox user can operate on the host-owned workspace without 'dubious ownership' errors"
+      /gitConfigEnvironmentPreamble/,
+      "sandbox Git config must use the shared indexed-environment preamble builder"
     )
   }
+  assert.match(
+    localSandboxSource,
+    /\["GIT_CONFIG_COUNT", String\(entries\.length\)\]/,
+    "GIT_CONFIG_COUNT must follow the generated entry count"
+  )
 })
 
 test("sandbox ACL grants only cover writable sandbox roots", () => {
@@ -1697,8 +1706,8 @@ test("workflow surfaces the real reason an invalid resumeFromRunId failed", () =
   )
   assert.match(
     workflowToolSource,
-    /resolveScriptSource\(workspacePath, input, resume\.run\?\.script, resume\.note\)/,
-    "the resume note is threaded into resolveScriptSource"
+    /resolveScriptSource\(\s*workspacePath,\s*threadId,\s*input,\s*resume\.run\?\.script,\s*resume\.note\s*\)/,
+    "the thread identity and resume note are threaded into resolveScriptSource"
   )
 })
 
@@ -1718,7 +1727,7 @@ test("workflow warns when the initial run state could not be persisted", () => {
   )
   assert.match(
     workflowToolSource,
-    /initialPersisted[\s\S]*?may NOT be resumable/,
+    /initialPersisted[\s\S]*?may not be resumable/,
     "the tool warns the user when the run isn't durable"
   )
 })
@@ -1731,7 +1740,7 @@ test("workflow allows concurrent runs over the same workspace; workspace lock re
   // worktree, so the accepted trade-off is that two write-heavy runs touching the
   // same file can clobber each other — low-frequency and git-recoverable.
   // activeRunForWorkspace is KEPT (auto-commit still skips while ANY run is active on
-  // the workspace), so the scan-by-canonical-key + realpath logic must remain.
+  // the workspace), so the scan-by-canonical-key + async realpath logic must remain.
   assert.match(
     workflowRunManagerSource,
     /activeRunForWorkspace\(workspacePath: string\)[\s\S]*?runKey === key \|\| isPathInside\(runKey, key\) \|\| isPathInside\(key, runKey\)/,
@@ -1739,8 +1748,13 @@ test("workflow allows concurrent runs over the same workspace; workspace lock re
   )
   assert.match(
     workflowRunManagerSource,
-    /function workspaceKey\(p: string\)[\s\S]*?realpathSync\.native\(p\)/,
-    "workspace key is realpath-canonicalized"
+    /async function prepareWorkspaceKey\(p: string\)[\s\S]*?canonicalizeWorkspacePath\(p\)/,
+    "workspace key is realpath-canonicalized without main-thread sync I/O"
+  )
+  assert.match(
+    workflowToolSource,
+    /await workflowRunManager\.prepareLaunch\(workspacePath, threadId\)/,
+    "production launch awaits canonical workspace identity before its sync critical section"
   )
   // launch() must NOT throw a workspace clash anymore — the lock is gone.
   assert.doesNotMatch(
@@ -1792,14 +1806,19 @@ test("workflow subagent hard-stops a hung stream via raceWithAbort", () => {
   assert.equal(wrapped.length, 2, "both stream consumptions are wrapped in raceWithAbort")
 })
 
-test("workflow persists the resumed flag at launch (survives reload)", () => {
-  // #7: resumed is set ONCE at launch from the resume journal — matching engine's
-  // run-start `journal.length > 0` — and persisted, so a fresh run whose journal
-  // later grows is not mistaken for a resume after a renderer reload.
+test("workflow persists the explicit resumed flag at launch (survives reload)", () => {
+  // Resume is explicit rather than inferred only from the journal: isolated
+  // worktrees deliberately are not journal-replayed, but resuming such a run
+  // must still preserve its durable records and renderer status.
   assert.match(
     workflowRunManagerSource,
-    /resumed: \(request\.resumeJournal\?\.length \?\? 0\) > 0/,
-    "launch persists resumed from the resume journal length"
+    /resumed: request\.resumed === true/,
+    "launch persists the explicit resume state"
+  )
+  assert.match(
+    workflowToolSource,
+    /resumed: resume\.run !== null/,
+    "workflow tool marks resume even when only durable worktrees are reused"
   )
 })
 
@@ -1811,17 +1830,17 @@ test("workflow notification backlog drains: ack kicks the next pending run", () 
   // otherwise the older one is stranded until the next hydrate/reload.
   assert.match(
     workflowRunManagerSource,
-    /kickNextPendingNotification\(workspacePath: string, threadId: string\): void/,
-    "run manager exposes a backlog-draining kick"
+    /async kickNextPendingNotificationAsync\([\s\S]*?\): Promise<void>/,
+    "run manager exposes an async backlog-draining kick"
   )
   assert.match(
     workflowRunManagerSource,
-    /kickNextPendingNotification[\s\S]*?findPendingNotification\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{ type: "workflow_notification"/,
-    "the kick re-broadcasts the next undelivered run's notification"
+    /kickNextPendingNotificationAsync[\s\S]*?await this\.findPendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?broadcast\(threadId, \{ type: "workflow_notification"/,
+    "the async kick re-broadcasts the next undelivered run's notification"
   )
   assert.match(
     agentIpcSource,
-    /workflowRunManager\.kickNextPendingNotification\(settle\.workspacePath, threadId\)/,
+    /await workflowRunManager\.kickNextPendingNotificationAsync\([\s\S]*?settle\.workspacePath,[\s\S]*?threadId/,
     "the successful-ack path drains the next pending notification"
   )
 })
@@ -1840,13 +1859,13 @@ test("workflow resume keeps an append-only journal (never wiped) for crash safet
     /resetJournal/,
     "engine must not wipe the journal on resume (append-only crash safety)"
   )
-  // The store deep-copies its seed so a live append never mutates the caller's
-  // journal object — two resumes seeded from one object would otherwise corrupt
-  // each other now that the journal isn't reset.
+  // The store copies every mutable container/record without a monolithic JSON
+  // round-trip, so a large resumed journal neither blocks main nor aliases the
+  // caller's array/entry records.
   assert.match(
     workflowRunStoreSource,
-    /const state: PersistedWorkflowRun = JSON\.parse\(JSON\.stringify\(initial\)\)/,
-    "run store deep-copies the initial run so appends don't mutate the caller's journal"
+    /const state: PersistedWorkflowRun = \{[\s\S]*?journal: initial\.journal\.map\(\(entry\) => \(\{ \.\.\.entry \}\)\)[\s\S]*?stats: \{ \.\.\.initial\.stats \}/,
+    "run store copies mutable state without cloning a potentially huge payload graph"
   )
   // resetJournal is gone (dead once resume is append-only).
   assert.doesNotMatch(
@@ -1860,12 +1879,12 @@ test("workflow resume keeps an append-only journal (never wiped) for crash safet
   // journal (which would re-execute completed edit agents a second time).
   assert.match(
     workflowRunStoreSource,
-    /rename\(`\$\{journalPath\}\.tmp`, journalPath\)[\s\S]{0,160}?rename\(`\$\{path\}\.tmp`, path\)/,
+    /await writeWorkflowJournalSidecar\([\s\S]*?journalPath[\s\S]*?await writeFile\([\s\S]*?path[\s\S]*?await rename\([\s\S]*?path/,
     "doWrite renames the journal before run.json (crash-safe resume ordering)"
   )
   assert.doesNotMatch(
     workflowRunStoreSource,
-    /rename\(`\$\{path\}\.tmp`, path\)[\s\S]{0,160}?rename\(`\$\{journalPath\}\.tmp`, journalPath\)/,
+    /await rename\([\s\S]*?path[\s\S]{0,160}?await writeWorkflowJournalSidecar/,
     "run.json is never renamed before the journal (would let resume re-run completed agents)"
   )
 })
@@ -1879,19 +1898,24 @@ test("workflow file reads/writes guard non-regular files (FIFO/device) before to
   // source.
   assert.match(
     workflowToolSource,
-    /const st = statSync\(resolved\)[\s\S]*?if \(!st\.isFile\(\)\)/,
-    "top-level scriptPath isFile-guards before the synchronous readFileSync"
+    /openStableFileHandle\([\s\S]*?readStableFileHandleBounded\(opened, MAX_WORKFLOW_SCRIPT_BYTES\)/,
+    "top-level scriptPath uses a stable regular-file handle and bounded async read"
   )
-  // engine guards all three of its paths: guest readFile, child workflow
-  // scriptPath, and guest writeFile.
+  // Engine guards guest readFile/writeFile directly. Child workflow scriptPath
+  // uses the same stable-handle primitive as the top-level loader.
   const engineGuards = (workflowEngineSource.match(/\.isFile\(\)/g) ?? []).length
   assert(
-    engineGuards >= 3,
-    `engine isFile-guards readFile + child scriptPath + writeFile (>=3), got ${engineGuards}`
+    engineGuards >= 2,
+    `engine isFile-guards guest readFile + writeFile (>=2), got ${engineGuards}`
+  )
+  assert.match(
+    workflowEngineSource,
+    /openStableFileHandle\(workspacePath, requestedPath\)[\s\S]*?readStableFileHandleBounded\(opened, MAX_WORKFLOW_SCRIPT_BYTES\)/,
+    "child workflow scriptPath uses a stable regular-file handle and bounded read"
   )
 })
 
-test("edit-and-resume sidecar sweep runs AFTER approval-reject and BEFORE launch", () => {
+test("workflow edit-and-resume sweep and async storage preflight run before launch", () => {
   // P2: clearAllAgentToolStreams deletes the prior run's tool-stream sidecars on a journal-dropping
   // resume (reused runId, new callHashes). It MUST sit AFTER the approval-reject return — a rejected
   // edit-and-resume must NOT destroy the prior run's still-in-history tool stream — and BEFORE launch
@@ -1900,28 +1924,66 @@ test("edit-and-resume sidecar sweep runs AFTER approval-reject and BEFORE launch
   // workflow-engine: testClearAllAgentToolStreamsSweepsRunIdSidecars.)
   const rejectReturnAt = workflowToolSource.indexOf('status: "rejected"')
   const sweepAt = workflowToolSource.indexOf("clearAllAgentToolStreams(workspacePath")
+  const prepareAt = workflowToolSource.indexOf("workflowRunManager.prepareLaunch(")
   const launchAt = workflowToolSource.indexOf("workflowRunManager.launch(")
   assert(
-    rejectReturnAt > 0 && sweepAt > 0 && launchAt > 0,
-    "approval-reject, sweep, and launch anchors are all present in tool.ts"
+    rejectReturnAt > 0 && sweepAt > 0 && prepareAt > 0 && launchAt > 0,
+    "approval-reject, sweep, async preflight, and launch anchors are all present in tool.ts"
   )
   assert(
     rejectReturnAt < sweepAt,
     "sweep must run AFTER the approval-reject return — a rejected edit-and-resume must not delete history"
   )
   assert(sweepAt < launchAt, "sweep must run BEFORE launch (no new sidecar exists yet to race)")
-  // ...and the sweep itself must NOT block the launch on display I/O (run-store:253 — hung writes
-  // stall only the sidecar chain, never the run). It is SYNC (void), and in-flight writes get an
-  // ORDERED delete on the op chain (enqueueAgentSidecarOp) — never an awaited Promise.allSettled.
+  assert(
+    sweepAt < prepareAt && prepareAt < launchAt,
+    "workspace/storage realpath I/O must be awaited before the synchronous launch critical section"
+  )
+  assert.match(
+    workflowToolSource,
+    /await workflowRunManager\.prepareLaunch\(workspacePath, threadId\)/,
+    "production launch must not fall back to synchronous workspace/storage canonicalization"
+  )
+  // ...and the sweep awaits only settled-file async I/O. In-flight writes still get an ORDERED
+  // delete on the op chain (enqueueAgentSidecarOp), never an awaited Promise.allSettled, so a hung
+  // display write cannot block launch while settled old files are gone before launch starts.
   assert.match(
     workflowRunStoreSource,
-    /export function clearAllAgentToolStreams\([\s\S]*?\): void \{/,
-    "clearAllAgentToolStreams is sync (void) — it can't await/block the launch on display I/O"
+    /export async function clearAllAgentToolStreams\([\s\S]*?\): Promise<void> \{/,
+    "clearAllAgentToolStreams uses async filesystem I/O for the settled-file sweep"
+  )
+  assert.match(
+    workflowToolSource,
+    /await clearAllAgentToolStreams\(workspacePath, threadId, runId\)/,
+    "settled old sidecars must be removed before the replacement launch starts"
   )
   assert.match(
     workflowRunStoreSource,
-    /clearAllAgentToolStreams[\s\S]*?enqueueAgentSidecarOp\(opPath/,
+    /function enqueuePendingAgentToolStreamDeletes[\s\S]*?enqueueAgentSidecarOp\(opPath/,
     "in-flight writes get an ordered op-chain delete (handles revival without blocking the launch)"
+  )
+  assert.match(
+    workflowRunStoreSource,
+    /clearAllAgentToolStreams[\s\S]*?enqueuePendingAgentToolStreamDeletes\(dirs, runId\)/,
+    "the async settled-file sweep also schedules pending-path deletes"
+  )
+})
+
+test("workflow launch and workspace-pin paths avoid synchronous filesystem I/O", () => {
+  assert.doesNotMatch(
+    workflowRunManagerSource,
+    /\b(?:realpathSync|mkdirSync|writeFileSync|existsSync)\s*\(/,
+    "run-manager must not block Electron's main loop on launch or workspace-pin filesystem I/O"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /await stat\(record\.directory\)/,
+    "manifest directory checks must remain asynchronous"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /await launchReady[\s\S]*?runWorkflowEngine\(/,
+    "the engine must wait for initial state and editable-script persistence"
   )
 })
 
@@ -2035,7 +2097,7 @@ test("workflow journal sidecar is written atomically (tmp+rename)", () => {
   // crash would otherwise return an empty journal on resume, losing the replay cache.
   assert.match(
     workflowRunStoreSource,
-    /writeFile\(`\$\{journalPath\}\.tmp`[\s\S]*?rename\(`\$\{journalPath\}\.tmp`, journalPath\)/,
+    /async function writeWorkflowJournalSidecar[\s\S]*?const handle = await open\(tempPath[\s\S]*?await rename\(tempPath, targetPath\)/,
     "journal sidecar uses tmp+rename (atomic), not a direct overwrite"
   )
 })
@@ -2069,6 +2131,16 @@ test("workflow settle reports + retries a failed final persist (no stale notific
     /if \(!finalPersisted\)[\s\S]*?could NOT be persisted/,
     "settle logs loudly when the final persist fails"
   )
+  const fallbackPublishedAt = workflowRunManagerSource.indexOf(
+    "this.captureFlushFailedRun(request"
+  )
+  const lifecycleRemovedAt = workflowRunManagerSource.indexOf(
+    "this.active.delete(request.threadId)"
+  )
+  assert(
+    fallbackPublishedAt >= 0 && lifecycleRemovedAt >= 0 && fallbackPublishedAt < lifecycleRemovedAt,
+    "terminal fallback is published before the active lifecycle entry is removed"
+  )
 })
 
 test("workflow notification reads an in-memory snapshot when final persist failed", () => {
@@ -2082,7 +2154,7 @@ test("workflow notification reads an in-memory snapshot when final persist faile
   )
   assert.match(
     workflowRunManagerSource,
-    /if \(!finalPersisted\)[\s\S]*?this\.flushFailedRuns\.set\(/,
+    /if \(!finalPersisted\)[\s\S]*?this\.captureFlushFailedRun\(/,
     "a failed final persist stores the terminal snapshot"
   )
   assert.match(
@@ -2102,7 +2174,7 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
   // else findPendingNotification would re-surface and wrongly report it.
   assert.match(
     workflowRunManagerSource,
-    /if \(!entry\.userCancelled\)[\s\S]*?if \(!finalPersisted\)[\s\S]*?flushFailedRuns\.set\(/,
+    /if \(!entry\.userCancelled && !finalPersisted\)[\s\S]*?captureFlushFailedRun\(/,
     "flush-failed snapshot is stored only for non-cancelled runs"
   )
   assert.match(
@@ -2124,28 +2196,39 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
   )
   assert.match(
     workflowsIpcSource,
-    /const recovered = workflowRunManager\.getFlushFailedRun\(runId\)[\s\S]*?return stripJournalForRenderer\(recovered\)/,
-    "get-run serves the in-memory terminal snapshot"
+    /const recovered = workflowRunManager\.getFlushFailedRun\(runId\)[\s\S]*?if \(recovered\?\.threadId === threadId\)[\s\S]*?retryPersistFlushFailedRun\(workspacePath, threadId, runId\)[\s\S]*?return stripJournalForRenderer\(recovered\)/,
+    "get-run serves and retries only an in-memory snapshot owned by the requested thread"
   )
   // ack writes the true terminal state back to disk (disk may have recovered),
   // carrying the capture-time disposal epoch so a snapshot from a deleted (then
   // revived) incarnation is dropped instead of rebuilding the swept run dir.
   assert.match(
     workflowRunManagerSource,
-    /async recoverFlushFailedRun[\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*snapshot,\s*this\.flushFailedEpochs\.get\(runId\)\s*\)/,
+    /persistCurrentFlushFailedRun[\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*frozen,\s*this\.flushFailedEpochs\.get\(runId\),[\s\S]*?preserveJournalSidecar[\s\S]*?flushFailedRevisions\.get\(runId\)[\s\S]*?dropFlushFailedRun\(runId\)/,
     "recoverFlushFailedRun writes the snapshot back to disk on ack, epoch-fenced"
   )
-  // The snapshot keeps the FULL journal (writing an empty one would wipe the resume
-  // cache); the real behavior is covered by testPersistRecoveredRunKeepsJournal.
   assert.match(
     workflowRunManagerSource,
+    /async recoverFlushFailedRun[\s\S]*?this\.persistCurrentFlushFailedRun\(workspacePath, threadId, runId\)/,
+    "the ack path uses the revision-fenced write-back helper"
+  )
+  // Final-persist failure keeps authoritative terminal state without a giant
+  // stringify/parse clone on Electron main. Durable journals stay in their
+  // sidecar; an unwritten journal is retained by immutable entry reference.
+  assert.doesNotMatch(
+    workflowRunManagerSource,
     /flushFailedRuns\.set\(request\.runId, JSON\.parse\(JSON\.stringify\(runStore\.state\)\)\)/,
-    "flush-failed snapshot keeps the full run incl. journal (no data loss on write-back)"
+    "flush-failed capture never deep-clones a potentially 128 MiB journal"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /captureFlushFailedRun\(request, runStore\.captureFlushFailureSnapshot\(\)\)/,
+    "final-persist failure captures the run store's compact/sidecar-aware snapshot"
   )
   // list-runs shows the in-memory terminal summary, not the stale "running" disk row.
   assert.match(
     workflowsIpcSource,
-    /const withSnapshots[\s\S]*?toRunSummary\(snapshot\)/,
+    /const overlays = workflowRunManager\.listFlushFailedRuns\(threadId\)\.map\(toRunSummary\)[\s\S]*?listWorkflowRunsPage\([\s\S]*?overlays/,
     "list-runs surfaces the flush-failed run's true terminal summary"
   )
   // ack kicks the backlog when EITHER delivered persisted or the flush-failed
@@ -2155,18 +2238,18 @@ test("flush-failed-run snapshot handles the cancel + zombie-reconcile boundaries
     /if \(delivered \|\| shouldKickPendingDrain\)/,
     "ack drains the notification backlog after a successful write-back too"
   )
-  // #5: flushFailedRuns has a SOFT cap (best-effort; each snapshot holds a full
-  // journal). Only already-delivered snapshots are evicted, so it can exceed the cap
-  // rather than ever drop an unreported result.
+  // A retained terminal result opens a storage circuit breaker. It stops new,
+  // unrelated runs from amplifying a persistent disk failure, but healthy-disk
+  // concurrency is not pre-emptively reduced to an invented global limit.
   assert.match(
     workflowRunManagerSource,
-    /const MAX_FLUSH_FAILED_RUNS = \d+/,
-    "the flush-failed snapshot map has a soft cap (best-effort, never drops an unreported result)"
+    /isLaunchBlockedByFlushFailure[\s\S]*?this\.flushFailedRuns\.size[\s\S]*?isLaunchBlockedByFlushFailure\(request\.runId, request\.threadId\)/,
+    "an unrelated launch is blocked while terminal results await durable storage"
   )
-  assert.match(
+  assert.doesNotMatch(
     workflowRunManagerSource,
-    /size > MAX_FLUSH_FAILED_RUNS[\s\S]*?snap\.notificationDelivered && !this\.inFlightNotifications\.has\(id\)[\s\S]*?this\.dropFlushFailedRun\(id\)/,
-    "cap evicts ONLY an already-delivered, not-in-flight snapshot (never drops an unreported result)"
+    /projectedFallback(?:Count|Bytes)[\s\S]*?this\.active\.size/,
+    "healthy concurrent runs are not charged a worst-case disk-failure reservation"
   )
 })
 
@@ -2297,13 +2380,13 @@ test("flush-failed run with NO disk file is still surfaced in history + hydrate 
   )
   assert.match(
     workflowsIpcSource,
-    /listFlushFailedRuns\(threadId\)[\s\S]*?if \(!seen\.has\(snap\.runId\)\) merged\.push\(toRunSummary\(snap\)\)/,
+    /listFlushFailedRuns\(threadId\)\.map\(toRunSummary\)[\s\S]*?listWorkflowRunsPage\([\s\S]*?overlays/,
     "list-runs appends memory-only snapshots that are absent from the disk listing"
   )
   assert.match(
     workflowsIpcSource,
-    /memLatest && \(!diskLatest \|\| byNewestRun\(memLatest, diskLatest\) < 0\)/,
-    "hydrate picks the genuinely-newest run (byNewestRun tie-break) — a memory-only snapshot can beat a STALE disk run, not just fill a blank panel"
+    /const latestPage = await listWorkflowRunsPage\(workspacePath, threadId, \{[\s\S]*?overlays[\s\S]*?const latestRunId = activeRunId \?\? latestPage\.runs\[0\]\?\.runId/,
+    "hydrate picks the newest overlay-aware page entry, so a memory-only snapshot can beat a stale disk run"
   )
 })
 
@@ -2332,7 +2415,7 @@ test("flush-failed snapshot gets a real write-back retry on read paths, not just
   // does NOT touch notificationDelivered (the ack owns that flag).
   assert.match(
     workflowRunManagerSource,
-    /async retryPersistFlushFailedRun\([\s\S]*?persistRecoveredRun\(\s*workspacePath,\s*threadId,\s*snapshot,\s*this\.flushFailedEpochs\.get\(runId\)\s*\)[\s\S]*?this\.dropFlushFailedRun\(runId\)/,
+    /async retryPersistFlushFailedRun\([\s\S]*?return this\.persistCurrentFlushFailedRun\(workspacePath, threadId, runId\)/,
     "run manager exposes a read-path write-back retry that drops the snapshot on success"
   )
   assert.match(
@@ -2376,12 +2459,12 @@ test("auto-commit is skipped while background work is active on the thread (#3)"
   // so the running-check is false there and that turn commits normally.
   assert.match(
     agentIpcSource,
-    /workspacePath && workflowRunManager\.activeRunForWorkspace\(workspacePath\)/,
+    /await workflowRunManager\.activeRunForWorkspaceAsync\(workspacePath\)/,
     "finalizeAutoCommit skips at WORKSPACE level (covers a workflow on another thread, same workspace)"
   )
   assert.match(
     agentIpcSource,
-    /activeRunForWorkspace\(workspacePath\)[\s\S]*?workflowRunManager\.isActive\(threadId\)[\s\S]*?status: "skipped"/,
+    /activeWorkflowOnWorkspace \|\|[\s\S]*?workflowRunManager\.isActive\(threadId\)[\s\S]*?status: "skipped"/,
     "with an isActive(threadId) fallback, then skips"
   )
   assert.match(
@@ -2396,8 +2479,115 @@ test("auto-commit is skipped while background work is active on the thread (#3)"
   )
   assert.match(
     agentIpcSource,
-    /workflowRunManager\.hasDeliverablePendingNotification\(workspacePath, threadId\)[\s\S]*?status: "skipped"/,
+    /await workflowRunManager\.hasDeliverablePendingNotificationAsync\(workspacePath, threadId\)[\s\S]*?status: "skipped"/,
     "and skips a FAST workflow's undelivered edits (honors 'leave for review'); the delivered run is already markNotified before finalize, so no turn-type guard is needed"
+  )
+})
+
+test("only source-mutating worktree merge uses the workspace integration guard", () => {
+  assert.doesNotMatch(
+    agentIpcSource,
+    /tryWithWorkspaceIntegrationLease/,
+    "worktree integration must not hold a product-wide lease across ordinary auto-commit UI"
+  )
+  assert.match(
+    workflowsIpcSource,
+    /if \(payload\.action === "diff"\)[\s\S]*?else if \(payload\.action === "discard"\)[\s\S]*?else if \(payload\.action === "cleanup"\)[\s\S]*?else \{[\s\S]*?withWorkspaceIntegrationLease/,
+    "diff/discard/cleanup must not occupy the source-integration lease"
+  )
+  assert.match(
+    workflowsIpcSource,
+    /withWorkspaceIntegrationLease\(\s*record\.sourceRoot,\s*`ui:\$\{payload\.threadId\}:\$\{payload\.runId\}`/,
+    "merge alone must serialize the shared source checkout mutation"
+  )
+})
+
+test("isolated worktree provisioning requires the durable run index", () => {
+  assert.match(
+    workflowRunManagerSource,
+    /!\(await runStore\.whenInitialPersisted\)[\s\S]{0,120}!\(await runStore\.isCurrentSnapshotPersistedAsync\(\)\)[\s\S]{0,500}entry\.worktrees\.acquire/,
+    "worktree ownership requires either the eager persist or a later durable snapshot of the current run"
+  )
+})
+
+test("isolated commits use native Git without the old staging broker", () => {
+  assert.doesNotMatch(
+    gitWorktreeSource,
+    /commitWorkflowWorktree|stageWorkflowWorktreeUnlocked/,
+    "isolated add/commit must preserve the agent's actual native Git index and hooks"
+  )
+  assert.match(
+    localSandboxSource,
+    /executionPlan\.writableRoots\.push\(commonDir\)/,
+    "Windows worktree Git must be able to update linked-worktree administration"
+  )
+  assert.match(
+    localSandboxSource,
+    /runScopedWritableRootKeys\.add\(normalizeDirKey\(commonDir\)\)[\s\S]*?let permanentAcl = !runScopedWritableRootKeys\.has\(cacheKey\)/,
+    "a user repository commonDir ACL must remain run-scoped instead of becoming permanent"
+  )
+})
+
+test("retained worktrees pin only their owning workspace until explicitly resolved", () => {
+  assert.match(
+    workflowRunManagerSource,
+    /isWorkspacePinnedForThread[\s\S]*?countUnresolvedWorkflowWorktreesAsync\([\s\S]*?workspacePath,[\s\S]*?threadId,[\s\S]*?failClosedOnUnreadable: false/,
+    "workspace pinning includes durable unresolved worktrees"
+  )
+  assert.doesNotMatch(
+    agentIpcSource,
+    /workflowLeaveBlockedMessage[\s\S]{0,900}isWorkspacePinnedForThread/,
+    "a retained worktree does not block mode-only changes"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /isWorkspacePinnedForThread[\s\S]*?identifyRepository\(workspacePath\)[\s\S]*?listWorkflowWorktreeRecordsForPrune\(repository\.commonDir\)[\s\S]*?record\.threadId !== threadId/,
+    "workspace pinning also sees a crash-window manifest absent from run.json"
+  )
+})
+
+test("flush-failed worktree recovery paths remain actionable", () => {
+  assert.match(
+    workflowsIpcSource,
+    /getFlushFailedRun\(payload\.runId\) \?\?[\s\S]*?loadWorkflowRunAsync\(workspacePath, payload\.threadId, payload\.runId\)/,
+    "worktree actions must use the same in-memory terminal run shown by workflow:get-run"
+  )
+  assert.match(
+    workflowsIpcSource,
+    /persistActionWorktreeRecord\([\s\S]*?updateFlushFailedWorktreeRecord/,
+    "worktree action results must update a flush-failed snapshot before retrying disk persistence"
+  )
+  assert.match(
+    threadsSource,
+    /listFlushFailedRuns\(threadId\)[\s\S]*?record\.cleanupPending === true/,
+    "thread deletion keeps a flush-failed terminal worktree whose branch or manifest cleanup remains pending"
+  )
+  assert.match(
+    workflowRunManagerSource,
+    /updateFlushFailedWorktreeRecord[\s\S]*?newerWorkflowWorktreeRecord\(current, record\)/,
+    "flush-failed snapshots use the same terminal-monotonic worktree merge as run.json"
+  )
+})
+
+test("pristine cleanup keeps a terminal recovery record when ownership deletion fails", () => {
+  assert.match(
+    workflowRunManagerSource,
+    /onRecordDelete: \(record\)[\s\S]*?run\.worktrees = \(run\.worktrees \?\? \[\]\)\.filter/,
+    "the normal path still removes a pristine worktree from run history"
+  )
+  const leaseSource = readFileSync(
+    new URL("../src/main/agent/workflow/worktree-lease.ts", import.meta.url),
+    "utf8"
+  )
+  assert.match(
+    leaseSource,
+    /private async removeAndForget[\s\S]*?deleteWorkflowWorktreeRecord[\s\S]*?catch \(error\)[\s\S]*?"discarded"[\s\S]*?cleanupPending: true[\s\S]*?onRecordChange/,
+    "a removed pristine checkout is terminal-pending, never hidden while its manifest remains"
+  )
+  assert.match(
+    threadsSource,
+    /alreadyCleaned[\s\S]*?finalizeWorkflowWorktreeRecord/,
+    "thread deletion finalizes a clean terminal tombstone before dropping its recovery route"
   )
 })
 
@@ -2445,8 +2635,8 @@ test("deleting a thread sweeps leftover workflow-subagent (__wf_) checkpoints (#
   // the __wf_ ones — add a symmetric sweep.
   assert.match(
     storageSource,
-    /export function deleteThreadWorkflowCheckpoints\([\s\S]*?sweepCheckpointVariants\(`\$\{parentThreadId\}__wf_`\)/,
-    "storage exposes a __wf_ checkpoint sweep mirroring the __worker__ one"
+    /export function deleteThreadWorkflowCheckpoints\([\s\S]*?sweepCheckpointVariants\(index\.workflowThreadIdsByParent\.get\(parentThreadId\) \?\? \[\]\)/,
+    "storage exposes an indexed __wf_ checkpoint sweep mirroring the __worker__ one"
   )
   assert.match(
     threadsSource,
@@ -2522,12 +2712,17 @@ test("workflow run IPC strips the (tens-of-MB) journal before sending a run to t
 })
 
 test("workflow notification is at-least-once: delivered persisted only on SUCCESS (crash re-reports)", () => {
-  // Turn START marks the run in-flight IN MEMORY only — it must NOT persist the
-  // durable delivered flag here (that was the at-most-once crash hole).
+  // Turn START atomically discovers + claims the run IN MEMORY only — it must NOT
+  // persist the durable delivered flag here (that was the at-most-once crash hole).
+  assert.match(
+    workflowRunManagerSource,
+    /async claimPendingNotificationAsync\([\s\S]*?await this\.findPendingNotificationAsync\([\s\S]*?this\.inFlightNotifications\.add\(run\.runId\)/,
+    "notification turn start atomically claims the run in memory"
+  )
   assert.match(
     agentIpcSource,
-    /workflowRunManager\.markNotificationInFlight\(pendingWorkflowRun\.runId\)/,
-    "notification turn start marks in-flight in memory"
+    /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId\s*\)/,
+    "notification turn uses the atomic async claim"
   )
   // delivered (markNotified) is persisted ONLY on the success/ack path, and its
   // boolean return gates the backlog kick (a failed write must not let the same
@@ -2539,7 +2734,7 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   )
   assert.match(
     agentIpcSource,
-    /if \(delivered \|\| shouldKickPendingDrain\) \{\s*\n\s*workflowRunManager\.kickNextPendingNotification\(settle\.workspacePath, threadId\)/,
+    /if \(delivered \|\| shouldKickPendingDrain\) \{[\s\S]*?await workflowRunManager\.kickNextPendingNotificationAsync\([\s\S]*?settle\.workspacePath,[\s\S]*?threadId/,
     "the next pending run is kicked when this run's delivered flag persisted OR its flush-failed state was written back"
   )
   // A turn that ends in the catch clears in-flight UNCONDITIONALLY (abort too) and
@@ -2548,8 +2743,8 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
   // in inFlightNotifications and it can never be re-reported this process.
   assert.match(
     agentIpcSource,
-    /workflowRunManager\.clearNotificationInFlight\(settleRunId\)\s*\n\s*if \(!isAbortError\) \{\s*\n\s*workflowRunManager\.renotify\(threadId, settleRunId\)/,
-    "abort still clears in-flight; only renotify is gated on genuine failure"
+    /releaseWorkflowNotification\(settleRunId, ownerRunToken\)\s*\n\s*if \(!isAbortError\) \{\s*\n\s*workflowRunManager\.renotify\(threadId, settleRunId\)/,
+    "abort still releases its owned in-flight claim; only renotify is gated on genuine failure"
   )
   // run-manager excludes in-flight runs from discovery so a concurrent invoke
   // can't double-report the same run.
@@ -2604,7 +2799,7 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
     "threads:update blocks leaving workflow to ANY non-workflow mode"
   )
   // agent:invoke + resume paths use a shared workflowLeaveBlockedMessage helper,
-  // gated on leaving workflow (effectiveAgentMode / requestedAgentMode !== workflow).
+  // gated on leaving workflow (effectiveAgentMode / current requestedResumeMode !== workflow).
   assert.match(
     agentIpcSource,
     /function workflowLeaveBlockedMessage\(/,
@@ -2617,8 +2812,8 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   )
   assert.match(
     agentIpcSource,
-    /metadata\.agentMode === "workflow" && requestedAgentMode !== "workflow"/,
-    "resume path blocks leaving workflow to any non-workflow mode"
+    /getAgentModeFromMetadata\(latestMetadata\) === "workflow" &&\s*requestedResumeMode !== "workflow"/,
+    "resume path blocks leaving workflow using the latest serialized metadata"
   )
   // Regression guard: the workflow guard must NOT be bound to "switch to normal"
   // (isNormalModeBlocked) — that was the half-fix that let workflow → coordinator
@@ -2633,29 +2828,19 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
   // running/pending — otherwise the threads:update guard is just a bypassed side door.
   assert.match(
     modelsSource,
-    /assertWorkspaceSwitchAllowed[\s\S]*?workflowRunManager\.isBusyForThread\(/,
+    /assertWorkspaceSwitchAllowed[\s\S]*?workflowRunManager\.isWorkspacePinnedForThread\(/,
     "workspace-picker entry blocks a switch while a workflow is busy (the real entry, not just threads:update)"
   )
-  // threads:update is the secondary entry; it reuses the same isBusyForThread check
-  // when switching workspace while staying in workflow mode.
+  // threads:update is the secondary entry; any real workspace change uses the
+  // retained-worktree pin, including a combined mode+workspace update.
   assert.match(
     threadsSource,
-    /nextMetadata\.agentMode === "workflow"[\s\S]*?nextMetadata\.workspacePath !== currentMetadata\.workspacePath[\s\S]*?workflowRunManager\.isBusyForThread\(threadId, currentMetadata\.workspacePath\)/,
-    "threads:update also guards a workspace switch while staying in workflow mode"
+    /nextMetadata\.workspacePath !== currentMetadata\.workspacePath[\s\S]*?await workflowRunManager\.isWorkspacePinnedForThread\(\s*threadId,\s*currentMetadata\.workspacePath\s*\)/,
+    "threads:update also guards a workspace switch with unresolved worktrees"
   )
   // #7 escape hatch: both guard sites release a pending run whose auto-re-report
   // has been exhausted this process, so a wedged notification can't lock the user
   // in workflow mode with no exit but deleting the thread.
-  assert.match(
-    agentIpcSource,
-    /workflowRunManager\.hasDeliverablePendingNotification\(workspacePath, threadId\)/,
-    "agent:invoke workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
-  )
-  assert.match(
-    threadsSource,
-    /workflowRunManager\.hasDeliverablePendingNotification\(wsp, threadId\)/,
-    "threads:update workflow guard scans ALL pending runs (exhausted-only unlocks the exit; an older deliverable run keeps blocking)"
-  )
   // #5 strand-caveat parity: the workspace-picker entry (the REAL switch path, hit
   // by "创建 Worktree 并切换" → workspace:set) must, after releasing a
   // renotify-exhausted pending run, log the same strand-under-original-workspace
@@ -2726,7 +2911,12 @@ test("workflow subagent cleanup cancels run_in_background tasks (no leak past th
   // leaks CPU/memory/file writes after the workflow completes or is cancelled.
   assert.match(
     runtimeSource,
-    /LocalSandbox\.cancelBackgroundTasks\(workflowThreadId\)/,
-    "workflow subagent cleanup cancels run_in_background tasks"
+    /LocalSandbox\.cancelBackgroundTasksAndWait\(workflowThreadId\)/,
+    "workflow subagent cleanup cancels and waits for run_in_background process trees"
+  )
+  assert.doesNotMatch(
+    runtimeSource,
+    /waitForWorktreeHookCommands/,
+    "worktree hooks reuse the normal hook runner instead of adding a second process registry"
   )
 })
