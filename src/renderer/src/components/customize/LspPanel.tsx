@@ -48,9 +48,18 @@ interface LspPanelProps {
   threadId: string | null
   embedded?: boolean
   statusOnly?: boolean
+  onSummaryChange?: (summary: {
+    config: LspConfig
+    status: LspStatus | null
+  }) => void
 }
 
-export function LspPanel({ threadId, embedded = false, statusOnly = false }: LspPanelProps): React.JSX.Element {
+export function LspPanel({
+  threadId,
+  embedded = false,
+  statusOnly = false,
+  onSummaryChange
+}: LspPanelProps): React.JSX.Element {
   const [config, setConfig] = useState<LspConfig | null>(null)
   const [status, setStatus] = useState<LspStatus | null>(null)
   const [jdkHomeInput, setJdkHomeInput] = useState("")
@@ -62,6 +71,7 @@ export function LspPanel({ threadId, embedded = false, statusOnly = false }: Lsp
   const [projectRoot, setProjectRoot] = useState<string | null>(null)
   const mountedRef = useRef(true)
   const hasReceivedDownloadStatePushRef = useRef(false)
+  const loadRequestIdRef = useRef(0)
 
   useEffect(() => {
     mountedRef.current = true
@@ -69,41 +79,47 @@ export function LspPanel({ threadId, embedded = false, statusOnly = false }: Lsp
   }, [])
 
   useEffect(() => {
+    loadRequestIdRef.current += 1
     setJdkFallbackNotice(null)
+    setProjectRoot(null)
+    setStatus(null)
   }, [threadId])
 
   const loadAll = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current
+    const isCurrent = (): boolean =>
+      mountedRef.current && requestId === loadRequestIdRef.current
     try {
       const cfg = await window.api.lsp.getConfig()
-      if (!mountedRef.current) return
+      if (!isCurrent()) return
       setConfig(cfg)
 
       if (!cfg.enabled) {
         setProjectRoot(null)
         const currentStatus = await window.api.lsp.getStatus(null)
-        if (mountedRef.current) setStatus(currentStatus)
+        if (isCurrent()) setStatus(currentStatus)
         return
       }
 
       if (!threadId) {
         setProjectRoot(null)
         const currentStatus = await window.api.lsp.getStatus(null)
-        if (mountedRef.current) setStatus(currentStatus)
+        if (isCurrent()) setStatus(currentStatus)
         return
       }
 
       const workspace = await window.api.workspace.get(threadId)
-      if (!mountedRef.current) return
+      if (!isCurrent()) return
       setProjectRoot(workspace)
 
       if (!workspace) {
         const currentStatus = await window.api.lsp.getStatus(null)
-        if (mountedRef.current) setStatus(currentStatus)
+        if (isCurrent()) setStatus(currentStatus)
         return
       }
 
       const currentStatus = await window.api.lsp.getStatus(workspace)
-      if (mountedRef.current) {
+      if (isCurrent()) {
         setStatus(currentStatus)
       }
     } catch (e) {
@@ -118,6 +134,10 @@ export function LspPanel({ threadId, embedded = false, statusOnly = false }: Lsp
   useEffect(() => {
     return window.api.lsp.onChanged(() => { loadAll() })
   }, [loadAll])
+
+  useEffect(() => {
+    if (config) onSummaryChange?.({ config, status })
+  }, [config, onSummaryChange, status])
 
   const loadDownloadState = useCallback(async () => {
     try {

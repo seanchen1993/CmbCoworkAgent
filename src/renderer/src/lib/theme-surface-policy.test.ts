@@ -125,17 +125,22 @@ describe("theme surface policy", () => {
     expect(violations).toEqual([])
   })
 
-  it("reserves the fixed light canvas for isolated HTML skill previews", () => {
+  it("reserves the fixed light canvas for isolated HTML previews", () => {
     const skillsPanelPath = join(RENDERER_ROOT, "components/customize/SkillsPanel.tsx")
+    const chatHtmlPreviewPath = join(RENDERER_ROOT, "components/chat/previews/HtmlPreview.tsx")
     const usages = rendererSourceFiles(RENDERER_ROOT).filter((file) =>
       readFileSync(file, "utf8").includes("html-preview-light-canvas")
     )
     const skillsPanel = readFileSync(skillsPanelPath, "utf8")
+    const chatHtmlPreview = readFileSync(chatHtmlPreviewPath, "utf8")
     const css = readFileSync(join(RENDERER_ROOT, "index.css"), "utf8")
 
-    expect(usages).toEqual([skillsPanelPath])
+    expect(usages).toEqual([chatHtmlPreviewPath, skillsPanelPath])
     expect(skillsPanel).toMatch(
       /previewKind === "html"[\s\S]{0,300}html-preview-light-canvas[\s\S]{0,300}srcDoc=/
+    )
+    expect(chatHtmlPreview).toMatch(
+      /<iframe[\s\S]{0,300}srcDoc=[\s\S]{0,300}html-preview-light-canvas/
     )
     expect(css).toMatch(HTML_PREVIEW_LIGHT_CANVAS_RULE)
   })
@@ -183,6 +188,10 @@ describe("theme surface policy", () => {
 
   it("keeps embedded code and diagram renderers on shared theme tokens", () => {
     const codeViewer = readFileSync(join(RENDERER_ROOT, "components/tabs/CodeViewer.tsx"), "utf8")
+    const codeHighlightWorker = readFileSync(
+      join(RENDERER_ROOT, "components/tabs/code-highlight-worker.ts"),
+      "utf8"
+    )
     const scriptEditor = readFileSync(
       join(RENDERER_ROOT, "components/browser/BrowserScriptEditor.tsx"),
       "utf8"
@@ -196,8 +205,9 @@ describe("theme surface policy", () => {
       "utf8"
     )
 
-    expect(codeViewer).toContain("createCssVariablesTheme")
+    expect(codeHighlightWorker).toContain("createCssVariablesTheme")
     expect(codeViewer).not.toContain("github-light")
+    expect(codeHighlightWorker).not.toContain("github-light")
     expect(scriptEditor).not.toMatch(/bg-\[#[0-9a-f]{6}\]/i)
     expect(taskMmd).toContain("subscribeThemePreference")
     expect(taskMmd).not.toMatch(/primaryColor:\s*["']#/i)

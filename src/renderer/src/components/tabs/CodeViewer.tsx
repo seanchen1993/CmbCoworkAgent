@@ -1,53 +1,7 @@
 import { useEffect, useState, useMemo } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { VirtualList } from "@/components/ui/virtual-list"
-import { createCssVariablesTheme, createHighlighterCore, type HighlighterCore } from "shiki/core"
-import { createJavaScriptRegexEngine } from "shiki/engine/javascript"
-
-// Import bundled languages
-import langTypescript from "shiki/langs/typescript.mjs"
-import langTsx from "shiki/langs/tsx.mjs"
-import langJavascript from "shiki/langs/javascript.mjs"
-import langJsx from "shiki/langs/jsx.mjs"
-import langPython from "shiki/langs/python.mjs"
-import langJson from "shiki/langs/json.mjs"
-import langCss from "shiki/langs/css.mjs"
-import langHtml from "shiki/langs/html.mjs"
-import langMarkdown from "shiki/langs/markdown.mjs"
-import langYaml from "shiki/langs/yaml.mjs"
-import langBash from "shiki/langs/bash.mjs"
-import langSql from "shiki/langs/sql.mjs"
-
-// Singleton highlighter instance (using JS engine - no WASM needed)
-let highlighterPromise: Promise<HighlighterCore> | null = null
-const appSyntaxTheme = createCssVariablesTheme({
-  name: "cmbdevclaw",
-  variablePrefix: "--shiki-"
-})
-
-async function getHighlighter(): Promise<HighlighterCore> {
-  if (!highlighterPromise) {
-    highlighterPromise = createHighlighterCore({
-      themes: [appSyntaxTheme],
-      langs: [
-        langTypescript,
-        langTsx,
-        langJavascript,
-        langJsx,
-        langPython,
-        langJson,
-        langCss,
-        langHtml,
-        langMarkdown,
-        langYaml,
-        langBash,
-        langSql
-      ],
-      engine: createJavaScriptRegexEngine()
-    })
-  }
-  return highlighterPromise
-}
+import { requestCodeHighlight } from "./code-highlight-client"
 
 interface CodeViewerProps {
   filePath: string
@@ -57,6 +11,7 @@ interface CodeViewerProps {
 const VIRTUAL_SCROLL_LINE_THRESHOLD = 100
 const CODE_LINE_HEIGHT = 22
 const CODE_OVERSCAN_LINES = 16
+const MAX_HIGHLIGHT_CONTENT_CHARS = 64 * 1024
 
 // Map file extensions to Shiki language identifiers (only languages we've loaded)
 const SUPPORTED_LANGS = new Set([
@@ -102,7 +57,7 @@ function getLanguage(ext: string | undefined): string | null {
 }
 
 export function CodeViewer({ filePath, content }: CodeViewerProps) {
-  const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null)
+  const [highlighted, setHighlighted] = useState<{ key: string; html: string } | null>(null)
 
   // Get file extension for syntax highlighting
   const fileName = filePath.split("/").pop() || filePath
@@ -111,44 +66,21 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
   const lines = useMemo(() => content.split("\n"), [content])
   const shouldVirtualize = lines.length > VIRTUAL_SCROLL_LINE_THRESHOLD
   const lineCount = lines.length
+  const highlightKey =
+    language !== null && !shouldVirtualize && content.length <= MAX_HIGHLIGHT_CONTENT_CHARS
+      ? `${language}\u0000${content}`
+      : null
+  const highlightedHtml = highlighted?.key === highlightKey ? highlighted.html : null
 
   // Highlight code with Shiki
   useEffect(() => {
-    let cancelled = false
-
-    async function highlight() {
-      if (language === null || shouldVirtualize) {
-        setHighlightedHtml(null)
-        return
-      }
-
-      try {
-        console.log("[CodeViewer] Starting highlight for", language)
-        const highlighter = await getHighlighter()
-
-        if (cancelled) return
-
-        const html = highlighter.codeToHtml(content, {
-          lang: language,
-          theme: "cmbdevclaw"
-        })
-
-        if (cancelled) return
-
-        console.log("[CodeViewer] Highlighting complete, html length:", html.length)
-        setHighlightedHtml(html)
-      } catch (e) {
-        console.error("[CodeViewer] Shiki highlighting failed:", e)
-        setHighlightedHtml(null)
-      }
-    }
-
-    highlight()
-
-    return () => {
-      cancelled = true
-    }
-  }, [content, language, shouldVirtualize])
+    if (!highlightKey || !language) return
+    const request = requestCodeHighlight(content, language)
+    void request.promise
+      .then((html) => setHighlighted({ key: highlightKey, html }))
+      .catch(() => undefined)
+    return request.cancel
+  }, [content, highlightKey, language])
 
   return (
     <div className="flex h-full flex-1 flex-col min-h-0 overflow-hidden">

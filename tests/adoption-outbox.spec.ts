@@ -7,44 +7,46 @@
 
 import { execFile } from "child_process"
 import { createHash } from "crypto"
-import { existsSync } from "fs"
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "fs/promises"
-import { homedir, tmpdir } from "os"
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "fs/promises"
+import { tmpdir } from "os"
 import { join, resolve } from "path"
 import initSqlJs from "sql.js"
 import { promisify } from "util"
-import {
-  captureStagedSnapshotsForCommit,
-  flushAdoptionCommitJobs,
-  flushAdoptionEventOutbox,
-  getCommitMeasurementStatus,
-  initializeAdoptionTracker,
-  measureForCommit,
-  recordGen,
-  setAdoptionContext,
-  shutdownAdoptionTracker
-} from "../src/main/services/adoption-tracker.ts"
-import {
-  cleanupAdoptionDeliveryRecords,
-  closeAdoptionIndex,
-  enqueueCommitJob,
-  enqueueEventOutbox,
-  findPendingGensForFile,
-  flushAdoptionIndex,
-  getAdoptLineDetails,
-  getCommitJob,
-  getGenRowByEventId,
-  getOutboxEvent,
-  markOutboxFailed
-} from "../src/main/services/adoption-index.ts"
-import {
-  buildEvent,
-  NoopEventReporter,
-  setEventReporter,
-  type CoworkEvent,
-  type EventReportResult,
-  type IEventReporter
+import type {
+  CoworkEvent,
+  EventReportResult,
+  IEventReporter
 } from "../src/main/services/event-reporter.ts"
+
+type AdoptionTrackerModule = typeof import("../src/main/services/adoption-tracker.ts")
+type AdoptionIndexModule = typeof import("../src/main/services/adoption-index.ts")
+type EventReporterModule = typeof import("../src/main/services/event-reporter.ts")
+
+let testDataRoot = ""
+let captureStagedSnapshotsForCommit!: AdoptionTrackerModule["captureStagedSnapshotsForCommit"]
+let flushAdoptionCommitJobs!: AdoptionTrackerModule["flushAdoptionCommitJobs"]
+let flushAdoptionEventOutbox!: AdoptionTrackerModule["flushAdoptionEventOutbox"]
+let getCommitMeasurementStatus!: AdoptionTrackerModule["getCommitMeasurementStatus"]
+let initializeAdoptionTracker!: AdoptionTrackerModule["initializeAdoptionTracker"]
+let measureForCommit!: AdoptionTrackerModule["measureForCommit"]
+let recordGen!: AdoptionTrackerModule["recordGen"]
+let setAdoptionContext!: AdoptionTrackerModule["setAdoptionContext"]
+let shutdownAdoptionTracker!: AdoptionTrackerModule["shutdownAdoptionTracker"]
+let waitForAdoptionRecordGenIdleForTest!: AdoptionTrackerModule["waitForAdoptionRecordGenIdleForTest"]
+let cleanupAdoptionDeliveryRecords!: AdoptionIndexModule["cleanupAdoptionDeliveryRecords"]
+let closeAdoptionIndex!: AdoptionIndexModule["closeAdoptionIndex"]
+let enqueueCommitJob!: AdoptionIndexModule["enqueueCommitJob"]
+let enqueueEventOutbox!: AdoptionIndexModule["enqueueEventOutbox"]
+let findPendingGensForFile!: AdoptionIndexModule["findPendingGensForFile"]
+let flushAdoptionIndex!: AdoptionIndexModule["flushAdoptionIndex"]
+let getAdoptLineDetails!: AdoptionIndexModule["getAdoptLineDetails"]
+let getCommitJob!: AdoptionIndexModule["getCommitJob"]
+let getGenRowByEventId!: AdoptionIndexModule["getGenRowByEventId"]
+let getOutboxEvent!: AdoptionIndexModule["getOutboxEvent"]
+let markOutboxFailed!: AdoptionIndexModule["markOutboxFailed"]
+let buildEvent!: EventReporterModule["buildEvent"]
+let NoopEventReporter!: EventReporterModule["NoopEventReporter"]
+let setEventReporter!: EventReporterModule["setEventReporter"]
 
 const execFileAsync = promisify(execFile)
 
@@ -54,6 +56,30 @@ function assert(condition: unknown, message: string): asserts condition {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
+}
+
+async function settleWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  try {
+    return await Promise.race([promise, timeoutPromise])
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+  }
+}
+
+async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return
+    await sleep(10)
+  }
+  throw new Error(message)
 }
 
 class AdoptionReporter implements IEventReporter {
@@ -112,37 +138,29 @@ async function withTempRepo<T>(name: string, fn: (repo: string) => Promise<T>): 
   }
 }
 
-async function moveIfExists(from: string, to: string): Promise<boolean> {
-  if (!existsSync(from)) return false
-  await rm(to, { recursive: true, force: true })
-  await rename(from, to)
-  return true
-}
-
-async function restorePath(path: string, backup: string, existed: boolean): Promise<void> {
-  await rm(path, { recursive: true, force: true })
-  if (existed) await rename(backup, path)
-}
-
 async function withIsolatedAdoptionStore<T>(fn: () => Promise<T>): Promise<T> {
   shutdownAdoptionTracker()
-  const root = join(homedir(), ".cmbcoworkagent")
-  await mkdir(root, { recursive: true })
-  const backupRoot = await mkdtemp(join(tmpdir(), "adoption-outbox-backup-"))
-  const adoptionDir = join(root, "adoption")
-  const adoptionIndex = join(root, "adoption-index.sqlite")
-  const adoptionDirBackup = join(backupRoot, "adoption")
-  const adoptionIndexBackup = join(backupRoot, "adoption-index.sqlite")
-  const hadAdoptionDir = await moveIfExists(adoptionDir, adoptionDirBackup)
-  const hadAdoptionIndex = await moveIfExists(adoptionIndex, adoptionIndexBackup)
+  const adoptionDir = join(testDataRoot, "adoption")
+  const adoptionIndex = join(testDataRoot, "adoption-index.sqlite")
+  const removeStore = async () => {
+    await rm(adoptionDir, { recursive: true, force: true })
+    await Promise.all(
+      [
+        adoptionIndex,
+        `${adoptionIndex}.tmp`,
+        `${adoptionIndex}.bak`,
+        `${adoptionIndex}.bak.tmp`
+      ].map((filePath) => rm(filePath, { force: true }))
+    )
+  }
+  await removeStore()
   try {
     return await fn()
   } finally {
+    await waitForAdoptionRecordGenIdleForTest()
     shutdownAdoptionTracker()
     setEventReporter(new NoopEventReporter())
-    await restorePath(adoptionDir, adoptionDirBackup, hadAdoptionDir)
-    await restorePath(adoptionIndex, adoptionIndexBackup, hadAdoptionIndex)
-    await rm(backupRoot, { recursive: true, force: true })
+    await removeStore()
   }
 }
 
@@ -173,9 +191,26 @@ async function waitForGenerationCall(reporter: AdoptionReporter, index = 0): Pro
   throw new Error("timed out waiting for code_gen delivery")
 }
 
+function enqueueTestOutboxEvent(label: string, createdAt = Date.now()): CoworkEvent {
+  const event = buildEvent("code_adopt", "code_adoption", {
+    eventId: `a_${label}`,
+    genEventId: `g_${label}`
+  })
+  assert(
+    enqueueEventOutbox({
+      eventId: event.eventId,
+      eventName: event.eventName,
+      payloadJson: JSON.stringify(event),
+      createdAt
+    }),
+    `${label} event should enter the outbox`
+  )
+  return event
+}
+
 async function querySnapshotCount(sql: string, params: Array<string | number>): Promise<number> {
   const SQL = await initSqlJs()
-  const indexPath = join(homedir(), ".cmbcoworkagent", "adoption-index.sqlite")
+  const indexPath = join(testDataRoot, "adoption-index.sqlite")
   const snapshot = new SQL.Database(await readFile(indexPath))
   const stmt = snapshot.prepare(sql)
   stmt.bind(params)
@@ -334,7 +369,7 @@ async function testCodeGenRequiresAnIndexedBaseline(): Promise<void> {
         tool: "write_file",
         generatedContent
       })
-      await sleep(100)
+      await waitForAdoptionRecordGenIdleForTest()
 
       assert(reporter.generationCalls.length === 0, "unindexed code_gen must be suppressed")
       assert(
@@ -351,17 +386,31 @@ async function testCodeGenUsesDurableBatchedOutbox(): Promise<void> {
     const reporter = new AdoptionReporter()
     reporter.failGeneration = true
     let durablePairCounts = { baseline: 0, outbox: 0 }
+    let durablePairIds = { generation: "", outbox: "" }
+    let settleDurablePairCheck!: () => void
+    let rejectDurablePairCheck!: (error: unknown) => void
+    const durablePairCheck = new Promise<void>((resolvePromise, rejectPromise) => {
+      settleDurablePairCheck = resolvePromise
+      rejectDurablePairCheck = rejectPromise
+    })
     reporter.onGenerationReport = async (event) => {
-      const genEventId = String(event.properties?.eventId ?? "")
-      const baselineCount = await querySnapshotCount(
-        "SELECT COUNT(*) AS count FROM gen_events WHERE event_id = ?",
-        [genEventId]
-      )
-      const outboxCount = await querySnapshotCount(
-        "SELECT COUNT(*) AS count FROM event_outbox WHERE event_id = ?",
-        [event.eventId]
-      )
-      durablePairCounts = { baseline: baselineCount, outbox: outboxCount }
+      try {
+        const genEventId = String(event.properties?.eventId ?? "")
+        const baselineCount = await querySnapshotCount(
+          "SELECT COUNT(*) AS count FROM gen_events WHERE event_id = ?",
+          [genEventId]
+        )
+        const outboxCount = await querySnapshotCount(
+          "SELECT COUNT(*) AS count FROM event_outbox WHERE event_id = ?",
+          [event.eventId]
+        )
+        durablePairCounts = { baseline: baselineCount, outbox: outboxCount }
+        durablePairIds = { generation: genEventId, outbox: event.eventId }
+        settleDurablePairCheck()
+      } catch (error) {
+        rejectDurablePairCheck(error)
+        throw error
+      }
     }
     setEventReporter(reporter)
     await initializeAdoptionTracker()
@@ -385,11 +434,13 @@ async function testCodeGenUsesDurableBatchedOutbox(): Promise<void> {
       assert(reporter.generationCalls.length === 0, "code_gen drain should be batched")
 
       const firstEvent = await waitForGenerationCall(reporter)
+      await durablePairCheck
+      await flushAdoptionEventOutbox()
       const genEventId = String(firstEvent.properties?.eventId ?? "")
       assert(genEventId.startsWith("g_"), "code_gen should retain its measurement id")
       assert(
         durablePairCounts.baseline === 1 && durablePairCounts.outbox === 1,
-        `reporter must see a disk-durable baseline/outbox pair: ${JSON.stringify(durablePairCounts)}`
+        `reporter must see a disk-durable baseline/outbox pair: ${JSON.stringify({ ...durablePairCounts, ...durablePairIds })}`
       )
       assert(
         getGenRowByEventId(genEventId)?.measured === 0,
@@ -507,7 +558,6 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
         tool: "edit_file",
         generatedContent: newString,
         oldString,
-        newString,
         occurrences: 1
       })
 
@@ -515,6 +565,13 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
       assert(
         genEvent.properties?.lineCount === 1,
         "oversize code_gen should report one net-new line"
+      )
+      assert(
+        genEvent.properties?.deletedLineCount === 0 &&
+          genEvent.properties?.netNewRatio === 1 &&
+          genEvent.properties?.newRatio === undefined &&
+          genEvent.properties?.changeKind === "new",
+        "oversize append should preserve the new-only classification"
       )
       await flushAdoptionEventOutbox()
       const adoptEvent = reporter.adoptionCalls.find(
@@ -534,6 +591,12 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
         adoptEvent?.properties?.generatedLineCount === 1 &&
           adoptEvent.properties?.effectiveGeneratedLineCount === 1,
         "oversize terminal event should use the same net-new denominator"
+      )
+      assert(
+        adoptEvent?.properties?.netNewRatio === 1 &&
+          adoptEvent.properties?.newRatio === undefined &&
+          adoptEvent.properties?.changeKind === "new",
+        "oversize terminal event should carry the same change classification"
       )
       assert(
         findPendingGensForFile(filePath, 0).length === 0,
@@ -585,6 +648,10 @@ async function testStableOutboxRetryAcrossRestart(): Promise<void> {
       assert(
         firstEvent.properties?.genEventId === committed.genEventId,
         "outbox event should reference the measured generation"
+      )
+      assert(
+        firstEvent.properties?.netNewRatio === 1 && firstEvent.properties?.newRatio === undefined,
+        "measured adoption should use only the explicitly-double ratio field"
       )
 
       // Make the failed row immediately due, then restart before retrying. This
@@ -655,6 +722,290 @@ async function testCommitJobRecoveryFromRepoAndSha(): Promise<void> {
     })
   })
   console.log("PASS commit job recovers snapshots from repo path and SHA")
+}
+
+async function testUnconfiguredReporterUsesLongDeferredRetry(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    setEventReporter(new NoopEventReporter())
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const startedAt = Date.now()
+    const event = enqueueTestOutboxEvent("unconfigured_backoff", startedAt)
+    await flushAdoptionEventOutbox()
+
+    const row = getOutboxEvent(event.eventId)
+    assert(row?.status === "retry", "an unconfigured reporter should retain the event")
+    assert(row.attempts === 0, "an unconfigured reporter must not consume an attempt")
+    assert(
+      row.next_attempt_at >= startedAt + 5 * 60_000,
+      "an unconfigured reporter should not reclaim and export the database every 15 seconds"
+    )
+  })
+  console.log("PASS unconfigured reporter defers outbox work for at least five minutes")
+}
+
+async function testOutboxNormalizesUnsafeCustomRetryAfter(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    setEventReporter({
+      async report(): Promise<EventReportResult> {
+        return {
+          ok: false,
+          retryable: true,
+          error: "custom reporter requested an unsafe delay",
+          retryAfterMs: Number.MAX_VALUE,
+          attempted: false
+        }
+      }
+    })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const createdAt = Date.now() - 1_000
+    const event = enqueueTestOutboxEvent("unsafe_retry_after", createdAt)
+    await flushAdoptionEventOutbox()
+
+    const row = getOutboxEvent(event.eventId)
+    assert(row?.status === "retry", "unsafe custom retry guidance should remain retryable")
+    assert(Number.isFinite(row.next_attempt_at), "next_attempt_at must always remain finite")
+    assert(
+      row.next_attempt_at <= createdAt + 24 * 60 * 60 * 1000,
+      "next_attempt_at must not exceed the event's 24-hour retry window"
+    )
+    assert(row.attempts === 0, "reporter-side deferral must not consume an attempt")
+  })
+  console.log("PASS custom Retry-After values are finite and capped to the event retry window")
+}
+
+async function testPermanentUnattemptedResultDeadLettersWithoutAttempt(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    let reportCalls = 0
+    setEventReporter({
+      async report(): Promise<EventReportResult> {
+        reportCalls += 1
+        return {
+          ok: false,
+          retryable: false,
+          error: "payload rejected before transport",
+          attempted: false
+        }
+      }
+    })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const event = enqueueTestOutboxEvent("permanent_unattempted")
+    await flushAdoptionEventOutbox()
+    const row = getOutboxEvent(event.eventId)
+    assert(row?.status === "dead_letter", "a permanent result must not be deferred")
+    assert(row.attempts === 0, "a permanent unattempted result must not consume an attempt")
+    await flushAdoptionEventOutbox()
+    assert(reportCalls === 1, "a permanent unattempted result must not be reclaimed")
+  })
+  console.log("PASS permanent unattempted results dead-letter without consuming an attempt")
+}
+
+async function testFlushPublishesSingleFlightBeforeReporterReentry(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    let nestedFlush: Promise<void> | undefined
+    setEventReporter({
+      async report(): Promise<EventReportResult> {
+        nestedFlush = flushAdoptionEventOutbox()
+        return { ok: true, status: 200 }
+      }
+    })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const event = enqueueTestOutboxEvent("single_flight_reentry")
+    const outerFlush = flushAdoptionEventOutbox()
+    await outerFlush
+
+    assert(nestedFlush === outerFlush, "synchronous reporter reentry should reuse the active drain")
+    assert(
+      getOutboxEvent(event.eventId)?.status === "delivered",
+      "single-flight reentry should still deliver the claimed event"
+    )
+  })
+  console.log("PASS outbox single-flight is visible before custom reporter code can reenter")
+}
+
+async function testShutdownBeforeReporterMicrotaskSkipsUpload(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    let oldReporterCalls = 0
+    setEventReporter({
+      async report(): Promise<EventReportResult> {
+        oldReporterCalls += 1
+        return new Promise<EventReportResult>(() => undefined)
+      }
+    })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const event = enqueueTestOutboxEvent("shutdown_before_report")
+    const stoppedFlush = flushAdoptionEventOutbox()
+    shutdownAdoptionTracker()
+    await settleWithin(stoppedFlush, 1_000, "shutdown should release a scheduled outbox drain")
+    assert(oldReporterCalls === 0, "shutdown before the report microtask must suppress the upload")
+
+    setEventReporter({ report: async () => ({ ok: true, status: 200 }) })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+    assert(
+      getOutboxEvent(event.eventId)?.status === "delivered",
+      "the next lifecycle should recover and deliver the untouched pending event"
+    )
+  })
+  console.log("PASS shutdown before reporter scheduling prevents a stale external upload")
+}
+
+async function testShutdownReleasesHungReporterAndIgnoresLateRejection(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    let rejectOldReport!: (error: unknown) => void
+    let oldReporterCalls = 0
+    setEventReporter({
+      async report(): Promise<EventReportResult> {
+        oldReporterCalls += 1
+        return await new Promise<EventReportResult>((_resolve, reject) => {
+          rejectOldReport = reject
+        })
+      }
+    })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const event = enqueueTestOutboxEvent("shutdown_hung_reporter")
+    const oldFlush = flushAdoptionEventOutbox()
+    await waitUntil(() => oldReporterCalls === 1, "hung custom reporter was not invoked")
+    shutdownAdoptionTracker()
+    await settleWithin(oldFlush, 1_000, "shutdown should cancel a hung custom reporter wait")
+
+    setEventReporter({ report: async () => ({ ok: true, status: 200 }) })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+    assert(
+      getOutboxEvent(event.eventId)?.status === "delivered",
+      "reinitialization should not remain locked behind the old reporter promise"
+    )
+    assert(
+      getOutboxEvent(event.eventId)?.attempts === 1,
+      "a cancelled lifecycle claim must not consume an extra attempt"
+    )
+
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on("unhandledRejection", onUnhandled)
+    try {
+      rejectOldReport(new Error("late old-lifecycle rejection"))
+      await sleep(10)
+      assert(unhandled.length === 0, "a late custom reporter rejection must remain handled")
+      assert(
+        getOutboxEvent(event.eventId)?.status === "delivered",
+        "a late old-lifecycle rejection must not roll back the new delivery"
+      )
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
+  })
+  console.log("PASS shutdown/reinitialize isolates hung reporters and late rejections")
+}
+
+async function testHungReporterStopsBatchAfterOneDeadline(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    let reportCalls = 0
+    let resolveLateReport!: (result: EventReportResult) => void
+    const pendingReport = new Promise<EventReportResult>((resolvePromise) => {
+      resolveLateReport = resolvePromise
+    })
+    setEventReporter({
+      async report(): Promise<EventReportResult> {
+        reportCalls += 1
+        return await pendingReport
+      }
+    })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const firstEvent = enqueueTestOutboxEvent("hung_batch_first")
+    const secondEvent = enqueueTestOutboxEvent("hung_batch_second")
+    const startedAt = Date.now()
+    await settleWithin(
+      flushAdoptionEventOutbox(),
+      14_000,
+      "hung reporter should be bounded by the 12-second outbox deadline"
+    )
+    const elapsedMs = Date.now() - startedAt
+
+    assert(elapsedMs >= 11_500, "the configured reporter deadline should remain approximately 12s")
+    assert(reportCalls === 1, "one hung reporter must stop the batch instead of blocking every row")
+    assert(
+      getOutboxEvent(firstEvent.eventId)?.status === "retry" &&
+        getOutboxEvent(firstEvent.eventId)?.attempts === 1,
+      "the timed-out report should consume exactly one real attempt"
+    )
+    assert(
+      getOutboxEvent(secondEvent.eventId)?.status === "pending" &&
+        getOutboxEvent(secondEvent.eventId)?.attempts === 0,
+      "later rows should remain untouched for a future drain"
+    )
+
+    resolveLateReport({ ok: true, status: 200 })
+    await sleep(10)
+    assert(
+      getOutboxEvent(firstEvent.eventId)?.status === "retry",
+      "a late reporter resolution must not overwrite the recorded timeout"
+    )
+  })
+  console.log("PASS one 12-second reporter deadline bounds the whole outbox batch")
+}
+
+async function testDeferredReportsDoNotConsumeAttempts(): Promise<void> {
+  await withIsolatedAdoptionStore(async () => {
+    let reportCalls = 0
+    setEventReporter({
+      async report(): Promise<EventReportResult> {
+        reportCalls += 1
+        return {
+          ok: false,
+          retryable: true,
+          error: "reporter admission deferred",
+          retryAfterMs: 60_000,
+          attempted: false
+        }
+      }
+    })
+    await initializeAdoptionTracker()
+    await flushAdoptionEventOutbox()
+
+    const event = buildEvent("code_adopt", "code_adoption", {
+      eventId: "a_deferred_attempt_test",
+      genEventId: "g_deferred_attempt_test"
+    })
+    assert(
+      enqueueEventOutbox({
+        eventId: event.eventId,
+        eventName: event.eventName,
+        payloadJson: JSON.stringify(event),
+        createdAt: Date.now()
+      }),
+      "deferred event should enter the outbox"
+    )
+
+    for (let deferred = 0; deferred < 12; deferred++) {
+      if (deferred > 0) markOutboxFailed(event.eventId, "make deferred report due", 0, false)
+      await flushAdoptionEventOutbox()
+      const row = getOutboxEvent(event.eventId)
+      assert(row?.status === "retry", "a deferred report should return to retry state")
+      assert(row.attempts === 0, "a deferred report must roll back its claimed attempt")
+    }
+
+    assert(reportCalls === 12, "all deferred deliveries should reach reporter admission")
+    assert(
+      getOutboxEvent(event.eventId)?.status !== "dead_letter",
+      "reporter backoff must not exhaust the durable attempt limit"
+    )
+  })
+  console.log("PASS reporter admission deferrals do not consume durable outbox attempts")
 }
 
 async function testOutboxAttemptAndRetentionLimits(): Promise<void> {
@@ -744,10 +1095,59 @@ async function main(): Promise<void> {
   await testOversizeEditReportsNetGeneratedLines()
   await testStableOutboxRetryAcrossRestart()
   await testCommitJobRecoveryFromRepoAndSha()
+  await testUnconfiguredReporterUsesLongDeferredRetry()
+  await testOutboxNormalizesUnsafeCustomRetryAfter()
+  await testPermanentUnattemptedResultDeadLettersWithoutAttempt()
+  await testFlushPublishesSingleFlightBeforeReporterReentry()
+  await testShutdownBeforeReporterMicrotaskSkipsUpload()
+  await testShutdownReleasesHungReporterAndIgnoresLateRejection()
+  await testHungReporterStopsBatchAfterOneDeadline()
+  await testDeferredReportsDoNotConsumeAttempts()
   await testOutboxAttemptAndRetentionLimits()
 }
 
-main().catch((error) => {
+async function run(): Promise<void> {
+  testDataRoot = await mkdtemp(join(tmpdir(), "adoption-outbox-data-"))
+  process.env.CMB_COWORK_AGENT_HOME = testDataRoot
+  try {
+    const adoptionTracker = await import("../src/main/services/adoption-tracker.ts")
+    const adoptionIndex = await import("../src/main/services/adoption-index.ts")
+    const eventReporter = await import("../src/main/services/event-reporter.ts")
+    ;({
+      captureStagedSnapshotsForCommit,
+      flushAdoptionCommitJobs,
+      flushAdoptionEventOutbox,
+      getCommitMeasurementStatus,
+      initializeAdoptionTracker,
+      measureForCommit,
+      recordGen,
+      setAdoptionContext,
+      shutdownAdoptionTracker,
+      waitForAdoptionRecordGenIdleForTest
+    } = adoptionTracker)
+    ;({
+      cleanupAdoptionDeliveryRecords,
+      closeAdoptionIndex,
+      enqueueCommitJob,
+      enqueueEventOutbox,
+      findPendingGensForFile,
+      flushAdoptionIndex,
+      getAdoptLineDetails,
+      getCommitJob,
+      getGenRowByEventId,
+      getOutboxEvent,
+      markOutboxFailed
+    } = adoptionIndex)
+    ;({ buildEvent, NoopEventReporter, setEventReporter } = eventReporter)
+    await main()
+  } finally {
+    await waitForAdoptionRecordGenIdleForTest?.()
+    shutdownAdoptionTracker?.()
+    await rm(testDataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  }
+}
+
+run().catch((error) => {
   console.error("FAIL adoption outbox tests", error)
   process.exitCode = 1
 })

@@ -187,6 +187,49 @@ const makeHttpHook = (path: string): HookConfig => ({
   createdAt: "",
   updatedAt: ""
 })
+
+// Hook records must redact credentials before preview truncation; otherwise a
+// long URL password can be cut before @ and stop looking like a credential.
+{
+  const passwordFragment = "hook-password-fragment"
+  const password = passwordFragment.repeat(2_000)
+  const hook: HookConfig = {
+    id: "hook-preview-redaction-boundary",
+    event: "PostToolUse",
+    matcher: "execute",
+    type: "command",
+    command: `open https://build-user:${password}@host/path`,
+    enabled: true,
+    createdAt: "",
+    updatedAt: ""
+  }
+  const hookResult: HookResult = {
+    exitCode: 0,
+    stdout: `request=https://build-user:${password}@host/path`,
+    stderr: "",
+    blocked: false
+  }
+  const record = buildHookResultRecordForConfig(
+    "PostToolUse",
+    hook,
+    hookResult,
+    { enabled: true, diagnostic: false }
+  )
+
+  assert(
+    record?.stdout.includes("https://[REDACTED]") === true,
+    "P2 Hook preview redacts URL credentials"
+  )
+  assert(
+    record?.stdout.includes(passwordFragment) === false,
+    "P2 Hook preview does not leak a password fragment at the truncation boundary"
+  )
+  assert(
+    record?.label.includes(passwordFragment) === false &&
+      record.label.includes("https://[REDACTED]") === true,
+    "P2 Hook label redacts URL credentials before truncation"
+  )
+}
 const httpContext = {
   toolName: "read_file",
   toolArgs: { file_path: "note.txt" },
@@ -698,7 +741,7 @@ const runnerSrc = _read(
   "utf-8"
 )
 assert(
-  /hook\.async === true && event !== "Setup"/.test(runnerSrc),
+  /hook\.async === true\s*&&\s*event !== "Setup"/.test(runnerSrc),
   "P3c runner does not return async placeholder for Setup"
 )
 

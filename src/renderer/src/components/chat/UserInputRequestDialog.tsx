@@ -12,7 +12,12 @@ import { cn } from "@/lib/utils"
 import type { UserInputAnswer, UserInputRequest, UserInputResponse } from "@/types"
 
 type DraftAnswer =
-  | { type: "option"; optionIndex: number }
+  | {
+      type: "option"
+      optionIndex: number
+      additionalText?: string
+      additionalTextOpen?: boolean
+    }
   | { type: "other"; text: string }
 
 interface UserInputRequestDialogProps {
@@ -154,8 +159,50 @@ export function UserInputRequestDialog({
   }
 
   const selectOption = (questionId: string, optionIndex: number): void => {
-    updateDraft(questionId, { type: "option", optionIndex })
+    setDraftAnswers((prev) => {
+      const current = prev[questionId]
+      const answer =
+        current?.type === "option" && current.optionIndex === optionIndex
+          ? current
+          : { type: "option" as const, optionIndex }
+      return { ...prev, [questionId]: answer }
+    })
     setActiveIndex((prev) => Math.min(request.questions.length - 1, prev + 1))
+  }
+
+  const openAdditionalText = (questionId: string, optionIndex: number): void => {
+    setDraftAnswers((prev) => {
+      const current = prev[questionId]
+      const additionalText =
+        current?.type === "option" && current.optionIndex === optionIndex
+          ? current.additionalText
+          : undefined
+      return {
+        ...prev,
+        [questionId]: {
+          type: "option",
+          optionIndex,
+          additionalText,
+          additionalTextOpen: true
+        }
+      }
+    })
+  }
+
+  const updateAdditionalText = (
+    questionId: string,
+    optionIndex: number,
+    additionalText: string
+  ): void => {
+    setDraftAnswers((prev) => ({
+      ...prev,
+      [questionId]: {
+        type: "option",
+        optionIndex,
+        additionalText,
+        additionalTextOpen: true
+      }
+    }))
   }
 
   const handleSubmit = (): void => {
@@ -176,12 +223,14 @@ export function UserInputRequestDialog({
 
       const option = question.options[answer.optionIndex]
       if (!option) continue
+      const additionalText = answer.additionalText?.trim()
       answers[question.id] = {
         type: "option",
         questionId: question.id,
         optionIndex: answer.optionIndex,
         label: option.label,
-        description: option.description
+        description: option.description,
+        ...(additionalText ? { additionalText } : {})
       }
     }
 
@@ -198,8 +247,8 @@ export function UserInputRequestDialog({
       className={cn(
         "absolute z-30 flex items-stretch overflow-hidden rounded-[calc(1.5rem+1px)] border border-primary/25 bg-background shadow-[0_-12px_30px_rgba(15,23,42,0.08)] transition-[inset,min-height,max-height] duration-200",
         collapsed
-          ? "-inset-px"
-          : "-inset-x-px -bottom-px min-h-[320px] max-h-[520px]"
+          ? "-inset-x-px -top-px bottom-12"
+          : "-inset-x-px bottom-12 min-h-[320px] max-h-[520px]"
       )}
     >
       <div
@@ -268,33 +317,68 @@ export function UserInputRequestDialog({
                       const selected =
                         activeDraft?.type === "option" && activeDraft.optionIndex === optionIndex
                       return (
-                        <button
+                        <div
                           key={`${activeQuestion.id}-${optionIndex}`}
-                          type="button"
-                          role="radio"
-                          aria-checked={selected}
                           className={cn(
-                            "flex w-full items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors",
+                            "overflow-hidden rounded-md border transition-colors",
                             selected
                               ? "border-primary bg-primary/10"
                               : "border-border bg-background hover:bg-background-interactive"
                           )}
-                          onClick={() => selectOption(activeQuestion.id, optionIndex)}
                         >
-                          {selected ? (
-                            <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
+                          <button
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            className="flex w-full items-start gap-3 px-3 py-2 text-left"
+                            onClick={() => selectOption(activeQuestion.id, optionIndex)}
+                          >
+                            {selected ? (
+                              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
+                            ) : (
+                              <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                            )}
+                            <span className="min-w-0">
+                              <span className="block break-words text-sm font-medium">
+                                {option.label}
+                              </span>
+                              <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
+                                {option.description}
+                              </span>
+                            </span>
+                          </button>
+                          {selected && activeDraft.additionalTextOpen ? (
+                            <div className="flex items-center gap-2 border-t border-primary/20 px-3 py-2">
+                              <PencilLine className="size-3.5 shrink-0 text-muted-foreground" />
+                              <input
+                                autoFocus
+                                type="text"
+                                className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                                value={activeDraft.additionalText ?? ""}
+                                aria-label={`${option.label}的补充说明`}
+                                onChange={(event) =>
+                                  updateAdditionalText(
+                                    activeQuestion.id,
+                                    optionIndex,
+                                    event.target.value
+                                  )
+                                }
+                              />
+                            </div>
                           ) : (
-                            <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                            <div className="px-3 pb-2 pl-10">
+                              <button
+                                type="button"
+                                className="inline-flex items-center gap-1.5 rounded-md border border-border/80 bg-muted/40 px-2 py-1 text-[11px] font-medium text-muted-foreground/80 transition-colors hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                aria-label={`为${option.label}添加补充说明`}
+                                onClick={() => openAdditionalText(activeQuestion.id, optionIndex)}
+                              >
+                                <PencilLine className="size-3 shrink-0" />
+                                <span>补充说明</span>
+                              </button>
+                            </div>
                           )}
-                          <span className="min-w-0">
-                            <span className="block break-words text-sm font-medium">
-                              {option.label}
-                            </span>
-                            <span className="mt-0.5 block break-words text-xs leading-5 text-muted-foreground">
-                              {option.description}
-                            </span>
-                          </span>
-                        </button>
+                        </div>
                       )
                     })}
                   </div>
@@ -307,6 +391,11 @@ export function UserInputRequestDialog({
                       value={activeDraft?.type === "other" ? activeDraft.text : ""}
                       aria-label="自定义回答"
                       placeholder="以上都不是我想要的，我希望："
+                      onFocus={() => {
+                        if (activeDraft?.type !== "other") {
+                          updateDraft(activeQuestion.id, { type: "other", text: "" })
+                        }
+                      }}
                       onChange={(event) =>
                         updateDraft(activeQuestion.id, {
                           type: "other",

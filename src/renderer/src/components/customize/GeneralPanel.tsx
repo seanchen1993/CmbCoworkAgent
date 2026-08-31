@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
 import {
-  AlertTriangle,
   Check,
   Gauge,
   Loader2,
@@ -15,14 +14,6 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog"
 import {
   Select,
   SelectContent,
@@ -62,13 +53,6 @@ import {
 } from "@/lib/theme-preference"
 import { DEFAULT_THEME_ID, THEME_DEFINITIONS } from "@/lib/theme-registry"
 import { cn } from "@/lib/utils"
-import { useAppStore } from "@/lib/store"
-import {
-  CHAT_AUTO_SCROLL_ALWAYS,
-  DEFAULT_CHAT_AUTO_SCROLL_MESSAGE_LIMIT,
-  normalizeChatAutoScrollMessageLimit,
-  type ChatScrollSettings
-} from "../../../../shared/chat-scroll"
 
 const THEME_GROUPS = [
   {
@@ -156,13 +140,6 @@ export function GeneralPanel(): React.JSX.Element {
   const [runtimeSettingsError, setRuntimeSettingsError] = useState<string | null>(null)
   const [worktreeSettingsError, setWorktreeSettingsError] = useState<string | null>(null)
   const closeBehaviorRevisionRef = useRef(0)
-  const chatScrollSettings = useAppStore((state) => state.chatScrollSettings)
-  const setStoredChatScrollSettings = useAppStore((state) => state.setChatScrollSettings)
-  const [chatScrollMessageLimitInput, setChatScrollMessageLimitInput] = useState(
-    String(DEFAULT_CHAT_AUTO_SCROLL_MESSAGE_LIMIT)
-  )
-  const [chatScrollSaving, setChatScrollSaving] = useState(false)
-  const [alwaysScrollDialogOpen, setAlwaysScrollDialogOpen] = useState(false)
   const trayAreaName = window.electron.process.platform === "darwin" ? "菜单栏" : "系统托盘"
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
@@ -243,14 +220,6 @@ export function GeneralPanel(): React.JSX.Element {
     })
   }, [])
 
-  useEffect(() => {
-    setChatScrollMessageLimitInput(
-      chatScrollSettings.autoScrollMessageLimit === CHAT_AUTO_SCROLL_ALWAYS
-        ? String(DEFAULT_CHAT_AUTO_SCROLL_MESSAGE_LIMIT)
-        : String(chatScrollSettings.autoScrollMessageLimit)
-    )
-  }, [chatScrollSettings.autoScrollMessageLimit])
-
   const handleCloseBehaviorChange = useCallback(
     async (value: string): Promise<void> => {
       if (!isWindowCloseBehavior(value) || closeBehavior === null || value === closeBehavior) return
@@ -300,60 +269,6 @@ export function GeneralPanel(): React.JSX.Element {
     const label = mode === "system" ? "跟随系统" : mode === "light" ? "浅色" : "深色"
     toast.success(`外观模式已切换为${label}`)
   }, [])
-
-  const persistChatScrollSettings = useCallback(
-    async (autoScrollMessageLimit: ChatScrollSettings["autoScrollMessageLimit"]): Promise<void> => {
-      const previousSettings = chatScrollSettings
-      const nextSettings = { autoScrollMessageLimit }
-      setStoredChatScrollSettings(nextSettings)
-      setChatScrollSaving(true)
-      try {
-        const savedSettings = await window.electron.setChatScrollSettings(nextSettings)
-        setStoredChatScrollSettings(savedSettings)
-        toast.success("会话滚动设置已保存")
-      } catch (saveError) {
-        console.error("[GeneralPanel] Failed to save chat scroll settings:", saveError)
-        setStoredChatScrollSettings(previousSettings)
-        toast.error("会话滚动设置保存失败")
-      } finally {
-        setChatScrollSaving(false)
-      }
-    },
-    [chatScrollSettings, setStoredChatScrollSettings]
-  )
-
-  const handleChatScrollModeChange = useCallback(
-    (value: string): void => {
-      if (value === CHAT_AUTO_SCROLL_ALWAYS) {
-        if (chatScrollSettings.autoScrollMessageLimit !== CHAT_AUTO_SCROLL_ALWAYS) {
-          setAlwaysScrollDialogOpen(true)
-        }
-        return
-      }
-
-      if (value !== "limited") return
-      const limit = normalizeChatAutoScrollMessageLimit(chatScrollMessageLimitInput)
-      if (limit !== CHAT_AUTO_SCROLL_ALWAYS) {
-        void persistChatScrollSettings(limit)
-      }
-    },
-    [chatScrollMessageLimitInput, chatScrollSettings, persistChatScrollSettings]
-  )
-
-  const handleChatScrollMessageLimitBlur = useCallback((): void => {
-    if (chatScrollSettings.autoScrollMessageLimit === CHAT_AUTO_SCROLL_ALWAYS) {
-      return
-    }
-    const limit = normalizeChatAutoScrollMessageLimit(chatScrollMessageLimitInput)
-    setChatScrollMessageLimitInput(String(limit))
-    if (limit !== chatScrollSettings.autoScrollMessageLimit) {
-      void persistChatScrollSettings(limit)
-    }
-  }, [chatScrollMessageLimitInput, chatScrollSettings, persistChatScrollSettings])
-
-  const chatScrollIsAlwaysEnabled =
-    chatScrollSettings.autoScrollMessageLimit === CHAT_AUTO_SCROLL_ALWAYS
-
   const handleRecursionLimitSave = useCallback(async (): Promise<void> => {
     const value = Number(recursionLimitDraft)
     if (!isAgentGraphRecursionLimit(value)) {
@@ -500,50 +415,12 @@ export function GeneralPanel(): React.JSX.Element {
           <div className="border-b border-border/70 px-5 py-4">
             <h2 className="text-sm font-semibold text-foreground">会话滚动</h2>
           </div>
-          <div className="flex flex-col gap-4 px-5 py-5">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0 sm:pr-8">
-                <div className="text-sm font-medium text-foreground">流式输出时自动置底</div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  默认仅在会话消息数不超过限制时跟随最新内容；超过限制后会自动停止，以降低长会话的渲染和布局开销。
-                </p>
-              </div>
-              <div className="flex w-full shrink-0 flex-col gap-2 sm:w-[250px]">
-                <Select
-                  value={chatScrollIsAlwaysEnabled ? CHAT_AUTO_SCROLL_ALWAYS : "limited"}
-                  onValueChange={handleChatScrollModeChange}
-                  disabled={chatScrollSaving}
-                >
-                  <SelectTrigger aria-label="流式输出时自动置底模式" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="limited">按消息数量限制</SelectItem>
-                    <SelectItem value={CHAT_AUTO_SCROLL_ALWAYS}>永远保持置底</SelectItem>
-                  </SelectContent>
-                </Select>
-                {!chatScrollIsAlwaysEnabled && (
-                  <div className="flex items-center gap-2">
-                    <Input
-                      type="number"
-                      min={1}
-                      max={100000}
-                      value={chatScrollMessageLimitInput}
-                      onChange={(event) => setChatScrollMessageLimitInput(event.target.value)}
-                      onBlur={handleChatScrollMessageLimitBlur}
-                      disabled={chatScrollSaving}
-                      aria-label="自动置底消息数量"
-                    />
-                    <span className="shrink-0 text-xs text-muted-foreground">条消息</span>
-                  </div>
-                )}
-                {chatScrollSaving && (
-                  <Loader2
-                    className="size-4 self-end animate-spin text-muted-foreground"
-                    aria-label="正在保存"
-                  />
-                )}
-              </div>
+          <div className="px-5 py-5">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-foreground">智能跟随最新消息</div>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                打开会话时会定位到最新消息；当你停留在底部附近时，新消息和流式内容会自动跟随。向上查看历史后会保持当前位置，不会抢夺滚动。
+              </p>
             </div>
           </div>
         </section>
@@ -871,33 +748,6 @@ export function GeneralPanel(): React.JSX.Element {
           </div>
         </section>
       </div>
-      <Dialog open={alwaysScrollDialogOpen} onOpenChange={setAlwaysScrollDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="size-4 text-status-warning" />
-              确认开启永久置底？
-            </DialogTitle>
-            <DialogDescription className="leading-6">
-              在较长会话中，持续跟随新内容会让页面频繁进行布局与滚动计算，可能增加 CPU
-              和内存占用，并影响交互流畅度。建议仅在短会话或确实需要实时跟随时开启；你也可以随时改回按消息数量限制。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAlwaysScrollDialogOpen(false)}>
-              取消
-            </Button>
-            <Button
-              onClick={() => {
-                setAlwaysScrollDialogOpen(false)
-                void persistChatScrollSettings(CHAT_AUTO_SCROLL_ALWAYS)
-              }}
-            >
-              仍然开启
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

@@ -9,10 +9,14 @@ import {
   writeFileSync,
   unlinkSync,
   renameSync,
-  readdirSync
+  readdirSync,
+  statSync
 } from "fs"
 import {
   deleteSqliteDurableFileSync,
+  forgetRegisteredSqliteQuarantineArtifact,
+  listRegisteredSqliteQuarantineArtifacts,
+  subscribeSqliteQuarantineArtifacts,
   sqliteDurableVariantBase,
   sqliteQuarantineVariantBase
 } from "./utils/sqlite-durable-file"
@@ -60,10 +64,29 @@ import { parseSkillFrontmatter } from "./skills/frontmatter"
 import {
   getDiscoveredSkillId,
   isDiscoveredSkillDisabled,
+  MAX_CANONICAL_STANDALONE_SKILL_ID_LENGTH,
+  MAX_DISABLED_STANDALONE_SKILL_IDS,
+  normalizeCanonicalStandaloneSkillId,
   normalizeSkillId,
+  normalizeStandaloneDisabledSkillIds,
   removeDisabledSkillEntriesForSkills,
-  resolveDisabledSkillIds
+  resolveDisabledSkillIds,
+  setDisabledSkillIdState
 } from "./skills/ids"
+import {
+  DISABLED_SKILL_STORE_MISSING_FINGERPRINT,
+  fingerprintDisabledSkillStoreText
+} from "./skills/disabled-store-fingerprint"
+import {
+  bumpDisabledSkillStoreRevision,
+  getDisabledSkillStoreRevision
+} from "./skills/disabled-store-revision"
+import { SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES } from "./skill-plugin-catalog/protocol"
+import { getHookCatalogGlobalRevision } from "./hook-catalog/revision"
+import {
+  isSkillCatalogTopologyMutationBusy,
+  waitForSkillCatalogTopologyIdle
+} from "./skill-plugin-catalog/topology-mutation-gate"
 import {
   DEFAULT_PLUGIN_HOOKS_PATH,
   getPluginSkillSearchSources,
@@ -75,6 +98,7 @@ import {
   calculateMaxCompatibleOutputTokens,
   calculateSummarizationTriggerTokens
 } from "../shared/model-token-budget"
+import { getHookDateKey } from "../shared/hook-time"
 
 const OPENWORK_DIR = getCmbCoworkAgentDataRoot()
 const ENV_FILE = join(OPENWORK_DIR, ".env")
@@ -134,12 +158,239 @@ export function getThreadCheckpointDir(): string {
 }
 
 const SAFE_ID_RE = /^[a-zA-Z0-9_-]+$/
+const COORDINATOR_WORKER_CHECKPOINT_DELIMITER = "__worker__"
+const WORKFLOW_CHECKPOINT_DELIMITER = "__wf_"
+
+interface ThreadCheckpointArtifactIndex {
+  directory: string
+  scanned: boolean
+  threadIds: Set<string>
+  durableThreadIds: Set<string>
+  quarantineFilenamesByThreadId: Map<string, Set<string>>
+  workerThreadIdsByParent: Map<string, Set<string>>
+  workflowThreadIdsByParent: Map<string, Set<string>>
+}
+
+let threadCheckpointArtifactIndex: ThreadCheckpointArtifactIndex | null = null
+let threadCheckpointArtifactDirectoryScanCount = 0
+
+function assertSafeThreadCheckpointId(threadId: string): void {
+  if (!SAFE_ID_RE.test(threadId)) throw new Error(`Invalid threadId: ${threadId}`)
+}
+
+function threadCheckpointPath(directory: string, threadId: string): string {
+  assertSafeThreadCheckpointId(threadId)
+  return join(directory, `${threadId}.sqlite`)
+}
+
+function addCheckpointFamilyMember(
+  membersByParent: Map<string, Set<string>>,
+  parentThreadId: string,
+  threadId: string
+): void {
+  const members = membersByParent.get(parentThreadId) ?? new Set<string>()
+  members.add(threadId)
+  membersByParent.set(parentThreadId, members)
+}
+
+function checkpointFamiliesOf(
+  threadId: string
+): Array<{ kind: "worker" | "workflow"; parentThreadId: string }> {
+  const families: Array<{ kind: "worker" | "workflow"; parentThreadId: string }> = []
+  const collect = (kind: "worker" | "workflow", delimiter: string): void => {
+    let delimiterIndex = threadId.indexOf(delimiter)
+    while (delimiterIndex >= 0) {
+      if (delimiterIndex > 0) {
+        families.push({ kind, parentThreadId: threadId.slice(0, delimiterIndex) })
+      }
+      delimiterIndex = threadId.indexOf(delimiter, delimiterIndex + delimiter.length)
+    }
+  }
+  // Preserve the old startsWith-prefix semantics exactly. A nested generated id
+  // can match more than one valid parent prefix; indexing every such owner lets
+  // whichever parent is deleted first reach it, while Set membership prevents
+  // duplicate work within one family.
+  collect("worker", COORDINATOR_WORKER_CHECKPOINT_DELIMITER)
+  collect("workflow", WORKFLOW_CHECKPOINT_DELIMITER)
+  return families
+}
+
+function registerCheckpointThreadId(
+  index: ThreadCheckpointArtifactIndex,
+  threadId: string
+): void {
+  if (!SAFE_ID_RE.test(threadId)) return
+  index.threadIds.add(threadId)
+
+  for (const family of checkpointFamiliesOf(threadId)) {
+    addCheckpointFamilyMember(
+      family.kind === "worker"
+        ? index.workerThreadIdsByParent
+        : index.workflowThreadIdsByParent,
+      family.parentThreadId,
+      threadId
+    )
+  }
+}
+
+function checkpointArtifactIndexForDirectory(directory: string): ThreadCheckpointArtifactIndex {
+  if (threadCheckpointArtifactIndex?.directory === directory) {
+    return threadCheckpointArtifactIndex
+  }
+  threadCheckpointArtifactIndex = {
+    directory,
+    scanned: false,
+    threadIds: new Set(),
+    durableThreadIds: new Set(),
+    quarantineFilenamesByThreadId: new Map(),
+    workerThreadIdsByParent: new Map(),
+    workflowThreadIdsByParent: new Map()
+  }
+  return threadCheckpointArtifactIndex
+}
+
+function ensureThreadCheckpointArtifactIndex(): ThreadCheckpointArtifactIndex {
+  const directory = getThreadCheckpointDir()
+  const index = checkpointArtifactIndexForDirectory(directory)
+  if (index.scanned) return index
+
+  // Preserve paths registered before the first scan (including an initializing
+  // saver whose file does not exist yet), then merge every crash leftover found
+  // on disk. From this point on, all production checkpoint paths are registered
+  // by getThreadCheckpointPath and new quarantine names are registered by the
+  // durable/native sqlite recovery layer.
+  const registeredThreadIds = Array.from(index.threadIds)
+  index.threadIds.clear()
+  index.durableThreadIds.clear()
+  index.quarantineFilenamesByThreadId.clear()
+  index.workerThreadIdsByParent.clear()
+  index.workflowThreadIdsByParent.clear()
+  for (const threadId of registeredThreadIds) registerCheckpointThreadId(index, threadId)
+
+  threadCheckpointArtifactDirectoryScanCount += 1
+  for (const filename of readdirSync(directory)) {
+    const durableBase = sqliteDurableVariantBase(filename)
+    const quarantineBase = durableBase === null ? sqliteQuarantineVariantBase(filename) : null
+    const threadId = durableBase ?? quarantineBase
+    if (!threadId || !SAFE_ID_RE.test(threadId)) continue
+    registerCheckpointThreadId(index, threadId)
+    if (durableBase !== null) {
+      index.durableThreadIds.add(threadId)
+    } else {
+      const filenames = index.quarantineFilenamesByThreadId.get(threadId) ?? new Set<string>()
+      filenames.add(filename)
+      index.quarantineFilenamesByThreadId.set(threadId, filenames)
+    }
+  }
+  index.scanned = true
+  return index
+}
+
+function removeCheckpointFamilyMember(
+  membersByParent: Map<string, Set<string>>,
+  parentThreadId: string,
+  threadId: string
+): void {
+  const members = membersByParent.get(parentThreadId)
+  if (!members) return
+  members.delete(threadId)
+  if (members.size === 0) membersByParent.delete(parentThreadId)
+}
+
+function forgetCheckpointThreadId(
+  index: ThreadCheckpointArtifactIndex,
+  threadId: string
+): void {
+  index.threadIds.delete(threadId)
+  index.durableThreadIds.delete(threadId)
+  index.quarantineFilenamesByThreadId.delete(threadId)
+
+  for (const family of checkpointFamiliesOf(threadId)) {
+    removeCheckpointFamilyMember(
+      family.kind === "worker"
+        ? index.workerThreadIdsByParent
+        : index.workflowThreadIdsByParent,
+      family.parentThreadId,
+      threadId
+    )
+  }
+}
+
+// A timestamped quarantine can be created after the one-time directory scan —
+// including by an old saver whose initialize() loses a deletion race. Re-add
+// its exact checkpoint/family synchronously at the recovery-layer registration
+// point. Merely keeping the generic registry is insufficient: parent cleanup
+// enumerates its family map before it can ask the registry about each member.
+subscribeSqliteQuarantineArtifacts((databasePath, artifactPath) => {
+  const index = threadCheckpointArtifactIndex
+  if (!index) return
+
+  const databaseRelativePath = relative(index.directory, databasePath)
+  const artifactRelativePath = relative(index.directory, artifactPath)
+  if (
+    isAbsolute(databaseRelativePath) ||
+    isAbsolute(artifactRelativePath) ||
+    databaseRelativePath.startsWith("..") ||
+    artifactRelativePath.startsWith("..") ||
+    databaseRelativePath !== basename(databaseRelativePath) ||
+    artifactRelativePath !== basename(artifactRelativePath)
+  ) {
+    return
+  }
+
+  const threadId = sqliteDurableVariantBase(databaseRelativePath)
+  if (
+    !threadId ||
+    databaseRelativePath !== `${threadId}.sqlite` ||
+    sqliteQuarantineVariantBase(artifactRelativePath) !== threadId ||
+    !SAFE_ID_RE.test(threadId)
+  ) {
+    return
+  }
+
+  registerCheckpointThreadId(index, threadId)
+  if (index.scanned) {
+    const filenames = index.quarantineFilenamesByThreadId.get(threadId) ?? new Set<string>()
+    filenames.add(artifactRelativePath)
+    index.quarantineFilenamesByThreadId.set(threadId, filenames)
+  }
+})
+
+function deleteIndexedCheckpointArtifacts(
+  index: ThreadCheckpointArtifactIndex,
+  threadId: string
+): boolean {
+  const databasePath = threadCheckpointPath(index.directory, threadId)
+  const registeredQuarantinePaths = listRegisteredSqliteQuarantineArtifacts(databasePath)
+  const hadIndexedArtifacts =
+    index.durableThreadIds.has(threadId) ||
+    (index.quarantineFilenamesByThreadId.get(threadId)?.size ?? 0) > 0 ||
+    registeredQuarantinePaths.length > 0
+  const removedLive = deleteSqliteDurableFileSync(databasePath)
+
+  const quarantinePaths = new Set<string>(registeredQuarantinePaths)
+  for (const filename of index.quarantineFilenamesByThreadId.get(threadId) ?? []) {
+    quarantinePaths.add(join(index.directory, filename))
+  }
+  for (const artifactPath of quarantinePaths) {
+    try {
+      unlinkSync(artifactPath)
+      forgetRegisteredSqliteQuarantineArtifact(databasePath, artifactPath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      forgetRegisteredSqliteQuarantineArtifact(databasePath, artifactPath)
+    }
+  }
+
+  forgetCheckpointThreadId(index, threadId)
+  return hadIndexedArtifacts || removedLive
+}
 
 export function getThreadCheckpointPath(threadId: string): string {
-  if (!SAFE_ID_RE.test(threadId)) {
-    throw new Error(`Invalid threadId: ${threadId}`)
-  }
-  return join(getThreadCheckpointDir(), `${threadId}.sqlite`)
+  assertSafeThreadCheckpointId(threadId)
+  const directory = getThreadCheckpointDir()
+  registerCheckpointThreadId(checkpointArtifactIndexForDirectory(directory), threadId)
+  return threadCheckpointPath(directory, threadId)
 }
 
 export function deleteThreadCheckpoint(threadId: string): void {
@@ -153,75 +404,62 @@ export function deleteThreadCheckpoint(threadId: string): void {
   // known fixed-suffix variants only (no directory scan). Quarantine archives
   // never resurrect (not recovery candidates); their privacy cleanup belongs to
   // thread deletion — see purgeThreadCheckpointArtifacts.
-  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
+  assertSafeThreadCheckpointId(threadId)
+  const directory = getThreadCheckpointDir()
+  const databasePath = threadCheckpointPath(directory, threadId)
+  deleteSqliteDurableFileSync(databasePath)
+  if (threadCheckpointArtifactIndex?.directory === directory) {
+    threadCheckpointArtifactIndex.durableThreadIds.delete(threadId)
+    const hasIndexedQuarantine =
+      (threadCheckpointArtifactIndex.quarantineFilenamesByThreadId.get(threadId)?.size ?? 0) > 0
+    const hasRegisteredQuarantine =
+      listRegisteredSqliteQuarantineArtifacts(databasePath).length > 0
+    // Workflow subagents call this hot path after every completed run. Do not
+    // retain one family-index entry per historical subagent for the process
+    // lifetime; keep only ids that still own quarantine data for the parent's
+    // later privacy sweep. An unscanned index is safe too: its eventual one-time
+    // directory scan rediscovers any crash-era quarantine files.
+    if (!hasIndexedQuarantine && !hasRegisteredQuarantine) {
+      forgetCheckpointThreadId(threadCheckpointArtifactIndex, threadId)
+    }
+  }
 }
 
 /** Deep cleanup for the USER-FACING "delete thread" semantic: durable variants
  * plus quarantine archives (`.corrupt.<ts>` / `.bak.<ts>`), which are not
- * recovery candidates but still hold full transcripts (privacy residue). Does a
- * directory scan, so keep it on the cold thread-deletion path — subagent
- * self-clean uses the fast deleteThreadCheckpoint instead. */
+ * recovery candidates but still hold full transcripts (privacy residue). The
+ * first deep cleanup lazily indexes the shared directory once; later deletes
+ * use exact-id/family lookups. Subagent self-clean still uses the fixed-suffix
+ * deleteThreadCheckpoint hot path. */
 export function purgeThreadCheckpointArtifacts(threadId: string): void {
-  deleteSqliteDurableFileSync(getThreadCheckpointPath(threadId))
-  const dir = getThreadCheckpointDir()
-  for (const filename of readdirSync(dir)) {
-    if (sqliteQuarantineVariantBase(filename) !== threadId) continue
-    try {
-      unlinkSync(join(dir, filename))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-    }
-  }
+  assertSafeThreadCheckpointId(threadId)
+  deleteIndexedCheckpointArtifacts(ensureThreadCheckpointArtifactIndex(), threadId)
 }
 
-/** Shared sweep for prefix-scoped checkpoint cleanup: removes the live file,
+/** Indexed sweep for prefix-scoped checkpoint cleanup: removes the live file,
  * every durable sidecar (a `.bak` whose live file is already gone still counts
  * as a leftover checkpoint) AND quarantine archives (transcript-bearing
  * `.corrupt.<ts>` / `.bak.<ts>` files). Returns the number of distinct
  * checkpoint thread ids removed. */
-function sweepCheckpointVariants(prefix: string): number {
-  const dir = getThreadCheckpointDir()
-
-  // Group by checkpoint first, then delete each through the durable helper so
-  // every checkpoint gets the safe deletion order (sidecars first, live last)
-  // instead of readdir's arbitrary file order. The helper tolerates ENOENT, so
-  // a concurrent cleanup (subagent self-clean) racing this sweep is safe.
-  const checkpointThreadIds = new Set<string>()
-  const quarantineFiles: string[] = []
-  for (const filename of readdirSync(dir)) {
-    const durableBase = sqliteDurableVariantBase(filename)
-    const quarantineBase = durableBase === null ? sqliteQuarantineVariantBase(filename) : null
-    const checkpointThreadId = durableBase ?? quarantineBase
-    if (!checkpointThreadId || !checkpointThreadId.startsWith(prefix)) continue
-    if (!SAFE_ID_RE.test(checkpointThreadId)) continue
-    if (quarantineBase !== null) quarantineFiles.push(filename)
-    checkpointThreadIds.add(checkpointThreadId)
+function sweepCheckpointVariants(threadIds: Iterable<string>): number {
+  const index = ensureThreadCheckpointArtifactIndex()
+  let deletedCount = 0
+  for (const threadId of Array.from(threadIds)) {
+    if (deleteIndexedCheckpointArtifacts(index, threadId)) deletedCount += 1
   }
-  for (const checkpointThreadId of checkpointThreadIds) {
-    deleteSqliteDurableFileSync(join(dir, `${checkpointThreadId}.sqlite`))
-  }
-  for (const filename of quarantineFiles) {
-    try {
-      unlinkSync(join(dir, filename))
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-    }
-  }
-
-  return checkpointThreadIds.size
+  return deletedCount
 }
 
 export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
-  if (!SAFE_ID_RE.test(parentThreadId)) {
-    throw new Error(`Invalid threadId: ${parentThreadId}`)
-  }
-  if (parentThreadId.includes("__worker__")) {
+  assertSafeThreadCheckpointId(parentThreadId)
+  if (parentThreadId.includes(COORDINATOR_WORKER_CHECKPOINT_DELIMITER)) {
     throw new Error(
       `Invalid coordinator parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __worker__ delimiter.`
     )
   }
 
-  return sweepCheckpointVariants(`${parentThreadId}__worker__`)
+  const index = ensureThreadCheckpointArtifactIndex()
+  return sweepCheckpointVariants(index.workerThreadIdsByParent.get(parentThreadId) ?? [])
 }
 
 /** Delete leftover workflow-subagent checkpoints for a thread. Workflow subagents
@@ -231,16 +469,20 @@ export function deleteThreadWorkerCheckpoints(parentThreadId: string): number {
  * failed cleanup left behind — the symmetric counterpart to
  * deleteThreadWorkerCheckpoints, which only covers `__worker__`. (#3) */
 export function deleteThreadWorkflowCheckpoints(parentThreadId: string): number {
-  if (!SAFE_ID_RE.test(parentThreadId)) {
-    throw new Error(`Invalid threadId: ${parentThreadId}`)
-  }
-  if (parentThreadId.includes("__wf_")) {
+  assertSafeThreadCheckpointId(parentThreadId)
+  if (parentThreadId.includes(WORKFLOW_CHECKPOINT_DELIMITER)) {
     throw new Error(
       `Invalid workflow parent threadId: ${parentThreadId}. Parent thread ids may not contain the reserved __wf_ delimiter.`
     )
   }
 
-  return sweepCheckpointVariants(`${parentThreadId}__wf_`)
+  const index = ensureThreadCheckpointArtifactIndex()
+  return sweepCheckpointVariants(index.workflowThreadIdsByParent.get(parentThreadId) ?? [])
+}
+
+/** Read-only diagnostic used by the checkpoint cleanup performance regression. */
+export function getThreadCheckpointArtifactDirectoryScanCount(): number {
+  return threadCheckpointArtifactDirectoryScanCount
 }
 
 export function getEnvFilePath(): string {
@@ -248,9 +490,15 @@ export function getEnvFilePath(): string {
 }
 
 // Read .env file and parse into object
+let parsedEnvFileCache: Record<string, string> | null = null
+
 function parseEnvFile(): Record<string, string> {
+  if (parsedEnvFileCache) return parsedEnvFileCache
   const envPath = getEnvFilePath()
-  if (!existsSync(envPath)) return {}
+  if (!existsSync(envPath)) {
+    parsedEnvFileCache = {}
+    return parsedEnvFileCache
+  }
 
   const content = readFileSync(envPath, "utf-8")
   const result: Record<string, string> = {}
@@ -265,7 +513,8 @@ function parseEnvFile(): Record<string, string> {
       result[key] = value
     }
   }
-  return result
+  parsedEnvFileCache = result
+  return parsedEnvFileCache
 }
 
 // Write object back to .env file
@@ -275,6 +524,7 @@ function writeEnvFile(env: Record<string, string>): void {
     .filter((entry) => entry[1])
     .map(([k, v]) => `${k}=${v}`)
   writeFileSync(getEnvFilePath(), lines.join("\n") + "\n")
+  parsedEnvFileCache = { ...env }
 }
 
 /** Resolve the managed-model credential, keeping runtime values overridable. */
@@ -462,6 +712,7 @@ export function setSkillEvolutionTurnThreshold(value: number): void {
 // ── Memory settings ──
 
 const MEMORY_SETTINGS_FILE = join(OPENWORK_DIR, "memory-settings.json")
+const CHAT_MOUNT_SETTINGS_MAX_BYTES = 64 * 1024
 
 interface MemorySettings {
   enabled?: boolean
@@ -469,21 +720,34 @@ interface MemorySettings {
   sessionOptInMigrated?: boolean
 }
 
+let memorySettingsCache: MemorySettings | null = null
+
 function readMemorySettings(): MemorySettings {
-  if (!existsSync(MEMORY_SETTINGS_FILE)) return {}
+  if (memorySettingsCache) return memorySettingsCache
+  if (!existsSync(MEMORY_SETTINGS_FILE)) {
+    memorySettingsCache = {}
+    return memorySettingsCache
+  }
   try {
+    if (statSync(MEMORY_SETTINGS_FILE).size > CHAT_MOUNT_SETTINGS_MAX_BYTES) {
+      memorySettingsCache = {}
+      return memorySettingsCache
+    }
     const parsed = JSON.parse(readFileSync(MEMORY_SETTINGS_FILE, "utf-8"))
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    memorySettingsCache = parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as MemorySettings)
       : {}
+    return memorySettingsCache
   } catch {
-    return {}
+    memorySettingsCache = {}
+    return memorySettingsCache
   }
 }
 
 function writeMemorySettings(settings: MemorySettings): void {
   getOpenworkDir()
   writeFileSync(MEMORY_SETTINGS_FILE, JSON.stringify(settings, null, 2))
+  memorySettingsCache = settings
 }
 
 function hasLegacyMemoryFiles(): boolean {
@@ -802,22 +1066,96 @@ export function setCodeExecEnabled(enabled: boolean): void {
 
 const DISABLED_SKILLS_FILE = join(OPENWORK_DIR, "disabled-skills.json")
 
-function readDisabledSkillEntries(): string[] {
+interface DisabledSkillStoreSnapshot {
+  entries: string[]
+  fingerprint: string
+  valid: boolean
+}
+
+export interface DisabledSkillRuntimePolicy {
+  readonly disabledSkillIds: readonly string[]
+  readonly disabledSkillIdSet: ReadonlySet<string>
+  readonly disabledSkillDirs: readonly string[]
+  readonly disabledSkillDirKeys: ReadonlySet<string>
+  readonly denyAllStandaloneSkills: boolean
+  readonly catalogGlobalRevision: number
+}
+
+interface LastKnownGoodDisabledSkillRuntimePolicy extends DisabledSkillRuntimePolicy {
+  readonly storeFingerprint: string
+}
+
+let lastKnownGoodDisabledSkillRuntimePolicy: LastKnownGoodDisabledSkillRuntimePolicy | null = null
+
+function hasDisabledSkillStoreControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 0x1f || code === 0x7f) return true
+  }
+  return false
+}
+
+function readDisabledSkillStoreSnapshot(): DisabledSkillStoreSnapshot {
   getOpenworkDir()
-  if (!existsSync(DISABLED_SKILLS_FILE)) return []
   try {
+    const stat = statSync(DISABLED_SKILLS_FILE)
+    if (!stat.isFile() || stat.size > SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES) {
+      return { entries: [], fingerprint: "invalid", valid: false }
+    }
     const content = readFileSync(DISABLED_SKILLS_FILE, "utf-8")
+    if (
+      Buffer.byteLength(content, "utf-8") >
+      SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES
+    ) {
+      return { entries: [], fingerprint: "invalid", valid: false }
+    }
+    const fingerprint = fingerprintDisabledSkillStoreText(content)
     const parsed = JSON.parse(content) as unknown
-    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : []
-  } catch {
-    return []
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length > MAX_DISABLED_STANDALONE_SKILL_IDS ||
+      parsed.some(
+        (entry) =>
+          typeof entry !== "string" ||
+          entry.length === 0 ||
+          entry.length > MAX_CANONICAL_STANDALONE_SKILL_ID_LENGTH ||
+          hasDisabledSkillStoreControlCharacter(entry)
+      )
+    ) {
+      return { entries: [], fingerprint, valid: false }
+    }
+    return { entries: parsed, fingerprint, valid: true }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? {
+          entries: [],
+          fingerprint: DISABLED_SKILL_STORE_MISSING_FINGERPRINT,
+          valid: true
+        }
+      : { entries: [], fingerprint: "invalid", valid: false }
   }
 }
 
 function writeDisabledSkillEntries(disabledEntries: string[]): void {
   getOpenworkDir()
-  writeFileSync(DISABLED_SKILLS_FILE, JSON.stringify(disabledEntries, null, 2))
+  const tempFile = `${DISABLED_SKILLS_FILE}.tmp`
+  const content = JSON.stringify(disabledEntries, null, 2)
+  if (Buffer.byteLength(content, "utf-8") > SKILL_PLUGIN_CATALOG_MAX_DISABLED_STORE_BYTES) {
+    throw new RangeError("Disabled skill store is too large")
+  }
+  writeFileSync(tempFile, content)
+  renameSync(tempFile, DISABLED_SKILLS_FILE)
+  bumpDisabledSkillStoreRevision()
   invalidateEnabledSkillsCache()
+}
+
+export interface DisabledSkillStoreMutationResult {
+  disabledSkillIds: string[]
+  revision: number
+}
+
+export function getDisabledSkillsRevision(): number {
+  return getDisabledSkillStoreRevision()
 }
 
 function resolveDisabledSkillEntries(
@@ -835,26 +1173,228 @@ function resolveDisabledSkillEntries(
 }
 
 export function getDisabledSkills(): string[] {
-  return resolveDisabledSkillEntries(readDisabledSkillEntries())
+  return [...getDisabledSkillRuntimePolicy().disabledSkillIds]
 }
 
-let _disabledSkillDirsCache: string[] | null = null
+/**
+ * Runtime authorization must not turn a corrupt/unreadable disabled store into
+ * an empty allow-list. A valid file (including a missing file) refreshes the
+ * process-local last-known-good policy. Invalid input reuses that policy, or
+ * denies every standalone skill during a cold start when none exists yet.
+ */
+export function getDisabledSkillRuntimePolicy(): DisabledSkillRuntimePolicy {
+  const snapshot = readDisabledSkillStoreSnapshot()
+  const catalogGlobalRevision = getHookCatalogGlobalRevision()
+  if (isSkillCatalogTopologyMutationBusy()) {
+    if (
+      lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision ===
+      catalogGlobalRevision
+    ) {
+      return lastKnownGoodDisabledSkillRuntimePolicy
+    }
+    return denyAllStandaloneSkillRuntimePolicy(catalogGlobalRevision)
+  }
+  if (snapshot.valid) {
+    if (
+      lastKnownGoodDisabledSkillRuntimePolicy?.storeFingerprint === snapshot.fingerprint &&
+      lastKnownGoodDisabledSkillRuntimePolicy.catalogGlobalRevision === catalogGlobalRevision
+    ) {
+      return lastKnownGoodDisabledSkillRuntimePolicy
+    }
+    const skills = discoverSkillsFromSourcesSync()
+    const disabledSkillIds = resolveDisabledSkillIds(snapshot.entries, skills)
+    const disabledSet = new Set(disabledSkillIds.map((name) => name.trim().toLowerCase()))
+    const disabledSkillDirs = skills
+      .filter((skill) => isDiscoveredSkillDisabled(skill, disabledSet))
+      .map((skill) => skill.rootDir)
+    const policy: LastKnownGoodDisabledSkillRuntimePolicy = {
+      disabledSkillIds,
+      disabledSkillIdSet: disabledSet,
+      disabledSkillDirs,
+      disabledSkillDirKeys: new Set(disabledSkillDirs.map(normalizeSkillDirPath)),
+      denyAllStandaloneSkills: false,
+      catalogGlobalRevision,
+      storeFingerprint: snapshot.fingerprint
+    }
+    lastKnownGoodDisabledSkillRuntimePolicy = policy
+    return policy
+  }
+  if (
+    lastKnownGoodDisabledSkillRuntimePolicy?.catalogGlobalRevision === catalogGlobalRevision
+  ) {
+    return lastKnownGoodDisabledSkillRuntimePolicy
+  }
+  return denyAllStandaloneSkillRuntimePolicy(catalogGlobalRevision)
+}
+
+function denyAllStandaloneSkillRuntimePolicy(
+  catalogGlobalRevision: number
+): DisabledSkillRuntimePolicy {
+  return {
+    disabledSkillIds: [],
+    disabledSkillIdSet: new Set(),
+    disabledSkillDirs: [],
+    disabledSkillDirKeys: new Set(),
+    denyAllStandaloneSkills: true,
+    catalogGlobalRevision
+  }
+}
+
+export function isStandaloneSkillDisabledByRuntimePolicy(
+  skill: DiscoveredSkill,
+  policy: DisabledSkillRuntimePolicy
+): boolean {
+  if (policy.denyAllStandaloneSkills) return true
+  if (policy.disabledSkillDirKeys.has(normalizeSkillDirPath(skill.rootDir))) return true
+  return isDiscoveredSkillDisabled(skill, policy.disabledSkillIdSet)
+}
+
+export function isDisabledSkillRuntimePolicyCurrent(
+  policy: DisabledSkillRuntimePolicy
+): boolean {
+  return (
+    !isSkillCatalogTopologyMutationBusy() &&
+    policy.catalogGlobalRevision === getHookCatalogGlobalRevision()
+  )
+}
 
 export function getDisabledSkillDirs(): string[] {
-  if (_disabledSkillDirsCache) return _disabledSkillDirsCache
-  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
-  const result =
-    disabled.size === 0
-      ? []
-      : discoverSkillsFromSourcesSync()
-          .filter((skill) => isDiscoveredSkillDisabled(skill, disabled))
-          .map((skill) => skill.rootDir)
-  _disabledSkillDirsCache = result
-  return result
+  const policy = getDisabledSkillRuntimePolicy()
+  if (policy.denyAllStandaloneSkills) {
+    return getSkillsSources()
+  }
+  return [...policy.disabledSkillDirs]
 }
 
 export function setDisabledSkills(skillIds: string[]): void {
   writeDisabledSkillEntries(resolveDisabledSkillEntries(skillIds))
+}
+
+/**
+ * Atomically mutate one standalone skill against the latest persisted state.
+ * Since the read/modify/write sequence is synchronous on Electron's main
+ * thread, concurrent renderer requests cannot overwrite each other's stale
+ * snapshots. The returned ids are the authoritative post-mutation state.
+ */
+function setSkillDisabledStateFromEntries(
+  skillId: string,
+  disabled: boolean,
+  currentEntries: string[],
+  resolvedDisabledSkillIds?: readonly string[]
+): string[] {
+  const persisted = normalizeStandaloneDisabledSkillIds(currentEntries)
+  const current = normalizeStandaloneDisabledSkillIds(
+    resolvedDisabledSkillIds ? [...resolvedDisabledSkillIds] : currentEntries
+  )
+  const targetId = normalizeCanonicalStandaloneSkillId(skillId)
+  if (!targetId) return current
+  if (
+    disabled &&
+    !current.includes(targetId) &&
+    current.length >= MAX_DISABLED_STANDALONE_SKILL_IDS
+  ) {
+    throw new RangeError("Disabled skill limit reached")
+  }
+  const next = setDisabledSkillIdState(current, targetId, disabled)
+  const changed =
+    persisted.length !== next.length || persisted.some((entry, index) => entry !== next[index])
+  if (changed) writeDisabledSkillEntries(next)
+  return next
+}
+
+export function setSkillDisabledState(
+  skillId: string,
+  disabled: boolean,
+  resolvedDisabledSkillIds?: readonly string[]
+): string[] {
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!persistedSnapshot.valid) {
+    throw new Error("Disabled skill store is invalid; refusing to overwrite it")
+  }
+  return setSkillDisabledStateFromEntries(
+    skillId,
+    disabled,
+    persistedSnapshot.entries,
+    resolvedDisabledSkillIds
+  )
+}
+
+function matchesDisabledSkillStoreFingerprint(
+  snapshot: DisabledSkillStoreSnapshot,
+  expectedFingerprint: string
+): boolean {
+  if (snapshot.valid && snapshot.fingerprint === expectedFingerprint) return true
+  // The Worker cache key only changes when this epoch advances. If content
+  // changed before fs.watch delivered its event, advance it here so the CAS
+  // retry performs a fresh Worker scan instead of reusing the stale snapshot.
+  bumpDisabledSkillStoreRevision()
+  return false
+}
+
+/**
+ * Apply a worker-resolved canonical snapshot only if neither the in-process
+ * revision nor the exact file content changed since the Worker scan. The
+ * comparison and synchronous read/modify/write execute without an await,
+ * which makes this a real CAS boundary on Electron's main-process event loop.
+ */
+export function compareAndSetSkillDisabledState(
+  skillId: string,
+  disabled: boolean,
+  resolvedDisabledSkillIds: readonly string[],
+  expectedRevision: number,
+  expectedFingerprint: string,
+  expectedCatalogGlobalRevision: number
+): DisabledSkillStoreMutationResult | null {
+  if (
+    isSkillCatalogTopologyMutationBusy() ||
+    getHookCatalogGlobalRevision() !== expectedCatalogGlobalRevision
+  ) {
+    return null
+  }
+  if (getDisabledSkillStoreRevision() !== expectedRevision) return null
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!matchesDisabledSkillStoreFingerprint(persistedSnapshot, expectedFingerprint)) {
+    return null
+  }
+  const disabledSkillIds = setSkillDisabledStateFromEntries(
+    skillId,
+    disabled,
+    persistedSnapshot.entries,
+    resolvedDisabledSkillIds
+  )
+  return {
+    disabledSkillIds,
+    revision: getDisabledSkillStoreRevision()
+  }
+}
+
+/** Commit a complete canonical Worker projection without main-thread discovery. */
+export function compareAndSetCanonicalDisabledSkills(
+  resolvedDisabledSkillIds: readonly string[],
+  expectedRevision: number,
+  expectedFingerprint: string,
+  expectedCatalogGlobalRevision: number
+): DisabledSkillStoreMutationResult | null {
+  if (
+    isSkillCatalogTopologyMutationBusy() ||
+    getHookCatalogGlobalRevision() !== expectedCatalogGlobalRevision
+  ) {
+    return null
+  }
+  if (getDisabledSkillStoreRevision() !== expectedRevision) return null
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!matchesDisabledSkillStoreFingerprint(persistedSnapshot, expectedFingerprint)) {
+    return null
+  }
+  const persisted = normalizeStandaloneDisabledSkillIds(persistedSnapshot.entries)
+  const next = normalizeStandaloneDisabledSkillIds([...resolvedDisabledSkillIds])
+  const changed =
+    persisted.length !== next.length || persisted.some((entry, index) => entry !== next[index])
+  if (changed) writeDisabledSkillEntries(next)
+  return {
+    disabledSkillIds: next,
+    revision: getDisabledSkillStoreRevision()
+  }
 }
 
 function normalizeSkillDirPath(input: string): string {
@@ -887,12 +1427,14 @@ export function findExistingSkillById(skillId: string): DiscoveredSkill | null {
 }
 
 function computeDisabledSkillEntriesWithoutSkillDir(skillDir: string): string[] | null {
+  const persistedSnapshot = readDisabledSkillStoreSnapshot()
+  if (!persistedSnapshot.valid) return null
   const allSkills = discoverSkillsFromSourcesSync()
   const skillsToRemove = allSkills.filter((skill) => isSameOrChildPath(skill.rootDir, skillDir))
   if (skillsToRemove.length === 0) return null
 
   const remainingSkills = allSkills.filter((skill) => !isSameOrChildPath(skill.rootDir, skillDir))
-  const currentEntries = readDisabledSkillEntries()
+  const currentEntries = persistedSnapshot.entries
   const nextEntries = removeDisabledSkillEntriesForSkills(
     currentEntries,
     skillsToRemove,
@@ -910,9 +1452,27 @@ export function clearDisabledSkillsForSkillDir(skillDir: string): void {
 }
 
 export function prepareDisabledSkillsCleanupForSkillDir(skillDir: string): () => void {
-  const nextEntries = computeDisabledSkillEntriesWithoutSkillDir(skillDir)
+  // Capture identities while the directory still exists, but re-read the
+  // persisted entries only when cleanup executes after the awaited trash
+  // operation. This preserves toggles committed by another window in the gap
+  // without performing a second full main-thread directory scan.
+  const allSkills = discoverSkillsFromSourcesSync()
+  const skillsToRemove = allSkills.filter((skill) => isSameOrChildPath(skill.rootDir, skillDir))
+  const remainingSkills = allSkills.filter((skill) => !isSameOrChildPath(skill.rootDir, skillDir))
   return () => {
-    if (nextEntries) writeDisabledSkillEntries(nextEntries)
+    if (skillsToRemove.length === 0) return
+    const persistedSnapshot = readDisabledSkillStoreSnapshot()
+    if (!persistedSnapshot.valid) return
+    const currentEntries = persistedSnapshot.entries
+    const nextEntries = removeDisabledSkillEntriesForSkills(
+      currentEntries,
+      skillsToRemove,
+      remainingSkills
+    )
+    const unchanged =
+      currentEntries.length === nextEntries.length &&
+      currentEntries.every((entry, index) => entry === nextEntries[index])
+    if (!unchanged) writeDisabledSkillEntries(nextEntries)
   }
 }
 
@@ -948,9 +1508,8 @@ export function invalidateEnabledSkillsCache(): void {
   _pluginSkillSourcesCache = null
   _pluginMcpCache = null
   _pluginHooksCache = null
-  _skillHooksCache = null
   _skillHookMetadataCache = null
-  _disabledSkillDirsCache = null
+  _skillHookMetadataCacheRevision = -1
 }
 
 /**
@@ -959,6 +1518,7 @@ export function invalidateEnabledSkillsCache(): void {
  */
 export async function getEnabledSkillsSources(): Promise<string[]> {
   await cleanupLegacyEnabledSkillsDirsAsync()
+  await waitForSkillCatalogTopologyIdle()
   return getSkillsSources()
 }
 
@@ -997,45 +1557,56 @@ export async function cleanCmbSkillsFromClaudeDir(workDir: string): Promise<void
 export async function syncSkillsToClaudeDir(workDir: string): Promise<void> {
   const claudeSkillsDir = join(workDir, ".claude", "skills")
   await mkdir(claudeSkillsDir, { recursive: true })
-
-  // Clean up old _cmb_ skills
-  await cleanCmbSkillsFromClaudeDir(workDir)
-
-  // Copy enabled skills
-  const sourceDirs = await getEnabledSkillsSources()
-  const disabled = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
-  let count = 0
-  const usedDestNames = new Map<string, string>()
-  for (const sourceDir of sourceDirs) {
-    if (!existsSync(sourceDir)) continue
-    const skills = await discoverSkills(sourceDir)
-    for (const skill of skills) {
-      if (isDiscoveredSkillDisabled(skill, disabled)) continue
-      const relativeName = skill.relativePath || basename(skill.rootDir)
-      let destName = CMB_SKILL_PREFIX + makeFlattenedSkillDirName(relativeName)
-      const existingRelativeName = usedDestNames.get(destName)
-      if (existingRelativeName && existingRelativeName !== relativeName) {
-        const hash = createHash("sha256").update(relativeName).digest("hex").slice(0, 8)
-        destName = `${destName}-${hash}`
-      }
-      usedDestNames.set(destName, relativeName)
-      const dest = join(claudeSkillsDir, destName)
-      try {
-        // Remove existing dest to avoid merge with prior copy (e.g. builtin vs custom same name)
-        if (existsSync(dest)) await rm(dest, { recursive: true, force: true })
-        await copyDirRecursive(skill.rootDir, dest)
-        count++
-      } catch (e) {
-        console.warn(`[Storage] Failed to sync skill ${skill.name} to Claude dir:`, e)
+  const maxAttempts = 2
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    // Always remove the previous attempt before consulting a fresh policy.
+    await cleanCmbSkillsFromClaudeDir(workDir)
+    const sourceDirs = await getEnabledSkillsSources()
+    const runtimePolicy = getDisabledSkillRuntimePolicy()
+    if (runtimePolicy.denyAllStandaloneSkills) {
+      console.warn(
+        `[Storage] Disabled skill policy unavailable; removed managed skills from ${claudeSkillsDir}`
+      )
+      return
+    }
+    let count = 0
+    const usedDestNames = new Map<string, string>()
+    for (const sourceDir of sourceDirs) {
+      if (!existsSync(sourceDir)) continue
+      const skills = await discoverSkills(sourceDir)
+      for (const skill of skills) {
+        if (isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)) continue
+        const relativeName = skill.relativePath || basename(skill.rootDir)
+        let destName = CMB_SKILL_PREFIX + makeFlattenedSkillDirName(relativeName)
+        const existingRelativeName = usedDestNames.get(destName)
+        if (existingRelativeName && existingRelativeName !== relativeName) {
+          const hash = createHash("sha256").update(relativeName).digest("hex").slice(0, 8)
+          destName = `${destName}-${hash}`
+        }
+        usedDestNames.set(destName, relativeName)
+        const dest = join(claudeSkillsDir, destName)
         try {
-          await rm(dest, { recursive: true, force: true })
-        } catch {
-          /* ignore */
+          // Remove existing dest to avoid merge with prior copy (e.g. builtin vs custom same name)
+          if (existsSync(dest)) await rm(dest, { recursive: true, force: true })
+          await copyDirRecursive(skill.rootDir, dest)
+          count++
+        } catch (e) {
+          console.warn(`[Storage] Failed to sync skill ${skill.name} to Claude dir:`, e)
+          try {
+            await rm(dest, { recursive: true, force: true })
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
+    if (isDisabledSkillRuntimePolicyCurrent(runtimePolicy)) {
+      console.log(`[Storage] Synced ${count} skills to ${claudeSkillsDir}`)
+      return
+    }
   }
-  console.log(`[Storage] Synced ${count} skills to ${claudeSkillsDir}`)
+  await cleanCmbSkillsFromClaudeDir(workDir)
+  console.warn(`[Storage] Skill topology kept changing; left ${claudeSkillsDir} fail-closed`)
 }
 
 // Custom model configurations stored as JSON in ~/.cmbcoworkagent/custom-models.json
@@ -1600,14 +2171,27 @@ export function getDefaultModelConfig(): CustomModelConfig | null {
   return configs[0] ?? null
 }
 
+let customModelsRawCache: StoredCustomModelRecord[] | null = null
+
+function cloneStoredCustomModels(items: StoredCustomModelRecord[]): StoredCustomModelRecord[] {
+  return items.map((item) => ({ ...item }))
+}
+
 function readCustomModelsRaw(): StoredCustomModelRecord[] {
+  if (customModelsRawCache) return cloneStoredCustomModels(customModelsRawCache)
   getOpenworkDir()
-  if (!existsSync(CUSTOM_MODELS_FILE)) return []
+  if (!existsSync(CUSTOM_MODELS_FILE)) {
+    customModelsRawCache = []
+    return []
+  }
   try {
     const content = readFileSync(CUSTOM_MODELS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
+    if (!Array.isArray(parsed)) {
+      customModelsRawCache = []
+      return []
+    }
+    customModelsRawCache = parsed.filter(
       (item): item is StoredCustomModelRecord =>
         !!item &&
         typeof item === "object" &&
@@ -1616,13 +2200,16 @@ function readCustomModelsRaw(): StoredCustomModelRecord[] {
         typeof (item as { baseUrl?: unknown }).baseUrl === "string" &&
         typeof (item as { model?: unknown }).model === "string"
     )
+    return cloneStoredCustomModels(customModelsRawCache)
   } catch {
+    customModelsRawCache = []
     return []
   }
 }
 
 function writeCustomModelsRaw(items: StoredCustomModelRecord[]): void {
   writeFileSync(CUSTOM_MODELS_FILE, JSON.stringify(items, null, 2))
+  customModelsRawCache = cloneStoredCustomModels(items)
 }
 
 function writeUserInfoModelsRaw(items: UserInfoConfig): void {
@@ -1904,6 +2491,7 @@ export function deleteAllCustomModelConfigs(): void {
   if (existsSync(CUSTOM_MODEL_FILE)) {
     unlinkSync(CUSTOM_MODEL_FILE)
   }
+  customModelsRawCache = []
   deleteAllCustomModelApiKeys()
 }
 
@@ -2581,8 +3169,8 @@ let _pluginSkillsCache: string[] | null = null
 let _pluginSkillSourcesCache: PluginSkillSourceMetadata[] | null = null
 let _pluginMcpCache: Record<string, PluginMcpServerConfig> | null = null
 let _pluginHooksCache: PluginHookMetadata[] | null = null
-let _skillHooksCache: HookConfig[] | null = null
 let _skillHookMetadataCache: SkillHookMetadata[] | null = null
+let _skillHookMetadataCacheRevision = -1
 
 export function getPluginsDir(): string {
   if (!existsSync(PLUGINS_DIR)) {
@@ -2899,6 +3487,10 @@ export function getHookLoggingConfig(): import("./types").HookLoggingConfig {
     return _hookLoggingCache
   }
   try {
+    if (statSync(HOOK_LOGGING_CONFIG_FILE).size > CHAT_MOUNT_SETTINGS_MAX_BYTES) {
+      _hookLoggingCache = defaultHookLoggingConfig()
+      return _hookLoggingCache
+    }
     const parsed = JSON.parse(readFileSync(HOOK_LOGGING_CONFIG_FILE, "utf-8")) as Record<
       string,
       unknown
@@ -2954,12 +3546,9 @@ export function getHookLogDir(): string {
   return dir
 }
 
-/** Absolute path to the jsonl log file for a given local date. */
+/** Absolute path to the jsonl log file for a fixed Beijing calendar date. */
 export function getHookLogFilePath(date: Date = new Date()): string {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, "0")
-  const d = String(date.getDate()).padStart(2, "0")
-  return join(getHookLogDir(), `hooks.${y}-${m}-${d}.jsonl`)
+  return join(getHookLogDir(), `hooks.${getHookDateKey(date)}.jsonl`)
 }
 
 // ── Sandbox Settings ──────────────────────────────────────────────────────────
@@ -2973,19 +3562,36 @@ const SANDBOX_MODES = new Set<"none" | "unelevated" | "readonly" | "elevated">([
   "elevated"
 ])
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
+type SandboxSettings = { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean }
 
-function readSandboxSettings(): { mode: SandboxMode; yolo: boolean; nuxCompleted: boolean } {
-  if (!existsSync(SANDBOX_SETTINGS_FILE)) return { mode: "none", yolo: false, nuxCompleted: true }
+let sandboxSettingsCache: SandboxSettings | null = null
+
+function defaultSandboxSettings(): SandboxSettings {
+  return { mode: "none", yolo: false, nuxCompleted: true }
+}
+
+function readSandboxSettings(): SandboxSettings {
+  if (sandboxSettingsCache) return sandboxSettingsCache
+  if (!existsSync(SANDBOX_SETTINGS_FILE)) {
+    sandboxSettingsCache = defaultSandboxSettings()
+    return sandboxSettingsCache
+  }
   try {
+    if (statSync(SANDBOX_SETTINGS_FILE).size > CHAT_MOUNT_SETTINGS_MAX_BYTES) {
+      sandboxSettingsCache = defaultSandboxSettings()
+      return sandboxSettingsCache
+    }
     const parsed = JSON.parse(readFileSync(SANDBOX_SETTINGS_FILE, "utf-8"))
-    return {
+    sandboxSettingsCache = {
       mode: SANDBOX_MODES.has(parsed.mode) ? parsed.mode : "none",
       yolo: parsed.yolo === true,
       nuxCompleted: parsed.nuxCompleted !== false
     }
+    return sandboxSettingsCache
   } catch (err) {
     console.warn("[Storage] Failed to load sandbox settings:", err)
-    return { mode: "none", yolo: false, nuxCompleted: true }
+    sandboxSettingsCache = defaultSandboxSettings()
+    return sandboxSettingsCache
   }
 }
 
@@ -2994,7 +3600,9 @@ function updateSandboxSettings(
 ): void {
   getOpenworkDir()
   const current = readSandboxSettings()
-  writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify({ ...current, ...patch }, null, 2))
+  const next = { ...current, ...patch }
+  writeFileSync(SANDBOX_SETTINGS_FILE, JSON.stringify(next, null, 2))
+  sandboxSettingsCache = next
 }
 
 export function getWindowsSandboxMode(): SandboxMode {
@@ -3438,20 +4046,32 @@ function expandCcHooksSettings(
 
 // ── end CC format compatibility ───────────────────────────────────────────────
 
+function getHookFileDates(filePath: string): Pick<HookConfig, "createdAt" | "updatedAt"> {
+  try {
+    const stats = statSync(filePath)
+    const birthtime = stats.birthtime.getTime() > 0 ? stats.birthtime : stats.ctime
+    return {
+      createdAt: Number.isFinite(birthtime.getTime()) ? birthtime.toISOString() : "",
+      updatedAt: Number.isFinite(stats.mtime.getTime()) ? stats.mtime.toISOString() : ""
+    }
+  } catch {
+    return { createdAt: "", updatedAt: "" }
+  }
+}
+
 export function getHooks(): HookConfig[] {
   getOpenworkDir()
   if (!existsSync(HOOKS_FILE)) return []
   try {
     const content = readFileSync(HOOKS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
-    const now = new Date().toISOString()
+    const dates = getHookFileDates(HOOKS_FILE)
     const fmt = detectHooksFileFormat(parsed)
 
     if (fmt === "cc_settings") {
       return expandCcHooksSettings(parsed as Record<string, unknown>, "global", {
         enabled: true,
-        createdAt: now,
-        updatedAt: now
+        ...dates
       })
     }
 
@@ -3507,8 +4127,8 @@ export function getHooks(): HookConfig[] {
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
-          createdAt: typeof h.createdAt === "string" ? h.createdAt : now,
-          updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : now
+          createdAt: typeof h.createdAt === "string" ? h.createdAt : dates.createdAt,
+          updatedAt: typeof h.updatedAt === "string" ? h.updatedAt : dates.updatedAt
         }
       ]
     })
@@ -3547,8 +4167,7 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
     const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
     const meta = {
       enabled: plugin.enabled,
-      createdAt: plugin.createdAt,
-      updatedAt: plugin.updatedAt
+      ...getHookFileDates(hooksFilePath)
     }
     const idPrefix = `plugin:${plugin.id}`
     const fmt = detectHooksFileFormat(parsed)
@@ -3608,8 +4227,8 @@ function parsePluginHooks(plugin: PluginMetadata): PluginHookMetadata[] {
             timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
             async: h.async === true ? true : undefined,
             enabled: h.enabled !== false,
-            createdAt: plugin.createdAt,
-            updatedAt: plugin.updatedAt
+            createdAt: meta.createdAt,
+            updatedAt: meta.updatedAt
           }
         ]
       })
@@ -3682,11 +4301,10 @@ export function parseSkillFrontmatterHooks(skillDir: string, skillName: string):
   const settingsObj = readSkillFrontmatterHooksSettings(skillMdPath)
   if (!settingsObj) return []
 
-  const now = new Date().toISOString()
   return expandCcHooksSettings(
     settingsObj,
     `skill:${skillName}/SKILL.md`,
-    { enabled: true, createdAt: now, updatedAt: now },
+    { enabled: true, ...getHookFileDates(skillMdPath) },
     skillName
   )
 }
@@ -3701,7 +4319,7 @@ interface SkillHookSource {
 
 function collectSkillHookSourcesFromDir(
   sourceDir: string,
-  disabledSkills: Set<string>,
+  runtimePolicy: DisabledSkillRuntimePolicy,
   respectDisabledList: boolean,
   seenDirs: Set<string>,
   pluginMeta?: { pluginId: string; pluginName: string; pluginRoot: string },
@@ -3711,7 +4329,12 @@ function collectSkillHookSourcesFromDir(
   if (!existsSync(sourceDir)) return result
 
   const pushSkill = (skill: ReturnType<typeof discoverSkillsSync>[number]): void => {
-    if (respectDisabledList && isDiscoveredSkillDisabled(skill, disabledSkills)) return
+    if (
+      respectDisabledList &&
+      isStandaloneSkillDisabledByRuntimePolicy(skill, runtimePolicy)
+    ) {
+      return
+    }
     const skillDir = skill.rootDir
     if (seenDirs.has(skillDir)) return
     seenDirs.add(skillDir)
@@ -3730,19 +4353,21 @@ function collectSkillHookSourcesFromDir(
 }
 
 function getEnabledSkillHookSources(): SkillHookSource[] {
-  const disabledSkills = new Set(getDisabledSkills().map((name) => name.trim().toLowerCase()))
+  const runtimePolicy = getDisabledSkillRuntimePolicy()
   const seenDirs = new Set<string>()
   const sources: SkillHookSource[] = []
 
-  for (const sourceDir of getSkillsSources()) {
-    sources.push(...collectSkillHookSourcesFromDir(sourceDir, disabledSkills, true, seenDirs))
+  if (!runtimePolicy.denyAllStandaloneSkills) {
+    for (const sourceDir of getSkillsSources()) {
+      sources.push(...collectSkillHookSourcesFromDir(sourceDir, runtimePolicy, true, seenDirs))
+    }
   }
 
   for (const source of getEnabledPluginSkillSourceMetadata()) {
     sources.push(
       ...collectSkillHookSourcesFromDir(
         source.sourceDir,
-        disabledSkills,
+        runtimePolicy,
         false,
         seenDirs,
         { pluginId: source.pluginId, pluginName: source.pluginName, pluginRoot: source.pluginRoot },
@@ -3760,8 +4385,8 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
 
   try {
     const parsed = JSON.parse(readFileSync(hooksFilePath, "utf-8"))
-    const now = new Date().toISOString()
-    const meta = { enabled: true, createdAt: now, updatedAt: now }
+    const dates = getHookFileDates(hooksFilePath)
+    const meta = { enabled: true, ...dates }
     const idPrefix =
       hooksRelPath === SKILL_HOOKS_FILE
         ? `skill:${skillName}`
@@ -3821,8 +4446,7 @@ function parseSkillHooks(skillDir: string, skillName: string, hooksRelPath: stri
           timeout: parseNativeHookTimeout(h.timeoutMs) ?? parseNativeHookTimeout(h.timeout),
           async: h.async === true ? true : undefined,
           enabled: h.enabled !== false,
-          createdAt: now,
-          updatedAt: now
+          ...dates
         }
       ]
     })
@@ -3865,16 +4489,28 @@ function buildEnabledSkillHookMetadata(): SkillHookMetadata[] {
 }
 
 export function getEnabledSkillHookMetadata(): SkillHookMetadata[] {
-  if (_skillHookMetadataCache) return _skillHookMetadataCache
-  _skillHookMetadataCache = buildEnabledSkillHookMetadata()
-  _skillHooksCache = _skillHookMetadataCache
-  return _skillHookMetadataCache
+  const catalogGlobalRevision = getHookCatalogGlobalRevision()
+  const topologyBusy = isSkillCatalogTopologyMutationBusy()
+  if (
+    !topologyBusy &&
+    _skillHookMetadataCache &&
+    _skillHookMetadataCacheRevision === catalogGlobalRevision
+  ) {
+    return _skillHookMetadataCache
+  }
+  const metadata = buildEnabledSkillHookMetadata()
+  if (
+    !topologyBusy &&
+    catalogGlobalRevision === getHookCatalogGlobalRevision()
+  ) {
+    _skillHookMetadataCache = metadata
+    _skillHookMetadataCacheRevision = catalogGlobalRevision
+  }
+  return metadata
 }
 
 export function getEnabledSkillHooks(): HookConfig[] {
-  if (_skillHooksCache) return _skillHooksCache
-  _skillHooksCache = getEnabledSkillHookMetadata()
-  return _skillHooksCache
+  return getEnabledSkillHookMetadata()
 }
 
 export function setPluginHookEnabled(pluginId: string, hookId: string, enabled: boolean): void {
@@ -4065,7 +4701,6 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
   const hooksDir = join(workspacePath, WORKSPACE_HOOKS_DIR)
   if (!existsSync(hooksDir)) return []
   const result: HookConfig[] = []
-  const now = new Date().toISOString()
   try {
     const files = readdirSync(hooksDir).filter((f) => f.endsWith(".json"))
     for (const file of files) {
@@ -4073,6 +4708,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
       const baseName = file.replace(/\.json$/, "")
       try {
         const parsed = JSON.parse(readFileSync(filePath, "utf-8"))
+        const dates = getHookFileDates(filePath)
         const fmt = detectHooksFileFormat(parsed)
 
         // ── CC multi-hook file (cc_plugin or cc_settings) ──
@@ -4083,8 +4719,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               : (parsed as Record<string, unknown>)
           const hooks = expandCcHooksSettings(settingsObj, `ws:${baseName}`, {
             enabled: true,
-            createdAt: now,
-            updatedAt: now
+            ...dates
           })
           result.push(
             ...hooks.map((hook) => withHookSource(hook, "workspace", workspacePath, filePath))
@@ -4134,8 +4769,7 @@ export function getWorkspaceHooks(workspacePath: string): HookConfig[] {
               timeout: parseNativeHookTimeout(raw.timeoutMs) ?? parseNativeHookTimeout(raw.timeout),
               async: raw.async === true ? true : undefined,
               enabled: true,
-              createdAt: now,
-              updatedAt: now
+              ...dates
             },
             "workspace",
             workspacePath,
@@ -4248,19 +4882,29 @@ interface RoutingSettings {
   mode: "auto" | "pinned"
 }
 
+let routingSettingsCache: RoutingSettings | null = null
+
 function readRoutingSettings(): RoutingSettings {
-  if (!existsSync(ROUTING_SETTINGS_FILE)) return { mode: "pinned" }
+  if (routingSettingsCache) return routingSettingsCache
+  if (!existsSync(ROUTING_SETTINGS_FILE)) {
+    routingSettingsCache = { mode: "pinned" }
+    return routingSettingsCache
+  }
   try {
     const content = readFileSync(ROUTING_SETTINGS_FILE, "utf-8")
     const parsed = JSON.parse(content) as unknown
     if (parsed && typeof parsed === "object" && "mode" in parsed) {
       const m = (parsed as Record<string, unknown>).mode
-      if (m === "auto" || m === "pinned") return { mode: m }
+      if (m === "auto" || m === "pinned") {
+        routingSettingsCache = { mode: m }
+        return routingSettingsCache
+      }
     }
   } catch {
     // ignore parse errors, fall back to default
   }
-  return { mode: "pinned" }
+  routingSettingsCache = { mode: "pinned" }
+  return routingSettingsCache
 }
 
 export function getGlobalRoutingMode(): "auto" | "pinned" {
@@ -4270,6 +4914,7 @@ export function getGlobalRoutingMode(): "auto" | "pinned" {
 export function setGlobalRoutingMode(mode: "auto" | "pinned"): void {
   getOpenworkDir()
   writeFileSync(ROUTING_SETTINGS_FILE, JSON.stringify({ mode }, null, 2), "utf-8")
+  routingSettingsCache = { mode }
 }
 
 // ─── Preferred IDE ──────────────────────────────────────────────────────────

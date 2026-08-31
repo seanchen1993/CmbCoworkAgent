@@ -1,11 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react"
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties
+} from "react"
 import { ArrowLeft, Loader2, Workflow } from "lucide-react"
 import { MessageBubble } from "./MessageBubble"
 import { HookLogChip, HookLogModal } from "./HookLogViews"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useThreadContext, useThreadState, type HookLogBucket } from "@/lib/thread-context"
-import { useAppStore } from "@/lib/store"
+import { applyWorkerFocusTailUpdateToMergedMessages, useAppStore } from "@/lib/store"
 import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
 import {
   buildVisibleMessageLayout,
@@ -25,6 +33,10 @@ import {
 import type { Message } from "@/types"
 import { cn } from "@/lib/utils"
 import {
+  buildWorkerMessageWindow,
+  WORKER_MESSAGE_WINDOW_SIZE
+} from "@/lib/worker-message-window"
+import {
   getMessageProviderSourceId,
   MESSAGE_SAME_ROLE_DUPLICATE_MARKER,
   normalizeAppendedMessageIds,
@@ -33,12 +45,18 @@ import {
 } from "../../../../shared/message-role-collision"
 
 const MAX_WORKER_SIGNATURE_CHARS = 512
+const MAX_DETACHED_WORKER_HOOK_BUCKETS = 80
 const EMPTY_WORKER_HOOK_LOG_BUCKETS: HookLogBucket[] = []
+const WORKER_MESSAGE_ROW_STYLE: CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 180px"
+}
 
 type ThreadHistoryEntry = {
   checkpoint?: {
     channel_values?: {
       messages?: unknown[]
+      __cmb_original_message_count?: number
     }
   }
 }
@@ -676,7 +694,8 @@ function workerMessagePreview(message: Message): string {
 function buildWorkerHookLogBuckets(
   messages: Message[],
   hookLogBuckets: HookLogBucket[],
-  workerThreadId: string | undefined
+  workerThreadId: string | undefined,
+  userTurnOffset = 0
 ): {
   bucketById: Map<string, HookLogBucket>
   bucketByMessageId: Map<string, HookLogBucket>
@@ -692,7 +711,7 @@ function buildWorkerHookLogBuckets(
 
   const userMessages = messages.filter((message) => message.role === "user")
   const userMessageByTurn = new Map<number, Message>()
-  userMessages.forEach((message, index) => userMessageByTurn.set(index + 1, message))
+  userMessages.forEach((message, index) => userMessageByTurn.set(userTurnOffset + index + 1, message))
 
   const upsertBucket = (bucket: HookLogBucket): HookLogBucket => {
     const existing = bucketById.get(bucket.turnId)
@@ -739,6 +758,10 @@ function buildWorkerHookLogBuckets(
         continue
       }
 
+      // A known turn outside the mounted page belongs to another page. Keeping all of those
+      // as detached chips would recreate the large DOM that windowing is meant to avoid.
+      if (workerTurn !== undefined) continue
+
       const turnLabel = workerTurn ? `第 ${workerTurn} 轮` : "未匹配轮次"
       upsertBucket({
         turnId: `worker-hook:${workerThreadId}:${workerTurn ?? "unknown"}`,
@@ -750,7 +773,12 @@ function buildWorkerHookLogBuckets(
     }
   }
 
-  return { bucketById, bucketByMessageId, detachedBuckets, totalEntryCount }
+  return {
+    bucketById,
+    bucketByMessageId,
+    detachedBuckets: detachedBuckets.slice(-MAX_DETACHED_WORKER_HOOK_BUCKETS),
+    totalEntryCount
+  }
 }
 
 function messageContentLength(content: Message["content"] | undefined): number {
@@ -861,9 +889,56 @@ function resolveWorkerPanelContent(
   return preferIncomingContent(existingMessage.content, incomingMessage.content)
 }
 
+interface WorkerPanelMessageMergeCache {
+  historyMessages: Message[]
+  liveMessages: Message[]
+  liveContentVersion: number
+  liveTail: Message | undefined
+  messages: Message[]
+}
+
+function mergeWorkerPanelMessages(
+  historyMessages: Message[],
+  liveMessages: Message[],
+  liveContentVersion: number,
+  previous?: WorkerPanelMessageMergeCache
+): WorkerPanelMessageMergeCache {
+  if (
+    previous?.historyMessages === historyMessages &&
+    previous.liveMessages === liveMessages &&
+    previous.liveContentVersion !== liveContentVersion
+  ) {
+    const messages = applyWorkerFocusTailUpdateToMergedMessages(
+      previous.messages,
+      previous.liveTail,
+      liveMessages
+    )
+    if (messages) {
+      return {
+        historyMessages,
+        liveMessages,
+        liveContentVersion,
+        liveTail: liveMessages.at(-1),
+        messages
+      }
+    }
+  }
+
+  return {
+    historyMessages,
+    liveMessages,
+    liveContentVersion,
+    liveTail: liveMessages.at(-1),
+    messages: mergeMessages(historyMessages, liveMessages)
+  }
+}
+
 export function WorkerStreamPanel(): React.JSX.Element {
   const workerFocusView = useAppStore((state) => state.workerFocusView)
   const workerFocusMessages = useAppStore((state) => state.workerFocusMessages)
+  const workerFocusMessagesContentVersion = useAppStore(
+    (state) => state.workerFocusMessagesContentVersion
+  )
   const closeWorkerFocusView = useAppStore((state) => state.closeWorkerFocusView)
   const threadContext = useThreadContext()
   const [historyMessages, setHistoryMessages] = useState<Message[]>([])
@@ -871,6 +946,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [openHookLogBucketId, setOpenHookLogBucketId] = useState<string | null>(null)
+  const [messageWindowEnd, setMessageWindowEnd] = useState<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const thinkingCycleRef = useRef(-1)
   const wasRunningRef = useRef(false)
@@ -879,6 +955,14 @@ export function WorkerStreamPanel(): React.JSX.Element {
   const previousHistoryLoadRef = useRef<{
     workerThreadId: string
     turns?: number
+  } | null>(null)
+  const userTurnOffsetCacheRef = useRef<{
+    key: string
+    value: number
+  } | null>(null)
+  const hookWindowMessagesCacheRef = useRef<{
+    key: string
+    messages: Message[]
   } | null>(null)
   const threadState = useThreadState(workerFocusView?.threadId ?? null)
   const currentWorker = threadState?.coordinatorWorkers.find(
@@ -902,6 +986,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
       [focusedParentThreadId, threadContext]
     )
   )
+  const messageMergeCacheRef = useRef<WorkerPanelMessageMergeCache | undefined>(undefined)
 
   useEffect(() => {
     const workerThreadId = workerFocusView?.workerThreadId
@@ -931,7 +1016,13 @@ export function WorkerStreamPanel(): React.JSX.Element {
         }
 
         const history = buildWorkerCheckpointHistory(rawMessages, workerThreadId)
-        setTruncatedHistoryCount(history.truncatedCount)
+        const originalMessageCount =
+          latestCheckpoint?.checkpoint?.channel_values?.__cmb_original_message_count
+        const workerOmittedCount =
+          typeof originalMessageCount === "number" && originalMessageCount > rawMessages.length
+            ? originalMessageCount - rawMessages.length
+            : 0
+        setTruncatedHistoryCount(workerOmittedCount + history.truncatedCount)
         setHistoryMessages(history.messages)
       } catch (error) {
         console.error("[WorkerStreamPanel] Failed to load worker checkpoint:", error)
@@ -949,36 +1040,89 @@ export function WorkerStreamPanel(): React.JSX.Element {
     }
   }, [currentWorker?.status, currentWorker?.turns, workerFocusView?.workerThreadId])
 
-  const messages = useMemo(
-    () => mergeMessages(historyMessages, workerFocusMessages),
-    [historyMessages, workerFocusMessages]
+  const messages = useMemo(() => {
+    const nextCache = mergeWorkerPanelMessages(
+      historyMessages,
+      workerFocusMessages,
+      workerFocusMessagesContentVersion,
+      messageMergeCacheRef.current
+    )
+    messageMergeCacheRef.current = nextCache
+    return nextCache.messages
+  }, [historyMessages, workerFocusMessages, workerFocusMessagesContentVersion])
+  const messageWindow = useMemo(
+    () => buildWorkerMessageWindow(messages, messageWindowEnd),
+    [messageWindowEnd, messages, workerFocusMessagesContentVersion]
   )
+  const messageWindowStart = messageWindow.start
+  const effectiveMessageWindowEnd = messageWindow.end
+  const windowMessages = messageWindow.messages
+  const userTurnOffsetKey = [
+    messageWindowStart,
+    messages.length,
+    messages[0]?.id ?? "",
+    messages[messageWindowStart - 1]?.id ?? ""
+  ].join(":")
+  if (userTurnOffsetCacheRef.current?.key !== userTurnOffsetKey) {
+    let count = 0
+    for (let index = 0; index < messageWindowStart; index += 1) {
+      if (messages[index]?.role === "user") count += 1
+    }
+    userTurnOffsetCacheRef.current = { key: userTurnOffsetKey, value: count }
+  }
+  const userTurnOffset = userTurnOffsetCacheRef.current.value
+  const windowMessageStructureKey = useMemo(
+    () =>
+      windowMessages
+        .map((message) =>
+          [
+            message.role,
+            message.id,
+            message.role === "user" ? workerMessagePreview(message) : ""
+          ].join("\u0000")
+        )
+        .join("\u0001"),
+    [windowMessages]
+  )
+  if (hookWindowMessagesCacheRef.current?.key !== windowMessageStructureKey) {
+    hookWindowMessagesCacheRef.current = {
+      key: windowMessageStructureKey,
+      messages: windowMessages
+    }
+  }
+  const hookWindowMessages = hookWindowMessagesCacheRef.current.messages
   const workerHookLogs = useMemo(
     () =>
       buildWorkerHookLogBuckets(
-        messages,
+        hookWindowMessages,
         parentHookLogBuckets,
-        workerFocusView?.workerThreadId
+        workerFocusView?.workerThreadId,
+        userTurnOffset
       ),
-    [messages, parentHookLogBuckets, workerFocusView?.workerThreadId]
+    [
+      parentHookLogBuckets,
+      userTurnOffset,
+      hookWindowMessages,
+      workerFocusView?.workerThreadId
+    ]
   )
   const openHookLogBucket = openHookLogBucketId
     ? (workerHookLogs.bucketById.get(openHookLogBucketId) ?? null)
     : null
   const visibleMessageLayout = useMemo(
     () =>
-      buildVisibleMessageLayout(messages, (message) => {
+      buildVisibleMessageLayout(windowMessages, (message) => {
         if (!messageRendersNothing(message)) return true
         if (message.role !== "user") return false
         return Boolean(workerHookLogs.bucketByMessageId.get(message.id)?.entries.length)
       }),
-    [messages, workerHookLogs.bucketByMessageId]
+    [windowMessages, workerHookLogs.bucketByMessageId]
   )
   const showAssistantMetaByIndex = useMemo(() => {
-    const result = new Array<boolean>(messages.length)
+    const result = new Array<boolean>(windowMessages.length)
     let nextVisibleMessage: Message | null = null
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]
+    for (let index = windowMessages.length - 1; index >= 0; index -= 1) {
+      const message = windowMessages[index]
       const hasHookLogChip =
         message.role === "user" &&
         Boolean(workerHookLogs.bucketByMessageId.get(message.id)?.entries.length)
@@ -993,12 +1137,12 @@ export function WorkerStreamPanel(): React.JSX.Element {
       nextVisibleMessage = message
     }
     return result
-  }, [messages, workerHookLogs.bucketByMessageId])
+  }, [windowMessages, workerHookLogs.bucketByMessageId])
   const hasUserAfterHeadByIndex = useMemo(() => {
-    const result = new Array<boolean>(messages.length)
-    let hasUserAfterHead = false
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index]
+    const result = new Array<boolean>(windowMessages.length)
+    let hasUserAfterHead = effectiveMessageWindowEnd < messages.length
+    for (let index = windowMessages.length - 1; index >= 0; index -= 1) {
+      const message = windowMessages[index]
       result[index] = hasUserAfterHead
       const hasHookLogChip =
         message.role === "user" &&
@@ -1008,13 +1152,16 @@ export function WorkerStreamPanel(): React.JSX.Element {
       }
     }
     return result
-  }, [messages, workerHookLogs.bucketByMessageId])
+  }, [effectiveMessageWindowEnd, messages.length, windowMessages, workerHookLogs.bucketByMessageId])
 
   const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
-    () => buildMessageBubbleTimingMeta(messages),
-    [messages]
+    () => buildMessageBubbleTimingMeta(windowMessages),
+    [windowMessages]
   )
-  const toolResults = useMemo(() => buildToolResultAssociations(messages), [messages])
+  const toolResults = useMemo(
+    () => buildToolResultAssociations(windowMessages),
+    [windowMessages]
+  )
   const getScrollViewport = useCallback((): HTMLDivElement | null => {
     const root = scrollRef.current
     if (!root) return null
@@ -1051,7 +1198,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     isAtBottomRef.current = bottomDistance < 50
   }, [getScrollViewport])
   const scrollSignature = useMemo(() => {
-    const lastMessage = messages[visibleMessageLayout.lastVisibleMessageIndex]
+    const lastMessage = windowMessages[visibleMessageLayout.lastVisibleMessageIndex]
     return [
       messages.length,
       lastMessage?.id ?? "",
@@ -1066,6 +1213,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     ].join(":")
   }, [
     messages,
+    workerFocusMessagesContentVersion,
     toolResults.size,
     workerFocusMessages.length,
     workerHookLogs.totalEntryCount,
@@ -1080,6 +1228,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
 
   useEffect(() => {
     setOpenHookLogBucketId(null)
+    setMessageWindowEnd(null)
   }, [workerFocusView?.workerThreadId])
 
   useEffect(() => {
@@ -1198,6 +1347,61 @@ export function WorkerStreamPanel(): React.JSX.Element {
                 checkpoint 消息；更早的 {truncatedHistoryCount} 条历史未在面板加载。
               </div>
             )}
+            {(messageWindowStart > 0 || effectiveMessageWindowEnd < messages.length) && (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <span>
+                  当前渲染第 {messageWindowStart + 1}–{effectiveMessageWindowEnd} 条，共{" "}
+                  {messages.length} 条
+                </span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {messageWindowStart > 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        isAtBottomRef.current = false
+                        setMessageWindowEnd(messageWindowStart)
+                      }}
+                    >
+                      更早
+                    </Button>
+                  )}
+                  {effectiveMessageWindowEnd < messages.length && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        const nextEnd = Math.min(
+                          messages.length,
+                          effectiveMessageWindowEnd + WORKER_MESSAGE_WINDOW_SIZE
+                        )
+                        setMessageWindowEnd(nextEnd >= messages.length ? null : nextEnd)
+                      }}
+                    >
+                      较新
+                    </Button>
+                  )}
+                  {effectiveMessageWindowEnd < messages.length && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => {
+                        setMessageWindowEnd(null)
+                        isAtBottomRef.current = true
+                      }}
+                    >
+                      最新
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
             {workerHookLogs.detachedBuckets.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {workerHookLogs.detachedBuckets.map((bucket) => (
@@ -1209,7 +1413,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
                 ))}
               </div>
             )}
-            {messages.map((message, index) => {
+            {windowMessages.map((message, index) => {
               const hookLogBucketForTurn =
                 message.role === "user" ? workerHookLogs.bucketByMessageId.get(message.id) : null
               if (messageRendersNothing(message) && !hookLogBucketForTurn?.entries.length) {
@@ -1219,7 +1423,11 @@ export function WorkerStreamPanel(): React.JSX.Element {
               const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
 
               return (
-                <div key={message.id}>
+                <div
+                  key={message.id}
+                  data-worker-message-row="true"
+                  style={WORKER_MESSAGE_ROW_STYLE}
+                >
                   <MessageBubble
                     message={message}
                     previousMessage={previousMessage}

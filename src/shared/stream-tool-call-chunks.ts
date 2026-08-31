@@ -249,7 +249,7 @@ export function mergeStreamToolCallArgs(
   chunk: string,
   contentMode: "delta" | "snapshot" | "auto" = "auto"
 ): string {
-  if (contentMode === "snapshot") return chunk || accumulated
+  if (contentMode === "snapshot") return chunk
   // AIMessageChunk tool_call_chunks are deltas. Append them byte-for-byte: a
   // repeated boundary can be legitimate data ("bana" + "nana"), so overlap
   // inference would silently corrupt the JSON argument value.
