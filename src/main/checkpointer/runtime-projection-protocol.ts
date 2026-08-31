@@ -16,6 +16,8 @@ export interface LegacyCheckpointTranscriptMigrationStats {
 
 export const CHECKPOINT_RUNTIME_PROJECTION_CANCELLED =
   "CHECKPOINT_RUNTIME_PROJECTION_CANCELLED"
+export const CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY =
+  "CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY"
 
 export interface CheckpointRuntimeProjectionEnsureRequest {
   type: "ensure-runtime-projection"
@@ -33,6 +35,15 @@ export interface CheckpointLatestTupleReadRequest {
   checkpointNs: string
   messageLimit?: number
   messageByteBudget?: number
+  cancellationBuffer?: SharedArrayBuffer
+}
+
+export interface CheckpointLatestRuntimeTupleReadRequest {
+  type: "read-latest-runtime-tuple"
+  requestId: number
+  databasePath: string
+  threadId: string
+  checkpointNs: string
   cancellationBuffer?: SharedArrayBuffer
 }
 
@@ -62,6 +73,7 @@ export interface CheckpointRuntimeProjectionShutdownRequest {
 export type CheckpointRuntimeProjectionWorkerRequest =
   | CheckpointRuntimeProjectionEnsureRequest
   | CheckpointLatestTupleReadRequest
+  | CheckpointLatestRuntimeTupleReadRequest
   | LegacyCheckpointTranscriptBootstrapRequest
   | CheckpointTranscriptPresenceRequest
   | CheckpointRuntimeProjectionShutdownRequest
@@ -75,6 +87,13 @@ export interface CheckpointRuntimeProjectionEnsureSuccess {
 
 export interface CheckpointLatestTupleReadSuccess {
   type: "read-latest-tuple-result"
+  requestId: number
+  ok: true
+  tuple: unknown | null
+}
+
+export interface CheckpointLatestRuntimeTupleReadSuccess {
+  type: "read-latest-runtime-tuple-result"
   requestId: number
   ok: true
   tuple: unknown | null
@@ -99,6 +118,7 @@ export interface CheckpointRuntimeProjectionFailure {
   type:
     | "ensure-runtime-projection-result"
     | "read-latest-tuple-result"
+    | "read-latest-runtime-tuple-result"
     | "bootstrap-legacy-transcript-result"
     | "inspect-transcript-presence-result"
   requestId: number
@@ -117,6 +137,7 @@ export interface CheckpointRuntimeProjectionShutdownComplete {
 export type CheckpointRuntimeProjectionWorkerResponse =
   | CheckpointRuntimeProjectionEnsureSuccess
   | CheckpointLatestTupleReadSuccess
+  | CheckpointLatestRuntimeTupleReadSuccess
   | LegacyCheckpointTranscriptBootstrapSuccess
   | CheckpointTranscriptPresenceSuccess
   | CheckpointRuntimeProjectionFailure

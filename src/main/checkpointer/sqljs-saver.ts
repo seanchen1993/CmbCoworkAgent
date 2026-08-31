@@ -135,10 +135,44 @@ const MAX_HYDRATED_MESSAGE_SNAPSHOTS = 8
  */
 const checkpointNamespaceQueues = new Map<string, Promise<void>>()
 const checkpointNamespacePendingWriteIntents = new Map<string, number>()
+const checkpointDatabaseSetupQueues = new Map<string, Promise<void>>()
 
 function canonicalCheckpointDatabaseKey(dbPath: string): string {
   const absolute = resolve(dbPath)
   return process.platform === "win32" ? absolute.toLowerCase() : absolute
+}
+
+async function acquireCheckpointDatabaseSetup(databaseKey: string): Promise<() => void> {
+  const previous = checkpointDatabaseSetupQueues.get(databaseKey) ?? Promise.resolve()
+  let releaseGate: () => void = () => {}
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve
+  })
+  const tail = previous.catch(() => {}).then(() => gate)
+  checkpointDatabaseSetupQueues.set(databaseKey, tail)
+  await previous.catch(() => {
+    // A failed predecessor must not poison later setup attempts for this file.
+  })
+
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    releaseGate()
+    void tail.finally(() => {
+      if (checkpointDatabaseSetupQueues.get(databaseKey) === tail) {
+        checkpointDatabaseSetupQueues.delete(databaseKey)
+      }
+    })
+  }
+}
+
+interface CheckpointForkBoundaryBackfill {
+  threadId: string
+  checkpointNs: string
+  checkpointId: string
+  metadataType: string | null
+  metadataPayload: string | Uint8Array
 }
 
 interface ExternalMessagesReference {
@@ -495,25 +529,30 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     if (this.closePromise) await this.closePromise
 
     const initializePromise = (async () => {
-      if (this.retired) {
-        throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
-      }
-
-      const { database } = openNativeSqliteDatabase(this.dbPath, "SqlJsSaver")
-      this.db = database
-      this.isSetup = false
+      const releaseSetup = await acquireCheckpointDatabaseSetup(this.checkpointDatabaseKey)
       try {
-        await this.setup()
         if (this.retired) {
           throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
         }
-      } catch (error) {
-        if (this.db === database) {
-          this.db = null
-          this.isSetup = false
+
+        const { database } = openNativeSqliteDatabase(this.dbPath, "SqlJsSaver")
+        this.db = database
+        this.isSetup = false
+        try {
+          await this.setup()
+          if (this.retired) {
+            throw new Error(`[SqlJsSaver] Saver is retired (thread deleted): ${this.dbPath}`)
+          }
+        } catch (error) {
+          if (this.db === database) {
+            this.db = null
+            this.isSetup = false
+          }
+          database.close({ checkpoint: false })
+          throw error
         }
-        database.close({ checkpoint: false })
-        throw error
+      } finally {
+        releaseSetup()
       }
     })().finally(() => {
       if (this.initializePromise === initializePromise) this.initializePromise = null
@@ -526,34 +565,39 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     return checkpointNs === "" ? this.maxRootCheckpoints : this.maxNonRootCheckpoints
   }
 
-  private async backfillCheckpointForkBoundaryMarkers(
+  private async prepareCheckpointForkBoundaryMarkerBackfill(
     database: NativeSqliteAdapter
-  ): Promise<void> {
+  ): Promise<CheckpointForkBoundaryBackfill[]> {
     const result = database.exec(
-      `SELECT thread_id, checkpoint_ns, checkpoint_id, type, metadata
-       FROM checkpoints
-       WHERE fork_boundary_marker = 0`
+      `SELECT thread_id, checkpoint_ns, checkpoint_id, type, metadata FROM checkpoints`
     )
     const rows = result[0]?.values ?? []
-    if (rows.length === 0) return
+    const backfill: CheckpointForkBoundaryBackfill[] = []
 
     for (const row of rows) {
       try {
+        const metadataPayload = row[4]
+        if (!(typeof metadataPayload === "string" || metadataPayload instanceof Uint8Array)) {
+          continue
+        }
+        const metadataType = typeof row[3] === "string" ? row[3] : null
         const metadata = (await this.serde.loadsTyped(
-          typeof row[3] === "string" ? row[3] : "json",
-          row[4] as string | Uint8Array
+          metadataType ?? "json",
+          metadataPayload
         )) as CheckpointMetadata
         if (!checkpointMetadataHasForkBoundaryMarker(metadata)) continue
-        database.run(
-          `UPDATE checkpoints
-           SET fork_boundary_marker = 1
-           WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
-          [String(row[0] ?? ""), String(row[1] ?? ""), String(row[2] ?? "")]
-        )
+        backfill.push({
+          threadId: String(row[0] ?? ""),
+          checkpointNs: String(row[1] ?? ""),
+          checkpointId: String(row[2] ?? ""),
+          metadataType,
+          metadataPayload
+        })
       } catch (error) {
         console.warn("[SqlJsSaver] Failed to backfill checkpoint fork marker:", error)
       }
     }
+    return backfill
   }
 
   /**
@@ -574,8 +618,28 @@ export class SqlJsSaver extends BaseCheckpointSaver {
     )
     if (applied[0]?.values.length) return
 
-    database.run("BEGIN")
+    // Metadata decoding can yield. Finish it before acquiring SQLite's writer
+    // lock so another connection can never synchronously busy-wait while this
+    // main-thread continuation is unable to resume and commit.
+    const forkBoundaryBackfill = await this.prepareCheckpointForkBoundaryMarkerBackfill(database)
+
+    let migrationStarted = false
     try {
+      database.run("BEGIN IMMEDIATE")
+      migrationStarted = true
+
+      // Another process may have completed the migration while metadata was
+      // decoded. Recheck both the marker and live schema under the writer lock.
+      const concurrentlyApplied = database.exec(
+        `SELECT 1 FROM checkpoint_schema_migrations WHERE migration_id = ? LIMIT 1`,
+        [CHECKPOINT_SCHEMA_MIGRATION_ID]
+      )
+      if (concurrentlyApplied[0]?.values.length) {
+        database.run("COMMIT")
+        migrationStarted = false
+        return
+      }
+
       const tableInfo = database.exec("PRAGMA table_info(checkpoints)")
       const columns = new Set(
         (tableInfo[0]?.values ?? []).map((row) => String(row[1] ?? ""))
@@ -597,17 +661,34 @@ export class SqlJsSaver extends BaseCheckpointSaver {
          SET fork_boundary_marker = 1
          WHERE fork_boundary_marker = 0 AND metadata LIKE '%cmb_fork_boundary%'`
       )
-      await this.backfillCheckpointForkBoundaryMarkers(database)
+      for (const candidate of forkBoundaryBackfill) {
+        database.run(
+          `UPDATE checkpoints
+           SET fork_boundary_marker = 1
+           WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+             AND fork_boundary_marker = 0 AND type IS ? AND metadata = ?`,
+          [
+            candidate.threadId,
+            candidate.checkpointNs,
+            candidate.checkpointId,
+            candidate.metadataType,
+            candidate.metadataPayload
+          ]
+        )
+      }
       database.run(
         `INSERT INTO checkpoint_schema_migrations (migration_id, applied_at) VALUES (?, ?)`,
         [CHECKPOINT_SCHEMA_MIGRATION_ID, Date.now()]
       )
       database.run("COMMIT")
+      migrationStarted = false
     } catch (error) {
-      try {
-        database.run("ROLLBACK")
-      } catch {
-        // Preserve the migration error.
+      if (migrationStarted) {
+        try {
+          database.run("ROLLBACK")
+        } catch {
+          // Preserve the migration error; a failed BEGIN has no transaction.
+        }
       }
       throw error
     }
@@ -695,8 +776,6 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
       )
     `)
-
-    await this.migrateCheckpointSchemaOnce(this.db)
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS writes (
@@ -796,6 +875,10 @@ export class SqlJsSaver extends BaseCheckpointSaver {
         "ALTER TABLE checkpoint_runtime_projections ADD COLUMN projection_version INTEGER NOT NULL DEFAULT 0"
       )
     }
+    // Publish every table needed by the projection worker before the first
+    // asynchronous legacy decode. A worker may observe the database while that
+    // cold migration yields; at that point it must see a complete base schema.
+    await this.migrateCheckpointSchemaOnce(this.db)
     this.isSetup = true
   }
 

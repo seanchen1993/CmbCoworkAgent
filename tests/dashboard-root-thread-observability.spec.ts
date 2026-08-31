@@ -37,18 +37,30 @@ const projectModePanelSource = readFileSync(
 )
 
 function testThreadListAggUsesRootThreadId(): void {
-  const source = section(dashboardSource, "function threadListAgg", "function parseThreadListContainer")
+  const source = section(
+    dashboardSource,
+    "function threadListAgg",
+    "function parseThreadListContainer"
+  )
   assertIncludes(
     source,
     'total_threads: { cardinality: { field: "rootThreadId" } }',
     "thread view total count should use rootThreadId"
   )
   assertIncludes(source, 'field: "rootThreadId"', "thread view buckets should use rootThreadId")
-  assertNotIncludes(source, 'field: "threadId"', "thread view should not bucket by physical threadId")
+  assertNotIncludes(
+    source,
+    'field: "threadId"',
+    "thread view should not bucket by physical threadId"
+  )
 }
 
 function testCommitAdoptionUsesRootThreadId(): void {
-  const source = section(dashboardSource, "async function fetchCommitAdoptionMap", "function attachCommitAdoption")
+  const source = section(
+    dashboardSource,
+    "async function fetchCommitAdoptionMap",
+    "function attachCommitAdoption"
+  )
   assertIncludes(
     source,
     'by_thread: { terms: { field: "properties.rootThreadId", size: 50 } }',
@@ -57,24 +69,56 @@ function testCommitAdoptionUsesRootThreadId(): void {
 }
 
 function testCommitPairUsesRootThreadId(): void {
-  const source = section(dashboardSource, "async function fetchCommitAdoptionEvents", "// ─────────────────────────────────────────────────────────\n// Dashboard data fetchers")
-  assertIncludes(source, '"properties.rootThreadId"', "commit adoption event detail should load rootThreadId")
+  const source = section(
+    dashboardSource,
+    "async function fetchCommitAdoptionEvents",
+    "// ─────────────────────────────────────────────────────────\n// Dashboard data fetchers"
+  )
+  assertIncludes(
+    source,
+    '"properties.rootThreadId"',
+    "commit adoption event detail should load rootThreadId"
+  )
   assertIncludes(source, "eventRootThreadId(gen)", "paired gen rows should prefer rootThreadId")
-  assertIncludes(source, "eventRootThreadId(adopt)", "unpaired adopt rows should prefer rootThreadId")
+  assertIncludes(
+    source,
+    "eventRootThreadId(adopt)",
+    "unpaired adopt rows should prefer rootThreadId"
+  )
 }
 
 function testUncommittedDetailUsesRootThreadId(): void {
   const source = section(dashboardSource, "async function fetchUncommittedDetail", "return {")
   assertIncludes(source, '"properties.rootThreadId"', "uncommitted detail should load rootThreadId")
-  assertIncludes(source, "threadId: eventRootThreadId(props)", "uncommitted samples should prefer rootThreadId")
+  assertIncludes(
+    source,
+    "threadId: eventRootThreadId(props)",
+    "uncommitted samples should prefer rootThreadId"
+  )
 }
 
 function testDevMockContainsWorkflowAndTaskSubagents(): void {
-  const source = section(dashboardSource, "function makeMockSubagentSessionTraces", "function makeMockAgentTrace")
-  assertIncludes(source, 'subagentKind: "workflow_agent"', "mock should include workflow agent sub traces")
+  const source = section(
+    dashboardSource,
+    "function makeMockSubagentSessionTraces",
+    "function makeMockAgentTrace"
+  )
+  assertIncludes(
+    source,
+    'subagentKind: "workflow_agent"',
+    "mock should include workflow agent sub traces"
+  )
   assertIncludes(source, 'subagentKind: "task"', "mock should include task agent sub traces")
-  assertIncludes(source, "rootThreadId: workflowRootThreadId", "workflow sub traces should link root thread")
-  assertIncludes(source, "rootThreadId: taskRootThreadId", "task sub traces should link root thread")
+  assertIncludes(
+    source,
+    "rootThreadId: workflowRootThreadId",
+    "workflow sub traces should link root thread"
+  )
+  assertIncludes(
+    source,
+    "rootThreadId: taskRootThreadId",
+    "task sub traces should link root thread"
+  )
 }
 
 function testDevMockContainsVisibleReasoning(): void {
@@ -108,7 +152,11 @@ function testDevMockContainsVisibleReasoning(): void {
 }
 
 function testDevMockThreadTracesResolveNamespacedRootThread(): void {
-  const source = section(dashboardSource, "function makeMockThreadTraces", "function makeMockSkillCodeStats")
+  const source = section(
+    dashboardSource,
+    "function makeMockThreadTraces",
+    "function makeMockSkillCodeStats"
+  )
   assertIncludes(
     source,
     "findMockThreadGroupForThreadId(groups, threadId)",
@@ -150,12 +198,12 @@ function testProjectListConversationCountUsesActiveMainAgentTraces(): void {
   )
   assertIncludes(
     usageSource,
-    "main_agent_conversations: { filter: projectModeMainAgentConversationFilter() }",
+    "filter: projectModeMainAgentConversationFilter(),",
     "per-project usage should aggregate active main-Agent conversations separately"
   )
   assertIncludes(
     usageSource,
-    "perProject.set(key, asNumber(asRecord(b.main_agent_conversations).doc_count))",
+    "perProject.set(key, asNumber(mainAgentConversations.doc_count))",
     "project-list values and metric sorting should use the main-Agent bucket"
   )
   assertNotIncludes(
@@ -165,6 +213,44 @@ function testProjectListConversationCountUsesActiveMainAgentTraces(): void {
   )
 }
 
+function testSuspectedTechnicalDetailMetricIsGatedAndNested(): void {
+  const accessSource = section(
+    dashboardSource,
+    "const DASHBOARD_ALLOWED_IDS_ENV",
+    "function getDashboardAccessContext"
+  )
+  assertIncludes(
+    accessSource,
+    "VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS",
+    "technical-detail metric access should come from encrypted environment configuration"
+  )
+
+  const usageSource = section(
+    dashboardSource,
+    "async function fetchProjectModePageUsage",
+    "/**\n * Code-adoption stats for project mode."
+  )
+  assertIncludes(
+    usageSource,
+    "includeSuspectedTechnicalDetail",
+    "technical-detail aggregation should be conditional on viewer access"
+  )
+  assertIncludes(
+    usageSource,
+    "filter: { term: { suspectedTechnicalDetailSupplement: true } }",
+    "technical-detail count should use the forward-only trace boolean"
+  )
+  assertIncludes(
+    projectModePanelSource,
+    "用户输入全文中累计包含 10 个及以上英文字母的会话数量",
+    "technical-detail metric should explain its conversation-count heuristic in the UI"
+  )
+  assertNotIncludes(
+    projectModePanelSource,
+    "历史 Trace 不回填",
+    "technical-detail metric should not expose trace implementation details in the UI"
+  )
+}
 function testProjectListConversationCountExplainsItsScope(): void {
   assertIncludes(
     projectModePanelSource,
@@ -197,6 +283,8 @@ function run(): void {
   console.log("PASS dashboard project-list active main-Agent conversation count")
   testProjectListConversationCountExplainsItsScope()
   console.log("PASS dashboard project-list conversation-count scope hint")
+  testSuspectedTechnicalDetailMetricIsGatedAndNested()
+  console.log("PASS dashboard project-list suspected technical-detail metric")
 }
 
 run()

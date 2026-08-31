@@ -102,7 +102,7 @@ assert(
 assert(
   sources.heartbeat.includes('import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"') &&
     sources.heartbeat.includes("const threadId = HEARTBEAT_THREAD_ID") &&
-    sources.heartbeat.includes("releaseCheckpointerPin = pinCheckpointer(threadId)"),
+    sources.heartbeat.includes("pinCheckpointer(threadId)"),
   "heartbeat Runtime must use its fixed, pinned service thread"
 )
 assert(

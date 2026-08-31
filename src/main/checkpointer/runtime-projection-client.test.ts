@@ -23,7 +23,10 @@ import {
   prepareLatestRuntimeProjectionMigration
 } from "./runtime-projection-store"
 import { SqlJsSaver } from "./sqljs-saver"
-import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "./runtime-projection-protocol"
+import {
+  CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+  CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+} from "./runtime-projection-protocol"
 import {
   openThreadMessageHydrationDatabase,
   readThreadMessagesPage
@@ -226,6 +229,840 @@ describe("checkpoint runtime projection worker", () => {
         "thread-without-a-run"
       )
     ).resolves.toBeNull()
+  })
+
+  it("returns null when a fully published checkpoint database has no checkpoint", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-empty-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "empty.sqlite")
+    const saver = new SqlJsSaver(databasePath)
+    await saver.initialize()
+    await saver.close()
+
+    const client = createClient()
+    await expect(client.readLatestTuple(databasePath, "empty-thread")).resolves.toBeNull()
+    await expect(client.hasTranscript(databasePath, "empty-thread")).resolves.toBe(false)
+    await expect(
+      client.bootstrapLegacyTranscript(
+        databasePath,
+        join(directory, "unused-messages.sqlite"),
+        "empty-thread"
+      )
+    ).resolves.toMatchObject({
+      runtimeTuple: null,
+      stats: { checkpointId: null, totalMessages: 0, migratedMessages: 0 }
+    })
+  })
+
+  it("does not require the pending-writes table for an empty bounded read", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-partial-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "partial.sqlite")
+    const partial = new DatabaseSync(databasePath)
+    partial.exec(`
+      CREATE TABLE checkpoints (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        type TEXT,
+        checkpoint TEXT,
+        metadata TEXT,
+        fork_boundary_marker INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      );
+      CREATE TABLE checkpoint_message_snapshots (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        prefix_length INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL,
+        generation TEXT NOT NULL DEFAULT '',
+        type TEXT,
+        suffix BLOB NOT NULL,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      );
+      CREATE TABLE checkpoint_runtime_projections (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        checkpoint_ts TEXT NOT NULL,
+        projection_version INTEGER NOT NULL DEFAULT 1,
+        type TEXT NOT NULL,
+        runtime_checkpoint BLOB NOT NULL,
+        PRIMARY KEY (thread_id, checkpoint_ns)
+      )
+    `)
+    partial.close()
+
+    const client = createClient()
+    await expect(
+      client.readLatestTuple(databasePath, "partial-thread", "", {
+        messageLimit: 500,
+        messageByteBudget: 1024 * 1024
+      })
+    ).resolves.toBeNull()
+    await expect(client.hasTranscript(databasePath, "partial-thread")).resolves.toBe(false)
+    await expect(
+      client.bootstrapLegacyTranscript(
+        databasePath,
+        join(directory, "unused-messages.sqlite"),
+        "partial-thread"
+      )
+    ).resolves.toMatchObject({
+      runtimeTuple: null,
+      stats: { checkpointId: null, totalMessages: 0, migratedMessages: 0 }
+    })
+    await expect(client.ensureRuntimeProjection(databasePath, "partial-thread")).resolves.toEqual({
+      sourceBytes: 0,
+      projectionBytes: 0,
+      inlineMessageCount: 0,
+      migrated: false,
+      stale: false
+    })
+  })
+
+  it("still rejects a checkpoint table missing a required base column", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-invalid-base-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "invalid-base.sqlite")
+    const invalid = new DatabaseSync(databasePath)
+    invalid.exec(`
+      CREATE TABLE checkpoints (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        type TEXT,
+        checkpoint TEXT,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      )
+    `)
+    invalid.close()
+
+    const client = createClient()
+    await expect(
+      client.readLatestTuple(databasePath, "invalid-base", "", {
+        messageLimit: 500,
+        messageByteBudget: 1024 * 1024
+      })
+    ).rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY })
+    await expect(client.hasTranscript(databasePath, "invalid-base")).rejects.toMatchObject({
+      name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+    })
+    await expect(
+      client.bootstrapLegacyTranscript(
+        databasePath,
+        join(directory, "unused-messages.sqlite"),
+        "invalid-base"
+      )
+    ).rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY })
+  })
+
+  it("bootstraps a checkpoints-and-writes-only legacy database without creating projections", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-base-only-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "base-only.sqlite")
+    const threadId = "base-only-inline-thread"
+    const legacyCheckpoint = checkpoint("base-only-inline", 1, [
+      { id: "legacy-visible", type: "human", content: "recover without auxiliary tables" }
+    ])
+    const legacyCheckpointPayload = JSON.stringify(legacyCheckpoint)
+    const legacy = new DatabaseSync(databasePath)
+    legacy.exec(`
+      CREATE TABLE checkpoints (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        type TEXT,
+        checkpoint TEXT,
+        metadata TEXT,
+        checkpoint_ts TEXT,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      );
+      CREATE TABLE writes (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        idx INTEGER NOT NULL,
+        channel TEXT NOT NULL,
+        type TEXT,
+        value TEXT,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+      )
+    `)
+    legacy
+      .prepare(
+        `INSERT INTO checkpoints
+         (thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata, checkpoint_ts)
+         VALUES (?, '', ?, 'json', ?, ?, ?)`
+      )
+      .run(
+        threadId,
+        legacyCheckpoint.id,
+        legacyCheckpointPayload,
+        JSON.stringify(metadata),
+        legacyCheckpoint.ts
+      )
+    legacy.close()
+
+    const client = createClient()
+    await expect(
+      client.readLatestTuple(databasePath, threadId, "", {
+        messageLimit: 500,
+        messageByteBudget: 1024 * 1024
+      })
+    ).resolves.toMatchObject({
+      checkpoint: {
+        id: legacyCheckpoint.id,
+        channel_values: {
+          messages: [{ id: "legacy-visible", type: "human" }]
+        }
+      }
+    })
+    await expect(client.hasTranscript(databasePath, threadId)).resolves.toBe(true)
+    await expect(client.readLatestRuntimeTuple(databasePath, threadId)).resolves.toMatchObject({
+      checkpoint: {
+        id: legacyCheckpoint.id,
+        channel_values: {
+          messages: [],
+          todos: [{ id: "todo-1", content: "legacy todo", status: "pending" }],
+          __interrupt__: [{ value: { actionRequests: [{ action: "shell", args: {} }] } }]
+        }
+      }
+    })
+    const zeroMessageTuple = (await client.readLatestTuple(databasePath, threadId, "", {
+      messageLimit: 0,
+      messageByteBudget: 0
+    })) as {
+      checkpoint?: { channel_values?: Record<string, unknown> }
+    }
+    expect(zeroMessageTuple.checkpoint?.channel_values).toMatchObject({
+      messages: [],
+      todos: [{ id: "todo-1", content: "legacy todo", status: "pending" }],
+      __interrupt__: [{ value: { actionRequests: [{ action: "shell", args: {} }] } }]
+    })
+
+    await expect(client.readLatestTuple(databasePath, threadId)).resolves.toMatchObject({
+      checkpoint: {
+        id: legacyCheckpoint.id,
+        channel_values: {
+          messages: [{ id: "legacy-visible", type: "human" }],
+          todos: [{ id: "todo-1", content: "legacy todo", status: "pending" }],
+          __interrupt__: [{ value: { actionRequests: [{ action: "shell", args: {} }] } }]
+        }
+      },
+      pendingWrites: []
+    })
+
+    const messageDatabasePath = createMessageDatabase(databasePath, threadId)
+    await expect(
+      client.bootstrapLegacyTranscript(databasePath, messageDatabasePath, threadId)
+    ).resolves.toMatchObject({
+      runtimeTuple: { checkpoint: { id: legacyCheckpoint.id } },
+      stats: { checkpointId: legacyCheckpoint.id, totalMessages: 1, migratedMessages: 1 }
+    })
+    await expect(client.ensureRuntimeProjection(databasePath, threadId)).resolves.toMatchObject({
+      migrated: false,
+      stale: false
+    })
+
+    const verifier = new DatabaseSync(databasePath, { readOnly: true })
+    const source = verifier
+      .prepare(
+        `SELECT type, checkpoint FROM checkpoints
+         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`
+      )
+      .get(threadId, legacyCheckpoint.id) as { type?: unknown; checkpoint?: unknown }
+    expect(source).toMatchObject({ type: "json", checkpoint: legacyCheckpointPayload })
+    const tables = verifier
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name IN (
+           'checkpoint_message_snapshots', 'checkpoint_runtime_projections', 'writes'
+         ) ORDER BY name`
+      )
+      .all() as Array<{ name?: unknown }>
+    verifier.close()
+    expect(tables.map((table) => String(table.name))).toEqual(["writes"])
+
+    const messages = new DatabaseSync(messageDatabasePath, { readOnly: true })
+    const durableMessage = messages
+      .prepare(
+        `SELECT message_id, role, content_json, ordinal FROM thread_messages
+         WHERE thread_id = ? ORDER BY ordinal`
+      )
+      .get(threadId)
+    messages.close()
+    expect(durableMessage).toMatchObject({
+      message_id: "legacy-visible",
+      role: "user",
+      content_json: '"recover without auxiliary tables"',
+      ordinal: 0
+    })
+  })
+
+  it("restores runtime state from a real long inline history within a small worker heap", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-long-state-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "long-state.sqlite")
+    const threadId = "long-runtime-state"
+    const checkpointId = "long-runtime-checkpoint"
+    const saver = new SqlJsSaver(databasePath)
+    await saver.initialize()
+    await saver.close()
+
+    const messageContent = "history".padEnd(8 * 1024, "x")
+    const messages = Array.from({ length: 3_000 }, (_, index) => ({
+      id: `history-${index}`,
+      type: index % 2 === 0 ? "human" : "ai",
+      content: messageContent
+    }))
+    const longCheckpoint = checkpoint(checkpointId, 1, messages, "keep runtime todo")
+    const serializedCheckpoint = JSON.stringify(longCheckpoint)
+    expect(Buffer.byteLength(serializedCheckpoint, "utf8")).toBeGreaterThan(20 * 1024 * 1024)
+
+    const database = new DatabaseSync(databasePath)
+    database
+      .prepare(
+        `INSERT INTO checkpoints
+         (thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata, checkpoint_ts)
+         VALUES (?, '', ?, 'json', ?, ?, ?)`
+      )
+      .run(
+        threadId,
+        checkpointId,
+        serializedCheckpoint,
+        JSON.stringify(metadata),
+        longCheckpoint.ts
+      )
+    database.close()
+
+    const limitedClient = new CheckpointRuntimeProjectionClient(
+      async () =>
+        new Worker(workerBundlePath, {
+          name: "runtime-projection-small-heap-test",
+          resourceLimits: {
+            maxOldGenerationSizeMb: 48,
+            maxYoungGenerationSizeMb: 8,
+            stackSizeMb: 4
+          }
+        })
+    )
+    clients.push(limitedClient)
+
+    let mainTickerCount = 0
+    const ticker = setInterval(() => {
+      mainTickerCount += 1
+    }, 1)
+    let runtimeTuple: unknown
+    try {
+      runtimeTuple = await limitedClient.readLatestRuntimeTuple(
+        databasePath,
+        threadId,
+        "",
+        "long-runtime-state"
+      )
+    } finally {
+      clearInterval(ticker)
+    }
+
+    const projected = runtimeTuple as {
+      checkpoint?: { channel_values?: Record<string, unknown> }
+    }
+    expect(projected.checkpoint?.channel_values).toMatchObject({
+      messages: [],
+      todos: [{ id: "todo-1", content: "keep runtime todo", status: "pending" }],
+      __interrupt__: [{ value: { actionRequests: [{ action: "shell", args: {} }] } }]
+    })
+    expect(projected.checkpoint?.channel_values).not.toHaveProperty("unrelated")
+    expect(Buffer.byteLength(JSON.stringify(runtimeTuple), "utf8")).toBeLessThan(128 * 1024)
+    expect(mainTickerCount).toBeGreaterThan(5)
+
+    const readBoundedTail = async (): Promise<{
+      tuple: unknown
+      tickerCount: number
+    }> => {
+      let tickerCount = 0
+      const tailTicker = setInterval(() => {
+        tickerCount += 1
+      }, 1)
+      try {
+        return {
+          tuple: await limitedClient.readLatestTuple(databasePath, threadId, "", {
+            messageLimit: 128,
+            messageByteBudget: 1024 * 1024
+          }),
+          tickerCount
+        }
+      } finally {
+        clearInterval(tailTicker)
+      }
+    }
+    const inlineTail = await readBoundedTail()
+    const inlineMessages = (
+      inlineTail.tuple as {
+        checkpoint?: {
+          channel_values?: { messages?: unknown[]; __cmb_original_message_count?: number }
+        }
+      }
+    ).checkpoint?.channel_values
+    expect(inlineMessages?.messages?.length).toBeGreaterThan(100)
+    expect(inlineMessages?.messages?.length).toBeLessThanOrEqual(128)
+    expect(inlineMessages?.messages?.at(0)).toMatchObject({
+      id: `history-${messages.length - (inlineMessages?.messages?.length ?? 0)}`
+    })
+    expect(inlineMessages?.messages?.at(-1)).toMatchObject({ id: "history-2999" })
+    expect(inlineMessages?.__cmb_original_message_count).toBe(messages.length)
+    expect(Buffer.byteLength(JSON.stringify(inlineTail.tuple), "utf8")).toBeLessThan(
+      1024 * 1024
+    )
+    expect(inlineTail.tickerCount).toBeGreaterThan(5)
+
+    const external = new DatabaseSync(databasePath)
+    external
+      .prepare(
+        `INSERT INTO checkpoint_message_snapshots
+         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+          prefix_length, message_count, type, suffix)
+         VALUES (?, '', ?, NULL, 0, ?, 'json', ?)`
+      )
+      .run(threadId, checkpointId, messages.length, JSON.stringify(messages))
+    external
+      .prepare(
+        `UPDATE checkpoints SET checkpoint = ?
+         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`
+      )
+      .run(
+        JSON.stringify({
+          ...longCheckpoint,
+          channel_values: {
+            ...longCheckpoint.channel_values,
+            messages: {
+              __cmb_sqljs_external_messages_v1: true,
+              messageCount: messages.length
+            }
+          }
+        }),
+        threadId,
+        checkpointId
+      )
+    external.close()
+
+    const externalTail = await readBoundedTail()
+    const externalMessages = (
+      externalTail.tuple as {
+        checkpoint?: {
+          channel_values?: { messages?: unknown[]; __cmb_original_message_count?: number }
+        }
+      }
+    ).checkpoint?.channel_values
+    expect(externalMessages?.messages?.length).toBeGreaterThan(100)
+    expect(externalMessages?.messages?.length).toBeLessThanOrEqual(128)
+    expect(externalMessages?.messages?.at(0)).toMatchObject({
+      id: `history-${messages.length - (externalMessages?.messages?.length ?? 0)}`
+    })
+    expect(externalMessages?.messages?.at(-1)).toMatchObject({ id: "history-2999" })
+    expect(externalMessages?.__cmb_original_message_count).toBe(messages.length)
+    expect(Buffer.byteLength(JSON.stringify(externalTail.tuple), "utf8")).toBeLessThan(
+      1024 * 1024
+    )
+    expect(externalTail.tickerCount).toBeGreaterThan(5)
+
+    const withoutSnapshots = new DatabaseSync(databasePath)
+    withoutSnapshots.exec("DROP TABLE checkpoint_message_snapshots")
+    withoutSnapshots.close()
+    await expect(
+      limitedClient.readLatestRuntimeTuple(databasePath, threadId)
+    ).resolves.toMatchObject({
+      checkpoint: {
+        channel_values: {
+          messages: [],
+          todos: [{ id: "todo-1", content: "keep runtime todo", status: "pending" }]
+        }
+      }
+    })
+
+    const verifier = new DatabaseSync(databasePath, { readOnly: true })
+    const persisted = verifier
+      .prepare(
+        `SELECT json_extract(
+                  checkpoint,
+                  '$.channel_values.messages.messageCount'
+                ) AS message_count,
+                length(runtime_checkpoint) AS projection_bytes
+         FROM checkpoints
+         JOIN checkpoint_runtime_projections USING (thread_id, checkpoint_ns, checkpoint_id)
+         WHERE thread_id = ? AND checkpoint_ns = '' AND checkpoint_id = ?`
+      )
+      .get(threadId, checkpointId) as {
+      message_count?: unknown
+      projection_bytes?: unknown
+    }
+    verifier.close()
+    expect(Number(persisted.message_count)).toBe(messages.length)
+    expect(Number(persisted.projection_bytes)).toBeLessThan(128 * 1024)
+  }, 30_000)
+
+  it("reads the authoritative tail across truncated external snapshot generations", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-tail-chain-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "tail-chain.sqlite")
+    const threadId = "truncated-tail-chain"
+    const saver = new SqlJsSaver(databasePath)
+    await saver.initialize()
+    await saver.close()
+
+    const message = (id: string): Record<string, unknown> => ({
+      id,
+      type: "ai",
+      content: id
+    })
+    const latestCheckpoint = checkpoint("snapshot-c", 3, [], "chain todo")
+    const database = new DatabaseSync(databasePath)
+    database
+      .prepare(
+        `INSERT INTO checkpoints
+         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+          type, checkpoint, metadata, checkpoint_ts)
+         VALUES (?, '', ?, 'snapshot-b', 'json', ?, ?, ?)`
+      )
+      .run(
+        threadId,
+        latestCheckpoint.id,
+        JSON.stringify({
+          ...latestCheckpoint,
+          channel_values: {
+            ...latestCheckpoint.channel_values,
+            messages: {
+              __cmb_sqljs_external_messages_v1: true,
+              messageCount: 5
+            }
+          }
+        }),
+        JSON.stringify(metadata),
+        latestCheckpoint.ts
+      )
+    const insertSnapshot = database.prepare(
+      `INSERT INTO checkpoint_message_snapshots
+       (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+        prefix_length, message_count, type, suffix)
+       VALUES (?, '', ?, ?, ?, ?, 'json', ?)`
+    )
+    insertSnapshot.run(
+      threadId,
+      "snapshot-a",
+      null,
+      0,
+      4,
+      JSON.stringify([message("a"), message("b"), message("c"), message("d")])
+    )
+    insertSnapshot.run(
+      threadId,
+      "snapshot-b",
+      "snapshot-a",
+      2,
+      4,
+      JSON.stringify([message("e"), message("f")])
+    )
+    insertSnapshot.run(
+      threadId,
+      "snapshot-c",
+      "snapshot-b",
+      3,
+      5,
+      JSON.stringify([message("g"), message("h")])
+    )
+    database.close()
+
+    const client = createClient()
+    const tuple = (await client.readLatestTuple(databasePath, threadId, "", {
+      messageLimit: 4,
+      messageByteBudget: 1024 * 1024
+    })) as {
+      checkpoint?: {
+        channel_values?: {
+          messages?: Array<{ id?: string }>
+          __cmb_original_message_count?: number
+          todos?: unknown[]
+        }
+      }
+    }
+    expect(tuple.checkpoint?.channel_values?.messages?.map((entry) => entry.id)).toEqual([
+      "b",
+      "e",
+      "g",
+      "h"
+    ])
+    expect(tuple.checkpoint?.channel_values?.__cmb_original_message_count).toBe(5)
+    expect(tuple.checkpoint?.channel_values?.todos).toMatchObject([
+      { id: "todo-1", content: "chain todo", status: "pending" }
+    ])
+  })
+
+  it("keeps tool identity when an oversized checkpoint message uses SQL fallback", async () => {
+    const threadId = "oversized-bounded-tool-message"
+    const { databasePath } = await seedLegacyInlineFixture({
+      threadId,
+      messages: [
+        {
+          id: ["langchain_core", "messages", "AIMessage"],
+          additional_kwargs: {},
+          kwargs: {
+            id: "oversized-ai",
+            content: "large tool request",
+            additional_kwargs: { cmb_internal_coordinator_notification: true },
+            tool_calls: [
+              {
+                id: "call-large-write",
+                name: "write_file",
+                args: { content: "x".repeat(96 * 1024) }
+              }
+            ]
+          }
+        }
+      ]
+    })
+    const client = createClient()
+    const tuple = (await client.readLatestTuple(databasePath, threadId, "", {
+      messageLimit: 10,
+      messageByteBudget: 1024 * 1024
+    })) as {
+      checkpoint?: {
+        channel_values?: {
+          messages?: Array<Record<string, unknown>>
+        }
+      }
+    }
+    expect(tuple.checkpoint?.channel_values?.messages).toEqual([
+      expect.objectContaining({
+        id: "oversized-ai",
+        type: "ai",
+        content: "large tool request",
+        tool_calls: [{ id: "call-large-write", name: "write_file", args: {} }]
+      })
+    ])
+    expect(tuple.checkpoint?.channel_values?.messages?.[0]).not.toHaveProperty(
+      "additional_kwargs.cmb_internal_coordinator_notification"
+    )
+  })
+
+  it("rejects an external checkpoint until its snapshot schema is published", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-missing-snapshot-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "missing-snapshot.sqlite")
+    const partial = new DatabaseSync(databasePath)
+    partial.exec(`
+      CREATE TABLE checkpoints (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        type TEXT,
+        checkpoint TEXT,
+        metadata TEXT,
+        fork_boundary_marker INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      );
+      CREATE TABLE writes (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        idx INTEGER NOT NULL,
+        channel TEXT NOT NULL,
+        type TEXT,
+        value TEXT,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+      );
+      CREATE TABLE checkpoint_runtime_projections (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        checkpoint_ts TEXT NOT NULL,
+        projection_version INTEGER NOT NULL DEFAULT 1,
+        type TEXT NOT NULL,
+        runtime_checkpoint BLOB NOT NULL,
+        PRIMARY KEY (thread_id, checkpoint_ns)
+      )
+    `)
+    partial
+      .prepare(
+        `INSERT INTO checkpoints
+         (thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata)
+         VALUES (?, '', 'checkpoint-1', 'json', ?, '{}')`
+      )
+      .run(
+        "external-thread",
+        JSON.stringify({
+          v: 1,
+          id: "checkpoint-1",
+          ts: "2026-08-31T00:00:00.000Z",
+          channel_values: {
+            messages: { __cmb_sqljs_external_messages_v1: true, messageCount: 1 }
+          },
+          channel_versions: {},
+          versions_seen: {}
+        })
+      )
+    partial.close()
+
+    const client = createClient()
+    await expect(client.hasTranscript(databasePath, "external-thread")).rejects.toMatchObject({
+      name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+    })
+    await expect(
+      client.readLatestTuple(databasePath, "external-thread", "", {
+        messageLimit: 500,
+        messageByteBudget: 1024 * 1024
+      })
+    ).rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY })
+    await expect(
+      client.bootstrapLegacyTranscript(
+        databasePath,
+        join(directory, "unused-messages.sqlite"),
+        "external-thread"
+      )
+    ).rejects.toMatchObject({ name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY })
+    await expect(
+      client.ensureRuntimeProjection(databasePath, "external-thread")
+    ).resolves.toMatchObject({ migrated: true, stale: false })
+    await expect(
+      client.readLatestRuntimeTuple(databasePath, "external-thread")
+    ).resolves.toMatchObject({
+      checkpoint: {
+        id: "checkpoint-1",
+        channel_values: { messages: [] }
+      }
+    })
+    await expect(
+      client.ensureRuntimeProjection(databasePath, "external-thread")
+    ).resolves.toMatchObject({ migrated: false, stale: false })
+  })
+
+  it("reads a pre-timestamp base checkpoint before SqlJsSaver publishes the full schema", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cmb-runtime-projection-saver-retry-"))
+    temporaryDirectories.push(directory)
+    const databasePath = join(directory, "legacy-base.sqlite")
+    const threadId = "legacy-base-retry"
+    const olderCheckpoint = checkpoint("legacy-base-checkpoint-001", 0, [
+      { id: "legacy-older-message", type: "human", content: "older checkpoint" }
+    ])
+    const legacyCheckpoint = checkpoint("legacy-base-checkpoint-002", 1, [
+      { id: "legacy-retry-message", type: "human", content: "retry after schema upgrade" }
+    ])
+    const legacy = new DatabaseSync(databasePath)
+    legacy.exec(`
+      CREATE TABLE checkpoints (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        type TEXT,
+        checkpoint TEXT,
+        metadata TEXT,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      )
+    `)
+    const insertCheckpoint = legacy.prepare(
+      `INSERT INTO checkpoints
+       (thread_id, checkpoint_ns, checkpoint_id, type, checkpoint, metadata)
+       VALUES (?, '', ?, 'json', ?, ?)`
+    )
+    for (const storedCheckpoint of [olderCheckpoint, legacyCheckpoint]) {
+      insertCheckpoint.run(
+        threadId,
+        storedCheckpoint.id,
+        JSON.stringify(storedCheckpoint),
+        JSON.stringify(metadata)
+      )
+    }
+    legacy.close()
+
+    const client = createClient()
+    await expect(
+      client.readLatestTuple(databasePath, threadId, "", {
+        messageLimit: 500,
+        messageByteBudget: 1024 * 1024
+      })
+    ).resolves.toMatchObject({
+      checkpoint: {
+        id: legacyCheckpoint.id,
+        channel_values: { messages: [{ id: "legacy-retry-message", type: "human" }] }
+      }
+    })
+    await expect(client.hasTranscript(databasePath, threadId)).resolves.toBe(true)
+    await expect(client.readLatestTuple(databasePath, threadId)).rejects.toMatchObject({
+      name: CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+    })
+
+    const messageDatabasePath = createMessageDatabase(databasePath, threadId)
+    await expect(
+      client.bootstrapLegacyTranscript(databasePath, messageDatabasePath, threadId)
+    ).resolves.toMatchObject({
+      runtimeTuple: { checkpoint: { id: legacyCheckpoint.id } },
+      stats: { checkpointId: legacyCheckpoint.id, totalMessages: 1, migratedMessages: 1 }
+    })
+
+    const saver = new SqlJsSaver(databasePath)
+    await saver.initialize()
+    await saver.close()
+
+    await expect(
+      client.readLatestTuple(databasePath, threadId, "", {
+        messageLimit: 500,
+        messageByteBudget: 1024 * 1024
+      })
+    ).resolves.toMatchObject({
+      checkpoint: {
+        id: legacyCheckpoint.id,
+        channel_values: { messages: [{ id: "legacy-retry-message", type: "human" }] }
+      }
+    })
+    await expect(client.readLatestTuple(databasePath, threadId)).resolves.toMatchObject({
+      checkpoint: { id: legacyCheckpoint.id },
+      pendingWrites: []
+    })
+
+    const verifier = new DatabaseSync(databasePath, { readOnly: true })
+    const checkpointColumns = verifier.prepare("PRAGMA table_info(checkpoints)").all() as Array<{
+      name?: unknown
+    }>
+    const auxiliaryTables = verifier
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name IN (
+           'checkpoint_message_snapshots', 'checkpoint_runtime_projections', 'writes'
+         )
+         ORDER BY name`
+      )
+      .all() as Array<{ name?: unknown }>
+    const checkpointTimestamps = verifier
+      .prepare("SELECT checkpoint_id, checkpoint_ts FROM checkpoints ORDER BY checkpoint_id")
+      .all() as Array<{ checkpoint_id?: unknown; checkpoint_ts?: unknown }>
+    verifier.close()
+    expect(checkpointColumns.some((column) => column.name === "checkpoint_ts")).toBe(true)
+    expect(checkpointColumns.some((column) => column.name === "fork_boundary_marker")).toBe(true)
+    expect(auxiliaryTables.map((table) => table.name)).toEqual([
+      "checkpoint_message_snapshots",
+      "checkpoint_runtime_projections",
+      "writes"
+    ])
+    expect(checkpointTimestamps).toEqual([
+      {
+        checkpoint_id: olderCheckpoint.id,
+        checkpoint_ts: olderCheckpoint.id
+      },
+      {
+        checkpoint_id: legacyCheckpoint.id,
+        checkpoint_ts: legacyCheckpoint.id
+      }
+    ])
   })
 
   it("serializes concurrent saver and worker upgrades of a pre-generation snapshot table", async () => {

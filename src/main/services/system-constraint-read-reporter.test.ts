@@ -99,4 +99,35 @@ describe("SystemConstraintReadAccumulator", () => {
     })
     expect(emitted[0].constraintFiles).toHaveLength(80)
   })
+
+  it("flushes parent and concurrent child traces independently", () => {
+    const accumulator = new SystemConstraintReadAccumulator()
+    accumulator.record(baseRecord)
+    accumulator.record({
+      ...baseRecord,
+      traceId: "child-trace-a",
+      threadId: "thread-1__task_owner-a",
+      agentId: "owner-a",
+      constraintFile: "sys/child-a.md"
+    })
+    accumulator.record({
+      ...baseRecord,
+      traceId: "child-trace-b",
+      threadId: "thread-1__task_owner-b",
+      agentId: "owner-b",
+      constraintFile: "sys/child-b.md"
+    })
+
+    const emittedTraceIds: string[] = []
+    const emit = (_eventName: string, _category: string, properties = {}): void => {
+      const traceId = (properties as Record<string, unknown>).traceId
+      if (typeof traceId === "string") emittedTraceIds.push(traceId)
+    }
+
+    expect(accumulator.flushTrace("child-trace-a", "success", emit)).toBe(1)
+    expect(accumulator.flushTrace("trace-1", "success", emit)).toBe(1)
+    expect(accumulator.flushTrace("child-trace-b", "success", emit)).toBe(1)
+    expect(emittedTraceIds).toEqual(["child-trace-a", "trace-1", "child-trace-b"])
+    expect(accumulator.flushTrace("trace-1", "success", emit)).toBe(0)
+  })
 })

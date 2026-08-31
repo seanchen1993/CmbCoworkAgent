@@ -54,6 +54,11 @@ import type {
 } from "../../shared/adoption-trace-types"
 import { buildEvent, getEventReporter, type CoworkEvent } from "./event-reporter"
 import { getGitRootForPath } from "./git-repository-discovery"
+import {
+  attributeChangeKind,
+  normalizeChangeKind,
+  normalizeNewRatio
+} from "./change-kind-classifier"
 import { getTestCodeMatchRule, type TestCodeMatchRule } from "./adoption-file-policy"
 import {
   cleanupAdoptionDeliveryRecords,
@@ -298,22 +303,18 @@ export interface RecordGenInput {
   /** Optional: workspace root — used to turn absolute path into relative. */
   workspacePath?: string
   /**
-   * Optional: non-blank lines removed by this tool call. When provided, the
-   * tracker uses this directly. write_file passes 0 here (it can only create
-   * new files).
+   * Optional: non-blank old-only lines removed or replaced by this tool call.
+   * When provided, the tracker uses this directly. write_file passes 0 here
+   * because it can only create new files.
    */
   deletedLineCount?: number
   /**
    * Optional: the local `old_string` fragment being replaced by edit_file.
-   * Together with `newString` and `occurrences` the tracker derives a cheap
-   * net-deletion count in the microtask — no full-file scan, no references
-   * to editor buffers retained. Slight over/undercount at oldString boundary
-   * lines is accepted: deletedLineCount is an auxiliary metric; the primary
-   * adoption signal is `generatedContent` (= newString) retention.
+   * Together with `generatedContent` and `occurrences`, the tracker derives
+   * matching new-only and old-only line multisets without reading the full file
+   * or retaining editor buffers.
    */
   oldString?: string
-  /** Optional: the local `new_string` fragment. See `oldString`. */
-  newString?: string
   /** Optional: replacement count returned by the edit tool. Defaults to 1. */
   occurrences?: number
   /**
@@ -556,23 +557,6 @@ function normalizeLine(line: string): string {
   return line.trim().replace(/\s+/g, " ")
 }
 
-/**
- * Count non-blank, whitespace-normalised lines in `content`. Mirrors the
- * normalisation used by `computeLineHashes` so the count matches the number of
- * hashes we would actually compare. Exported so write/edit tool call sites can
- * compute `deletedLineCount` against the same definition the tracker uses for
- * added lines.
- */
-export function countNonBlankLines(content: string): number {
-  if (!content) return 0
-  const lines = content.split(/\r?\n/)
-  let count = 0
-  for (const raw of lines) {
-    if (normalizeLine(raw).length > 0) count++
-  }
-  return count
-}
-
 function computeLineHashes(content: string): Uint32Array {
   const lines = content.split(/\r?\n/)
   const hashes: number[] = []
@@ -609,33 +593,53 @@ function getGenerationOccurrenceCount(input: Pick<RecordGenInput, "tool" | "occu
   return occurrences > 0 ? occurrences : 1
 }
 
+export interface NetLineChangeCounts {
+  generatedLineCount: number
+  deletedLineCount: number
+}
+
 /**
- * Count only net-new, non-blank lines without expanding replaceAll occurrences
- * into a potentially huge baseline. Used by the oversize fast path, where we
- * deliberately skip persistence/hashing details but still need an accurate
- * denominator for telemetry.
+ * Count new-only and old-only non-blank lines as multisets, without expanding
+ * replaceAll occurrences into a potentially huge baseline. An old-only line is
+ * a deletion or replacement, so equal-size rewrites remain visible instead of
+ * looking like pure additions.
  */
-export function countNetGeneratedLines(
+export function countNetLineChanges(
   input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
-): number {
+): NetLineChangeCounts {
   const generatedCounts = buildLineHashCounts(computeLineHashes(input.generatedContent))
   const generationOccurrences = getGenerationOccurrenceCount(input)
 
   if (input.tool !== "edit_file" || typeof input.oldString !== "string") {
-    let total = 0
-    for (const count of generatedCounts.values()) total += count * generationOccurrences
-    return total
+    let generatedLineCount = 0
+    for (const count of generatedCounts.values()) {
+      generatedLineCount += count * generationOccurrences
+    }
+    return { generatedLineCount, deletedLineCount: 0 }
   }
 
   const oldCounts = buildLineHashCounts(computeLineHashes(input.oldString))
   const deletionOccurrences = getDeletionOccurrenceCount(input)
-  let total = 0
+  let generatedLineCount = 0
+  let deletedLineCount = 0
   for (const [hash, count] of generatedCounts) {
     const generated = count * generationOccurrences
-    const unchanged = (oldCounts.get(hash) ?? 0) * deletionOccurrences
-    total += Math.max(0, generated - unchanged)
+    const old = (oldCounts.get(hash) ?? 0) * deletionOccurrences
+    generatedLineCount += Math.max(0, generated - old)
+    deletedLineCount += Math.max(0, old - generated)
   }
-  return total
+  for (const [hash, count] of oldCounts) {
+    if (generatedCounts.has(hash)) continue
+    deletedLineCount += count * deletionOccurrences
+  }
+  return { generatedLineCount, deletedLineCount }
+}
+
+/** Backward-compatible projection used by existing oversize-count callers/tests. */
+export function countNetGeneratedLines(
+  input: Pick<RecordGenInput, "tool" | "generatedContent" | "oldString" | "occurrences">
+): number {
+  return countNetLineChanges(input).generatedLineCount
 }
 
 function repeatLineEntries(entries: LineEntry[], occurrences: number): LineEntry[] {
@@ -797,18 +801,11 @@ function getDeletionOccurrenceCount(input: Pick<RecordGenInput, "occurrences">):
   return Math.max(0, Math.floor(input.occurrences))
 }
 
-function deriveDeletedLineCount(input: RecordGenInput): number {
-  if (typeof input.deletedLineCount === "number") {
-    return Math.max(0, input.deletedLineCount)
+function resolveDeletedLineCount(input: RecordGenInput, detectedLineCount: number): number {
+  if (typeof input.deletedLineCount === "number" && Number.isFinite(input.deletedLineCount)) {
+    return Math.max(0, Math.floor(input.deletedLineCount))
   }
-  if (typeof input.oldString !== "string") return 0
-
-  const occurrences = getDeletionOccurrenceCount(input)
-  if (occurrences === 0) return 0
-
-  const oldNonBlank = countNonBlankLines(input.oldString)
-  const newNonBlank = typeof input.newString === "string" ? countNonBlankLines(input.newString) : 0
-  return Math.max(0, oldNonBlank - newNonBlank) * occurrences
+  return Math.max(0, Math.floor(detectedLineCount))
 }
 
 function normalizeUsedSkills(skills: unknown): string[] {
@@ -1233,6 +1230,10 @@ function buildCodeGenerationProperties(args: {
     skillSource,
     testMatchRule
   } = args
+  // Bucketing for the 研发效能 panel: 新增 (绿地) vs 存量迭代 (棕地). Derived here
+  // from counts this function already has, and mirrored onto the commit-time
+  // `code_adopt` event so ES can slice adoption rates without a two-step join.
+  const { newRatio, changeKind } = attributeChangeKind(lineCount, deletedLineCount)
   return {
     schemaVersion: 1,
     eventId,
@@ -1243,6 +1244,10 @@ function buildCodeGenerationProperties(args: {
     language: extname(absPath).slice(1).toLowerCase() || null,
     lineCount,
     deletedLineCount,
+    // Explicitly mapped as `double` in ES. Do not reuse the legacy `newRatio`
+    // field: its first 0/1 value can make dynamic mapping lock it to `long`.
+    netNewRatio: newRatio,
+    changeKind,
     usedSkills,
     ...(skillSource.length > 0 ? { skillSource } : {}),
     modelId: ctx.modelId ?? null,
@@ -1329,12 +1334,14 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
     const createdAt = Date.now()
 
     if (Math.max(rawLineCount, rawOldLineCount) > MAX_LINES_FOR_MEASURE) {
+      const lineChanges = countNetLineChanges(input)
       emitSkippedLargeAtGen({
         eventId,
         input,
         absPath,
         relPath,
-        lineCount: countNetGeneratedLines(input),
+        lineCount: lineChanges.generatedLineCount,
+        deletedLineCount: resolveDeletedLineCount(input, lineChanges.deletedLineCount),
         createdAt,
         ctx,
         testMatchRule
@@ -1356,6 +1363,7 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         absPath,
         relPath,
         lineCount: baseline.generatedLineHashes.length,
+        deletedLineCount: resolveDeletedLineCount(input, baseline.supersededLineHashes.length),
         createdAt,
         ctx,
         testMatchRule
@@ -1370,20 +1378,18 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
       return
     }
     // `hashes` is the net-new baseline. For edit_file this removes unchanged
-    // oldString context from newString, while `oldLineHashes` keeps only the
-    // old-only lines that should supersede earlier agent generations.
+    // oldString context from generatedContent, while `oldLineHashes` keeps only
+    // the old-only lines that should supersede earlier agent generations.
     const reportedLineCount = hashes.length
 
     // ── JSONL record ────────────────────────────────────
-    // Derive net-deletion count here (in the microtask), NOT at the tool
-    // call site — this keeps edit_file's hot path free of any O(N) scan for
-    // files that are about to be filtered out anyway (non-code, oversize,
-    // empty-after-normalization — all handled above).
-    // Only the local `oldString` / `newString` fragments are scanned — no
-    // full-file reads — so the cost is proportional to the edit size, not
-    // the file size. Boundary-line merging (e.g. oldString ending mid-line)
-    // can introduce small +/- 1 errors; acceptable for an auxiliary metric.
-    const deletedLineCount = deriveDeletedLineCount(input)
+    // The old-only baseline counts both outright deletions and replaced lines.
+    // Reusing it here keeps classification consistent with adoption supersession
+    // and avoids another scan of the edit fragment.
+    const deletedLineCount = resolveDeletedLineCount(input, oldLineHashes.length)
+    // 新增/存量 bucket for the 研发效能 panel. Computed once here so the sqlite row
+    // and the cloud `code_gen` event can never disagree.
+    const changeAttribution = attributeChangeKind(reportedLineCount, deletedLineCount)
     const usedSkills = normalizeUsedSkills(ctx.usedSkills)
     const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
     const generationProperties = buildCodeGenerationProperties({
@@ -1457,6 +1463,10 @@ async function doRecordGen(input: RecordGenInput): Promise<void> {
         harness_node_status: ctx.harnessNodeStatus ?? null,
         harness_adapter_name: ctx.harnessAdapterName ?? null,
         harness_adapter_version: ctx.harnessAdapterVersion ?? null,
+        // Persisted so the commit-time `code_adopt` event can carry the bucket
+        // without re-deriving it from a diff that has since moved on.
+        new_ratio: changeAttribution.newRatio,
+        change_kind: changeAttribution.changeKind,
         ...observabilityColumns
       },
       toOutboxEvent(generationEvent, createdAt)
@@ -1492,13 +1502,24 @@ function emitSkippedLargeAtGen(args: {
   absPath: string
   relPath: string
   lineCount: number
+  deletedLineCount: number
   createdAt: number
   /** Attribution snapshot taken before any await — see doRecordGen. */
   ctx: AdoptionContext
   testMatchRule: TestCodeMatchRule | null
 }): void {
-  const { eventId, input, absPath, relPath, lineCount, createdAt, ctx, testMatchRule } = args
-  const deletedLineCount = deriveDeletedLineCount(input)
+  const {
+    eventId,
+    input,
+    absPath,
+    relPath,
+    lineCount,
+    deletedLineCount,
+    createdAt,
+    ctx,
+    testMatchRule
+  } = args
+  const changeAttribution = attributeChangeKind(lineCount, deletedLineCount)
   const usedSkills = normalizeUsedSkills(ctx.usedSkills)
   const observabilityProps = buildObservabilityEventProperties(ctx, input.threadId)
   const skillSource = normalizeSkillSourceRefs(ctx.skillSource, usedSkills)
@@ -1526,9 +1547,9 @@ function emitSkippedLargeAtGen(args: {
 
   const generationEvent = buildEvent("code_gen", "code_adoption", generationProperties)
 
-  // Terminal L2/L3 equivalent — no hashing possible, so persist skipped_large
-  // immediately. The complete envelope (including its top-level eventId) is
-  // immutable in the outbox and reused for every retry.
+  // Terminal L2/L3 equivalent — no persisted per-line baseline, so persist
+  // skipped_large immediately. The complete envelope (including its top-level
+  // eventId) is immutable in the outbox and reused for every retry.
   const adoptEvent = buildEvent("code_adopt", "code_adoption", {
     schemaVersion: 1,
     eventId: `a_${randomUUID()}`,
@@ -1557,6 +1578,8 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
+    netNewRatio: changeAttribution.newRatio,
+    changeKind: changeAttribution.changeKind,
     ...observabilityProps
   })
   if (
@@ -1926,6 +1949,11 @@ async function buildMeasurementsForFile(
         harnessNodeStatus: pending.harness_node_status ?? null,
         harnessAdapterName: pending.harness_adapter_name ?? null,
         harnessAdapterVersion: pending.harness_adapter_version ?? null,
+        // Carried over from gen time. The adopted/effective line counts live on
+        // this event, so the bucket has to travel with them — otherwise slicing
+        // adoption by 新增/存量 would need a join back to code_gen.
+        netNewRatio: normalizeNewRatio(pending.new_ratio),
+        changeKind: normalizeChangeKind(pending.change_kind),
         ...observabilityProps
       })
       const details = buildLocalAdoptLineDetailsRow({

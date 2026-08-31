@@ -508,7 +508,6 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
         tool: "edit_file",
         generatedContent: newString,
         oldString,
-        newString,
         occurrences: 1
       })
 
@@ -516,6 +515,13 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
       assert(
         genEvent.properties?.lineCount === 1,
         "oversize code_gen should report one net-new line"
+      )
+      assert(
+        genEvent.properties?.deletedLineCount === 0 &&
+          genEvent.properties?.netNewRatio === 1 &&
+          genEvent.properties?.newRatio === undefined &&
+          genEvent.properties?.changeKind === "new",
+        "oversize append should preserve the new-only classification"
       )
       await flushAdoptionEventOutbox()
       const adoptEvent = reporter.adoptionCalls.find(
@@ -535,6 +541,12 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
         adoptEvent?.properties?.generatedLineCount === 1 &&
           adoptEvent.properties?.effectiveGeneratedLineCount === 1,
         "oversize terminal event should use the same net-new denominator"
+      )
+      assert(
+        adoptEvent?.properties?.netNewRatio === 1 &&
+          adoptEvent.properties?.newRatio === undefined &&
+          adoptEvent.properties?.changeKind === "new",
+        "oversize terminal event should carry the same change classification"
       )
       assert(
         findPendingGensForFile(filePath, 0).length === 0,
@@ -586,6 +598,10 @@ async function testStableOutboxRetryAcrossRestart(): Promise<void> {
       assert(
         firstEvent.properties?.genEventId === committed.genEventId,
         "outbox event should reference the measured generation"
+      )
+      assert(
+        firstEvent.properties?.netNewRatio === 1 && firstEvent.properties?.newRatio === undefined,
+        "measured adoption should use only the explicitly-double ratio field"
       )
 
       // Make the failed row immediately due, then restart before retrying. This

@@ -150,6 +150,7 @@ import type {
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
 } from "../shared/harness-board-types"
+import type { ProjectMetricFilters, ProjectMetricListOptions } from "../shared/project-metrics"
 import type {
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
@@ -3699,6 +3700,20 @@ const api = {
       source: string | null
     ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
       ipcRenderer.invoke("dashboard:projectModeCodeStats", range, opts, source),
+    efficiency: (
+      range: { from: string; to: string },
+      opts?: { upperOrgLv1?: string | string[] | null }
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:efficiency", range, opts),
+    projectMetricSummary: (
+      filters: ProjectMetricFilters
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricSummary", filters),
+    projectMetricProjects: (
+      filters: ProjectMetricFilters,
+      options?: ProjectMetricListOptions
+    ): Promise<{ success: boolean; data?: unknown; error?: string }> =>
+      ipcRenderer.invoke("dashboard:projectMetricProjects", filters, options),
     projectModeProjects: (
       range: { from: string; to: string },
       options?: {

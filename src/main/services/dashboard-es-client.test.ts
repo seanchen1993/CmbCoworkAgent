@@ -9,6 +9,7 @@ import { build } from "esbuild"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import {
   DASHBOARD_ES_MAX_ACTIVE_REQUESTS,
+  DASHBOARD_ES_MAX_DISPATCHED_REQUESTS,
   DASHBOARD_ES_MAX_REQUEST_BODY_BYTES,
   DASHBOARD_ES_WORKER_RESOURCE_LIMITS,
   DashboardEsRequestCancelledError,
@@ -27,6 +28,8 @@ let workerBuildDirectory = ""
 let workerBundlePath = ""
 let server: Server
 let serverUrl = ""
+let overlapSlowActiveRequests = 0
+let overlapSlowPeakRequests = 0
 
 const tickerPayload = `${JSON.stringify({ value: "ticker" })}${" ".repeat(7 * 1024 * 1024)}`
 const projectedHomePayload = JSON.stringify({
@@ -93,6 +96,16 @@ beforeAll(async () => {
     if (index === "slow") {
       response.writeHead(200, { "content-type": "application/json" })
       setTimeout(() => response.end(JSON.stringify({ value: "slow" })), 200)
+      return
+    }
+    if (index === "overlap-slow") {
+      overlapSlowActiveRequests += 1
+      overlapSlowPeakRequests = Math.max(overlapSlowPeakRequests, overlapSlowActiveRequests)
+      response.writeHead(200, { "content-type": "application/json" })
+      setTimeout(() => {
+        overlapSlowActiveRequests -= 1
+        response.end(JSON.stringify({ value: "overlap-slow" }))
+      }, 200)
       return
     }
     response.writeHead(200, { "content-type": "application/json" })
@@ -243,6 +256,56 @@ describe("Dashboard ES worker", () => {
     await expect(query(client, "after-cancel")).resolves.toMatchObject({
       index: "after-cancel"
     })
+  })
+
+  it("absorbs rapid cancelled replacements without overflowing the worker queue", async () => {
+    expect(DASHBOARD_ES_MAX_DISPATCHED_REQUESTS).toBe(4)
+    const client = createClient()
+    const cancelled: Promise<unknown>[] = []
+
+    for (let round = 0; round < 4; round += 1) {
+      const controllers = Array.from({ length: 6 }, () => new AbortController())
+      controllers.forEach((controller) => {
+        cancelled.push(query(client, "slow", controller.signal).catch((error) => error))
+      })
+      // Let each dashboard generation reach the worker before a tab/range switch
+      // supersedes all six endpoint calls.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10))
+      controllers.forEach((controller) => controller.abort())
+    }
+
+    const cancelledResults = await Promise.all(cancelled)
+    expect(cancelledResults).toHaveLength(24)
+    expect(
+      cancelledResults.every((result) => result instanceof DashboardEsRequestCancelledError)
+    ).toBe(true)
+    await expect(query(client, "after-switch-burst")).resolves.toMatchObject({
+      index: "after-switch-burst"
+    })
+  })
+
+  it("accepts the dashboard's nine-request initial fan-out while dispatch stays bounded", async () => {
+    expect(DASHBOARD_ES_MAX_ACTIVE_REQUESTS).toBe(32)
+    expect(DASHBOARD_ES_MAX_DISPATCHED_REQUESTS).toBe(4)
+    const client = createClient()
+
+    const initialDashboard = Array.from({ length: 9 }, () => query(client, "slow"))
+    await expect(Promise.all(initialDashboard)).resolves.toHaveLength(9)
+  })
+
+  it("accepts the 9+8 dashboard/project-mode overlap without exceeding four dispatches", async () => {
+    expect(DASHBOARD_ES_MAX_ACTIVE_REQUESTS).toBeGreaterThanOrEqual(17)
+    expect(DASHBOARD_ES_MAX_DISPATCHED_REQUESTS).toBe(4)
+    overlapSlowActiveRequests = 0
+    overlapSlowPeakRequests = 0
+    const client = createClient()
+
+    const initialDashboard = Array.from({ length: 9 }, () => query(client, "overlap-slow"))
+    const projectMode = Array.from({ length: 8 }, () => query(client, "overlap-slow"))
+    await expect(Promise.all([...initialDashboard, ...projectMode])).resolves.toHaveLength(17)
+
+    expect(overlapSlowActiveRequests).toBe(0)
+    expect(overlapSlowPeakRequests).toBe(DASHBOARD_ES_MAX_DISPATCHED_REQUESTS)
   })
 
   it("restarts after a worker crash and keeps request failures bounded", async () => {

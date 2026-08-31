@@ -7,7 +7,6 @@ import {
   type WorkspaceFilePreviewCancelRequest,
   type WorkspaceFilePreviewOpenMediaRequest,
   type WorkspaceFilePreviewOpenMediaResult,
-  type WorkspaceFilePreviewFailure,
   type WorkspaceFilePreviewReadRequest,
   type WorkspaceFilePreviewReadResult,
   type WorkspaceFilePreviewReleaseRequest,
@@ -20,11 +19,9 @@ import {
 } from "../services/external-file-read-tokens"
 import { openStableFileHandle } from "../services/stable-file-handle"
 import { getWorkspaceFilePreviewClient } from "../workspace-file-preview/client"
+import { workspaceFilePreviewFailure } from "../workspace-file-preview/errors"
 import type { WorkspaceFilePreviewWorkerSource } from "../workspace-file-preview/protocol"
-import {
-  mediaPreviewUrl,
-  type MediaPreviewEntry
-} from "../workspace-file-preview/media-registry"
+import { mediaPreviewUrl, type MediaPreviewEntry } from "../workspace-file-preview/media-registry"
 import { workspaceFilePreviewMediaRegistry } from "../workspace-file-preview/media-protocol"
 
 interface ActivePreviewRequest {
@@ -45,9 +42,18 @@ function validateSource(source: unknown): source is WorkspaceFilePreviewSource {
   if (!source || typeof source !== "object" || Array.isArray(source)) return false
   const record = source as Record<string, unknown>
   const filePath = validBoundedString(record.filePath, 32_768)
-  const workspaceSource = validBoundedString(record.threadId, 256) && filePath
-  const externalSource = validBoundedString(record.externalGrant, 256) && filePath
-  return (workspaceSource && !externalSource) || (externalSource && !workspaceSource)
+  const hasThreadId = Object.prototype.hasOwnProperty.call(record, "threadId")
+  const hasExternalGrant = Object.prototype.hasOwnProperty.call(record, "externalGrant")
+  if (hasThreadId === hasExternalGrant) return false
+  const workspacePathKind = record.workspacePathKind
+  const validWorkspacePathKind =
+    workspacePathKind === undefined ||
+    workspacePathKind === "relative" ||
+    workspacePathKind === "absolute" ||
+    workspacePathKind === "auto"
+  return hasThreadId
+    ? validBoundedString(record.threadId, 256) && filePath && validWorkspacePathKind
+    : validBoundedString(record.externalGrant, 256) && filePath && workspacePathKind === undefined
 }
 
 function validateBaseRequest(
@@ -132,7 +138,11 @@ async function prepareWorkerSource(
   const workspacePath = await readThreadWorkspacePathInWorker(source.threadId)
   if (!workspacePath) throw new Error("No workspace folder linked")
   return {
-    source: { threadId: source.threadId, filePath: source.filePath },
+    source: {
+      threadId: source.threadId,
+      filePath: source.filePath,
+      workspacePathKind: source.workspacePathKind ?? "relative"
+    },
     workspacePath,
     trustedRootPath: workspacePath
   }
@@ -188,10 +198,7 @@ function mimeTypeForPath(filePath: string, requestedMimeType?: string): string {
   return "application/octet-stream"
 }
 
-function inlineMediaPolicy(
-  mimeType: string,
-  size: number
-): { allowed: boolean; reason?: string } {
+function inlineMediaPolicy(mimeType: string, size: number): { allowed: boolean; reason?: string } {
   if (mimeType.startsWith("video/") || mimeType.startsWith("audio/")) {
     return { allowed: true }
   }
@@ -208,50 +215,50 @@ function inlineMediaPolicy(
   return { allowed: false, reason: "该二进制格式不支持应用内预览" }
 }
 
-function cancelledFailure(error: unknown): WorkspaceFilePreviewFailure {
-  const cancelled = error instanceof Error && error.name === WORKSPACE_FILE_PREVIEW_CANCELLED
-  return {
-    success: false,
-    cancelled,
-    error: cancelled
-      ? "Workspace file preview was cancelled"
-      : error instanceof Error
-        ? error.message
-        : "Unable to preview file"
-  }
-}
-
 export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "workspace:filePreviewRead",
-    async (event, request: WorkspaceFilePreviewReadRequest): Promise<WorkspaceFilePreviewReadResult> => {
+    async (
+      event,
+      request: WorkspaceFilePreviewReadRequest
+    ): Promise<WorkspaceFilePreviewReadResult> => {
       if (!validateBaseRequest(request)) {
-        return { success: false, error: "Invalid workspace file preview request" }
+        return {
+          success: false,
+          error: "Invalid workspace file preview request",
+          errorCode: "invalid-request"
+        }
       }
       const offset = request.offset ?? 0
       if (!Number.isSafeInteger(offset) || offset < 0) {
-        return { success: false, error: "Invalid workspace file preview offset" }
+        return {
+          success: false,
+          error: "Invalid workspace file preview offset",
+          errorCode: "invalid-request"
+        }
       }
 
       const active = beginRequest(event.sender, request.lane, request.requestToken)
       const client = getWorkspaceFilePreviewClient()
       try {
         const prepared = await prepareWorkerSource(request.source, event.sender.id)
-        if (!isCurrent(active)) throw Object.assign(new Error("Preview superseded"), {
-          name: WORKSPACE_FILE_PREVIEW_CANCELLED
-        })
+        if (!isCurrent(active))
+          throw Object.assign(new Error("Preview superseded"), {
+            name: WORKSPACE_FILE_PREVIEW_CANCELLED
+          })
         const page = await client.readText(
           prepared.source,
           prepared.workspacePath,
           offset,
           active.latestKey
         )
-        if (!isCurrent(active)) throw Object.assign(new Error("Preview superseded"), {
-          name: WORKSPACE_FILE_PREVIEW_CANCELLED
-        })
+        if (!isCurrent(active))
+          throw Object.assign(new Error("Preview superseded"), {
+            name: WORKSPACE_FILE_PREVIEW_CANCELLED
+          })
         return page.result
       } catch (error) {
-        return cancelledFailure(error)
+        return workspaceFilePreviewFailure(error)
       } finally {
         finishRequest(active)
       }
@@ -265,23 +272,29 @@ export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
       request: WorkspaceFilePreviewOpenMediaRequest
     ): Promise<WorkspaceFilePreviewOpenMediaResult> => {
       if (!validateBaseRequest(request)) {
-        return { success: false, error: "Invalid workspace media preview request" }
+        return {
+          success: false,
+          error: "Invalid workspace media preview request",
+          errorCode: "invalid-request"
+        }
       }
       const active = beginRequest(event.sender, request.lane, request.requestToken)
       const client = getWorkspaceFilePreviewClient()
       try {
         const prepared = await prepareWorkerSource(request.source, event.sender.id)
-        if (!isCurrent(active)) throw Object.assign(new Error("Preview superseded"), {
-          name: WORKSPACE_FILE_PREVIEW_CANCELLED
-        })
+        if (!isCurrent(active))
+          throw Object.assign(new Error("Preview superseded"), {
+            name: WORKSPACE_FILE_PREVIEW_CANCELLED
+          })
         const inspected = await client.inspect(
           prepared.source,
           prepared.workspacePath,
           active.latestKey
         )
-        if (!isCurrent(active)) throw Object.assign(new Error("Preview superseded"), {
-          name: WORKSPACE_FILE_PREVIEW_CANCELLED
-        })
+        if (!isCurrent(active))
+          throw Object.assign(new Error("Preview superseded"), {
+            name: WORKSPACE_FILE_PREVIEW_CANCELLED
+          })
         const stableFile = await openStableFileHandle(
           prepared.trustedRootPath,
           inspected.resolvedPath
@@ -323,7 +336,7 @@ export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
           if (!transferred) await stableFile.handle.close().catch(() => undefined)
         }
       } catch (error) {
-        return cancelledFailure(error)
+        return workspaceFilePreviewFailure(error)
       } finally {
         finishRequest(active)
       }

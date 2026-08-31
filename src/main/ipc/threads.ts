@@ -187,6 +187,7 @@ import {
   bootstrapLegacyCheckpointTranscriptInWorker,
   cancelLegacyCheckpointTranscriptBootstrap,
   isCheckpointRuntimeProjectionCancelled,
+  readLatestCheckpointRuntimeTupleInWorker,
   readLatestCheckpointTupleInWorker
 } from "../checkpointer/runtime-projection-client"
 import { readThreadConversationPresenceForMutation } from "../services/thread-conversation-presence"
@@ -3606,7 +3607,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   const performThreadDeletion = async (
     event: IpcMainInvokeEvent,
-    threadId: string
+    threadId: string,
+    groupGuard?: ThreadDeleteOptions["groupGuard"]
   ): Promise<void> => {
     console.log("[Threads] Deleting thread:", threadId)
 
@@ -3751,6 +3753,33 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // durable revocation fails, abort deletion so an active grant can never
       // outlive a missing thread by accident.
       await imRemoteAccessService.disableThread(threadId)
+
+      // The teardown above crosses several async boundaries. Revalidate the
+      // destructive selection and external run ownership synchronously at the
+      // database commit boundary so a revived/rebound task cannot be deleted
+      // using a stale bulk-selection snapshot.
+      const latestThread = getThreadCore(threadId)
+      if (!latestThread) throw new Error("Thread not found")
+      let latestMetadata: Record<string, unknown>
+      try {
+        const parsed = latestThread.metadata ? (JSON.parse(latestThread.metadata) as unknown) : {}
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("Thread metadata is not an object")
+        }
+        latestMetadata = parsed as Record<string, unknown>
+      } catch {
+        throw new Error("会话元数据异常，无法确认删除条件，请重新打开后再试。")
+      }
+      if (
+        groupGuard &&
+        (!matchesThreadIncarnation(latestThread, groupGuard.incarnation) ||
+          !threadMetadataMatchesGroupSelector(latestMetadata, groupGuard.selector))
+      ) {
+        throw new Error("会话已变更或已移出分组，请重新确认。")
+      }
+      if (isExternallyManagedThreadRunBusy(threadId, latestMetadata)) {
+        throw new Error("会话仍在运行或有待处理结果，已停止删除。")
+      }
 
       // Delete from our metadata store — the point of no return.
       dbDeleteThread(threadId)
@@ -3928,7 +3957,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
         while (deletingThreads.has(threadId)) {
           await deletingThreads.get(threadId)?.catch(() => undefined)
         }
-        const deletion = performThreadDeletion(event, threadId)
+        const deletion = performThreadDeletion(event, threadId, options?.groupGuard)
         deletingThreads.set(threadId, deletion)
         try {
           await deletion
@@ -3956,9 +3985,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  // Get only a bounded tail of the latest worker checkpoint. The full snapshot
-  // is reconstructed inside the worker, but at most 500 / 1 MiB crosses into
-  // Electron main and the renderer worker panel.
+  // Read only a bounded SQLite tail of the latest worker checkpoint. Neither
+  // the full snapshot nor more than 500 messages / 1 MiB enters Electron main.
   ipcMain.handle("threads:latest-checkpoint", async (event, threadId: string) => {
     try {
       const normalizedThreadId = assertValidCheckpointThreadId(threadId)
@@ -3985,15 +4013,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("threads:latest-checkpoint-runtime-state", async (event, threadId: string) => {
     try {
       const normalizedThreadId = assertValidCheckpointThreadId(threadId)
-      return await readLatestCheckpointTupleInWorker(
+      return await readLatestCheckpointRuntimeTupleInWorker(
         getThreadCheckpointPath(normalizedThreadId),
         normalizedThreadId,
         "",
-        {
-          messageLimit: 0,
-          messageByteBudget: 0,
-          foregroundKey: `thread-hydration:${event.sender.id}`
-        }
+        `thread-hydration:${event.sender.id}`
       )
     } catch (e) {
       if (isCheckpointRuntimeProjectionCancelled(e)) return null

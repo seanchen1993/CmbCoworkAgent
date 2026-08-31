@@ -55,6 +55,11 @@ interface PendingRequest {
   latestKey: string | null
 }
 
+interface ThreadListFirstPageFlight {
+  current: Promise<ThreadSummaryPage>
+  trailing: Promise<ThreadSummaryPage> | null
+}
+
 export class ThreadMetadataHydrationWorkerUnavailableError extends Error {
   readonly code = "THREAD_METADATA_HYDRATION_WORKER_UNAVAILABLE"
   constructor(message: string, options?: ErrorOptions) {
@@ -96,6 +101,7 @@ export class ThreadMetadataHydrationClient {
   private readonly threadRequests = new Map<string, Promise<Thread | null>>()
   private readonly workspacePathRequests = new Map<string, Promise<string | null>>()
   private readonly gitContextRequests = new Map<string, Promise<ThreadGitMetadataProjection>>()
+  private readonly firstPageFlights = new Map<string, ThreadListFirstPageFlight>()
 
   constructor(
     private readonly workerFactory: WorkerFactory = createBundledWorker,
@@ -339,22 +345,77 @@ export class ThreadMetadataHydrationClient {
     options: ThreadSummaryPageOptions = {},
     webContentsId?: number
   ): Promise<ThreadSummaryPage> {
-    const latestKey = Number.isSafeInteger(webContentsId) ? `list:${webContentsId}` : null
-    return (await this.request(
-      "list-page",
-      {
-        type: "read-list-page",
-        ...(Number.isFinite(options.beforeUpdatedAt)
-          ? { beforeUpdatedAt: options.beforeUpdatedAt }
-          : {}),
-        ...(typeof options.beforeThreadId === "string" && options.beforeThreadId.length > 0
-          ? { beforeThreadId: options.beforeThreadId }
-          : {}),
-        limit: options.limit ?? 128,
-        byteBudget: options.byteBudget ?? 512 * 1024
-      },
-      latestKey
-    )) as ThreadSummaryPage
+    const beforeUpdatedAt = Number.isFinite(options.beforeUpdatedAt)
+      ? options.beforeUpdatedAt
+      : undefined
+    const beforeThreadId =
+      typeof options.beforeThreadId === "string" && options.beforeThreadId.length > 0
+        ? options.beforeThreadId
+        : undefined
+    const limit = options.limit ?? 128
+    const byteBudget = options.byteBudget ?? 512 * 1024
+    const issueRequest = (): Promise<ThreadSummaryPage> =>
+      this.request(
+        "list-page",
+        {
+          type: "read-list-page",
+          ...(beforeUpdatedAt === undefined ? {} : { beforeUpdatedAt }),
+          ...(beforeThreadId === undefined ? {} : { beforeThreadId }),
+          limit,
+          byteBudget
+        },
+        null
+      ) as Promise<ThreadSummaryPage>
+
+    // Cursor pages belong to an already established pagination chain and must
+    // never cancel an independently useful first-page refresh.
+    const isCursorPage = beforeUpdatedAt !== undefined || beforeThreadId !== undefined
+    if (isCursorPage || !Number.isSafeInteger(webContentsId)) return issueRequest()
+
+    // Rapid focus/thread-change events used to either retain every obsolete
+    // first-page scan or reject the superseded IPC call as an error. Keep one
+    // active request plus one coalesced trailing refresh instead: older renderer
+    // generations receive the active result and discard it, while every newer
+    // caller shares the fresh trailing snapshot.
+    const flightKey = `${webContentsId}:${limit}:${byteBudget}`
+    const existing = this.firstPageFlights.get(flightKey)
+    if (existing) {
+      if (existing.trailing) return existing.trailing
+      const trailing = existing.current
+        .catch(() => undefined)
+        .then(() => {
+          const current = issueRequest()
+          existing.current = current
+          existing.trailing = null
+          this.trackFirstPageFlight(flightKey, existing, current)
+          return current
+        })
+      existing.trailing = trailing
+      return trailing
+    }
+
+    const current = issueRequest()
+    const flight: ThreadListFirstPageFlight = { current, trailing: null }
+    this.firstPageFlights.set(flightKey, flight)
+    this.trackFirstPageFlight(flightKey, flight, current)
+    return current
+  }
+
+  private trackFirstPageFlight(
+    key: string,
+    flight: ThreadListFirstPageFlight,
+    request: Promise<ThreadSummaryPage>
+  ): void {
+    const cleanup = (): void => {
+      if (
+        this.firstPageFlights.get(key) === flight &&
+        flight.current === request &&
+        flight.trailing === null
+      ) {
+        this.firstPageFlights.delete(key)
+      }
+    }
+    void request.then(cleanup, cleanup)
   }
 
   async readGroupIds(
@@ -473,6 +534,7 @@ export class ThreadMetadataHydrationClient {
     this.threadRequests.clear()
     this.workspacePathRequests.clear()
     this.gitContextRequests.clear()
+    this.firstPageFlights.clear()
     const worker = this.worker
     this.worker = null
     this.workerPromise = null

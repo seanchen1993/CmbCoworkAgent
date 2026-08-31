@@ -210,10 +210,8 @@ describe("threads:get hydration contract", () => {
     const handler = source.slice(start, end)
 
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(handler).toContain("readLatestCheckpointTupleInWorker")
-    expect(handler).toContain("messageLimit: 0")
-    expect(handler).toContain("messageByteBudget: 0")
-    expect(handler).toContain("foregroundKey: `thread-hydration:${event.sender.id}`")
+    expect(handler).toContain("readLatestCheckpointRuntimeTupleInWorker")
+    expect(handler).toContain("`thread-hydration:${event.sender.id}`")
     expect(handler).toContain("isCheckpointRuntimeProjectionCancelled(e)")
     expect(handler).toContain("throw e")
     expect(handler).not.toMatch(
@@ -221,5 +219,6 @@ describe("threads:get hydration contract", () => {
     )
     expect(handler).not.toContain("withCheckpointer")
     expect(handler).not.toContain("getLatestRuntimeTuple")
+    expect(handler).not.toContain("readLatestCheckpointTupleInWorker")
   })
 })

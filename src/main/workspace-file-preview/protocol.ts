@@ -1,7 +1,14 @@
-import type { WorkspaceFilePreviewTextResult } from "../../shared/workspace-file-preview"
+import type {
+  WorkspaceFilePreviewTextResult,
+  WorkspaceFilePreviewWorkspacePathKind
+} from "../../shared/workspace-file-preview"
 
 export type WorkspaceFilePreviewWorkerSource =
-  | { threadId: string; filePath: string }
+  | {
+      threadId: string
+      filePath: string
+      workspacePathKind: WorkspaceFilePreviewWorkspacePathKind
+    }
   | { externalFullPath: string; trustedRootPath: string }
 
 interface WorkspaceFilePreviewWorkerRequestBase {
@@ -9,16 +16,14 @@ interface WorkspaceFilePreviewWorkerRequestBase {
   cancellationBuffer: SharedArrayBuffer
 }
 
-export interface WorkspaceFilePreviewReadWorkerRequest
-  extends WorkspaceFilePreviewWorkerRequestBase {
+export interface WorkspaceFilePreviewReadWorkerRequest extends WorkspaceFilePreviewWorkerRequestBase {
   type: "read-text"
   source: WorkspaceFilePreviewWorkerSource
   workspacePath?: string
   offset: number
 }
 
-export interface WorkspaceFilePreviewInspectWorkerRequest
-  extends WorkspaceFilePreviewWorkerRequestBase {
+export interface WorkspaceFilePreviewInspectWorkerRequest extends WorkspaceFilePreviewWorkerRequestBase {
   type: "inspect"
   source: WorkspaceFilePreviewWorkerSource
   workspacePath?: string
@@ -38,15 +43,13 @@ interface WorkspaceFilePreviewWorkerSuccessBase {
   ok: true
 }
 
-export interface WorkspaceFilePreviewReadWorkerSuccess
-  extends WorkspaceFilePreviewWorkerSuccessBase {
+export interface WorkspaceFilePreviewReadWorkerSuccess extends WorkspaceFilePreviewWorkerSuccessBase {
   type: "read-text-result"
   result: WorkspaceFilePreviewTextResult
   resolvedPath: string
 }
 
-export interface WorkspaceFilePreviewInspectWorkerSuccess
-  extends WorkspaceFilePreviewWorkerSuccessBase {
+export interface WorkspaceFilePreviewInspectWorkerSuccess extends WorkspaceFilePreviewWorkerSuccessBase {
   type: "inspect-result"
   resolvedPath: string
   size: number

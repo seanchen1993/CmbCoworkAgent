@@ -5,7 +5,10 @@ import type {
   CheckpointRuntimeProjectionStats,
   LegacyCheckpointTranscriptMigrationStats
 } from "./runtime-projection-protocol"
-import { CHECKPOINT_RUNTIME_PROJECTION_CANCELLED } from "./runtime-projection-protocol"
+import {
+  CHECKPOINT_RUNTIME_PROJECTION_CANCELLED,
+  CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+} from "./runtime-projection-protocol"
 import {
   getMessageProviderTupleFromMetadata,
   normalizeCompleteSnapshotMessageIds
@@ -28,6 +31,49 @@ const LEGACY_TRANSCRIPT_FRAGMENT_CHAR_LIMIT = 16 * 1024
 const LEGACY_TRANSCRIPT_STRUCTURED_PROJECTION_BYTES = 512 * 1024
 const CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET = 8 * 1024 * 1024
 const CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT = 4_096
+const CHECKPOINT_RUNTIME_SOURCE_FIELDS_CHAR_LIMIT = 4 * 1024 * 1024
+const CHECKPOINT_RUNTIME_PROJECTION_BYTE_LIMIT = 512 * 1024
+// checkpoint_ts was added after the original base table. Worker reads preserve
+// that deployed layout by using checkpoint_id, exactly as the later saver migration does.
+const CHECKPOINT_REQUIRED_COLUMNS = [
+  "thread_id",
+  "checkpoint_ns",
+  "checkpoint_id",
+  "parent_checkpoint_id",
+  "type",
+  "checkpoint",
+  "metadata"
+] as const
+const MESSAGE_SNAPSHOT_COLUMNS = [
+  "thread_id",
+  "checkpoint_ns",
+  "checkpoint_id",
+  "parent_checkpoint_id",
+  "prefix_length",
+  "message_count",
+  "type",
+  "suffix"
+] as const
+const RUNTIME_PROJECTION_COLUMNS = [
+  "thread_id",
+  "checkpoint_ns",
+  "checkpoint_id",
+  "parent_checkpoint_id",
+  "checkpoint_ts",
+  "projection_version",
+  "type",
+  "runtime_checkpoint"
+] as const
+const WRITES_COLUMNS = [
+  "thread_id",
+  "checkpoint_ns",
+  "checkpoint_id",
+  "task_id",
+  "idx",
+  "channel",
+  "type",
+  "value"
+] as const
 
 class CheckpointRuntimeProjectionCancelledError extends Error {
   constructor() {
@@ -42,6 +88,78 @@ function throwIfCancelled(cancellation?: Int32Array): void {
   }
 }
 
+class CheckpointRuntimeProjectionSchemaNotReadyError extends Error {
+  constructor() {
+    super("Checkpoint database schema is not fully published yet")
+    this.name = CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY
+  }
+}
+
+interface CheckpointSchemaLayout {
+  hasCheckpointTs: boolean
+}
+
+function sqliteTableColumns(database: DatabaseSync, tableName: string): Set<string> {
+  const columns = database.prepare(`PRAGMA table_info("${tableName}")`).all() as Array<{
+    name?: unknown
+  }>
+  return new Set(columns.map((column) => String(column.name ?? "")))
+}
+
+function sqliteTableHasColumns(
+  database: DatabaseSync,
+  tableName: string,
+  requiredColumns: readonly string[]
+): boolean {
+  const columns = sqliteTableColumns(database, tableName)
+  return columns.size > 0 && requiredColumns.every((column) => columns.has(column))
+}
+
+function checkpointSchemaLayout(database: DatabaseSync): CheckpointSchemaLayout | null {
+  const columns = sqliteTableColumns(database, "checkpoints")
+  if (
+    columns.size === 0 ||
+    !CHECKPOINT_REQUIRED_COLUMNS.every((column) => columns.has(column))
+  ) {
+    return null
+  }
+  return { hasCheckpointTs: columns.has("checkpoint_ts") }
+}
+
+function messageSnapshotSchemaIsPublished(database: DatabaseSync): boolean {
+  return sqliteTableHasColumns(database, "checkpoint_message_snapshots", MESSAGE_SNAPSHOT_COLUMNS)
+}
+
+function runtimeProjectionSchemaIsPublished(database: DatabaseSync): boolean {
+  return sqliteTableHasColumns(
+    database,
+    "checkpoint_runtime_projections",
+    RUNTIME_PROJECTION_COLUMNS
+  )
+}
+
+function writesSchemaIsPublished(database: DatabaseSync): boolean {
+  return sqliteTableHasColumns(database, "writes", WRITES_COLUMNS)
+}
+
+function assertSchemaLayerIsPublished(published: boolean): void {
+  if (!published) throw new CheckpointRuntimeProjectionSchemaNotReadyError()
+}
+
+function assertCheckpointSchemaIsPublished(database: DatabaseSync): CheckpointSchemaLayout {
+  const layout = checkpointSchemaLayout(database)
+  if (!layout) throw new CheckpointRuntimeProjectionSchemaNotReadyError()
+  return layout
+}
+
+function assertMessageSnapshotSchemaIsPublished(database: DatabaseSync): void {
+  assertSchemaLayerIsPublished(messageSnapshotSchemaIsPublished(database))
+}
+
+function assertWritesSchemaIsPublished(database: DatabaseSync): void {
+  assertSchemaLayerIsPublished(writesSchemaIsPublished(database))
+}
+
 export interface StoredCheckpointRow {
   threadId: string
   checkpointNs: string
@@ -51,6 +169,21 @@ export interface StoredCheckpointRow {
   type: string
   checkpoint: string | Uint8Array
   metadata?: string | Uint8Array
+}
+
+interface StoredRuntimeProjectionRow {
+  threadId: string
+  checkpointNs: string
+  checkpointId: string
+  parentCheckpointId: string | null
+  checkpointTs: string
+  type: string
+  runtimeCheckpoint: string | Uint8Array
+}
+
+interface PreparedRuntimeProjectionOnly {
+  row: Omit<StoredRuntimeProjectionRow, "type" | "runtimeCheckpoint">
+  runtimeCheckpoint: Uint8Array
 }
 
 export interface PreparedRuntimeProjectionMigration {
@@ -84,20 +217,32 @@ function normalizePayload(value: unknown, label: string): string | Uint8Array {
   throw new Error(`[CheckpointRuntimeWorker] Invalid ${label} payload`)
 }
 
+function checkpointTimestampExpression(
+  layout: CheckpointSchemaLayout,
+  tableAlias?: "checkpoint" | "newer"
+): string {
+  const prefix = tableAlias ? `${tableAlias}.` : ""
+  return layout.hasCheckpointTs
+    ? `COALESCE(${prefix}checkpoint_ts, ${prefix}checkpoint_id)`
+    : `${prefix}checkpoint_id`
+}
+
 function readLatestCheckpointRow(
   database: DatabaseSync,
   threadId: string,
   checkpointNs: string,
-  includeMetadata: boolean
+  includeMetadata: boolean,
+  layout: CheckpointSchemaLayout = assertCheckpointSchemaIsPublished(database)
 ): StoredCheckpointRow | null {
+  const checkpointTimestamp = checkpointTimestampExpression(layout)
   const row = database
     .prepare(
       `SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
-              COALESCE(checkpoint_ts, checkpoint_id) AS checkpoint_ts,
+              ${checkpointTimestamp} AS checkpoint_ts,
               type, checkpoint${includeMetadata ? ", metadata" : ""}
        FROM checkpoints
        WHERE thread_id = ? AND checkpoint_ns = ?
-       ORDER BY COALESCE(checkpoint_ts, checkpoint_id) DESC, checkpoint_id DESC
+       ORDER BY ${checkpointTimestamp} DESC, checkpoint_id DESC
        LIMIT 1`
     )
     .get(threadId, checkpointNs) as Record<string, unknown> | undefined
@@ -113,17 +258,18 @@ function readLatestCheckpointRow(
     checkpointTs: String(row.checkpoint_ts ?? row.checkpoint_id ?? ""),
     type: typeof row.type === "string" ? row.type : "json",
     checkpoint: normalizePayload(row.checkpoint, "checkpoint"),
-    ...(includeMetadata
-      ? { metadata: normalizePayload(row.metadata, "checkpoint metadata") }
-      : {})
+    ...(includeMetadata ? { metadata: normalizePayload(row.metadata, "checkpoint metadata") } : {})
   }
 }
 
 function hasCurrentRuntimeProjection(
   database: DatabaseSync,
   threadId: string,
-  checkpointNs: string
+  checkpointNs: string,
+  layout: CheckpointSchemaLayout = assertCheckpointSchemaIsPublished(database)
 ): boolean {
+  const newerTimestamp = checkpointTimestampExpression(layout, "newer")
+  const checkpointTimestamp = checkpointTimestampExpression(layout, "checkpoint")
   const row = database
     .prepare(
       `SELECT 1
@@ -139,11 +285,9 @@ function hasCurrentRuntimeProjection(
            WHERE newer.thread_id = checkpoint.thread_id
              AND newer.checkpoint_ns = checkpoint.checkpoint_ns
              AND (
-               COALESCE(newer.checkpoint_ts, newer.checkpoint_id) >
-                 COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id)
+               ${newerTimestamp} > ${checkpointTimestamp}
                OR (
-                 COALESCE(newer.checkpoint_ts, newer.checkpoint_id) =
-                   COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id)
+                 ${newerTimestamp} = ${checkpointTimestamp}
                  AND newer.checkpoint_id > checkpoint.checkpoint_id
                )
              )
@@ -152,6 +296,295 @@ function hasCurrentRuntimeProjection(
     )
     .get(threadId, checkpointNs, CHECKPOINT_RUNTIME_PROJECTION_VERSION)
   return Boolean(row)
+}
+
+function sanitizeRuntimeCheckpoint(
+  value: unknown,
+  row: Pick<StoredRuntimeProjectionRow, "checkpointId" | "checkpointTs">
+): Checkpoint {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("[CheckpointRuntimeWorker] Invalid runtime checkpoint object")
+  }
+  const bounded = buildCheckpointRuntimeProjection(value as Checkpoint)
+  const channelValues =
+    bounded.channel_values &&
+    typeof bounded.channel_values === "object" &&
+    !Array.isArray(bounded.channel_values)
+      ? bounded.channel_values
+      : {}
+  return {
+    ...bounded,
+    id: row.checkpointId,
+    ts: typeof bounded.ts === "string" ? bounded.ts : row.checkpointTs,
+    channel_values: {
+      ...channelValues,
+      // Runtime hydration has a strict no-transcript contract. An explicit
+      // empty array preserves the renderer's legacy shape without allowing a
+      // forged or stale projection to smuggle checkpoint history over IPC.
+      messages: []
+    }
+  }
+}
+
+function runtimeTupleFromProjectionRow(row: StoredRuntimeProjectionRow): unknown {
+  const runtimeCheckpoint = parseTypedJson(
+    row.type,
+    row.runtimeCheckpoint,
+    "runtime checkpoint"
+  )
+  return {
+    config: {
+      configurable: {
+        thread_id: row.threadId,
+        checkpoint_ns: row.checkpointNs,
+        checkpoint_id: row.checkpointId
+      }
+    },
+    checkpoint: sanitizeRuntimeCheckpoint(runtimeCheckpoint, row),
+    ...(row.parentCheckpointId
+      ? {
+          parentConfig: {
+            configurable: {
+              thread_id: row.threadId,
+              checkpoint_ns: row.checkpointNs,
+              checkpoint_id: row.parentCheckpointId
+            }
+          }
+        }
+      : {})
+  }
+}
+
+function readCurrentRuntimeProjectionRow(
+  database: DatabaseSync,
+  threadId: string,
+  checkpointNs: string,
+  layout: CheckpointSchemaLayout
+): StoredRuntimeProjectionRow | null {
+  if (!runtimeProjectionSchemaIsPublished(database)) return null
+  const newerTimestamp = checkpointTimestampExpression(layout, "newer")
+  const checkpointTimestamp = checkpointTimestampExpression(layout, "checkpoint")
+  const row = database
+    .prepare(
+      `SELECT projection.thread_id, projection.checkpoint_ns, projection.checkpoint_id,
+              projection.parent_checkpoint_id, projection.checkpoint_ts,
+              projection.type, projection.runtime_checkpoint
+       FROM checkpoint_runtime_projections AS projection
+       JOIN checkpoints AS checkpoint
+         ON checkpoint.thread_id = projection.thread_id
+        AND checkpoint.checkpoint_ns = projection.checkpoint_ns
+        AND checkpoint.checkpoint_id = projection.checkpoint_id
+       WHERE projection.thread_id = ? AND projection.checkpoint_ns = ?
+         AND projection.projection_version = ?
+         AND length(projection.runtime_checkpoint) <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM checkpoints AS newer
+           WHERE newer.thread_id = checkpoint.thread_id
+             AND newer.checkpoint_ns = checkpoint.checkpoint_ns
+             AND (
+               ${newerTimestamp} > ${checkpointTimestamp}
+               OR (
+                 ${newerTimestamp} = ${checkpointTimestamp}
+                 AND newer.checkpoint_id > checkpoint.checkpoint_id
+               )
+             )
+         )
+       LIMIT 1`
+    )
+    .get(
+      threadId,
+      checkpointNs,
+      CHECKPOINT_RUNTIME_PROJECTION_VERSION,
+      CHECKPOINT_RUNTIME_PROJECTION_BYTE_LIMIT
+    ) as Record<string, unknown> | undefined
+  if (!row) return null
+  return {
+    threadId: String(row.thread_id ?? ""),
+    checkpointNs: String(row.checkpoint_ns ?? ""),
+    checkpointId: String(row.checkpoint_id ?? ""),
+    parentCheckpointId:
+      row.parent_checkpoint_id === null || row.parent_checkpoint_id === undefined
+        ? null
+        : String(row.parent_checkpoint_id),
+    checkpointTs: String(row.checkpoint_ts ?? row.checkpoint_id ?? ""),
+    type: typeof row.type === "string" ? row.type : "json",
+    runtimeCheckpoint: normalizePayload(row.runtime_checkpoint, "runtime checkpoint")
+  }
+}
+
+function prepareLatestRuntimeProjectionOnly(
+  database: DatabaseSync,
+  threadId: string,
+  checkpointNs: string,
+  layout: CheckpointSchemaLayout,
+  cancellation?: Int32Array
+): PreparedRuntimeProjectionOnly | null {
+  throwIfCancelled(cancellation)
+  const checkpointTimestamp = checkpointTimestampExpression(layout)
+  // A multi-path json_extract scans the legacy document in SQLite and returns
+  // only the five small runtime fields. In particular, channel_values.messages
+  // is never materialized in JavaScript, serialized again, or sent over IPC.
+  const row = database
+    .prepare(
+      `SELECT thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+              ${checkpointTimestamp} AS checkpoint_ts, type,
+              substr(
+                json_extract(
+                  CAST(checkpoint AS TEXT),
+                  '$.v',
+                  '$.id',
+                  '$.ts',
+                  '$.channel_values.todos',
+                  '$.channel_values.__interrupt__'
+                ),
+                1,
+                ?
+              ) AS runtime_fields
+       FROM checkpoints
+       WHERE thread_id = ? AND checkpoint_ns = ?
+       ORDER BY ${checkpointTimestamp} DESC, checkpoint_id DESC
+       LIMIT 1`
+    )
+    .get(CHECKPOINT_RUNTIME_SOURCE_FIELDS_CHAR_LIMIT + 1, threadId, checkpointNs) as
+    | Record<string, unknown>
+    | undefined
+  if (!row) return null
+  throwIfCancelled(cancellation)
+  const sourceType = typeof row.type === "string" ? row.type : "json"
+  if (sourceType !== "json") {
+    throw new Error(
+      `[CheckpointRuntimeWorker] Unsupported runtime checkpoint serialization: ${sourceType}`
+    )
+  }
+  const runtimeFields = row.runtime_fields
+  if (typeof runtimeFields !== "string") {
+    throw new Error("[CheckpointRuntimeWorker] Invalid runtime checkpoint JSON fields")
+  }
+  if (runtimeFields.length > CHECKPOINT_RUNTIME_SOURCE_FIELDS_CHAR_LIMIT) {
+    throw new Error("[CheckpointRuntimeWorker] Runtime checkpoint fields exceed safety limit")
+  }
+  const fields = JSON.parse(runtimeFields) as unknown
+  if (!Array.isArray(fields) || fields.length !== 5) {
+    throw new Error("[CheckpointRuntimeWorker] Invalid runtime checkpoint field projection")
+  }
+  const checkpointId = String(row.checkpoint_id ?? "")
+  const checkpointTs = String(row.checkpoint_ts ?? checkpointId)
+  const projected = buildCheckpointRuntimeProjection({
+    v: typeof fields[0] === "number" ? fields[0] : 1,
+    id: checkpointId,
+    ts: typeof fields[2] === "string" ? fields[2] : checkpointTs,
+    channel_values: {
+      ...(Array.isArray(fields[3]) ? { todos: fields[3] } : {}),
+      ...(Array.isArray(fields[4]) ? { __interrupt__: fields[4] } : {})
+    },
+    channel_versions: {},
+    versions_seen: {}
+  } as Checkpoint)
+  const runtimeCheckpoint = serializeJsonPayload(projected)
+  if (runtimeCheckpoint.byteLength > CHECKPOINT_RUNTIME_PROJECTION_BYTE_LIMIT) {
+    throw new Error("[CheckpointRuntimeWorker] Runtime projection exceeds safety limit")
+  }
+  return {
+    row: {
+      threadId: String(row.thread_id ?? ""),
+      checkpointNs: String(row.checkpoint_ns ?? ""),
+      checkpointId,
+      parentCheckpointId:
+        row.parent_checkpoint_id === null || row.parent_checkpoint_id === undefined
+          ? null
+          : String(row.parent_checkpoint_id),
+      checkpointTs
+    },
+    runtimeCheckpoint
+  }
+}
+
+function exactRuntimeProjectionSourceIsStillLatest(
+  database: DatabaseSync,
+  prepared: PreparedRuntimeProjectionOnly,
+  layout: CheckpointSchemaLayout
+): boolean {
+  const { row } = prepared
+  const newerTimestamp = checkpointTimestampExpression(layout, "newer")
+  const checkpointTimestamp = checkpointTimestampExpression(layout, "checkpoint")
+  return Boolean(
+    database
+      .prepare(
+        `SELECT 1
+         FROM checkpoints AS checkpoint
+         WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ?
+           AND checkpoint.checkpoint_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM checkpoints AS newer
+             WHERE newer.thread_id = checkpoint.thread_id
+               AND newer.checkpoint_ns = checkpoint.checkpoint_ns
+               AND (
+                 ${newerTimestamp} > ${checkpointTimestamp}
+                 OR (
+                   ${newerTimestamp} = ${checkpointTimestamp}
+                   AND newer.checkpoint_id > checkpoint.checkpoint_id
+                 )
+               )
+           )
+         LIMIT 1`
+      )
+      .get(row.threadId, row.checkpointNs, row.checkpointId)
+  )
+}
+
+function commitRuntimeProjectionOnly(
+  database: DatabaseSync,
+  prepared: PreparedRuntimeProjectionOnly,
+  layout: CheckpointSchemaLayout
+): boolean {
+  const canPersistProjection = runtimeProjectionSchemaIsPublished(database)
+  database.exec("BEGIN IMMEDIATE")
+  try {
+    if (!exactRuntimeProjectionSourceIsStillLatest(database, prepared, layout)) {
+      database.exec("ROLLBACK")
+      return false
+    }
+    if (canPersistProjection) {
+      const { row } = prepared
+      database
+        .prepare(
+          `INSERT INTO checkpoint_runtime_projections
+         (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+          checkpoint_ts, projection_version, type, runtime_checkpoint)
+         VALUES (?, ?, ?, ?, ?, ?, 'json', ?)
+         ON CONFLICT(thread_id, checkpoint_ns) DO UPDATE SET
+           checkpoint_id = excluded.checkpoint_id,
+           parent_checkpoint_id = excluded.parent_checkpoint_id,
+           checkpoint_ts = excluded.checkpoint_ts,
+           projection_version = excluded.projection_version,
+           type = excluded.type,
+           runtime_checkpoint = excluded.runtime_checkpoint
+         WHERE excluded.checkpoint_ts > checkpoint_runtime_projections.checkpoint_ts
+            OR (
+              excluded.checkpoint_ts = checkpoint_runtime_projections.checkpoint_ts
+              AND excluded.checkpoint_id >= checkpoint_runtime_projections.checkpoint_id
+            )`
+        )
+        .run(
+          row.threadId,
+          row.checkpointNs,
+          row.checkpointId,
+          row.parentCheckpointId,
+          row.checkpointTs,
+          CHECKPOINT_RUNTIME_PROJECTION_VERSION,
+          prepared.runtimeCheckpoint
+        )
+    }
+    database.exec("COMMIT")
+    return true
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK")
+    } catch {
+      // Preserve the projection write failure.
+    }
+    throw error
+  }
 }
 
 function prepareRuntimeProjectionMigrationFromCheckpoint(
@@ -216,7 +649,22 @@ export function prepareLatestRuntimeProjectionMigration(
   threadId: string,
   checkpointNs = ""
 ): PreparedRuntimeProjectionMigration | null {
-  const row = readLatestCheckpointRow(database, threadId, checkpointNs, false)
+  const layout = assertCheckpointSchemaIsPublished(database)
+  return prepareLatestRuntimeProjectionMigrationWithLayout(
+    database,
+    threadId,
+    checkpointNs,
+    layout
+  )
+}
+
+function prepareLatestRuntimeProjectionMigrationWithLayout(
+  database: DatabaseSync,
+  threadId: string,
+  checkpointNs: string,
+  layout: CheckpointSchemaLayout
+): PreparedRuntimeProjectionMigration | null {
+  const row = readLatestCheckpointRow(database, threadId, checkpointNs, false, layout)
   return row ? prepareRuntimeProjectionMigration(row) : null
 }
 
@@ -294,7 +742,17 @@ export function hasVisibleCheckpointTranscript(
   try {
     database.exec("PRAGMA busy_timeout = 5000")
     throwIfCancelled(cancellation)
-    const row = readLatestCheckpointRow(database, threadId, checkpointNs, true)
+    // Old inline-checkpoint databases predate the auxiliary snapshot,
+    // projection and writes tables. Only the authoritative checkpoint table is
+    // required until the payload proves that it references external messages.
+    const checkpointSchema = assertCheckpointSchemaIsPublished(database)
+    const row = readLatestCheckpointRow(
+      database,
+      threadId,
+      checkpointNs,
+      true,
+      checkpointSchema
+    )
     if (!row || row.metadata === undefined) return false
     throwIfCancelled(cancellation)
     if (payloadBytes(row.checkpoint) > CHECKPOINT_TRANSCRIPT_PRESENCE_BYTE_BUDGET) return true
@@ -306,8 +764,14 @@ export function hasVisibleCheckpointTranscript(
     if (Array.isArray(messages)) return messages.some(isVisibleSerializedCheckpointMessage)
     const reference = objectRecord(messages)
     if (reference?.[EXTERNAL_MESSAGES_MARKER] !== true) return false
+    // An external marker without its snapshot schema is a publication race or
+    // an incomplete legacy upgrade. Surface a transient result instead of a
+    // raw SQLite "no such table" error or an authoritative empty answer.
+    assertMessageSnapshotSchemaIsPublished(database)
     const messageCount = Number(reference.messageCount)
     if (Number.isSafeInteger(messageCount) && messageCount === 0) return false
+    // A missing/cyclic/oversized chain cannot prove the transcript empty, so
+    // preserve the mutation guard's fail-closed result.
     if (!checkpointSnapshotChainFitsPresenceBudget(database, row, cancellation)) return true
     const hydrated = hydrateRawCheckpointMessages(
       database,
@@ -326,9 +790,12 @@ export function hasVisibleCheckpointTranscript(
 
 function exactSourceIsStillLatest(
   database: DatabaseSync,
-  prepared: PreparedRuntimeProjectionMigration
+  prepared: PreparedRuntimeProjectionMigration,
+  layout: CheckpointSchemaLayout = assertCheckpointSchemaIsPublished(database)
 ): boolean {
   const { row } = prepared
+  const newerTimestamp = checkpointTimestampExpression(layout, "newer")
+  const checkpointTimestamp = checkpointTimestampExpression(layout, "checkpoint")
   const current = database
     .prepare(
       `SELECT 1
@@ -341,11 +808,9 @@ function exactSourceIsStillLatest(
            WHERE newer.thread_id = checkpoint.thread_id
              AND newer.checkpoint_ns = checkpoint.checkpoint_ns
              AND (
-               COALESCE(newer.checkpoint_ts, newer.checkpoint_id) >
-                 COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id)
+               ${newerTimestamp} > ${checkpointTimestamp}
                OR (
-                 COALESCE(newer.checkpoint_ts, newer.checkpoint_id) =
-                   COALESCE(checkpoint.checkpoint_ts, checkpoint.checkpoint_id)
+                 ${newerTimestamp} = ${checkpointTimestamp}
                  AND newer.checkpoint_id > checkpoint.checkpoint_id
                )
              )
@@ -500,28 +965,37 @@ export function ensureCheckpointRuntimeProjection(
   threadId: string,
   checkpointNs: string
 ): CheckpointRuntimeProjectionStats {
+  const emptyStats = (): CheckpointRuntimeProjectionStats => ({
+    sourceBytes: 0,
+    projectionBytes: 0,
+    inlineMessageCount: 0,
+    migrated: false,
+    stale: false
+  })
+  if (!existsSync(databasePath)) return emptyStats()
   const database = new DatabaseSync(databasePath, { timeout: 5_000 })
   try {
     database.exec("PRAGMA busy_timeout = 5000")
-    if (hasCurrentRuntimeProjection(database, threadId, checkpointNs)) {
-      return {
-        sourceBytes: 0,
-        projectionBytes: 0,
-        inlineMessageCount: 0,
-        migrated: false,
-        stale: false
-      }
+    // Projection persistence always needs its source and destination tables.
+    // Snapshot storage is asserted later only when this particular checkpoint
+    // still contains inline messages. Pending writes are unrelated.
+    const checkpointSchema = checkpointSchemaLayout(database)
+    if (!checkpointSchema || !runtimeProjectionSchemaIsPublished(database)) {
+      return emptyStats()
     }
-    const prepared = prepareLatestRuntimeProjectionMigration(database, threadId, checkpointNs)
+    if (hasCurrentRuntimeProjection(database, threadId, checkpointNs, checkpointSchema)) {
+      return emptyStats()
+    }
+    const prepared = prepareLatestRuntimeProjectionMigrationWithLayout(
+      database,
+      threadId,
+      checkpointNs,
+      checkpointSchema
+    )
     if (!prepared) {
-      return {
-        sourceBytes: 0,
-        projectionBytes: 0,
-        inlineMessageCount: 0,
-        migrated: false,
-        stale: false
-      }
+      return emptyStats()
     }
+    if (prepared.messages && !messageSnapshotSchemaIsPublished(database)) return emptyStats()
     const migrated = commitPreparedRuntimeProjection(database, prepared)
     return {
       sourceBytes: payloadBytes(prepared.row.checkpoint),
@@ -530,6 +1004,64 @@ export function ensureCheckpointRuntimeProjection(
       migrated,
       stale: !migrated
     }
+  } finally {
+    database.close()
+  }
+}
+
+/**
+ * Read renderer/runtime affordances without reconstructing checkpoint history.
+ * A current v1 projection is preferred. Legacy inline checkpoints are scanned
+ * inside SQLite for only the bounded runtime fields; external snapshot chains
+ * are never opened by this path.
+ */
+export function readLatestCheckpointRuntimeTuple(
+  databasePath: string,
+  threadId: string,
+  checkpointNs: string,
+  cancellationBuffer?: SharedArrayBuffer
+): unknown | null {
+  const cancellation = cancellationBuffer ? new Int32Array(cancellationBuffer) : undefined
+  throwIfCancelled(cancellation)
+  if (!existsSync(databasePath)) return null
+  const database = new DatabaseSync(databasePath, { timeout: 5_000 })
+  try {
+    database.exec("PRAGMA busy_timeout = 5000")
+    const layout = assertCheckpointSchemaIsPublished(database)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      throwIfCancelled(cancellation)
+      const current = readCurrentRuntimeProjectionRow(
+        database,
+        threadId,
+        checkpointNs,
+        layout
+      )
+      if (current) {
+        try {
+          return runtimeTupleFromProjectionRow(current)
+        } catch {
+          // A version-labelled row can still be corrupt or left by a broken
+          // pre-release build. Rebuild from the authoritative checkpoint.
+        }
+      }
+
+      const prepared = prepareLatestRuntimeProjectionOnly(
+        database,
+        threadId,
+        checkpointNs,
+        layout,
+        cancellation
+      )
+      if (!prepared) return null
+      throwIfCancelled(cancellation)
+      if (!commitRuntimeProjectionOnly(database, prepared, layout)) continue
+      return runtimeTupleFromProjectionRow({
+        ...prepared.row,
+        type: "json",
+        runtimeCheckpoint: prepared.runtimeCheckpoint
+      })
+    }
+    throw new Error("[CheckpointRuntimeWorker] Checkpoint changed during runtime projection read")
   } finally {
     database.close()
   }
@@ -567,6 +1099,8 @@ function hydrateRawCheckpointMessages(
   ) {
     return checkpoint
   }
+
+  assertMessageSnapshotSchemaIsPublished(database)
 
   const chain: Array<{
     checkpointId: string
@@ -1299,7 +1833,10 @@ function migrateLegacyMessagesIntoDurableRows(input: {
 }
 
 function checkpointTupleFromRaw(input: {
-  row: StoredCheckpointRow
+  row: Pick<
+    StoredCheckpointRow,
+    "threadId" | "checkpointNs" | "checkpointId" | "parentCheckpointId"
+  >
   checkpoint: Record<string, unknown>
 }): unknown {
   return {
@@ -1353,22 +1890,23 @@ export function bootstrapLegacyCheckpointTranscript(
   const checkpointDatabase = new DatabaseSync(checkpointDatabasePath, { timeout: 5_000 })
   try {
     checkpointDatabase.exec("PRAGMA busy_timeout = 5000")
-    const hasCheckpointTable = checkpointDatabase
-      .prepare(
-        `SELECT 1
-         FROM sqlite_master
-         WHERE type = 'table' AND name = 'checkpoints'
-         LIMIT 1`
-      )
-      .get()
-    if (!hasCheckpointTable) return emptyResult()
+    // Bootstrap can recover an inline legacy transcript using only the base
+    // checkpoint table. Auxiliary tables are optional optimizations unless the
+    // checkpoint itself contains an external-message marker.
+    const checkpointSchema = assertCheckpointSchemaIsPublished(checkpointDatabase)
     checkpointDatabase.exec("BEGIN")
     let row: StoredCheckpointRow | null = null
     let rawCheckpoint: Record<string, unknown> | null = null
     let hydratedCheckpoint: Record<string, unknown> | null = null
     try {
       throwIfCancelled(cancellation)
-      row = readLatestCheckpointRow(checkpointDatabase, threadId, checkpointNs, true)
+      row = readLatestCheckpointRow(
+        checkpointDatabase,
+        threadId,
+        checkpointNs,
+        true,
+        checkpointSchema
+      )
       if (!row || row.metadata === undefined) {
         checkpointDatabase.exec("COMMIT")
         return emptyResult()
@@ -1398,8 +1936,16 @@ export function bootstrapLegacyCheckpointTranscript(
 
     throwIfCancelled(cancellation)
     const prepared = prepareRuntimeProjectionMigrationFromCheckpoint(row, rawCheckpoint)
-    const projectionInstalled = commitPreparedRuntimeProjection(checkpointDatabase, prepared)
-    if (!projectionInstalled) {
+    const canPersistProjection =
+      runtimeProjectionSchemaIsPublished(checkpointDatabase) &&
+      (!prepared.messages || messageSnapshotSchemaIsPublished(checkpointDatabase))
+    // A base-only legacy database can still return an in-memory projection and
+    // migrate its transcript. Keep the stale-source CAS even when auxiliary
+    // projection persistence is unavailable.
+    const sourceStillCurrent = canPersistProjection
+      ? commitPreparedRuntimeProjection(checkpointDatabase, prepared)
+      : exactSourceIsStillLatest(checkpointDatabase, prepared, checkpointSchema)
+    if (!sourceStillCurrent) {
       throw new Error("[CheckpointRuntimeWorker] Checkpoint changed during legacy bootstrap")
     }
     throwIfCancelled(cancellation)
@@ -1446,6 +1992,31 @@ const CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT = 120_000
 const CHECKPOINT_TRANSFER_CONTENT_BLOCK_LIMIT = 80
 const CHECKPOINT_TRANSFER_BLOCK_TEXT_LIMIT = 20_000
 const CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT = 50
+// The SQLite tail reader never lets an individual serialized message enter V8
+// above this size. Oversized rows are projected to bounded scalar fields in SQL.
+const CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT = 64 * 1024
+// Invalid/non-object tail entries are skipped by the legacy transfer contract.
+// Scan a bounded cushion so malformed history cannot turn a UI read into a full
+// transcript walk while normal histories can still fill the requested window.
+const CHECKPOINT_TRANSFER_MAX_SCAN_MESSAGES = 4_096
+
+interface BoundedCheckpointTransferOptions {
+  messageLimit: number
+  messageByteBudget: number
+}
+
+interface BoundedCheckpointMessageRow {
+  messageIndex: number
+  rawMessage: string | null
+  fallbackMessage: string | null
+}
+
+interface ExternalMessageSnapshotSegment {
+  checkpointId: string
+  localStart: number
+  localEnd: number
+  globalOffset: number
+}
 
 function boundedTransferContent(value: unknown): unknown {
   if (typeof value === "string") {
@@ -1565,53 +2136,684 @@ function boundedTransferCheckpointMessage(raw: unknown, index: number): unknown 
   }
 }
 
-function buildBoundedCheckpointTransfer(
-  checkpoint: Record<string, unknown>,
-  options: { messageLimit?: number; messageByteBudget?: number },
-  cancellation?: Int32Array
-): Record<string, unknown> {
-  const channelValues = objectRecord(checkpoint.channel_values) ?? {}
-  const rawMessages = Array.isArray(channelValues.messages) ? channelValues.messages : []
-  const messageLimit = Math.min(
-    CHECKPOINT_TRANSFER_MAX_MESSAGE_LIMIT,
-    Math.max(1, Math.floor(options.messageLimit ?? CHECKPOINT_TRANSFER_DEFAULT_MESSAGE_LIMIT))
-  )
-  const byteBudget = Math.min(
-    CHECKPOINT_TRANSFER_MAX_BYTE_BUDGET,
-    Math.max(
-      1,
-      Math.floor(options.messageByteBudget ?? CHECKPOINT_TRANSFER_DEFAULT_BYTE_BUDGET)
+function normalizeBoundedCheckpointTransferOptions(options: {
+  messageLimit?: number
+  messageByteBudget?: number
+}): BoundedCheckpointTransferOptions {
+  return {
+    messageLimit: Math.min(
+      CHECKPOINT_TRANSFER_MAX_MESSAGE_LIMIT,
+      Math.max(0, Math.floor(options.messageLimit ?? CHECKPOINT_TRANSFER_DEFAULT_MESSAGE_LIMIT))
+    ),
+    messageByteBudget: Math.min(
+      CHECKPOINT_TRANSFER_MAX_BYTE_BUDGET,
+      Math.max(
+        0,
+        Math.floor(options.messageByteBudget ?? CHECKPOINT_TRANSFER_DEFAULT_BYTE_BUDGET)
+      )
     )
+  }
+}
+
+function boundedTransferCheckpointMessageFromRow(
+  row: BoundedCheckpointMessageRow
+): unknown | null {
+  const serialized = row.rawMessage ?? row.fallbackMessage
+  if (serialized === null) return null
+  return boundedTransferCheckpointMessage(
+    JSON.parse(serialized) as unknown,
+    row.messageIndex
   )
-  const messages: unknown[] = []
-  let selectedBytes = 0
-  for (let index = rawMessages.length - 1; index >= 0 && messages.length < messageLimit; index -= 1) {
-    if (messages.length % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) throwIfCancelled(cancellation)
-    const message = boundedTransferCheckpointMessage(rawMessages[index], index)
-    if (!message) continue
+}
+
+class BoundedCheckpointMessageWindow {
+  readonly messages: unknown[] = []
+  private messageBytes: number[] = []
+  private selectedBytes = 0
+
+  constructor(private readonly options: BoundedCheckpointTransferOptions) {}
+
+  get isDisabled(): boolean {
+    return this.options.messageLimit === 0 || this.options.messageByteBudget === 0
+  }
+
+  get scanMessageLimit(): number {
+    if (this.isDisabled) return 0
+    return Math.min(
+      CHECKPOINT_TRANSFER_MAX_SCAN_MESSAGES,
+      this.options.messageLimit + Math.min(64, this.options.messageLimit)
+    )
+  }
+
+  pushChronological(row: BoundedCheckpointMessageRow): void {
+    if (this.isDisabled) return
+    const message = boundedTransferCheckpointMessageFromRow(row)
+    if (!message) return
     const messageBytes = payloadBytes(JSON.stringify(message))
-    if (messages.length > 0 && selectedBytes + messageBytes > byteBudget) break
-    messages.unshift(message)
-    selectedBytes += messageBytes
+    if (messageBytes > this.options.messageByteBudget) {
+      this.messages.length = 0
+      this.messageBytes.length = 0
+      this.selectedBytes = 0
+      return
+    }
+    this.messages.push(message)
+    this.messageBytes.push(messageBytes)
+    this.selectedBytes += messageBytes
+    while (
+      this.messages.length > this.options.messageLimit ||
+      this.selectedBytes > this.options.messageByteBudget
+    ) {
+      this.messages.shift()
+      this.selectedBytes -= this.messageBytes.shift() ?? 0
+    }
+  }
+}
+
+const BOUNDED_CHECKPOINT_MESSAGE_SELECT = `
+  CAST(message.key AS INTEGER) AS message_index,
+  CASE
+    WHEN length(CAST(message.value AS BLOB)) <= ? THEN CAST(message.value AS TEXT)
+    ELSE NULL
+  END AS raw_message,
+  CASE
+    WHEN length(CAST(message.value AS BLOB)) > ? THEN
+      json_object(
+        'id', CASE
+          WHEN json_type(message.value, '$.id') = 'array'
+           AND json_type(message.value, '$.id[#-1]') = 'text'
+            THEN json_array(substr(json_extract(message.value, '$.id[#-1]'), 1, 256))
+          ELSE NULL
+        END,
+        'type', substr(
+          COALESCE(
+            CASE WHEN json_type(message.value, '$.type') = 'text'
+              THEN json_extract(message.value, '$.type') END,
+            CASE WHEN json_type(message.value, '$.kwargs.type') = 'text'
+              THEN json_extract(message.value, '$.kwargs.type') END,
+            CASE WHEN json_type(message.value, '$.role') = 'text'
+              THEN json_extract(message.value, '$.role') END,
+            CASE WHEN json_type(message.value, '$.kwargs.role') = 'text'
+              THEN json_extract(message.value, '$.kwargs.role') END,
+            'assistant'
+          ),
+          1,
+          128
+        ),
+        'content', CASE
+          WHEN json_type(message.value, '$.content') = 'text'
+            THEN substr(json_extract(message.value, '$.content'), 1, ${CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT})
+          WHEN json_type(message.value, '$.content') = 'array'
+            THEN '[Oversized structured checkpoint content omitted]'
+          WHEN json_type(message.value, '$.content') IS NOT NULL
+            AND json_type(message.value, '$.content') <> 'null'
+            THEN ''
+          WHEN json_type(message.value, '$.kwargs.content') = 'text'
+            THEN substr(json_extract(message.value, '$.kwargs.content'), 1, ${CHECKPOINT_TRANSFER_CONTENT_TEXT_LIMIT})
+          WHEN json_type(message.value, '$.kwargs.content') = 'array'
+            THEN '[Oversized structured checkpoint content omitted]'
+          ELSE ''
+        END,
+        'tool_calls', json(
+          COALESCE(
+            (
+              SELECT json_group_array(
+                json_object(
+                  'id', substr(
+                    CASE WHEN json_type(bounded_tool.tool_value, '$.id') = 'text'
+                      THEN json_extract(bounded_tool.tool_value, '$.id') END,
+                    1,
+                    256
+                  ),
+                  'name', substr(
+                    CASE WHEN json_type(bounded_tool.tool_value, '$.name') = 'text'
+                      THEN json_extract(bounded_tool.tool_value, '$.name') END,
+                    1,
+                    256
+                  ),
+                  'args', json_object()
+                )
+              )
+              FROM (
+                SELECT tool.value AS tool_value
+                FROM json_each(
+                  CASE
+                    WHEN json_type(message.value, '$.tool_calls') = 'array'
+                      THEN json_extract(message.value, '$.tool_calls')
+                    WHEN json_type(message.value, '$.tool_calls') IS NOT NULL
+                      AND json_type(message.value, '$.tool_calls') <> 'null'
+                      THEN json('[]')
+                    WHEN json_type(message.value, '$.kwargs.tool_calls') = 'array'
+                      THEN json_extract(message.value, '$.kwargs.tool_calls')
+                    ELSE json('[]')
+                  END
+                ) AS tool
+                WHERE tool.type = 'object'
+                LIMIT ${CHECKPOINT_TRANSFER_TOOL_CALL_LIMIT}
+              ) AS bounded_tool
+            ),
+            '[]'
+          )
+        ),
+        'is_error', CASE
+          WHEN json_extract(message.value, '$.is_error') = 1
+            OR json_extract(message.value, '$.kwargs.is_error') = 1
+            THEN json('true')
+          ELSE json('false')
+        END,
+        'kwargs', json_object(
+          'id', substr(
+            COALESCE(
+              CASE WHEN json_type(message.value, '$.kwargs.id') = 'text'
+                THEN json_extract(message.value, '$.kwargs.id') END,
+              CASE WHEN json_type(message.value, '$.id') = 'text'
+                THEN json_extract(message.value, '$.id') END
+            ),
+            1,
+            256
+          ),
+          'tool_call_id', substr(
+            COALESCE(
+              CASE WHEN json_type(message.value, '$.tool_call_id') = 'text'
+                THEN json_extract(message.value, '$.tool_call_id') END,
+              CASE WHEN json_type(message.value, '$.kwargs.tool_call_id') = 'text'
+                THEN json_extract(message.value, '$.kwargs.tool_call_id') END
+            ),
+            1,
+            256
+          ),
+          'name', substr(
+            COALESCE(
+              CASE WHEN json_type(message.value, '$.name') = 'text'
+                THEN json_extract(message.value, '$.name') END,
+              CASE WHEN json_type(message.value, '$.kwargs.name') = 'text'
+                THEN json_extract(message.value, '$.kwargs.name') END
+            ),
+            1,
+            256
+          ),
+          'status', substr(
+            COALESCE(
+              CASE WHEN json_type(message.value, '$.status') = 'text'
+                THEN json_extract(message.value, '$.status') END,
+              CASE WHEN json_type(message.value, '$.kwargs.status') = 'text'
+                THEN json_extract(message.value, '$.kwargs.status') END
+            ),
+            1,
+            128
+          ),
+          'is_error', CASE
+            WHEN json_extract(message.value, '$.is_error') = 1
+              OR json_extract(message.value, '$.kwargs.is_error') = 1
+              THEN json('true')
+            ELSE json('false')
+          END,
+          'additional_kwargs', json_object(
+            'cmb_internal_coordinator_notification', CASE
+              WHEN (
+                CASE
+                  WHEN json_type(message.value, '$.additional_kwargs') = 'object'
+                    THEN json_extract(message.value, '$.additional_kwargs.cmb_internal_coordinator_notification')
+                  ELSE json_extract(message.value, '$.kwargs.additional_kwargs.cmb_internal_coordinator_notification')
+                END
+              ) = 1
+                THEN json('true')
+              ELSE json('false')
+            END,
+            'is_error', CASE
+              WHEN (
+                CASE
+                  WHEN json_type(message.value, '$.additional_kwargs') = 'object'
+                    THEN json_extract(message.value, '$.additional_kwargs.is_error')
+                  ELSE json_extract(message.value, '$.kwargs.additional_kwargs.is_error')
+                END
+              ) = 1
+                THEN json('true')
+              ELSE json('false')
+            END,
+            'cmb_internal_provider_source_id', substr(
+              CASE
+                WHEN json_type(message.value, '$.additional_kwargs') = 'object'
+                  THEN CASE
+                    WHEN json_type(message.value, '$.additional_kwargs.cmb_internal_provider_source_id') = 'text'
+                      THEN json_extract(message.value, '$.additional_kwargs.cmb_internal_provider_source_id')
+                  END
+                ELSE CASE
+                  WHEN json_type(message.value, '$.kwargs.additional_kwargs.cmb_internal_provider_source_id') = 'text'
+                    THEN json_extract(message.value, '$.kwargs.additional_kwargs.cmb_internal_provider_source_id')
+                END
+              END,
+              1,
+              256
+            ),
+            'cmb_internal_provider_occurrence', CASE
+              WHEN json_type(message.value, '$.additional_kwargs') = 'object'
+                THEN CASE
+                  WHEN json_type(message.value, '$.additional_kwargs.cmb_internal_provider_occurrence') IN ('integer', 'real')
+                    THEN json_extract(message.value, '$.additional_kwargs.cmb_internal_provider_occurrence')
+                END
+              ELSE CASE
+                WHEN json_type(message.value, '$.kwargs.additional_kwargs.cmb_internal_provider_occurrence') IN ('integer', 'real')
+                  THEN json_extract(message.value, '$.kwargs.additional_kwargs.cmb_internal_provider_occurrence')
+              END
+            END
+          )
+        )
+      )
+    ELSE NULL
+  END AS fallback_message`
+
+function boundedCheckpointMessageRow(raw: Record<string, unknown>): BoundedCheckpointMessageRow {
+  const messageIndex = Number(raw.message_index)
+  if (!Number.isSafeInteger(messageIndex) || messageIndex < 0) {
+    throw new Error("[CheckpointRuntimeWorker] Invalid checkpoint message index")
   }
   return {
-    v: checkpoint.v,
-    id: checkpoint.id,
-    ts: checkpoint.ts,
+    messageIndex,
+    rawMessage: typeof raw.raw_message === "string" ? raw.raw_message : null,
+    fallbackMessage: typeof raw.fallback_message === "string" ? raw.fallback_message : null
+  }
+}
+
+function boundedCheckpointTransferFromRuntime(input: {
+  runtimeCheckpoint: Record<string, unknown>
+  messages: unknown[]
+  originalMessageCount: number
+}): Record<string, unknown> {
+  const runtimeChannelValues = objectRecord(input.runtimeCheckpoint.channel_values) ?? {}
+  return {
+    v: input.runtimeCheckpoint.v,
+    id: input.runtimeCheckpoint.id,
+    ts: input.runtimeCheckpoint.ts,
     channel_values: {
-      messages,
-      __cmb_original_message_count: rawMessages.length
+      ...runtimeChannelValues,
+      messages: input.messages,
+      __cmb_original_message_count: input.originalMessageCount
     },
     channel_versions: {},
     versions_seen: {}
   }
 }
 
+function readBoundedRuntimeCheckpoint(
+  database: DatabaseSync,
+  threadId: string,
+  checkpointNs: string,
+  layout: CheckpointSchemaLayout,
+  cancellation?: Int32Array
+): {
+  row: StoredRuntimeProjectionRow
+  runtimeCheckpoint: Record<string, unknown>
+} | null {
+  throwIfCancelled(cancellation)
+  const current = readCurrentRuntimeProjectionRow(database, threadId, checkpointNs, layout)
+  if (current) {
+    try {
+      return {
+        row: current,
+        runtimeCheckpoint: sanitizeRuntimeCheckpoint(
+          parseTypedJson(current.type, current.runtimeCheckpoint, "runtime checkpoint"),
+          current
+        ) as unknown as Record<string, unknown>
+      }
+    } catch {
+      // Rebuild a corrupt pre-release projection from bounded SQLite fields.
+    }
+  }
+  const prepared = prepareLatestRuntimeProjectionOnly(
+    database,
+    threadId,
+    checkpointNs,
+    layout,
+    cancellation
+  )
+  if (!prepared) return null
+  const row: StoredRuntimeProjectionRow = {
+    ...prepared.row,
+    type: "json",
+    runtimeCheckpoint: prepared.runtimeCheckpoint
+  }
+  return {
+    row,
+    runtimeCheckpoint: sanitizeRuntimeCheckpoint(
+      parseTypedJson(row.type, row.runtimeCheckpoint, "runtime checkpoint"),
+      row
+    ) as unknown as Record<string, unknown>
+  }
+}
+
+type BoundedCheckpointMessageSource =
+  | { kind: "empty"; messageCount: 0 }
+  | { kind: "inline"; messageCount: number }
+  | { kind: "external"; markerMessageCount: number | null }
+
+function inspectBoundedCheckpointMessageSource(
+  database: DatabaseSync,
+  row: StoredRuntimeProjectionRow
+): BoundedCheckpointMessageSource {
+  const source = database
+    .prepare(
+      `SELECT type,
+              json_type(CAST(checkpoint AS TEXT), '$.channel_values.messages') AS message_type,
+              json_array_length(CAST(checkpoint AS TEXT), '$.channel_values.messages') AS inline_count,
+              json_extract(
+                CAST(checkpoint AS TEXT),
+                '$.channel_values.messages.${EXTERNAL_MESSAGES_MARKER}'
+              ) AS external_marker,
+              json_extract(
+                CAST(checkpoint AS TEXT),
+                '$.channel_values.messages.messageCount'
+              ) AS marker_message_count
+       FROM checkpoints
+       WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+       LIMIT 1`
+    )
+    .get(row.threadId, row.checkpointNs, row.checkpointId) as
+    | Record<string, unknown>
+    | undefined
+  if (!source) {
+    throw new Error("[CheckpointRuntimeWorker] Checkpoint changed during bounded read")
+  }
+  const sourceType = typeof source.type === "string" ? source.type : "json"
+  if (sourceType !== "json") {
+    throw new Error(
+      `[CheckpointRuntimeWorker] Unsupported checkpoint serialization: ${sourceType}`
+    )
+  }
+  if (source.message_type === "array") {
+    const messageCount = Number(source.inline_count)
+    if (!Number.isSafeInteger(messageCount) || messageCount < 0) {
+      throw new Error("[CheckpointRuntimeWorker] Invalid inline checkpoint message count")
+    }
+    return { kind: "inline", messageCount }
+  }
+  if (source.message_type === "object" && Number(source.external_marker) === 1) {
+    const markerMessageCount = Number(source.marker_message_count)
+    return {
+      kind: "external",
+      markerMessageCount:
+        Number.isSafeInteger(markerMessageCount) && markerMessageCount >= 0
+          ? markerMessageCount
+          : null
+    }
+  }
+  return { kind: "empty", messageCount: 0 }
+}
+
+function readInlineBoundedCheckpointMessages(input: {
+  database: DatabaseSync
+  row: StoredRuntimeProjectionRow
+  messageCount: number
+  window: BoundedCheckpointMessageWindow
+  cancellation?: Int32Array
+}): void {
+  if (input.window.isDisabled || input.messageCount === 0) return
+  const scanStart = Math.max(0, input.messageCount - input.window.scanMessageLimit)
+  let previousIndex = scanStart - 1
+  let visited = 0
+  const rows = input.database
+    .prepare(
+      `SELECT ${BOUNDED_CHECKPOINT_MESSAGE_SELECT}
+       FROM checkpoints AS checkpoint,
+            json_each(
+              CAST(checkpoint.checkpoint AS TEXT),
+              '$.channel_values.messages'
+            ) AS message
+       WHERE checkpoint.thread_id = ? AND checkpoint.checkpoint_ns = ?
+         AND checkpoint.checkpoint_id = ?
+         AND CAST(message.key AS INTEGER) >= ?
+         AND CAST(message.key AS INTEGER) < ?
+         AND message.type = 'object'
+       ORDER BY CAST(message.key AS INTEGER)`
+    )
+    .iterate(
+      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      input.row.threadId,
+      input.row.checkpointNs,
+      input.row.checkpointId,
+      scanStart,
+      input.messageCount
+    )
+  for (const raw of rows) {
+    if (visited % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) {
+      throwIfCancelled(input.cancellation)
+    }
+    const row = boundedCheckpointMessageRow(raw)
+    if (row.messageIndex <= previousIndex || row.messageIndex >= input.messageCount) {
+      throw new Error("[CheckpointRuntimeWorker] Unordered inline checkpoint messages")
+    }
+    previousIndex = row.messageIndex
+    visited += 1
+    input.window.pushChronological(row)
+  }
+}
+
+function readExternalMessageSnapshotSegments(input: {
+  database: DatabaseSync
+  row: StoredRuntimeProjectionRow
+  markerMessageCount: number | null
+  scanMessageLimit: number
+  cancellation?: Int32Array
+}): { messageCount: number; segments: ExternalMessageSnapshotSegment[] } {
+  assertMessageSnapshotSchemaIsPublished(input.database)
+  if (input.scanMessageLimit === 0) {
+    const snapshot = input.database
+      .prepare(
+        `SELECT message_count
+         FROM checkpoint_message_snapshots
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+         LIMIT 1`
+      )
+      .get(input.row.threadId, input.row.checkpointNs, input.row.checkpointId) as
+      | Record<string, unknown>
+      | undefined
+    const messageCount = Number(snapshot?.message_count)
+    if (!snapshot || !Number.isSafeInteger(messageCount) || messageCount < 0) {
+      throw new Error(
+        `[CheckpointRuntimeWorker] Missing message snapshot: ${input.row.checkpointId}`
+      )
+    }
+    if (input.markerMessageCount !== null && input.markerMessageCount !== messageCount) {
+      throw new Error(
+        `[CheckpointRuntimeWorker] Message count mismatch: ${input.row.checkpointId}`
+      )
+    }
+    return { messageCount, segments: [] }
+  }
+  const segments: ExternalMessageSnapshotSegment[] = []
+  const visited = new Set<string>()
+  let cursor: string | null = input.row.checkpointId
+  let messageCount: number | null = null
+  let visibleStart = 0
+  let visibleEnd = 0
+  while (cursor) {
+    throwIfCancelled(input.cancellation)
+    if (visited.has(cursor) || visited.size >= CHECKPOINT_TRANSCRIPT_PRESENCE_CHAIN_LIMIT) {
+      throw new Error(`[CheckpointRuntimeWorker] Cyclic message snapshot: ${cursor}`)
+    }
+    visited.add(cursor)
+    const snapshot = input.database
+      .prepare(
+        `SELECT checkpoint_id, parent_checkpoint_id, prefix_length, message_count, type,
+                json_array_length(CAST(suffix AS TEXT)) AS suffix_count
+         FROM checkpoint_message_snapshots
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+         LIMIT 1`
+      )
+      .get(input.row.threadId, input.row.checkpointNs, cursor) as
+      | Record<string, unknown>
+      | undefined
+    if (!snapshot) {
+      throw new Error(`[CheckpointRuntimeWorker] Missing message snapshot: ${cursor}`)
+    }
+    const checkpointId = String(snapshot.checkpoint_id ?? "")
+    const prefixLength = Number(snapshot.prefix_length)
+    const snapshotMessageCount = Number(snapshot.message_count)
+    const suffixCount = Number(snapshot.suffix_count)
+    const type = typeof snapshot.type === "string" ? snapshot.type : "json"
+    if (
+      type !== "json" ||
+      !Number.isSafeInteger(prefixLength) ||
+      prefixLength < 0 ||
+      !Number.isSafeInteger(snapshotMessageCount) ||
+      snapshotMessageCount < prefixLength ||
+      !Number.isSafeInteger(suffixCount) ||
+      suffixCount !== snapshotMessageCount - prefixLength
+    ) {
+      throw new Error(`[CheckpointRuntimeWorker] Invalid message snapshot: ${checkpointId}`)
+    }
+    if (messageCount === null) {
+      messageCount = snapshotMessageCount
+      if (
+        input.markerMessageCount !== null &&
+        input.markerMessageCount !== snapshotMessageCount
+      ) {
+        throw new Error(`[CheckpointRuntimeWorker] Message count mismatch: ${checkpointId}`)
+      }
+      visibleStart = Math.max(0, messageCount - input.scanMessageLimit)
+      visibleEnd = messageCount
+    } else if (visibleEnd > snapshotMessageCount) {
+      throw new Error(`[CheckpointRuntimeWorker] Invalid message snapshot prefix: ${checkpointId}`)
+    }
+
+    const segmentStart = Math.max(prefixLength, visibleStart)
+    const segmentEnd = Math.min(snapshotMessageCount, visibleEnd)
+    if (segmentStart < segmentEnd) {
+      segments.push({
+        checkpointId,
+        localStart: segmentStart - prefixLength,
+        localEnd: segmentEnd - prefixLength,
+        globalOffset: prefixLength
+      })
+    }
+    visibleEnd = Math.min(visibleEnd, prefixLength)
+    if (visibleEnd <= visibleStart) break
+    cursor =
+      snapshot.parent_checkpoint_id === null || snapshot.parent_checkpoint_id === undefined
+        ? null
+        : String(snapshot.parent_checkpoint_id)
+  }
+  if (messageCount === null) {
+    throw new Error(`[CheckpointRuntimeWorker] Missing message snapshot: ${input.row.checkpointId}`)
+  }
+  if (visibleEnd > visibleStart) {
+    throw new Error(`[CheckpointRuntimeWorker] Missing message snapshot prefix: ${input.row.checkpointId}`)
+  }
+  return { messageCount, segments: segments.reverse() }
+}
+
+function readExternalBoundedCheckpointMessages(input: {
+  database: DatabaseSync
+  row: StoredRuntimeProjectionRow
+  segments: ExternalMessageSnapshotSegment[]
+  window: BoundedCheckpointMessageWindow
+  cancellation?: Int32Array
+}): void {
+  if (input.window.isDisabled) return
+  let previousGlobalIndex = -1
+  let visited = 0
+  const statement = input.database.prepare(
+    `SELECT ${BOUNDED_CHECKPOINT_MESSAGE_SELECT}
+     FROM checkpoint_message_snapshots AS snapshot,
+          json_each(CAST(snapshot.suffix AS TEXT)) AS message
+     WHERE snapshot.thread_id = ? AND snapshot.checkpoint_ns = ?
+       AND snapshot.checkpoint_id = ?
+       AND CAST(message.key AS INTEGER) >= ?
+       AND CAST(message.key AS INTEGER) < ?
+       AND message.type = 'object'
+     ORDER BY CAST(message.key AS INTEGER)`
+  )
+  for (const segment of input.segments) {
+    const rows = statement.iterate(
+      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      CHECKPOINT_TRANSFER_RAW_MESSAGE_BYTE_LIMIT,
+      input.row.threadId,
+      input.row.checkpointNs,
+      segment.checkpointId,
+      segment.localStart,
+      segment.localEnd
+    )
+    for (const raw of rows) {
+      if (visited % LEGACY_TRANSCRIPT_BATCH_LIMIT === 0) {
+        throwIfCancelled(input.cancellation)
+      }
+      const localRow = boundedCheckpointMessageRow(raw)
+      const globalIndex = segment.globalOffset + localRow.messageIndex
+      if (globalIndex <= previousGlobalIndex) {
+        throw new Error("[CheckpointRuntimeWorker] Unordered external checkpoint messages")
+      }
+      previousGlobalIndex = globalIndex
+      visited += 1
+      input.window.pushChronological({ ...localRow, messageIndex: globalIndex })
+    }
+  }
+}
+
+function readLatestBoundedCheckpointTuple(input: {
+  database: DatabaseSync
+  threadId: string
+  checkpointNs: string
+  layout: CheckpointSchemaLayout
+  options: { messageLimit?: number; messageByteBudget?: number }
+  cancellation?: Int32Array
+}): unknown | null {
+  const runtime = readBoundedRuntimeCheckpoint(
+    input.database,
+    input.threadId,
+    input.checkpointNs,
+    input.layout,
+    input.cancellation
+  )
+  if (!runtime) return null
+  throwIfCancelled(input.cancellation)
+  const source = inspectBoundedCheckpointMessageSource(input.database, runtime.row)
+  const window = new BoundedCheckpointMessageWindow(
+    normalizeBoundedCheckpointTransferOptions(input.options)
+  )
+  let originalMessageCount = source.kind === "external" ? 0 : source.messageCount
+  if (source.kind === "inline") {
+    readInlineBoundedCheckpointMessages({
+      database: input.database,
+      row: runtime.row,
+      messageCount: source.messageCount,
+      window,
+      cancellation: input.cancellation
+    })
+  } else if (source.kind === "external") {
+    if (window.isDisabled && source.markerMessageCount !== null) {
+      originalMessageCount = source.markerMessageCount
+    } else {
+      const external = readExternalMessageSnapshotSegments({
+        database: input.database,
+        row: runtime.row,
+        markerMessageCount: source.markerMessageCount,
+        scanMessageLimit: window.scanMessageLimit,
+        cancellation: input.cancellation
+      })
+      originalMessageCount = external.messageCount
+      readExternalBoundedCheckpointMessages({
+        database: input.database,
+        row: runtime.row,
+        segments: external.segments,
+        window,
+        cancellation: input.cancellation
+      })
+    }
+  }
+  return checkpointTupleFromRaw({
+    row: runtime.row,
+    checkpoint: boundedCheckpointTransferFromRuntime({
+      runtimeCheckpoint: runtime.runtimeCheckpoint,
+      messages: window.messages,
+      originalMessageCount
+    })
+  })
+}
+
 /**
- * Full snapshot reconstruction stays in the worker. Callers serving renderer
- * UI pass a message window so Electron main receives only a bounded tail;
- * cold internal callers may still omit options when they explicitly need the
- * complete tuple.
+ * Renderer callers pass a message window, so the worker reads a bounded SQLite
+ * tail without reconstructing the complete transcript. Cold internal callers
+ * may still omit options when they explicitly need the full checkpoint tuple.
  */
 export function readLatestCheckpointTuple(
   databasePath: string,
@@ -1627,14 +2829,46 @@ export function readLatestCheckpointTuple(
     ? new Int32Array(options.cancellationBuffer)
     : undefined
   throwIfCancelled(cancellation)
+  if (!existsSync(databasePath)) return null
   const database = new DatabaseSync(databasePath, {
     readOnly: true,
     timeout: 5_000
   })
   database.exec("PRAGMA query_only = ON")
+  let checkpointSchema: CheckpointSchemaLayout
+  try {
+    // Bounded renderer hydration only needs the authoritative checkpoint row.
+    // Snapshot and writes tables are asserted lazily when the payload/operation
+    // actually uses them, preserving compatibility with base-only inline
+    // checkpoint databases.
+    checkpointSchema = assertCheckpointSchemaIsPublished(database)
+  } catch (error) {
+    database.close()
+    throw error
+  }
   database.exec("BEGIN")
   try {
-    const row = readLatestCheckpointRow(database, threadId, checkpointNs, true)
+    const boundedTransfer =
+      options.messageLimit !== undefined || options.messageByteBudget !== undefined
+    if (boundedTransfer) {
+      const tuple = readLatestBoundedCheckpointTuple({
+        database,
+        threadId,
+        checkpointNs,
+        layout: checkpointSchema,
+        options,
+        cancellation
+      })
+      database.exec("COMMIT")
+      return tuple
+    }
+    const row = readLatestCheckpointRow(
+      database,
+      threadId,
+      checkpointNs,
+      true,
+      checkpointSchema
+    )
     if (!row || row.metadata === undefined) {
       database.exec("COMMIT")
       return null
@@ -1650,15 +2884,10 @@ export function readLatestCheckpointTuple(
       rawCheckpoint as Record<string, unknown>,
       cancellation
     )
-    const boundedTransfer =
-      options.messageLimit !== undefined || options.messageByteBudget !== undefined
-    if (boundedTransfer) {
-      database.exec("COMMIT")
-      return checkpointTupleFromRaw({
-        row,
-        checkpoint: buildBoundedCheckpointTransfer(checkpoint, options, cancellation)
-      })
-    }
+    // Full internal tuple reads include pending writes. Keep that stronger
+    // contract local to the unbounded branch instead of blocking bounded UI
+    // hydration on a table it never queries.
+    assertWritesSchemaIsPublished(database)
     const metadata = parseTypedJson(row.type, row.metadata, "checkpoint metadata")
     const pendingWrites = Array.from(
       database

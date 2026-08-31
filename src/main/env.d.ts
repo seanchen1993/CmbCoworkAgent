@@ -14,11 +14,13 @@ interface ImportMetaEnv {
   readonly VITE_LEANSTAR_PERSONAL_TOKEN_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_MOCK?: string
   readonly VITE_ES_INDEX_SKILL_EVAL?: string
+  readonly VITE_ES_INDEX_PROJECT_INFO?: string
   readonly VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS?: string
   readonly VITE_ADMIN_YST_IDS?: string
   readonly VITE_BUILTIN_ROBOT_DEBUG_YST_IDS?: string
   readonly VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_SKILL_EVAL_YST_IDS?: string
+  readonly VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS?: string
   readonly VITE_RENDER_URL?: string
   readonly VITE_PROJECT_MODE_MEMORY_ENABLED?: string
   readonly VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?: string

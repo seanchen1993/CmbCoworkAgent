@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   boundedPresence: "empty" as "empty" | "nonempty" | "unknown",
   migrationStatus: null as "migrating" | "complete" | null,
   checkpointPresence: false,
+  checkpointPresenceError: null as Error | null,
   readPage: vi.fn()
 }))
 
@@ -15,7 +16,10 @@ vi.mock("../storage", () => ({
   getThreadCheckpointPath: (threadId: string) => `${threadId}.sqlite`
 }))
 vi.mock("../checkpointer/runtime-projection-client", () => ({
-  hasVisibleCheckpointTranscriptInWorker: vi.fn(async () => mocks.checkpointPresence)
+  hasVisibleCheckpointTranscriptInWorker: vi.fn(async () => {
+    if (mocks.checkpointPresenceError) throw mocks.checkpointPresenceError
+    return mocks.checkpointPresence
+  })
 }))
 vi.mock("../thread-message-hydration/client", () => ({
   readThreadMessagesPageInWorker: mocks.readPage
@@ -30,6 +34,7 @@ beforeEach(() => {
   mocks.boundedPresence = "empty"
   mocks.migrationStatus = null
   mocks.checkpointPresence = false
+  mocks.checkpointPresenceError = null
   mocks.readPage.mockReset()
 })
 
@@ -119,5 +124,15 @@ describe("thread conversation presence mutation guard", () => {
     await expect(readThreadConversationPresenceForMutation("long-visible")).resolves.toBe(
       "nonempty"
     )
+  })
+
+  it("fails closed when checkpoint presence cannot be inspected", async () => {
+    const transient = new Error("checkpoint schema is not ready")
+    transient.name = "CHECKPOINT_RUNTIME_PROJECTION_SCHEMA_NOT_READY"
+    mocks.checkpointPresenceError = transient
+
+    await expect(
+      readThreadConversationPresenceForMutation("partial-checkpoint-schema")
+    ).rejects.toBe(transient)
   })
 })

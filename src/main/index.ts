@@ -331,9 +331,9 @@ import {
 } from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
 import {
-  flushTraceWriteQueue,
   flushPendingTraceReports,
   hasPendingTraceReports,
+  flushTraceWriteQueue,
   initializeTraceStorageSecurity,
   setTraceReporter
 } from "./agent/trace/collector"

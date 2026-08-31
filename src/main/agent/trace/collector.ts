@@ -38,6 +38,8 @@ import type {
   RoutingTrace
 } from "./types"
 import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
+import { hasSuspectedTechnicalDetailSupplement } from "./technical-detail-supplement"
+import { summarizeTraceCacheTokens } from "./token-usage"
 import { app, safeStorage } from "electron"
 import { getLocalIP } from "../../net-utils"
 import { getUserInfo } from "../../storage"
@@ -565,6 +567,7 @@ export class TraceCollector {
   private readonly threadId: string
   private readonly startedAt: string
   private readonly userMessage: string
+  private readonly suspectedTechnicalDetailSupplement: boolean
   private modelId: string
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
@@ -601,6 +604,7 @@ export class TraceCollector {
   ) {
     this.traceId = this.collectionBudget.takeText(options.traceId ?? uuid(), 256)
     this.threadId = this.collectionBudget.takeText(threadId, 256)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage)
     this.userMessage = this.collectionBudget.takeText(userMessage, 64 * 1024)
     this.modelId = this.collectionBudget.takeText(modelId, 1024)
     this.triggerSource = options.triggerSource ?? "chat"
@@ -1072,9 +1076,10 @@ export class TraceCollector {
    * Safe to call multiple times — only the first call takes effect.
    */
   finish(outcome: TraceOutcome, errorMessage?: string): Promise<AgentTrace> {
-    if (!this.finishPromise) {
-      this.finishPromise = this.finishOnce(outcome, errorMessage)
-    }
+    // Finishing touches several non-idempotent side channels (skill-eval
+    // windows, local persistence, cloud reporting, and adoption cleanup). Keep
+    // the documented first-call-wins contract even when two teardown paths race.
+    this.finishPromise ??= this.finishOnce(outcome, errorMessage)
     return this.finishPromise
   }
 
@@ -1186,6 +1191,7 @@ export class TraceCollector {
       endedAt,
       durationMs,
       userMessage: this.userMessage,
+      suspectedTechnicalDetailSupplement: this.suspectedTechnicalDetailSupplement,
       modelId: this.modelId,
       ...(this.modelName ? { modelName: this.modelName } : {}),
       userIp: this.collectionBudget.takeText(getLocalIP(), 256),
@@ -1219,6 +1225,9 @@ export class TraceCollector {
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
       modelCalls: this.modelCalls,
+      // Flattened for dashboard aggregation — `sum` cannot reach into the
+      // per-call array above.
+      ...summarizeTraceCacheTokens(this.modelCalls),
       nodes: this.finalizeNodes(
         outcome,
         endedAt,

@@ -76,6 +76,9 @@ const requestUserInputWithAutoResolutionSchema = questionsSchema
   })
   .superRefine(validateQuestionIds)
 
+const additionalTextDescription =
+  "A submitted option answer may include additionalText, an optional user-entered clarification that supplements rather than replaces the selected option; the client provides this capability automatically, so do not add it to the question options."
+
 function isFreeformOption(label: string): boolean {
   const normalized = label.trim().toLowerCase()
   const compact = normalized.replace(/[\s\p{P}\p{S}]/gu, "")
@@ -224,9 +227,11 @@ export function createRequestUserInputTool(context: RequestUserInputToolContext)
     },
     {
       name: "request_user_input",
-      description: allowAutoResolution
-        ? "Request user input for one to ten short questions and wait for the response, with optional automatic resolution for non-blocking questions."
-        : "Request user input for one to ten short questions and wait for the user's response.",
+      description: `${
+        allowAutoResolution
+          ? "Request user input for one to ten short questions and wait for the response, with optional automatic resolution for non-blocking questions."
+          : "Request user input for one to ten short questions and wait for the user's response."
+      } ${additionalTextDescription}`,
       schema
     }
   )

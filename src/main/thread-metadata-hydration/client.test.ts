@@ -297,6 +297,82 @@ describe("ThreadMetadataHydrationClient", () => {
     await expect(background).resolves.toMatchObject({ thread_id: "background" })
   })
 
+  it("allows independent list pages from the same window to finish", async () => {
+    const { database, path } = fixture()
+    const insert = database.prepare(
+      `INSERT INTO threads
+       (thread_id, created_at, updated_at, metadata, status, thread_values, title)
+       VALUES (?, ?, ?, '{}', 'idle', '{}', ?)`
+    )
+    for (let index = 0; index < 4; index += 1) {
+      insert.run(`thread-${index}`, index, index, `Thread ${index}`)
+    }
+    database.close()
+
+    const client = clientFor(path)
+    const newestPage = client.readListPage({ limit: 2 }, 7)
+    const olderPage = client.readListPage(
+      { beforeUpdatedAt: 2, beforeThreadId: "thread-2", limit: 2 },
+      7
+    )
+
+    await expect(newestPage).resolves.toMatchObject({
+      threads: [{ thread_id: "thread-3" }, { thread_id: "thread-2" }]
+    })
+    await expect(olderPage).resolves.toMatchObject({
+      threads: [{ thread_id: "thread-1" }, { thread_id: "thread-0" }]
+    })
+  })
+
+  it("coalesces rapid first-page refreshes into one bounded trailing request", async () => {
+    const worker = new FakeMetadataWorker()
+    const client = new ThreadMetadataHydrationClient(
+      async () => worker as unknown as Worker,
+      () => "C:\\fixture.db"
+    )
+    clients.push(client)
+
+    const first = client.readListPage({ limit: 2 }, 7)
+    const replacements = Array.from({ length: 12 }, () =>
+      client.readListPage({ limit: 2 }, 7)
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(worker.queryMessages).toHaveLength(1)
+
+    const firstRequestId = worker.queryMessages[0]?.requestId
+    worker.emit("message", {
+      type: "read-list-page-result",
+      requestId: firstRequestId,
+      ok: true,
+      threads: [{ thread_id: "stale" }],
+      beforeUpdatedAt: null,
+      beforeThreadId: null,
+      hasMore: false,
+      stats: { sourceBytes: 0, responseBytes: 0, truncated: false }
+    })
+    await expect(first).resolves.toMatchObject({ threads: [{ thread_id: "stale" }] })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(worker.queryMessages).toHaveLength(2)
+
+    const trailingRequestId = worker.queryMessages[1]?.requestId
+    worker.emit("message", {
+      type: "read-list-page-result",
+      requestId: trailingRequestId,
+      ok: true,
+      threads: [{ thread_id: "fresh" }],
+      beforeUpdatedAt: null,
+      beforeThreadId: null,
+      hasMore: false,
+      stats: { sourceBytes: 0, responseBytes: 0, truncated: false }
+    })
+    await expect(Promise.all(replacements)).resolves.toEqual(
+      Array.from({ length: 12 }, () =>
+        expect.objectContaining({ threads: [{ thread_id: "fresh" }] })
+      )
+    )
+    expect(worker.queryMessages).toHaveLength(2)
+  })
+
   it("hydrates large goal-event history off-thread with a hard response budget", async () => {
     const { database, path } = fixture()
     const insert = database.prepare(
@@ -345,9 +421,18 @@ describe("ThreadMetadataHydrationClient", () => {
 
 class FakeMetadataWorker extends EventEmitter {
   postError: Error | null = null
+  readonly queryMessages: Array<{ requestId: number }> = []
 
-  postMessage(): void {
+  postMessage(message?: unknown): void {
     if (this.postError) throw this.postError
+    if (
+      message &&
+      typeof message === "object" &&
+      "requestId" in message &&
+      typeof message.requestId === "number"
+    ) {
+      this.queryMessages.push({ requestId: message.requestId })
+    }
   }
 
   unref(): this {

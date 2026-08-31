@@ -29,6 +29,7 @@ vi.mock("../skill-eval/window", () => ({
 
 import {
   flushPendingTraceReports,
+  flushTraceWriteQueue,
   hasPendingTraceReports,
   setTraceReporter,
   TraceCollector
@@ -40,6 +41,7 @@ let previousTracesDir: string | undefined
 
 beforeEach(async () => {
   await flushPendingTraceReports(1_000)
+  await flushTraceWriteQueue()
   tracesDir = mkdtempSync(join(tmpdir(), "trace-collector-test-"))
   previousStorageMode = process.env.CMB_COWORK_TRACE_STORAGE_MODE
   previousTracesDir = process.env.CMB_COWORK_TRACES_DIR
@@ -49,6 +51,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await flushPendingTraceReports(1_000)
+  await flushTraceWriteQueue()
   setTraceReporter({
     async report() {
       return undefined
@@ -76,7 +79,7 @@ describe("TraceCollector completion", () => {
 
     expect(duplicateFinish).toBe(firstFinish)
     const [firstTrace, duplicateTrace] = await Promise.all([firstFinish, duplicateFinish])
-    await flushPendingTraceReports(1_000)
+    await Promise.all([flushPendingTraceReports(1_000), flushTraceWriteQueue()])
 
     expect(firstTrace).toBe(duplicateTrace)
     expect(firstTrace.outcome).toBe("cancelled")

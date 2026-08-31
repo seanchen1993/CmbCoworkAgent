@@ -28,6 +28,16 @@ class FakeTracer {
   modelName: string | undefined
   stepCount = 0
   endedStepCount = 0
+  private traceContext: TraceContext | undefined
+
+  setTraceContext(context: TraceContext): void {
+    this.traceContext = context
+  }
+
+  getTraceContext(): TraceContext {
+    if (!this.traceContext) throw new Error("fake trace context is not initialized")
+    return this.traceContext
+  }
 
   setModelName(name: string): void {
     this.modelName = name
@@ -159,6 +169,28 @@ function createHarness(
         creations.push({ threadId, message, modelId, options: traceOptions })
         if (options.failCreate) return undefined
         const tracer = throwingTracer ?? new FakeTracer()
+        const traceId = `child-trace-${traceOptions.subagentRunId ?? threadId}`
+        tracer.setTraceContext({
+          traceId,
+          threadId,
+          rootNodeId: `trace:${traceId}`,
+          observabilitySchemaVersion: 1,
+          traceKind: traceOptions.traceKind ?? "root",
+          executionMode: traceOptions.executionMode ?? "normal",
+          rootTraceId: traceOptions.rootTraceId ?? traceId,
+          rootThreadId: traceOptions.rootThreadId ?? threadId,
+          parentTraceId: traceOptions.parentTraceId,
+          parentThreadId: traceOptions.parentThreadId,
+          parentSpanId: traceOptions.parentSpanId,
+          linkType: traceOptions.linkType,
+          subagentKind: traceOptions.subagentKind,
+          subagentRunId: traceOptions.subagentRunId,
+          subagentThreadId: traceOptions.subagentThreadId,
+          handoffAction: traceOptions.handoffAction,
+          handoffSourceAgent: traceOptions.handoffSourceAgent,
+          handoffTargetAgent: traceOptions.handoffTargetAgent,
+          harnessFeature: traceOptions.harnessFeature
+        })
         tracers.set(traceOptions.subagentRunId ?? threadId, tracer)
         return tracer as unknown as TraceCollector
       },
@@ -211,6 +243,15 @@ describe("SoloTaskTraceManager", () => {
       }
     })
     expect(manager.hasCapturedTask("task/call:1")).toBe(false)
+    expect(manager.getTraceContextForOwner("task/call:1")).toMatchObject({
+      traceId: "child-trace-task/call:1",
+      threadId: "root-thread__task_task_call_1",
+      rootTraceId: "root-trace",
+      rootThreadId: "root-thread",
+      parentTraceId: "root-trace",
+      subagentRunId: "task/call:1",
+      harnessFeature: parent.harnessFeature
+    })
 
     const beforeModel = manager.middleware.beforeModel
     if (typeof beforeModel !== "function") throw new Error("beforeModel hook missing")
@@ -270,6 +311,7 @@ describe("SoloTaskTraceManager", () => {
 
     manager.finishTask("task/call:1", "success", "done")
     manager.finishTask("task/call:1", "success", "duplicate")
+    expect(manager.getTraceContextForOwner("task/call:1")).toBeUndefined()
     expect(tracer.terminals).toHaveLength(1)
     expect(finishes).toHaveLength(1)
     expect(finishes[0]).toMatchObject({ outcome: "success", error: undefined })

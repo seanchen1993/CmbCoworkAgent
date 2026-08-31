@@ -1,13 +1,19 @@
 import {
+  appendFileSync,
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
+  truncateSync,
   utimesSync,
-  writeFileSync
+  writeFileSync,
+  writeSync
 } from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
@@ -16,8 +22,12 @@ import {
   getTraceLocalStorage,
   getTraceStorageCacheDiagnostics,
   resolveTraceStorageMode,
+  TRACE_INVENTORY_MAX_DIRECTORIES,
+  TRACE_INVENTORY_MAX_ENTRIES,
+  TRACE_INVENTORY_MAX_FILES,
   TraceLocalStorage,
-  type TraceKeyProtector
+  type TraceKeyProtector,
+  type TraceStorageInitializationResult
 } from "./local-storage"
 
 class TestKeyProtector implements TraceKeyProtector {
@@ -57,6 +67,17 @@ function makeRoot(prefix: string): string {
   return root
 }
 
+function readFilePrefix(filePath: string, length: number): string {
+  const descriptor = openSync(filePath, "r")
+  const prefix = Buffer.alloc(length)
+  try {
+    const bytesRead = readSync(descriptor, prefix, 0, length, 0)
+    return prefix.subarray(0, bytesRead).toString("utf8")
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true })
@@ -64,6 +85,14 @@ afterEach(() => {
 })
 
 describe("encrypted local trace storage", () => {
+  it("keeps bounded inventory capacity above observed long-lived stores", () => {
+    expect(TRACE_INVENTORY_MAX_DIRECTORIES).toBeGreaterThanOrEqual(8_192)
+    expect(TRACE_INVENTORY_MAX_FILES).toBeGreaterThanOrEqual(16_384)
+    expect(TRACE_INVENTORY_MAX_ENTRIES).toBeGreaterThanOrEqual(
+      TRACE_INVENTORY_MAX_DIRECTORIES + TRACE_INVENTORY_MAX_FILES
+    )
+  })
+
   it("keeps sensitive trace content out of both JSONL and the wrapped key file", async () => {
     const root = makeRoot("trace-storage-encrypted-")
     const storage = new TraceLocalStorage(root, {
@@ -352,6 +381,49 @@ describe("encrypted local trace storage", () => {
     expect(existsSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME))).toBe(false)
   })
 
+  it("resumes a byte-budgeted migration without rereading verified files", async () => {
+    const root = makeRoot("trace-storage-budget-resume-")
+    const legacyFiles = Array.from({ length: 3 }, (_, index) => {
+      const traceFile = join(root, `thread-${index}`, `trace-${index}.jsonl`)
+      mkdirSync(dirname(traceFile), { recursive: true })
+      writeFileSync(
+        traceFile,
+        `${JSON.stringify({ secret: `legacy-${index}-${"x".repeat(80)}` })}\n`
+      )
+      return traceFile
+    })
+
+    const migrationResults: TraceStorageInitializationResult[] = []
+    for (let launch = 0; launch < legacyFiles.length; launch += 1) {
+      const storage = new TraceLocalStorage(root, {
+        mode: "encrypted",
+        protector: new TestKeyProtector(),
+        migrationMaxTotalBytes: 64
+      })
+      migrationResults.push(await storage.initialize())
+    }
+
+    expect(migrationResults.map((result) => result.migratedFiles)).toEqual([1, 1, 1])
+    expect(migrationResults.every((result) => result.failedFiles === 0)).toBe(true)
+    expect(existsSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME))).toBe(false)
+    expect(existsSync(join(root, MIGRATION_MARKER_FILE_NAME))).toBe(true)
+    for (const traceFile of legacyFiles) {
+      expect(readFileSync(traceFile, "utf8")).not.toContain("legacy-")
+    }
+
+    const verified = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector(),
+      migrationMaxTotalBytes: 64
+    })
+    expect(await verified.initialize()).toMatchObject({
+      migratedFiles: 0,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: true
+    })
+  })
+
   it("drops an oversized append before encryption or filesystem work", async () => {
     const root = makeRoot("trace-storage-append-budget-")
     const storage = new TraceLocalStorage(root, {
@@ -379,6 +451,347 @@ describe("encrypted local trace storage", () => {
     expect(storedLine).not.toContain("s".repeat(1024))
     expect(storage.decodeStoredLine(storedLine)).toContain("oversized legacy trace omitted")
   })
+
+  it("streams legacy files above the in-memory migration limit", async () => {
+    const root = makeRoot("trace-storage-large-legacy-file-")
+    const traceFile = join(root, "thread", "large-legacy.jsonl")
+    mkdirSync(dirname(traceFile), { recursive: true })
+    writeFileSync(traceFile, `{"secret":"${"s".repeat(8 * 1024 * 1024)}"}\n`, "utf8")
+    const storage = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+
+    expect(await storage.initialize()).toMatchObject({ migratedFiles: 1, failedFiles: 0 })
+    const storedLine = readFileSync(traceFile, "utf8").trim()
+    expect(storedLine).not.toContain("s".repeat(1024))
+    expect(storage.decodeStoredLine(storedLine)).toContain("oversized legacy trace omitted")
+  })
+
+  it("preserves large encrypted envelopes during a later streaming verification", async () => {
+    const root = makeRoot("trace-storage-large-envelope-recheck-")
+    const traceFile = join(root, "thread", "large-envelopes.jsonl")
+    mkdirSync(dirname(traceFile), { recursive: true })
+    const legacyLine = JSON.stringify({ payload: "v".repeat(1400 * 1024) })
+    writeFileSync(traceFile, `${legacyLine}\n`.repeat(6), "utf8")
+    const first = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await first.initialize()).toMatchObject({ migratedFiles: 1, failedFiles: 0 })
+    const encryptedContent = readFileSync(traceFile, "utf8")
+    expect(encryptedContent).not.toContain("v".repeat(1024))
+    rmSync(join(root, MIGRATION_MARKER_FILE_NAME))
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await restarted.initialize()).toMatchObject({
+      migratedFiles: 0,
+      protectedFiles: 1,
+      failedFiles: 0
+    })
+    expect(readFileSync(traceFile, "utf8")).toBe(encryptedContent)
+  })
+
+  it("defers a valid encrypted file above the single-launch budget without changing it", async () => {
+    const root = makeRoot("trace-storage-valid-oversized-encrypted-")
+    const traceFile = join(root, "valid-encrypted.jsonl")
+    const writer = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    await writer.initialize()
+    await writer.appendJsonLine(traceFile, JSON.stringify({ payload: "v".repeat(900 * 1024) }))
+    const encryptedLine = readFileSync(traceFile)
+    for (let index = 1; index < 56; index += 1) appendFileSync(traceFile, encryptedLine)
+    const originalStat = statSync(traceFile)
+    expect(originalStat.size).toBeGreaterThan(64 * 1024 * 1024)
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    const deferred = await restarted.initialize()
+    expect(deferred).toMatchObject({
+      migratedFiles: 0,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    expect(deferred.reason).toContain("deferred 1 file")
+    expect(statSync(traceFile).size).toBe(originalStat.size)
+    const descriptor = openSync(traceFile, "r")
+    const retainedPrefix = Buffer.alloc(encryptedLine.length)
+    try {
+      expect(readSync(descriptor, retainedPrefix, 0, retainedPrefix.length, 0)).toBe(
+        encryptedLine.length
+      )
+    } finally {
+      closeSync(descriptor)
+    }
+    expect(retainedPrefix).toEqual(encryptedLine)
+    expect(existsSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME))).toBe(true)
+
+    const changedDescriptor = openSync(traceFile, "r+")
+    try {
+      const plaintextPrefix = Buffer.from('{"secret":"changed-before-probe-offset"}\n', "utf8")
+      expect(writeSync(changedDescriptor, plaintextPrefix, 0, plaintextPrefix.length, 0)).toBe(
+        plaintextPrefix.length
+      )
+    } finally {
+      closeSync(changedDescriptor)
+    }
+    const changedRestart = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await changedRestart.initialize()).toMatchObject({
+      migratedFiles: 1,
+      protectedFiles: 0,
+      failedFiles: 0
+    })
+    const replacement = readFileSync(traceFile, "utf8").trim()
+    expect(replacement).not.toContain("changed-before-probe-offset")
+    expect(JSON.parse(changedRestart.decodeStoredLine(replacement))).toMatchObject({
+      traceStorageNotice: "oversized legacy trace file omitted during migration",
+      originalBytes: originalStat.size
+    })
+  }, 20_000)
+
+  it("resumes oversized probes until plaintext after an encrypted prefix is secured", async () => {
+    const root = makeRoot("trace-storage-oversized-mixed-tail-")
+    const traceFile = join(root, "mixed-tail.jsonl")
+    const writer = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    await writer.initialize()
+    await writer.appendJsonLine(traceFile, JSON.stringify({ payload: "v".repeat(900 * 1024) }))
+    const encryptedLine = readFileSync(traceFile)
+    for (let index = 1; index < 8; index += 1) appendFileSync(traceFile, encryptedLine)
+    const plaintextOffset = statSync(traceFile).size
+    appendFileSync(traceFile, '{"secret":"plaintext-after-encrypted-prefix"}\n', "utf8")
+    expect(plaintextOffset).toBeGreaterThan(8 * 1024 * 1024)
+    const originalBytes = 64 * 1024 * 1024 + 1
+    truncateSync(traceFile, originalBytes)
+
+    const firstRestart = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await firstRestart.initialize()).toMatchObject({
+      migratedFiles: 0,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    const progress = JSON.parse(
+      readFileSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME), "utf8")
+    ) as {
+      oversizedProbeOffsets?: Record<string, { offset?: unknown; size?: unknown }>
+    }
+    expect(progress.oversizedProbeOffsets?.["mixed-tail.jsonl"]).toMatchObject({
+      size: originalBytes
+    })
+    expect(progress.oversizedProbeOffsets?.["mixed-tail.jsonl"]?.offset).toEqual(expect.any(Number))
+
+    const secondRestart = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await secondRestart.initialize()).toMatchObject({
+      migratedFiles: 1,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    const storedLine = readFileSync(traceFile, "utf8").trim()
+    expect(storedLine).not.toContain("plaintext-after-encrypted-prefix")
+    expect(JSON.parse(secondRestart.decodeStoredLine(storedLine))).toMatchObject({
+      traceStorageNotice: "oversized legacy trace file omitted during migration",
+      originalBytes
+    })
+    expect(existsSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME))).toBe(false)
+    expect(existsSync(join(root, MIGRATION_MARKER_FILE_NAME))).toBe(true)
+  }, 30_000)
+
+  it("secures a clearly plaintext oversized file without starving later small files", async () => {
+    const root = makeRoot("trace-storage-hard-file-budget-")
+    const traceFile = join(root, "thread", "unexpectedly-huge.jsonl")
+    const smallTraceFile = join(root, "small-legacy.jsonl")
+    mkdirSync(dirname(traceFile), { recursive: true })
+    writeFileSync(traceFile, '{"secret":"legacy-prefix"}\n', "utf8")
+    writeFileSync(smallTraceFile, '{"secret":"small-legacy"}\n', "utf8")
+    const originalBytes = 64 * 1024 * 1024 + 1
+    truncateSync(traceFile, originalBytes)
+    const storage = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+
+    const initialized = await storage.initialize()
+    expect(initialized).toMatchObject({
+      migratedFiles: 2,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    const smallStoredLine = readFileSync(smallTraceFile, "utf8").trim()
+    expect(storage.decodeStoredLine(smallStoredLine)).toBe('{"secret":"small-legacy"}')
+    const storedLine = readFileSync(traceFile, "utf8").trim()
+    expect(statSync(traceFile).size).toBeLessThan(1024)
+    expect(storedLine).not.toContain("legacy-prefix")
+    expect(JSON.parse(storage.decodeStoredLine(storedLine))).toMatchObject({
+      traceStorageNotice: "oversized legacy trace file omitted during migration",
+      originalBytes,
+      migrationLimitBytes: 64 * 1024 * 1024
+    })
+    expect(existsSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME))).toBe(false)
+    expect(existsSync(join(root, MIGRATION_MARKER_FILE_NAME))).toBe(true)
+  }, 20_000)
+
+  it("secures an oversized file whose first encrypted envelope is corrupt", async () => {
+    const root = makeRoot("trace-storage-corrupt-oversized-envelope-")
+    const traceFile = join(root, "corrupt-envelope.jsonl")
+    const writer = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    await writer.initialize()
+    await writer.appendJsonLine(traceFile, '{"secret":"damaged-envelope"}')
+    const envelope = JSON.parse(readFileSync(traceFile, "utf8")) as Record<string, unknown>
+    envelope.authTag = Buffer.alloc(16).toString("base64")
+    writeFileSync(traceFile, `${JSON.stringify(envelope)}\n`, "utf8")
+    const originalBytes = 64 * 1024 * 1024 + 1
+    truncateSync(traceFile, originalBytes)
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await restarted.initialize()).toMatchObject({
+      migratedFiles: 1,
+      protectedFiles: 0,
+      failedFiles: 0
+    })
+    const storedLine = readFileSync(traceFile, "utf8").trim()
+    expect(JSON.parse(restarted.decodeStoredLine(storedLine))).toMatchObject({
+      traceStorageNotice: "oversized legacy trace file omitted during migration",
+      originalBytes
+    })
+  })
+
+  it("secures a valid oversized legacy record once and skips it on the next launch", async () => {
+    const root = makeRoot("trace-storage-unterminated-oversized-")
+    const traceFile = join(root, "thread", "large-valid-legacy.jsonl")
+    mkdirSync(dirname(traceFile), { recursive: true })
+    writeFileSync(traceFile, '{"secret":"', "utf8")
+    const payloadChunk = "S".repeat(1024 * 1024)
+    for (let index = 0; index < 65; index += 1) appendFileSync(traceFile, payloadChunk)
+    appendFileSync(traceFile, '"}\n', "utf8")
+    const originalBytes = statSync(traceFile).size
+    expect(originalBytes).toBeGreaterThan(64 * 1024 * 1024)
+
+    const storage = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    const initialized = await storage.initialize()
+    expect(initialized).toMatchObject({
+      migratedFiles: 1,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    const storedLine = readFileSync(traceFile, "utf8").trim()
+    expect(statSync(traceFile).size).toBeLessThan(1024)
+    expect(JSON.parse(storedLine)).toMatchObject({
+      format: "cmbcowork.trace",
+      version: 1,
+      algorithm: "aes-256-gcm"
+    })
+    expect(JSON.parse(storage.decodeStoredLine(storedLine))).toMatchObject({
+      traceStorageNotice: "oversized legacy trace file omitted during migration",
+      originalBytes
+    })
+    expect(existsSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME))).toBe(false)
+    expect(existsSync(join(root, MIGRATION_MARKER_FILE_NAME))).toBe(true)
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await restarted.initialize()).toMatchObject({
+      migratedFiles: 0,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: true
+    })
+  }, 30_000)
+
+  it("preserves bounded prefixes that could still be reordered or truncated envelopes", async () => {
+    const root = makeRoot("trace-storage-possible-envelope-prefix-")
+    const reorderedFile = join(root, "reordered-envelope.jsonl")
+    const truncatedKeyFile = join(root, "truncated-envelope-key.jsonl")
+    const originalBytes = 64 * 1024 * 1024 + 1
+    writeFileSync(reorderedFile, '{"ciphertext":"possibly-reordered', "utf8")
+    const probeBytes = 8 * 1024 * 1024 + 2
+    writeFileSync(truncatedKeyFile, `{${" ".repeat(probeBytes - 5)}"for`, "utf8")
+    truncateSync(reorderedFile, originalBytes)
+    truncateSync(truncatedKeyFile, originalBytes)
+
+    const storage = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    const deferred = await storage.initialize()
+    expect(deferred).toMatchObject({
+      migratedFiles: 0,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    expect(deferred.reason).toContain("deferred 2 file")
+    expect(statSync(reorderedFile).size).toBe(originalBytes)
+    expect(statSync(truncatedKeyFile).size).toBe(originalBytes)
+    expect(readFilePrefix(reorderedFile, 32)).toContain("ciphertext")
+    expect(readFilePrefix(truncatedKeyFile, probeBytes).endsWith('"for')).toBe(true)
+    expect(existsSync(join(root, MIGRATION_IN_PROGRESS_FILE_NAME))).toBe(true)
+  }, 20_000)
+
+  it("migrates stores beyond the former 2048-directory scan limit and then skips content work", async () => {
+    const root = makeRoot("trace-storage-many-directories-")
+    const directoryCount = 2_049
+    for (let index = 0; index < directoryCount; index += 1) {
+      mkdirSync(join(root, `thread-${index}`), { recursive: true })
+    }
+    const traceFile = join(root, `thread-${directoryCount - 1}`, "legacy.jsonl")
+    writeFileSync(traceFile, '{"secret":"beyond-old-directory-limit"}\n', "utf8")
+
+    const first = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await first.initialize()).toMatchObject({
+      migratedFiles: 1,
+      failedFiles: 0,
+      migrationSkipped: false
+    })
+    expect(readFileSync(traceFile, "utf8")).not.toContain("beyond-old-directory-limit")
+
+    const restarted = new TraceLocalStorage(root, {
+      mode: "encrypted",
+      protector: new TestKeyProtector()
+    })
+    expect(await restarted.initialize()).toMatchObject({
+      migratedFiles: 0,
+      protectedFiles: 0,
+      failedFiles: 0,
+      migrationSkipped: true
+    })
+  }, 30_000)
 })
 
 describe("trace storage modes", () => {
@@ -412,9 +825,9 @@ describe("trace storage modes", () => {
     expect(await plaintext.initialize()).toMatchObject({ ready: true })
     expect(existsSync(markerPath)).toBe(false)
     const traceFile = join(root, "thread-legacy", "legacy.jsonl")
-    expect(
-      await plaintext.appendJsonLine(traceFile, '{"secret":"plaintext-after-marker"}')
-    ).toBe(true)
+    expect(await plaintext.appendJsonLine(traceFile, '{"secret":"plaintext-after-marker"}')).toBe(
+      true
+    )
 
     const restarted = new TraceLocalStorage(root, {
       mode: "encrypted",
