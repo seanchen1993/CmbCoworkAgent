@@ -4013,6 +4013,17 @@ const api = {
   },
   requirements: {
     list: (): Promise<RequirementRuntimeItem[]> => ipcRenderer.invoke("requirements:list"),
+    getToken: () =>
+      ipcRenderer.invoke("requirements:get-token") as Promise<{
+        success: boolean
+        token: string
+        error?: string
+      }>,
+    saveToken: (token: string) =>
+      ipcRenderer.invoke("requirements:save-token", token) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     create: (payload: {
       systemId: string
       title: string

@@ -21,7 +21,7 @@ function RequirementControls(): React.JSX.Element {
     <div className="flex h-8 items-center gap-1.5">
       <label
         htmlFor="requirement-system-select"
-        className="whitespace-nowrap text-[11px] font-semibold text-[#756a5f]"
+        className="whitespace-nowrap text-[12px] font-semibold text-[#756a5f]"
       >
         需求系统
       </label>
@@ -33,16 +33,16 @@ function RequirementControls(): React.JSX.Element {
       >
         <SelectTrigger
           id="requirement-system-select"
-          className="h-8 w-[132px] rounded-[7px] border-[#e3d9ce] bg-white px-2.5 text-[11px] font-semibold text-[#5d554d] shadow-none"
+          className="h-8 w-[132px] rounded-[7px] border-[#e3d9ce] bg-white px-2.5 text-[12px] font-semibold text-[#5d554d] shadow-none"
         >
           <SelectValue placeholder="全部" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={ALL_REQUIREMENT_SYSTEMS_VALUE} className="text-xs">
+          <SelectItem value={ALL_REQUIREMENT_SYSTEMS_VALUE} className="text-sm">
             全部
           </SelectItem>
           {systemList.map((system) => (
-            <SelectItem key={system.id} value={system.id} className="text-xs">
+            <SelectItem key={system.id} value={system.id} className="text-sm">
               {system.name}
             </SelectItem>
           ))}
@@ -65,7 +65,7 @@ export function RequirementBreadcrumbHeader({
     <header className="flex min-h-[52px] shrink-0 items-center border-b border-[#dcd2c6] bg-[#fdfbf8] px-6 shadow-[0_2px_8px_rgba(77,56,38,0.035)] lg:px-8">
       <nav
         aria-label={ariaLabel}
-        className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground"
+        className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground"
       >
         {items.map((item, index) => {
           const isCurrent = index === items.length - 1

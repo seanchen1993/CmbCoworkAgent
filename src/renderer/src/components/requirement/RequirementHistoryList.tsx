@@ -30,7 +30,8 @@ import {
 import { filterRequirementsBySystem } from "./requirement-history-filter"
 
 const PAGE_SIZE = 10
-const HISTORY_GRID_COLUMNS = "grid-cols-[88px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
+const HISTORY_GRID_COLUMNS =
+  "grid-cols-[88px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
 
 const SYSTEM_COLOR_OPTIONS = [
   { text: "#9b4b3a", background: "#fcebe5" },
@@ -79,7 +80,7 @@ function RequirementSystem({
       style={{ backgroundColor: color.background, color: color.text }}
       title={name}
     >
-      <span className="flex size-5 shrink-0 items-center justify-center rounded-[5px] bg-white/70 text-[10px] font-bold">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-[5px] bg-white/70 text-[11px] font-bold">
         {name.slice(0, 1)}
       </span>
       <span className="min-w-0 truncate">{name}</span>
@@ -150,7 +151,7 @@ function RequirementWorkDir({
             }
           }}
           className={cn(
-            "min-w-0 cursor-help truncate font-mono text-[10px] outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-[#c26b4f]/45",
+            "min-w-0 cursor-help truncate font-mono text-[11px] outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-[#c26b4f]/45",
             missing ? "text-[#a65a3e]" : path ? "text-[#74695f]" : "text-[#a59a8f]"
           )}
           aria-label={path ? `工作目录：${path}` : "未关联工作目录"}
@@ -162,17 +163,17 @@ function RequirementWorkDir({
         side="top"
         align="start"
         sideOffset={6}
-        className="w-auto max-w-[360px] p-2.5 text-xs"
+        className="w-auto max-w-[360px] p-2.5 text-sm"
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
         onPointerEnter={showPopover}
         onPointerLeave={hidePopover}
       >
         <div className="mb-1 font-semibold text-[#74695f]">工作目录</div>
-        <div className="break-all font-mono text-[10.5px] leading-4 text-[#302a25]">
+        <div className="break-all font-mono text-[11.5px] leading-4 text-[#302a25]">
           {path || "未关联工作目录"}
         </div>
-        {missing ? <div className="mt-1 text-[10px] text-[#a65a3e]">工作目录已删除</div> : null}
+        {missing ? <div className="mt-1 text-[11px] text-[#a65a3e]">工作目录已删除</div> : null}
       </PopoverContent>
     </Popover>
   )
@@ -276,7 +277,7 @@ export function RequirementHistoryList({
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="px-0 pb-3">
             <div
-              className={`${HISTORY_GRID_COLUMNS} grid items-center gap-2.5 whitespace-nowrap border-b border-[#f0f0f0] bg-[#fbf9f6] px-3 text-[10.5px] text-[#958a7f]`}
+              className={`${HISTORY_GRID_COLUMNS} grid items-center gap-2.5 whitespace-nowrap border-b border-[#f0f0f0] bg-[#fbf9f6] px-3 text-[11.5px] text-[#958a7f]`}
             >
               <span className="flex h-[38px] items-center">系统</span>
               <span>需求名称</span>
@@ -298,7 +299,7 @@ export function RequirementHistoryList({
               return (
                 <div key={item.id} className="border-b border-[#eee8e1]">
                   <div
-                    className={`${HISTORY_GRID_COLUMNS} grid min-h-[52px] w-full items-center gap-2.5 bg-white px-3 text-left text-xs transition-colors hover:bg-[#fdf8f3]`}
+                    className={`${HISTORY_GRID_COLUMNS} grid min-h-[52px] w-full items-center gap-2.5 bg-white px-3 text-left text-sm transition-colors hover:bg-[#fdf8f3]`}
                   >
                     <span className="min-w-0 truncate">
                       <RequirementSystem systemId={item.systemId} name={item.system} />
@@ -310,14 +311,14 @@ export function RequirementHistoryList({
                     </span>
                     <span
                       className={cn(
-                        "truncate text-[10.5px]",
+                        "truncate text-[11.5px]",
                         sourceType === "file" ? "text-[#8f6a2a]" : "text-[#3970a5]"
                       )}
                     >
                       {sourceType === "file" ? "上传文件" : "Link"}
                     </span>
-                    <span className="flex min-w-0 items-center gap-1.5 font-mono text-[10.5px]">
-                      <span className="shrink-0 rounded-[5px] bg-[#f1eae1] px-1.5 py-0.5 text-[9px] font-sans text-[#958a7f]">
+                    <span className="flex min-w-0 items-center gap-1.5 font-mono text-[11.5px]">
+                      <span className="shrink-0 rounded-[5px] bg-[#f1eae1] px-1.5 py-0.5 text-[10px] font-sans text-[#958a7f]">
                         {getLegacyLabel(item)}
                       </span>
                       {sourceType === "file" ? (
@@ -375,7 +376,7 @@ export function RequirementHistoryList({
                     </span>
                     <span
                       className={cn(
-                        "justify-self-start whitespace-nowrap rounded-full px-2 py-0.5 text-[9px] font-semibold",
+                        "justify-self-start whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold",
                         getStatusClass(item.status)
                       )}
                     >
@@ -383,7 +384,7 @@ export function RequirementHistoryList({
                     </span>
                     <span
                       className={cn(
-                        "justify-self-start whitespace-nowrap rounded-full px-2 py-0.5 text-[9px] font-semibold",
+                        "justify-self-start whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold",
                         isRequirementPublished(item)
                           ? "bg-status-nominal/10 text-status-nominal"
                           : "bg-[#f5f0eb] text-[#a0958a]"
@@ -393,7 +394,7 @@ export function RequirementHistoryList({
                     </span>
                     <span
                       className={cn(
-                        "text-[11px] font-semibold tabular-nums flex  items-center",
+                        "text-[12px] font-semibold tabular-nums flex  items-center",
                         item.prdGenerated ? "text-[#5d554d]" : "text-[#958a7f]"
                       )}
                     >
@@ -416,7 +417,7 @@ export function RequirementHistoryList({
                         </button>
                       ) : null}
                     </span>
-                    <span className="whitespace-nowrap text-right text-[11px] tabular-nums text-[#958a7f]">
+                    <span className="whitespace-nowrap text-right text-[12px] tabular-nums text-[#958a7f]">
                       {item.updatedAt}
                     </span>
                     <span className="flex items-center justify-end gap-1">
@@ -446,7 +447,7 @@ export function RequirementHistoryList({
                           }
                           onOpen(item)
                         }}
-                        className="ml-4 inline-flex shrink-0 items-center justify-center whitespace-nowrap rounded-[6px] bg-[#C4956A] px-2.5 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-colors hover:bg-[#b0845b] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C4956A]/45"
+                        className="ml-4 inline-flex shrink-0 items-center justify-center whitespace-nowrap rounded-[6px] bg-[#C4956A] px-2.5 py-1.5 text-[12px] font-semibold text-white shadow-sm transition-colors hover:bg-[#b0845b] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C4956A]/45"
                       >
                         {item.status.includes("沟通") ? "继续" : "查看"} →
                       </button>
@@ -458,10 +459,10 @@ export function RequirementHistoryList({
                       className="border-t border-[#eee8e1] bg-[#fffaf5] px-4 py-3"
                     >
                       <div className="mb-2 flex items-center justify-between gap-3">
-                        <span className="text-[10px] font-semibold text-[#74695f]">
+                        <span className="text-[11px] font-semibold text-[#74695f]">
                           规范 PRD 模块详情
                         </span>
-                        <span className="text-[10px] tabular-nums text-[#958a7f]">
+                        <span className="text-[11px] tabular-nums text-[#958a7f]">
                           共 {modules.length} 个
                         </span>
                       </div>
@@ -472,14 +473,14 @@ export function RequirementHistoryList({
                             className="rounded-[7px] border border-[#eadfd4] bg-white px-3 py-2.5"
                           >
                             <div className="flex items-start gap-2">
-                              <span className="shrink-0 rounded-[5px] bg-[#f1eae1] px-1.5 py-0.5 text-[9px] font-semibold text-[#8b715b]">
+                              <span className="shrink-0 rounded-[5px] bg-[#f1eae1] px-1.5 py-0.5 text-[10px] font-semibold text-[#8b715b]">
                                 {module.moduleId}
                               </span>
-                              <span className="min-w-0 truncate text-[11px] font-semibold text-[#302a25]">
+                              <span className="min-w-0 truncate text-[12px] font-semibold text-[#302a25]">
                                 {module.name}
                               </span>
                             </div>
-                            <p className="mt-2 text-[10px] leading-4 text-[#74695f]">
+                            <p className="mt-2 text-[11px] leading-4 text-[#74695f]">
                               {module.description || "暂无模块描述"}
                             </p>
                             {module.keywords.length > 0 ? (
@@ -487,14 +488,14 @@ export function RequirementHistoryList({
                                 {module.keywords.map((keyword, keywordIndex) => (
                                   <span
                                     key={`${module.moduleId}-${keyword}-${keywordIndex}`}
-                                    className="rounded border border-[#eadfd4] bg-[#fffaf5] px-1.5 py-0.5 text-[9px] text-[#8b715b]"
+                                    className="rounded border border-[#eadfd4] bg-[#fffaf5] px-1.5 py-0.5 text-[10px] text-[#8b715b]"
                                   >
                                     {keyword}
                                   </span>
                                 ))}
                               </div>
                             ) : null}
-                            <p className="mt-2 break-all text-[10px] text-[#958a7f]">
+                            <p className="mt-2 break-all text-[11px] text-[#958a7f]">
                               文件：{module.filePath || "—"}
                             </p>
                           </article>
@@ -506,11 +507,11 @@ export function RequirementHistoryList({
               )
             })}
             {pageItems.length === 0 && (
-              <div className="border-b border-[#eee8e1] bg-white px-3 py-12 text-center text-[11px] text-[#958a7f]">
+              <div className="border-b border-[#eee8e1] bg-white px-3 py-12 text-center text-[12px] text-[#958a7f]">
                 没有匹配的需求历史
               </div>
             )}
-            <div className="flex items-center justify-center gap-1.5 border-[#eee8e1] pt-3 text-[11px]">
+            <div className="flex items-center justify-center gap-1.5 border-[#eee8e1] pt-3 text-[12px]">
               <span className="mr-2 whitespace-nowrap text-[#958a7f]">
                 共 <b className="text-[#5d554d]">{visibleItems.length}</b> 条 · 第{" "}
                 <b className="text-[#5d554d]">{currentPage}</b> /{" "}
@@ -533,7 +534,7 @@ export function RequirementHistoryList({
                   aria-current={pageNumber === currentPage ? "page" : undefined}
                   onClick={() => setPageState({ filterKey, page: pageNumber })}
                   className={cn(
-                    "flex size-7 items-center justify-center rounded-[7px] border text-[11px] font-semibold transition-colors",
+                    "flex size-7 items-center justify-center rounded-[7px] border text-[12px] font-semibold transition-colors",
                     pageNumber === currentPage
                       ? "border-[#c26b4f] bg-[#c26b4f] text-white"
                       : "border-[#ddd5cc] bg-white text-[#5d554d] hover:border-[#c26b4f]/50"
@@ -571,12 +572,12 @@ export function RequirementHistoryList({
             </DialogDescription>
           </DialogHeader>
           {requirementToDelete?.requirementPath ? (
-            <p className="rounded-lg border border-[#e5d9ce] bg-[#fbf8f4] px-3 py-2 font-mono text-[10px] leading-5 text-[#74695f] break-all">
+            <p className="rounded-lg border border-[#e5d9ce] bg-[#fbf8f4] px-3 py-2 font-mono text-[11px] leading-5 text-[#74695f] break-all">
               {requirementToDelete.requirementPath}
             </p>
           ) : null}
           {deleteError ? (
-            <p role="alert" className="rounded-lg bg-[#fceae5] px-3 py-2 text-xs text-[#9f493a]">
+            <p role="alert" className="rounded-lg bg-[#fceae5] px-3 py-2 text-sm text-[#9f493a]">
               {deleteError}
             </p>
           ) : null}

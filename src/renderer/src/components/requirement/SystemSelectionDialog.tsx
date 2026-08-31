@@ -49,9 +49,9 @@ export function SystemSelectionDialog({
           </div>
         </DialogHeader>
         <div className="px-6 pb-3 pt-4">
-          <div className="flex items-center gap-2 text-xs font-bold text-muted-foreground">
+          <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
             <span>全部业务系统</span>
-            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold">
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold">
               {systemList.length}
             </span>
             <label className="relative ml-auto block">
@@ -61,7 +61,7 @@ export function SystemSelectionDialog({
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索系统名称 / 分类"
                 aria-label="搜索业务系统"
-                className="h-8 w-56 bg-white pl-8 text-xs"
+                className="h-8 w-56 bg-white pl-8 text-sm"
               />
             </label>
           </div>
@@ -90,24 +90,24 @@ export function SystemSelectionDialog({
                   )}
                   <span className="flex items-center gap-2">
                     <span
-                      className="flex size-8 items-center justify-center rounded-lg text-xs font-bold text-white"
+                      className="flex size-8 items-center justify-center rounded-lg text-sm font-bold text-white"
                       style={{ backgroundColor: system.tokens?.accent ?? "#c4956a" }}
                     >
                       {system.name.slice(0, 1)}
                     </span>
                     <span className="min-w-0">
-                      <span className="block truncate text-xs font-bold text-foreground">
+                      <span className="block truncate text-sm font-bold text-foreground">
                         {system.name}
                       </span>
-                      <span className="mt-0.5 block truncate text-[9px] text-muted-foreground">
+                      <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
                         {system.category || system.id}
                       </span>
                     </span>
                   </span>
-                  <span className="mt-2 line-clamp-2 text-[10px] leading-4 text-muted-foreground">
+                  <span className="mt-2 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
                     {system.description}
                   </span>
-                  <span className="mt-auto rounded-md border border-[#d3e6da] bg-[#e9f2ec] px-2 py-1 text-[9px] font-semibold text-[#44715a]">
+                  <span className="mt-auto rounded-md border border-[#d3e6da] bg-[#e9f2ec] px-2 py-1 text-[10px] font-semibold text-[#44715a]">
                     系统规范
                   </span>
                 </button>
@@ -115,13 +115,13 @@ export function SystemSelectionDialog({
             })}
           </div>
           {visibleSystems.length === 0 && (
-            <div className="px-4 py-10 text-center text-xs text-muted-foreground">
+            <div className="px-4 py-10 text-center text-sm text-muted-foreground">
               没有找到匹配的业务系统
             </div>
           )}
         </div>
         <DialogFooter className="mt-5 items-center gap-3 border-t border-border bg-[#fbf8f4] px-6 py-3 sm:justify-between">
-          <p className="mr-auto text-xs text-muted-foreground">
+          <p className="mr-auto text-sm text-muted-foreground">
             {selectedSystem ? `已选：${selectedSystem.name} · 系统规范` : "请选择一个业务系统"}
           </p>
           <Button type="button" variant="outline" onClick={onCancel}>

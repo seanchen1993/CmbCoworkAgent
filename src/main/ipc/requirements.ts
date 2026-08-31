@@ -31,9 +31,10 @@ export type RequirementIndexItem = {
 export type IndexedPrdManifest = {
   prd: {
     name: string
-    status: string
+    status: "" | "init" | "draft" | "generated" | "published"
     description: string
     file: string
+    prDetailUrl?: string
   }
   functions: Array<{
     fr: string
@@ -130,6 +131,18 @@ const REQUIREMENT_SETTINGS_FILENAME = "settings.json"
 
 type RequirementSettings = {
   lastWorkDir?: string
+}
+
+type RequirementsIndexFile = {
+  list?: Array<
+    RequirementIndexItem & {
+      workDir?: string
+      prdVersion?: string | null
+      prdPublished?: boolean
+      prdManifestSynced?: boolean
+    }
+  >
+  token?: string
 }
 
 function safeSegment(value: string, fallback: string): string {
@@ -235,30 +248,23 @@ async function ensureRequirementDirs(): Promise<void> {
 
 async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
   await ensureRequirementDirs()
-  const data = await readJson<{
-    list?: Array<
-      RequirementIndexItem & {
-        workDir?: string
-        prdVersion?: string | null
-        prdPublished?: boolean
-        prdManifestSynced?: boolean
-      }
-    >
-  }>(path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME), { list: [] })
+  const data = await readJson<RequirementsIndexFile>(
+    path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME),
+    { list: [] }
+  )
   const list = Array.isArray(data.list) ? data.list : []
-  const normalized = list.map(
-    ({
-      workDir: _workDir,
-      prdVersion: _prdVersion,
-      prdPublished: _prdPublished,
-      prdManifestSynced: _prdManifestSynced,
-      ...item
-    }) => ({
+  const normalized = list.map((rawItem) => {
+    const item = { ...rawItem }
+    delete item.workDir
+    delete item.prdVersion
+    delete item.prdPublished
+    delete item.prdManifestSynced
+    return {
       ...item,
       prdGenerated: item.prdGenerated === true,
       prdManifest: normalizePrdManifest(item.prdManifest)
-    })
-  )
+    }
+  })
   if (normalized.some((item, index) => JSON.stringify(item) !== JSON.stringify(list[index]))) {
     await writeRequirementIndex(normalized)
   }
@@ -266,7 +272,27 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
 }
 
 async function writeRequirementIndex(list: RequirementIndexItem[]): Promise<void> {
-  await writeJson(path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME), { list })
+  const indexPath = path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME)
+  const existing = await readJson<RequirementsIndexFile>(indexPath, {})
+  await writeJson(indexPath, { ...(existing.token ? { token: existing.token } : {}), list })
+}
+
+async function readRequirementToken(): Promise<string> {
+  await ensureRequirementDirs()
+  const data = await readJson<RequirementsIndexFile>(
+    path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME),
+    {}
+  )
+  return typeof data.token === "string" ? data.token.trim() : ""
+}
+
+async function saveRequirementToken(token: string): Promise<void> {
+  const normalized = token.trim()
+  if (!normalized) throw new Error("Token 不能为空")
+  await ensureRequirementDirs()
+  const indexPath = path.join(getRequirementsRoot(), REQUIREMENTS_INDEX_FILENAME)
+  const existing = await readJson<RequirementsIndexFile>(indexPath, {})
+  await writeJson(indexPath, { ...existing, token: normalized, list: existing.list ?? [] })
 }
 
 async function getLastRequirementWorkDir(): Promise<string | null> {
@@ -342,11 +368,17 @@ function normalizePrdManifest(value: unknown): IndexedPrdManifest {
   const source = isRecord(value) ? value : {}
   const prd = isRecord(source.prd) ? source.prd : {}
   const normalized = createEmptyPrdManifest()
+  const status = readManifestString(prd, "status").trim().toLowerCase()
+  const prDetailUrl = readManifestString(prd, "prDetailUrl")
   normalized.prd = {
     name: readManifestString(prd, "name"),
-    status: readManifestString(prd, "status"),
+    status:
+      status === "init" || status === "draft" || status === "generated" || status === "published"
+        ? status
+        : "",
     description: readManifestString(prd, "description"),
-    file: readManifestString(prd, "file")
+    file: readManifestString(prd, "file"),
+    ...(prDetailUrl ? { prDetailUrl } : {})
   }
 
   if (Array.isArray(source.functions)) {
@@ -566,7 +598,7 @@ async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementR
   const prdManifest: IndexedPrdManifest = {
     prd: {
       name: item.title,
-      status: "formal",
+      status: "generated",
       description: "",
       file: PRD_PREVIEW_FILENAME
     },
@@ -708,6 +740,25 @@ function ensureWorkspaceChild(workspacePath: string, childPath: string): string 
 
 export function registerRequirementHandlers(ipcMain: IpcMain): void {
   ipcMain.handle("requirements:list", async () => listRequirements())
+  ipcMain.handle("requirements:get-token", async () => {
+    try {
+      return { success: true, token: await readRequirementToken() }
+    } catch (error) {
+      return {
+        success: false,
+        token: "",
+        error: error instanceof Error ? error.message : "读取 Token 失败"
+      }
+    }
+  })
+  ipcMain.handle("requirements:save-token", async (_event, token: string) => {
+    try {
+      await saveRequirementToken(token)
+      return { success: true }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : "保存 Token 失败" }
+    }
+  })
   ipcMain.handle("requirements:get-work-dir", async () => getLastRequirementWorkDir())
   ipcMain.handle("requirements:select-work-dir", async () => {
     try {

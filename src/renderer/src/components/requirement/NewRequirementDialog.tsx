@@ -12,10 +12,69 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
+import { marketApi } from "@/api/market"
+import {
+  isMarketVersionDifferent,
+  marketInstalledVersionStorage,
+  normalizeMarketVersion
+} from "../customize/MarketPanel/MarketUpdateBadge"
 import { fromPersistedRequirement, type RequirementRecord } from "./requirement-data"
 import type { DesignSystemInfo } from "../design/types"
 
 type UploadSource = "file" | "link"
+const REQUIRED_PRD_SKILL_NAME = "requirement-to-prd"
+
+async function ensureRequirementToPrdSkill(): Promise<void> {
+  const [installedSkills, marketResponse] = await Promise.all([
+    window.api.skills.list(),
+    marketApi.getSkills()
+  ])
+  const existingSkill = installedSkills.find(
+    (skill) => skill.name.trim().toLowerCase() === REQUIRED_PRD_SKILL_NAME
+  )
+
+  if (!marketResponse.success || !marketResponse.data) {
+    if (existingSkill) return
+    throw new Error(marketResponse.error || "无法读取公共市场技能")
+  }
+
+  const marketSkill = marketResponse.data.find(
+    (item) => item.name.trim().toLowerCase() === REQUIRED_PRD_SKILL_NAME
+  )
+  if (!marketSkill) {
+    if (existingSkill) return
+    throw new Error(`公共市场未找到技能「${REQUIRED_PRD_SKILL_NAME}」`)
+  }
+
+  const recordedVersion = marketInstalledVersionStorage.getVersion(REQUIRED_PRD_SKILL_NAME, "skill")
+  const installedVersion = normalizeMarketVersion(existingSkill?.version || recordedVersion)
+  const marketVersion = normalizeMarketVersion(marketSkill.version)
+  const needsInstall =
+    !existingSkill ||
+    !installedVersion ||
+    (Boolean(marketVersion) && isMarketVersionDifferent(installedVersion, marketVersion))
+
+  if (!needsInstall) return
+
+  if (existingSkill) {
+    const deleteResult = await window.api.skills.delete(existingSkill.path)
+    if (!deleteResult.success) {
+      throw new Error(deleteResult.error || `删除旧版技能「${REQUIRED_PRD_SKILL_NAME}」失败`)
+    }
+  }
+
+  const installResult = await marketApi.downloadItem(
+    REQUIRED_PRD_SKILL_NAME,
+    "skill",
+    false,
+    marketSkill.featured === "精品",
+    marketSkill
+  )
+  if (!installResult.success) {
+    throw new Error(installResult.error || `安装技能「${REQUIRED_PRD_SKILL_NAME}」失败`)
+  }
+  marketInstalledVersionStorage.setVersion(REQUIRED_PRD_SKILL_NAME, "skill", marketSkill.version)
+}
 
 function getRequirementTitleFromFileName(fileName: string): string {
   return fileName.replace(/\.[^.]+$/, "").trim() || "新需求草稿"
@@ -50,6 +109,7 @@ export function NewRequirementDialog({
   const [workDir, setWorkDir] = useState<string | null>(null)
   const [workDirLoading, setWorkDirLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [preparingSkill, setPreparingSkill] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const lastAutoFilledTitleRef = useRef("")
 
@@ -108,6 +168,9 @@ export function NewRequirementDialog({
 
     setSaving(true)
     try {
+      setPreparingSkill(true)
+      await ensureRequirementToPrdSkill()
+      setPreparingSkill(false)
       const sourcePayload =
         source === "file"
           ? {
@@ -137,6 +200,7 @@ export function NewRequirementDialog({
       toast.success("需求草稿已归档")
       await onStartConversation(requirement)
     } catch (error) {
+      setPreparingSkill(false)
       toast.error(error instanceof Error ? error.message : "保存需求草稿失败")
     } finally {
       setSaving(false)
@@ -174,12 +238,12 @@ export function NewRequirementDialog({
             <div className="mb-2 flex items-center gap-2">
               <FolderOpen className="size-4 text-primary" />
               <span className="text-sm font-semibold text-foreground">需求工作目录</span>
-              <span className="text-xs text-muted-foreground">
+              <span className="text-sm text-muted-foreground">
                 默认使用上次选择的目录（多个需求可共用同一个根目录，无需分别设置）
               </span>
             </div>
             <div className="flex items-center gap-2">
-              <div className="min-w-0 flex-1 truncate rounded-lg border border-border bg-white px-3 py-2 text-xs text-foreground">
+              <div className="min-w-0 flex-1 truncate rounded-lg border border-border bg-white px-3 py-2 text-sm text-foreground">
                 {workDir || "尚未选择需求工作目录"}
               </div>
               <Button
@@ -193,9 +257,8 @@ export function NewRequirementDialog({
                 {workDirLoading ? "选择中..." : workDir ? "更换目录" : "选择目录"}
               </Button>
             </div>
-            <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
-              系统会在目录下为各需求创建独立子文件夹，规范 PRD
-              文件将存放于对应需求的独立文件夹下。
+            <p className="mt-2 text-[12px] leading-5 text-muted-foreground">
+              系统会在目录下为各需求创建独立子文件夹，规范 PRD 文件将存放于对应需求的独立文件夹下。
             </p>
           </div>
 
@@ -211,7 +274,7 @@ export function NewRequirementDialog({
                   type="button"
                   onClick={() => setSource(item.id)}
                   className={cn(
-                    "flex h-8 items-center gap-1.5 rounded px-3 text-xs font-semibold transition-colors",
+                    "flex h-8 items-center gap-1.5 rounded px-3 text-sm font-semibold transition-colors",
                     source === item.id
                       ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
                       : "text-muted-foreground hover:text-foreground"
@@ -239,7 +302,7 @@ export function NewRequirementDialog({
               <span className="text-sm font-semibold text-foreground">
                 {file ? file.name : "拖拽文件到此处，或点击上传"}
               </span>
-              <span className="mt-1 text-xs text-muted-foreground">
+              <span className="mt-1 text-sm text-muted-foreground">
                 仅支持 .docx 格式 · 请将旧版 .doc 文件另存为 .docx 后上传
               </span>
               {file ? (
@@ -248,10 +311,10 @@ export function NewRequirementDialog({
                     <FileText className="size-3.5" />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[11px] font-semibold text-foreground">
+                    <span className="block truncate text-[12px] font-semibold text-foreground">
                       {file.name}
                     </span>
-                    <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
                       {Math.ceil(file.size / 1024)} KB · 草稿已就绪
                     </span>
                   </span>
@@ -286,7 +349,7 @@ export function NewRequirementDialog({
                   className="h-10 bg-white pl-9"
                 />
               </div>
-              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+              <p className="mt-3 text-sm leading-5 text-muted-foreground">
                 支持飞书文档、腾讯文档、语雀、Confluence 和普通网页链接，链接信息会一起归档。
               </p>
             </div>
@@ -308,7 +371,7 @@ export function NewRequirementDialog({
               className="h-10 bg-white"
               disabled={saving}
             />
-            <p className="mt-3 text-xs leading-5 text-muted-foreground">
+            <p className="mt-3 text-sm leading-5 text-muted-foreground">
               {source === "file"
                 ? "上传需求文件后会默认带出文件名，支持继续编辑。"
                 : "建议填写一个便于检索和沟通的需求名称。"}
@@ -316,7 +379,7 @@ export function NewRequirementDialog({
           </div>
         </div>
         <DialogFooter className="border-t border-border bg-[#fbf8f4] px-6 py-3">
-          <span className="mr-auto text-[11px] text-muted-foreground">
+          <span className="mr-auto text-[12px] text-muted-foreground">
             {source === "file"
               ? "草稿与后续 PRD 会归档到已选需求工作目录"
               : "链接快照与后续 PRD 会归档到已选需求工作目录"}
@@ -331,7 +394,11 @@ export function NewRequirementDialog({
           </Button>
           <Button type="button" onClick={() => void handleConfirm()} disabled={saving}>
             {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-            {source === "file" ? "上传并开始沟通" : "保存并开始沟通"}
+            {preparingSkill
+              ? "正在检查 PRD 技能..."
+              : source === "file"
+                ? "上传并开始沟通"
+                : "保存并开始沟通"}
             {!saving ? <ArrowRight className="size-4" /> : null}
           </Button>
         </DialogFooter>

@@ -49,14 +49,14 @@ export function RequirementHistoryView({
                   onChange={(event) => setRequirementSearchInput(event.target.value)}
                   placeholder="搜索名称、系统、旧需求或目录"
                   aria-label="搜索需求历史"
-                  className="h-[30px] w-[220px] border-[#ddd5cc] bg-white pl-8 text-[11px] shadow-[0_1px_2px_rgba(80,55,35,0.03)]"
+                  className="h-[30px] w-[220px] border-[#ddd5cc] bg-white pl-8 text-[12px] shadow-[0_1px_2px_rgba(80,55,35,0.03)]"
                 />
               </label>
               <Button
                 type="submit"
                 variant="outline"
                 size="sm"
-                className="h-[30px] rounded-[7px] px-3 text-[11px]"
+                className="h-[30px] rounded-[7px] px-3 text-[12px]"
               >
                 <Search className="size-3.5" />
                 搜索
@@ -67,7 +67,7 @@ export function RequirementHistoryView({
                 type="button"
                 size="sm"
                 onClick={onNew}
-                className="h-[30px] rounded-[7px] px-3 text-[11px]"
+                className="h-[30px] rounded-[7px] px-3 text-[12px]"
               >
                 <ClipboardList className="size-3.5" />
                 新增需求

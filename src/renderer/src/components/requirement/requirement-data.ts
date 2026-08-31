@@ -9,9 +9,10 @@ export type RequirementModule = {
 export type RequirementPrdManifest = {
   prd: {
     name: string
-    status: string
+    status: "" | "init" | "draft" | "generated" | "published"
     description: string
     file: string
+    prDetailUrl?: string
   }
   functions: Array<{
     fr: string

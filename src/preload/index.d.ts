@@ -2021,6 +2021,8 @@ interface CustomAPI {
   }
   requirements: {
     list: () => Promise<RequirementRuntimeItem[]>
+    getToken: () => Promise<{ success: boolean; token: string; error?: string }>
+    saveToken: (token: string) => Promise<{ success: boolean; error?: string }>
     create: (payload: {
       systemId: string
       title: string

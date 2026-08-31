@@ -1,11 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertTriangle, Bot, CheckCircle2, Eye, ListTodo, Loader2, Send } from "lucide-react"
+import {
+  AlertTriangle,
+  Bot,
+  CheckCircle2,
+  ExternalLink,
+  Eye,
+  KeyRound,
+  ListTodo,
+  Loader2,
+  Send
+} from "lucide-react"
 import { toast } from "sonner"
 import { ChatContainer } from "@/components/chat/ChatContainer"
 import { FileTree, ResourcePreview } from "@/components/panels/RightPanel"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAppStore } from "@/lib/store"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
@@ -19,8 +38,9 @@ import {
   type RequirementRecord
 } from "./requirement-data"
 
-const PRD_GENERATION_MESSAGE = "使用prd-generate技能把source文件夹下的原需求文件生成规范化PRD"
+const PRD_GENERATION_MESSAGE = "使用requirement-to-prd技能把source文件夹下的原需求文件生成规范化PRD"
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
+const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
 const PRD_COMPLETION_CHECK_MAX_ATTEMPTS = 4
 const PRD_COMPLETION_CHECK_RETRY_DELAY_MS = 500
 
@@ -52,6 +72,13 @@ function asText(value: unknown): string {
   return typeof value === "string" ? value : ""
 }
 
+function normalizePrdStatus(value: unknown): RequirementPrdManifest["prd"]["status"] {
+  const status = asText(value).trim().toLowerCase()
+  return status === "init" || status === "draft" || status === "generated" || status === "published"
+    ? status
+    : ""
+}
+
 function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManifest {
   const parsed = asRecord(value) ?? {}
   const prd = asRecord(parsed.prd) ?? {}
@@ -59,9 +86,10 @@ function normalizeRequirementSpaceManifest(value: unknown): RequirementPrdManife
   return {
     prd: {
       name: asText(prd.name),
-      status: asText(prd.status),
+      status: normalizePrdStatus(prd.status),
       description: asText(prd.description),
-      file: asText(prd.file)
+      file: asText(prd.file),
+      ...(asText(prd.prDetailUrl) ? { prDetailUrl: asText(prd.prDetailUrl) } : {})
     },
     functions: functions.map((item) => {
       const functionInfo = asRecord(item) ?? {}
@@ -90,6 +118,7 @@ function hasRequirementSpaceManifestData(manifest: RequirementPrdManifest): bool
     manifest.prd.status !== "" ||
     manifest.prd.description !== "" ||
     manifest.prd.file !== "" ||
+    Boolean(manifest.prd.prDetailUrl) ||
     manifest.functions.length > 0
   )
 }
@@ -122,7 +151,6 @@ function RequirementConversationSession({
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
   const autoQueuedPrdGenerationRef = useRef(false)
-  const historyLoadingObservedRef = useRef(false)
   const conversationLoadingObservedRef = useRef(false)
   const publishRequestQueuedRef = useRef(false)
   const workspaceFilesRef = useRef(threadState?.workspaceFiles ?? [])
@@ -138,6 +166,9 @@ function RequirementConversationSession({
   const [manifestLoading, setManifestLoading] = useState(false)
   const [manifestError, setManifestError] = useState<string | null>(null)
   const [publishRequestQueued, setPublishRequestQueued] = useState(false)
+  const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
+  const [tokenDraft, setTokenDraft] = useState("")
+  const [tokenSaving, setTokenSaving] = useState(false)
   const orderedRequirements = useMemo(
     () => sortRequirementsByUpdatedAt(requirements),
     [requirements]
@@ -262,6 +293,7 @@ function RequirementConversationSession({
   const handlePublishToRequirementSpace = useCallback((): void => {
     if (
       !threadState ||
+      conversationLoading ||
       isRequirementSpacePublished(requirementSpaceManifest) ||
       publishRequestQueuedRef.current
     ) {
@@ -277,7 +309,69 @@ function RequirementConversationSession({
       updated_at: new Date()
     })
     toast.success("已向对话发送发布到需求空间请求")
-  }, [requirementSpaceManifest, threadState])
+  }, [conversationLoading, requirementSpaceManifest, threadState])
+
+  const queueLeanstarToken = useCallback(
+    (token: string): void => {
+      const normalized = token.trim()
+      if (!threadState || !normalized) return
+      threadState.addQueuedMessage({
+        id: crypto.randomUUID(),
+        text: `${LEANSTAR_TOKEN_MESSAGE_PREFIX}${normalized}`,
+        created_at: new Date(),
+        updated_at: new Date()
+      })
+      toast.success("已向对话发送身份令牌")
+    },
+    [threadState]
+  )
+
+  const handleSendLeanstarToken = useCallback(async (): Promise<void> => {
+    if (!threadState || conversationLoading) return
+    setTokenSaving(true)
+    try {
+      const result = await window.api.requirements.getToken()
+      if (!result.success) throw new Error(result.error || "读取 Token 失败")
+      if (result.token) {
+        queueLeanstarToken(result.token)
+        return
+      }
+      setTokenDraft("")
+      setTokenDialogOpen(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取 Token 失败")
+    } finally {
+      setTokenSaving(false)
+    }
+  }, [conversationLoading, queueLeanstarToken, threadState])
+
+  const handleConfirmLeanstarToken = useCallback(async (): Promise<void> => {
+    const token = tokenDraft.trim()
+    if (!token) {
+      toast.error("请填写精益之星身份令牌-Token")
+      return
+    }
+    setTokenSaving(true)
+    try {
+      const result = await window.api.requirements.saveToken(token)
+      if (!result.success) throw new Error(result.error || "保存 Token 失败")
+      setTokenDialogOpen(false)
+      queueLeanstarToken(token)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存 Token 失败")
+    } finally {
+      setTokenSaving(false)
+    }
+  }, [queueLeanstarToken, tokenDraft])
+
+  const handleOpenLeanstarTokenPage = useCallback((): void => {
+    const url = import.meta.env.VITE_LEANSTAR_PERSONAL_TOKEN_URL?.trim() || ""
+    if (!url) {
+      toast.error("未配置精益之星 Token 获取链接")
+      return
+    }
+    void window.electron.openExternal(url).catch(() => toast.error("打开 Token 获取页面失败"))
+  }, [])
 
   const handleFunctionFilePreview = useCallback(
     (filePath: string): void => {
@@ -307,16 +401,12 @@ function RequirementConversationSession({
   }, [selectThread, threadId])
 
   useEffect(() => {
-    if (threadState?.historyLoading) {
-      historyLoadingObservedRef.current = true
-      return
-    }
     if (
       !autoGeneratePrd ||
       autoQueuedPrdGenerationRef.current ||
       requirement.prdGenerated ||
       !threadState ||
-      !historyLoadingObservedRef.current ||
+      threadState.historyLoading ||
       threadState.messages.length > 0 ||
       threadState.queuedMessages.length > 0
     ) {
@@ -425,13 +515,13 @@ function RequirementConversationSession({
         <div className="grid h-full min-h-0 min-w-[1242px] grid-cols-[minmax(240px,0.5fr)_minmax(380px,1fr)_minmax(620px,1.5fr)] gap-x-[0.5px]">
           <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[#f7f4ef]">
             <div className="flex h-[37px] shrink-0 items-center justify-between border-b border-border/80 bg-[#fffdf9] px-4">
-              <div className="flex min-w-0 items-center gap-2.5 text-xs font-semibold text-foreground">
+              <div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold text-foreground">
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                   <ListTodo className="size-3.5" />
                 </span>
                 <span>需求列表</span>
               </div>
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-[#eee7df] text-[10px] font-semibold tabular-nums text-[#74695f]">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-[#eee7df] text-[11px] font-semibold tabular-nums text-[#74695f]">
                 {requirements.length}
               </span>
             </div>
@@ -464,12 +554,12 @@ function RequirementConversationSession({
                       >
                         <span className="flex min-w-0 flex-1 flex-col justify-between gap-1">
                           <span className="flex min-w-0 items-center gap-2 ">
-                            <span className="min-w-0 flex-1 truncate text-xs font-semibold leading-5">
+                            <span className="min-w-0 flex-1 truncate text-sm font-semibold leading-5">
                               {item.title}
                             </span>
                             <span
                               className={cn(
-                                "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-medium leading-none",
+                                "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium leading-none",
                                 item.coreFilesMissing || item.workspaceMissing
                                   ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
                                   : item.prdGenerated
@@ -498,7 +588,7 @@ function RequirementConversationSession({
                                   : "沟通中"}
                             </span>
                           </span>
-                          <span className="flex min-w-0 items-center justify-between gap-2 text-[10px] leading-4">
+                          <span className="flex min-w-0 items-center justify-between gap-2 text-[11px] leading-4">
                             <span className="min-w-0 truncate text-[#81766b]">{item.system}</span>
                             <span className="shrink-0 tabular-nums text-[#a0958a]">
                               {item.updatedAt}
@@ -510,7 +600,7 @@ function RequirementConversationSession({
                   })}
                 </div>
               ) : (
-                <div className="px-2 py-8 text-center text-[11px] text-muted-foreground">
+                <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
                   暂无需求
                 </div>
               )}
@@ -519,13 +609,13 @@ function RequirementConversationSession({
 
           <main className="flex min-h-0 min-w-0 flex-col bg-white">
             <div className="flex h-[37px] shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-[#fffdf9] px-4">
-              <div className="flex min-w-0 items-center gap-2.5 text-xs font-semibold text-foreground">
+              <div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold text-foreground">
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                   <Bot className="size-3.5" />
                 </span>
                 <span>需求澄清会话</span>
               </div>
-              <span className="truncate text-[10px] text-muted-foreground">
+              <span className="truncate text-[11px] text-muted-foreground">
                 结合原始需求持续完善 PRD
               </span>
             </div>
@@ -545,7 +635,7 @@ function RequirementConversationSession({
             {requirement.workspaceMissing ? (
               <div
                 role="alert"
-                className="flex shrink-0 items-center gap-2 border-b border-[#ead3a1] bg-[#fff9e9] px-4 py-2 text-xs leading-5 text-[#8f6a2a]"
+                className="flex shrink-0 items-center gap-2 border-b border-[#ead3a1] bg-[#fff9e9] px-4 py-2 text-sm leading-5 text-[#8f6a2a]"
               >
                 <AlertTriangle className="size-3.5 shrink-0" />
                 <span>该需求的工作目录已被删除，当前内容可能不可用。</span>
@@ -554,7 +644,7 @@ function RequirementConversationSession({
             {requirement.coreFilesMissing && !requirement.workspaceMissing ? (
               <div
                 role="alert"
-                className="flex shrink-0 items-center gap-2 border-b border-status-critical/20 bg-status-critical/5 px-4 py-2 text-xs leading-5 text-status-critical"
+                className="flex shrink-0 items-center gap-2 border-b border-status-critical/20 bg-status-critical/5 px-4 py-2 text-sm leading-5 text-status-critical"
               >
                 <AlertTriangle className="size-3.5 shrink-0" />
                 <span>
@@ -587,17 +677,17 @@ function RequirementConversationSession({
                 <TabsList className="h-9 rounded-none bg-transparent p-0">
                   <TabsTrigger
                     value="source"
-                    className="h-9 rounded-none border-b-2 border-transparent px-3 text-[11px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
+                    className="h-9 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
                   >
                     旧需求文件
                   </TabsTrigger>
                   <TabsTrigger
                     value="prd"
-                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[11px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
+                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
                   >
                     新PRD文件
                     <span
-                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium leading-none ${
+                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
                         requirement.coreFilesMissing || requirement.workspaceMissing
                           ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
                           : prdGenerationCompleted
@@ -622,11 +712,11 @@ function RequirementConversationSession({
                   <TabsTrigger
                     value="requirement-space"
                     disabled={!prdGenerationCompleted}
-                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[11px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
+                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
                   >
                     需求空间3.0
                     <span
-                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium leading-none ${
+                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
                         requirementSpacePublished
                           ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
                           : "border-status-info/30 bg-status-info/15 text-status-info"
@@ -645,7 +735,7 @@ function RequirementConversationSession({
 
               <TabsContent value="source" className="m-0 min-h-0 flex-1 overflow-y-auto">
                 {sourcePreviewLoading ? (
-                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="size-4 animate-spin text-primary" />
                     正在读取原始需求
                   </div>
@@ -653,12 +743,12 @@ function RequirementConversationSession({
                   <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center">
                     <div className="flex max-w-[340px] flex-col items-center gap-3">
                       <AlertTriangle className="size-5 text-status-critical" />
-                      <p className="text-xs leading-5 text-status-critical">{sourcePreviewError}</p>
+                      <p className="text-sm leading-5 text-status-critical">{sourcePreviewError}</p>
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
-                        className="h-8 text-xs"
+                        className="h-8 text-sm"
                         onClick={() => void loadSourcePreview()}
                       >
                         重新读取
@@ -706,7 +796,7 @@ function RequirementConversationSession({
                             onReload={() => setPrdPreviewReloadToken((value) => value + 1)}
                           />
                         ) : (
-                          <div className="flex h-full items-center justify-center px-6 text-center text-xs leading-5 text-muted-foreground">
+                          <div className="flex h-full items-center justify-center px-6 text-center text-sm leading-5 text-muted-foreground">
                             请选择文件预览
                           </div>
                         )}
@@ -720,7 +810,7 @@ function RequirementConversationSession({
                         <Loader2 className="size-5 animate-spin" />
                       </span>
                       <div className="text-sm font-semibold text-foreground">等待生成中</div>
-                      <p className="text-xs leading-5 text-muted-foreground">
+                      <p className="text-sm leading-5 text-muted-foreground">
                         继续在中间会话中补充需求，PRD 文件生成后会自动显示。
                       </p>
                     </div>
@@ -730,7 +820,7 @@ function RequirementConversationSession({
 
               <TabsContent value="requirement-space" className="m-0 min-h-0 flex-1 overflow-y-auto">
                 {manifestLoading ? (
-                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <div className="flex h-full min-h-[260px] items-center justify-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="size-4 animate-spin text-primary" />
                     正在读取需求空间数据
                   </div>
@@ -738,12 +828,12 @@ function RequirementConversationSession({
                   <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center">
                     <div className="flex max-w-[340px] flex-col items-center gap-3">
                       <AlertTriangle className="size-5 text-status-critical" />
-                      <p className="text-xs leading-5 text-status-critical">{manifestError}</p>
+                      <p className="text-sm leading-5 text-status-critical">{manifestError}</p>
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
-                        className="h-8 text-xs"
+                        className="h-8 text-sm"
                         onClick={() => void loadRequirementSpaceManifest()}
                       >
                         重新读取
@@ -755,7 +845,7 @@ function RequirementConversationSession({
                     <section className="border-b border-border/70 pb-4">
                       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">
+                          <p className="mb-1 text-[11px] font-semibold uppercase text-muted-foreground">
                             PRD
                           </p>
                           <div className="flex items-center gap-1.5">
@@ -783,7 +873,7 @@ function RequirementConversationSession({
                         </div>
                         <span
                           className={cn(
-                            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-semibold",
+                            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-semibold",
                             isRequirementSpacePublished(requirementSpaceManifest)
                               ? "border-status-nominal/30 bg-status-nominal/10 text-status-nominal"
                               : "border-status-info/30 bg-status-info/10 text-status-info"
@@ -797,10 +887,10 @@ function RequirementConversationSession({
                           {requirementSpaceManifest.prd.status || "未发布"}
                         </span>
                       </div>
-                      <p className="text-xs leading-5 text-muted-foreground">
+                      <p className="text-sm leading-5 text-muted-foreground">
                         {requirementSpaceManifest.prd.description || "暂无 PRD 描述"}
                       </p>
-                      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[10px] text-muted-foreground">
+                      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] text-muted-foreground">
                         {requirementSpaceManifest.prd.file ? (
                           <span>
                             文档文件{" "}
@@ -810,9 +900,9 @@ function RequirementConversationSession({
                           </span>
                         ) : null}
                       </div>
-                      <div className="mt-4">
+                      <div className="mt-4 flex flex-wrap items-center gap-2">
                         {isRequirementSpacePublished(requirementSpaceManifest) ? (
-                          <div className="inline-flex items-center gap-2 text-xs font-semibold text-status-nominal">
+                          <div className="inline-flex items-center gap-2 text-sm font-semibold text-status-nominal">
                             <CheckCircle2 className="size-3.5" />
                             已发布到需求空间3.0
                           </div>
@@ -820,8 +910,8 @@ function RequirementConversationSession({
                           <Button
                             type="button"
                             size="sm"
-                            disabled={publishRequestQueued}
-                            className="h-8 gap-1.5 rounded-[7px] px-3 text-xs"
+                            disabled={publishRequestQueued || conversationLoading}
+                            className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
                             onClick={handlePublishToRequirementSpace}
                           >
                             {publishRequestQueued ? (
@@ -832,13 +922,42 @@ function RequirementConversationSession({
                             {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
                           </Button>
                         )}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={conversationLoading || tokenSaving}
+                          className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
+                          onClick={() => void handleSendLeanstarToken()}
+                        >
+                          {tokenSaving ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <KeyRound className="size-3.5" />
+                          )}
+                          发送Token身份令牌
+                        </Button>
                       </div>
+                      {requirementSpaceManifest.prd.prDetailUrl ? (
+                        <button
+                          type="button"
+                          className="mt-3 inline-flex max-w-full items-center gap-1.5 truncate text-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                          title={requirementSpaceManifest.prd.prDetailUrl}
+                          onClick={() => {
+                            const url = requirementSpaceManifest.prd.prDetailUrl
+                            if (url) void window.electron.openExternal(url)
+                          }}
+                        >
+                          <ExternalLink className="size-3.5 shrink-0" />
+                          <span className="truncate">需求空间3.0详情</span>
+                        </button>
+                      ) : null}
                     </section>
 
                     <section>
                       <div className="mb-2 flex items-center justify-between gap-3">
-                        <h4 className="text-xs font-semibold text-foreground">功能清单</h4>
-                        <span className="text-[10px] tabular-nums text-muted-foreground">
+                        <h4 className="text-sm font-semibold text-foreground">功能清单</h4>
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
                           {requirementSpaceManifest.functions.length} 项
                         </span>
                       </div>
@@ -850,12 +969,12 @@ function RequirementConversationSession({
                               className="py-3"
                             >
                               <div className="flex items-start gap-2">
-                                <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                                <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
                                   {functionInfo.fr}
                                 </span>
                                 <div className="min-w-0 flex-1">
                                   <div className="flex items-center gap-1.5">
-                                    <h5 className="min-w-0 flex-1 text-xs font-semibold text-foreground">
+                                    <h5 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
                                       {functionInfo.name || "未命名功能"}
                                     </h5>
                                     <IconPopoverButton
@@ -872,21 +991,21 @@ function RequirementConversationSession({
                                       onClick={() => handleFunctionFilePreview(functionInfo.file)}
                                     />
                                   </div>
-                                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                  <p className="mt-1 text-sm leading-5 text-muted-foreground">
                                     {functionInfo.description || "暂无功能描述"}
                                   </p>
                                   <div className="mt-2 flex flex-wrap gap-1.5">
                                     {functionInfo.keywords.map((keyword, keywordIndex) => (
                                       <span
                                         key={`${functionInfo.fr}-${keyword}-${keywordIndex}`}
-                                        className="rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                                        className="rounded border border-border/70 bg-muted/30 px-1.5 py-0.5 text-[11px] text-muted-foreground"
                                       >
                                         {keyword}
                                       </span>
                                     ))}
                                   </div>
                                   {functionInfo.file ? (
-                                    <p className="mt-2 text-[10px] text-muted-foreground">
+                                    <p className="mt-2 text-[11px] text-muted-foreground">
                                       文档文件 {functionInfo.file}
                                     </p>
                                   ) : null}
@@ -896,14 +1015,14 @@ function RequirementConversationSession({
                           ))}
                         </div>
                       ) : (
-                        <p className="border-y border-border/70 py-4 text-xs text-muted-foreground">
+                        <p className="border-y border-border/70 py-4 text-sm text-muted-foreground">
                           暂无功能数据
                         </p>
                       )}
                     </section>
                   </div>
                 ) : (
-                  <div className="flex h-full min-h-[260px] items-center justify-center text-xs text-muted-foreground">
+                  <div className="flex h-full min-h-[260px] items-center justify-center text-sm text-muted-foreground">
                     暂无需求空间数据
                   </div>
                 )}
@@ -912,6 +1031,56 @@ function RequirementConversationSession({
           </aside>
         </div>
       </div>
+      <Dialog open={tokenDialogOpen} onOpenChange={setTokenDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>精益之星身份令牌-Token</DialogTitle>
+            <DialogDescription>
+              填写 Token 后会保存到本地需求配置，并自动发送到当前会话。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Input
+              value={tokenDraft}
+              onChange={(event) => setTokenDraft(event.target.value)}
+              placeholder="请输入 Token"
+              autoFocus
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault()
+                  void handleConfirmLeanstarToken()
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-sm text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              onClick={handleOpenLeanstarTokenPage}
+            >
+              打开链接获取 Token
+              <ExternalLink className="size-3" />
+            </button>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setTokenDialogOpen(false)}
+              disabled={tokenSaving}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleConfirmLeanstarToken()}
+              disabled={tokenSaving}
+            >
+              {tokenSaving ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              确定
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

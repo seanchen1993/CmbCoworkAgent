@@ -67,6 +67,8 @@ describe("requirement source preview", () => {
     const deleteRequirement = handlers.get("requirements:delete")
     const openWorkDir = handlers.get("requirements:open-work-dir")
     const syncManifest = handlers.get("requirements:sync-manifest")
+    const getToken = handlers.get("requirements:get-token")
+    const saveToken = handlers.get("requirements:save-token")
     expect(create).toBeTypeOf("function")
     expect(getWorkDir).toBeTypeOf("function")
     expect(list).toBeTypeOf("function")
@@ -75,6 +77,8 @@ describe("requirement source preview", () => {
     expect(deleteRequirement).toBeTypeOf("function")
     expect(openWorkDir).toBeTypeOf("function")
     expect(syncManifest).toBeTypeOf("function")
+    expect(getToken).toBeTypeOf("function")
+    expect(saveToken).toBeTypeOf("function")
 
     const created = (await create!(null, {
       systemId: "system-a",
@@ -184,6 +188,7 @@ describe("requirement source preview", () => {
           status: "published",
           description: "提供基础待办管理与提醒能力",
           file: "pr-doc.md",
+          prDetailUrl: "https://www.baidu.com",
           extraField: "ignored"
         },
         functions: [
@@ -212,7 +217,13 @@ describe("requirement source preview", () => {
       prdGenerated: boolean
       coreFilesMissing: boolean
       prdManifest: {
-        prd: { name: string; status: string; description: string; file: string }
+        prd: {
+          name: string
+          status: string
+          description: string
+          file: string
+          prDetailUrl?: string
+        }
         functions: Array<{
           fr: string
           name: string
@@ -231,7 +242,8 @@ describe("requirement source preview", () => {
         name: "DOCX 需求",
         status: "published",
         description: "提供基础待办管理与提醒能力",
-        file: "pr-doc.md"
+        file: "pr-doc.md",
+        prDetailUrl: "https://www.baidu.com"
       },
       functions: [
         {
@@ -280,6 +292,27 @@ describe("requirement source preview", () => {
     expect(index.list[0]).not.toHaveProperty("prdVersion")
     expect(index.list[0]).not.toHaveProperty("prdPublished")
     expect(index.list[0]).not.toHaveProperty("prdManifestSynced")
+
+    const emptyToken = (await getToken!(null)) as {
+      success: boolean
+      token: string
+      error?: string
+    }
+    expect(emptyToken.success, emptyToken.error).toBe(true)
+    expect(emptyToken.token).toBe("")
+    const tokenSaved = (await saveToken!(null, "  leanstar-token  ")) as {
+      success: boolean
+      error?: string
+    }
+    expect(tokenSaved.success, tokenSaved.error).toBe(true)
+    const configuredToken = (await getToken!(null)) as {
+      success: boolean
+      token: string
+      error?: string
+    }
+    expect(configuredToken.success, configuredToken.error).toBe(true)
+    expect(configuredToken.token).toBe("leanstar-token")
+    expect(JSON.parse(readFileSync(indexPath, "utf-8"))).toMatchObject({ token: "leanstar-token" })
 
     writeFileSync(
       indexPath,
