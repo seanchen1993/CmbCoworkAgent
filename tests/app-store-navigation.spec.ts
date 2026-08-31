@@ -32,6 +32,7 @@ function resetNavigationState(): void {
     showKanbanView: false,
     rightModule: "work",
     rightPanelCollapsed: true,
+    rightPanelWorkRequest: null,
     workerFocusView: null,
     workerFocusMessagesThreadId: null,
     workerFocusMessages: []
@@ -46,6 +47,19 @@ async function testBrowserPanelOpenRequestUsesGlobalStore(): Promise<void> {
   assert(
     state.rightModule === "browser" && !state.rightPanelCollapsed,
     "browser panel request should select the browser module and expand the right panel"
+  )
+}
+
+async function testAgentsPanelOpenRequestExpandsRightPanel(): Promise<void> {
+  resetNavigationState()
+  useAppStore.getState().requestOpenRightPanelAgents("parent-thread")
+
+  const state = useAppStore.getState()
+  assert(!state.rightPanelCollapsed, "agents panel request should expand the right panel")
+  assert(
+    state.rightPanelWorkRequest?.target === "agents" &&
+      state.rightPanelWorkRequest.threadId === "parent-thread",
+    "agents panel request should target the current thread's agents section"
   )
 }
 
@@ -82,6 +96,8 @@ async function testClaudeCodeMainViewClearsWorkerFocus(): Promise<void> {
 async function run(): Promise<void> {
   await testBrowserPanelOpenRequestUsesGlobalStore()
   console.log("PASS browser panel open request uses global store")
+  await testAgentsPanelOpenRequestExpandsRightPanel()
+  console.log("PASS agents panel open request expands right panel")
   await testHarnessBoardClearsWorkerFocus()
   console.log("PASS harness board clears worker focus")
   await testClaudeCodeMainViewClearsWorkerFocus()

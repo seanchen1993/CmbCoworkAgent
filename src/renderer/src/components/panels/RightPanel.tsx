@@ -924,12 +924,12 @@ export function RightPanel({
   }, [currentThreadId])
 
   useEffect(() => {
-    if (!showSystemConstraints) return
-    if (rightPanelWorkRequest?.target !== "systemConstraints") return
+    if (!rightPanelWorkRequest) return
     if (rightPanelWorkRequest.threadId !== currentThreadId) return
+    if (rightPanelWorkRequest.target === "systemConstraints" && !showSystemConstraints) return
     if (handledWorkRequestIdsRef.current.has(rightPanelWorkRequest.id)) return
     handledWorkRequestIdsRef.current.add(rightPanelWorkRequest.id)
-    setExclusiveOpenPanel("systemConstraints")
+    setExclusiveOpenPanel(rightPanelWorkRequest.target)
   }, [currentThreadId, rightPanelWorkRequest, setExclusiveOpenPanel, showSystemConstraints])
 
   // Auto-open once when an ordinary task subagent starts.

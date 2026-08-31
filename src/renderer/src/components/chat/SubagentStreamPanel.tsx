@@ -49,6 +49,7 @@ function messageContentLength(content: Message["content"] | undefined): number {
 export function SubagentStreamPanel(): React.JSX.Element {
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
   const closeSubagentFocusView = useAppStore((state) => state.closeSubagentFocusView)
+  const requestOpenRightPanelAgents = useAppStore((state) => state.requestOpenRightPanelAgents)
   const focusedThreadId = subagentFocusView?.threadId ?? "__subagent_focus_none__"
   const focusedParentThreadId = subagentFocusView?.threadId ?? null
   const focusedSubagentId = subagentFocusView?.subagentId
@@ -469,7 +470,10 @@ export function SubagentStreamPanel(): React.JSX.Element {
             variant="ghost"
             size="sm"
             type="button"
-            onClick={() => closeSubagentFocusView()}
+            onClick={() => {
+              requestOpenRightPanelAgents(subagentFocusView.threadId)
+              closeSubagentFocusView()
+            }}
             className="h-7 w-9 p-0"
             title="返回"
             aria-label="返回"

@@ -791,6 +791,41 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   )
 }
 
+async function testSubagentFocusBackReturnsToAgentsPanel(): Promise<void> {
+  const panel = await readProjectFile("src/renderer/src/components/chat/SubagentStreamPanel.tsx")
+  const workerPanel = await readProjectFile(
+    "src/renderer/src/components/chat/WorkerStreamPanel.tsx"
+  )
+
+  assertIncludes(
+    panel,
+    "requestOpenRightPanelAgents(subagentFocusView.threadId)",
+    "subagent focus back requests the parent thread agents panel"
+  )
+  assertIncludes(
+    panel,
+    "closeSubagentFocusView()",
+    "subagent focus back closes the focused transcript"
+  )
+  assertSourceOrder(
+    panel,
+    "requestOpenRightPanelAgents(subagentFocusView.threadId)",
+    "closeSubagentFocusView()",
+    "subagent focus back requests agents before closing the transcript"
+  )
+  assertIncludes(
+    workerPanel,
+    "requestOpenRightPanelAgents(workerFocusView.threadId)",
+    "team worker focus back requests the parent thread agents panel"
+  )
+  assertSourceOrder(
+    workerPanel,
+    "requestOpenRightPanelAgents(workerFocusView.threadId)",
+    "closeWorkerFocusView()",
+    "team worker focus back requests agents before closing the tool stream"
+  )
+}
+
 async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   const sidebar = await readProjectFile("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
   const deletionHelper = await readProjectFile(
@@ -912,6 +947,8 @@ async function run(): Promise<void> {
   console.log("PASS subagent thread state aggregate tool count")
   await testRightPanelDisplaysAndAutoOpens()
   console.log("PASS subagent right panel observability")
+  await testSubagentFocusBackReturnsToAgentsPanel()
+  console.log("PASS subagent focus back returns to agents panel")
   await testSidebarKeepsThreadLoadingWhileWorkerRuns()
   console.log("PASS sidebar coordinator worker loading state")
   await testWorkerToolFlowPreservesToolErrorStatus()

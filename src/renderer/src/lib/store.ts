@@ -893,7 +893,7 @@ export interface SubagentFocusView {
 
 export interface RightPanelWorkRequest {
   id: number
-  target: "systemConstraints"
+  target: "systemConstraints" | "agents"
   threadId: string
 }
 
@@ -1037,6 +1037,7 @@ interface AppState {
   toggleRightPanel: () => void
   setRightPanelCollapsed: (collapsed: boolean) => void
   requestOpenRightPanelSystemConstraints: (threadId: string) => void
+  requestOpenRightPanelAgents: (threadId: string) => void
 
   // Kanban actions
   setShowKanbanView: (show: boolean) => void
@@ -1598,6 +1599,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       rightPanelWorkRequest: {
         id: (state.rightPanelWorkRequest?.id ?? 0) + 1,
         target: "systemConstraints",
+        threadId
+      }
+    }))
+  },
+
+  requestOpenRightPanelAgents: (threadId: string) => {
+    set((state) => ({
+      rightPanelCollapsed: false,
+      rightPanelWorkRequest: {
+        id: (state.rightPanelWorkRequest?.id ?? 0) + 1,
+        target: "agents",
         threadId
       }
     }))

@@ -940,6 +940,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     (state) => state.workerFocusMessagesContentVersion
   )
   const closeWorkerFocusView = useAppStore((state) => state.closeWorkerFocusView)
+  const requestOpenRightPanelAgents = useAppStore((state) => state.requestOpenRightPanelAgents)
   const threadContext = useThreadContext()
   const [historyMessages, setHistoryMessages] = useState<Message[]>([])
   const [truncatedHistoryCount, setTruncatedHistoryCount] = useState(0)
@@ -1300,7 +1301,10 @@ export function WorkerStreamPanel(): React.JSX.Element {
             variant="ghost"
             size="sm"
             type="button"
-            onClick={() => closeWorkerFocusView()}
+            onClick={() => {
+              requestOpenRightPanelAgents(workerFocusView.threadId)
+              closeWorkerFocusView()
+            }}
             className="h-7 w-9 p-0"
             title="返回"
             aria-label="返回"

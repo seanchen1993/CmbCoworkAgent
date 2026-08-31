@@ -689,7 +689,7 @@ function App(): React.JSX.Element {
   }, [setRightModule])
 
   useEffect(() => {
-    if (rightPanelWorkRequest?.target !== "systemConstraints") return
+    if (!rightPanelWorkRequest) return
     setRightModule("work")
   }, [rightPanelWorkRequest, setRightModule])
 
