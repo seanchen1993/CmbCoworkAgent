@@ -105,7 +105,7 @@ async function resolveHarnessSkill(
 
   const [localSkills, pluginSkills] = await Promise.all([listAllSkills(), listPluginSkills()])
   const disabledSkillIds = new Set(getDisabledSkills().map(normalizeSkillId))
-  const preferredPlugin = getHarnessProjectAdapterSnapshot(projectId)
+  const preferredPlugin = await getHarnessProjectAdapterSnapshot(projectId)
   const matches = [...localSkills, ...pluginSkills].filter((skill) => {
     if (normalizeSkillId(skill.name) !== normalizedSlashSkill) return false
     if (isLocalSkillDisabled(skill, disabledSkillIds)) return false

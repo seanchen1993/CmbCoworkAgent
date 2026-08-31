@@ -1,6 +1,7 @@
 import React, {
   useRef,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useCallback,
   useState,
@@ -8,6 +9,7 @@ import React, {
 } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
+import type { VirtuosoHandle } from "react-virtuoso"
 import {
   Send,
   Square,
@@ -79,23 +81,17 @@ import {
   useCurrentThread,
   useThreadStream,
   useThreadContext,
-  type HookLogBucket,
   type ApiErrorDetailState
 } from "@/lib/thread-context"
+import { filterCoordinatorNoiseMessages } from "@/lib/message-display-helpers"
+import { canChangeThreadAgentMode } from "@/lib/agent-mode-switch-availability"
 import {
-  filterCoordinatorNoiseMessages,
-  isCoordinatorNotificationPrompt
-} from "@/lib/message-display-helpers"
-import { reconcileMessageDisplayOrder } from "@/lib/message-display-order"
-import {
-  buildToolResultAssociations,
   getWorkerToolUiKey
 } from "@/lib/worker-tool-result-key"
 import {
-  buildVisibleMessageLayout,
-  messageHasVisibleRow
+  messageHasVisibleRow,
+  normalizeVisibleReasoningText
 } from "@/lib/message-display-visibility"
-import { createToolDerivationMessageSelector } from "@/lib/message-render-stability"
 import {
   isCoordinatorModeMetadata,
   isMultiModeMetadata,
@@ -110,7 +106,6 @@ import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
 import { ContextUsageIndicator } from "./ContextUsageIndicator"
-import { ChatMessageCount } from "./ChatMessageCount"
 import {
   getSystemConstraintsLoadCounts,
   hasNoLoadedSystemConstraints,
@@ -119,7 +114,6 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
-  HITLRequest,
   HarnessHumanGateSnapshot,
   Message,
   SkillMetadata,
@@ -129,19 +123,36 @@ import type {
   ToolCallStatus,
   UserInputResponse
 } from "@/types"
-import { MessageBubble } from "./MessageBubble"
-import { ChatScrollNavigator } from "./ChatScrollNavigator"
+import {
+  CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD,
+  ChatMessageVirtualList,
+  shouldVirtualizeChatMessageList,
+  type ChatApprovalDecision
+} from "./ChatMessageVirtualList"
+import {
+  ChatScrollNavigator
+} from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
-import { ChatSearchOverlay } from "./ChatSearchOverlay"
+import {
+  ChatSearchOverlay,
+  type DurableChatSearchOptions,
+  type DurableChatSearchMatch,
+  type DurableChatSearchPage
+} from "./ChatSearchOverlay"
+import {
+  chatScrollSessionStore,
+  type ChatScrollSessionAnchor
+} from "./chat-scroll-session-store"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
-import { uploadChatData, ChatReportPayload } from "@/api"
-import { insertLog, updateMMJUserInfo } from "../../../js/mmjUtils"
+import { uploadChatData } from "@/api"
+import { insertLog } from "../../../js/mmjUtils"
 import { toast } from "sonner"
 import { SlashCommandPopover } from "@/features/slash-commands/SlashCommandPopover"
+import { formatHookClockTime, HOOK_TIME_ZONE_LABEL } from "../../../../shared/hook-time"
 import {
   getBuiltinBrowserTitleSource,
   isBuiltinBrowserCommandSelection,
@@ -166,20 +177,45 @@ import {
 } from "@/features/mentions/useAtFileMentions"
 import { AtFileMentionPopover } from "@/features/mentions/AtFileMentionPopover"
 import {
+  readBoundedWorkspaceMentionFile,
+  retainMentionedWorkspaceFilesForWorkspace,
   resolveAtFileAttachments,
   resolveAtFileSelection,
   type MentionedWorkspaceFile
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
+import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
-  CHAT_AUTO_SCROLL_ALWAYS,
-  normalizeChatAutoScrollMessageLimit
-} from "../../../../shared/chat-scroll"
+  MAX_ATTACHMENT_FILE_BYTES,
+  type SelectedAttachmentFileGrant
+} from "../../../../shared/file-attachment"
+import { cleanUserAttachmentContentForDisplay } from "../../../../shared/user-attachment-display"
+import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
+import { projectVisibleChatSearchContent } from "../../../../shared/chat-search-visible-content"
+import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
+import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
+import {
+  createMessageIdIndexLookup,
+  type MessageIdIndexLookup
+} from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
-import { mergeChatSkills, selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
+import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
 import { formatSkillUseBlock, parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
+import {
+  ensureDisabledSkillsChangedInvalidationSource,
+  ensureSkillsChangedInvalidationSource,
+  isSkillCatalogFresh,
+  projectChatSkillCatalog,
+  readSkillCatalogCache,
+  revalidateSkillCatalog,
+  subscribeSkillCatalogInvalidation,
+  type ChatSkillCatalogProjection
+} from "@/lib/app-catalog-cache"
+import {
+  readHarnessBoardCatalogCache
+} from "@/components/harness-board/harness-board-cache"
 import {
   getQueuedModelContent,
   getQueuedDisplayContent,
@@ -188,17 +224,13 @@ import {
   canClaimQueuedMessage,
   classifyGuidedMessage
 } from "@/lib/queued-message-content"
-import { getSkillMetadataId, isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
+import { getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
 import {
-  liveStreamMessageRole,
-  normalizeLiveStreamMessageIds,
-  normalizeLiveStreamMessageContent,
-  stringifyMessageContentForReport,
-  type LiveStreamMessage as StreamMessage
-} from "@/lib/live-stream-messages"
-import { buildMessageBubbleTimingMeta } from "@/lib/message-bubble-timing"
+  buildLatestChatReportBatch,
+  type ChatReportBatch
+} from "@/lib/chat-report-batch"
 import {
   markChatReportUploadFailed,
   markChatReportUploadSucceeded,
@@ -209,19 +241,112 @@ import {
   shouldClearPendingApprovalAfterGoalControl
 } from "@/lib/goal-control-submit"
 import {
+  getSubmitInFlightReleaseVersion,
   releaseSubmitInFlightLock,
   shouldQueueBehindInFlightSubmit,
   shouldUseSubmitInFlightLock,
+  subscribeSubmitInFlightRelease,
   tryAcquireSubmitInFlightLock,
   type SubmitInFlightLockRef
 } from "@/lib/submit-in-flight-lock"
 import { GitBranchSwitcher } from "./GitBranchSwitcher"
 import { ProcessingDuration } from "./ProcessingDuration"
 import { ContextCompactionCard } from "./ContextCompactionCard"
-import { HookLogChip, HookLogModal } from "./HookLogViews"
+import { HookLogModal } from "./HookLogViews"
+import {
+  shouldHydrateDurableSearchMatch,
+  type ChatSearchCorpus,
+  type ChatSearchDocument
+} from "@/lib/chat-search-matches"
+import { createChatMessageProjector } from "@/lib/chat-message-projection"
+import { getChatThreadProjectionRuntime } from "@/lib/chat-thread-projection-cache"
+import {
+  chatScrollTailMessageIdentity,
+  classifyChatScrollTailChange,
+  shouldMarkChatTailContentGrowth
+} from "@/lib/chat-scroll-tail-change"
+import {
+  buildBoundedChatSearchText,
+  CHAT_SEARCH_DOCUMENT_TEXT_LIMIT
+} from "@/lib/bounded-chat-search-text"
+import { buildStreamingMarkdownPreview } from "@/lib/streaming-markdown-schedule"
+import {
+  continueWorkspaceFilesDeduped,
+  loadWorkspaceFilesDeduped
+} from "@/lib/workspace-file-load"
+import {
+  createChatScrollState,
+  isChatScrollDetached,
+  mergeChatScrollEffects,
+  shouldFollowChatOutput,
+  transitionChatScroll,
+  type ChatScrollEffect,
+  type ChatScrollEvent,
+  type ChatScrollState,
+  type ChatScrollTransition
+} from "../../../../shared/chat-scroll-controller"
+import {
+  isProjectModeAgentTeamEnabled,
+  isProjectModeAgentTeamSelectionDisabled
+} from "../../../../shared/project-mode-agent-team"
 
-const PROJECT_MODE_AGENT_TEAM_ENABLED =
-  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?.trim() === "1"
+const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
+  import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
+)
+const CHAT_AT_BOTTOM_THRESHOLD_PX = 32
+const CHAT_SCROLL_UP_DETACH_DELTA_PX = 1
+const CHAT_USER_SCROLL_INTENT_WINDOW_MS = 350
+const CHAT_BOTTOM_SETTLE_MAX_FRAMES = 60
+const CHAT_FOLLOW_SETTLE_MAX_FRAMES = 12
+const CHAT_HISTORY_ANCHOR_MAX_FRAMES = 120
+const CHAT_HISTORY_ANCHOR_STABLE_FRAMES = 12
+const CHAT_SESSION_ANCHOR_STABLE_FRAMES = 2
+const CHAT_LOCAL_SEARCH_HISTORY_LIMIT = 500
+const CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT = 4 * 1024 * 1024
+
+function awaitWorkspaceMentionLoad<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    const error = new Error("Workspace mention load was cancelled")
+    error.name = "AbortError"
+    return Promise.reject(error)
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort)
+      const error = new Error("Workspace mention load was cancelled")
+      error.name = "AbortError"
+      reject(error)
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort)
+        reject(error)
+      }
+    )
+  })
+}
+
+interface PendingDurableHistoryAnchor {
+  threadId: string
+  generation: number
+  messageId: string
+  viewportTop: number
+  previousMessageCount: number
+  previousLoadedMessageCount: number
+  attempt: number
+  stableFrames: number
+}
+
+interface PendingChatSessionAnchor extends ChatScrollSessionAnchor {
+  threadId: string
+  attempt: number
+  stableFrames: number
+}
 
 function interruptionNoticeCopy(event: string, action: string): {
   title: string
@@ -786,11 +911,6 @@ function isTerminalToolCallStatus(status?: ToolCallStatus): boolean {
   )
 }
 
-function useStableToolDerivationMessages(messages: readonly Message[]): readonly Message[] {
-  const [selectStableMessages] = useState(createToolDerivationMessageSelector)
-  return selectStableMessages(messages)
-}
-
 const THINKING_MESSAGES = [
   "我先想想...",
   "让我捋一捋...",
@@ -834,9 +954,14 @@ const ATTACH_FILE_POPOVER_CONTENT = (
 const DOC_SAVE_AS_DOCX_HINT = "doc文件不要直接改后缀，在文件系统“另存为”docx之后上传。"
 const MAX_ATTACHMENTS = 3
 const MAX_TOTAL_CHARS = 24_000
+const AT_FILE_PREVIEW_LANE = "chat-at-file-submit"
 /** 输入框正文硬上限(字符数)。超过则拒绝发送并提示,防止病态超长输入。
  * 取值与附件总字符上限(MAX_TOTAL_CHARS)一致,均为 24000。 */
 const MAX_INPUT_CHARS = 24_000
+
+type PendingAttachmentInput =
+  | ({ kind: "selected" } & SelectedAttachmentFileGrant)
+  | { kind: "bytes"; fileName: string; bytes: ArrayBuffer }
 
 // Module-level (not a component-local useRef): TabbedPanel unmounts ChatContainer
 // entirely when switching to a file tab (`isAgentTab ? <ChatContainer> : <FileViewer>`)
@@ -908,22 +1033,6 @@ const ROTATING_WORDS = [
   "部署上线"
 ]
 
-const MESSAGE_TIMES_THREAD_VALUE_KEY = "messageTimes"
-const MESSAGE_TIME_ORDER_THREAD_VALUE_KEY = "messageTimeOrder"
-
-type MessageTimeValue = {
-  start_at?: string
-  end_at?: string
-}
-
-type MessageTimeMap = Record<string, MessageTimeValue>
-
-const messageTimeOrderEntries = (
-  updates: MessageTimeMap
-): Array<MessageTimeValue & { id: string }> => {
-  return Object.entries(updates).map(([id, time]) => ({ id, ...time }))
-}
-
 const getMessageText = (content: Message["content"]): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return ""
@@ -936,6 +1045,82 @@ const getMessageText = (content: Message["content"]): string => {
     })
     .filter(Boolean)
     .join("\n")
+}
+
+function cleanUserAttachmentMarkupForDisplay(message: Message): Message {
+  if (
+    message.role !== "user" ||
+    typeof message.content !== "string" ||
+    !message.content.includes("<attachment ")
+  ) {
+    return message
+  }
+
+  const content = cleanUserAttachmentContentForDisplay(message.content)
+  return { ...message, content }
+}
+
+interface ThreadDisplayBaselineCacheEntry {
+  contentVersion: number
+  sourceLength: number
+  sourceTailSnapshot: Message | undefined
+  sourceTailProjected: boolean
+  baseline: Message[]
+}
+
+const threadDisplayBaselineCache = new WeakMap<
+  readonly Message[],
+  ThreadDisplayBaselineCacheEntry
+>()
+
+function getThreadDisplayBaseline(
+  messages: readonly Message[],
+  contentVersion: number
+): Message[] {
+  const cached = threadDisplayBaselineCache.get(messages)
+  if (cached?.contentVersion === contentVersion) return cached.baseline
+  const sourceTail = messages.at(-1)
+  if (
+    cached &&
+    cached.sourceLength === messages.length &&
+    cached.sourceTailSnapshot &&
+    sourceTail &&
+    cached.sourceTailSnapshot.id === sourceTail.id &&
+    cached.sourceTailSnapshot.role === sourceTail.role &&
+    cached.sourceTailSnapshot.tool_call_id === sourceTail.tool_call_id
+  ) {
+    const projectedTail = filterCoordinatorNoiseMessages(
+      isVisibleCheckpointTranscriptMessage(sourceTail)
+        ? [cleanUserAttachmentMarkupForDisplay(sourceTail)]
+        : []
+    )
+    if (!cached.sourceTailProjected && projectedTail.length === 0) {
+      cached.contentVersion = contentVersion
+      cached.sourceTailSnapshot = sourceTail
+      return cached.baseline
+    }
+    if (
+      cached.sourceTailProjected &&
+      projectedTail.length === 1 &&
+      cached.baseline.at(-1)?.id === sourceTail.id
+    ) {
+      cached.baseline[cached.baseline.length - 1] = projectedTail[0]
+      cached.contentVersion = contentVersion
+      cached.sourceTailSnapshot = sourceTail
+      return cached.baseline
+    }
+  }
+  const baseline = filterCoordinatorNoiseMessages(
+    messages.filter(isVisibleCheckpointTranscriptMessage).map(cleanUserAttachmentMarkupForDisplay)
+  )
+  threadDisplayBaselineCache.set(messages, {
+    contentVersion,
+    sourceLength: messages.length,
+    sourceTailSnapshot: sourceTail,
+    sourceTailProjected: Boolean(sourceTail && baseline.at(-1)?.id === sourceTail.id),
+    baseline
+  })
+  return baseline
 }
 
 type ForkDestinationMode = "local" | "workspace"
@@ -1039,6 +1224,54 @@ function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFea
   const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
   const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
   return projectId && slug ? { projectId, slug } : null
+}
+
+type HarnessPreferredPlugin = { id?: string; name?: string } | null
+
+function getCachedHarnessPreferredPlugin(projectId: string): HarnessPreferredPlugin {
+  const project = readHarnessBoardCatalogCache()?.projects.find(
+    (candidate) => candidate.projectId === projectId
+  )
+  return project
+    ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name }
+    : null
+}
+
+interface InitialChatSkillCatalogState {
+  projection: ChatSkillCatalogProjection | null
+  loading: boolean
+  targetProjectId: string | null
+  resolvedProjectId: string | null
+  preferredPlugin: HarnessPreferredPlugin
+}
+
+function createInitialChatSkillCatalogState(
+  threadId: string,
+  surface: ChatSurface
+): InitialChatSkillCatalogState {
+  const store = useAppStore.getState()
+  const binding = getHarnessFeatureBinding(
+    store.threads.find((thread) => thread.thread_id === threadId)
+  )
+  const targetProjectId = binding?.projectId ?? null
+  const harnessScoped = surface !== "default" || Boolean(binding)
+  const preferredPlugin = binding ? getCachedHarnessPreferredPlugin(binding.projectId) : null
+  const harnessCatalogReady = !binding || preferredPlugin !== null
+  const snapshot = readSkillCatalogCache()
+  const projection = snapshot
+    ? projectChatSkillCatalog(snapshot, {
+        harnessScoped,
+        preferredPlugin
+      })
+    : null
+
+  return {
+    projection,
+    loading: !isSkillCatalogFresh(snapshot, store.pluginVersion) || !harnessCatalogReady,
+    targetProjectId,
+    resolvedProjectId: harnessCatalogReady ? targetProjectId : null,
+    preferredPlugin
+  }
 }
 
 function getSafeHttpUrl(href: unknown): string | null {
@@ -1301,158 +1534,6 @@ function ChatErrorCard({
   )
 }
 
-type ChatApprovalDecision = "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-
-interface ChatToolResultInfo {
-  content: string | unknown
-  is_error?: boolean
-}
-
-interface ChatMessageFlags {
-  showAssistantMeta: boolean[]
-  hasUserAfterHead: boolean[]
-}
-
-interface ChatMessageListProps {
-  messages: Message[]
-  perMessageFlags: ChatMessageFlags
-  hookLoggingEnabled: boolean
-  hookLogBucketByTurnId: Map<string, HookLogBucket>
-  detachedHookLogBuckets: HookLogBucket[]
-  contentMessageRefs: React.RefObject<Map<string, HTMLDivElement>>
-  setMessageRef: (messageId: string, role: Message["role"]) => (node: HTMLDivElement | null) => void
-  isLoading: boolean
-  toolResults: Map<string, ChatToolResultInfo>
-  toolCallStates: Map<string, ToolCallState>
-  pendingApprovalToolCallKeys: Set<string>
-  pendingApproval: HITLRequest | null
-  autoApproveGitPush: boolean
-  onApprovalDecision: (decision: ChatApprovalDecision) => void
-  onEditUserMessage: (message: Message) => void
-  onSetGoalFromMessage: (text: string) => void
-  onForkFromMessage: (message: Message) => void
-  forkingMessageId: string | null
-  onOpenHookLogBucket: (turnId: string) => void
-  threadId: string
-  assistantDurationMsById: Map<string, number>
-  userSendTimeLabelById: Map<string, string>
-}
-
-const ChatMessageList = React.memo(function ChatMessageList({
-  messages,
-  perMessageFlags,
-  hookLoggingEnabled,
-  hookLogBucketByTurnId,
-  detachedHookLogBuckets,
-  contentMessageRefs,
-  setMessageRef,
-  isLoading,
-  toolResults,
-  toolCallStates,
-  pendingApprovalToolCallKeys,
-  pendingApproval,
-  autoApproveGitPush,
-  onApprovalDecision,
-  onEditUserMessage,
-  onSetGoalFromMessage,
-  onForkFromMessage,
-  forkingMessageId,
-  onOpenHookLogBucket,
-  threadId,
-  assistantDurationMsById,
-  userSendTimeLabelById
-}: ChatMessageListProps): React.JSX.Element {
-  const visibleMessageLayout = useMemo(
-    () =>
-      buildVisibleMessageLayout(messages, (message) => {
-        const hasHookLogChip =
-          hookLoggingEnabled &&
-          message.role === "user" &&
-          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-        return messageHasVisibleRow(message, hasHookLogChip)
-      }),
-    [hookLogBucketByTurnId, hookLoggingEnabled, messages]
-  )
-
-  return (
-    <>
-      {messages.map((message, index) => {
-        const previousMessage = visibleMessageLayout.previousVisibleMessageByIndex[index]
-        const isLastMessage = index === visibleMessageLayout.lastVisibleMessageIndex
-        const hasUserAfterHead = perMessageFlags.hasUserAfterHead[index]
-        const showAssistantMeta = perMessageFlags.showAssistantMeta[index]
-
-        const hookLogBucketForTurn =
-          hookLoggingEnabled && message.role === "user"
-            ? hookLogBucketByTurnId.get(message.id)
-            : undefined
-        const hasHookLogChip = Boolean(hookLogBucketForTurn?.entries.length)
-        if (!messageHasVisibleRow(message, hasHookLogChip)) return null
-
-        const navigatorRef = setMessageRef(message.id, message.role)
-        const combinedRef = (node: HTMLDivElement | null): void => {
-          navigatorRef(node)
-          if (node && message.role !== "tool") {
-            contentMessageRefs.current.set(message.id, node)
-            return
-          }
-          contentMessageRefs.current.delete(message.id)
-        }
-
-        return (
-          <div
-            key={`${message.role}:${message.id}`}
-            ref={combinedRef}
-            data-message-role={message.role}
-          >
-            <MessageBubble
-              message={message}
-              previousMessage={previousMessage}
-              isStreaming={isLastMessage && isLoading}
-              showAssistantMeta={showAssistantMeta}
-              toolResults={toolResults}
-              toolCallStates={toolCallStates}
-              pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
-              pendingApproval={pendingApproval}
-              autoApproveGitPush={autoApproveGitPush}
-              onApprovalDecision={onApprovalDecision}
-              onEditUserMessage={onEditUserMessage}
-              onSetGoalFromMessage={onSetGoalFromMessage}
-              onForkFromMessage={onForkFromMessage}
-              forkingMessageId={forkingMessageId}
-              threadId={threadId}
-              isLoading={isLoading}
-              hasUserAfterHead={hasUserAfterHead}
-              assistantDurationMs={assistantDurationMsById.get(message.id)}
-              userSendTimeLabel={userSendTimeLabelById.get(message.id) ?? null}
-            />
-            {hookLogBucketForTurn && hookLogBucketForTurn.entries.length > 0 && (
-              <div className="mt-1 ml-12">
-                <HookLogChip
-                  bucket={hookLogBucketForTurn}
-                  onClick={() => onOpenHookLogBucket(hookLogBucketForTurn.turnId)}
-                />
-              </div>
-            )}
-          </div>
-        )
-      })}
-
-      {hookLoggingEnabled && detachedHookLogBuckets.length > 0 && (
-        <div className="flex flex-wrap justify-start gap-2 mt-1">
-          {detachedHookLogBuckets.map((bucket) => (
-            <HookLogChip
-              key={bucket.turnId}
-              bucket={bucket}
-              onClick={() => onOpenHookLogBucket(bucket.turnId)}
-            />
-          ))}
-        </div>
-      )}
-    </>
-  )
-})
-
 function SystemPromptPreviewButton({
   threadId
 }: {
@@ -1577,6 +1658,11 @@ export function ChatContainer({
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
+  const [initialChatScrollView] = useState(() => chatScrollSessionStore.open(threadId))
+  const initialChatScrollSession = initialChatScrollView.session
+  const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
+  const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
   const readOnly = Boolean(readOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
@@ -1585,21 +1671,82 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null)
+  const chatScrollStateRef = useRef<ChatScrollState | null>(
+    initialChatScrollSession?.state ?? null
+  )
+  if (chatScrollStateRef.current === null) {
+    chatScrollStateRef.current = createChatScrollState(threadId)
+  }
+  const pendingChatSessionAnchorRef = useRef<PendingChatSessionAnchor | null>(
+    initialChatScrollSession?.anchor
+      ? {
+          ...initialChatScrollSession.anchor,
+          threadId,
+          attempt: 0,
+          stableFrames: 0
+        }
+      : null
+  )
+  const [chatScrollUiState, setChatScrollUiState] = useState(() => ({
+    generation: chatScrollStateRef.current?.generation ?? 0,
+    mode: chatScrollStateRef.current?.mode ?? "initializing",
+    hasUnread: chatScrollStateRef.current?.hasUnread ?? false,
+    unreadCount: chatScrollStateRef.current?.unreadCount ?? 0
+  }))
+  const pendingBottomScrollEffectRef = useRef<ChatScrollEffect | null>(null)
+  const bottomScrollFrameRef = useRef<number | null>(null)
+  const bottomSettleAttemptRef = useRef(0)
+  const bottomSettleEffectKeyRef = useRef("")
+  const lastVisibleMessageIndexRef = useRef(-1)
+  const messageVirtualizationEnabledRef = useRef(false)
+  const lastObservedScrollTopRef = useRef(0)
+  const upwardUserScrollIntentUntilRef = useRef(0)
+  const downwardUserScrollIntentUntilRef = useRef(0)
+  const scrollbarUserIntentActiveRef = useRef(false)
+  const chatContentSnapshotRef = useRef<{
+    threadId: string
+    visibleCount: number
+    lastMessageId: string | null
+    lastMessageIdentity: string | null
+    loadedMessageCount: number
+    contentVersion: number
+    structureVersion: number
+  } | null>(initialChatScrollSession?.contentSnapshot ?? null)
+  const pendingDurableHistoryAnchorRef = useRef<PendingDurableHistoryAnchor | null>(null)
+  const pendingDurableSearchRevealIdRef = useRef<string | null>(
+    initialPendingDurableRevealMessageId
+  )
+  const durableMessageWindowGenerationRef = useRef(0)
+  const chatViewMountedRef = useRef(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
   const contentMessageRefs = useRef<Map<string, HTMLDivElement>>(new Map())
   const isComposingRef = useRef(false)
   // Alias, not a fresh useRef — see submitInFlightLockStore's module-level
   // declaration above for why this must survive ChatContainer remounts.
   const submitInFlightRef = submitInFlightLockStore
-  const [skills, setSkills] = useState<SkillMetadata[]>([])
-  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(new Set())
-  const [skillsLoading, setSkillsLoading] = useState(true)
-  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(null)
-  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(null)
+  const [initialSkillCatalogState] = useState(() =>
+    createInitialChatSkillCatalogState(threadId, surface)
+  )
+  const [skills, setSkills] = useState<SkillMetadata[]>(
+    () => initialSkillCatalogState.projection?.skills ?? []
+  )
+  const [disabledSkillIds, setDisabledSkillIds] = useState<Set<string>>(
+    () => initialSkillCatalogState.projection?.disabledSkillIds ?? new Set()
+  )
+  const [skillsLoading, setSkillsLoading] = useState(initialSkillCatalogState.loading)
+  const [skillsHarnessProjectId, setSkillsHarnessProjectId] = useState<string | null>(
+    initialSkillCatalogState.resolvedProjectId
+  )
+  const [skillsLoadTargetProjectId, setSkillsLoadTargetProjectId] = useState<string | null>(
+    initialSkillCatalogState.targetProjectId
+  )
   const [skillsHarnessPreferredPlugin, setSkillsHarnessPreferredPlugin] = useState<{
     id?: string
     name?: string
-  } | null>(null)
+  } | null>(initialSkillCatalogState.preferredPlugin)
+  const skillsLoadRequestIdRef = useRef(0)
   const [thinkingMessageIndex, setThinkingMessageIndex] = useState(0)
   const [userInputDialogLayout, setUserInputDialogLayout] =
     useState<UserInputRequestDialogLayout | null>(null)
@@ -1621,8 +1768,6 @@ export function ChatContainer({
   )
   const [yoloMode, setYoloMode] = useState(false)
   const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
-  const chatScrollSettings = useAppStore((state) => state.chatScrollSettings)
-  const chatScrollLimitNoticeKeyRef = useRef<string | null>(null)
   const [glowVisible, setGlowVisible] = useState(false)
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
@@ -1665,90 +1810,66 @@ export function ChatContainer({
   const agentModeChangeRequestRef = useRef(0)
   const agentModeChangeChainRef = useRef<Promise<void>>(Promise.resolve())
   const agentModeSaveRef = useRef<Promise<void>>(Promise.resolve())
-  // Draft-queue UI state: inline edit, drag-reorder, and a pump tick that
-  // re-triggers the auto-drain effect after each queued send settles.
+  // Draft-queue UI state: inline edit, drag-reorder, and a retry tick for
+  // authoritative handoff reconciliation.
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
   const [editingQueueText, setEditingQueueText] = useState("")
   const [draggingQueueId, setDraggingQueueId] = useState<string | null>(null)
   const queuedEditRequestRef = useRef(0)
   const guidingQueuedMessageIdsRef = useRef(new Set<string>())
   const [queuePumpTick, setQueuePumpTick] = useState(0)
+  const subscribeToSubmitRelease = useCallback(
+    (listener: () => void) => subscribeSubmitInFlightRelease(submitInFlightRef, threadId, listener),
+    [submitInFlightRef, threadId]
+  )
+  const getSubmitReleaseVersion = useCallback(
+    () => getSubmitInFlightReleaseVersion(submitInFlightRef, threadId),
+    [submitInFlightRef, threadId]
+  )
+  const submitReleaseVersion = useSyncExternalStore(
+    subscribeToSubmitRelease,
+    getSubmitReleaseVersion,
+    getSubmitReleaseVersion
+  )
   const chatReportUploadTimersRef = useRef<Record<string, number>>({})
   const chatReportRetryTimersRef = useRef<Record<string, number>>({})
-  const chatReportRetryQueuesRef = useRef<
-    Record<string, Array<{ messages: Message[]; attempt: number }>>
+  const chatReportRetryBatchesRef = useRef<
+    Record<string, { batch: ChatReportBatch; attempt: number } | undefined>
   >({})
+  const chatReportPendingBatchesRef = useRef<
+    Record<string, { batch: ChatReportBatch; attempt: number } | undefined>
+  >({})
+  const chatReportAbortControllersRef = useRef<Record<string, AbortController | undefined>>({})
+  const chatReportDisposedRef = useRef(false)
   // Get the stream data via subscription - reactive updates without re-rendering provider
   const streamData = useThreadStream(threadId)
   const stream = streamData.stream
-
-  useEffect(() => {
-    const { ipcRenderer } = window.electron
-
-    // 主动请求版本，不依赖推送时序
-    ipcRenderer
-      .invoke("get-version")
-      .then((ver: unknown) => {
-        console.log("版本 (invoke)：", ver)
-        if (ver) {
-          localStorage.setItem("version", ver as string)
-          updateMMJUserInfo()
-        }
-      })
-      .catch((e: unknown) => console.warn("get-version failed:", e))
-
-    // 保留推送监听作为备用
-    const removeListener = ipcRenderer.on("version", (ver: unknown) => {
-      console.log("版本 (push)：", ver)
-      localStorage.setItem("version", ver as string)
-      updateMMJUserInfo()
-    })
-
-    return () => {
-      if (typeof removeListener === "function") removeListener()
-    }
-  }, [])
-
-  useEffect(() => {
-    const { ipcRenderer } = window.electron
-
-    // 主动请求 IP，不依赖推送时序
-    ipcRenderer
-      .invoke("get-local-ip")
-      .then((ip: unknown) => {
-        console.log("local ip (invoke)：", ip)
-        if (ip) {
-          localStorage.setItem("localIp", ip as string)
-          updateMMJUserInfo()
-        }
-      })
-      .catch((e: unknown) => console.warn("get-local-ip failed:", e))
-
-    // 保留推送监听作为备用（例如网络变化时主进程重新推送）
-    const removeListener = ipcRenderer.on("ip", (ver: unknown) => {
-      console.log("local ip (push)：", ver)
-      if (ver) {
-        localStorage.setItem("localIp", ver as string)
-      }
-    })
-
-    return () => {
-      if (typeof removeListener === "function") removeListener()
-    }
-  }, [])
 
   const {
     threads,
     models,
     createThread,
     forkThread,
-    updateThread,
+    patchThreadMetadata,
     generateTitleForFirstMessage,
     setShowCustomizeView,
     rightPanelCollapsed,
     pluginVersion,
     requestOpenRightPanelSystemConstraints
-  } = useAppStore()
+  } = useAppStore(
+    useShallow((state) => ({
+      threads: state.threads,
+      models: state.models,
+      createThread: state.createThread,
+      forkThread: state.forkThread,
+      patchThreadMetadata: state.patchThreadMetadata,
+      generateTitleForFirstMessage: state.generateTitleForFirstMessage,
+      setShowCustomizeView: state.setShowCustomizeView,
+      rightPanelCollapsed: state.rightPanelCollapsed,
+      pluginVersion: state.pluginVersion,
+      requestOpenRightPanelSystemConstraints: state.requestOpenRightPanelSystemConstraints
+    }))
+  )
   const [forkingMessageId, setForkingMessageId] = useState<string | null>(null)
   const currentThread = useMemo(
     () => threads.find((thread) => thread.thread_id === threadId) ?? null,
@@ -1817,7 +1938,11 @@ export function ChatContainer({
     },
     [humanGate, humanGateDecisionBusy]
   )
-  const disableCoordinatorModeOption = isProjectModeAgentContext && !PROJECT_MODE_AGENT_TEAM_ENABLED
+  const disableCoordinatorModeOption = isProjectModeAgentTeamSelectionDisabled(
+    currentThread?.metadata,
+    isProjectModeAgentContext,
+    PROJECT_MODE_AGENT_TEAM_ENABLED
+  )
   const disableWorkflowModeOption = false
   const pendingHarnessNextActionVersion = useSyncExternalStore(
     subscribePendingHarnessNextActions,
@@ -1845,7 +1970,7 @@ export function ChatContainer({
         return "coordinator"
       }
       const environmentForcedCoordinator = await window.api.agent
-        .isCoordinatorModeForced()
+        .isCoordinatorModeForced(threadId)
         .catch((error) => {
           console.warn("[ChatContainer] Failed to load environment coordinator mode:", error)
           return false
@@ -1855,7 +1980,7 @@ export function ChatContainer({
       }
       return isMultiModeMetadata(metadata) ? "multi" : "normal"
     },
-    [disableCoordinatorModeOption, disableWorkflowModeOption]
+    [disableCoordinatorModeOption, disableWorkflowModeOption, threadId]
   )
 
   const loadResolvedAgentMode = useCallback(async (): Promise<ChatAgentMode> => {
@@ -1914,74 +2039,101 @@ export function ChatContainer({
   // invalidating its own identity (useCallback with empty deps).
   const harnessFeatureBindingRef = useRef(harnessFeatureBinding)
   harnessFeatureBindingRef.current = harnessFeatureBinding
+  const chatSurfaceRef = useRef(surface)
+  chatSurfaceRef.current = surface
 
-  // Define loadSkills function at component level so it can be accessed everywhere
+  // Keep a stable callback for both plugin-version effects and the application-level
+  // skills:changed bridge. The shared cache makes concurrent Chat/RightPanel reads one request.
   const loadSkills = useCallback(async (): Promise<void> => {
-    setSkillsLoading(true)
+    const requestId = ++skillsLoadRequestIdRef.current
     const binding = harnessFeatureBindingRef.current
+    const harnessScoped = chatSurfaceRef.current !== "default" || Boolean(binding)
     const targetProjectId = binding?.projectId ?? null
     setSkillsLoadTargetProjectId(targetProjectId)
-    try {
-      const pluginSkillsPromise =
-        typeof window.api.skills.listPlugins === "function"
-          ? window.api.skills.listPlugins().catch((error) => {
-              console.warn("[ChatContainer] Failed to load plugin skills:", error)
-              return []
-            })
-          : Promise.resolve([])
-      // Pull plugin skills alongside built-in/custom so the slash popover and
-      // welcome-screen skill cards can surface them. Plugin-shipped skills go
-      // through their own enable/disable lifecycle (plugin-level, not the
-      // disabled-skills list), and listPlugins() already filters by
-      // plugin.enabled, so we don't apply disabledSet to them here.
-      const [loadedSkills, pluginSkills, disabledList] = await Promise.all([
-        window.api.skills.list(),
-        pluginSkillsPromise,
-        window.api.skills.getDisabled()
-      ])
-      const disabledSet = new Set(disabledList.map(normalizeSkillId))
-      setDisabledSkillIds(disabledSet)
-      const availableSkills = loadedSkills.filter(
-        (s) => s.source === "project" || s.source === "user"
-      )
+    const pluginVersion = useAppStore.getState().pluginVersion
 
-      // In harness mode, resolve the project's bound plugin so slash surfaces
-      // only expose standalone skills and skills owned by that plugin.
-      let preferredPlugin: { id?: string; name?: string } | null = null
-      if (binding && typeof window.api.harnessBoard?.listProjects === "function") {
-        try {
-          const projects = await window.api.harnessBoard.listProjects()
-          const project = projects.find((p) => p.projectId === binding.projectId)
-          if (project) {
-            preferredPlugin = {
-              id: project.harnessAdapter.id,
-              name: project.harnessAdapter.name
-            }
-          }
-        } catch {
-          // Non-critical: fall through without a preference.
-        }
-      }
-
-      // Keep same-name standalone/plugin rows visible outside harness mode; in
-      // harness mode, plugin skills are restricted to the bound plugin.
-      const merged = mergeChatSkills(availableSkills, pluginSkills, disabledSet, preferredPlugin)
-      setSkills([...merged].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")))
+    const applySnapshot = (
+      snapshot: NonNullable<ReturnType<typeof readSkillCatalogCache>>,
+      preferredPlugin: HarnessPreferredPlugin
+    ): void => {
+      if (requestId !== skillsLoadRequestIdRef.current) return
+      const projection = projectChatSkillCatalog(snapshot, {
+        harnessScoped,
+        preferredPlugin
+      })
+      setSkills(projection.skills)
+      setDisabledSkillIds(projection.disabledSkillIds)
       setSkillsHarnessProjectId(targetProjectId)
       setSkillsHarnessPreferredPlugin(preferredPlugin)
+      setSkillsLoading(false)
+    }
+
+    const cachedSkills = readSkillCatalogCache()
+    const cachedHarnessCatalog = readHarnessBoardCatalogCache()
+    const cachedHarnessPreferredPlugin = binding
+      ? getCachedHarnessPreferredPlugin(binding.projectId)
+      : null
+    if (cachedSkills) {
+      const preferredPlugin = binding
+        ? getCachedHarnessPreferredPlugin(binding.projectId)
+        : null
+      const cachedProjection = projectChatSkillCatalog(cachedSkills, {
+        harnessScoped,
+        preferredPlugin
+      })
+      setSkills(cachedProjection.skills)
+      setDisabledSkillIds(cachedProjection.disabledSkillIds)
+      setSkillsHarnessPreferredPlugin(preferredPlugin)
+      setSkillsHarnessProjectId(!binding || cachedHarnessPreferredPlugin ? targetProjectId : null)
+    }
+    if (
+      isSkillCatalogFresh(cachedSkills, pluginVersion) &&
+      (!binding || cachedHarnessPreferredPlugin)
+    ) {
+      applySnapshot(
+        cachedSkills,
+        cachedHarnessPreferredPlugin
+      )
+      return
+    }
+
+    setSkillsLoading(true)
+    try {
+      const skillCatalogPromise = revalidateSkillCatalog(pluginVersion)
+      const harnessCatalogPromise = !binding
+        ? Promise.resolve(null)
+        : cachedHarnessPreferredPlugin && cachedHarnessCatalog
+          ? Promise.resolve(cachedHarnessCatalog)
+          : window.api.harnessBoard.catalogPage({
+              requestScope: "chat-binding",
+              projectId: binding.projectId,
+              projectLimit: 1,
+              includeRegistry: false
+            }).catch((error) => {
+              console.warn("[ChatContainer] Failed to resolve harness skill binding:", error)
+              return null
+            })
+      const [snapshot, harnessCatalog] = await Promise.all([
+        skillCatalogPromise,
+        harnessCatalogPromise
+      ])
+      const project = binding
+        ? harnessCatalog?.projects.find((candidate) => candidate.projectId === binding.projectId)
+        : null
+      const preferredPlugin = project
+        ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name }
+        : null
+      applySnapshot(snapshot, preferredPlugin)
     } catch (error) {
       console.error("[ChatContainer] Failed to load skills:", error)
-      setSkills([])
-      setSkillsHarnessProjectId(null)
-      setSkillsHarnessPreferredPlugin(null)
-    } finally {
-      setSkillsLoading(false)
+      if (requestId === skillsLoadRequestIdRef.current) setSkillsLoading(false)
     }
   }, [])
 
   // Get persisted thread state and actions from context
   const {
     messages: threadMessages,
+    messagesContentVersion,
     queuedMessages,
     queueAutoDrainSuppressed,
     toolCallStates,
@@ -2007,6 +2159,12 @@ export function ChatContainer({
     workflowRun,
     scheduledTaskLoading,
     historyLoading,
+    historyPageLoading,
+    historyHasMore,
+    historyWindowGap,
+    historyMessageTotal,
+    historyConversationPresence,
+    historyLoadedMessageCount,
     scheduledTaskId,
     modelRetry,
     contextCompaction,
@@ -2021,6 +2179,11 @@ export function ChatContainer({
     clearFinishedWorkflowRun,
     appendMessage,
     syncDurableTranscript,
+    loadEarlierMessages,
+    loadMessageWindowAround,
+    loadReleasedMessageWindow,
+    restoreLatestMessageWindow,
+    cancelMessageWindowLoad,
     removeLocalMessage,
     addQueuedMessage,
     prependQueuedMessage,
@@ -2041,6 +2204,8 @@ export function ChatContainer({
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
+  const workspacePathRef = useRef(workspacePath)
+  workspacePathRef.current = workspacePath
 
   const storedHarnessNextActionDialogTips = harnessNextActionDialogTips?.trim() || null
   const nextActionDialogTips = pendingHarnessDialogTips ?? storedHarnessNextActionDialogTips
@@ -2098,6 +2263,7 @@ export function ChatContainer({
 
     return () => {
       cancelled = true
+      void window.api.harnessBoard.cancelDialogTips().catch(() => undefined)
     }
   }, [
     harnessDialogTipsProjectId,
@@ -2116,11 +2282,7 @@ export function ChatContainer({
     useCallback(() => threadContext.getHookLogBuckets(threadId), [threadContext, threadId])
   )
 
-  const hookLogBucketByTurnId = useMemo(() => {
-    const map = new Map<string, HookLogBucket>()
-    for (const bucket of hookLogBuckets) map.set(bucket.turnId, bucket)
-    return map
-  }, [hookLogBuckets])
+  const hookLogBucketByTurnId = threadProjectionRuntime.projectHookLogBucketMap(hookLogBuckets)
   const [hookLogConfig, setHookLogConfig] = useState<{ enabled: boolean; diagnostic: boolean }>({
     enabled: false,
     diagnostic: false
@@ -2157,7 +2319,11 @@ export function ChatContainer({
     setShowCustomizeView(true, "memory")
   }, [setShowCustomizeView])
 
-  const canChangeAgentMode = !historyLoading && threadMessages.length === 0
+  const canChangeAgentMode = canChangeThreadAgentMode({
+    historyLoading,
+    conversationPresence: historyConversationPresence,
+    residentMessageCount: threadMessages.length
+  })
   const queuedApprovalCount = Math.max(0, pendingApprovals.length - 1)
 
   useEffect(() => {
@@ -2175,7 +2341,9 @@ export function ChatContainer({
   const agentModeSwitchDisabledReason = !canChangeAgentMode
     ? historyLoading
       ? "会话历史加载中，暂时不能切换执行模式。"
-      : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
+      : historyConversationPresence === "unknown"
+        ? "会话消息状态尚未确认，请稍后重试。"
+        : "当前线程已有消息，执行模式已锁定，请新开线程切换。"
     : isLoading
       ? "当前请求执行中，结束后才能切换执行模式。"
       : undefined
@@ -2200,25 +2368,36 @@ export function ChatContainer({
           toast.error("会话历史加载中，暂时不能切换执行模式。")
           return
         }
-        if (threadMessages.length > 0) {
+        if (
+          !canChangeThreadAgentMode({
+            historyLoading,
+            conversationPresence: historyConversationPresence,
+            residentMessageCount: threadMessages.length
+          })
+        ) {
+          if (historyConversationPresence === "unknown") {
+            toast.error("会话消息状态尚未确认，请稍后重试。")
+            return
+          }
           toast.error("当前线程已有消息，不能再切换执行模式。请新开线程选择其他模式。")
           return
         }
         if (nextMode !== "coordinator" && !disableCoordinatorModeOption) {
           const isEnvironmentForcedCoordinator = await window.api.agent
-            .isCoordinatorModeForced()
+            .isCoordinatorModeForced(threadId)
             .catch(() => false)
           if (requestId !== agentModeChangeRequestRef.current) return
           if (isEnvironmentForcedCoordinator) {
             toast.error("当前环境变量强制开启 Agent Team，不能切换到其他执行模式")
             return
           }
-          const [workers, hasPendingNotifications] = await Promise.all([
-            window.api.agent
-              .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
-              .catch(() => []),
-            window.api.agent.hasCoordinatorWorkerNotifications(threadId).catch(() => false)
-          ])
+          const workers = await window.api.agent
+            .getCoordinatorWorkers(threadId, { subscribeUpdates: false })
+            .catch(() => [])
+          if (requestId !== agentModeChangeRequestRef.current) return
+          const hasPendingNotifications = await window.api.agent
+            .hasCoordinatorWorkerNotifications(threadId)
+            .catch(() => false)
           if (requestId !== agentModeChangeRequestRef.current) return
           const hasRemoteUnresolvedWorkers = workers.some(
             (worker) => worker.status === "running" || worker.notification_acknowledged === false
@@ -2232,24 +2411,19 @@ export function ChatContainer({
         if (requestId !== agentModeChangeRequestRef.current) return
         agentModeHydratedRef.current = true
         setAgentMode(nextMode)
-        const thread = await window.api.threads.get(threadId)
-        if (requestId !== agentModeChangeRequestRef.current) return
-        const metadata = thread?.metadata ?? {}
-        const nextMetadata: Record<string, unknown> = {
-          ...metadata,
+        const set: Record<string, unknown> = {
           agentMode: nextMode === "multi" ? "normal" : nextMode
         }
+        const remove: string[] = []
         if (nextMode === "normal" || nextMode === "multi") {
-          nextMetadata.subagentsEnabled = nextMode === "multi"
+          set.subagentsEnabled = nextMode === "multi"
         } else {
-          delete nextMetadata.subagentsEnabled
+          remove.push("subagentsEnabled")
         }
         if (nextMode !== "coordinator") {
-          delete nextMetadata.coordinatorMode
+          remove.push("coordinatorMode")
         }
-        await updateThread(threadId, {
-          metadata: nextMetadata
-        })
+        await patchThreadMetadata(threadId, { set, remove })
         persistedAgentModeRef.current = nextMode
       })
       // Serialize writes so an older request can never finish after a newer one
@@ -2274,9 +2448,10 @@ export function ChatContainer({
       disableCoordinatorModeOption,
       disableWorkflowModeOption,
       historyLoading,
+      historyConversationPresence,
       threadId,
       threadMessages,
-      updateThread
+      patchThreadMetadata
     ]
   )
   const userInputScrollPadding = pendingUserInput
@@ -2314,6 +2489,7 @@ export function ChatContainer({
   const [dragOver, setDragOver] = useState(false)
   const attachmentsRef = useRef<FileAttachment[]>([])
   const mentionedFilesRef = useRef<MentionedWorkspaceFile[]>([])
+  const activeAtFilePreviewTokensRef = useRef(new Set<string>())
 
   // Keep ref in sync with state
   useEffect(() => {
@@ -2322,6 +2498,26 @@ export function ChatContainer({
   useEffect(() => {
     mentionedFilesRef.current = mentionedFiles
   }, [mentionedFiles])
+  useEffect(() => {
+    setMentionedFiles((current) => {
+      const retained = retainMentionedWorkspaceFilesForWorkspace(current, workspacePath)
+      if (retained.length === current.length) return current
+      mentionedFilesRef.current = retained
+      return retained
+    })
+  }, [workspacePath])
+  useEffect(
+    () => () => {
+      for (const requestToken of activeAtFilePreviewTokensRef.current) {
+        void window.api.workspace.cancelFilePreview({
+          lanePrefix: AT_FILE_PREVIEW_LANE,
+          requestToken
+        })
+      }
+      activeAtFilePreviewTokensRef.current.clear()
+    },
+    []
+  )
 
   const totalAttachmentChars = useMemo(
     () => attachments.reduce((sum, a) => sum + a.content.length, 0),
@@ -2335,9 +2531,9 @@ export function ChatContainer({
   const totalPendingFileCount = attachments.length + mentionedFiles.length
   const hasPendingFilePayload = totalPendingFileCount > 0
 
-  const handleFileSelectByPath = useCallback(
-    async (filePaths: string[]) => {
-      if (filePaths.length === 0 || attachmentLoading) return
+  const handleAttachmentInputs = useCallback(
+    async (inputs: PendingAttachmentInput[]) => {
+      if (inputs.length === 0 || attachmentLoading) return
       setAttachmentLoading(true)
       clearError()
       try {
@@ -2349,19 +2545,22 @@ export function ChatContainer({
           ...mentionedFilesRef.current.map((item) => item.absolutePath)
         ])
 
-        for (const filePath of filePaths) {
+        for (const input of inputs) {
+          const displayIdentity = input.kind === "selected" ? input.filePath : input.fileName
           // #7: skip duplicates
-          if (existingPaths.has(filePath)) {
-            const dupName = filePath.replace(/^.*[/\\]/, "") || filePath
+          if (existingPaths.has(displayIdentity)) {
+            const dupName = displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             setError(`文件"${dupName}"已添加，跳过重复`)
             continue
           }
 
           // #6: check extension before calling backend
-          const lastDot = filePath.lastIndexOf(".")
-          const ext = lastDot >= 0 ? filePath.substring(lastDot).toLowerCase() : ""
+          const lastDot = displayIdentity.lastIndexOf(".")
+          const ext =
+            lastDot >= 0 ? displayIdentity.substring(lastDot).toLowerCase() : ""
           if (!ext || !SUPPORTED_EXTS.has(ext)) {
-            const fileName = filePath.replace(/^.*[/\\]/, "") || filePath
+            const fileName =
+              displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             if (ext === ".doc") {
               setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
             } else {
@@ -2380,7 +2579,18 @@ export function ChatContainer({
             setError(`附件总内容已达上限（${MAX_TOTAL_CHARS.toLocaleString()} 字符）`)
             break
           }
-          const result = await window.api.file.parse(filePath, remaining)
+          const result =
+            input.kind === "selected"
+              ? await window.api.file.parseSelected({
+                  grant: input.grant,
+                  filePath: input.filePath,
+                  maxLength: remaining
+                })
+              : await window.api.file.parseBytes({
+                  fileName: input.fileName,
+                  bytes: input.bytes,
+                  maxLength: remaining
+                })
           if (result.success && result.attachment) {
             // #12: skip empty files
             if (!result.attachment.content.trim()) {
@@ -2416,10 +2626,13 @@ export function ChatContainer({
       return
     }
     const result = await window.api.file.select()
-    if (!result.canceled && result.filePaths.length > 0) {
-      await handleFileSelectByPath(result.filePaths)
+    if (result.error) setError(result.error)
+    if (!result.canceled && result.files.length > 0) {
+      await handleAttachmentInputs(
+        result.files.map((file) => ({ kind: "selected" as const, ...file }))
+      )
     }
-  }, [handleFileSelectByPath, setError])
+  }, [handleAttachmentInputs, setError])
 
   const removeAttachment = useCallback((index: number) => {
     setAttachments((prev) => prev.filter((_, i) => i !== index))
@@ -2438,15 +2651,30 @@ export function ChatContainer({
       if (attachmentLoading) return
       const files = e.dataTransfer.files
       if (files.length > 0) {
-        const paths = Array.from(files)
-          .map((f) => window.api.file.getFilePath(f))
-          .filter((p) => !!p)
-        if (paths.length > 0) {
-          await handleFileSelectByPath(paths)
+        const availableSlots = Math.max(
+          0,
+          MAX_ATTACHMENTS - attachmentsRef.current.length - mentionedFilesRef.current.length
+        )
+        const inputs: PendingAttachmentInput[] = []
+        for (const file of Array.from(files).slice(0, availableSlots)) {
+          const lastDot = file.name.lastIndexOf(".")
+          const ext = lastDot >= 0 ? file.name.substring(lastDot).toLowerCase() : ""
+          if (!SUPPORTED_EXTS.has(ext)) {
+            setError(`不支持的文件类型"${file.name}"，仅支持 txt、md、csv、docx、xlsx、xls`)
+            continue
+          }
+          if (file.size > MAX_ATTACHMENT_FILE_BYTES) {
+            setError(`文件"${file.name}"过大，单文件不超过 5MB`)
+            continue
+          }
+          inputs.push({ kind: "bytes", fileName: file.name, bytes: await file.arrayBuffer() })
+        }
+        if (inputs.length > 0) {
+          await handleAttachmentInputs(inputs)
         }
       }
     },
-    [handleFileSelectByPath, attachmentLoading]
+    [handleAttachmentInputs, attachmentLoading, setError]
   )
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -2491,21 +2719,9 @@ export function ChatContainer({
       setModelContextLimit(undefined)
       return
     }
-    let ignore = false
-    window.api.models
-      .list()
-      .then((models) => {
-        if (ignore) return
-        const match = models.find((model) => model.id === currentModel)
-        setModelContextLimit(match?.maxTokens)
-      })
-      .catch(() => {
-        if (!ignore) setModelContextLimit(undefined)
-      })
-    return () => {
-      ignore = true
-    }
-  }, [currentModel])
+    const match = models.find((model) => model.id === currentModel)
+    setModelContextLimit(match?.maxTokens)
+  }, [currentModel, models])
 
   useEffect(() => {
     const fetchYoloMode = (): void => {
@@ -2525,51 +2741,73 @@ export function ChatContainer({
   }, [])
 
   const uploadLoChatDataForThread = useCallback(
-    async (targetThreadId: string, msgs: Message[], attempt = 0) => {
-      const lastMsg = msgs[msgs.length - 1]
-      if (!lastMsg || lastMsg.role === "user") return
-
-      let lUidx = -1
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === "user") {
-          lUidx = i
-          break
-        }
+    async (targetThreadId: string, batch: ChatReportBatch, attempt = 0) => {
+      if (chatReportDisposedRef.current) return
+      if (chatReportAbortControllersRef.current[targetThreadId]) {
+        // Per thread, retain only the newest pending report while one bounded request is active.
+        chatReportPendingBatchesRef.current[targetThreadId] = { batch, attempt }
+        return
       }
-      if (lUidx === -1) return
-
-      const tailMessages = msgs.slice(lUidx)
       const reservedIds = reserveChatReportMessageIds(
         targetThreadId,
-        tailMessages.map((msg) => msg.id)
+        batch.messageIds
       )
       if (reservedIds.length === 0) return
 
-      const payload: ChatReportPayload[] = tailMessages.map((msg) => ({
-        role: msg.role,
-        content: stringifyMessageContentForReport(msg.content)
-      }))
+      const controller = new AbortController()
+      chatReportAbortControllersRef.current[targetThreadId] = controller
       try {
-        await uploadChatData(targetThreadId, payload)
+        await uploadChatData(targetThreadId, batch.payload, controller.signal)
         markChatReportUploadSucceeded(targetThreadId, reservedIds)
       } catch (error) {
         markChatReportUploadFailed(targetThreadId, reservedIds)
-        if (attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS) {
-          const retryQueue = (chatReportRetryQueuesRef.current[targetThreadId] ??= [])
-          retryQueue.push({ messages: tailMessages, attempt: attempt + 1 })
+        if (
+          !controller.signal.aborted &&
+          !chatReportDisposedRef.current &&
+          attempt < CHAT_REPORT_MAX_RETRY_ATTEMPTS
+        ) {
+          chatReportRetryBatchesRef.current[targetThreadId] = {
+            batch,
+            attempt: attempt + 1
+          }
           if (!chatReportRetryTimersRef.current[targetThreadId]) {
             const retryThreadId = targetThreadId
             const retryDelayMs = Math.min(CHAT_REPORT_RETRY_DELAY_MS * 2 ** attempt, 30_000)
             chatReportRetryTimersRef.current[retryThreadId] = window.setTimeout(() => {
               delete chatReportRetryTimersRef.current[retryThreadId]
-              const retryItems = chatReportRetryQueuesRef.current[retryThreadId]?.splice(0) ?? []
-              for (const retryItem of retryItems) {
-                void uploadLoChatDataForThread(retryThreadId, retryItem.messages, retryItem.attempt)
+              if (chatReportDisposedRef.current) return
+              const retryItem = chatReportRetryBatchesRef.current[retryThreadId]
+              delete chatReportRetryBatchesRef.current[retryThreadId]
+              if (
+                retryItem &&
+                !chatReportAbortControllersRef.current[retryThreadId] &&
+                !chatReportPendingBatchesRef.current[retryThreadId]
+              ) {
+                void uploadLoChatDataForThread(
+                  retryThreadId,
+                  retryItem.batch,
+                  retryItem.attempt
+                )
               }
             }, retryDelayMs)
           }
         }
         console.warn("[Upload] chat数据上报失败:", error)
+      } finally {
+        if (chatReportAbortControllersRef.current[targetThreadId] === controller) {
+          delete chatReportAbortControllersRef.current[targetThreadId]
+        }
+        if (!chatReportDisposedRef.current) {
+          const pending = chatReportPendingBatchesRef.current[targetThreadId]
+          delete chatReportPendingBatchesRef.current[targetThreadId]
+          if (pending) {
+            const retryTimer = chatReportRetryTimersRef.current[targetThreadId]
+            if (retryTimer) window.clearTimeout(retryTimer)
+            delete chatReportRetryTimersRef.current[targetThreadId]
+            delete chatReportRetryBatchesRef.current[targetThreadId]
+            void uploadLoChatDataForThread(targetThreadId, pending.batch, pending.attempt)
+          }
+        }
       }
     },
     []
@@ -2577,16 +2815,39 @@ export function ChatContainer({
 
   const scheduleChatReportUpload = useCallback(
     (targetThreadId: string, msgs: Message[]) => {
+      const batch = buildLatestChatReportBatch(msgs)
+      if (!batch) return
       const existingTimer = chatReportUploadTimersRef.current[targetThreadId]
       if (existingTimer) window.clearTimeout(existingTimer)
-      const messagesForUpload = msgs.slice()
       chatReportUploadTimersRef.current[targetThreadId] = window.setTimeout(() => {
         delete chatReportUploadTimersRef.current[targetThreadId]
-        void uploadLoChatDataForThread(targetThreadId, messagesForUpload)
+        if (chatReportDisposedRef.current) return
+        void uploadLoChatDataForThread(targetThreadId, batch)
       }, CHAT_REPORT_UPLOAD_DEBOUNCE_MS)
     },
     [uploadLoChatDataForThread]
   )
+
+  useEffect(() => {
+    chatReportDisposedRef.current = false
+    return () => {
+      chatReportDisposedRef.current = true
+      for (const timer of Object.values(chatReportUploadTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      for (const timer of Object.values(chatReportRetryTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+      for (const controller of Object.values(chatReportAbortControllersRef.current)) {
+        controller?.abort(new DOMException("Chat surface disposed", "AbortError"))
+      }
+      chatReportUploadTimersRef.current = {}
+      chatReportRetryTimersRef.current = {}
+      chatReportRetryBatchesRef.current = {}
+      chatReportPendingBatchesRef.current = {}
+      chatReportAbortControllersRef.current = {}
+    }
+  }, [])
 
   // Check if sandbox NUX is needed. The main process currently defaults sandbox mode to
   // "none", so this remains dormant unless the setup flow is re-enabled later.
@@ -2663,9 +2924,7 @@ export function ChatContainer({
   // workspace:pushWorktree calls before the pending approval is cleared on re-render.
   const gitPushInFlightRef = useRef<Set<string>>(new Set())
   const handleApprovalDecision = useCallback(
-    async (
-      decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
-    ): Promise<void> => {
+    async (decision: ChatApprovalDecision): Promise<void> => {
       if (!pendingApproval) return
 
       // Check if this is an orchestrator-sourced approval (has requestId)
@@ -2924,277 +3183,561 @@ export function ChatContainer({
     return () => clearTimeout(timer)
   }, [appleIntelligenceGlowEnabled, isLoading])
 
-  const displayMessages = useMemo(() => {
-    const normalizedLiveMessages = normalizeLiveStreamMessageIds(
-      threadMessages.map((message) => ({
-        id: message.id,
-        type:
-          message.role === "user"
-            ? "human"
-            : message.role === "assistant"
-              ? "ai"
-              : message.role
-      })),
-      streamData.liveMessages || []
-    )
-    const threadMessageIds = new Set(threadMessages.map((m) => m.id))
-    const liveReasoningById = new Map<string, string>()
-    for (const liveMessage of normalizedLiveMessages) {
-      if (
-        liveMessage.id &&
-        liveStreamMessageRole(liveMessage.type) === "assistant" &&
-        typeof liveMessage.reasoning === "string" &&
-        liveMessage.reasoning.trim()
-      ) {
-        liveReasoningById.set(liveMessage.id, liveMessage.reasoning)
-      }
-    }
-    const threadMessagesWithLiveReasoning = threadMessages.map((message) => {
-      if (message.role !== "assistant" || message.reasoning) return message
-      const liveReasoning = liveReasoningById.get(message.id)
-      return liveReasoning ? { ...message, reasoning: liveReasoning } : message
+  const threadDisplayBaseline = useMemo(
+    () => getThreadDisplayBaseline(threadMessages, messagesContentVersion),
+    [messagesContentVersion, threadMessages]
+  )
+  const liveDisplayProjection = threadProjectionRuntime.projectLiveDisplayMessages(
+    threadMessages,
+    streamData.liveMessages || []
+  )
+  const liveDisplayMessages = liveDisplayProjection.messages
+  let projectChatMessages = threadProjectionRuntime.chatMessageProjectors.get(threadDisplayBaseline)
+  if (!projectChatMessages) {
+    projectChatMessages = createChatMessageProjector()
+    threadProjectionRuntime.chatMessageProjectors.set(threadDisplayBaseline, projectChatMessages)
+  }
+  const displayMessageProjection = projectChatMessages(
+    threadDisplayBaseline,
+    liveDisplayMessages,
+    streamData.messages,
+    messagesContentVersion,
+    liveDisplayProjection
+  )
+  const displayMessages = displayMessageProjection.messages
+  const streamingSearchMessageIdRef = useRef<string | null>(null)
+  streamingSearchMessageIdRef.current = isLoading
+    ? (displayMessages.findLast((message) =>
+        messageHasVisibleRow(
+          message,
+          Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
+        )
+      )?.id ?? null)
+    : null
+  const displayMessagesContentVersion = displayMessageProjection.contentVersion
+  const displayMessagesStructureVersion = displayMessageProjection.structureVersion
+  const chatScrollQuestionStructureRevision =
+    threadProjectionRuntime.projectChatScrollQuestionRevision({
+      scopeKey: threadId,
+      messages: displayMessages,
+      structureVersion: displayMessagesStructureVersion,
+      changedMessages: displayMessageProjection.changedMessages
     })
-    const streamingMsgs: Message[] = normalizedLiveMessages
-      .filter((m): m is StreamMessage & { id: string } => !!m.id && !threadMessageIds.has(m.id))
-      .filter((m) => !(m.type === "human" && isCoordinatorNotificationPrompt(m.content)))
-      .map((streamMsg) => {
-        const role = liveStreamMessageRole(streamMsg.type)
+  const stableMessageIndexProjection = threadProjectionRuntime.projectStableMessageIndexes({
+    baseline: threadDisplayBaseline,
+    indexById: displayMessageProjection.indexById,
+    structureVersion: displayMessagesStructureVersion,
+    hookLogBucketByTurnId,
+    hookLogEnabled: hookLogConfig.enabled
+  })
+  const orderedStableVisibleMessageIndexes = stableMessageIndexProjection.visibleIndexes
+  const hasHookLogChipForMessage = useCallback(
+    (message: Message): boolean =>
+      Boolean(
+        hookLogConfig.enabled &&
+          message.role === "user" &&
+          hookLogBucketByTurnId.get(message.id)?.entries.length
+      ),
+    [hookLogBucketByTurnId, hookLogConfig.enabled]
+  )
+  const dynamicVisibilityProjection = threadProjectionRuntime.projectDynamicLiveVisibility({
+    live: liveDisplayProjection,
+    displayMessages,
+    displayIndexById: displayMessageProjection.indexById,
+    displayContentVersion: displayMessagesContentVersion,
+    displayStructureVersion: displayMessagesStructureVersion,
+    hasHookLogChip: hasHookLogChipForMessage
+  })
+  const dynamicVisibilityByIndex = dynamicVisibilityProjection.byIndex
+  const orderedDynamicVisibleMessageIndexes =
+    dynamicVisibilityProjection.orderedVisibleIndexes
+  const liveLastUserMessageIndex = liveDisplayProjection.lastUserMessageId
+    ? displayMessageProjection.indexById.get(liveDisplayProjection.lastUserMessageId)
+    : undefined
+  const lastUserMessageIndex = Math.max(
+    stableMessageIndexProjection.lastUserIndex,
+    liveLastUserMessageIndex ?? -1
+  )
+
+  const chatScrollNavigatorMessages = displayMessages
+
+  // Keep closed search off the token hot path. The content projector already exposes a cheap
+  // scalar version, so search can refresh live text without re-joining block-array content here.
+  const searchRecomputeKey = useMemo(() => {
+    if (!searchOpen) return "closed"
+    return `${displayMessagesContentVersion}:${displayMessages.length}:${isLoading}`
+  }, [displayMessages.length, displayMessagesContentVersion, isLoading, searchOpen])
+
+  const detachedHookLogBuckets = threadProjectionRuntime.projectDetachedHookLogBuckets({
+    displayMessages,
+    structureVersion: displayMessagesStructureVersion,
+    hookLogBuckets
+  })
+
+  const visibleMessageIndexes = threadProjectionRuntime.projectVisibleMessageIndexes({
+    stableIndexes: orderedStableVisibleMessageIndexes,
+    dynamicVisibilityByIndex,
+    orderedDynamicIndexes: orderedDynamicVisibleMessageIndexes,
+    dynamicVersion: dynamicVisibilityProjection.version
+  })
+  const historyGapBeforeVisibleMessageId = useMemo(() => {
+    if (!historyWindowGap) return null
+    const boundaryIndex = displayMessageProjection.indexById.get(
+      historyWindowGap.beforeMessageId
+    )
+    if (boundaryIndex === undefined) return null
+    const visibleBoundaryIndex = visibleMessageIndexes.find((index) => index >= boundaryIndex)
+    return visibleBoundaryIndex === undefined
+      ? null
+      : displayMessages[visibleBoundaryIndex]?.id ?? null
+  }, [
+    displayMessageProjection.indexById,
+    displayMessages,
+    displayMessagesStructureVersion,
+    historyWindowGap,
+    visibleMessageIndexes
+  ])
+  const lastVisibleMessageIndex = visibleMessageIndexes[visibleMessageIndexes.length - 1]
+  const lastContentMessageId =
+    lastVisibleMessageIndex === undefined
+      ? null
+      : displayMessages[lastVisibleMessageIndex]?.id ?? null
+
+  // Ordinary assistant tokens update only the changed display slot. Keep the
+  // tool projection stable and replace a slot only when that changed row is
+  // itself tool-relevant.
+  const toolDerivationProjection = threadProjectionRuntime.projectToolDerivationMessages(
+    displayMessages,
+    displayMessageProjection.changedMessages,
+    displayMessagesStructureVersion
+  )
+  const toolDerivationMessages = toolDerivationProjection.messages
+  const toolResults = threadProjectionRuntime.projectToolResults(
+    toolDerivationMessages,
+    toolDerivationProjection.version
+  )
+
+  const { assistantDurationMsById, userSendTimeLabelById } =
+    threadProjectionRuntime.projectTimingMeta(
+      displayMessages,
+      displayMessagesStructureVersion
+    )
+
+  const { toolCallDisplayStates, pendingApprovalToolCallKeys } =
+    threadProjectionRuntime.projectToolCallDisplayState({
+      messages: toolDerivationMessages,
+      projectionVersion: toolDerivationProjection.version,
+      toolResults,
+      toolCallStates,
+      pendingApproval,
+      isLoading,
+      compute: () => {
+        const orderedToolCalls: Array<{
+          key: string
+          call: { id: string; name: string; args: Record<string, unknown> }
+        }> = []
+
+        for (const message of toolDerivationMessages) {
+          if (!Array.isArray(message.tool_calls)) continue
+          message.tool_calls.forEach((toolCall, index) => {
+            if (!toolCall?.id) return
+            orderedToolCalls.push({
+              key: getWorkerToolUiKey(message.id, toolCall.id, index),
+              call: toolCall
+            })
+          })
+        }
+
+        const lastOccurrenceKeyByCallId = new Map<string, string>()
+        for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
+
+        const currentApprovalIds = new Set<string>()
+        if (pendingApproval?.pendingToolCallIds?.length) {
+          for (const id of pendingApproval.pendingToolCallIds) {
+            if (id) currentApprovalIds.add(id)
+          }
+        } else if (pendingApproval?.tool_call?.id) {
+          currentApprovalIds.add(pendingApproval.tool_call.id)
+        }
+        const approvalKeys = new Set<string>()
+        for (const id of currentApprovalIds) {
+          const key = lastOccurrenceKeyByCallId.get(id)
+          if (key) approvalKeys.add(key)
+        }
+
+        let activeAssigned = false
+        const nextStates = new Map<string, ToolCallState>()
+
+        for (const { key, call: toolCall } of orderedToolCalls) {
+          const baseState =
+            lastOccurrenceKeyByCallId.get(toolCall.id) === key
+              ? toolCallStates[toolCall.id]
+              : undefined
+          const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
+          const result = toolResults.get(key)
+          let status: ToolCallStatus
+
+          if (result !== undefined) {
+            status = result.is_error ? "failed" : "completed"
+          } else if (isTerminalToolCallStatus(baseState?.status)) {
+            status = baseState!.status
+          } else if (approvalKeys.has(key)) {
+            status = "awaiting_approval"
+            activeAssigned = true
+          } else if (!isLoading) {
+            status = "interrupted"
+          } else if (!activeAssigned) {
+            status = "running"
+            activeAssigned = true
+          } else {
+            status = "queued"
+          }
+
+          nextStates.set(key, {
+            id: toolCall.id,
+            status,
+            name: toolCall.name || baseState?.name,
+            args: mergedArgs,
+            command: getToolCallCommand(mergedArgs) || baseState?.command,
+            filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
+            reason: baseState?.reason,
+            operation: baseState?.operation,
+            code: getToolCallCode(mergedArgs) || baseState?.code,
+            timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
+            updatedAt: baseState?.updatedAt ?? new Date()
+          })
+        }
 
         return {
-          id: streamMsg.id,
-          role,
-          content: normalizeLiveStreamMessageContent(streamMsg.content),
-          ...(role === "assistant" && streamMsg.reasoning
-            ? { reasoning: streamMsg.reasoning }
-            : {}),
-          tool_calls: streamMsg.tool_calls,
-          ...(role === "tool" &&
-            streamMsg.tool_call_id && { tool_call_id: streamMsg.tool_call_id }),
-          ...(role === "tool" && streamMsg.name && { name: streamMsg.name }),
-          ...(role === "tool" &&
-            streamMsg.is_error !== undefined && { is_error: streamMsg.is_error }),
-          created_at: streamMsg.start_at ?? streamMsg.end_at ?? new Date(),
-          ...(streamMsg.start_at && { start_at: streamMsg.start_at }),
-          ...(streamMsg.end_at && { end_at: streamMsg.end_at })
+          toolCallDisplayStates: nextStates,
+          pendingApprovalToolCallKeys: approvalKeys
         }
-      })
-
-    // Clean up attachment XML tags in user messages for display
-    const allMessages = reconcileMessageDisplayOrder(
-      [...threadMessagesWithLiveReasoning, ...streamingMsgs].filter(
-        isVisibleCheckpointTranscriptMessage
-      ),
-      streamData.messages
-    )
-    const cleanedMessages = allMessages.map((msg) => {
-      if (
-        msg.role !== "user" ||
-        typeof msg.content !== "string" ||
-        !msg.content.includes("<attachment ")
-      )
-        return msg
-      // Extract filenames and user text separately, then reorder: filenames first
-      const fileNames: string[] = []
-      const textOnly = msg.content
-        .replace(
-          /<attachment\s+filename="([^"]*)"[^>]*>[\s\S]*?<\/attachment>/g,
-          (_match, name) => {
-            const decoded = name
-              .replace(/&amp;/g, "&")
-              .replace(/&lt;/g, "<")
-              .replace(/&gt;/g, ">")
-              .replace(/&quot;/g, '"')
-            fileNames.push(`📎 ${decoded}`)
-            return ""
-          }
-        )
-        .trim()
-      const cleaned =
-        fileNames.length > 0 ? `${fileNames.join("\n")}\n\n${textOnly}`.trim() : textOnly
-      return { ...msg, content: cleaned }
+      }
     })
-    return filterCoordinatorNoiseMessages(cleanedMessages)
-  }, [threadMessages, streamData.liveMessages, streamData.messages])
 
-  const chatScrollNavigatorMessages = useMemo(
-    () => filterCoordinatorNoiseMessages(threadMessages.filter(isVisibleCheckpointTranscriptMessage)),
-    [threadMessages]
-  )
-
-  // Key that drives in-session search re-matching. Message count and isLoading
-  // stay constant while tokens append to the SAME streaming message, so fold in
-  // the last message's text length — otherwise search misses text that is still
-  // being streamed until the run ends.
-  const searchRecomputeKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    return `${displayMessages.length}:${isLoading}:${lastTextLength}`
-  }, [displayMessages, isLoading])
-
-  const chatAutoScrollTriggerKey = useMemo(() => {
-    const last = displayMessages[displayMessages.length - 1]
-    const lastTextLength = last ? getMessageText(last.content).length : 0
-    const lastReasoningLength =
-      last && typeof last.reasoning === "string" ? last.reasoning.length : 0
-    const lastToolCallCount = Array.isArray(last?.tool_calls) ? last.tool_calls.length : 0
-    return [
-      displayMessages.length,
-      isLoading ? 1 : 0,
-      last?.id ?? "",
-      lastTextLength,
-      lastReasoningLength,
-      lastToolCallCount,
-      queuedMessages.length
-    ].join(":")
-  }, [displayMessages, isLoading, queuedMessages.length])
-
-  const detachedHookLogBuckets = useMemo(() => {
-    const userMessageIds = new Set(
-      displayMessages.filter((message) => message.role === "user").map((message) => message.id)
-    )
-    return hookLogBuckets.filter(
-      (bucket) => bucket.entries.length > 0 && !userMessageIds.has(bucket.turnId)
-    )
-  }, [displayMessages, hookLogBuckets])
-
-  const lastContentMessageId = useMemo(() => {
-    // Match what actually renders: ordinary empty messages are skipped, while
-    // an empty user row with Hook entries still owns a visible chip and scroll
-    // anchor. Returning a skipped row would make precise alignment fall back to
-    // scroll-to-bottom; omitting the Hook-only row would anchor one turn early.
-    for (let index = displayMessages.length - 1; index >= 0; index -= 1) {
-      const message = displayMessages[index]
-      const hasHookLogChip = Boolean(
-        hookLogConfig.enabled &&
-        message.role === "user" &&
-        hookLogBucketByTurnId.get(message.id)?.entries.length
-      )
-      if (messageHasVisibleRow(message, hasHookLogChip)) return message.id
-    }
-    return null
-  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
-
-  // Per-message derived flags precomputed in a single O(n) reverse pass. Use
-  // the same visibility rule as ChatMessageList so invisible tool/empty rows do
-  // not affect assistant actions or turn boundaries.
-  const perMessageFlags = useMemo(() => {
-    const n = displayMessages.length
-    const showAssistantMeta: boolean[] = new Array(n)
-    const hasUserAfterHead: boolean[] = new Array(n)
-    let nextVisibleRole: string | null = null
-    let userAfter = false
-    for (let index = n - 1; index >= 0; index -= 1) {
-      const message = displayMessages[index]
-      hasUserAfterHead[index] = userAfter
-      const hasHookLogChip =
-        hookLogConfig.enabled &&
-        message.role === "user" &&
-        Boolean(hookLogBucketByTurnId.get(message.id)?.entries.length)
-      if (!messageHasVisibleRow(message, hasHookLogChip)) {
-        showAssistantMeta[index] = false
-        continue
-      }
-      showAssistantMeta[index] =
-        message.role !== "assistant" || nextVisibleRole === null || nextVisibleRole !== "assistant"
-      if (message.role === "user") userAfter = true
-      nextVisibleRole = message.role
-    }
-    return { showAssistantMeta, hasUserAfterHead }
-  }, [displayMessages, hookLogBucketByTurnId, hookLogConfig.enabled])
-
-  const toolDerivationMessages = useStableToolDerivationMessages(displayMessages)
-  const toolResults = useMemo(
-    () => buildToolResultAssociations(toolDerivationMessages),
-    [toolDerivationMessages]
-  )
-
-  const { assistantDurationMsById, userSendTimeLabelById } = useMemo(
-    () => buildMessageBubbleTimingMeta(displayMessages),
-    [displayMessages]
-  )
-
-  const { toolCallDisplayStates, pendingApprovalToolCallKeys } = useMemo(() => {
-    const orderedToolCalls: Array<{
-      key: string
-      call: { id: string; name: string; args: Record<string, unknown> }
-    }> = []
-
-    for (const message of toolDerivationMessages) {
-      if (!Array.isArray(message.tool_calls)) continue
-      message.tool_calls.forEach((toolCall, index) => {
-        if (!toolCall?.id) return
-        orderedToolCalls.push({
-          key: getWorkerToolUiKey(message.id, toolCall.id, index),
-          call: toolCall
-        })
-      })
-    }
-
-    const lastOccurrenceKeyByCallId = new Map<string, string>()
-    for (const { key, call } of orderedToolCalls) lastOccurrenceKeyByCallId.set(call.id, key)
-
-    const currentApprovalIds = new Set<string>()
-    if (pendingApproval?.pendingToolCallIds?.length) {
-      for (const id of pendingApproval.pendingToolCallIds) {
-        if (id) currentApprovalIds.add(id)
-      }
-    } else if (pendingApproval?.tool_call?.id) {
-      currentApprovalIds.add(pendingApproval.tool_call.id)
-    }
-    const approvalKeys = new Set<string>()
-    for (const id of currentApprovalIds) {
-      const key = lastOccurrenceKeyByCallId.get(id)
-      if (key) approvalKeys.add(key)
-    }
-
-    let activeAssigned = false
-    const nextStates = new Map<string, ToolCallState>()
-
-    for (const { key, call: toolCall } of orderedToolCalls) {
-      const baseState =
-        lastOccurrenceKeyByCallId.get(toolCall.id) === key
-          ? toolCallStates[toolCall.id]
+  const buildSearchDocument = useCallback(
+    (message: Message, sortIndex: number): ChatSearchDocument | null => {
+      const hookLogBucket =
+        hookLogConfig.enabled && message.role === "user"
+          ? hookLogBucketByTurnId.get(message.id)
           : undefined
-      const mergedArgs = mergeToolCallArgs(baseState?.args, toolCall.args)
-      const result = toolResults.get(key)
-      let status: ToolCallStatus
+      const hasHookLogChip = Boolean(hookLogBucket?.entries.length)
+      if (!messageHasVisibleRow(message, hasHookLogChip)) return null
 
-      if (result !== undefined) {
-        status = result.is_error ? "failed" : "completed"
-      } else if (isTerminalToolCallStatus(baseState?.status)) {
-        status = baseState!.status
-      } else if (approvalKeys.has(key)) {
-        status = "awaiting_approval"
-        activeAssigned = true
-      } else if (!isLoading) {
-        status = "interrupted"
-      } else if (!activeAssigned) {
-        status = "running"
-        activeAssigned = true
-      } else {
-        status = "queued"
+      // Reasoning and Hook details are folded into controls/modals and have no highlightable text
+      // in the transcript row. Search only content that reveal can actually expose in this row.
+      let displayContent =
+        message.role === "user" && typeof message.content === "string"
+          ? cleanUserAttachmentContentForDisplay(message.content)
+          : message.content
+      const hasVisibleReasoning =
+        message.role === "assistant" && Boolean(normalizeVisibleReasoningText(message.reasoning))
+      if (hasVisibleReasoning) {
+        if (typeof displayContent === "string") {
+          displayContent = stripThinkBlocksForDisplay(displayContent)
+        } else if (Array.isArray(displayContent)) {
+          displayContent = displayContent.map((block) =>
+            block.type === "text" && block.text
+              ? { ...block, text: stripThinkBlocksForDisplay(block.text) }
+              : block
+          )
+        }
       }
-
-      nextStates.set(key, {
-        id: toolCall.id,
-        status,
-        name: toolCall.name || baseState?.name,
-        args: mergedArgs,
-        command: getToolCallCommand(mergedArgs) || baseState?.command,
-        filePath: getToolCallFilePath(mergedArgs) || baseState?.filePath,
-        reason: baseState?.reason,
-        operation: baseState?.operation,
-        code: getToolCallCode(mergedArgs) || baseState?.code,
-        timeoutMs: getToolCallTimeout(mergedArgs) ?? baseState?.timeoutMs,
-        updatedAt: baseState?.updatedAt ?? new Date()
-      })
+      let visibleContent: string
+      if (
+        message.role === "assistant" &&
+        message.id === streamingSearchMessageIdRef.current &&
+        (typeof displayContent === "string" || Array.isArray(displayContent))
+      ) {
+        const textBlocks = typeof displayContent === "string"
+          ? [displayContent]
+          : displayContent.flatMap((block) =>
+              block.type === "text" && block.text ? [block.text] : []
+            )
+        visibleContent = textBlocks
+          .flatMap((block) => {
+            const preview = buildStreamingMarkdownPreview(block)
+            return [preview.head, preview.tail].filter(Boolean)
+          })
+          .map((part) => projectVisibleChatSearchContent(message.role, part))
+          .join("\n")
+      } else {
+        visibleContent = projectVisibleChatSearchContent(message.role, displayContent)
+      }
+      const parts: unknown[] = [visibleContent]
+      for (const toolCall of message.tool_calls ?? []) {
+        parts.push(getCollapsedToolCallSummary(toolCall))
+      }
+      const text = buildBoundedChatSearchText(parts)
+      return {
+        messageId: message.id,
+        text,
+        truncated: text.length >= CHAT_SEARCH_DOCUMENT_TEXT_LIMIT,
+        durableAuthoritative: hasVisibleReasoning,
+        sortIndex
+      }
+    },
+    [hookLogBucketByTurnId, hookLogConfig.enabled]
+  )
+  const stableSearchDocumentsRef = useRef<{
+    baseline: readonly Message[]
+    baselineIndexLookup: MessageIdIndexLookup
+    rawMessages: readonly Message[]
+    indexById: ReadonlyMap<string, number>
+    buildDocument: typeof buildSearchDocument
+    gapBeforeMessageId: string | null
+    contentVersion: number
+    startIndex: number
+    textUnits: number
+    documents: ChatSearchDocument[]
+    documentIndexById: Map<string, number>
+  } | null>(null)
+  const dynamicSearchDocumentsRef = useRef<{
+    liveStructureVersion: number
+    liveContentVersion: number
+    displayIndexById: ReadonlyMap<string, number>
+    buildDocument: typeof buildSearchDocument
+    documents: ChatSearchDocument[]
+    documentIndexById: Map<string, number>
+  } | null>(null)
+  const getSearchCorpus = useCallback((): ChatSearchCorpus => {
+    let cached = stableSearchDocumentsRef.current
+    let stableDocuments = cached?.documents
+    const stableIdentityMatches =
+      cached &&
+      cached.baseline === threadDisplayBaseline &&
+      cached.rawMessages === threadMessages &&
+      cached.indexById === displayMessageProjection.indexById &&
+      cached.buildDocument === buildSearchDocument &&
+      cached.gapBeforeMessageId === (historyWindowGap?.beforeMessageId ?? null)
+    if (
+      cached &&
+      stableIdentityMatches &&
+      cached.contentVersion !== messagesContentVersion
+    ) {
+      let requiresRebuild = false
+      let textUnits = cached.textUnits
+      const nextDocuments = [...cached.documents]
+      for (const changedMessage of displayMessageProjection.changedMessages) {
+        const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
+        const baselineIndex = cached.baselineIndexLookup.findFirstIndex(changedMessage.id)
+        const belongsToCachedWindow =
+          baselineIndex >= cached.startIndex &&
+          baselineIndex < threadDisplayBaseline.length
+        if (cachedDocumentIndex === undefined) {
+          if (
+            belongsToCachedWindow &&
+            buildSearchDocument(
+              changedMessage,
+              displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+            )
+          ) {
+            requiresRebuild = true
+            break
+          }
+          continue
+        }
+        const nextDocument = buildSearchDocument(
+          changedMessage,
+          displayMessageProjection.indexById.get(changedMessage.id) ?? baselineIndex
+        )
+        if (!nextDocument) {
+          requiresRebuild = true
+          break
+        }
+        textUnits += nextDocument.text.length - nextDocuments[cachedDocumentIndex].text.length
+        nextDocuments[cachedDocumentIndex] = nextDocument
+      }
+      if (requiresRebuild) {
+        stableSearchDocumentsRef.current = null
+        cached = null
+      } else {
+        while (
+          nextDocuments.length > 1 &&
+          textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          textUnits -= nextDocuments.shift()?.text.length ?? 0
+        }
+        cached.documents = nextDocuments
+        cached.documentIndexById = new Map(
+          nextDocuments.map((document, index) => [document.messageId, index] as const)
+        )
+        cached.textUnits = textUnits
+        cached.contentVersion = messagesContentVersion
+        stableDocuments = nextDocuments
+      }
     }
-
+    if (
+      !cached ||
+      cached.baseline !== threadDisplayBaseline ||
+      cached.rawMessages !== threadMessages ||
+      cached.indexById !== displayMessageProjection.indexById ||
+      cached.buildDocument !== buildSearchDocument ||
+      cached.gapBeforeMessageId !== (historyWindowGap?.beforeMessageId ?? null)
+    ) {
+      // The durable search API covers the complete persisted transcript. Keep the renderer-side
+      // corpus bounded to the already-visible recent page so opening search after paging through a
+      // very long task cannot synchronously stringify and index the entire hydrated history.
+      const documents: ChatSearchDocument[] = []
+      let textUnits = 0
+      // A resident gap makes the in-memory array non-contiguous. Index only the latest side of
+      // that gap locally; durable results provide the omitted prefix in database order. Otherwise
+      // merging "old resident prefix + durable gap + latest tail" could advertise a false order.
+      const contiguousTailStartIndex = resolveChatSearchContiguousTailStart(
+        threadMessages,
+        threadDisplayBaseline,
+        historyWindowGap?.beforeMessageId ?? null
+      )
+      const startIndex = Math.max(
+        contiguousTailStartIndex,
+        threadDisplayBaseline.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT
+      )
+      for (
+        let messageIndex = threadDisplayBaseline.length - 1;
+        messageIndex >= startIndex;
+        messageIndex -= 1
+      ) {
+        const message = threadDisplayBaseline[messageIndex]
+        const sortIndex = displayMessageProjection.indexById.get(message.id)
+        if (sortIndex === undefined) continue
+        const document = buildSearchDocument(message, sortIndex)
+        if (!document) continue
+        if (
+          documents.length > 0 &&
+          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          break
+        }
+        documents.push(document)
+        textUnits += document.text.length
+        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+      }
+      stableDocuments = documents.sort(
+        (left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0)
+      )
+      stableSearchDocumentsRef.current = {
+        baseline: threadDisplayBaseline,
+        baselineIndexLookup: createMessageIdIndexLookup(threadDisplayBaseline),
+        rawMessages: threadMessages,
+        indexById: displayMessageProjection.indexById,
+        buildDocument: buildSearchDocument,
+        gapBeforeMessageId: historyWindowGap?.beforeMessageId ?? null,
+        contentVersion: messagesContentVersion,
+        startIndex,
+        textUnits,
+        documents: stableDocuments,
+        documentIndexById: new Map(
+          stableDocuments.map((document, index) => [document.messageId, index] as const)
+        )
+      }
+    }
+    let dynamicCache = dynamicSearchDocumentsRef.current
+    const rebuildDynamicDocuments = (): typeof dynamicCache => {
+      const documents: ChatSearchDocument[] = []
+      let textUnits = 0
+      const startIndex = Math.max(0, liveDisplayMessages.length - CHAT_LOCAL_SEARCH_HISTORY_LIMIT)
+      for (
+        let liveIndex = liveDisplayMessages.length - 1;
+        liveIndex >= startIndex;
+        liveIndex -= 1
+      ) {
+        const liveMessage = liveDisplayMessages[liveIndex]
+        const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+        if (sortIndex === undefined) continue
+        const message = displayMessages[sortIndex]
+        const document = message ? buildSearchDocument(message, sortIndex) : null
+        if (!document) continue
+        if (
+          documents.length > 0 &&
+          textUnits + document.text.length > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
+        ) {
+          break
+        }
+        documents.push(document)
+        textUnits += document.text.length
+        if (textUnits >= CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) break
+      }
+      documents.sort((left, right) => (left.sortIndex ?? 0) - (right.sortIndex ?? 0))
+      dynamicCache = {
+        liveStructureVersion: liveDisplayProjection.structureVersion,
+        liveContentVersion: liveDisplayProjection.contentVersion,
+        displayIndexById: displayMessageProjection.indexById,
+        buildDocument: buildSearchDocument,
+        documents,
+        documentIndexById: new Map(
+          documents.map((document, index) => [document.messageId, index])
+        )
+      }
+      dynamicSearchDocumentsRef.current = dynamicCache
+      return dynamicCache
+    }
+    if (
+      !dynamicCache ||
+      dynamicCache.liveStructureVersion !== liveDisplayProjection.structureVersion ||
+      dynamicCache.displayIndexById !== displayMessageProjection.indexById ||
+      dynamicCache.buildDocument !== buildSearchDocument
+    ) {
+      dynamicCache = rebuildDynamicDocuments()
+    } else if (dynamicCache.liveContentVersion !== liveDisplayProjection.contentVersion) {
+      let requiresRebuild = false
+      for (const liveMessage of liveDisplayProjection.changedMessages) {
+        const sortIndex = displayMessageProjection.indexById.get(liveMessage.id)
+        if (sortIndex === undefined) {
+          requiresRebuild = true
+          break
+        }
+        const message = displayMessages[sortIndex]
+        const document = message ? buildSearchDocument(message, sortIndex) : null
+        const documentIndex = dynamicCache.documentIndexById.get(liveMessage.id)
+        if (!document || documentIndex === undefined) {
+          requiresRebuild = true
+          break
+        }
+        dynamicCache.documents[documentIndex] = document
+      }
+      if (requiresRebuild) {
+        dynamicCache = rebuildDynamicDocuments()
+      } else {
+        dynamicCache.liveContentVersion = liveDisplayProjection.contentVersion
+      }
+    }
     return {
-      toolCallDisplayStates: nextStates,
-      pendingApprovalToolCallKeys: approvalKeys
+      stableDocuments: stableDocuments ?? [],
+      dynamicDocuments: dynamicCache?.documents ?? [],
+      dynamicMessageIds: liveDisplayProjection.messageIds
     }
-  }, [isLoading, pendingApproval, toolCallStates, toolDerivationMessages, toolResults])
+  }, [
+    buildSearchDocument,
+    displayMessageProjection.indexById,
+    displayMessages,
+    displayMessagesContentVersion,
+    liveDisplayProjection,
+    liveDisplayMessages,
+    historyWindowGap,
+    messagesContentVersion,
+    threadMessages,
+    threadDisplayBaseline
+  ])
+  const setPendingDurableRevealMessageId = useCallback(
+    (messageId: string | null): void => {
+      pendingDurableSearchRevealIdRef.current = messageId
+      const lease = chatScrollSessionLeaseRef.current
+      if (lease.threadId !== threadId) return
+      chatScrollSessionStore.setPendingRevealMessageId(lease, messageId)
+    },
+    [threadId]
+  )
+  const invalidateDurableMessageReveal = useCallback((): void => {
+    durableMessageWindowGenerationRef.current += 1
+    setPendingDurableRevealMessageId(null)
+    cancelMessageWindowLoad()
+  }, [cancelMessageWindowLoad, setPendingDurableRevealMessageId])
+  const closeSearch = useCallback((): void => {
+    invalidateDurableMessageReveal()
+    stableSearchDocumentsRef.current = null
+    dynamicSearchDocumentsRef.current = null
+    setSearchOpen(false)
+  }, [invalidateDurableMessageReveal])
 
   // Get the actual scrollable viewport element from Radix ScrollArea
   const getViewport = useCallback((): HTMLDivElement | null => {
@@ -3203,47 +3746,896 @@ export function ChatContainer({
     ) as HTMLDivElement | null
   }, [])
 
-  const scrollToConversationBottom = useCallback((): void => {
-    const viewport = getViewport()
-    if (!viewport) return
-    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-  }, [getViewport])
+  useLayoutEffect(() => {
+    setScrollParent(getViewport())
+  }, [getViewport, threadId])
+
+  const applyChatScrollEvent = useCallback((event: ChatScrollEvent): ChatScrollTransition => {
+    const current = chatScrollStateRef.current ?? createChatScrollState(threadId)
+    const transition = transitionChatScroll(current, event)
+    chatScrollStateRef.current = transition.state
+    setChatScrollUiState((previous) => {
+      if (
+        previous.generation === transition.state.generation &&
+        previous.mode === transition.state.mode &&
+        previous.hasUnread === transition.state.hasUnread &&
+        previous.unreadCount === transition.state.unreadCount
+      ) {
+        return previous
+      }
+      return {
+        generation: transition.state.generation,
+        mode: transition.state.mode,
+        hasUnread: transition.state.hasUnread,
+        unreadCount: transition.state.unreadCount
+      }
+    })
+    return transition
+  }, [threadId])
+
+  useLayoutEffect(() => {
+    if (bottomScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(bottomScrollFrameRef.current)
+      bottomScrollFrameRef.current = null
+    }
+    if (chatScrollStateRef.current?.threadId !== threadId) {
+      const opened = chatScrollSessionStore.open(threadId)
+      chatScrollSessionLeaseRef.current = opened.lease
+      const restored = opened.session
+      const nextState = restored?.state ?? createChatScrollState(threadId)
+      chatScrollStateRef.current = nextState
+      pendingChatSessionAnchorRef.current = restored?.anchor
+        ? { ...restored.anchor, threadId, attempt: 0, stableFrames: 0 }
+        : null
+      chatContentSnapshotRef.current = restored?.contentSnapshot ?? null
+      pendingDurableSearchRevealIdRef.current = opened.pendingRevealMessageId
+      setChatScrollUiState({
+        generation: nextState.generation,
+        mode: nextState.mode,
+        hasUnread: nextState.hasUnread,
+        unreadCount: nextState.unreadCount
+      })
+    }
+    pendingBottomScrollEffectRef.current = null
+    bottomSettleAttemptRef.current = 0
+    bottomSettleEffectKeyRef.current = ""
+    lastObservedScrollTopRef.current = 0
+    upwardUserScrollIntentUntilRef.current = 0
+    downwardUserScrollIntentUntilRef.current = 0
+    scrollbarUserIntentActiveRef.current = false
+  }, [threadId])
 
   useEffect(() => {
-    if (historyLoading || pendingApproval || pendingUserInput) return
+    if (scrollParent || !scrollRef.current) return
+    setScrollParent(getViewport())
+  }, [getViewport, scrollParent])
 
-    const configuredLimit = normalizeChatAutoScrollMessageLimit(
-      chatScrollSettings.autoScrollMessageLimit
-    )
-    if (
-      configuredLimit !== CHAT_AUTO_SCROLL_ALWAYS &&
-      displayMessages.length > configuredLimit
-    ) {
-      const noticeKey = `${threadId}:${configuredLimit}`
-      if (chatScrollLimitNoticeKeyRef.current !== noticeKey) {
-        chatScrollLimitNoticeKeyRef.current = noticeKey
-        toast.warning(
-          `会话消息已超过 ${configuredLimit} 条，已暂停自动置底。可前往“自定义 / 基础功能 / 通用”调整自动置底消息数量。`
+  const visibleMessageIndexById = useMemo(() => {
+    const indexById = new Map<string, number>()
+    visibleMessageIndexes.forEach((messageIndex, visibleIndex) => {
+      const message = displayMessages[messageIndex]
+      if (message) indexById.set(message.id, visibleIndex)
+    })
+    return indexById
+  }, [displayMessages, displayMessagesStructureVersion, visibleMessageIndexes])
+  const isMessageVirtualizationEnabled = shouldVirtualizeChatMessageList(
+    visibleMessageIndexes.length
+  )
+  lastVisibleMessageIndexRef.current = visibleMessageIndexes.length - 1
+  messageVirtualizationEnabledRef.current = isMessageVirtualizationEnabled
+  useEffect(() => {
+    pendingDurableHistoryAnchorRef.current = null
+  }, [threadId])
+
+  const scheduleBottomScrollEffect = useCallback(
+    (effect: ChatScrollEffect): void => {
+      pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+        pendingBottomScrollEffectRef.current,
+        effect
+      )
+      if (bottomScrollFrameRef.current !== null) return
+
+      const run = (): void => {
+        bottomScrollFrameRef.current = null
+        const pending = pendingBottomScrollEffectRef.current
+        pendingBottomScrollEffectRef.current = null
+        const state = chatScrollStateRef.current
+        if (!pending || !state || pending.generation !== state.generation) return
+
+        const viewport = getViewport()
+        const lastVisibleIndex = lastVisibleMessageIndexRef.current
+        if (!viewport || lastVisibleIndex < 0) {
+          applyChatScrollEvent({
+            type:
+              pending.reason === "content-appended" || pending.reason === "content-grown"
+                ? "PROGRAMMATIC_SCROLL_END"
+                : "SCROLL_TO_BOTTOM_FAILED",
+            generation: pending.generation
+          })
+          return
+        }
+
+        if (messageVirtualizationEnabledRef.current && virtuosoRef.current) {
+          virtuosoRef.current.scrollToIndex({
+            index: lastVisibleIndex,
+            align: "end",
+            behavior: "auto"
+          })
+        }
+        // The Virtuoso footer lives after the last indexed message (queued rows, loading state,
+        // approvals, user-input cards). scrollToIndex mounts/measures the last row; this final
+        // bounded write includes the footer and is skipped when the viewport is already settled.
+        const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        if (Math.abs(viewport.scrollTop - bottom) > 1) {
+          viewport.scrollTo({ top: bottom, behavior: "auto" })
+        }
+
+        const distanceToBottom =
+          viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+          bottomSettleAttemptRef.current = 0
+          applyChatScrollEvent({
+            type: "BOTTOM_CONFIRMED",
+            generation: pending.generation
+          })
+          return
+        }
+
+        const longSettle =
+          pending.reason === "initial-position" ||
+          pending.reason === "return-to-bottom" ||
+          pending.reason === "restore-complete"
+        const settleKey = `${pending.generation}:${pending.reason}`
+        if (bottomSettleEffectKeyRef.current !== settleKey) {
+          bottomSettleEffectKeyRef.current = settleKey
+          bottomSettleAttemptRef.current = 0
+        }
+        const settleLimit = longSettle
+          ? CHAT_BOTTOM_SETTLE_MAX_FRAMES
+          : CHAT_FOLLOW_SETTLE_MAX_FRAMES
+        if (
+          bottomSettleAttemptRef.current < settleLimit
+        ) {
+          bottomSettleAttemptRef.current += 1
+          pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
+            pendingBottomScrollEffectRef.current,
+            pending
+          )
+          bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+          return
+        }
+
+        bottomSettleAttemptRef.current = 0
+        bottomSettleEffectKeyRef.current = ""
+        applyChatScrollEvent({
+          type: longSettle ? "SCROLL_TO_BOTTOM_FAILED" : "PROGRAMMATIC_SCROLL_END",
+          generation: pending.generation
+        })
+      }
+
+      bottomScrollFrameRef.current = window.requestAnimationFrame(run)
+    },
+    [applyChatScrollEvent, getViewport]
+  )
+
+  const runChatScrollTransition = useCallback(
+    (transition: ChatScrollTransition): ChatScrollState => {
+      if (transition.state.mode === "restoring" || isChatScrollDetached(transition.state)) {
+        pendingBottomScrollEffectRef.current = null
+        if (bottomScrollFrameRef.current !== null) {
+          window.cancelAnimationFrame(bottomScrollFrameRef.current)
+          bottomScrollFrameRef.current = null
+        }
+      }
+      for (const effect of transition.effects) scheduleBottomScrollEffect(effect)
+      return transition.state
+    },
+    [scheduleBottomScrollEffect]
+  )
+
+  const dispatchChatScrollEvent = useCallback(
+    (event: ChatScrollEvent): ChatScrollState => {
+      let nextState = runChatScrollTransition(applyChatScrollEvent(event))
+      // A real user gesture during page-anchor restoration owns the viewport. Cancel the restore
+      // session immediately so its next animation frame cannot pull the reader back to the old
+      // anchor after wheel/touch/keyboard navigation.
+      if (event.type === "USER_DETACH" && pendingDurableHistoryAnchorRef.current) {
+        pendingDurableHistoryAnchorRef.current = null
+        nextState = runChatScrollTransition(
+          applyChatScrollEvent({ type: "RESTORE_END", generation: nextState.generation })
         )
       }
+      return nextState
+    },
+    [applyChatScrollEvent, runChatScrollTransition]
+  )
+
+  const waitForTranscriptCommit = useCallback(
+    (): Promise<void> =>
+      new Promise((resolve) => {
+        window.requestAnimationFrame(() => resolve())
+      }),
+    []
+  )
+
+  const scrollToConversationBottom = useCallback((): void => {
+    const revealGeneration = durableMessageWindowGenerationRef.current + 1
+    durableMessageWindowGenerationRef.current = revealGeneration
+    setPendingDurableRevealMessageId(null)
+    cancelMessageWindowLoad()
+    pendingChatSessionAnchorRef.current = null
+    // Persist the user's intent before waiting for disk. If the chat unmounts while the latest
+    // page is loading (for example, a file tab opens), cleanup must save `following`, not the
+    // detached state that existed before the click.
+    dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+
+    void (async () => {
+      if (historyWindowGap || historyPageLoading) {
+        const restored = await restoreLatestMessageWindow()
+        if (
+          !chatViewMountedRef.current ||
+          durableMessageWindowGenerationRef.current !== revealGeneration
+        ) {
+          return
+        }
+        if (!restored) {
+          toast.error("恢复最新消息失败，请稍后重试")
+          return
+        }
+        await waitForTranscriptCommit()
+      }
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        return
+      }
+      dispatchChatScrollEvent({ type: "RETURN_TO_BOTTOM" })
+    })()
+  }, [
+    cancelMessageWindowLoad,
+    dispatchChatScrollEvent,
+    historyPageLoading,
+    historyWindowGap,
+    restoreLatestMessageWindow,
+    setPendingDurableRevealMessageId,
+    waitForTranscriptCommit
+  ])
+
+  useLayoutEffect(() => {
+    chatViewMountedRef.current = true
+    const sessionLease = chatScrollSessionLeaseRef.current
+    return () => {
+      chatViewMountedRef.current = false
+      durableMessageWindowGenerationRef.current += 1
+      const state = chatScrollStateRef.current
+      if (state?.threadId === threadId) {
+        const viewport = getViewport()
+        let anchor: ChatScrollSessionAnchor | null = null
+        // A durable reveal that is still loading owns the remount destination. Saving the old
+        // viewport anchor here would race it and pull the reopened chat back to stale content.
+        if (
+          viewport &&
+          isChatScrollDetached(state) &&
+          !pendingDurableSearchRevealIdRef.current
+        ) {
+          const viewportTop = viewport.getBoundingClientRect().top
+          let closestDistance = Number.POSITIVE_INFINITY
+          for (const candidate of viewport.querySelectorAll<HTMLElement>(
+            "[data-chat-message-id]"
+          )) {
+            const messageId = candidate.dataset.chatMessageId
+            if (!messageId) continue
+            const offsetFromViewportTop = candidate.getBoundingClientRect().top - viewportTop
+            const distance = Math.abs(offsetFromViewportTop)
+            if (distance >= closestDistance) continue
+            closestDistance = distance
+            anchor = { messageId, offsetFromViewportTop }
+          }
+        }
+        chatScrollSessionStore.save(sessionLease, {
+          state,
+          anchor,
+          contentSnapshot: chatContentSnapshotRef.current
+        })
+      }
+      pendingBottomScrollEffectRef.current = null
+      if (bottomScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomScrollFrameRef.current)
+        bottomScrollFrameRef.current = null
+      }
+    }
+  }, [getViewport, threadId])
+  const searchDurableMessages = useCallback(
+    (
+      query: string,
+      options: DurableChatSearchOptions
+    ): Promise<DurableChatSearchPage> => {
+      return window.api.threads.searchMessages(threadId, query, options)
+    },
+    [threadId]
+  )
+  const revealDurableMessage = useCallback(
+    async (match: DurableChatSearchMatch): Promise<void> => {
+      if (!shouldHydrateDurableSearchMatch(match.messageId, visibleMessageIndexById)) {
+        // The overlay's common reveal path mounts/centers this resident virtual row immediately.
+        return
+      }
+      const revealGeneration = durableMessageWindowGenerationRef.current + 1
+      durableMessageWindowGenerationRef.current = revealGeneration
+      pendingChatSessionAnchorRef.current = null
+      setPendingDurableRevealMessageId(match.messageId)
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      const loaded = await loadMessageWindowAround(match)
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        throw new Error("Durable chat reveal was superseded")
+      }
+      if (!loaded) {
+        setPendingDurableRevealMessageId(null)
+        throw new Error("Unable to hydrate durable chat search result")
+      }
+      await waitForTranscriptCommit()
+    },
+    [
+      dispatchChatScrollEvent,
+      loadMessageWindowAround,
+      setPendingDurableRevealMessageId,
+      visibleMessageIndexById,
+      waitForTranscriptCommit
+    ]
+  )
+
+  useEffect(() => {
+    if (!scrollParent) return
+    lastObservedScrollTopRef.current = scrollParent.scrollTop
+
+    const confirmOrDetachFromScroll = (): void => {
+      const previousTop = lastObservedScrollTopRef.current
+      const nextTop = scrollParent.scrollTop
+      const distanceToBottom =
+        scrollParent.scrollHeight - nextTop - scrollParent.clientHeight
+      lastObservedScrollTopRef.current = nextTop
+
+      if (
+        nextTop < previousTop - CHAT_SCROLL_UP_DETACH_DELTA_PX &&
+        performance.now() <= upwardUserScrollIntentUntilRef.current
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+        return
+      }
+      if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+        const state = chatScrollStateRef.current
+        // Explicit wheel/touch/keyboard/scrollbar handlers own detachment. Do not let the scroll
+        // event immediately re-attach a detached reader while the viewport is still moving up
+        // inside the at-bottom threshold. Downward movement to the bottom still re-attaches.
+        if (
+          state &&
+          isChatScrollDetached(state) &&
+          (nextTop <= previousTop + CHAT_SCROLL_UP_DETACH_DELTA_PX ||
+            (performance.now() > downwardUserScrollIntentUntilRef.current &&
+              !scrollbarUserIntentActiveRef.current))
+        ) {
+          return
+        }
+        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+      }
+    }
+    const cancelPendingHistoryAnchorFromUserGesture = (): void => {
+      pendingChatSessionAnchorRef.current = null
+      invalidateDurableMessageReveal()
+      const anchor = pendingDurableHistoryAnchorRef.current
+      if (!anchor) return
+      dispatchChatScrollEvent({
+        type: "USER_DETACH",
+        source: "user-input",
+        generation: anchor.generation
+      })
+    }
+    const detachFromExplicitWheel = (event: WheelEvent): void => {
+      if (event.deltaY < 0) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (event.deltaY > 0) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+    const scrollRoot = scrollRef.current
+    const detachFromScrollbarPointer = (event: PointerEvent): void => {
+      if (
+        event.composedPath().some(
+          (target) =>
+            target instanceof HTMLElement && target.hasAttribute("data-scroll-area-scrollbar")
+        )
+      ) {
+        scrollbarUserIntentActiveRef.current = true
+        cancelPendingHistoryAnchorFromUserGesture()
+        dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      }
+    }
+    const clearScrollbarPointerIntent = (): void => {
+      scrollbarUserIntentActiveRef.current = false
+    }
+    let lastTouchY: number | null = null
+    const rememberTouchPosition = (event: TouchEvent): void => {
+      lastTouchY = event.touches[0]?.clientY ?? null
+    }
+    const detachFromTouchScroll = (event: TouchEvent): void => {
+      const nextTouchY = event.touches[0]?.clientY ?? null
+      if (lastTouchY !== null && nextTouchY !== null && nextTouchY > lastTouchY + 1) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (lastTouchY !== null && nextTouchY !== null && nextTouchY < lastTouchY - 1) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+      lastTouchY = nextTouchY
+    }
+    const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
+      if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
+      if (!chatRootRef.current.contains(document.activeElement) && document.activeElement !== document.body) {
+        return
+      }
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
+      if (
+        event.key === "ArrowUp" ||
+        event.key === "PageUp" ||
+        event.key === "Home" ||
+        (event.key === " " && event.shiftKey)
+      ) {
+        downwardUserScrollIntentUntilRef.current = 0
+        upwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      } else if (
+        event.key === "ArrowDown" ||
+        event.key === "PageDown" ||
+        event.key === "End" ||
+        (event.key === " " && !event.shiftKey)
+      ) {
+        upwardUserScrollIntentUntilRef.current = 0
+        downwardUserScrollIntentUntilRef.current =
+          performance.now() + CHAT_USER_SCROLL_INTENT_WINDOW_MS
+        cancelPendingHistoryAnchorFromUserGesture()
+      }
+    }
+
+    scrollParent.addEventListener("scroll", confirmOrDetachFromScroll, { passive: true })
+    scrollParent.addEventListener("wheel", detachFromExplicitWheel, { passive: true })
+    scrollRoot?.addEventListener("pointerdown", detachFromScrollbarPointer, {
+      capture: true,
+      passive: true
+    })
+    scrollParent.addEventListener("touchstart", rememberTouchPosition, { passive: true })
+    scrollParent.addEventListener("touchmove", detachFromTouchScroll, { passive: true })
+    window.addEventListener("keydown", detachFromKeyboardScroll, true)
+    window.addEventListener("pointerup", clearScrollbarPointerIntent, true)
+    window.addEventListener("pointercancel", clearScrollbarPointerIntent, true)
+    window.addEventListener("blur", clearScrollbarPointerIntent)
+    confirmOrDetachFromScroll()
+    return () => {
+      scrollParent.removeEventListener("scroll", confirmOrDetachFromScroll)
+      scrollParent.removeEventListener("wheel", detachFromExplicitWheel)
+      scrollRoot?.removeEventListener("pointerdown", detachFromScrollbarPointer, true)
+      scrollParent.removeEventListener("touchstart", rememberTouchPosition)
+      scrollParent.removeEventListener("touchmove", detachFromTouchScroll)
+      window.removeEventListener("keydown", detachFromKeyboardScroll, true)
+      window.removeEventListener("pointerup", clearScrollbarPointerIntent, true)
+      window.removeEventListener("pointercancel", clearScrollbarPointerIntent, true)
+      window.removeEventListener("blur", clearScrollbarPointerIntent)
+    }
+  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
+
+  const scrollToMessageById = useCallback(
+    (messageId: string): void => {
+      const index = visibleMessageIndexById.get(messageId)
+      if (index === undefined) return
+      invalidateDurableMessageReveal()
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      const targetElement = contentMessageRefs.current.get(messageId)
+      const viewport = getViewport()
+      if (targetElement && viewport) {
+        const viewportRect = viewport.getBoundingClientRect()
+        const targetRect = targetElement.getBoundingClientRect()
+        viewport.scrollTo({
+          top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - 8),
+          behavior: "smooth"
+        })
+        return
+      }
+      virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
+    },
+    [
+      dispatchChatScrollEvent,
+      getViewport,
+      invalidateDurableMessageReveal,
+      visibleMessageIndexById
+    ]
+  )
+  const revealMessage = useCallback(
+    (messageId: string): void => {
+      const index = visibleMessageIndexById.get(messageId)
+      if (index === undefined) return
+      invalidateDurableMessageReveal()
+      dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+      const targetElement = contentMessageRefs.current.get(messageId)
+      if (targetElement) return
+      virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+    },
+    [dispatchChatScrollEvent, invalidateDurableMessageReveal, visibleMessageIndexById]
+  )
+  const handleScrollToQuestion = useCallback((): void => {
+    invalidateDurableMessageReveal()
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+  }, [dispatchChatScrollEvent, invalidateDurableMessageReveal])
+
+  const handleInitialVirtualItemsRendered = useCallback((): void => {
+    if (historyLoading) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent, historyLoading, visibleMessageIndexes.length])
+
+  const handleContentHeightChanged = useCallback((): void => {
+    const state = chatScrollStateRef.current
+    if (
+      visibleMessageIndexes.length === 0 ||
+      !state ||
+      state.generation !== chatScrollUiState.generation ||
+      !shouldFollowChatOutput(state)
+    ) {
+      return
+    }
+    dispatchChatScrollEvent({
+      type: "CONTENT_GROWN",
+      generation: chatScrollUiState.generation
+    })
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent, visibleMessageIndexes.length])
+
+  const handleVirtualAtBottomStateChange = useCallback((atBottom: boolean): void => {
+    const state = chatScrollStateRef.current
+    // Virtuoso may report `true` when a row collapses or a late measurement shortens content.
+    // That is layout, not proof that a detached reader intentionally returned to the bottom.
+    // Manual downward scrolling is confirmed by the viewport scroll listener; the button changes
+    // mode to following before its programmatic settle, so both intentional paths still work.
+    if (atBottom && state && !isChatScrollDetached(state)) {
+      dispatchChatScrollEvent({
+        type: "BOTTOM_CONFIRMED",
+        generation: chatScrollUiState.generation
+      })
+    }
+  }, [chatScrollUiState.generation, dispatchChatScrollEvent])
+
+  useLayoutEffect(() => {
+    const messageId = pendingDurableSearchRevealIdRef.current
+    if (!messageId || historyPageLoading) return
+    const index = visibleMessageIndexById.get(messageId)
+    if (index === undefined) {
+      setPendingDurableRevealMessageId(null)
+      return
+    }
+    setPendingDurableRevealMessageId(null)
+    virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" })
+  }, [historyPageLoading, setPendingDurableRevealMessageId, visibleMessageIndexById])
+
+  useLayoutEffect(() => {
+    const anchor = pendingChatSessionAnchorRef.current
+    if (
+      !anchor ||
+      anchor.threadId !== threadId ||
+      historyLoading ||
+      historyPageLoading ||
+      !scrollParent
+    ) {
+      return
+    }
+    const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+    if (visibleIndex === undefined) {
+      pendingChatSessionAnchorRef.current = null
       return
     }
 
-    const viewport = getViewport()
-    if (!viewport) return
-    const bottomDistance = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    if (bottomDistance <= 200) {
-      viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+    let frame: number | null = null
+    const finish = (): void => {
+      if (pendingChatSessionAnchorRef.current === anchor) {
+        pendingChatSessionAnchorRef.current = null
+      }
+    }
+    const restore = (): void => {
+      if (pendingChatSessionAnchorRef.current !== anchor) return
+      const viewport = getViewport()
+      const target =
+        contentMessageRefs.current.get(anchor.messageId) ??
+        Array.from(
+          viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []
+        ).find((candidate) => candidate.dataset.chatMessageId === anchor.messageId)
+      if (viewport && target) {
+        const viewportTop = viewport.getBoundingClientRect().top
+        const currentOffset = target.getBoundingClientRect().top - viewportTop
+        const delta = currentOffset - anchor.offsetFromViewportTop
+        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        if (anchor.stableFrames >= CHAT_SESSION_ANCHOR_STABLE_FRAMES) {
+          finish()
+          return
+        }
+      } else if (anchor.attempt === 0) {
+        virtuosoRef.current?.scrollToIndex({ index: visibleIndex, align: "start", behavior: "auto" })
+      }
+
+      anchor.attempt += 1
+      if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
+        frame = window.requestAnimationFrame(restore)
+      } else {
+        finish()
+      }
+    }
+    frame = window.requestAnimationFrame(restore)
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame)
     }
   }, [
-    chatAutoScrollTriggerKey,
-    chatScrollSettings.autoScrollMessageLimit,
-    displayMessages.length,
     getViewport,
     historyLoading,
-    pendingApproval,
-    pendingUserInput,
+    historyPageLoading,
+    scrollParent,
+    threadId,
+    visibleMessageIndexById
+  ])
+
+  useEffect(() => {
+    if (historyLoading || !scrollParent) return
+    dispatchChatScrollEvent({
+      type: "DATA_READY",
+      generation: chatScrollUiState.generation,
+      messageCount: visibleMessageIndexes.length
+    })
+  }, [
+    chatScrollUiState.generation,
+    dispatchChatScrollEvent,
+    historyLoading,
+    scrollParent,
+    threadId,
+    visibleMessageIndexes.length
+  ])
+
+  const loadEarlierHistoryPage = useCallback(async (): Promise<void> => {
+    if (historyPageLoading || !historyHasMore) return
+    const generation = chatScrollStateRef.current?.generation
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input", generation })
+    dispatchChatScrollEvent({ type: "RESTORE_BEGIN", generation })
+    const viewport = getViewport()
+    const viewportTop = viewport?.getBoundingClientRect().top ?? 0
+    let anchor: HTMLElement | null = null
+    let anchorDistance = Number.POSITIVE_INFINITY
+    for (const candidate of viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []) {
+      const distance = Math.abs(candidate.getBoundingClientRect().top - viewportTop)
+      if (distance < anchorDistance) {
+        anchor = candidate
+        anchorDistance = distance
+      }
+    }
+    const anchorId = anchor?.dataset.chatMessageId
+    const request =
+      anchorId && anchor
+        ? {
+            threadId,
+            generation: generation ?? 0,
+            messageId: anchorId,
+            viewportTop: anchor.getBoundingClientRect().top,
+            previousMessageCount: displayMessages.length,
+            previousLoadedMessageCount: historyLoadedMessageCount,
+            attempt: 0,
+            stableFrames: 0
+          }
+        : null
+    pendingDurableHistoryAnchorRef.current = request
+    try {
+      const prependedCount = await loadEarlierMessages()
+      if (prependedCount === 0 || !request) {
+        if (pendingDurableHistoryAnchorRef.current === request) {
+          pendingDurableHistoryAnchorRef.current = null
+        }
+        dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      }
+    } catch (error) {
+      if (pendingDurableHistoryAnchorRef.current === request) {
+        pendingDurableHistoryAnchorRef.current = null
+      }
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation })
+      toast.error(error instanceof Error ? error.message : "加载更早消息失败")
+    }
+  }, [
+    dispatchChatScrollEvent,
+    displayMessages.length,
+    getViewport,
+    historyLoadedMessageCount,
+    historyHasMore,
+    historyPageLoading,
+    loadEarlierMessages,
     threadId
+  ])
+  const loadReleasedHistoryWindow = useCallback(async (): Promise<void> => {
+    const targetMessageId = historyWindowGap?.reloadTargetMessageId
+    if (!targetMessageId || historyPageLoading) return
+    const revealGeneration = durableMessageWindowGenerationRef.current + 1
+    durableMessageWindowGenerationRef.current = revealGeneration
+    pendingChatSessionAnchorRef.current = null
+    setPendingDurableRevealMessageId(targetMessageId)
+    dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
+    try {
+      const loaded = await loadReleasedMessageWindow()
+      if (
+        !chatViewMountedRef.current ||
+        durableMessageWindowGenerationRef.current !== revealGeneration
+      ) {
+        return
+      }
+      if (!loaded) {
+        setPendingDurableRevealMessageId(null)
+        toast.error("继续加载中间消息失败，请稍后重试")
+        return
+      }
+      await waitForTranscriptCommit()
+    } catch (error) {
+      if (
+        chatViewMountedRef.current &&
+        durableMessageWindowGenerationRef.current === revealGeneration
+      ) {
+        setPendingDurableRevealMessageId(null)
+        toast.error(error instanceof Error ? error.message : "继续加载中间消息失败")
+      }
+    }
+  }, [
+    dispatchChatScrollEvent,
+    historyPageLoading,
+    historyWindowGap?.reloadTargetMessageId,
+    loadReleasedMessageWindow,
+    setPendingDurableRevealMessageId,
+    waitForTranscriptCommit
+  ])
+  const historyRemainingCount = Math.max(
+    0,
+    historyMessageTotal - historyLoadedMessageCount
+  )
+
+  useLayoutEffect(() => {
+    const anchor = pendingDurableHistoryAnchorRef.current
+    if (!anchor || anchor.threadId !== threadId || historyPageLoading) return
+    if (
+      displayMessages.length <= anchor.previousMessageCount &&
+      historyLoadedMessageCount <= anchor.previousLoadedMessageCount
+    ) {
+      return
+    }
+    let frame: number | null = null
+    const finishRestore = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
+      pendingDurableHistoryAnchorRef.current = null
+      dispatchChatScrollEvent({ type: "RESTORE_END", generation: anchor.generation })
+    }
+    const restoreAnchor = (): void => {
+      if (pendingDurableHistoryAnchorRef.current !== anchor) return
+      const viewport = getViewport()
+      const target =
+        contentMessageRefs.current.get(anchor.messageId) ??
+        Array.from(
+          viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []
+        ).find((candidate) => candidate.dataset.chatMessageId === anchor.messageId)
+      if (viewport && target) {
+        const delta = target.getBoundingClientRect().top - anchor.viewportTop
+        if (Math.abs(delta) > 1) viewport.scrollTop += delta
+        anchor.stableFrames = Math.abs(delta) <= 1 ? anchor.stableFrames + 1 : 0
+        if (anchor.stableFrames >= CHAT_HISTORY_ANCHOR_STABLE_FRAMES) {
+          finishRestore()
+          return
+        }
+      }
+      const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
+      if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
+        virtuosoRef.current?.scrollToIndex({ index: visibleIndex, align: "start", behavior: "auto" })
+      }
+      anchor.attempt += 1
+      if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
+        frame = window.requestAnimationFrame(restoreAnchor)
+      } else {
+        finishRestore()
+      }
+    }
+    frame = window.requestAnimationFrame(restoreAnchor)
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame)
+    }
+  }, [
+    dispatchChatScrollEvent,
+    displayMessages.length,
+    getViewport,
+    historyLoadedMessageCount,
+    historyPageLoading,
+    threadId,
+    visibleMessageIndexById
+  ])
+
+  useEffect(() => {
+    const lastVisibleMessageIndex = visibleMessageIndexes.at(-1)
+    const lastVisibleMessage =
+      lastVisibleMessageIndex === undefined ? undefined : displayMessages[lastVisibleMessageIndex]
+    const nextSnapshot = {
+      threadId,
+      visibleCount: visibleMessageIndexes.length,
+      lastMessageId: lastVisibleMessage?.id ?? null,
+      lastMessageIdentity: chatScrollTailMessageIdentity(lastVisibleMessage),
+      loadedMessageCount: historyLoadedMessageCount,
+      contentVersion: displayMessagesContentVersion,
+      structureVersion: displayMessagesStructureVersion
+    }
+    const previous = chatContentSnapshotRef.current
+    if (historyLoading) return
+    chatContentSnapshotRef.current = nextSnapshot
+    if (!previous || previous.threadId !== threadId) return
+
+    const tailChange = classifyChatScrollTailChange({
+      previous,
+      current: nextSnapshot,
+      displayMessages,
+      visibleMessageIndexes,
+      visibleMessageIndexById
+    })
+
+    if (tailChange.appendedMessageCount > 0) {
+      dispatchChatScrollEvent({
+        type: "CONTENT_APPENDED",
+        unreadMessages: tailChange.unreadMessageCount
+      })
+      return
+    }
+    if (shouldMarkChatTailContentGrowth({
+      change: tailChange,
+      currentTail: lastVisibleMessage,
+      contentVersionChanged: nextSnapshot.contentVersion !== previous.contentVersion,
+      structureVersionChanged: nextSnapshot.structureVersion !== previous.structureVersion,
+      changedTail: displayMessageProjection.changedMessages.some(
+        (message) => message.id === nextSnapshot.lastMessageId
+      )
+    })) {
+      const state = chatScrollStateRef.current
+      if (state && isChatScrollDetached(state)) {
+        dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+      }
+    }
+  }, [
+    dispatchChatScrollEvent,
+    displayMessageProjection.changedMessages,
+    displayMessages,
+    displayMessagesContentVersion,
+    displayMessagesStructureVersion,
+    historyLoadedMessageCount,
+    historyLoading,
+    threadId,
+    visibleMessageIndexById,
+    visibleMessageIndexes,
+    visibleMessageIndexes.length
   ])
 
   // Ctrl/Cmd+F opens in-session search. Listen on window (capture phase) so it
@@ -3264,19 +4656,31 @@ export function ChatContainer({
   }, [])
 
   useEffect(() => {
-    if (!pendingApproval) return
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [pendingApproval, getViewport])
+    const state = chatScrollStateRef.current
+    if (!pendingApproval || !state || !shouldFollowChatOutput(state)) return
+    dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
+  }, [dispatchChatScrollEvent, pendingApproval])
 
   useEffect(() => {
-    if (!pendingUserInput || !userInputDialogLayout) return
+    const state = chatScrollStateRef.current
+    if (!pendingUserInput || !userInputDialogLayout || !state || !shouldFollowChatOutput(state)) {
+      return
+    }
     const viewport = getViewport()
     if (!viewport) return
+    const generation = state.generation
+    dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_BEGIN", generation })
 
     const frame = requestAnimationFrame(() => {
+      const currentState = chatScrollStateRef.current
+      if (
+        !currentState ||
+        currentState.generation !== generation ||
+        !shouldFollowChatOutput(currentState)
+      ) {
+        dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+        return
+      }
       const targetElement = lastContentMessageId
         ? contentMessageRefs.current.get(lastContentMessageId)
         : null
@@ -3287,32 +4691,26 @@ export function ChatContainer({
         const targetRect = targetElement.getBoundingClientRect()
         const scrollDelta = targetRect.bottom - targetBottom
         if (Math.abs(scrollDelta) > 1) {
-          viewport.scrollTop = Math.max(0, viewport.scrollTop + scrollDelta)
+          viewport.scrollBy({ top: scrollDelta, behavior: "auto" })
         }
       } else {
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: "auto" })
       }
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
     })
 
-    return () => cancelAnimationFrame(frame)
+    return () => {
+      cancelAnimationFrame(frame)
+      dispatchChatScrollEvent({ type: "PROGRAMMATIC_SCROLL_END", generation })
+    }
   }, [
+    dispatchChatScrollEvent,
     getViewport,
     lastContentMessageId,
     pendingUserInput,
     userInputDialogLayout?.height,
     userInputDialogLayout?.top
   ])
-
-  //  滚动到底部
-  // 1.初始化
-  // 2.切换thread
-  useEffect(() => {
-    const viewport = getViewport()
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight
-    }
-  }, [getViewport, historyLoading, threadId])
-
   // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus()
@@ -3390,10 +4788,47 @@ export function ChatContainer({
     skillSelected: selectedSkill !== null,
     browserSelected: selectedBuiltinBrowser
   })
+  const loadMoreWorkspaceMentionFiles = useCallback(
+    async (signal: AbortSignal) => {
+      if (!workspacePath) return null
+      let result: Awaited<ReturnType<typeof continueWorkspaceFilesDeduped>> | null
+      try {
+        // Do not bind the shared bounded scan to one transient keystroke. A
+        // superseded query stops awaiting it, while the completed segment is
+        // still published for the next query and the Files panel.
+        result = await awaitWorkspaceMentionLoad(
+          continueWorkspaceFilesDeduped(threadId, workspacePath),
+          signal
+        )
+      } catch (error) {
+        if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+          throw error
+        }
+        result = null
+      }
+
+      // Continuation cursors intentionally expire after an idle window. Reopen
+      // one bounded initial scan so @ search can recover without requiring the
+      // user to mount or refresh the Files panel first.
+      if (!result?.success) {
+        result = await awaitWorkspaceMentionLoad(
+          loadWorkspaceFilesDeduped(threadId, workspacePath),
+          signal
+        )
+      }
+      if (!result.success) return null
+      return {
+        files: result.files,
+        continuationAvailable: result.continuationAvailable === true
+      }
+    },
+    [threadId, workspacePath]
+  )
   const atFileMentions = useAtFileMentions({
     input,
     cursorOffset: inputRef.current?.selectionStart ?? input.length,
     workspaceFiles,
+    loadMoreWorkspaceFiles: loadMoreWorkspaceMentionFiles,
     disabled: slash.mode.kind === "slash" || !workspacePath
   })
   const slashPopoverKind = slash.mode.kind
@@ -3554,28 +4989,18 @@ export function ChatContainer({
         }
 
         clearError()
-          void (async () => {
-            let contentChars = 0
-            try {
-              const readResult = await window.api.workspace.readFile(
-                threadId,
-                selection.mentionedFile.workspaceFilePath
-              )
-              if (readResult.success && typeof readResult.content === "string") {
-                contentChars = readResult.content.length
-              }
-            } catch {
-              contentChars = 0
-            }
-
-            setMentionedFiles((prev) => [
-              ...prev,
-              {
-                ...selection.mentionedFile,
-                contentChars
-              }
-            ])
-          })()
+        setMentionedFiles((prev) => {
+          if (
+            prev.some(
+              (candidate) => candidate.absolutePath === selection.mentionedFile.absolutePath
+            )
+          ) {
+            return prev
+          }
+          const next = [...prev, selection.mentionedFile]
+          mentionedFilesRef.current = next
+          return next
+        })
 
         const { nextInput, nextCursor } = removeAtFileTokenFromInput(input, {
           startPos: atFileMentions.mode.startPos,
@@ -3592,13 +5017,13 @@ export function ChatContainer({
         setError("@文件暂时不可用，请直接发送消息或改用普通附件。")
       }
     },
-    [atFileMentions.mode, clearError, input, setError, setInput, threadId, workspacePath]
+    [atFileMentions.mode, clearError, input, setError, setInput, workspacePath]
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
     async (
       content: string,
-      options: { persistTiming?: boolean; id?: string } = {}
+      options: { id?: string } = {}
     ): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
@@ -3610,25 +5035,9 @@ export function ChatContainer({
         end_at: userStartAt
       }
       appendMessage(userMessage)
-      if (options.persistTiming === false) return userMessage
-
-      const userMessageTime: MessageTimeMap = {
-        [userMessage.id]: {
-          start_at: userStartAt.toISOString(),
-          end_at: userStartAt.toISOString()
-        }
-      }
-      try {
-        await window.api.threads.mergeThreadValues(threadId, {
-          [MESSAGE_TIMES_THREAD_VALUE_KEY]: userMessageTime,
-          [MESSAGE_TIME_ORDER_THREAD_VALUE_KEY]: messageTimeOrderEntries(userMessageTime)
-        })
-      } catch (error) {
-        console.warn("[ChatContainer] Failed to save user message time:", error)
-      }
       return userMessage
     },
-    [appendMessage, getViewport, threadId]
+    [appendMessage]
   )
 
   const showGoalControlNotice = useCallback((rawMessage?: string): void => {
@@ -3683,7 +5092,7 @@ export function ChatContainer({
       setMentionedFiles([])
       setSelectedSkill(null)
       insertLog("send: /goal resume")
-      await appendVisibleUserMessageWithTime("/goal resume", { persistTiming: false })
+      await appendVisibleUserMessageWithTime("/goal resume")
       await stream.submit(
         {
           messages: [{ type: "human", content: "/goal resume" }]
@@ -4027,22 +5436,61 @@ export function ChatContainer({
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       // 统一在 helper 里完成 @文件解析、内容读取、附件去重和文本清洗，
       // 这里仅消费结果，避免发送流程继续堆积细节分支。
+      const atFileRequestToken = crypto.randomUUID()
+      const atFileWorkspaceKey = normalizeWorkspacePathKey(workspacePath)
+      activeAtFilePreviewTokensRef.current.add(atFileRequestToken)
+      const cancelAtFileReads = (): void => {
+        void window.api.workspace.cancelFilePreview({
+          lanePrefix: AT_FILE_PREVIEW_LANE,
+          requestToken: atFileRequestToken
+        })
+      }
+      let atFileResolution: Awaited<ReturnType<typeof resolveAtFileAttachments>>
+      try {
+        atFileResolution = await resolveAtFileAttachments({
+          rawMessage,
+          attachments: claimedAttachments,
+          mentionedFiles: claimedMentionedFiles,
+          workspacePath,
+          workspaceFiles,
+          maxAttachments: MAX_ATTACHMENTS,
+          maxTotalChars: MAX_TOTAL_CHARS,
+          readWorkspaceFile: async (filePath, maxChars) => {
+            // A workspace can still change before the first user turn is
+            // committed. Fence both sides of the async read so content from a
+            // newly selected workspace is never attached under the old chip path.
+            if (
+              normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey
+            ) {
+              return { success: false }
+            }
+            const result = await readBoundedWorkspaceMentionFile({
+              maxChars,
+              readPage: (offset) =>
+                window.api.workspace.readFilePreview({
+                  source: { threadId, filePath },
+                  offset,
+                  lane: AT_FILE_PREVIEW_LANE,
+                  requestToken: atFileRequestToken
+                })
+            })
+            return normalizeWorkspacePathKey(workspacePathRef.current) === atFileWorkspaceKey
+              ? result
+              : { success: false }
+          },
+          cancelWorkspaceFileReads: cancelAtFileReads
+        })
+      } finally {
+        activeAtFilePreviewTokensRef.current.delete(atFileRequestToken)
+        cancelAtFileReads()
+      }
       const {
         cleanedMessage,
         attachments: resolvedAttachments,
         mentionCountLimitHit,
         mentionAttachmentLimitHit,
         warningMessage: atFileWarningMessage
-      } = await resolveAtFileAttachments({
-        rawMessage,
-        attachments: claimedAttachments,
-        mentionedFiles: claimedMentionedFiles,
-        workspacePath,
-        workspaceFiles,
-        maxAttachments: MAX_ATTACHMENTS,
-        maxTotalChars: MAX_TOTAL_CHARS,
-        readWorkspaceFile: (filePath) => window.api.workspace.readFile(threadId, filePath)
-      })
+      } = atFileResolution
       rawMessage = cleanedMessage
 
       // These are delivery warnings, not run failures. A thread error blocks the
@@ -4055,6 +5503,11 @@ export function ChatContainer({
         // 非致命失败只做提示，不中断后面的普通发送流程。
         toast.warning(atFileWarningMessage)
       }
+
+      // A stale chip may have been the only composer payload. Once it is
+      // rejected, do not emit an empty user turn merely because the pre-read
+      // validation originally saw a pending file chip.
+      if (!rawMessage && resolvedAttachments.length === 0 && !skill && !browser) return
 
       const attachmentPayload = resolvedAttachments.length > 0 ? resolvedAttachments : undefined
       const fallbackUserText = attachmentPayload && !skill ? "请分析以下文件内容。" : ""
@@ -4152,6 +5605,7 @@ export function ChatContainer({
 
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
+        canChangeAgentMode &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
       let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
         ? "normal"
@@ -4185,7 +5639,11 @@ export function ChatContainer({
       ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
-      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      } else if (
+        !coordinatorPrefixed &&
+        submitAgentMode === "coordinator" &&
+        agentMode !== "coordinator"
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -4194,9 +5652,7 @@ export function ChatContainer({
       if (shouldAppendVisibleUserMessage) {
         // 同步维护顺序数组，支持 app 重启后按消息顺序恢复历史耗时。user message 在前端先 append，
         // checkpoint 恢复时 id 可能不一定完全一致；因此仍需要顺序数组作为兜底。
-        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent, {
-          persistTiming: !isGoalSlashInput
-        })
+        const visibleUserMessagePromise = appendVisibleUserMessageWithTime(displayContent)
         visibleUserMessage = await visibleUserMessagePromise
       }
 
@@ -4270,6 +5726,10 @@ export function ChatContainer({
     } finally {
       if (shouldLockSubmit) liveSubmitPreparingThreads.delete(threadId)
       if (shouldLockQueuedDraftPreparation) queuedDraftPreparingThreads.delete(threadId)
+      // `done` can flip isLoading to false before stream.submit's promise
+      // continuation releases this mutable lock. The idle-rendered pump then
+      // observes the lock, returns, and otherwise has no reactive reason to
+      // try again. Publish a wake only after the lock is actually gone.
       releaseSubmitInFlightLock(submitInFlightRef, shouldLockSubmit, threadId)
     }
   }
@@ -4603,6 +6063,7 @@ export function ChatContainer({
       }
       const coordinatorPrefixed =
         !disableCoordinatorModeOption &&
+        canChangeAgentMode &&
         /^\s*(?:\[coordinator\]|#coordinator)\s*[:-]?/i.test(fullMessage)
       let submitAgentMode: ChatAgentMode = disableCoordinatorModeOption
         ? "normal"
@@ -4636,7 +6097,11 @@ export function ChatContainer({
       ) {
         agentModeHydratedRef.current = true
         setAgentMode("normal")
-      } else if (submitAgentMode === "coordinator" && agentMode !== "coordinator") {
+      } else if (
+        !coordinatorPrefixed &&
+        submitAgentMode === "coordinator" &&
+        agentMode !== "coordinator"
+      ) {
         agentModeHydratedRef.current = true
         setAgentMode("coordinator")
       }
@@ -4655,7 +6120,6 @@ export function ChatContainer({
       // a new orphaned "ghost" user bubble behind every attempt (appendMessage upserts
       // by id, so re-using queued.id makes a retry replace the same bubble instead).
       const visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
-        persistTiming: true,
         id: queued.id
       })
       if (isFirstMessage) {
@@ -4692,6 +6156,7 @@ export function ChatContainer({
     [
       agentMode,
       appendVisibleUserMessageWithTime,
+      canChangeAgentMode,
       clearFinishedWorkflowRun,
       currentModel,
       deleteQueuedMessage,
@@ -4819,8 +6284,8 @@ export function ChatContainer({
   // queue) could slip in ahead of the pump's own stream.submit and end up silently
   // queued behind it inside the SDK with no visible indication why, while the pump's
   // optimistic UI (bubble already appended, draft already removed from the queue)
-  // sits there looking "sent." Failing fast here avoids that. queuePumpTick forces
-  // a re-check after each settle.
+  // sits there looking "sent." Failing fast here avoids that. The shared release
+  // version forces a re-check after each settle, including across component remounts.
   useEffect(() => {
     if (queueAutoDrainSuppressed) return
     if (submitInFlightRef.current.has(threadId)) return
@@ -4879,7 +6344,6 @@ export function ChatContainer({
       })
       .finally(() => {
         releaseSubmitInFlightLock(submitInFlightRef, true, threadId)
-        setQueuePumpTick((tick) => tick + 1)
       })
   }, [
     contextReminderPending,
@@ -4897,6 +6361,7 @@ export function ChatContainer({
     removeLocalMessage,
     setError,
     stream,
+    submitReleaseVersion,
     submitQueuedMessage,
     submitInFlightRef,
     threadError,
@@ -5102,16 +6567,23 @@ export function ChatContainer({
 
   useEffect(() => {
     void loadSkills()
-  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId])
+    return () => {
+      skillsLoadRequestIdRef.current += 1
+      void window.api.harnessBoard.cancelCatalogRequests("chat-binding").catch(() => undefined)
+    }
+  }, [loadSkills, pluginVersion, harnessFeatureBinding?.projectId, surface])
 
-  // Main broadcasts `skills:changed` after skill evolution writes, optimizer
-  // patches, and plugin SKILL.md edits via the file editor. Subscribe so the
-  // slash popover and welcome-tree get a fresh list without waiting for the
-  // user to re-open `/` (which already triggers a re-fetch on its own).
+  // One application-lifetime bridge translates skills:changed into one cache
+  // revision. ChatContainer and RightPanel then share the same refresh promise.
   useEffect(() => {
-    return window.api.skills.onChanged(() => {
+    const unsubscribe = subscribeSkillCatalogInvalidation(() => {
       void loadSkills()
     })
+    ensureSkillsChangedInvalidationSource((listener) => window.api.skills.onChanged(listener))
+    ensureDisabledSkillsChangedInvalidationSource((listener) =>
+      window.api.hooks.onChanged(listener)
+    )
+    return unsubscribe
   }, [loadSkills])
 
   // ── Skill creation human-confirmation listener ──────────
@@ -5840,14 +7312,107 @@ export function ChatContainer({
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const chatMessageListFooter = (
+    <div
+      className="space-y-4 pt-4 pb-4"
+      style={
+        userInputScrollPadding
+          ? { paddingBottom: `${userInputScrollPadding}px` }
+          : undefined
+      }
+    >
+      {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
+      {modelRetry && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+          <div className="min-w-0 flex-1">
+            <span>
+              模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
+              {modelRetry.maxRetries}
+              {modelRetry.delayMs > 0 && <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>}
+              …
+            </span>
+          </div>
+        </div>
+      )}
+      {isLoading && (
+        <div className="space-y-3">
+          {contextCompaction?.phase !== "started" && (
+            <div className="flex items-center gap-2 text-sm">
+              <div className="rainbow-spinner" />
+              <span
+                className="thinking-shimmer-text"
+                data-text={THINKING_MESSAGES[thinkingMessageIndex]}
+              >
+                {THINKING_MESSAGES[thinkingMessageIndex]}
+              </span>
+              {streamData.isLoading && (
+                <ProcessingDuration key={threadId} startTime={activeTurnStartTime} text="已处理" />
+              )}
+            </div>
+          )}
+          {todos.length > 0 && <ChatTodos todos={todos} />}
+        </div>
+      )}
+      {workflowRun ? (
+        <WorkflowRunPanel threadId={threadId} run={workflowRun} />
+      ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
+        <WorkflowHistoryButton threadId={threadId} />
+      ) : null}
+      {hookInterruption && !isLoading && (
+        <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
+          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-300" />
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              {interruptionNotice?.title}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
+              <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+                {hookInterruption.event}
+              </span>
+              <span title={HOOK_TIME_ZONE_LABEL}>
+                {formatHookClockTime(hookInterruption.timestamp) ?? "时间无效"}
+              </span>
+            </div>
+            <div className="mt-2 text-sm text-amber-900/90 break-words dark:text-amber-100/90">
+              {hookInterruption.reason}
+            </div>
+            {hookInterruption.systemMessage && (
+              <div className="mt-2 text-xs text-amber-700/80 break-words dark:text-amber-200/80">
+                {hookInterruption.systemMessage}
+              </div>
+            )}
+            <div className="mt-2 text-xs text-muted-foreground">
+              {interruptionNotice?.explanation}
+            </div>
+          </div>
+          <button
+            onClick={clearHookInterruption}
+            className="shrink-0 rounded p-1 transition-colors hover:bg-amber-500/20"
+            aria-label="Dismiss hook notice"
+          >
+            <X className="size-4 text-muted-foreground" />
+          </button>
+        </div>
+      )}
+      {threadError && !isLoading && (
+        <ChatErrorCard error={threadError} detail={errorDetail} onDismiss={handleDismissError} />
+      )}
+    </div>
+  )
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         open={searchOpen}
-        onClose={() => setSearchOpen(false)}
+        onClose={closeSearch}
         getViewport={getViewport}
+        getSearchCorpus={getSearchCorpus}
+        onRevealMessage={revealMessage}
+        searchDurableMessages={searchDurableMessages}
+        onRevealDurableMessage={revealDurableMessage}
+        onCancelDurableReveal={invalidateDurableMessageReveal}
         recomputeKey={searchRecomputeKey}
       />
 
@@ -5974,22 +7539,40 @@ export function ChatContainer({
 
       {skillIntentBanner}
       {nuxDialog}
+      {visibleMessageIndexes.length > CHAT_MESSAGE_VIRTUALIZATION_THRESHOLD && (
+        <TooltipProvider delayDuration={180}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                role="img"
+                aria-label="虚拟列表已启用"
+                className="pointer-events-auto absolute right-4 top-4 z-20 block size-2.5 rounded-full bg-emerald-500 ring-2 ring-background shadow-[0_0_0_1px_rgb(16_185_129/0.3)]"
+              />
+            </TooltipTrigger>
+            <TooltipContent side="left" sideOffset={8}>
+              虚拟列表已启用
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
 
       <ChatScrollNavigator
         messages={chatScrollNavigatorMessages}
+        questionStructureRevision={chatScrollQuestionStructureRevision}
+        historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+        canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
+        onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
+        onRevealMessage={revealMessage}
         scrollContainerRef={scrollRef}
         rightPanelCollapsed={rightPanelCollapsed}
+        onScrollToQuestion={handleScrollToQuestion}
+        scrollToMessageById={scrollToMessageById}
       >
-        {({ reserveLeftSpace, setMessageRef }) => (
+        {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
               <div
-                className={cn("p-4", reserveLeftSpace && "md:pl-[20px]")}
-                style={
-                  userInputScrollPadding
-                    ? { paddingBottom: `${userInputScrollPadding}px` }
-                    : undefined
-                }
+                className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}
               >
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
@@ -6028,9 +7611,21 @@ export function ChatContainer({
                       onOpenMarketBySkill={handleOpenMarketBySkill}
                     />
                   )}
-                  <ChatMessageList
+                  <ChatMessageVirtualList
                     messages={displayMessages}
-                    perMessageFlags={perMessageFlags}
+                    visibleMessageIndexes={visibleMessageIndexes}
+                    lastUserMessageIndex={lastUserMessageIndex}
+                    contentVersion={displayMessagesContentVersion}
+                    onLoadEarlierHistoryPage={loadEarlierHistoryPage}
+                    historyHasMore={historyHasMore}
+                    historyPageLoading={historyPageLoading}
+                    historyRemainingCount={historyRemainingCount}
+                    historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
+                    canLoadReleasedHistory={Boolean(
+                      historyWindowGap?.reloadTargetMessageId
+                    )}
+                    onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
+                    onRestoreLatestHistoryWindow={scrollToConversationBottom}
                     hookLoggingEnabled={hookLogConfig.enabled}
                     hookLogBucketByTurnId={hookLogBucketByTurnId}
                     detachedHookLogBuckets={detachedHookLogBuckets}
@@ -6051,111 +7646,20 @@ export function ChatContainer({
                     threadId={threadId}
                     assistantDurationMsById={assistantDurationMsById}
                     userSendTimeLabelById={userSendTimeLabelById}
+                    customScrollParent={scrollParent}
+                    virtuosoRef={virtuosoRef}
+                    navigatorVirtualRangeRef={virtualRangeRef}
+                    initialTopMostItemIndex={
+                      chatScrollUiState.mode === "initializing" ||
+                      chatScrollUiState.mode === "following"
+                        ? { index: "LAST", align: "end", behavior: "auto" }
+                        : undefined
+                    }
+                    onInitialVirtualItemsRendered={handleInitialVirtualItemsRendered}
+                    onContentHeightChanged={handleContentHeightChanged}
+                    onAtBottomStateChange={handleVirtualAtBottomStateChange}
+                    footer={chatMessageListFooter}
                   />
-
-                  {contextCompaction && (
-                    <ContextCompactionCard compaction={contextCompaction} />
-                  )}
-
-                  {/*测试git diff功能*/}
-                  {/*<DisplayDiffTest/>*/}
-
-                  {/*
-              Hook log chips now live under each user message above. The modal
-              is mounted once at component scope below so it's not bound to a
-              specific message render. Buckets without a visible user message
-              (session lifecycle, worker auto-turns, older placeholders) render
-              their chips in ChatMessageList.
-            */}
-
-                  {/* Orchestrator standalone approval bar moved outside ScrollArea — see below */}
-                  {/* Model retry indicator — shown when the fetch layer is retrying a transient error */}
-                  {modelRetry && (
-                    <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 dark:border-amber-500/40 dark:bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-200">
-                      <span className="inline-block size-3 mt-0.5 rounded-full border-2 border-amber-500 border-t-transparent animate-spin shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <span>
-                          模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
-                          {modelRetry.maxRetries}
-                          {modelRetry.delayMs > 0 && (
-                            <>（等待 {Math.round(modelRetry.delayMs / 100) / 10}s）</>
-                          )}
-                          …
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  {/* Streaming indicator and inline TODOs */}
-                  {isLoading && (
-                    <div className="space-y-3">
-                      {contextCompaction?.phase !== "started" && (
-                        <div className="flex items-center gap-2 text-sm">
-                          <div className="rainbow-spinner" />
-                          <span
-                            className="thinking-shimmer-text"
-                            data-text={THINKING_MESSAGES[thinkingMessageIndex]}
-                          >
-                            {THINKING_MESSAGES[thinkingMessageIndex]}
-                          </span>
-                          {streamData.isLoading && (
-                            <ProcessingDuration
-                              key={threadId}
-                              startTime={activeTurnStartTime}
-                              text="已处理"
-                            />
-                          )}
-                        </div>
-                      )}
-                      {todos.length > 0 && <ChatTodos todos={todos} />}
-                    </div>
-                  )}
-                  {workflowRun ? (
-                    <WorkflowRunPanel threadId={threadId} run={workflowRun} />
-                  ) : isWorkflowModeMetadata(currentThread?.metadata) ? (
-                    <WorkflowHistoryButton threadId={threadId} />
-                  ) : null}
-                  {hookInterruption && !isLoading && (
-                    <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-                      <ShieldCheck className="size-5 text-amber-600 shrink-0 mt-0.5 dark:text-amber-300" />
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-amber-800 text-sm dark:text-amber-200">
-                          {interruptionNotice?.title}
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
-                          <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
-                            {hookInterruption.event}
-                          </span>
-                          <span>{hookInterruption.timestamp.toLocaleTimeString()}</span>
-                        </div>
-                        <div className="text-sm text-amber-900/90 mt-2 break-words dark:text-amber-100/90">
-                          {hookInterruption.reason}
-                        </div>
-                        {hookInterruption.systemMessage && (
-                          <div className="text-xs text-amber-700/80 mt-2 break-words dark:text-amber-200/80">
-                            {hookInterruption.systemMessage}
-                          </div>
-                        )}
-                        <div className="text-xs text-muted-foreground mt-2">
-                          {interruptionNotice?.explanation}
-                        </div>
-                      </div>
-                      <button
-                        onClick={clearHookInterruption}
-                        className="shrink-0 rounded p-1 hover:bg-amber-500/20 transition-colors"
-                        aria-label="Dismiss hook notice"
-                      >
-                        <X className="size-4 text-muted-foreground" />
-                      </button>
-                    </div>
-                  )}
-                  {/* Error state */}
-                  {threadError && !isLoading && (
-                    <ChatErrorCard
-                      error={threadError}
-                      detail={errorDetail}
-                      onDismiss={handleDismissError}
-                    />
-                  )}
                 </div>
               </div>
             </ScrollArea>
@@ -6528,9 +8032,10 @@ export function ChatContainer({
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
                 <ChatScrollToBottomButton
-                  getViewport={getViewport}
+                  visible={chatScrollUiState.mode === "detached"}
+                  hasUnread={chatScrollUiState.hasUnread}
+                  unreadCount={chatScrollUiState.unreadCount}
                   onScrollToBottom={scrollToConversationBottom}
-                  resetKey={threadId}
                 />
                 <SlashCommandPopover
                   mode={slash.mode}
@@ -7023,7 +8528,6 @@ export function ChatContainer({
                   {/*chat container bottom panel */}
                   <div className={"flex items-center justify-between"}>
                     <div className={"flex items-center gap-2"}>
-                      <ChatMessageCount count={displayMessages.length} />
                       {yoloMode && (
                         <button
                           type="button"

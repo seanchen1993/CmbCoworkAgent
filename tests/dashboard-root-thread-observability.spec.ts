@@ -31,6 +31,10 @@ function section(source: string, start: string, end: string): string {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const dashboardSource = readFileSync(join(__dirname, "../src/main/ipc/dashboard.ts"), "utf8")
+const projectModePanelSource = readFileSync(
+  join(__dirname, "../src/renderer/src/components/dashboard/panels/ProjectModePanel.tsx"),
+  "utf8"
+)
 
 function testThreadListAggUsesRootThreadId(): void {
   const source = section(dashboardSource, "function threadListAgg", "function parseThreadListContainer")
@@ -117,6 +121,102 @@ function testDevMockThreadTracesResolveNamespacedRootThread(): void {
   )
 }
 
+function testProjectListConversationCountUsesActiveMainAgentTraces(): void {
+  const filterSource = section(
+    dashboardSource,
+    "function projectModeMainAgentConversationFilter",
+    "/** Build the `name@version` key"
+  )
+  assertIncludes(
+    filterSource,
+    "buildChatTriggeredTraceFilter()",
+    "project-list conversation count should include only active triggers"
+  )
+  assertIncludes(
+    filterSource,
+    '{ term: { traceKind: "root" } }',
+    "project-list conversation count should include root traces"
+  )
+  assertIncludes(
+    filterSource,
+    '{ exists: { field: "parentTraceId" } }',
+    "legacy fallback should reject parent-linked child traces"
+  )
+
+  const usageSource = section(
+    dashboardSource,
+    "async function fetchProjectModePageUsage",
+    "/**\n * Code-adoption stats for project mode."
+  )
+  assertIncludes(
+    usageSource,
+    "filter: projectModeMainAgentConversationFilter(),",
+    "per-project usage should aggregate active main-Agent conversations separately"
+  )
+  assertIncludes(
+    usageSource,
+    "perProject.set(key, asNumber(mainAgentConversations.doc_count))",
+    "project-list values and metric sorting should use the main-Agent bucket"
+  )
+  assertNotIncludes(
+    usageSource,
+    "perProject.set(key, asNumber(b.doc_count))",
+    "project-list conversation count must not use the all-trace project bucket"
+  )
+}
+
+function testSuspectedTechnicalDetailMetricIsGatedAndNested(): void {
+  const accessSource = section(
+    dashboardSource,
+    "const DASHBOARD_ALLOWED_IDS_ENV",
+    "function getDashboardAccessContext"
+  )
+  assertIncludes(
+    accessSource,
+    "VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS",
+    "technical-detail metric access should come from encrypted environment configuration"
+  )
+
+  const usageSource = section(
+    dashboardSource,
+    "async function fetchProjectModePageUsage",
+    "/**\n * Code-adoption stats for project mode."
+  )
+  assertIncludes(
+    usageSource,
+    "includeSuspectedTechnicalDetail",
+    "technical-detail aggregation should be conditional on viewer access"
+  )
+  assertIncludes(
+    usageSource,
+    "filter: { term: { suspectedTechnicalDetailSupplement: true } }",
+    "technical-detail count should use the forward-only trace boolean"
+  )
+  assertIncludes(
+    projectModePanelSource,
+    "用户输入全文中累计包含 10 个及以上英文字母的会话数量",
+    "technical-detail metric should explain its conversation-count heuristic in the UI"
+  )
+  assertNotIncludes(
+    projectModePanelSource,
+    "历史 Trace 不回填",
+    "technical-detail metric should not expose trace implementation details in the UI"
+  )
+}
+
+function testProjectListConversationCountExplainsItsScope(): void {
+  assertIncludes(
+    projectModePanelSource,
+    "仅统计主动触发的主 Agent 会话",
+    "project-list conversation count should expose its scope in an info hint"
+  )
+  assertIncludes(
+    projectModePanelSource,
+    "也不包含子 Agent 会话",
+    "project-list conversation count hint should explain child traces are excluded"
+  )
+}
+
 function run(): void {
   testThreadListAggUsesRootThreadId()
   console.log("PASS dashboard thread list rootThreadId aggregation")
@@ -132,6 +232,12 @@ function run(): void {
   console.log("PASS dashboard dev mock visible reasoning")
   testDevMockThreadTracesResolveNamespacedRootThread()
   console.log("PASS dashboard dev mock namespaced threadTraces")
+  testProjectListConversationCountUsesActiveMainAgentTraces()
+  console.log("PASS dashboard project-list active main-Agent conversation count")
+  testProjectListConversationCountExplainsItsScope()
+  console.log("PASS dashboard project-list conversation-count scope hint")
+  testSuspectedTechnicalDetailMetricIsGatedAndNested()
+  console.log("PASS dashboard project-list suspected technical-detail metric")
 }
 
 run()

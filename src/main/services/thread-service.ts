@@ -1,4 +1,3 @@
-import { existsSync } from "fs"
 import Store from "electron-store"
 import { v4 as uuid } from "uuid"
 import { createThread as dbCreateThread } from "../db"
@@ -10,6 +9,7 @@ import {
 import { getOpenworkDir } from "../storage"
 import type { Thread } from "../types"
 import { getDefaultModel } from "../ipc/models"
+import { resolveRecentWorkspacePath } from "../ipc/recent-workspace"
 
 const settingsStore = new Store({
   name: "settings",
@@ -34,12 +34,13 @@ export async function createThreadService(metadata?: Record<string, unknown>): P
 
   const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
   if (!hasWorkspacePath) {
-    const lastWorkspacePath = settingsStore.get("workspacePath", null)
-    if (
-      typeof lastWorkspacePath === "string" &&
-      lastWorkspacePath &&
-      existsSync(lastWorkspacePath)
-    ) {
+    // UNC/network paths can block the Electron main process when probed
+    // synchronously. Keep the shared creation path aligned with the UAT IPC
+    // behavior and recheck the setting after the bounded async probe.
+    const lastWorkspacePath = await resolveRecentWorkspacePath(() =>
+      settingsStore.get("workspacePath", null)
+    )
+    if (lastWorkspacePath) {
       nextMetadata.workspacePath = lastWorkspacePath
     }
   }

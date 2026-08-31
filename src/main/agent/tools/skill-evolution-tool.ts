@@ -30,12 +30,15 @@ import { v4 as uuid } from "uuid"
 import type { SkillProposalWindowContext } from "../skill-evolution/proposal-window"
 import { discoverSkillsSync } from "../../skills/discovery"
 import { getDiscoveredSkillId, normalizeSkillId } from "../../skills/ids"
+import { bumpHookCatalogGlobalRevision } from "../../hook-catalog/revision"
+import { beginSkillCatalogTopologyMutation } from "../../skill-plugin-catalog/topology-mutation-gate"
 
 // ─────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────
 
 function notifyRenderer(channel: string, payload?: unknown): void {
+  if (channel === "skills:changed") bumpHookCatalogGlobalRevision()
   let sentCount = 0
   for (const win of BrowserWindow.getAllWindows()) {
     try {
@@ -404,6 +407,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
 
           mkdirSync(skillDir, { recursive: true })
           writeFileSync(join(skillDir, "SKILL.md"), decision.content ?? input.content, "utf-8")
+          bumpHookCatalogGlobalRevision()
           clearDisabledSkillsForSkillDir(skillDir)
 
           // Invalidate skills cache so runtime picks up the new skill next invocation
@@ -432,6 +436,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           // Full content replacement
           if (input.content) {
             writeFileSync(skillMdPath, input.content, "utf-8")
+            bumpHookCatalogGlobalRevision()
             invalidateEnabledSkillsCache()
             notifyRenderer("skills:changed")
             console.log(`[SkillEvolution] Patched (full replace) skill: ${input.skillId}`)
@@ -452,6 +457,7 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
             }
             const updated = current.replace(input.patchOldString, input.patchNewString)
             writeFileSync(skillMdPath, updated, "utf-8")
+            bumpHookCatalogGlobalRevision()
             invalidateEnabledSkillsCache()
             notifyRenderer("skills:changed")
             console.log(`[SkillEvolution] Patched (string replace) skill: ${input.skillId}`)
@@ -474,18 +480,22 @@ export function createSkillEvolutionTool(context: SkillEvolutionToolContext = {}
           const skillDir = resolved.dir
           if (!existsSync(skillDir)) return `Error: skill not found: ${input.skillId}`
           const cleanupDisabledSkills = prepareDisabledSkillsCleanupForSkillDir(skillDir)
+          const endTopologyMutation = beginSkillCatalogTopologyMutation()
+          try {
+            await shell.trashItem(skillDir)
+            cleanupDisabledSkills()
+            invalidateEnabledSkillsCache()
+            notifyRenderer("skills:changed")
 
-          await shell.trashItem(skillDir)
-          cleanupDisabledSkills()
-          invalidateEnabledSkillsCache()
-          notifyRenderer("skills:changed")
-
-          console.log(`[SkillEvolution] Deleted skill: ${input.skillId}`)
-          return JSON.stringify({
-            success: true,
-            skillId: resolved.id,
-            message: `Skill '${resolved.id}' moved to trash.`
-          })
+            console.log(`[SkillEvolution] Deleted skill: ${input.skillId}`)
+            return JSON.stringify({
+              success: true,
+              skillId: resolved.id,
+              message: `Skill '${resolved.id}' moved to trash.`
+            })
+          } finally {
+            endTopologyMutation()
+          }
         }
 
         default:

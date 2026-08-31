@@ -161,9 +161,19 @@ describe("close behavior UI integration", () => {
   it("protects every agent task owner and drains them before SessionEnd", () => {
     expect(agentIpc.includes("workflowRunManager.hasActiveRuns()")).toBe(true)
     expect(agentIpc.includes("coordinatorWorkerManager.hasRunningWorkers()")).toBe(true)
-    expect(agentIpc.includes("LocalSandbox.hasActiveProcesses()")).toBe(true)
+    expect(agentIpc.includes("LocalSandbox.hasActiveExecutionTasks()")).toBe(true)
     expect(workflowManager.includes("cancelAllAndWait")).toBe(true)
     expect(coordinatorManager.includes("cancelAllWorkersAndWait")).toBe(true)
+    expect(agentIpc.includes("LocalSandbox.beginApplicationShutdown()")).toBe(true)
+    expect(agentIpc.includes("LocalSandbox.cancelAllBackgroundTasksAndWait(timeoutMs)")).toBe(
+      true
+    )
+    expect(agentIpc.includes("LocalSandbox.killAllAndWait(timeoutMs)")).toBe(true)
+    const agentShutdown = agentIpc.slice(
+      agentIpc.indexOf("export async function shutdownAllAgentTasks("),
+      agentIpc.indexOf("function rejectAgentStartDuringShutdown(")
+    )
+    expect(agentShutdown.includes("LocalSandbox.killAll()"), agentShutdown).toBe(false)
     expect(scheduler.includes("hasActiveScheduledTaskRuns")).toBe(true)
     expect(scheduler.includes("stopSchedulerAndWait")).toBe(true)
     expect(heartbeat.includes("stopHeartbeatAndWait")).toBe(true)

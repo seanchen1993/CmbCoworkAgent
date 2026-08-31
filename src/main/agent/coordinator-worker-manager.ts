@@ -6,6 +6,11 @@ import {
   isCoordinatorPathWithin,
   resolveCoordinatorPath
 } from "./coordinator-worker-paths"
+import {
+  CoordinatorWorkerRestoreIndexStore,
+  type CoordinatorWorkerRestoreDirectoryIncarnation
+} from "./coordinator-worker-restore-index"
+import { BoundedWorkerAdmission } from "../services/bounded-worker-admission"
 import type { CoordinatorSelectedSkill } from "./coordinator-mode"
 import { emitAppAttention } from "../app-attention-events"
 import { getWorkflowRunWallClockMs } from "./workflow/types"
@@ -125,6 +130,7 @@ interface CoordinatorWorkerRecord {
   workerThreadId: string
   parentThreadId: string
   workspacePath: string
+  restoreDirectoryIncarnation: CoordinatorWorkerRestoreDirectoryIncarnation
   role: CoordinatorWorkerRole
   workload: CoordinatorWorkerWorkload
   baseWorkload: CoordinatorWorkerWorkload
@@ -154,6 +160,7 @@ interface CoordinatorWorkerRecord {
   currentRun?: Promise<void>
   statePersistPromise?: Promise<void>
   terminalPersistPromise?: Promise<void>
+  notificationEnqueuePromise?: Promise<string | undefined>
   onUpdateCallbacks?: Map<string, CoordinatorWorkerUpdateCallback>
   notificationEnqueued?: boolean
   notificationAcknowledged?: boolean
@@ -185,6 +192,11 @@ interface TerminalPersistFailureMetadata {
 
 interface CoordinatorWorkerManagerOptions {
   onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
+  restoreIndexStore?: CoordinatorWorkerRestoreIndexStore
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined
 }
 
 function waitOrAbort(ms: number, signal?: AbortSignal): Promise<void> {
@@ -273,6 +285,13 @@ interface RestoreWorkersOptions {
   onUpdate?: CoordinatorWorkerUpdateCallback
   onUpdateKey?: string
   mode?: "full" | "active" | "recent"
+  signal?: AbortSignal
+}
+
+function throwIfRestoreAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  if (signal.reason instanceof Error) throw signal.reason
+  throw new DOMException("Coordinator worker restore was superseded.", "AbortError")
 }
 
 const COORDINATOR_BASE_DIR = ".cmbdevclaw/coordinator"
@@ -304,16 +323,19 @@ const PERSISTED_NOTIFICATION_TOP_LEVEL_TAGS = new Set([
 ])
 export const MAX_COORDINATOR_WORKERS_IN_MEMORY = 80
 export const MAX_COORDINATOR_PRUNED_SNAPSHOTS_IN_MEMORY = 16
+export const MAX_COORDINATOR_UNRESOLVED_WORKERS = 40
+export const MAX_COORDINATOR_IDLE_PARENTS_IN_MEMORY = 24
+export const MAX_COORDINATOR_ACTIVE_RESTORES = 4
+export const MAX_COORDINATOR_RESTORE_WAITERS = 60
+export const MAX_COORDINATOR_RESTORES_PER_PARENT = 8
 // Stream-only workers can emit frequent text/value chunks without new tool calls.
 // A 2s throttle keeps the right-panel activity timestamp reasonably fresh
 // while reducing steady-state state.json writes for long-running workers.
 const PROGRESS_UPDATE_THROTTLE_MS = 2_000
-const ACTIVE_RESTORE_STATUS_SCAN_CHARS = 4_096
-const RECENT_RESTORE_TERMINAL_LIMIT = 40
+const RESTORE_STATE_FILE_MAX_BYTES = 2 * 1024 * 1024
+const RESTORE_STATE_TOTAL_MAX_BYTES = 4 * 1024 * 1024
 const RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY = 4
 const DEFAULT_WORKER_UPDATE_CALLBACK_KEY = "default"
-const WORKER_STATE_FILENAME_PATTERN =
-  /^(implementer|verifier)-(?<timestamp>\d+)-(?<sequence>\d+)\.json$/i
 const TERMINAL_STATUSES = new Set<CoordinatorWorkerStatus>(["completed", "failed", "cancelled"])
 
 // Inactivity watchdog: a worker whose model call stalls mid-stream has NO other
@@ -347,10 +369,10 @@ export function getCoordinatorWorkerInactivityMs(): number {
 /** Pure decision for the goal-defer "terminal-but-not-yet-enqueued" gap,
  * exported for unit tests. True when a worker has produced its terminal result
  * (terminalPersistPromise is in flight) but its notification has NOT been
- * enqueued yet — the brief span before persistTerminalAndNotify calls
- * enqueueNotification. enqueueNotification sets notificationEnqueued on its first
- * line, so a worker whose notification is already enqueued (incl. the one a
- * delivery turn is currently handling) returns false → no self-defer/deadlock.
+ * published yet — the span while persistTerminalAndNotify and enqueueNotification
+ * durably write the terminal/notification state and secondary index. Only after
+ * those writes settle does enqueueNotification set notificationEnqueued, so a
+ * notification visible to a delivery turn returns false → no self-defer/deadlock.
  * suppress/dismiss workers are excluded — their results are not auto-delivered,
  * so the goal must not defer forever waiting for them. */
 export function isWorkerAwaitingTerminalNotification(worker: {
@@ -546,13 +568,20 @@ function abortReason(signal: AbortSignal): string {
 }
 
 function workerStatePath(record: CoordinatorWorkerRecord): string {
-  const root = path.resolve(
+  const root = workerStateDirectory(
     record.workspacePath,
-    COORDINATOR_BASE_DIR,
-    normalizeThreadId(record.parentThreadId),
-    "workers"
+    record.parentThreadId
   )
   return path.resolve(root, `${normalizeWorkerId(record.workerId)}.json`)
+}
+
+function workerStateDirectory(workspacePath: string, parentThreadId: string): string {
+  return path.resolve(
+    workspacePath,
+    COORDINATOR_BASE_DIR,
+    normalizeThreadId(parentThreadId),
+    "workers"
+  )
 }
 
 function coordinatorScratchpadPath(workspacePath: string, parentThreadId: string): string {
@@ -628,8 +657,14 @@ function resolveWorkerResultReadRelativePath(parentThreadId: string, relativePat
   return slashNormalized
 }
 
-async function writeFileAtomic(target: string, content: string): Promise<void> {
+async function writeFileAtomic(
+  target: string,
+  content: string,
+  assertCurrent: () => void = () => undefined
+): Promise<void> {
+  assertCurrent()
   await mkdir(path.dirname(target), { recursive: true })
+  assertCurrent()
   const temp = path.join(
     path.dirname(target),
     `.${path.basename(target)}.${process.pid}.${Date.now()}.${Math.random()
@@ -638,14 +673,16 @@ async function writeFileAtomic(target: string, content: string): Promise<void> {
   )
   try {
     await writeFile(temp, content, "utf8")
+    assertCurrent()
     await rename(temp, target)
+    assertCurrent()
   } catch (error) {
     await rm(temp, { force: true }).catch(() => undefined)
     throw error
   }
 }
 
-export async function deleteCoordinatorWorkerArtifacts(
+async function removeCoordinatorWorkerArtifacts(
   parentThreadId: string,
   workspacePath: string
 ): Promise<void> {
@@ -1017,26 +1054,28 @@ function terminalStatus(status: CoordinatorWorkerStatus): boolean {
   return TERMINAL_STATUSES.has(status)
 }
 
-async function readWorkerStatePrefix(filePath: string): Promise<string> {
+async function readBoundedWorkerState(
+  filePath: string,
+  maxBytes: number,
+  signal?: AbortSignal
+): Promise<{ raw: string; bytes: number } | undefined> {
+  throwIfRestoreAborted(signal)
   const handle = await open(filePath, "r")
   try {
-    const buffer = Buffer.alloc(ACTIVE_RESTORE_STATUS_SCAN_CHARS)
+    throwIfRestoreAborted(signal)
+    const limit = Math.max(0, Math.min(RESTORE_STATE_FILE_MAX_BYTES, maxBytes))
+    if (limit === 0) return undefined
+    const buffer = Buffer.alloc(limit + 1)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    return buffer.subarray(0, bytesRead).toString("utf8")
+    throwIfRestoreAborted(signal)
+    if (bytesRead > limit) return undefined
+    return {
+      raw: buffer.subarray(0, bytesRead).toString("utf8"),
+      bytes: bytesRead
+    }
   } finally {
     await handle.close()
   }
-}
-
-function extractWorkerStatusFromJsonPrefix(prefix: string): CoordinatorWorkerStatus | undefined {
-  const match = /"status"\s*:\s*"(running|completed|failed|cancelled)"/.exec(prefix)
-  return match?.[1] as CoordinatorWorkerStatus | undefined
-}
-
-function extractNotificationAcknowledgedFromJsonPrefix(prefix: string): boolean | undefined {
-  const match = /"notification_acknowledged"\s*:\s*(true|false)/.exec(prefix)
-  if (!match) return undefined
-  return match[1] === "true"
 }
 
 function normalizeWorkerStatus(value: unknown): CoordinatorWorkerStatus | undefined {
@@ -1062,31 +1101,6 @@ function decodeNotificationXmlText(value: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, "&")
-}
-
-function parseWorkerStateFilenameRecencyKey(
-  file: string
-): { timestamp: number; sequence: number } | undefined {
-  const match = file.match(WORKER_STATE_FILENAME_PATTERN)
-  if (!match?.groups) return undefined
-  const timestamp = Number(match.groups.timestamp)
-  const sequence = Number(match.groups.sequence)
-  if (!Number.isFinite(timestamp) || !Number.isFinite(sequence)) return undefined
-  return { timestamp, sequence }
-}
-
-function compareWorkerStateFilesByRecency(left: string, right: string): number {
-  const leftKey = parseWorkerStateFilenameRecencyKey(left)
-  const rightKey = parseWorkerStateFilenameRecencyKey(right)
-  if (leftKey && rightKey) {
-    if (rightKey.timestamp !== leftKey.timestamp) {
-      return rightKey.timestamp - leftKey.timestamp
-    }
-    if (rightKey.sequence !== leftKey.sequence) {
-      return rightKey.sequence - leftKey.sequence
-    }
-  }
-  return right.localeCompare(left)
 }
 
 function numericValue(value: unknown, fallback: number): number {
@@ -1258,11 +1272,76 @@ function toPersistedWorkerState(record: CoordinatorWorkerRecord): CoordinatorWor
   }
 }
 
+function truncateUtf8Bytes(value: string | undefined, maxBytes: number): string | undefined {
+  if (!value) return value
+  const encoded = Buffer.from(value, "utf8")
+  if (encoded.byteLength <= maxBytes) return value
+  return `${encoded.subarray(0, maxBytes).toString("utf8")}\n...(truncated)`
+}
+
+function serializePersistedWorkerState(snapshot: CoordinatorWorkerSnapshot): string {
+  let serialized = JSON.stringify(snapshot, null, 2)
+  if (Buffer.byteLength(serialized, "utf8") <= RESTORE_STATE_FILE_MAX_BYTES) return serialized
+
+  const selectedSkill = snapshot.selected_skill
+    ? {
+        skillName: truncateUtf8Bytes(snapshot.selected_skill.skillName, 4 * 1024) ?? "",
+        skillPath: truncateUtf8Bytes(snapshot.selected_skill.skillPath, 16 * 1024) ?? "",
+        description: truncateUtf8Bytes(snapshot.selected_skill.description, 16 * 1024),
+        whenToUse: truncateUtf8Bytes(snapshot.selected_skill.whenToUse, 16 * 1024),
+        allowedTools: truncateUtf8Bytes(snapshot.selected_skill.allowedTools, 16 * 1024)
+      }
+    : undefined
+  const compact: CoordinatorWorkerSnapshot = {
+    ...snapshot,
+    owned_files: snapshot.owned_files.slice(0, 256),
+    description: truncateUtf8Bytes(snapshot.description, 32 * 1024) ?? snapshot.worker_id,
+    summary: truncateUtf8Bytes(snapshot.summary, 128 * 1024),
+    error: truncateUtf8Bytes(snapshot.error, 64 * 1024),
+    last_event: truncateUtf8Bytes(snapshot.last_event, 32 * 1024) ?? "Worker state compacted.",
+    notification_raw_text: truncateUtf8Bytes(snapshot.notification_raw_text, 512 * 1024),
+    notification_message: undefined,
+    selected_skill: selectedSkill
+  }
+  serialized = JSON.stringify(compact, null, 2)
+  if (Buffer.byteLength(serialized, "utf8") <= RESTORE_STATE_FILE_MAX_BYTES) return serialized
+
+  const minimal: CoordinatorWorkerSnapshot = {
+    ...compact,
+    owned_files: compact.owned_files.slice(0, 64),
+    description: truncateUtf8Bytes(compact.description, 8 * 1024) ?? compact.worker_id,
+    summary: truncateUtf8Bytes(compact.summary, 64 * 1024),
+    error: truncateUtf8Bytes(compact.error, 32 * 1024),
+    last_event: truncateUtf8Bytes(compact.last_event, 8 * 1024) ?? "Worker state compacted.",
+    notification_raw_text: undefined,
+    selected_skill: undefined
+  }
+  serialized = JSON.stringify(minimal, null, 2)
+  if (Buffer.byteLength(serialized, "utf8") <= RESTORE_STATE_FILE_MAX_BYTES) return serialized
+  throw new Error("Coordinator worker state exceeds its hard persistence byte budget")
+}
+
 export class CoordinatorWorkerManager {
   private readonly workersByParent = new Map<string, Map<string, CoordinatorWorkerRecord>>()
   private readonly notificationsByParent = new Map<string, string[]>()
   private readonly workspacePathByParent = new Map<string, string>()
   private readonly activeRestoreHydratedWorkspaceByParent = new Map<string, string>()
+  private readonly recentRestoreHydratedWorkspaceByParent = new Map<string, string>()
+  private readonly restoreOverflowWorkspaceByParent = new Map<string, string>()
+  private readonly restoreQueueByParent = new Map<string, Promise<void>>()
+  private readonly restoreQueueDepthByParent = new Map<string, number>()
+  private restoreOperationCount = 0
+  private readonly restoreAdmission = new BoundedWorkerAdmission(
+    MAX_COORDINATOR_ACTIVE_RESTORES,
+    MAX_COORDINATOR_RESTORE_WAITERS,
+    "Coordinator worker restore"
+  )
+  private readonly restoreGenerationByParent = new Map<string, number>()
+  private readonly restoreDirectoryIncarnationByParent = new Map<
+    string,
+    CoordinatorWorkerRestoreDirectoryIncarnation
+  >()
+  private readonly parentCacheLru = new Map<string, true>()
   private readonly prunedSnapshotsByParent = new Map<
     string,
     Map<string, CoordinatorWorkerSnapshot>
@@ -1270,7 +1349,9 @@ export class CoordinatorWorkerManager {
   private readonly preparedScratchpadDirs = new Set<string>()
   private readonly warnedScratchpadDirs = new Set<string>()
   private readonly onTerminalNotification?: (worker: CoordinatorWorkerSnapshot) => void
+  private readonly restoreIndexStore: CoordinatorWorkerRestoreIndexStore
   private sequence = 0
+  private restoreEpoch = 0
   private shuttingDown = false
   private workerWatchdogTimer?: ReturnType<typeof setInterval>
   /** Injected by runtime.ts (which owns pendingApprovals; the manager must not
@@ -1280,6 +1361,7 @@ export class CoordinatorWorkerManager {
 
   constructor(options: CoordinatorWorkerManagerOptions = {}) {
     this.onTerminalNotification = options.onTerminalNotification
+    this.restoreIndexStore = options.restoreIndexStore ?? new CoordinatorWorkerRestoreIndexStore()
   }
 
   startWorker(options: StartWorkerOptions): CoordinatorWorkerSnapshot {
@@ -1289,6 +1371,10 @@ export class CoordinatorWorkerManager {
       "Coordinator worker workspacePath"
     )
     this.workspacePathByParent.set(parentThreadId, workspacePath)
+    const restoreDirectoryIncarnation = this.getOrCreateRestoreDirectoryIncarnation(
+      parentThreadId,
+      workspacePath
+    )
     const role = normalizeWorkerRole(options.role)
     const workload = normalizeWorkerWorkload(role, options.workload)
     const ownedFiles = normalizeOwnedFiles(options.ownedFiles, workspacePath)
@@ -1314,6 +1400,7 @@ export class CoordinatorWorkerManager {
       workerThreadId,
       parentThreadId,
       workspacePath,
+      restoreDirectoryIncarnation,
       role,
       workload,
       baseWorkload: workload,
@@ -1526,13 +1613,13 @@ export class CoordinatorWorkerManager {
   /** A worker that is terminal (so hasRunningWorkersForThread is already false —
    * it checks status) but whose notification has NOT yet been enqueued: the brief
    * terminalPersistPromise span between the run's finally clearing currentRun and
-   * persistTerminalAndNotify → enqueueNotification. In that gap neither
+   * enqueueNotification publishing its durably persisted result. In that gap neither
    * hasRunningWorkersForThread NOR hasAutoRunnableNotifications catches the
    * worker, so a goal on another notification turn could evaluate on evidence
    * that is missing this worker's result. The goal defer guard ORs this to close
-   * that gap. Deadlock-safe: enqueueNotification sets notificationEnqueued at its
-   * FIRST line, so the notification a delivery turn is currently handling never
-   * matches here. Excludes suppress_notification_auto_run and
+   * that gap. Deadlock-safe: enqueueNotification sets notificationEnqueued before
+   * adding the notification to the visible queue, so the notification a delivery
+   * turn is currently handling never matches here. Excludes suppress_notification_auto_run and
    * dismissNotificationOnTerminalPersist workers — their results are not
    * auto-delivered, so the goal must not defer forever waiting for them. The
    * span always ends (persist success OR failure both fall through to enqueue,
@@ -1578,15 +1665,20 @@ export class CoordinatorWorkerManager {
    * and terminal-state persistence promises to settle during application exit. */
   async cancelAllWorkersAndWait(timeoutMs = 5_000): Promise<void> {
     this.shuttingDown = true
+    const startedAt = Date.now()
     const records = Array.from(this.workersByParent.values()).flatMap((workers) =>
-      Array.from(workers.values()).filter(
-        (record) =>
-          record.status === "running" ||
-          Boolean(record.currentRun || record.terminalPersistPromise || record.statePersistPromise)
+        Array.from(workers.values()).filter(
+          (record) =>
+            record.status === "running" ||
+            (terminalStatus(record.status) && record.notificationEnqueued !== true) ||
+            Boolean(
+            record.currentRun ||
+              record.terminalPersistPromise ||
+              record.statePersistPromise ||
+              record.notificationEnqueuePromise
+          )
       )
     )
-    if (records.length === 0) return
-
     for (const record of records) {
       if (record.status === "running") {
         this.cancelRecord(record, "Application is quitting.", true, true)
@@ -1598,28 +1690,51 @@ export class CoordinatorWorkerManager {
         record.dismissNotificationOnTerminalPersist = true
       }
     }
+    if (records.length === 0 && this.restoreIndexStore.isIdle()) return
 
-    const pending = records.flatMap((record) =>
-      [record.currentRun, record.terminalPersistPromise, record.statePersistPromise].filter(
-        (promise): promise is Promise<void> => Boolean(promise)
-      )
-    )
-    if (pending.length === 0) return
-
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
     let timedOut = false
-    try {
+
+    const waitWithinDeadline = async (promise: Promise<unknown>): Promise<boolean> => {
+      const remainingMs = timeoutMs - (Date.now() - startedAt)
+      if (remainingMs <= 0) return false
+      let settled = false
       await Promise.race([
-        Promise.allSettled(pending).then(() => undefined),
-        new Promise<void>((resolve) => {
-          timeoutTimer = setTimeout(() => {
-            timedOut = true
-            resolve()
-          }, Math.max(0, timeoutMs))
-        })
+        promise.finally(() => {
+          settled = true
+        }),
+        waitOrAbort(remainingMs)
       ])
-    } finally {
-      if (timeoutTimer) clearTimeout(timeoutTimer)
+      return settled
+    }
+
+    const readPending = (): Promise<unknown>[] =>
+      Array.from(this.workersByParent.values()).flatMap((workers) =>
+        Array.from(workers.values()).flatMap((record) =>
+          [
+            record.currentRun,
+            record.terminalPersistPromise,
+            record.statePersistPromise,
+            record.notificationEnqueuePromise
+          ].filter(isDefined)
+        )
+      )
+
+    while (!timedOut) {
+      const pending = readPending()
+      if (pending.length > 0) {
+        timedOut = !(await waitWithinDeadline(Promise.allSettled(pending)))
+        continue
+      }
+
+      // A record continuation can enqueue its restore-index update after an earlier snapshot.
+      // Drain, yield once for those continuations, then resample both sources before declaring
+      // shutdown quiescent.
+      timedOut = !(await waitWithinDeadline(this.restoreIndexStore.waitForIdle()))
+      if (timedOut) break
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if (readPending().length > 0) continue
+      timedOut = !(await waitWithinDeadline(this.restoreIndexStore.waitForIdle()))
+      break
     }
     if (timedOut) {
       console.warn("[CoordinatorWorker] Timed out waiting for workers to settle during shutdown")
@@ -1731,8 +1846,12 @@ export class CoordinatorWorkerManager {
         const pendingTerminalWork = records.flatMap((record) =>
           [
             record.terminalPersistPromise,
-            options.waitForCleanup ? record.currentRun : undefined
-          ].filter((promise): promise is Promise<void> => Boolean(promise))
+            record.notificationEnqueuePromise,
+            // Status becomes terminal just before the runner's finally block starts durable
+            // terminal persistence. Waiting for currentRun closes that handoff gap; otherwise a
+            // caller can delete the workspace while result/state/index writes are still starting.
+            record.currentRun
+          ].filter(isDefined)
         )
         if (pendingTerminalWork.length > 0) {
           const remainingMs = timeoutMs - (Date.now() - startedAt)
@@ -1764,6 +1883,7 @@ export class CoordinatorWorkerManager {
     const normalized = normalizeThreadId(parentThreadId)
     const notifications = this.notificationsByParent.get(normalized) ?? []
     this.notificationsByParent.delete(normalized)
+    this.touchParentCache(normalized)
     return [...notifications]
   }
 
@@ -1819,6 +1939,7 @@ export class CoordinatorWorkerManager {
     }
     if (!changed) return
     this.notificationsByParent.set(normalized, merged)
+    this.touchParentCache(normalized)
   }
 
   async restoreNotificationMessages(
@@ -1909,6 +2030,7 @@ export class CoordinatorWorkerManager {
       }
     }
     this.pruneInMemoryWorkerHistory(normalized)
+    await this.restoreNextOverflowPageAfterAcknowledgement(normalized)
   }
 
   async acknowledgeNotificationMessages(
@@ -1950,6 +2072,7 @@ export class CoordinatorWorkerManager {
       }
     }
     this.pruneInMemoryWorkerHistory(normalized)
+    await this.restoreNextOverflowPageAfterAcknowledgement(normalized)
   }
 
   cancelWorkersForThread(
@@ -2011,17 +2134,34 @@ export class CoordinatorWorkerManager {
         return terminalStatus(record.status)
       return normalizedWorkerIds.includes(record.workerId) && terminalStatus(record.status)
     })
-    if (filteredRecords.length === 0) return
     const startedAt = Date.now()
-    while (Date.now() - startedAt <= timeoutMs) {
-      const pending = filteredRecords
-        .map((record) => record.terminalPersistPromise)
-        .filter((promise): promise is Promise<void> => Boolean(promise))
-      if (pending.length === 0) return
-      const remainingMs = timeoutMs - (Date.now() - startedAt)
-      if (remainingMs <= 0) return
-      await Promise.race([Promise.allSettled(pending), waitOrAbort(Math.min(remainingMs, 250))])
+    if (filteredRecords.length > 0) {
+      while (Date.now() - startedAt <= timeoutMs) {
+        const pending = filteredRecords.flatMap((record) =>
+          [
+            record.currentRun,
+            record.terminalPersistPromise,
+            record.statePersistPromise,
+            record.notificationEnqueuePromise
+          ].filter(isDefined)
+        )
+        if (pending.length === 0) break
+        const remainingMs = timeoutMs - (Date.now() - startedAt)
+        if (remainingMs <= 0) return
+        await Promise.race([Promise.allSettled(pending), waitOrAbort(Math.min(remainingMs, 250))])
+      }
     }
+
+    const workspacePath =
+      filteredRecords[0]?.workspacePath ??
+      this.workspacePathByParent.get(normalizeThreadId(parentThreadId))
+    if (!workspacePath) return
+    const remainingMs = timeoutMs - (Date.now() - startedAt)
+    if (remainingMs <= 0) return
+    await Promise.race([
+      this.restoreIndexStore.waitForIdle(workerStateDirectory(workspacePath, parentThreadId)),
+      waitOrAbort(remainingMs)
+    ])
   }
 
   async waitForWorkerCleanup(
@@ -2030,7 +2170,7 @@ export class CoordinatorWorkerManager {
     timeoutMs = 5_000
   ): Promise<void> {
     const normalizedWorkerIds = workerIds?.map(normalizeWorkerId)
-    const readPendingRecords = async (): Promise<Promise<void>[]> => {
+    const readPendingRecords = async (): Promise<Promise<unknown>[]> => {
       const records = await this.readWorkerRecordsAsync(
         parentThreadId,
         normalizedWorkerIds && normalizedWorkerIds.length === 1 ? normalizedWorkerIds[0] : undefined
@@ -2040,21 +2180,53 @@ export class CoordinatorWorkerManager {
         return normalizedWorkerIds.includes(record.workerId)
       })
       return filteredRecords.flatMap((record) =>
-        [record.currentRun, record.terminalPersistPromise, record.statePersistPromise].filter(
-          (promise): promise is Promise<void> => Boolean(promise)
-        )
+        [
+          record.currentRun,
+          record.terminalPersistPromise,
+          record.statePersistPromise,
+          record.notificationEnqueuePromise
+        ].filter(isDefined)
       )
     }
     const startedAt = Date.now()
+    const workspacePath = this.workspacePathByParent.get(normalizeThreadId(parentThreadId))
+    const waitForIndexIdle = async (): Promise<boolean> => {
+      if (!workspacePath) return true
+      const remainingMs = timeoutMs - (Date.now() - startedAt)
+      if (remainingMs <= 0) return false
+      let indexIdle = false
+      await Promise.race([
+        this.restoreIndexStore
+          .waitForIdle(workerStateDirectory(workspacePath, parentThreadId))
+          .then(() => {
+            indexIdle = true
+          }),
+        waitOrAbort(remainingMs)
+      ])
+      return indexIdle
+    }
     while (Date.now() - startedAt <= timeoutMs) {
       const pending = await readPendingRecords()
-      if (pending.length === 0) return
-      const remainingMs = timeoutMs - (Date.now() - startedAt)
-      if (remainingMs <= 0) break
-      await Promise.race([Promise.allSettled(pending), waitOrAbort(Math.min(remainingMs, 250))])
+      if (pending.length > 0) {
+        const remainingMs = timeoutMs - (Date.now() - startedAt)
+        if (remainingMs <= 0) break
+        await Promise.race([Promise.allSettled(pending), waitOrAbort(Math.min(remainingMs, 250))])
+        continue
+      }
+
+      if (!(await waitForIndexIdle())) break
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      if ((await readPendingRecords()).length > 0) continue
+      if (await waitForIndexIdle()) return
+      break
     }
     if ((await readPendingRecords()).length === 0) {
-      return
+      if (!workspacePath) return
+      if (
+        this.restoreIndexStore.isIdle(workerStateDirectory(workspacePath, parentThreadId))
+      ) {
+        return
+      }
     }
     const workerLabel =
       workerIds && workerIds.length > 0 ? ` (${workerIds.map(normalizeWorkerId).join(", ")})` : ""
@@ -2071,59 +2243,205 @@ export class CoordinatorWorkerManager {
       options.workspacePath,
       "Coordinator worker workspacePath"
     )
-    this.workspacePathByParent.set(parentThreadId, workspacePath)
+    const restoreEpoch = this.restoreEpoch
+    const restoreGeneration = this.restoreGenerationByParent.get(parentThreadId) ?? 0
+    return this.enqueueWorkerRestore(
+      parentThreadId,
+      () =>
+        this.restoreWorkersForThreadSerialized(
+          options,
+          parentThreadId,
+          workspacePath,
+          restoreEpoch,
+          restoreGeneration
+        ),
+      options.signal
+    )
+  }
+
+  private enqueueWorkerRestore<T>(
+    parentThreadId: string,
+    operation: () => Promise<T>,
+    signal?: AbortSignal
+  ): Promise<T> {
+    const parentDepth = this.restoreQueueDepthByParent.get(parentThreadId) ?? 0
     if (
-      options.mode === "active" &&
-      this.activeRestoreHydratedWorkspaceByParent.get(parentThreadId) === workspacePath
+      this.restoreOperationCount >=
+        MAX_COORDINATOR_ACTIVE_RESTORES + MAX_COORDINATOR_RESTORE_WAITERS ||
+      parentDepth >= MAX_COORDINATOR_RESTORES_PER_PARENT
     ) {
+      return Promise.reject(new Error("Coordinator worker restore capacity exceeded"))
+    }
+    this.restoreOperationCount += 1
+    this.restoreQueueDepthByParent.set(parentThreadId, parentDepth + 1)
+    this.touchParentCache(parentThreadId)
+    const previous = this.restoreQueueByParent.get(parentThreadId) ?? Promise.resolve()
+    const task = previous
+      .catch(() => undefined)
+      .then(async () => {
+        throwIfRestoreAborted(signal)
+        const release = await this.restoreAdmission.acquire(signal, () => {
+          if (signal?.reason instanceof Error) return signal.reason
+          return new DOMException("Coordinator worker restore was superseded.", "AbortError")
+        })
+        try {
+          return await operation()
+        } finally {
+          release()
+        }
+      })
+    const tail = task.then(
+      () => undefined,
+      () => undefined
+    )
+    this.restoreQueueByParent.set(parentThreadId, tail)
+    void tail.finally(() => {
+      if (this.restoreQueueByParent.get(parentThreadId) === tail) {
+        this.restoreQueueByParent.delete(parentThreadId)
+        if (
+          !this.workersByParent.has(parentThreadId) &&
+          !this.workspacePathByParent.has(parentThreadId)
+        ) {
+          this.restoreGenerationByParent.delete(parentThreadId)
+        }
+        this.touchParentCache(parentThreadId)
+      }
+      this.restoreOperationCount = Math.max(0, this.restoreOperationCount - 1)
+      const nextDepth = (this.restoreQueueDepthByParent.get(parentThreadId) ?? 1) - 1
+      if (nextDepth <= 0) this.restoreQueueDepthByParent.delete(parentThreadId)
+      else this.restoreQueueDepthByParent.set(parentThreadId, nextDepth)
+    })
+    return task
+  }
+
+  private async restoreWorkersForThreadSerialized(
+    options: RestoreWorkersOptions,
+    parentThreadId: string,
+    workspacePath: string,
+    restoreEpoch: number,
+    restoreGeneration: number
+  ): Promise<CoordinatorWorkerSnapshot[]> {
+    throwIfRestoreAborted(options.signal)
+    if (
+      restoreEpoch !== this.restoreEpoch ||
+      restoreGeneration !== (this.restoreGenerationByParent.get(parentThreadId) ?? 0)
+    ) {
+      throw new DOMException("Coordinator worker restore was invalidated.", "AbortError")
+    }
+    const restoreMode = options.mode ?? "full"
+    const hydratedWorkspace =
+      restoreMode === "active"
+        ? this.activeRestoreHydratedWorkspaceByParent.get(parentThreadId)
+        : restoreMode === "recent"
+          ? this.recentRestoreHydratedWorkspaceByParent.get(parentThreadId)
+          : undefined
+    if (hydratedWorkspace === workspacePath) {
+      const existingRecords = Array.from(this.getParentMap(parentThreadId)?.values() ?? [])
+      for (const record of existingRecords) {
+        this.setUpdateCallback(record, options.onUpdate, options.onUpdateKey)
+      }
+      await this.publishRepairableRestoredNotifications(existingRecords)
       return this.readWorkers(parentThreadId)
     }
-    const workersDir = path.resolve(workspacePath, COORDINATOR_BASE_DIR, parentThreadId, "workers")
-    let files: string[]
 
-    try {
-      files = await readdir(workersDir)
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-        this.activeRestoreHydratedWorkspaceByParent.set(parentThreadId, workspacePath)
-        return this.readWorkers(parentThreadId)
-      }
-      throw error
-    }
-
-    const records = this.parentMap(parentThreadId)
-    const restoreMode = options.mode ?? "full"
+    const workersDir = workerStateDirectory(workspacePath, parentThreadId)
+    const restoreDirectoryIncarnation = this.getOrCreateRestoreDirectoryIncarnation(
+      parentThreadId,
+      workspacePath
+    )
     const fullRestore = restoreMode === "full"
     const recentRestore = restoreMode === "recent"
-    const sortedFiles = recentRestore ? [...files].sort(compareWorkerStateFilesByRecency) : files
-    let restoredRecentTerminalCount = 0
-    const pendingTerminalNotifications: CoordinatorWorkerRecord[] = []
-    for (const file of sortedFiles) {
+    let files: string[] = []
+    let candidateOverflow = false
+    let missingWorkersDirectory = false
+    let indexedCandidates = new Map<
+      string,
+      { status: CoordinatorWorkerStatus; notificationAcknowledged: boolean }
+    >()
+    if (fullRestore) {
+      try {
+        files = await readdir(workersDir)
+        throwIfRestoreAborted(options.signal)
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+          missingWorkersDirectory = true
+          files = []
+        } else {
+          throw error
+        }
+      }
+    } else {
+      const candidatePage = await this.restoreIndexStore.loadCandidates(
+        workersDir,
+        restoreMode,
+        options.signal,
+        restoreDirectoryIncarnation
+      )
+      throwIfRestoreAborted(options.signal)
+      candidateOverflow = candidatePage.overflow
+      indexedCandidates = new Map(
+        candidatePage.entries.map((entry) => [
+          entry.worker_id,
+          {
+            status: entry.status,
+            notificationAcknowledged: entry.notification_acknowledged
+          }
+        ])
+      )
+      files = candidatePage.entries.map((entry) => `${entry.worker_id}.json`)
+    }
+
+    const stagedRecords: CoordinatorWorkerRecord[] = []
+    const stagedStaleWorkerIds = new Set<string>()
+    const stagedPendingTerminal: CoordinatorWorkerRecord[] = []
+    let restoredStateBytes = 0
+    let deferredUnresolvedState = false
+    let truncatedCandidateState = false
+    for (const file of files) {
+      throwIfRestoreAborted(options.signal)
       if (!file.endsWith(".json")) continue
       const workerIdFromFile = file.slice(0, -".json".length)
       if (!WORKER_ID_PATTERN.test(workerIdFromFile)) continue
-      const existing = records.get(workerIdFromFile)
-      if (existing) {
-        this.setUpdateCallback(existing, options.onUpdate, options.onUpdateKey)
-        continue
-      }
 
       try {
         const statePath = path.join(workersDir, file)
-        let shouldHydrateRecentTerminalRecord = false
-        if (!fullRestore) {
-          const scan = await readWorkerStatePrefix(statePath)
-          const status = extractWorkerStatusFromJsonPrefix(scan)
-          const acknowledged = extractNotificationAcknowledgedFromJsonPrefix(scan)
-          if (status && terminalStatus(status) && acknowledged === true) {
-            if (!recentRestore || restoredRecentTerminalCount >= RECENT_RESTORE_TERMINAL_LIMIT) {
-              continue
-            }
-            shouldHydrateRecentTerminalRecord = true
-          }
+        const indexedCandidate = indexedCandidates.get(workerIdFromFile)
+        const unresolvedIndexedCandidate =
+          indexedCandidate?.status === "running" ||
+          indexedCandidate?.notificationAcknowledged === false
+        if (!fullRestore && restoredStateBytes >= RESTORE_STATE_TOTAL_MAX_BYTES) {
+          deferredUnresolvedState ||= unresolvedIndexedCandidate
+          truncatedCandidateState = true
+          break
         }
-        const raw = await readFile(statePath, "utf8")
-        const snapshot = JSON.parse(raw) as Partial<CoordinatorWorkerSnapshot>
+        throwIfRestoreAborted(options.signal)
+        const remainingStateBytes = RESTORE_STATE_TOTAL_MAX_BYTES - restoredStateBytes
+        const boundedState = fullRestore
+          ? {
+              raw: await readFile(statePath, { encoding: "utf8", signal: options.signal }),
+              bytes: 0
+            }
+          : await readBoundedWorkerState(
+              statePath,
+              remainingStateBytes,
+              options.signal
+            )
+        if (!boundedState) {
+          if (unresolvedIndexedCandidate && remainingStateBytes < RESTORE_STATE_FILE_MAX_BYTES) {
+            deferredUnresolvedState = true
+            truncatedCandidateState = true
+            break
+          }
+          console.warn(
+            `[CoordinatorWorker] Skipping oversized indexed restore state: ${workerIdFromFile}`
+          )
+          deferredUnresolvedState ||= unresolvedIndexedCandidate
+          truncatedCandidateState = true
+          continue
+        }
+        if (!fullRestore) restoredStateBytes += boundedState.bytes
+        throwIfRestoreAborted(options.signal)
+        const snapshot = JSON.parse(boundedState.raw) as Partial<CoordinatorWorkerSnapshot>
         const record = this.recordFromSnapshot(
           snapshot,
           workspacePath,
@@ -2135,10 +2453,6 @@ export class CoordinatorWorkerManager {
           continue
         }
 
-        records.set(record.workerId, record)
-        if (shouldHydrateRecentTerminalRecord) {
-          restoredRecentTerminalCount += 1
-        }
         if (record.status === "running") {
           const timestamp = nowIso()
           record.status = "failed"
@@ -2150,37 +2464,111 @@ export class CoordinatorWorkerManager {
           record.lastEvent = "Worker restored as stale after app restart."
           record.summary = record.error
           record.rawText = record.error
-          await this.persistTerminalRecord(record)
-          this.emitUpdate(record, await this.enqueueNotification(record))
-        } else if (terminalStatus(record.status) && !record.notificationAcknowledged) {
-          pendingTerminalNotifications.push(record)
+          stagedStaleWorkerIds.add(record.workerId)
+          stagedPendingTerminal.push(record)
+        } else if (terminalStatus(record.status) && record.notificationAcknowledged === false) {
+          stagedPendingTerminal.push(record)
+        } else if (!fullRestore && !recentRestore) {
+          continue
         }
+        stagedRecords.push(record)
       } catch (error) {
+        if (options.signal?.aborted) throwIfRestoreAborted(options.signal)
         console.warn("[CoordinatorWorker] Failed to restore worker state:", error)
       }
     }
 
-    if (pendingTerminalNotifications.length > 0) {
+    if (stagedPendingTerminal.length > 0) {
+      throwIfRestoreAborted(options.signal)
       await settleInBatches(
-        pendingTerminalNotifications,
+        stagedPendingTerminal,
         RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY,
-        (record) => this.hydrateRestoredRawText(record)
-      )
-      await settleInBatches(
-        pendingTerminalNotifications,
-        RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY,
-        async (record) => {
-          this.emitUpdate(record, await this.enqueueNotification(record))
+        (record) => {
+          throwIfRestoreAborted(options.signal)
+          return this.hydrateRestoredRawText(record, options.signal, false)
         }
       )
     }
 
-    this.activeRestoreHydratedWorkspaceByParent.set(parentThreadId, workspacePath)
+    throwIfRestoreAborted(options.signal)
+    if (
+      restoreEpoch !== this.restoreEpoch ||
+      restoreGeneration !== (this.restoreGenerationByParent.get(parentThreadId) ?? 0)
+    ) {
+      throw new DOMException("Coordinator worker restore was invalidated.", "AbortError")
+    }
+
+    // Commit is deliberately synchronous: cancellation and concurrent callers cannot observe a
+    // partially populated worker map. A live in-memory record always wins over a staged snapshot.
+    this.workspacePathByParent.set(parentThreadId, workspacePath)
+    const records = this.parentMap(parentThreadId)
+    for (const record of records.values()) {
+      this.setUpdateCallback(record, options.onUpdate, options.onUpdateKey)
+    }
+    const committedRecords: CoordinatorWorkerRecord[] = []
+    for (const stagedRecord of stagedRecords) {
+      const existing = records.get(stagedRecord.workerId)
+      if (existing) {
+        this.setUpdateCallback(existing, options.onUpdate, options.onUpdateKey)
+        continue
+      }
+      records.set(stagedRecord.workerId, stagedRecord)
+      committedRecords.push(stagedRecord)
+    }
+
+    const unresolvedRestoreIncomplete = candidateOverflow || deferredUnresolvedState
+    const recentRestoreIncomplete = candidateOverflow || truncatedCandidateState
+    if (unresolvedRestoreIncomplete) {
+      this.restoreOverflowWorkspaceByParent.set(parentThreadId, workspacePath)
+      this.activeRestoreHydratedWorkspaceByParent.delete(parentThreadId)
+    } else {
+      this.restoreOverflowWorkspaceByParent.delete(parentThreadId)
+      this.activeRestoreHydratedWorkspaceByParent.set(parentThreadId, workspacePath)
+    }
+    if (fullRestore || (recentRestore && !recentRestoreIncomplete)) {
+      this.recentRestoreHydratedWorkspaceByParent.set(parentThreadId, workspacePath)
+    } else if (recentRestore) {
+      this.recentRestoreHydratedWorkspaceByParent.delete(parentThreadId)
+    }
+    if (missingWorkersDirectory) {
+      this.activeRestoreHydratedWorkspaceByParent.set(parentThreadId, workspacePath)
+      this.recentRestoreHydratedWorkspaceByParent.set(parentThreadId, workspacePath)
+    }
+
+    const committedStaleRecords = committedRecords.filter((record) =>
+      stagedStaleWorkerIds.has(record.workerId)
+    )
+    await settleInBatches(
+      committedStaleRecords,
+      RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY,
+      (record) => this.persistTerminalAndNotify(record)
+    )
+
+    const staleIds = new Set(committedStaleRecords.map((record) => record.workerId))
+    const committedPendingRecords = committedRecords.filter(
+      (record) =>
+        terminalStatus(record.status) &&
+        record.notificationAcknowledged === false &&
+        !staleIds.has(record.workerId)
+    )
+    const repairableExistingRecords = Array.from(records.values()).filter(
+      (record) =>
+        !committedRecords.includes(record) && this.isRepairableRestoredNotification(record)
+    )
+    await this.publishRepairableRestoredNotifications([
+      ...committedPendingRecords,
+      ...repairableExistingRecords
+    ])
+
     return this.readWorkers(parentThreadId)
   }
 
   forgetThread(parentThreadId: string): void {
     const normalized = normalizeThreadId(parentThreadId)
+    this.restoreGenerationByParent.set(
+      normalized,
+      (this.restoreGenerationByParent.get(normalized) ?? 0) + 1
+    )
     const records = this.workersByParent.get(normalized)
     if (records) {
       for (const record of records.values()) {
@@ -2195,6 +2583,11 @@ export class CoordinatorWorkerManager {
         }
       }
     }
+    const restoreDirectoryIncarnation = this.restoreDirectoryIncarnationByParent.get(normalized)
+    if (restoreDirectoryIncarnation) {
+      this.restoreIndexStore.tombstoneDirectoryIncarnation(restoreDirectoryIncarnation)
+      this.restoreDirectoryIncarnationByParent.delete(normalized)
+    }
     this.workersByParent.delete(normalized)
     this.notificationsByParent.delete(normalized)
     this.prunedSnapshotsByParent.delete(normalized)
@@ -2206,9 +2599,57 @@ export class CoordinatorWorkerManager {
     }
     this.workspacePathByParent.delete(normalized)
     this.activeRestoreHydratedWorkspaceByParent.delete(normalized)
+    this.recentRestoreHydratedWorkspaceByParent.delete(normalized)
+    this.restoreOverflowWorkspaceByParent.delete(normalized)
+    this.parentCacheLru.delete(normalized)
+  }
+
+  async forgetThreadAndDeleteArtifacts(
+    parentThreadId: string,
+    workspacePath?: string,
+    timeoutMs = 5_000
+  ): Promise<void> {
+    const normalized = normalizeThreadId(parentThreadId)
+    const knownWorkspacePath = this.workspacePathByParent.get(normalized)
+    const normalizedWorkspacePath = optionalString(workspacePath) ?? knownWorkspacePath
+    if (!normalizedWorkspacePath) {
+      this.forgetThread(normalized)
+      return
+    }
+    const incarnation =
+      this.restoreDirectoryIncarnationByParent.get(normalized) ??
+      this.restoreIndexStore.createDirectoryIncarnation(
+        workerStateDirectory(normalizedWorkspacePath, normalized)
+      )
+    const cleanup = this.restoreIndexStore.deleteDirectoryIncarnation(incarnation, () =>
+      removeCoordinatorWorkerArtifacts(normalized, normalizedWorkspacePath)
+    )
+    this.forgetThread(normalized)
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        cleanup,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("Timed out deleting coordinator worker artifacts safely")),
+            Math.max(1, timeoutMs)
+          )
+        })
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+      // Cleanup deliberately continues behind the directory barrier after a timeout. A revived
+      // same-ID thread stays queued instead of racing a late old-generation mkdir or rename.
+      void cleanup.catch(() => undefined)
+    }
   }
 
   clear(): void {
+    this.restoreEpoch += 1
+    for (const incarnation of this.restoreDirectoryIncarnationByParent.values()) {
+      this.restoreIndexStore.tombstoneDirectoryIncarnation(incarnation)
+    }
+    this.restoreDirectoryIncarnationByParent.clear()
     for (const records of this.workersByParent.values()) {
       for (const record of records.values()) {
         record.discarded = true
@@ -2227,6 +2668,10 @@ export class CoordinatorWorkerManager {
     this.prunedSnapshotsByParent.clear()
     this.workspacePathByParent.clear()
     this.activeRestoreHydratedWorkspaceByParent.clear()
+    this.recentRestoreHydratedWorkspaceByParent.clear()
+    this.restoreOverflowWorkspaceByParent.clear()
+    this.restoreGenerationByParent.clear()
+    this.parentCacheLru.clear()
     this.preparedScratchpadDirs.clear()
     this.warnedScratchpadDirs.clear()
   }
@@ -2243,11 +2688,103 @@ export class CoordinatorWorkerManager {
       records = new Map()
       this.workersByParent.set(normalized, records)
     }
+    this.touchParentCache(normalized)
     return records
   }
 
+  private getOrCreateRestoreDirectoryIncarnation(
+    parentThreadId: string,
+    workspacePath: string
+  ): CoordinatorWorkerRestoreDirectoryIncarnation {
+    const normalized = normalizeThreadId(parentThreadId)
+    const workersDir = workerStateDirectory(workspacePath, normalized)
+    const existing = this.restoreDirectoryIncarnationByParent.get(normalized)
+    if (existing?.valid && existing.workersDir === workersDir) return existing
+    if (existing?.valid) this.restoreIndexStore.tombstoneDirectoryIncarnation(existing)
+    const incarnation = this.restoreIndexStore.createDirectoryIncarnation(workersDir)
+    this.restoreDirectoryIncarnationByParent.set(normalized, incarnation)
+    return incarnation
+  }
+
+  private assertCurrentRestoreDirectoryIncarnation(record: CoordinatorWorkerRecord): void {
+    if (
+      !record.restoreDirectoryIncarnation.valid ||
+      this.restoreDirectoryIncarnationByParent.get(record.parentThreadId) !==
+        record.restoreDirectoryIncarnation
+    ) {
+      throw new DOMException("Coordinator worker directory incarnation is stale.", "AbortError")
+    }
+  }
+
   private getParentMap(parentThreadId: string): Map<string, CoordinatorWorkerRecord> | undefined {
-    return this.workersByParent.get(normalizeThreadId(parentThreadId))
+    const normalized = normalizeThreadId(parentThreadId)
+    const records = this.workersByParent.get(normalized)
+    if (records) this.touchParentCache(normalized)
+    return records
+  }
+
+  private touchParentCache(parentThreadId: string): void {
+    const normalized = normalizeThreadId(parentThreadId)
+    this.parentCacheLru.delete(normalized)
+    this.parentCacheLru.set(normalized, true)
+    this.pruneIdleParentCaches(normalized)
+  }
+
+  private canEvictParentCache(parentThreadId: string): boolean {
+    if (this.restoreQueueByParent.has(parentThreadId)) return false
+    if ((this.notificationsByParent.get(parentThreadId)?.length ?? 0) > 0) return false
+    const records = this.workersByParent.get(parentThreadId)
+    if (records && Array.from(records.values()).some((record) => !this.canPruneWorkerRecord(record))) {
+      return false
+    }
+    return true
+  }
+
+  private pruneIdleParentCaches(preserveParentThreadId?: string): void {
+    const idleParents = Array.from(this.parentCacheLru.keys()).filter((parentThreadId) =>
+      this.canEvictParentCache(parentThreadId)
+    )
+    let removeCount = idleParents.length - MAX_COORDINATOR_IDLE_PARENTS_IN_MEMORY
+    if (removeCount <= 0) return
+    for (const parentThreadId of idleParents) {
+      if (removeCount <= 0) break
+      if (parentThreadId === preserveParentThreadId) continue
+      this.evictIdleParentCache(parentThreadId)
+      removeCount -= 1
+    }
+  }
+
+  private evictIdleParentCache(parentThreadId: string): void {
+    if (!this.canEvictParentCache(parentThreadId)) return
+    const records = this.workersByParent.get(parentThreadId)
+    if (records) {
+      for (const record of records.values()) {
+        record.discarded = true
+        this.clearUpdateCallbacks(record)
+        this.clearProgressUpdateTimer(record)
+      }
+    }
+    const workspacePath = this.workspacePathByParent.get(parentThreadId)
+    if (workspacePath) {
+      const scratchpadPath = coordinatorScratchpadPath(workspacePath, parentThreadId)
+      this.preparedScratchpadDirs.delete(scratchpadPath)
+      this.warnedScratchpadDirs.delete(scratchpadPath)
+    }
+    this.workersByParent.delete(parentThreadId)
+    this.notificationsByParent.delete(parentThreadId)
+    this.prunedSnapshotsByParent.delete(parentThreadId)
+    this.workspacePathByParent.delete(parentThreadId)
+    this.activeRestoreHydratedWorkspaceByParent.delete(parentThreadId)
+    this.recentRestoreHydratedWorkspaceByParent.delete(parentThreadId)
+    this.restoreOverflowWorkspaceByParent.delete(parentThreadId)
+    this.restoreGenerationByParent.delete(parentThreadId)
+    const restoreDirectoryIncarnation =
+      this.restoreDirectoryIncarnationByParent.get(parentThreadId)
+    if (restoreDirectoryIncarnation) {
+      this.restoreIndexStore.tombstoneDirectoryIncarnation(restoreDirectoryIncarnation)
+      this.restoreDirectoryIncarnationByParent.delete(parentThreadId)
+    }
+    this.parentCacheLru.delete(parentThreadId)
   }
 
   private getWorker(
@@ -2325,25 +2862,37 @@ export class CoordinatorWorkerManager {
     }
   }
 
-  private async hydrateRestoredRawText(record: CoordinatorWorkerRecord): Promise<void> {
+  private async hydrateRestoredRawText(
+    record: CoordinatorWorkerRecord,
+    signal?: AbortSignal,
+    persistChanges = true
+  ): Promise<void> {
     if (record.rawText?.trim() || !record.resultPath || !terminalStatus(record.status)) return
     const workspaceRoot = path.resolve(record.workspacePath)
     try {
+      throwIfRestoreAborted(signal)
       const resolvedRelativePath = resolveWorkerResultReadRelativePath(
         record.parentThreadId,
         record.resultPath
       )
       const target = path.resolve(workspaceRoot, resolvedRelativePath)
       if (!isCoordinatorPathWithin(target, workspaceRoot)) return
-      const persisted = JSON.parse(await readFile(target, "utf8")) as { raw_text?: unknown }
+      const boundedResult = await readBoundedWorkerState(
+        target,
+        RESTORE_STATE_FILE_MAX_BYTES,
+        signal
+      )
+      if (!boundedResult) return
+      const persisted = JSON.parse(boundedResult.raw) as { raw_text?: unknown }
       const rawText = optionalString(persisted.raw_text)
       if (rawText) {
         record.rawText = truncateWorkerRawText(rawText)
-        if (record.notificationAcknowledged === false) {
+        if (persistChanges && record.notificationAcknowledged === false) {
           await this.queuePersistWorkerState(record)
         }
       }
     } catch {
+      if (signal?.aborted) throwIfRestoreAborted(signal)
       // Best-effort restore only. If archived raw handoff content is unavailable, notification
       // rebuilding still falls back to summary/error.
     }
@@ -2361,6 +2910,59 @@ export class CoordinatorWorkerManager {
     return this.restoreWorkerFromDisk(normalizedParentThreadId, normalizedWorkerId, options)
   }
 
+  private async restoreNextOverflowPageAfterAcknowledgement(
+    parentThreadId: string
+  ): Promise<void> {
+    const workspacePath = this.restoreOverflowWorkspaceByParent.get(parentThreadId)
+    if (!workspacePath) return
+    const bufferedUnresolved = Array.from(this.getParentMap(parentThreadId)?.values() ?? []).some(
+      (record) => record.status === "running" || record.notificationAcknowledged === false
+    )
+    if (bufferedUnresolved) return
+    try {
+      await this.restoreWorkersForThread({
+        parentThreadId,
+        workspacePath,
+        mode: "active"
+      })
+    } catch (error) {
+      console.warn("[CoordinatorWorker] Failed to restore the next overflow page:", error)
+    }
+  }
+
+  private isRepairableRestoredNotification(record: CoordinatorWorkerRecord): boolean {
+    return (
+      terminalStatus(record.status) &&
+      record.notificationAcknowledged === false &&
+      record.notificationEnqueued !== true &&
+      !record.notificationEnqueuePromise &&
+      !record.currentRun &&
+      !record.terminalPersistPromise &&
+      !record.statePersistPromise &&
+      !record.discarded
+    )
+  }
+
+  private async publishRepairableRestoredNotifications(
+    records: readonly CoordinatorWorkerRecord[]
+  ): Promise<void> {
+    const deduped = new Map<string, CoordinatorWorkerRecord>()
+    for (const record of records) {
+      if (this.isRepairableRestoredNotification(record)) {
+        deduped.set(record.workerId, record)
+      }
+    }
+    await settleInBatches(
+      Array.from(deduped.values()),
+      RESTORED_RAW_TEXT_HYDRATE_CONCURRENCY,
+      async (record) => {
+        await this.hydrateRestoredRawText(record)
+        if (!this.isRepairableRestoredNotification(record)) return
+        this.emitUpdate(record, await this.enqueueNotification(record))
+      }
+    )
+  }
+
   private assertCanRunWorker(input: {
     parentThreadId: string
     workspacePath: string
@@ -2372,8 +2974,20 @@ export class CoordinatorWorkerManager {
     if (this.shuttingDown) {
       throw new Error("The application is quitting; a coordinator worker can no longer be started.")
     }
-    if (input.workload === "read_only") return
     const records = Array.from(this.getParentMap(input.parentThreadId)?.values() ?? [])
+    const unresolvedCount = records.filter((record) => {
+      if (record.workerId === input.workerIdToIgnore) return false
+      return record.status === "running" || record.notificationAcknowledged === false
+    }).length
+    if (
+      this.restoreOverflowWorkspaceByParent.has(input.parentThreadId) ||
+      unresolvedCount >= MAX_COORDINATOR_UNRESOLVED_WORKERS
+    ) {
+      throw new Error(
+        `Cannot start another coordinator worker while ${MAX_COORDINATOR_UNRESOLVED_WORKERS} worker results are still running or awaiting acknowledgement. Wait for their task-notifications first.`
+      )
+    }
+    if (input.workload === "read_only") return
     if (input.workload === "verify") {
       const writer = records.find((record) => {
         if (record.workerId === input.workerIdToIgnore) return false
@@ -2471,6 +3085,10 @@ export class CoordinatorWorkerManager {
       workerThreadId,
       parentThreadId: normalizedParentThreadId,
       workspacePath,
+      restoreDirectoryIncarnation: this.getOrCreateRestoreDirectoryIncarnation(
+        normalizedParentThreadId,
+        workspacePath
+      ),
       role: normalizedRole,
       workload: normalizedWorkload,
       baseWorkload: normalizeWorkerWorkload(normalizedRole, baseWorkload ?? normalizedWorkload),
@@ -2585,6 +3203,7 @@ export class CoordinatorWorkerManager {
       !record.currentRun &&
       !record.terminalPersistPromise &&
       !record.statePersistPromise &&
+      !record.notificationEnqueuePromise &&
       !record.progressUpdateTimer
     )
   }
@@ -3022,24 +3641,40 @@ export class CoordinatorWorkerManager {
     }
   }
 
-  private async enqueueNotification(record: CoordinatorWorkerRecord): Promise<string | undefined> {
-    if (record.notificationEnqueued) return undefined
-    record.notificationEnqueued = true
-    record.notificationAcknowledged = false
-    const notification =
-      this.validatePersistedNotificationMessage(record, record.notificationMessage) ??
-      this.formatNotification(record)
-    record.notificationMessage = notification
-    const notifications = this.notificationsByParent.get(record.parentThreadId) ?? []
-    notifications.push(notification)
-    this.notificationsByParent.set(record.parentThreadId, notifications)
-    try {
-      await this.queuePersistWorkerState(record)
-    } catch (error) {
-      console.warn("[CoordinatorWorker] Failed to persist queued notification state:", error)
-    }
-    this.onTerminalNotification?.(toSnapshot(record))
-    return notification
+  private enqueueNotification(record: CoordinatorWorkerRecord): Promise<string | undefined> {
+    if (record.notificationEnqueued) return Promise.resolve(undefined)
+    if (record.notificationEnqueuePromise) return record.notificationEnqueuePromise
+
+    const enqueuePromise = (async () => {
+      record.notificationAcknowledged = false
+      const notification =
+        this.validatePersistedNotificationMessage(record, record.notificationMessage) ??
+        this.formatNotification(record)
+      record.notificationMessage = notification
+      try {
+        await this.queuePersistWorkerState(record)
+      } catch (error) {
+        console.warn("[CoordinatorWorker] Failed to persist queued notification state:", error)
+      }
+      if (record.discarded) return undefined
+
+      // Do not publish a notification before its state/index write has settled. Consumers may
+      // immediately delete or switch the task after observing it; publishing first allowed the
+      // queued restore-index atomic write to recreate the just-removed worker directory.
+      record.notificationEnqueued = true
+      const notifications = this.notificationsByParent.get(record.parentThreadId) ?? []
+      notifications.push(notification)
+      this.notificationsByParent.set(record.parentThreadId, notifications)
+      this.touchParentCache(record.parentThreadId)
+      this.onTerminalNotification?.(toSnapshot(record))
+      return notification
+    })().finally(() => {
+      if (record.notificationEnqueuePromise === enqueuePromise) {
+        record.notificationEnqueuePromise = undefined
+      }
+    })
+    record.notificationEnqueuePromise = enqueuePromise
+    return enqueuePromise
   }
 
   private removeQueuedNotificationsForWorker(parentThreadId: string, ref: NotificationRef): void {
@@ -3054,9 +3689,11 @@ export class CoordinatorWorkerManager {
     })
     if (remaining.length === 0) {
       this.notificationsByParent.delete(parentThreadId)
+      this.touchParentCache(parentThreadId)
       return
     }
     this.notificationsByParent.set(parentThreadId, remaining)
+    this.touchParentCache(parentThreadId)
   }
 
   private shouldRestoreNotification(parentThreadId: string, notification: string): boolean {
@@ -3311,10 +3948,20 @@ export class CoordinatorWorkerManager {
     )
   }
 
-  private async persistTerminalRecord(record: CoordinatorWorkerRecord): Promise<void> {
+  private persistTerminalRecord(record: CoordinatorWorkerRecord): Promise<void> {
+    return this.restoreIndexStore.runDirectoryArtifactOperation(
+      record.restoreDirectoryIncarnation,
+      () => this.persistTerminalRecordCurrent(record)
+    )
+  }
+
+  private async persistTerminalRecordCurrent(record: CoordinatorWorkerRecord): Promise<void> {
+    const assertCurrent = (): void => this.assertCurrentRestoreDirectoryIncarnation(record)
+    assertCurrent()
     const target = workerResultPath(record)
     const resultPath = relativeWorkerResultPath(record)
     await mkdir(path.dirname(target), { recursive: true })
+    assertCurrent()
     record.transcriptPath = undefined
     record.transcriptText = undefined
     await writeFileAtomic(
@@ -3349,8 +3996,10 @@ export class CoordinatorWorkerManager {
         },
         null,
         2
-      )
+      ),
+      assertCurrent
     )
+    assertCurrent()
     record.resultPath = resultPath
     try {
       await this.persistWorkerState(record)
@@ -3382,19 +4031,42 @@ export class CoordinatorWorkerManager {
     }
   }
 
-  private async persistWorkerState(record: CoordinatorWorkerRecord): Promise<void> {
+  private persistWorkerState(record: CoordinatorWorkerRecord): Promise<void> {
+    return this.restoreIndexStore.runDirectoryArtifactOperation(
+      record.restoreDirectoryIncarnation,
+      () => this.persistWorkerStateCurrent(record)
+    )
+  }
+
+  private async persistWorkerStateCurrent(record: CoordinatorWorkerRecord): Promise<void> {
+    this.assertCurrentRestoreDirectoryIncarnation(record)
     const target = workerStatePath(record)
     await this.ensureScratchpadDirBestEffort(record)
-    await writeFileAtomic(target, JSON.stringify(toPersistedWorkerState(record), null, 2))
+    this.assertCurrentRestoreDirectoryIncarnation(record)
+    const snapshot = toPersistedWorkerState(record)
+    const indexUpdated = await this.restoreIndexStore.writeWorkerState(
+      target,
+      serializePersistedWorkerState(snapshot),
+      snapshot,
+      record.restoreDirectoryIncarnation
+    )
+    if (!indexUpdated) {
+      // The state file is authoritative. A missing secondary index forces a cancellable worker
+      // rebuild next time instead of turning a successful worker run into a failure.
+      console.warn("[CoordinatorWorker] Failed to update restore index; it will be rebuilt.")
+    }
   }
 
   private async ensureScratchpadDirBestEffort(record: CoordinatorWorkerRecord): Promise<void> {
+    this.assertCurrentRestoreDirectoryIncarnation(record)
     const scratchpadPath = workerScratchpadPath(record)
     if (this.preparedScratchpadDirs.has(scratchpadPath)) return
     try {
       await mkdir(scratchpadPath, { recursive: true })
+      this.assertCurrentRestoreDirectoryIncarnation(record)
       this.preparedScratchpadDirs.add(scratchpadPath)
     } catch (error) {
+      this.assertCurrentRestoreDirectoryIncarnation(record)
       if (!this.warnedScratchpadDirs.has(scratchpadPath)) {
         this.warnedScratchpadDirs.add(scratchpadPath)
         console.warn(
@@ -3416,3 +4088,10 @@ export const coordinatorWorkerManager = new CoordinatorWorkerManager({
     })
   }
 })
+
+export async function deleteCoordinatorWorkerArtifacts(
+  parentThreadId: string,
+  workspacePath: string
+): Promise<void> {
+  await coordinatorWorkerManager.forgetThreadAndDeleteArtifacts(parentThreadId, workspacePath)
+}

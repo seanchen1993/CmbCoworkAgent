@@ -137,7 +137,7 @@ function findManagedRunId(
   return record?.snapshot?.currentSession?.threadId === threadId ? record.snapshot.runId : undefined
 }
 
-function validateRequest(input: HumanGateRequestInput): string {
+async function validateRequest(input: HumanGateRequestInput): Promise<string> {
   const message = input.message.trim()
   if (!message || message.length > MESSAGE_MAX_LENGTH) {
     throw halt(`decision=human_gate 的 systemMessage 必须是 1-${MESSAGE_MAX_LENGTH} 字符的纯文本`)
@@ -149,18 +149,18 @@ function validateRequest(input: HumanGateRequestInput): string {
   if (!input.harnessPluginId || input.hookPluginId !== input.harnessPluginId) {
     throw halt("humanGate 只能由当前项目绑定的 Harness 插件请求")
   }
-  const binding = getHarnessFeatureBinding(input.projectId, input.featureId)
+  const binding = await getHarnessFeatureBinding(input.projectId, input.featureId)
   if (!binding) throw halt("humanGate 对应的 Feature 绑定不存在")
   return message
 }
 
 export async function requestHumanGate(input: HumanGateRequestInput): Promise<HumanGateLease> {
-  const message = validateRequest(input)
+  const message = await validateRequest(input)
   const key = featureKey(input.projectId, input.featureId)
   let active!: ActiveGate
   await featureLocks.withKey(key, async () => {
     const existing =
-      activeGates.get(key) ?? getHarnessFeatureBinding(input.projectId, input.featureId)?.humanGate
+      activeGates.get(key) ?? (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
     if (existing) {
       const conflictGate = "gate" in existing ? existing.gate : existing
       recordHumanGateEvent(
@@ -199,7 +199,7 @@ export async function requestHumanGate(input: HumanGateRequestInput): Promise<Hu
       resolve: resolveDecision,
       runtimeThreadId: input.runtimeThreadId
     }
-    setHarnessHumanGate(input.projectId, input.featureId, gate)
+    await setHarnessHumanGate(input.projectId, input.featureId, gate)
     activeGates.set(key, active)
     recordHumanGateEvent("human_gate_requested", gate)
     publishHumanGateChanged(gate, gate)
@@ -228,11 +228,11 @@ export async function approveHumanGate(input: HarnessHumanGateDecisionInput): Pr
   const key = featureKey(input.projectId, input.featureId)
   return featureLocks.withKey(key, async () => {
     const active = activeGates.get(key)
-    const persisted = getHarnessFeatureBinding(input.projectId, input.featureId)?.humanGate
+    const persisted = (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
     if (!active || active.state !== "pending" || persisted?.gateId !== input.gateId) return false
     active.state = "approved"
     recordHumanGateEvent("human_gate_approved", active.gate)
-    setHarnessHumanGate(input.projectId, input.featureId, undefined)
+    await setHarnessHumanGate(input.projectId, input.featureId, undefined)
     publishHumanGateChanged(active.gate)
     active.resolve("approve")
     return true
@@ -248,12 +248,12 @@ export async function rejectHumanGate(
   let rejectedActive: ActiveGate | undefined
   const result = await featureLocks.withKey(key, async () => {
     const active = activeGates.get(key)
-    const persisted = getHarnessFeatureBinding(input.projectId, input.featureId)?.humanGate
+    const persisted = (await getHarnessFeatureBinding(input.projectId, input.featureId))?.humanGate
     if (persisted?.gateId !== input.gateId) return false
     rejectedGate = persisted
     rejectedActive = active
     recordHumanGateEvent("human_gate_rejected", persisted, reasonCode, false)
-    setHarnessHumanGate(input.projectId, input.featureId, undefined)
+    await setHarnessHumanGate(input.projectId, input.featureId, undefined)
     activeGates.delete(key)
     publishHumanGateChanged(persisted)
     return true
@@ -281,8 +281,10 @@ export async function rejectHumanGate(
   return result
 }
 
-export function getHumanGateForThread(threadId: string): HarnessHumanGateSnapshot | undefined {
-  return listHarnessHumanGates().find((gate) => gate.sourceThreadId === threadId)
+export async function getHumanGateForThread(
+  threadId: string
+): Promise<HarnessHumanGateSnapshot | undefined> {
+  return (await listHarnessHumanGates()).find((gate) => gate.sourceThreadId === threadId)
 }
 
 export function listPendingHumanGateRuntimeThreadIds(): string[] {
@@ -292,7 +294,7 @@ export function listPendingHumanGateRuntimeThreadIds(): string[] {
 }
 
 export async function recoverHumanGatesAtStartup(): Promise<void> {
-  for (const gate of listHarnessHumanGates()) {
+  for (const gate of await listHarnessHumanGates()) {
     await rejectHumanGate(gate, "app_closed_during_human_gate")
   }
 }

@@ -36,6 +36,7 @@ import { getProjectThreadDataDirectory } from "./context-history-path"
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
+import { recoverMainCheckpointMessages } from "./checkpoint-message-recovery"
 import {
   LocalSandbox,
   agentFileWriteContext,
@@ -118,8 +119,8 @@ import { createSchedulerTool } from "./tools/scheduler-tool"
 import { createSkillEvolutionTool } from "./tools/skill-evolution-tool"
 import {
   flushStrict,
-  getThread,
-  getThreadMessages,
+  getThreadCore,
+  getThreadMessageIdentityContext,
   moveThreadMessagesAfterAnchor,
   moveThreadMessagesAfterLastNonAssistant,
   replaceThreadMessageId,
@@ -289,13 +290,12 @@ import {
 } from "./coordinator-worker-access"
 import {
   isGeneralPurposeSubagentEnabled,
-  loadAgentProfiles,
+  loadAgentProfilesAsync,
   stripBlockedToolDocs,
   stripCustomModelPrefix,
   type AgentShellAccess
 } from "./agent-registry"
 import {
-  createWorkerValuesSnapshotContext,
   extractWorkerFinalText,
   extractWorkerVisibleReasoning,
   extractWorkerUsage,
@@ -304,6 +304,7 @@ import {
   shouldClearWorkerFinalText,
   observeWorkerProgress,
   summarizeWorkerText,
+  WorkerValuesSnapshotAccumulator,
   type WorkerValuesSnapshotContext
 } from "./coordinator-worker-stream"
 import { setAdoptionContext } from "../services/adoption-tracker"
@@ -812,7 +813,32 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
   // the completed reply so a reused raw provider id cannot overwrite history.
   // The completed reply's priority then wins over delayed chunks for that tuple.
   const completedAssistantMessage = context?.completedAssistantMessage
-  const durableMessagesBeforeCompletedAssistant = getThreadMessages(threadId)
+  const durableMessagesBeforeCompletedAssistant = getThreadMessageIdentityContext(
+    threadId,
+    [
+      ...(context.anchorMessage
+        ? [
+            {
+              messageId: context.anchorMessage.id,
+              providerSourceId:
+                context.anchorMessage.providerSourceId ?? context.anchorMessage.id,
+              role: context.anchorMessage.role,
+              providerOccurrence: context.anchorMessage.providerOccurrence
+            }
+          ]
+        : []),
+      ...(completedAssistantMessage
+        ? [
+            {
+              messageId: completedAssistantMessage.id,
+              providerSourceId: completedAssistantMessage.sourceId,
+              role: "assistant" as const
+            }
+          ]
+        : [])
+    ],
+    32
+  )
   const durableAnchorMessageId = context.anchorMessage
     ? resolveCurrentRunInjectionAnchorId(
         durableMessagesBeforeCompletedAssistant,
@@ -875,7 +901,9 @@ setCurrentRunInjectionNotifier(async (threadId, messages, context) => {
       created_at: new Date()
     }))
   ]
-  const persistedCount = upsertThreadMessages(threadId, transcriptMessages)
+  const persistedCount = upsertThreadMessages(threadId, transcriptMessages, {
+    preserveExistingOrder: true
+  })
   assertCurrentRunMessagesDurablyPersisted(transcriptMessages.length, persistedCount)
   const transcriptMessageIds = transcriptMessages.map((message) => message.id)
   if (durableAnchorMessageId) {
@@ -2202,7 +2230,17 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(toolTokenLimitBeforeEvict != null && { toolTokenLimitBeforeEvict })
     })
     markFilesystemWriteToolAsUserInitiated(mw)
-    patchRuntimeReadFileTool({ middleware: mw, filesystemBackend, toolTokenLimitBeforeEvict })
+    patchRuntimeReadFileTool({
+      middleware: mw,
+      filesystemBackend,
+      toolTokenLimitBeforeEvict,
+      ...(soloTaskTraceManager
+        ? {
+            resolveTraceContextForAgent: (agentId: string) =>
+              soloTaskTraceManager.getTraceContextForOwner(agentId)
+          }
+        : {})
+    })
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const grepTool = mw.tools?.find((t: any) => t.name === "grep") as any
@@ -3368,7 +3406,10 @@ async function getCheckpointerInternal(
       ? 0
       : MAIN_THREAD_MAX_FORK_BOUNDARY_CHECKPOINTS,
     maxRootForkBoundaryBytes: isSubThreadCheckpoint ? 0 : MAIN_THREAD_MAX_FORK_BOUNDARY_BYTES,
-    maxNonRootCheckpoints: 1
+    maxNonRootCheckpoints: 1,
+    recoverMissingCheckpointMessages: isSubThreadCheckpoint
+      ? undefined
+      : recoverMainCheckpointMessages
   })
   await checkpointer.initialize()
   // Re-check AFTER the awaits above: a deletion landing while this instance
@@ -4428,7 +4469,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
 
   const runtimeThreadMetadata: Record<string, unknown> = (() => {
     try {
-      const threadRow = getThread(threadId)
+      const threadRow = getThreadCore(threadId)
       return threadRow?.metadata ? (JSON.parse(threadRow.metadata) as Record<string, unknown>) : {}
     } catch {
       console.warn("[Runtime] Failed to parse thread metadata for memory settings")
@@ -4504,6 +4545,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     "conversation_history"
   )
   const largeToolResultsDir = path.join(projectThreadDataDirectory, "large_tool_results")
+  const workflowScriptsDir = path.join(projectThreadDataDirectory, "workflows")
   console.log("[Runtime] Model instance created")
   console.log("[Runtime] Conversation history directory:", conversationHistoryPathPrefix)
   console.log("[Runtime] Large tool results directory:", largeToolResultsDir)
@@ -4543,7 +4585,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
   const registrySubagentSpecs =
     agentMode === "normal" && !disableSubagents
-      ? loadAgentProfiles(workspacePath, projectModeSoloSubagentConfig).map((profile) => ({
+      ? (await loadAgentProfilesAsync(workspacePath, projectModeSoloSubagentConfig)).map((profile) => ({
           name: profile.name,
           description: profile.description,
           systemPrompt: profile.systemPrompt,
@@ -4646,12 +4688,21 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     harnessAdapterVersion,
     harnessNodeName,
     harnessNodeStatus,
+    traceId: traceContext?.traceId,
+    rootTraceId: traceContext?.rootTraceId,
+    rootThreadId: traceContext?.rootThreadId,
     projectCode,
     projectDir,
     onFileMutation,
     abortSignal: options.abortSignal,
     runId: threadId,
+    // Foreground turns on the same thread can overlap briefly during bounded
+    // replacement. Keep background-task ownership logical, but scope ACL
+    // ownership to the physical run so predecessor cleanup cannot revoke a
+    // successor's ref-counted grant.
+    aclOwnerId: options.currentRunMessageQueueOwnerToken ?? threadId,
     largeToolResultsDir,
+    workflowScriptsDir,
     internalArtifactRoots: [conversationHistoryPathPrefix, largeToolResultsDir],
     skillHookKeys,
     skillUseTracker
@@ -5167,7 +5218,7 @@ The workspace root is: ${fileRoot}`
     let chatxRobotChatId: string | null = null
     if (options.threadId) {
       try {
-        const threadRow = getThread(options.threadId)
+        const threadRow = getThreadCore(options.threadId)
         if (threadRow?.metadata) {
           const meta = JSON.parse(threadRow.metadata)
           chatxRobotChatId = (meta.chatxRobotChatId as string) || null
@@ -5244,6 +5295,7 @@ The workspace root is: ${fileRoot}`
   }
 
   if (isWorkflowMode) {
+    const workflowAgentProfiles = await loadAgentProfilesAsync(workspacePath)
     const worktreeSubagentThreads = new Set<string>()
     // Dynamic Workflows: the model writes a JS orchestration script; the run
     // executes in the BACKGROUND (detached from this turn — the manager owns
@@ -5269,6 +5321,7 @@ The workspace root is: ${fileRoot}`
         // tool write serialize TOGETHER, not each in its own silo. (#2)
         runExclusiveFileWrite: <T>(fn: () => Promise<T>): Promise<T> =>
           getToolConcurrencyLock(threadId).write(fn),
+        agentProfiles: workflowAgentProfiles,
         subagentDeps: {
           traceContext,
           createRuntime: async (subagentOptions): Promise<WorkflowSubagentRuntime> => {
@@ -5309,6 +5362,7 @@ The workspace root is: ${fileRoot}`
               disableMemoryInjection: restrictedRole,
               memoryEnabled: memoryEnabledForThread,
               agentMode: "normal",
+              traceContext: subagentOptions.traceContext,
               disableSubagents: true,
               // agentType-resolved tool policy. Cuts the disallowed tools and
               // enforces the shell policy via the same filesystemAccess path
@@ -5336,6 +5390,20 @@ The workspace root is: ${fileRoot}`
               onHookResult,
               onFailureFuseNotice,
               hookTurnId,
+              pluginRoot,
+              pluginId,
+              pluginName,
+              pluginWorkspace,
+              featureId,
+              isHarnessProjectSession,
+              harnessProjectId,
+              harnessAdapterName,
+              harnessAdapterVersion,
+              harnessNodeName,
+              harnessNodeStatus,
+              projectCode,
+              projectDir,
+              pluginOutputDir,
               additionalTools: subagentOptions.additionalTools,
               // Subagents SHARING the workspace share the parent thread's tool-
               // concurrency queue so their file writes serialize across the run (no
@@ -5636,6 +5704,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
     let workerTraceTerminalRecorded = false
     let workerTraceOutcome: TraceOutcome = "success"
     let workerTraceError: string | undefined
+    let workerValuesSnapshotAccumulator: WorkerValuesSnapshotAccumulator | undefined
     const syncWorkerSkillAttribution = (): void => {
       if (!workerTracer) return
       const usedSkills = workerSkillUsageDetector.getUsedSkillNames()
@@ -5712,6 +5781,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           coordinatorWorkerThreadId: workerInput.workerThreadId
         }
       })
+      workerValuesSnapshotAccumulator = new WorkerValuesSnapshotAccumulator(effectiveWorkerPrompt)
       const workerRoutingResult = await resolveModel({
         taskSource: "chat",
         message: effectiveWorkerPrompt,
@@ -5725,6 +5795,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
         workerRoutingResult?.resolvedTier ?? "premium",
         workerRoutingResult?.layer !== "pinned"
       )
+      let workerRuntimeTraceContext = traceContext
       if (traceContext) {
         workerTracer = createTraceCollectorSafely(
           workerInput.workerThreadId,
@@ -5754,6 +5825,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
           },
           "CoordinatorWorker"
         )
+        workerRuntimeTraceContext = workerTracer?.getTraceContext() ?? traceContext
       }
       const streamConfig = {
         configurable: { thread_id: workerInput.workerThreadId },
@@ -5772,7 +5844,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
               stream: { mode: mode as "messages" | "values", data }
             })
           }
-          const valuesContext = createWorkerValuesSnapshotContext(mode, data, effectiveWorkerPrompt)
+          const valuesContext = workerValuesSnapshotAccumulator?.createContext(mode, data)
           runTraceSideEffect("CoordinatorWorker Skill observer", () => {
             if (observeWorkerSkillUsage(mode, data, workerSkillUsageDetector, valuesContext)) {
               syncWorkerSkillAttribution()
@@ -5886,6 +5958,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
@@ -5960,6 +6033,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
@@ -6015,6 +6089,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             maxRetryAttempts,
             hookScope: workerHookScope,
             memoryEnabled: memoryEnabledForThread,
+            traceContext: workerRuntimeTraceContext,
             ...workerHarnessContext,
             onHookResult: workerOnHookResult,
             onFailureFuseNotice
@@ -6102,6 +6177,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       workerTraceError = describeToolError(error)
       throw error
     } finally {
+      workerValuesSnapshotAccumulator?.reset()
       clearActionStationarityTurn(workerInput.workerThreadId, workerActionStationarityTurnId)
       if (workerTracer) {
         const tracerToFinish = workerTracer

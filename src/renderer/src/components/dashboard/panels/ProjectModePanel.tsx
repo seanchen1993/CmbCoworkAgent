@@ -33,7 +33,13 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle
+} from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import { marketApi, type MarketItem } from "@/api/market"
 import { buildUploaderIdCandidates } from "@/lib/skill-data-service"
@@ -53,9 +59,14 @@ import type {
   DashboardProjectModeData,
   DashboardProjectModeAdapter,
   DashboardProjectModeAnalytics,
+  DashboardProjectModeConstraintReadStats,
   DashboardProjectModeFeature,
   DashboardProjectModeFeatureNode,
+  DashboardProjectModeHookStats,
   DashboardProjectModeNodeStatus,
+  DashboardProjectModeOperationalDetailScope,
+  DashboardProjectModeOperationalDetails,
+  DashboardProjectModeOperationalDetailsLoader,
   DashboardProjectModeOrgDistributionItem,
   DashboardProjectModeProject,
   DashboardProjectModeProjectCounts,
@@ -578,6 +589,245 @@ function FeatureCodeStatsLine({
   )
 }
 
+/** Compact operational summary with a shared detail dialog for project/feature/stage scopes. */
+function OperationalTelemetry({
+  constraint,
+  hooks,
+  detailTitle,
+  detailDescription,
+  loadDetails,
+  detailScope,
+  triggerVariant = "summary"
+}: {
+  constraint?: DashboardProjectModeConstraintReadStats | null
+  hooks?: DashboardProjectModeHookStats | null
+  detailTitle: string
+  detailDescription: string
+  loadDetails?: DashboardProjectModeOperationalDetailsLoader
+  detailScope?: DashboardProjectModeOperationalDetailScope
+  triggerVariant?: "summary" | "table"
+}): React.JSX.Element | null {
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [loadedDetails, setLoadedDetails] = useState<{
+    loader: NonNullable<typeof loadDetails>
+    scopeKey: string
+    data: DashboardProjectModeOperationalDetails
+  } | null>(null)
+  const [loadingDetails, setLoadingDetails] = useState<{
+    loader: NonNullable<typeof loadDetails>
+    scopeKey: string
+  } | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
+  if (!constraint && !hooks) return null
+
+  const scopeKey = detailScope
+    ? `${detailScope.projectId}\u0000${detailScope.featureSlug ?? ""}\u0000${detailScope.nodeName ?? ""}`
+    : ""
+  const completeDetails =
+    loadedDetails && loadedDetails.loader === loadDetails && loadedDetails.scopeKey === scopeKey
+      ? loadedDetails.data
+      : null
+  const detailsLoading = Boolean(
+    loadDetails && loadingDetails?.loader === loadDetails && loadingDetails.scopeKey === scopeKey
+  )
+  const constraintFiles = completeDetails?.constraintFiles ?? constraint?.files ?? []
+  const hookEvents = completeDetails?.hookEvents ?? hooks?.byEvent ?? []
+  const distinctFileCount = constraint
+    ? Math.max(constraint.distinctFileCount, completeDetails?.constraintFiles.length ?? 0)
+    : 0
+  const hiddenConstraintFileCount = constraint
+    ? Math.max(0, distinctFileCount - constraintFiles.length)
+    : 0
+
+  const requestCompleteDetails = (): void => {
+    if (!loadDetails || !detailScope || completeDetails || detailsLoading) return
+    setLoadingDetails({ loader: loadDetails, scopeKey })
+    setDetailError(null)
+    void loadDetails(detailScope)
+      .then((data) => setLoadedDetails({ loader: loadDetails, scopeKey, data }))
+      .catch((error) => setDetailError(error instanceof Error ? error.message : String(error)))
+      .finally(() =>
+        setLoadingDetails((current) =>
+          current?.loader === loadDetails && current.scopeKey === scopeKey ? null : current
+        )
+      )
+  }
+
+  return (
+    <Dialog
+      open={detailOpen}
+      onOpenChange={(open) => {
+        setDetailOpen(open)
+        if (open) requestCompleteDetails()
+      }}
+    >
+      <button
+        type="button"
+        className={cn(
+          "flex w-full items-center rounded text-[10px] transition-colors hover:bg-muted/50",
+          triggerVariant === "table"
+            ? "justify-end gap-1 px-1 py-1 text-right"
+            : "justify-between gap-3 bg-muted/30 px-2 py-1.5 text-left"
+        )}
+        title={`点击查看${detailTitle}`}
+        onClick={(event) => {
+          event.stopPropagation()
+          setDetailOpen(true)
+          requestCompleteDetails()
+        }}
+      >
+        <div
+          className={cn(
+            "min-w-0 text-muted-foreground",
+            triggerVariant === "table"
+              ? "flex flex-col items-end gap-0.5"
+              : "flex items-center gap-4"
+          )}
+        >
+          {constraint ? (
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+              <span className="font-medium text-foreground/80">系统约束</span>
+              <span>{formatNumber(constraint.successfulReadCount)} 次有效读取</span>
+            </span>
+          ) : null}
+          {constraint && hooks && triggerVariant === "summary" ? (
+            <span className="h-3 w-px shrink-0 bg-border" />
+          ) : null}
+          {hooks ? (
+            <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+              <span className="font-medium text-foreground/80">运行时 Hook</span>
+              <span>{formatNumber(hooks.executionCount)} 次触发</span>
+            </span>
+          ) : null}
+        </div>
+        <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+      </button>
+
+      <DialogContent className="flex max-h-[80vh] max-w-[720px] flex-col gap-0 p-0">
+        <DialogHeader className="border-b border-border px-5 py-4">
+          <DialogTitle className="text-base">{detailTitle}</DialogTitle>
+          <DialogDescription className="truncate">{detailDescription}</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-5 overflow-y-auto px-5 py-4 text-xs">
+          {detailsLoading ? (
+            <div className="flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              正在加载完整明细…
+            </div>
+          ) : null}
+          {detailError ? (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+              完整明细加载失败：{detailError}
+            </div>
+          ) : null}
+          {constraint ? (
+            <section className="space-y-3">
+              <h4 className="font-medium text-foreground">系统约束读取</h4>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  ["涉及 Trace", `${formatNumber(constraint.traceCount)} 个`],
+                  ["有效读取", `${formatNumber(constraint.successfulReadCount)} 次`],
+                  [
+                    "约束文件",
+                    `${constraint.filesTruncated ? "至少 " : ""}${formatNumber(distinctFileCount)} 个`
+                  ]
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="rounded-md border border-border/60 bg-muted/20 px-3 py-2"
+                  >
+                    <div className="text-[10px] text-muted-foreground">{label}</div>
+                    <div className="mt-0.5 font-medium text-foreground">{value}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="overflow-hidden rounded-md border border-border/60">
+                <div className="border-b border-border/60 bg-muted/30 px-3 py-2 text-[11px] font-medium text-foreground">
+                  约束文件明细
+                </div>
+                {constraintFiles.length > 0 ? (
+                  <div className="max-h-56 divide-y divide-border/50 overflow-y-auto">
+                    {constraintFiles.map((file) => (
+                      <div
+                        key={file.path}
+                        className="flex items-center justify-between gap-4 px-3 py-2"
+                      >
+                        <span className="min-w-0 break-all font-mono text-[11px] text-foreground/90">
+                          {file.path}
+                        </span>
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {formatNumber(file.traceCount)} 个 Trace
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-3 py-3 text-[11px] text-muted-foreground">暂无文件明细</div>
+                )}
+                {hiddenConstraintFileCount > 0 ? (
+                  <div className="border-t border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
+                    另有 {formatNumber(hiddenConstraintFileCount)} 个文件未展示
+                  </div>
+                ) : null}
+                {constraint.filesTruncated ? (
+                  <div className="border-t border-border/60 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
+                    存在文件列表被截断的汇总，文件数为下限值。
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
+          {hooks ? (
+            <section className="space-y-3">
+              <h4 className="font-medium text-foreground">运行时 Hook</h4>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+                  <div className="text-[10px] text-muted-foreground">触发总数</div>
+                  <div className="mt-0.5 font-medium text-foreground">
+                    {formatNumber(hooks.executionCount)} 次
+                  </div>
+                </div>
+                <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+                  <div className="text-[10px] text-muted-foreground">阻断总数</div>
+                  <div className="mt-0.5 font-medium text-foreground">
+                    {formatNumber(hooks.blockedCount)} 次
+                  </div>
+                </div>
+              </div>
+              <div className="overflow-hidden rounded-md border border-border/60">
+                <div className="border-b border-border/60 bg-muted/30 px-3 py-2 text-[11px] font-medium text-foreground">
+                  Hook 类型明细
+                </div>
+                {hookEvents.length > 0 ? (
+                  <div className="max-h-56 divide-y divide-border/50 overflow-y-auto">
+                    {hookEvents.map((event) => (
+                      <div
+                        key={event.event}
+                        className="flex items-center justify-between gap-4 px-3 py-2"
+                      >
+                        <span className="font-mono text-[11px] text-foreground/90">
+                          {event.event}
+                        </span>
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {formatNumber(event.count)} 次
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-3 py-3 text-[11px] text-muted-foreground">暂无类型明细</div>
+                )}
+              </div>
+            </section>
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** 表格内一条「label X% (采纳/生成)」采纳率，按口径分组的列里上下各一条；有数据时可点击采纳溯源。 */
 function AdoptionRateLine({
   label,
@@ -691,7 +941,9 @@ function isStageBucketsEmpty(buckets: DashboardStageBuckets): boolean {
 function StageBucketCaliberHint(): React.JSX.Element {
   return (
     <div className="space-y-1.5">
-      <div>对话按每轮开始时、代码按实际生成时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：</div>
+      <div>
+        对话按每轮开始时、代码按实际生成时的工作流阶段状态 × 是否调用插件 Skill 交叉拆分为三类：
+      </div>
       {STAGE_BUCKET_VIEW.map(({ bucket }) => (
         <div key={bucket}>
           <span className="font-medium">{STAGE_BUCKET_LABELS[bucket]}</span>：
@@ -896,12 +1148,16 @@ function NodeBreakdownTabs({
 }
 
 function FeatureStageBreakdown({
+  projectId,
   feature,
   loadNodes,
+  loadOperationalDetails,
   onOpenNodeTraces
 }: {
+  projectId: string
   feature: DashboardProjectModeFeature
   loadNodes: (feature: DashboardProjectModeFeature) => Promise<DashboardProjectModeFeatureNode[]>
+  loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
   onOpenNodeTraces: (
     feature: DashboardProjectModeFeature,
     node: DashboardProjectModeFeatureNode,
@@ -997,6 +1253,18 @@ function FeatureStageBreakdown({
                   </button>
                 </div>
                 <FeatureCodeStatsLine codeStats={node.codeStats} />
+                <OperationalTelemetry
+                  constraint={node.systemConstraintReads}
+                  hooks={node.hookExecutions}
+                  detailTitle="阶段运行详情"
+                  detailDescription={node.nodeName}
+                  loadDetails={loadOperationalDetails}
+                  detailScope={{
+                    projectId,
+                    featureSlug: feature.slug,
+                    nodeName: node.nodeName
+                  }}
+                />
                 <NodeBreakdownTabs
                   byStatus={node.byStatus}
                   stageBuckets={node.stageBuckets}
@@ -1015,14 +1283,17 @@ function FeatureStageBreakdown({
 
 function ProjectRow({
   project,
+  showSuspectedTechnicalDetailMetric,
   expanded,
   onToggle,
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
-  loadFeatureNodes
+  loadFeatureNodes,
+  loadOperationalDetails
 }: {
   project: DashboardProjectModeProject
+  showSuspectedTechnicalDetailMetric: boolean
   expanded: boolean
   onToggle: () => void
   onOpenTraces: (
@@ -1036,6 +1307,7 @@ function ProjectRow({
   loadFeatureNodes: (
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
+  loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
 }): React.JSX.Element {
   const codeStats = project.codeStats
   const hasCommitAdoption = Boolean(codeStats && codeStats.effectiveGeneratedLines > 0)
@@ -1130,6 +1402,11 @@ function ProjectRow({
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
+        {showSuspectedTechnicalDetailMetric ? (
+          <td className="px-3 py-2 text-right font-medium tabular-nums">
+            {formatNumber(project.suspectedTechnicalDetailConversationCount ?? 0)}
+          </td>
+        ) : null}
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatLineCount(codeStats?.generatedLines ?? 0)}
         </td>
@@ -1192,6 +1469,21 @@ function ProjectRow({
         <td className="px-3 py-2 text-right tabular-nums">
           <ProjectStageAdoptionRates buckets={project.stageBuckets} />
         </td>
+        <td className="px-3 py-2 text-right tabular-nums">
+          {project.systemConstraintReads || project.hookExecutions ? (
+            <OperationalTelemetry
+              constraint={project.systemConstraintReads}
+              hooks={project.hookExecutions}
+              detailTitle="项目运行详情"
+              detailDescription={project.name}
+              loadDetails={loadOperationalDetails}
+              detailScope={{ projectId: project.projectId }}
+              triggerVariant="table"
+            />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </td>
         <td className="px-3 py-2">
           <div className="font-medium text-foreground">{creatorName}</div>
           {creatorId && creatorId !== creatorName ? (
@@ -1219,7 +1511,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={14} className="px-3 py-3">
+          <td colSpan={showSuspectedTechnicalDetailMetric ? 16 : 15} className="px-3 py-3">
             <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -1241,6 +1533,15 @@ function ProjectRow({
                   <StageBucketSplit buckets={project.stageBuckets} />
                 </div>
               )}
+
+              <OperationalTelemetry
+                constraint={project.systemConstraintReads}
+                hooks={project.hookExecutions}
+                detailTitle="项目运行详情"
+                detailDescription={project.name}
+                loadDetails={loadOperationalDetails}
+                detailScope={{ projectId: project.projectId }}
+              />
 
               {/* 特性状态 + 各特性采纳明细 + 关联 commit */}
               {project.features.length === 0 ? (
@@ -1307,10 +1608,23 @@ function ProjectRow({
                         </div>
                       </div>
                       <FeatureCodeStatsLine codeStats={feature.codeStats} />
+                      <OperationalTelemetry
+                        constraint={feature.systemConstraintReads}
+                        hooks={feature.hookExecutions}
+                        detailTitle="特性运行详情"
+                        detailDescription={feature.title}
+                        loadDetails={loadOperationalDetails}
+                        detailScope={{
+                          projectId: project.projectId,
+                          featureSlug: feature.slug
+                        }}
+                      />
                       {feature.slug && (
                         <FeatureStageBreakdown
+                          projectId={project.projectId}
                           feature={feature}
                           loadNodes={loadFeatureNodes}
+                          loadOperationalDetails={loadOperationalDetails}
                           onOpenNodeTraces={(f, node, status, stageBucket) =>
                             onOpenTraces(f, node, status, stageBucket)
                           }
@@ -1396,7 +1710,8 @@ function SortableTh({
   order,
   enabled,
   onSort,
-  title
+  title,
+  hint
 }: {
   label: string
   sortKey: DashboardProjectModeProjectSortKey
@@ -1405,11 +1720,15 @@ function SortableTh({
   enabled: boolean
   onSort: (key: DashboardProjectModeProjectSortKey) => void
   title?: string
+  hint?: ReactNode
 }): React.JSX.Element {
   if (!enabled) {
     return (
       <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title={title}>
-        {label}
+        <span className="inline-flex items-center justify-end gap-1">
+          <span>{label}</span>
+          {hint ? <InfoHint hint={hint} /> : null}
+        </span>
       </th>
     )
   }
@@ -1417,18 +1736,21 @@ function SortableTh({
   const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
     <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
-      <button
-        type="button"
-        onClick={() => onSort(sortKey)}
-        title={title ?? `按${label}排序`}
-        className={cn(
-          "ml-auto inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
-          active ? "text-foreground" : "text-muted-foreground"
-        )}
-      >
-        <span>{label}</span>
-        <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
-      </button>
+      <div className="ml-auto flex w-fit items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onSort(sortKey)}
+          title={title ?? `按${label}排序`}
+          className={cn(
+            "inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
+            active ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          <span>{label}</span>
+          <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
+        </button>
+        {hint ? <InfoHint hint={hint} /> : null}
+      </div>
     </th>
   )
 }
@@ -1449,6 +1771,7 @@ function ProjectListSection({
   onOpenFeatureCommits,
   onOpenProjectCommits,
   loadFeatureNodes,
+  loadOperationalDetails,
   lockedAdapterName
 }: {
   projectCounts?: DashboardProjectModeProjectCounts
@@ -1486,6 +1809,7 @@ function ProjectListSection({
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
+  loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
   /** 嵌入模式：锁定到该插件名（隐藏标题与插件下拉，强制按此插件过滤）。用于插件「项目数」弹窗。 */
   lockedAdapterName?: string
 }): React.JSX.Element {
@@ -1526,6 +1850,8 @@ function ProjectListSection({
   const effectiveSortBy = useExplicitSort ? sortBy : tabDefaultSort.key
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
+  const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 16 : 15
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -1660,7 +1986,8 @@ function ProjectListSection({
           <p className="mb-3 text-[11px] leading-relaxed text-muted-foreground">
             项目、插件、项目状态、特性数为当前状态；对话数、DEV 阶段会话数、DEV
             关联特性数、原始生成行数、提交、总量两口径采纳率，以及 Harness / VibeCoding
-            流程采纳率按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
+            流程采纳率、系统约束读取与运行时 Hook
+            按所选时间范围统计；展开后可查看技能、各特性采纳明细与关联 Commit。
           </p>
         </>
       )}
@@ -1735,7 +2062,12 @@ function ProjectListSection({
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full min-w-[2080px] table-fixed text-xs">
+        <table
+          className={cn(
+            "w-full table-fixed text-xs",
+            showSuspectedTechnicalDetailMetric ? "min-w-[2410px]" : "min-w-[2270px]"
+          )}
+        >
           {/*
            * Keep column allocation deterministic across macOS and Windows.
            * With table-layout:auto, CJK body text has a one-glyph min-content
@@ -1749,11 +2081,13 @@ function ProjectListSection({
             <col className="w-[90px]" />
             <col className="w-[76px]" />
             <col className="w-[76px]" />
+            {showSuspectedTechnicalDetailMetric ? <col className="w-[140px]" /> : null}
             <col className="w-[110px]" />
             <col className="w-[160px]" />
             <col className="w-[160px]" />
             <col className="w-[142px]" />
             <col className="w-[178px]" />
+            <col className="w-[190px]" />
             <col className="w-[110px]" />
             <col className="w-[210px]" />
             <col className="w-[140px]" />
@@ -1762,10 +2096,7 @@ function ProjectListSection({
           <thead>
             <tr className="whitespace-nowrap border-b border-border bg-muted/30 text-muted-foreground">
               <th
-                className={cn(
-                  PROJECT_LIST_PROJECT_COLUMN_CLASS,
-                  "px-3 py-2 text-left font-medium"
-                )}
+                className={cn(PROJECT_LIST_PROJECT_COLUMN_CLASS, "px-3 py-2 text-left font-medium")}
               >
                 项目
               </th>
@@ -1787,7 +2118,16 @@ function ProjectListSection({
                 order={sortOrder}
                 enabled={metricSortAllowed}
                 onSort={cycleSort}
+                hint="所选时间范围内，仅统计主动触发的主 Agent 会话；不包含定时任务、心跳等后台触发，也不包含子 Agent 会话。"
               />
+              {showSuspectedTechnicalDetailMetric ? (
+                <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
+                  <div className="ml-auto flex w-fit items-center gap-1">
+                    <span>疑似技术细节补充</span>
+                    <InfoHint hint="统计用户输入全文中累计包含 10 个及以上英文字母的会话数量，用于识别疑似补充技术细节的会话。结果基于规则估算，仅供参考。" />
+                  </div>
+                </th>
+              ) : null}
               <SortableTh
                 label="原始生成行数"
                 sortKey="generatedLines"
@@ -1812,6 +2152,12 @@ function ProjectListSection({
               >
                 Harness / VibeCoding 采纳率
               </th>
+              <th
+                className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                title="所选时间范围内，插件系统约束文件的有效读取次数与项目模式运行时 Hook 触发次数"
+              >
+                系统约束 / 运行时 Hook
+              </th>
               <th className="px-3 py-2 text-left font-medium">创建人</th>
               <th className="px-3 py-2 text-left font-medium">部门</th>
               <SortableTh
@@ -1830,6 +2176,7 @@ function ProjectListSection({
               <ProjectRow
                 key={project.projectId}
                 project={project}
+                showSuspectedTechnicalDetailMetric={showSuspectedTechnicalDetailMetric}
                 expanded={expandedId === project.projectId}
                 onToggle={() =>
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
@@ -1840,11 +2187,15 @@ function ProjectListSection({
                 onOpenFeatureCommits={(feature) => onOpenFeatureCommits(project, feature)}
                 onOpenProjectCommits={(pushedOnly) => onOpenProjectCommits(project, pushedOnly)}
                 loadFeatureNodes={(feature) => loadFeatureNodes(project, feature)}
+                loadOperationalDetails={loadOperationalDetails}
               />
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
+                <td
+                  colSpan={tableColumnCount}
+                  className="px-3 py-10 text-center text-muted-foreground"
+                >
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -1854,7 +2205,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={14} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={tableColumnCount} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -1862,12 +2213,15 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={14} className="h-[49px]" />
+                  <td colSpan={tableColumnCount} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={14} className="px-3 py-10 text-center text-muted-foreground">
+                <td
+                  colSpan={tableColumnCount}
+                  className="px-3 py-10 text-center text-muted-foreground"
+                >
                   {emptyText}
                 </td>
               </tr>
@@ -2015,9 +2369,7 @@ const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
 }
 
 /**
- * 用 item.user_id（上传者 SAP id）到全量用户目录解析 {负责人, 部门}。
- * 负责人/部门并不在插件列表响应里——应用市场与 Harness 看板都是靠 user_id 二次查
- * queryAllUser 拿到的，这里复用同一口径（queryAllUser + buildUploaderIdCandidates）。
+ * 用 item.user_id（上传者 SAP id）按需解析 {负责人, 部门}，只查询当前列表涉及的候选 ID。
  */
 async function resolvePluginUploaderProfiles(
   items: MarketItem[]
@@ -2027,9 +2379,14 @@ async function resolvePluginUploaderProfiles(
     new Set(items.map((item) => item.user_id?.trim() || "").filter(Boolean))
   )
   if (rawUserIds.length === 0) return result
-  if (typeof window.api?.dashboard?.queryAllUser !== "function") return result
+  if (typeof window.api?.dashboard?.userProfiles !== "function") return result
   try {
-    const response = await window.api.dashboard.queryAllUser()
+    const requestedSapIds = Array.from(
+      new Set(rawUserIds.flatMap((rawUserId) => buildUploaderIdCandidates(rawUserId)))
+    )
+    const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+      family: "project-mode-market"
+    })
     if (!response.success || !response.data) return result
     const allUsers = response.data.filter((user) => user.sapId?.trim())
     for (const rawUserId of rawUserIds) {
@@ -2189,7 +2546,8 @@ function AdapterListSection({
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
-  loadFeatureNodes
+  loadFeatureNodes,
+  loadOperationalDetails
 }: {
   adapters: DashboardProjectModeAdapter[]
   loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
@@ -2212,6 +2570,7 @@ function AdapterListSection({
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
+  loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
 }): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [mode, setMode] = useState<AdapterListMode>("byName")
@@ -2427,6 +2786,7 @@ function AdapterListSection({
         onOpenFeatureCommits={onOpenFeatureCommits}
         onOpenProjectCommits={onOpenProjectCommits}
         loadFeatureNodes={loadFeatureNodes}
+        loadOperationalDetails={loadOperationalDetails}
       />
     </section>
   )
@@ -2459,6 +2819,7 @@ interface AdapterProjectsDialogHandlers {
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
+  loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
 }
 
 /**
@@ -2506,7 +2867,8 @@ function AdapterProjectsDialogBody({
   onOpenTraces,
   onOpenFeatureCommits,
   onOpenProjectCommits,
-  loadFeatureNodes
+  loadFeatureNodes,
+  loadOperationalDetails
 }: { target: AdapterProjectsTarget } & AdapterProjectsDialogHandlers): React.JSX.Element {
   const [pages, setPages] = useState<
     Partial<Record<DashboardProjectModeProjectStatus, DashboardProjectModeProjectPageData>>
@@ -2581,6 +2943,7 @@ function AdapterProjectsDialogBody({
         onOpenFeatureCommits={onOpenFeatureCommits}
         onOpenProjectCommits={onOpenProjectCommits}
         loadFeatureNodes={loadFeatureNodes}
+        loadOperationalDetails={loadOperationalDetails}
         lockedAdapterName={target.name}
       />
     </div>
@@ -2604,6 +2967,7 @@ export function ProjectModePanel({
   onOpenFeatureCommits,
   onOpenProjectCommits,
   loadFeatureNodes,
+  loadOperationalDetails,
   loadPluginAggregate,
   fetchAdapterProjectPage,
   onSkillClick,
@@ -2659,6 +3023,7 @@ export function ProjectModePanel({
     project: DashboardProjectModeProject,
     feature: DashboardProjectModeFeature
   ) => Promise<DashboardProjectModeFeatureNode[]>
+  loadOperationalDetails: DashboardProjectModeOperationalDetailsLoader
   loadPluginAggregate: (adapterName: string) => Promise<DashboardProjectModeFeatureNode[]>
   /** 插件「项目数」弹窗复用项目列表所需的分页拉取器（按当前时间范围，调用方注入插件名/版本）。 */
   fetchAdapterProjectPage: (
@@ -2985,6 +3350,7 @@ export function ProjectModePanel({
         onOpenFeatureCommits={onOpenFeatureCommits}
         onOpenProjectCommits={onOpenProjectCommits}
         loadFeatureNodes={loadFeatureNodes}
+        loadOperationalDetails={loadOperationalDetails}
       />
 
       {/* Adapter (plugin) distribution — 紧随项目列表之后 */}
@@ -2996,6 +3362,7 @@ export function ProjectModePanel({
         onOpenFeatureCommits={onOpenFeatureCommits}
         onOpenProjectCommits={onOpenProjectCommits}
         loadFeatureNodes={loadFeatureNodes}
+        loadOperationalDetails={loadOperationalDetails}
       />
 
       <ProjectModeAnalyticsSection analytics={data?.analytics} onUserClick={onUserClick} />
