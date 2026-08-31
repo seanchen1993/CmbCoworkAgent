@@ -58,6 +58,7 @@ let pendingBatches = new Map<string, PendingLogBatch[]>()
 let pendingBytes = 0
 let flushTimer: NodeJS.Timeout | null = null
 let flushPromise: Promise<void> | null = null
+let maintenancePromise: Promise<void> | null = null
 let terminalFlushError: unknown
 
 function scheduleFlush(): void {
@@ -102,6 +103,7 @@ function prependPendingBatches(dateKey: string, batches: PendingLogBatch[]): voi
 }
 
 async function flushNow(): Promise<void> {
+  while (maintenancePromise) await maintenancePromise
   if (flushPromise) return flushPromise
   if (pendingBatches.size === 0) return
 
@@ -144,6 +146,36 @@ async function flushNow(): Promise<void> {
   })()
 
   return flushPromise
+}
+
+/**
+ * Run a hook-log rewrite while excluding physical appends. New records may
+ * continue entering the in-memory queue and are flushed after the rewrite;
+ * an already in-flight append is allowed to finish before maintenance starts.
+ */
+export async function withHookLogMaintenance<T>(operation: () => Promise<T>): Promise<T> {
+  while (maintenancePromise || flushPromise) {
+    await (maintenancePromise ?? flushPromise)
+  }
+
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  maintenancePromise = gate
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (maintenancePromise === gate) maintenancePromise = null
+    if (pendingBatches.size > 0) {
+      if (pendingBytes >= FLUSH_BYTES) {
+        void flushNow().catch((e) => console.warn("[Hooks] log flush failed:", e))
+      } else {
+        scheduleFlush()
+      }
+    }
+  }
 }
 
 function resolveRecordDate(record: unknown): Date {
@@ -297,6 +329,10 @@ async function collectLogFileEntries(dir: string): Promise<LogFileEntry[]> {
  * startup.
  */
 export async function pruneOldHookLogs(): Promise<void> {
+  await withHookLogMaintenance(pruneOldHookLogsUnlocked)
+}
+
+async function pruneOldHookLogsUnlocked(): Promise<void> {
   // Path-only lookup: don't create the directory just to discover it's empty.
   // Users who never enable Hook logging should see zero disk footprint here.
   const dir = resolveHookLogDir()

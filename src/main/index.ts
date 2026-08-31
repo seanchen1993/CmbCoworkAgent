@@ -1,4 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, shell } from "electron"
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  powerSaveBlocker,
+  shell,
+  type IpcMainEvent
+} from "electron"
 import {
   isBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
@@ -24,6 +34,7 @@ if (process.platform === "linux") {
 }
 
 import { join } from "path"
+import { pathToFileURL } from "url"
 import { existsSync, rmSync } from "fs"
 import {
   writeMainLog,
@@ -32,6 +43,17 @@ import {
   flushLogsSync,
   initializeLogRedaction
 } from "./logging"
+import {
+  createMainLogForwarder,
+  createMainLogForwardingGate,
+  createSafeLogMethod,
+  createSafeLogProcessingGuard,
+  createSafeProcessErrorHandler,
+  isEpipeError,
+  isTrustedMainLogToggleRequest,
+  isTrustedRendererUrl,
+  resolveTrustedRendererUrl
+} from "./main-log-forwarding"
 import { registerPathOpenersHandlers } from "./ipc/path-openers"
 import { scheduleHardDeadline, waitBestEffort } from "./shutdown-deadline"
 import {
@@ -83,7 +105,13 @@ const AGENT_RUNTIME_RECURSION_LIMIT_SET_CHANNEL = "app:set-agent-runtime-recursi
 const WORKFLOW_WORKTREE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-timeout"
 const WORKFLOW_WORKTREE_REMOVE_TIMEOUT_SET_CHANNEL = "app:set-workflow-worktree-remove-timeout"
 const CLOSE_TO_TRAY_PROMPT_TIMEOUT_MS = 15_000
-let mainLogForwardingEnabled = false
+const mainLogForwardingGate = createMainLogForwardingGate()
+let mainWindow: BrowserWindow | null = null
+const trustedMainRendererUrl = resolveTrustedRendererUrl(
+  app.isPackaged
+    ? pathToFileURL(join(__dirname, "../renderer/index.html")).href
+    : process.env["ELECTRON_RENDERER_URL"]
+)
 const EVENT_CATEGORIES = new Set<EventCategory>([
   "skill",
   "git",
@@ -189,62 +217,102 @@ function safeFormatLogValue(value: unknown, seen = new WeakSet<object>()): strin
   }
 }
 
-function forwardMainLogToRenderer(level: string, args: unknown[]): void {
-  if (!mainLogForwardingEnabled) return
-  const message = args.map((arg) => safeFormatLogValue(arg)).join(" ")
-  const windows = BrowserWindow.getAllWindows()
-  for (const window of windows) {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) continue
-    window.webContents.send(MAIN_LOG_EVENT_CHANNEL, { level, message })
+const forwardMainLogToRenderer = createMainLogForwarder({
+  channel: MAIN_LOG_EVENT_CHANNEL,
+  isEnabled: mainLogForwardingGate.isEnabled,
+  getWindows: () => (mainWindow ? [mainWindow] : []),
+  formatValue: safeFormatLogValue,
+  isTrustedWindow: (window) =>
+    window === mainWindow &&
+    isTrustedRendererUrl(window.webContents.getURL?.(), trustedMainRendererUrl) &&
+    isTrustedRendererUrl(window.webContents.mainFrame?.url, trustedMainRendererUrl)
+})
+
+function isTrustedMainLogToggleEvent(event: IpcMainEvent, enabled: unknown): boolean {
+  try {
+    const window = mainWindow
+    if (!window || window.isDestroyed()) return false
+    const contents = window.webContents
+    if (contents.isDestroyed()) return false
+    const mainFrame = contents.mainFrame
+    const senderFrame = event.senderFrame
+    if (!senderFrame) return false
+    if (mainFrame.detached || mainFrame.isDestroyed()) return false
+    return isTrustedMainLogToggleRequest({
+      enabled,
+      expectedWebContents: contents,
+      sender: event.sender,
+      expectedMainFrame: mainFrame,
+      senderFrame,
+      expectedRendererUrl: trustedMainRendererUrl,
+      senderUrl: contents.getURL(),
+      senderFrameUrl: senderFrame.url
+    })
+  } catch {
+    return false
   }
 }
 
-function withEpipeGuard<T extends (...args: unknown[]) => void>(fn: T): T {
-  return ((...args: Parameters<T>) => {
-    try {
-      fn(...args)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === "EPIPE") return
-      throw err
-    }
-  }) as T
-}
-
-function withMainFileLogging<T extends (...args: unknown[]) => void>(level: string, fn: T): T {
-  return ((...args: Parameters<T>) => {
-    const redactedArgs = writeMainLog(level, args)
-    forwardMainLogToRenderer(level, redactedArgs)
-    fn(...(redactedArgs as Parameters<T>))
-  }) as T
-}
-
 if (!browserNativeMessagingHostLaunch) {
+  // Capture the original methods before installing wrappers. Fatal-process logging
+  // deliberately uses these sinks without renderer forwarding, so it cannot enter
+  // the same webContents.send -> console.error chain that raised the exception.
+  const rawConsole = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+    debug: console.debug.bind(console),
+    trace: console.trace.bind(console)
+  }
+  const logProcessingGuard = createSafeLogProcessingGuard()
+  const createMainConsoleMethod = (
+    level: string,
+    sink: (...args: unknown[]) => void
+  ): ((...args: unknown[]) => void) =>
+    createSafeLogMethod({
+      level,
+      persist: writeMainLog,
+      forward: forwardMainLogToRenderer,
+      sink,
+      processingGuard: logProcessingGuard
+    })
+
   // Native messaging reserves stdout exclusively for length-prefixed protocol frames.
-  console.log = withEpipeGuard(withMainFileLogging("INFO", console.log.bind(console)))
-  console.info = withEpipeGuard(withMainFileLogging("INFO", console.info.bind(console)))
-  console.warn = withEpipeGuard(withMainFileLogging("WARN", console.warn.bind(console)))
-  console.error = withEpipeGuard(withMainFileLogging("ERROR", console.error.bind(console)))
-  console.debug = withEpipeGuard(withMainFileLogging("DEBUG", console.debug.bind(console)))
-  console.trace = withEpipeGuard(withMainFileLogging("DEBUG", console.trace.bind(console)))
+  console.log = createMainConsoleMethod("INFO", rawConsole.log)
+  console.info = createMainConsoleMethod("INFO", rawConsole.info)
+  console.warn = createMainConsoleMethod("WARN", rawConsole.warn)
+  console.error = createMainConsoleMethod("ERROR", rawConsole.error)
+  console.debug = createMainConsoleMethod("DEBUG", rawConsole.debug)
+  console.trace = createMainConsoleMethod("DEBUG", rawConsole.trace)
+
+  const writeEmergencyError = createSafeLogMethod({
+    level: "ERROR",
+    persist: writeMainLog,
+    sink: rawConsole.error,
+    processingGuard: logProcessingGuard
+  })
+
+  const handleStdoutError = createSafeProcessErrorHandler({
+    prefix: "[Main] stdout error:",
+    write: writeEmergencyError
+  })
+  const handleUncaughtException = createSafeProcessErrorHandler({
+    prefix: "[Main] Uncaught exception:",
+    write: writeEmergencyError,
+    flush: flushLogsSync
+  })
 
   // Suppress EPIPE errors that occur when stdout/stderr pipe closes (e.g. during dev mode
   // or when the renderer window is destroyed while the main process is still logging).
-  process.stdout.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EPIPE") return
-    console.error("[Main] stdout error:", err)
-  })
-  process.stderr.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EPIPE") return
+  process.stdout.on("error", handleStdoutError)
+  process.stderr.on("error", (error: unknown) => {
+    if (isEpipeError(error)) return
     // Don't re-log to stderr here to avoid infinite loop
   })
-  process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EPIPE") return // silently ignore broken pipe
-    console.error("[Main] Uncaught exception:", err)
-    // Persist the buffered tail (incl. this error) in case the process dies next.
-    flushLogsSync()
-  })
+  process.on("uncaughtException", handleUncaughtException)
   process.on("unhandledRejection", (reason) => {
-    console.error("[Main] Unhandled rejection:", reason)
+    writeEmergencyError("[Main] Unhandled rejection:", reason)
   })
 
   // Signal-based termination (e.g. Ctrl+C in dev, or SIGTERM from a supervisor)
@@ -395,7 +463,6 @@ import {
 // installed after readiness, together with the IPC endpoints below.
 registerWorkspaceFilePreviewScheme()
 
-let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
 let browserService: ReturnType<typeof registerBuiltinBrowserIpc> | null = null
 let closeToTrayPromptOpen = false
@@ -647,6 +714,7 @@ function createWindow(): void {
   mainWindow.on("blur", showPendingAppAttention)
 
   mainWindow.on("unresponsive", () => {
+    mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] BrowserWindow became unresponsive")
   })
 
@@ -657,6 +725,15 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: "deny" }
+  })
+
+  // Every new top-level document must opt in again from its trusted main frame.
+  // This also closes the teardown race while a previously trusted frame reloads.
+  mainWindow.webContents.on("will-navigate", () => {
+    mainLogForwardingGate.disableForLifecycle()
+  })
+  mainWindow.webContents.once("destroyed", () => {
+    mainLogForwardingGate.disableForLifecycle()
   })
 
   // Electron does not provide an application context menu automatically.
@@ -704,10 +781,12 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.on("did-start-loading", () => {
+    mainLogForwardingGate.disableForLifecycle()
     clearCloseToTrayPromptState()
   })
 
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    mainLogForwardingGate.disableForLifecycle()
     clearCloseToTrayPromptState()
     disposeBrowserServiceForMainWindow(`the renderer process ended with ${details.reason}`)
     console.error("[Main] Renderer process gone:", details)
@@ -750,7 +829,10 @@ function createWindow(): void {
       trayAvailable,
       hasActiveForegroundRuns: hasActiveForegroundRuns()
     })
-    if (decision.action === "allow-close") return
+    if (decision.action === "allow-close") {
+      mainLogForwardingGate.disableForLifecycle()
+      return
+    }
 
     event.preventDefault()
     if (!mainWindow) return
@@ -764,6 +846,7 @@ function createWindow(): void {
   })
 
   mainWindow.on("closed", () => {
+    mainLogForwardingGate.disableForLifecycle()
     console.warn("[Main] Main window closed", {
       platform: process.platform,
       pet: getPetWindowDebugInfo()
@@ -1228,8 +1311,9 @@ if (browserNativeMessagingHostLaunch) {
       performAction()
     })
 
-    ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (_event, enabled: unknown) => {
-      mainLogForwardingEnabled = Boolean(enabled)
+    ipcMain.on(MAIN_LOG_TOGGLE_CHANNEL, (event, enabled: unknown) => {
+      if (typeof enabled !== "boolean" || !isTrustedMainLogToggleEvent(event, enabled)) return
+      mainLogForwardingGate.setFromTrustedRenderer(enabled)
     })
 
     // Track event handler for client-side telemetry
@@ -1299,6 +1383,7 @@ if (browserNativeMessagingHostLaunch) {
 
     ipcMain.handle("open-login-page", async () => {
       if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
+        mainLogForwardingGate.disableForLifecycle()
         mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
           "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
           "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
