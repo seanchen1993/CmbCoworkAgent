@@ -1,0 +1,716 @@
+- generic [ref=f1e2]:
+  - generic [ref=f1e3]:
+    - link "Skip to content" [ref=f1e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=f1e6]:
+      - heading "Navigation Menu" [level=2] [ref=f1e7]
+      - generic [ref=f1e8]:
+        - link "Homepage" [ref=f1e10] [cursor=pointer]:
+          - /url: /
+        - generic [ref=f1e13]:
+          - navigation "Global" [ref=f1e16]:
+            - list [ref=f1e17]:
+              - listitem [ref=f1e18]:
+                - button "Platform" [ref=f1e20] [cursor=pointer]
+              - listitem [ref=f1e23]:
+                - button "Solutions" [ref=f1e25] [cursor=pointer]
+              - listitem [ref=f1e28]:
+                - button "Resources" [ref=f1e30] [cursor=pointer]
+              - listitem [ref=f1e33]:
+                - button "Open Source" [ref=f1e35] [cursor=pointer]
+              - listitem [ref=f1e38]:
+                - button "Enterprise" [ref=f1e40] [cursor=pointer]
+              - listitem [ref=f1e43]:
+                - link "Pricing" [ref=f1e44] [cursor=pointer]:
+                  - /url: https://github.com/pricing
+          - generic [ref=f1e46]:
+            - button "Search or jump to…" [ref=f1e49] [cursor=pointer]
+            - link "Sign in" [ref=f1e54] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fseanchen1993%2FCmbCoworkAgent%2Factions%2Fworkflows%2Fbuild-electron.yml
+            - link "Sign up" [ref=f1e55] [cursor=pointer]:
+              - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E%2Factions%2Findex&source=header-repo&source_repo=seanchen1993%2FCmbCoworkAgent
+            - button "Appearance settings" [ref=f1e58] [cursor=pointer]
+  - main [ref=f1e62]:
+    - generic [ref=f1e63]:
+      - generic [ref=f1e64]:
+        - generic [ref=f1e65]:
+          - generic [ref=f1e66]:
+            - link "seanchen1993" [ref=f1e70] [cursor=pointer]:
+              - /url: /seanchen1993
+            - generic [ref=f1e71]: /
+            - strong [ref=f1e72]:
+              - link "CmbCoworkAgent" [ref=f1e73] [cursor=pointer]:
+                - /url: /seanchen1993/CmbCoworkAgent
+            - generic [ref=f1e74]: Public
+          - generic [ref=f1e75]:
+            - text: forked from
+            - link "langchain-ai/openwork" [ref=f1e76] [cursor=pointer]:
+              - /url: /langchain-ai/openwork
+        - generic [ref=f1e77]:
+          - list:
+            - listitem [ref=f1e78]:
+              - link "You must be signed in to change notification settings" [ref=f1e79] [cursor=pointer]:
+                - /url: /login?return_to=%2Fseanchen1993%2FCmbCoworkAgent
+                - text: Notifications
+            - listitem [ref=f1e82]:
+              - link "Fork 2" [ref=f1e83] [cursor=pointer]:
+                - /url: /login?return_to=%2Fseanchen1993%2FCmbCoworkAgent
+                - text: Fork
+                - generic "2" [ref=f1e86]
+            - listitem [ref=f1e87]:
+              - link "You must be signed in to star a repository" [ref=f1e89] [cursor=pointer]:
+                - /url: /login?return_to=%2Fseanchen1993%2FCmbCoworkAgent
+                - text: Star
+                - generic "6 users starred this repository" [ref=f1e92]: "6"
+      - navigation "Repository" [ref=f1e93]:
+        - list [ref=f1e94]:
+          - listitem [ref=f1e95]:
+            - link "Code" [ref=f1e96] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent
+          - listitem [ref=f1e100]:
+            - link "Pull requests" [ref=f1e101] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/pulls
+          - listitem [ref=f1e105]:
+            - link "Actions" [ref=f1e106] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions
+          - listitem [ref=f1e110]:
+            - link "Projects" [ref=f1e111] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/projects
+          - listitem [ref=f1e115]:
+            - link "Security and quality" [ref=f1e116] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/security
+          - listitem [ref=f1e120]:
+            - link "Insights" [ref=f1e121] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/pulse
+    - generic [ref=f1e126]:
+      - 'heading "Actions: seanchen1993/CmbCoworkAgent" [level=1] [ref=f1e127]'
+      - generic [ref=f1e130]:
+        - generic [ref=f1e131]:
+          - heading "Actions" [level=2] [ref=f1e133]
+          - navigation "Actions Workflows" [ref=f1e137]:
+            - list [ref=f1e139]:
+              - listitem [ref=f1e140]:
+                - link "All workflows" [ref=f1e141] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/actions
+              - listitem [ref=f1e143]
+              - listitem [ref=f1e144]:
+                - list "Workflows" [ref=f1e148]:
+                  - listitem [ref=f1e149]:
+                    - link "Build Electron App" [ref=f1e150] [cursor=pointer]:
+                      - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml
+                      - generic:
+                        - img "pinned"
+                  - listitem [ref=f1e152]:
+                    - link "Build Electron Win Node Modules" [ref=f1e153] [cursor=pointer]:
+                      - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron-win-node-modules.yml
+                      - generic: Disabled
+                  - listitem [ref=f1e155]:
+                    - link "CI" [ref=f1e156] [cursor=pointer]:
+                      - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/ci.yml
+                      - generic: Disabled
+                  - listitem [ref=f1e158]:
+                    - link "Release" [ref=f1e159] [cursor=pointer]:
+                      - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/release.yml
+                      - generic: Disabled
+              - listitem [ref=f1e161]
+              - listitem [ref=f1e162]:
+                - generic [ref=f1e165]:
+                  - heading "Management" [level=3] [ref=f1e167]
+                  - list "Management" [ref=f1e168]:
+                    - listitem [ref=f1e169]:
+                      - link "Caches" [ref=f1e170] [cursor=pointer]:
+                        - /url: /seanchen1993/CmbCoworkAgent/actions/caches
+        - generic [ref=f1e174]:
+          - generic [ref=f1e175]:
+            - generic [ref=f1e176]:
+              - heading "Build Electron App" [level=2] [ref=f1e178]
+              - generic [ref=f1e181]:
+                - search [ref=f1e184]:
+                  - combobox "Filter workflow runs" [ref=f1e185]
+                - button "Show workflow options" [ref=f1e188] [cursor=pointer]
+            - link "build-electron.yml" [ref=f1e190] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/blob/main/.github/workflows/build-electron.yml
+          - generic [ref=f1e191]:
+            - generic [ref=f1e192]:
+              - strong [ref=f1e195]: 593 workflow runs
+              - generic [ref=f1e196]:
+                - button "Event" [ref=f1e200] [cursor=pointer]
+                - button "Status" [ref=f1e206] [cursor=pointer]
+                - button "Branch" [ref=f1e212] [cursor=pointer]
+                - button "Actor" [ref=f1e218] [cursor=pointer]
+            - generic [ref=f1e221]:
+              - generic [ref=f1e223]:
+                - generic [ref=f1e224]:
+                  - 'link "completed successfully: Run 594 of Build Electron App." [ref=f1e225] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29971504389
+                    - img "completed successfully:" [ref=f1e227]
+                    - generic [ref=f1e229]: Build Electron App
+                  - generic [ref=f1e230]:
+                    - text: "Build Electron App #594:"
+                    - generic [ref=f1e231]:
+                      - text: Manually run by
+                      - link "w876249494" [ref=f1e232] [cursor=pointer]:
+                        - /url: /w876249494
+                - link "codex/checkpoint-fork" [ref=f1e234] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/checkpoint-fork
+                - generic [ref=f1e236]:
+                  - generic [ref=f1e237]:
+                    - generic "Jul 23, 2026, 09:19 GMT+8" [ref=f1e242]: Today at 09:19
+                    - generic [ref=f1e243]:
+                      - img "Run duration" [ref=f1e244]
+                      - text: 8m 13s
+                  - group [ref=f1e247]:
+                    - img "Show options" [ref=f1e249] [cursor=pointer]
+              - generic [ref=f1e252]:
+                - generic [ref=f1e253]:
+                  - 'link "completed successfully: Run 593 of Build Electron App." [ref=f1e254] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29902541113
+                    - img "completed successfully:" [ref=f1e256]
+                    - generic [ref=f1e258]: Build Electron App
+                  - generic [ref=f1e259]:
+                    - text: "Build Electron App #593:"
+                    - generic [ref=f1e260]:
+                      - text: Manually run by
+                      - link "MolisXYliu" [ref=f1e261] [cursor=pointer]:
+                        - /url: /MolisXYliu
+                - link "UAT" [ref=f1e263] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/UAT
+                - generic [ref=f1e265]:
+                  - generic [ref=f1e266]:
+                    - generic "Jul 22, 2026, 16:04 GMT+8" [ref=f1e271]: Jul 22, 16:04 GMT+8
+                    - generic [ref=f1e272]:
+                      - img "Run duration" [ref=f1e273]
+                      - text: 9m 10s
+                  - group [ref=f1e276]:
+                    - img "Show options" [ref=f1e278] [cursor=pointer]
+              - generic [ref=f1e281]:
+                - generic [ref=f1e282]:
+                  - 'link "completed successfully: Run 592 of Build Electron App." [ref=f1e283] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29898485639
+                    - img "completed successfully:" [ref=f1e285]
+                    - generic [ref=f1e287]: Build Electron App
+                  - generic [ref=f1e288]:
+                    - text: "Build Electron App #592:"
+                    - generic [ref=f1e289]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e290] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser-extention" [ref=f1e292] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser-extention
+                - generic [ref=f1e294]:
+                  - generic [ref=f1e295]:
+                    - generic "Jul 22, 2026, 14:57 GMT+8" [ref=f1e300]: Jul 22, 14:57 GMT+8
+                    - generic [ref=f1e301]:
+                      - img "Run duration" [ref=f1e302]
+                      - text: 8m 31s
+                  - group [ref=f1e305]:
+                    - img "Show options" [ref=f1e307] [cursor=pointer]
+              - generic [ref=f1e310]:
+                - generic [ref=f1e311]:
+                  - 'link "completed successfully: Run 591 of Build Electron App." [ref=f1e312] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29889917253
+                    - img "completed successfully:" [ref=f1e314]
+                    - generic [ref=f1e316]: Build Electron App
+                  - generic [ref=f1e317]:
+                    - text: "Build Electron App #591:"
+                    - generic [ref=f1e318]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e319] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser-extention" [ref=f1e321] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser-extention
+                - generic [ref=f1e323]:
+                  - generic [ref=f1e324]:
+                    - generic "Jul 22, 2026, 12:00 GMT+8" [ref=f1e329]: Jul 22, 12:00 GMT+8
+                    - generic [ref=f1e330]:
+                      - img "Run duration" [ref=f1e331]
+                      - text: 8m 7s
+                  - group [ref=f1e334]:
+                    - img "Show options" [ref=f1e336] [cursor=pointer]
+              - generic [ref=f1e339]:
+                - generic [ref=f1e340]:
+                  - 'link "completed successfully: Run 590 of Build Electron App." [ref=f1e341] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29888741533
+                    - img "completed successfully:" [ref=f1e343]
+                    - generic [ref=f1e345]: Build Electron App
+                  - generic [ref=f1e346]:
+                    - text: "Build Electron App #590:"
+                    - generic [ref=f1e347]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e348] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser-extention" [ref=f1e350] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser-extention
+                - generic [ref=f1e352]:
+                  - generic [ref=f1e353]:
+                    - generic "Jul 22, 2026, 11:33 GMT+8" [ref=f1e358]: Jul 22, 11:33 GMT+8
+                    - generic [ref=f1e359]:
+                      - img "Run duration" [ref=f1e360]
+                      - text: 7m 59s
+                  - group [ref=f1e363]:
+                    - img "Show options" [ref=f1e365] [cursor=pointer]
+              - generic [ref=f1e368]:
+                - generic [ref=f1e369]:
+                  - 'link "completed successfully: Run 589 of Build Electron App." [ref=f1e370] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29886196023
+                    - img "completed successfully:" [ref=f1e372]
+                    - generic [ref=f1e374]: Build Electron App
+                  - generic [ref=f1e375]:
+                    - text: "Build Electron App #589:"
+                    - generic [ref=f1e376]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e377] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "feature/board_2607" [ref=f1e379] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/board_2607
+                - generic [ref=f1e381]:
+                  - generic [ref=f1e382]:
+                    - generic "Jul 22, 2026, 10:34 GMT+8" [ref=f1e387]: Jul 22, 10:34 GMT+8
+                    - generic [ref=f1e388]:
+                      - img "Run duration" [ref=f1e389]
+                      - text: 8m 25s
+                  - group [ref=f1e392]:
+                    - img "Show options" [ref=f1e394] [cursor=pointer]
+              - generic [ref=f1e397]:
+                - generic [ref=f1e398]:
+                  - 'link "completed successfully: Run 588 of Build Electron App." [ref=f1e399] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29886184853
+                    - img "completed successfully:" [ref=f1e401]
+                    - generic [ref=f1e403]: Build Electron App
+                  - generic [ref=f1e404]:
+                    - text: "Build Electron App #588:"
+                    - generic [ref=f1e405]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e406] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser-extention" [ref=f1e408] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser-extention
+                - generic [ref=f1e410]:
+                  - generic [ref=f1e411]:
+                    - generic "Jul 22, 2026, 10:34 GMT+8" [ref=f1e416]: Jul 22, 10:34 GMT+8
+                    - generic [ref=f1e417]:
+                      - img "Run duration" [ref=f1e418]
+                      - text: 7m 57s
+                  - group [ref=f1e421]:
+                    - img "Show options" [ref=f1e423] [cursor=pointer]
+              - generic [ref=f1e426]:
+                - generic [ref=f1e427]:
+                  - 'link "completed successfully: Run 587 of Build Electron App." [ref=f1e428] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29881294497
+                    - img "completed successfully:" [ref=f1e430]
+                    - generic [ref=f1e432]: Build Electron App
+                  - generic [ref=f1e433]:
+                    - text: "Build Electron App #587:"
+                    - generic [ref=f1e434]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e435] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser" [ref=f1e437] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser
+                - generic [ref=f1e439]:
+                  - generic [ref=f1e440]:
+                    - generic "Jul 22, 2026, 08:48 GMT+8" [ref=f1e445]: Jul 22, 08:48 GMT+8
+                    - generic [ref=f1e446]:
+                      - img "Run duration" [ref=f1e447]
+                      - text: 8m 19s
+                  - group [ref=f1e450]:
+                    - img "Show options" [ref=f1e452] [cursor=pointer]
+              - generic [ref=f1e455]:
+                - generic [ref=f1e456]:
+                  - 'link "completed successfully: Run 586 of Build Electron App." [ref=f1e457] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29828295838
+                    - img "completed successfully:" [ref=f1e459]
+                    - generic [ref=f1e461]: Build Electron App
+                  - generic [ref=f1e462]:
+                    - text: "Build Electron App #586:"
+                    - generic [ref=f1e463]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e464] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "feature/board_2607" [ref=f1e466] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/board_2607
+                - generic [ref=f1e468]:
+                  - generic [ref=f1e469]:
+                    - generic "Jul 21, 2026, 19:59 GMT+8" [ref=f1e474]: Jul 21, 19:59 GMT+8
+                    - generic [ref=f1e475]:
+                      - img "Run duration" [ref=f1e476]
+                      - text: 8m 20s
+                  - group [ref=f1e479]:
+                    - img "Show options" [ref=f1e481] [cursor=pointer]
+              - generic [ref=f1e484]:
+                - generic [ref=f1e485]:
+                  - 'link "completed successfully: Run 585 of Build Electron App." [ref=f1e486] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29825196239
+                    - img "completed successfully:" [ref=f1e488]
+                    - generic [ref=f1e490]: Build Electron App
+                  - generic [ref=f1e491]:
+                    - text: "Build Electron App #585:"
+                    - generic [ref=f1e492]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e493] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser" [ref=f1e495] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser
+                - generic [ref=f1e497]:
+                  - generic [ref=f1e498]:
+                    - generic "Jul 21, 2026, 19:12 GMT+8" [ref=f1e503]: Jul 21, 19:12 GMT+8
+                    - generic [ref=f1e504]:
+                      - img "Run duration" [ref=f1e505]
+                      - text: 8m 28s
+                  - group [ref=f1e508]:
+                    - img "Show options" [ref=f1e510] [cursor=pointer]
+              - generic [ref=f1e513]:
+                - generic [ref=f1e514]:
+                  - 'link "completed successfully: Run 584 of Build Electron App." [ref=f1e515] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29818269932
+                    - img "completed successfully:" [ref=f1e517]
+                    - generic [ref=f1e519]: Build Electron App
+                  - generic [ref=f1e520]:
+                    - text: "Build Electron App #584:"
+                    - generic [ref=f1e521]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e522] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser" [ref=f1e524] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser
+                - generic [ref=f1e526]:
+                  - generic [ref=f1e527]:
+                    - generic "Jul 21, 2026, 17:26 GMT+8" [ref=f1e532]: Jul 21, 17:26 GMT+8
+                    - generic [ref=f1e533]:
+                      - img "Run duration" [ref=f1e534]
+                      - text: 8m 47s
+                  - group [ref=f1e537]:
+                    - img "Show options" [ref=f1e539] [cursor=pointer]
+              - generic [ref=f1e542]:
+                - generic [ref=f1e543]:
+                  - 'link "completed successfully: Run 583 of Build Electron App." [ref=f1e544] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29817033116
+                    - img "completed successfully:" [ref=f1e546]
+                    - generic [ref=f1e548]: Build Electron App
+                  - generic [ref=f1e549]:
+                    - text: "Build Electron App #583:"
+                    - generic [ref=f1e550]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e551] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser" [ref=f1e553] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser
+                - generic [ref=f1e555]:
+                  - generic [ref=f1e556]:
+                    - generic "Jul 21, 2026, 17:08 GMT+8" [ref=f1e561]: Jul 21, 17:08 GMT+8
+                    - generic [ref=f1e562]:
+                      - img "Run duration" [ref=f1e563]
+                      - text: 7m 54s
+                  - group [ref=f1e566]:
+                    - img "Show options" [ref=f1e568] [cursor=pointer]
+              - generic [ref=f1e571]:
+                - generic [ref=f1e572]:
+                  - 'link "completed successfully: Run 582 of Build Electron App." [ref=f1e573] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29810499999
+                    - img "completed successfully:" [ref=f1e575]
+                    - generic [ref=f1e577]: Build Electron App
+                  - generic [ref=f1e578]:
+                    - text: "Build Electron App #582:"
+                    - generic [ref=f1e579]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e580] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "feature/board_2607" [ref=f1e582] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/board_2607
+                - generic [ref=f1e584]:
+                  - generic [ref=f1e585]:
+                    - generic "Jul 21, 2026, 15:27 GMT+8" [ref=f1e590]: Jul 21, 15:27 GMT+8
+                    - generic [ref=f1e591]:
+                      - img "Run duration" [ref=f1e592]
+                      - text: 7m 45s
+                  - group [ref=f1e595]:
+                    - img "Show options" [ref=f1e597] [cursor=pointer]
+              - generic [ref=f1e600]:
+                - generic [ref=f1e601]:
+                  - 'link "completed successfully: Run 581 of Build Electron App." [ref=f1e602] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29808365905
+                    - img "completed successfully:" [ref=f1e604]
+                    - generic [ref=f1e606]: Build Electron App
+                  - generic [ref=f1e607]:
+                    - text: "Build Electron App #581:"
+                    - generic [ref=f1e608]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e609] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "feature/board_2607" [ref=f1e611] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/board_2607
+                - generic [ref=f1e613]:
+                  - generic [ref=f1e614]:
+                    - generic "Jul 21, 2026, 14:51 GMT+8" [ref=f1e619]: Jul 21, 14:51 GMT+8
+                    - generic [ref=f1e620]:
+                      - img "Run duration" [ref=f1e621]
+                      - text: 7m 46s
+                  - group [ref=f1e624]:
+                    - img "Show options" [ref=f1e626] [cursor=pointer]
+              - generic [ref=f1e629]:
+                - generic [ref=f1e630]:
+                  - 'link "completed successfully: Run 580 of Build Electron App." [ref=f1e631] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29806945881
+                    - img "completed successfully:" [ref=f1e633]
+                    - generic [ref=f1e635]: Build Electron App
+                  - generic [ref=f1e636]:
+                    - text: "Build Electron App #580:"
+                    - generic [ref=f1e637]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e638] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "feature/board_2607" [ref=f1e640] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/board_2607
+                - generic [ref=f1e642]:
+                  - generic [ref=f1e643]:
+                    - generic "Jul 21, 2026, 14:24 GMT+8" [ref=f1e648]: Jul 21, 14:24 GMT+8
+                    - generic [ref=f1e649]:
+                      - img "Run duration" [ref=f1e650]
+                      - text: 6m 56s
+                  - group [ref=f1e653]:
+                    - img "Show options" [ref=f1e655] [cursor=pointer]
+              - generic [ref=f1e658]:
+                - generic [ref=f1e659]:
+                  - 'link "completed successfully: Run 579 of Build Electron App." [ref=f1e660] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29805721276
+                    - img "completed successfully:" [ref=f1e662]
+                    - generic [ref=f1e664]: Build Electron App
+                  - generic [ref=f1e665]:
+                    - text: "Build Electron App #579:"
+                    - generic [ref=f1e666]:
+                      - text: Manually run by
+                      - link "seanchen1993" [ref=f1e667] [cursor=pointer]:
+                        - /url: /seanchen1993
+                - link "feature/cmbdevclaw-security-test" [ref=f1e669] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/cmbdevclaw-security-test
+                - generic [ref=f1e671]:
+                  - generic [ref=f1e672]:
+                    - generic "Jul 21, 2026, 14:01 GMT+8" [ref=f1e677]: Jul 21, 14:01 GMT+8
+                    - generic [ref=f1e678]:
+                      - img "Run duration" [ref=f1e679]
+                      - text: 8m 7s
+                  - group [ref=f1e682]:
+                    - img "Show options" [ref=f1e684] [cursor=pointer]
+              - generic [ref=f1e687]:
+                - generic [ref=f1e688]:
+                  - 'link "completed successfully: Run 578 of Build Electron App." [ref=f1e689] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29798308367
+                    - img "completed successfully:" [ref=f1e691]
+                    - generic [ref=f1e693]: Build Electron App
+                  - generic [ref=f1e694]:
+                    - text: "Build Electron App #578:"
+                    - generic [ref=f1e695]:
+                      - text: Manually run by
+                      - link "rayon177" [ref=f1e696] [cursor=pointer]:
+                        - /url: /rayon177
+                - link "UAT" [ref=f1e698] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/UAT
+                - generic [ref=f1e700]:
+                  - generic [ref=f1e701]:
+                    - generic "Jul 21, 2026, 11:21 GMT+8" [ref=f1e706]: Jul 21, 11:21 GMT+8
+                    - generic [ref=f1e707]:
+                      - img "Run duration" [ref=f1e708]
+                      - text: 8m 20s
+                  - group [ref=f1e711]:
+                    - img "Show options" [ref=f1e713] [cursor=pointer]
+              - generic [ref=f1e716]:
+                - generic [ref=f1e717]:
+                  - 'link "completed successfully: Run 577 of Build Electron App." [ref=f1e718] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29797586160
+                    - img "completed successfully:" [ref=f1e720]
+                    - generic [ref=f1e722]: Build Electron App
+                  - generic [ref=f1e723]:
+                    - text: "Build Electron App #577:"
+                    - generic [ref=f1e724]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e725] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "codex/recover-in-app-browser" [ref=f1e727] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/codex/recover-in-app-browser
+                - generic [ref=f1e729]:
+                  - generic [ref=f1e730]:
+                    - generic "Jul 21, 2026, 11:05 GMT+8" [ref=f1e735]: Jul 21, 11:05 GMT+8
+                    - generic [ref=f1e736]:
+                      - img "Run duration" [ref=f1e737]
+                      - text: 8m 25s
+                  - group [ref=f1e740]:
+                    - img "Show options" [ref=f1e742] [cursor=pointer]
+              - generic [ref=f1e745]:
+                - generic [ref=f1e746]:
+                  - 'link "completed successfully: Run 576 of Build Electron App." [ref=f1e747] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29794656310
+                    - img "completed successfully:" [ref=f1e749]
+                    - generic [ref=f1e751]: Build Electron App
+                  - generic [ref=f1e752]:
+                    - text: "Build Electron App #576:"
+                    - generic [ref=f1e753]:
+                      - text: Manually run by
+                      - link "fluctlux" [ref=f1e754] [cursor=pointer]:
+                        - /url: /fluctlux
+                - link "feature/style4" [ref=f1e756] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/style4
+                - generic [ref=f1e758]:
+                  - generic [ref=f1e759]:
+                    - generic "Jul 21, 2026, 10:00 GMT+8" [ref=f1e764]: Jul 21, 10:00 GMT+8
+                    - generic [ref=f1e765]:
+                      - img "Run duration" [ref=f1e766]
+                      - text: 9m 49s
+                  - group [ref=f1e769]:
+                    - img "Show options" [ref=f1e771] [cursor=pointer]
+              - generic [ref=f1e774]:
+                - generic [ref=f1e775]:
+                  - 'link "completed successfully: Run 575 of Build Electron App." [ref=f1e776] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29791001219
+                    - img "completed successfully:" [ref=f1e778]
+                    - generic [ref=f1e780]: Build Electron App
+                  - generic [ref=f1e781]:
+                    - text: "Build Electron App #575:"
+                    - generic [ref=f1e782]:
+                      - text: Manually run by
+                      - link "rayon177" [ref=f1e783] [cursor=pointer]:
+                        - /url: /rayon177
+                - link "claude/adoption-unadopted-details-760669" [ref=f1e785] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/claude/adoption-unadopted-details-760669
+                - generic [ref=f1e787]:
+                  - generic [ref=f1e788]:
+                    - generic "Jul 21, 2026, 08:41 GMT+8" [ref=f1e793]: Jul 21, 08:41 GMT+8
+                    - generic [ref=f1e794]:
+                      - img "Run duration" [ref=f1e795]
+                      - text: 8m 44s
+                  - group [ref=f1e798]:
+                    - img "Show options" [ref=f1e800] [cursor=pointer]
+              - generic [ref=f1e803]:
+                - generic [ref=f1e804]:
+                  - 'link "completed successfully: Run 574 of Build Electron App." [ref=f1e805] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29736906054
+                    - img "completed successfully:" [ref=f1e807]
+                    - generic [ref=f1e809]: Build Electron App
+                  - generic [ref=f1e810]:
+                    - text: "Build Electron App #574:"
+                    - generic [ref=f1e811]:
+                      - text: Manually run by
+                      - link "rayon177" [ref=f1e812] [cursor=pointer]:
+                        - /url: /rayon177
+                - link "claude/adoption-unadopted-details-760669" [ref=f1e814] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/claude/adoption-unadopted-details-760669
+                - generic [ref=f1e816]:
+                  - generic [ref=f1e817]:
+                    - generic "Jul 20, 2026, 18:58 GMT+8" [ref=f1e822]: Jul 20, 18:58 GMT+8
+                    - generic [ref=f1e823]:
+                      - img "Run duration" [ref=f1e824]
+                      - text: 8m 34s
+                  - group [ref=f1e827]:
+                    - img "Show options" [ref=f1e829] [cursor=pointer]
+              - generic [ref=f1e832]:
+                - generic [ref=f1e833]:
+                  - 'link "completed successfully: Run 573 of Build Electron App." [ref=f1e834] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29724874386
+                    - img "completed successfully:" [ref=f1e836]
+                    - generic [ref=f1e838]: Build Electron App
+                  - generic [ref=f1e839]:
+                    - text: "Build Electron App #573:"
+                    - generic [ref=f1e840]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e841] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "feature/style4" [ref=f1e843] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/feature/style4
+                - generic [ref=f1e845]:
+                  - generic [ref=f1e846]:
+                    - generic "Jul 20, 2026, 15:31 GMT+8" [ref=f1e851]: Jul 20, 15:31 GMT+8
+                    - generic [ref=f1e852]:
+                      - img "Run duration" [ref=f1e853]
+                      - text: 8m 0s
+                  - group [ref=f1e856]:
+                    - img "Show options" [ref=f1e858] [cursor=pointer]
+              - generic [ref=f1e861]:
+                - generic [ref=f1e862]:
+                  - 'link "completed successfully: Run 572 of Build Electron App." [ref=f1e863] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29724865656
+                    - img "completed successfully:" [ref=f1e865]
+                    - generic [ref=f1e867]: Build Electron App
+                  - generic [ref=f1e868]:
+                    - text: "Build Electron App #572:"
+                    - generic [ref=f1e869]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e870] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "UAT_qyang" [ref=f1e872] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/UAT_qyang
+                - generic [ref=f1e874]:
+                  - generic [ref=f1e875]:
+                    - generic "Jul 20, 2026, 15:31 GMT+8" [ref=f1e880]: Jul 20, 15:31 GMT+8
+                    - generic [ref=f1e881]:
+                      - img "Run duration" [ref=f1e882]
+                      - text: 8m 1s
+                  - group [ref=f1e885]:
+                    - img "Show options" [ref=f1e887] [cursor=pointer]
+              - generic [ref=f1e890]:
+                - generic [ref=f1e891]:
+                  - 'link "completed successfully: Run 571 of Build Electron App." [ref=f1e892] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29720552291
+                    - img "completed successfully:" [ref=f1e894]
+                    - generic [ref=f1e896]: Build Electron App
+                  - generic [ref=f1e897]:
+                    - text: "Build Electron App #571:"
+                    - generic [ref=f1e898]:
+                      - text: Manually run by
+                      - link "qyang7" [ref=f1e899] [cursor=pointer]:
+                        - /url: /qyang7
+                - link "UAT_qyang" [ref=f1e901] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/UAT_qyang
+                - generic [ref=f1e903]:
+                  - generic [ref=f1e904]:
+                    - generic "Jul 20, 2026, 14:02 GMT+8" [ref=f1e909]: Jul 20, 14:02 GMT+8
+                    - generic [ref=f1e910]:
+                      - img "Run duration" [ref=f1e911]
+                      - text: 8m 32s
+                  - group [ref=f1e914]:
+                    - img "Show options" [ref=f1e916] [cursor=pointer]
+              - generic [ref=f1e919]:
+                - generic [ref=f1e920]:
+                  - 'link "completed successfully: Run 570 of Build Electron App." [ref=f1e921] [cursor=pointer]':
+                    - /url: /seanchen1993/CmbCoworkAgent/actions/runs/29713849298
+                    - img "completed successfully:" [ref=f1e923]
+                    - generic [ref=f1e925]: Build Electron App
+                  - generic [ref=f1e926]:
+                    - text: "Build Electron App #570:"
+                    - generic [ref=f1e927]:
+                      - text: Manually run by
+                      - link "rayon177" [ref=f1e928] [cursor=pointer]:
+                        - /url: /rayon177
+                - link "claude/adoption-unadopted-details-760669" [ref=f1e930] [cursor=pointer]:
+                  - /url: /seanchen1993/CmbCoworkAgent/tree/refs/heads/claude/adoption-unadopted-details-760669
+                - generic [ref=f1e932]:
+                  - generic [ref=f1e933]:
+                    - generic "Jul 20, 2026, 11:05 GMT+8" [ref=f1e938]: Jul 20, 11:05 GMT+8
+                    - generic [ref=f1e939]:
+                      - img "Run duration" [ref=f1e940]
+                      - text: 7m 44s
+                  - group [ref=f1e943]:
+                    - img "Show options" [ref=f1e945] [cursor=pointer]
+          - navigation "Pagination" [ref=f1e949]:
+            - generic "Previous page" [ref=f1e950]: Previous
+            - emphasis [ref=f1e951] [cursor=pointer]: "1"
+            - link "Page 2" [ref=f1e952] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml?page=2
+              - text: "2"
+            - link "Page 3" [ref=f1e953] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml?page=3
+              - text: "3"
+            - link "Page 4" [ref=f1e954] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml?page=4
+              - text: "4"
+            - link "Page 5" [ref=f1e955] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml?page=5
+              - text: "5"
+            - generic [ref=f1e956]: …
+            - link "Page 23" [ref=f1e957] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml?page=23
+              - text: "23"
+            - link "Page 24" [ref=f1e958] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml?page=24
+              - text: "24"
+            - link "Next page" [ref=f1e959] [cursor=pointer]:
+              - /url: /seanchen1993/CmbCoworkAgent/actions/workflows/build-electron.yml?page=2
+              - text: Next

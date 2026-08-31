@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>CmbCoworkAgent</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="popup-shell">
+      <section class="hero">
+        <p class="hero__badge">CHROME EXTENSION</p>
+        <h1>Windows 连接 CmbDevClaw</h1>
+        <p class="hero__description">
+          授权当前 Chrome Profile 的 Cookie 给桌面应用导入使用。
+        </p>
+      </section>
+
+      <section id="status-card" class="status-card" data-tone="loading">
+        <p class="status-card__eyebrow">连接状态</p>
+        <p id="status" class="status-card__title">正在连接桌面应用...</p>
+        <p id="result" class="status-card__detail" role="status">
+          正在检查桌面应用与 Native Host 是否就绪。
+        </p>
+      </section>
+
+      <div class="actions">
+        <button id="reconnect" type="button" class="secondary" hidden>重新连接</button>
+        <button id="authorize" type="button">授权读取网站 Cookie</button>
+      </div>
+
+      <section class="tips">
+        <p class="tips__title">使用提示</p>
+        <ul class="tips__list">
+          <li>首次使用前，请先启动桌面应用。</li>
+          <li>完成授权后，可以直接回到 CmbDevClaw 继续导入。</li>
+        </ul>
+      </section>
+
+      <p class="support-note">如有问题，请联系开发：杨琪/80293078</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

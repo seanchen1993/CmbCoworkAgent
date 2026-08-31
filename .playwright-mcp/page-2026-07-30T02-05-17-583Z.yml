@@ -1,0 +1,46 @@
+- generic [ref=e5]:
+  - button "🇨🇳" [ref=e8] [cursor=pointer]
+  - link "Link API" [ref=e12] [cursor=pointer]:
+    - /url: /home
+    - generic [ref=e13]:
+      - img "Link API logo" [ref=e15]
+      - strong [ref=e17]: Link API
+  - generic [ref=e19]:
+    - generic [ref=e20]:
+      - heading "欢迎回来" [level=2] [ref=e21]
+      - paragraph [ref=e22]: 登录您的账户以继续
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - generic [ref=e25]: 邮箱
+        - textbox "邮箱" [ref=e27]:
+          - /placeholder: 请输入邮箱
+      - generic [ref=e28]:
+        - generic [ref=e29]: 密码
+        - generic [ref=e30]:
+          - textbox "密码" [ref=e31]:
+            - /placeholder: 请输入密码
+          - button [ref=e32] [cursor=pointer]
+      - button "登录" [ref=e35] [cursor=pointer]
+      - generic [ref=e39]:
+        - checkbox "我已阅读并同意" [checked] [active] [ref=e40]
+        - paragraph [ref=e42]:
+          - text: 我已阅读并同意
+          - link "服务条款" [ref=e43] [cursor=pointer]:
+            - /url: /legal/terms
+          - text: 、
+          - link "使用政策" [ref=e44] [cursor=pointer]:
+            - /url: /legal/usage-policy
+          - text: 、
+          - link "支持的国家和地区" [ref=e45] [cursor=pointer]:
+            - /url: /legal/supported-regions
+          - text: 、
+          - link "服务特定条款" [ref=e46] [cursor=pointer]:
+            - /url: /legal/service-specific-terms
+  - generic [ref=e48]:
+    - link "返回首页" [ref=e49] [cursor=pointer]:
+      - /url: /home
+    - generic [ref=e50]:
+      - text: 还没有账户？
+      - link "注册" [ref=e51] [cursor=pointer]:
+        - /url: /register
+  - paragraph [ref=e52]: © 2026 Link API. 保留所有权利。

@@ -1,0 +1,53 @@
+- generic [ref=f1e2]:
+  - link "Skip to content" [ref=f1e3] [cursor=pointer]:
+    - /url: "#start-of-content"
+  - main [ref=f1e7]:
+    - generic [ref=f1e10]:
+      - complementary "Copilot navigation":
+        - generic: New chat
+        - generic: Agents
+        - generic: Spaces
+        - generic: Spark
+        - generic: Preview
+      - generic [ref=f1e11]:
+        - button "Toggle sidebar" [ref=f1e13] [cursor=pointer]
+        - generic [ref=f1e16]:
+          - generic [ref=f1e17]:
+            - button "New chat" [ref=f1e19] [cursor=pointer]
+            - navigation "Breadcrumbs" [ref=f1e23]:
+              - list [ref=f1e24]:
+                - listitem [ref=f1e25]:
+                  - button "New chat" [ref=f1e26] [cursor=pointer]
+          - button "Open workbench" [ref=f1e32] [cursor=pointer]
+      - generic [ref=f1e37]:
+        - generic [ref=f1e39]:
+          - button "Scroll to bottom"
+          - generic [ref=f1e41]:
+            - generic [ref=f1e42]:
+              - heading "Copilot Chat" [level=1] [ref=f1e43]
+              - heading "New chat" [level=2] [ref=f1e44]
+            - generic [ref=f1e45]:
+              - generic [ref=f1e47]:
+                - generic [ref=f1e48]:
+                  - 'heading "You said: Help me find the root cause of" [level=3] [ref=f1e49]'
+                  - generic [ref=f1e50]: "Help me find the root cause of this error: [paste error here]"
+                - toolbar "Message tools" [ref=f1e51]:
+                  - button "Edit message (up arrow)" [ref=f1e52] [cursor=pointer]
+              - generic [ref=f1e55]:
+                - img "Copilot badge" [ref=f1e56]
+                - generic [ref=f1e61]: Thinking...
+        - generic [ref=f1e71]:
+          - status [ref=f1e72]
+          - textbox "Copilot is responding…" [ref=f1e75]
+          - generic [ref=f1e76]:
+            - button "Ask" [ref=f1e79] [cursor=pointer]
+            - generic [ref=f1e82]:
+              - button "Select repositories to attach to conversation" [ref=f1e83] [cursor=pointer]
+              - button "Add files, and spaces" [ref=f1e86] [cursor=pointer]
+            - generic [ref=f1e89]:
+              - 'button "Model: Auto" [disabled] [ref=f1e91]':
+                - generic [ref=f1e93]:
+                  - generic [ref=f1e94]: "Model:"
+                  - generic [ref=f1e95]: Auto
+              - button "View token usage" [ref=f1e96] [cursor=pointer]
+              - button "Cancel (escape)" [ref=f1e100] [cursor=pointer]

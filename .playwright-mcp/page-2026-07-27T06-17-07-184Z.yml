@@ -1,0 +1,122 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner "Global navigation menu" [ref=e8]:
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - button "Open menu" [ref=e12] [cursor=pointer]
+          - link "Homepage (g then d)" [ref=e15] [cursor=pointer]:
+            - /url: /
+        - generic [ref=e18]:
+          - navigation "Breadcrumbs" [ref=e19]:
+            - list [ref=e20]:
+              - listitem [ref=e21]:
+                - link "Dashboard" [ref=e22] [cursor=pointer]:
+                  - /url: https://github.com/
+          - button "Search or jump to… (forward slash)" [ref=e24] [cursor=pointer]
+        - generic [ref=e27]:
+          - link "You have unread notifications (g then n)" [ref=e28] [cursor=pointer]:
+            - /url: /notifications
+          - button "Open user navigation menu" [ref=e32] [cursor=pointer]:
+            - img "User avatar" [ref=e33]
+  - generic [ref=e38]:
+    - generic [ref=e40]:
+      - main [ref=e42]:
+        - generic [ref=e44]:
+          - heading "Dashboard" [level=1] [ref=e45]
+          - generic [ref=e46]:
+            - generic [ref=e50]:
+              - generic [ref=e52]:
+                - heading "Good afternoon, qyang7!" [level=2] [ref=e54]
+                - generic [ref=e55]:
+                  - generic [ref=e56]: Preview
+                  - generic [ref=e58]:
+                    - text: ·
+                    - button "Give feedback" [ref=e59] [cursor=pointer]
+              - generic [ref=e63]:
+                - status [ref=e64]
+                - textbox "Ask anything or type @ to add context" [ref=e67]
+                - generic [ref=e68]:
+                  - button "Ask" [ref=e71] [cursor=pointer]
+                  - generic [ref=e74]:
+                    - button "Select repositories to attach to conversation" [ref=e75] [cursor=pointer]
+                    - button "Add files, and spaces" [ref=e78] [cursor=pointer]
+                  - generic [ref=e81]:
+                    - button "View token usage" [ref=e82] [cursor=pointer]
+                    - button "Send now (enter)" [ref=e86] [cursor=pointer]
+              - heading "Chat commands" [level=2] [ref=e89]
+              - list [ref=e91]:
+                - listitem [ref=e92]:
+                  - button "Agent" [ref=e93] [cursor=pointer]
+                - listitem [ref=e96]:
+                  - button "Create issue" [ref=e97] [cursor=pointer]
+                - listitem [ref=e100]:
+                  - button "Write code" [ref=e101] [cursor=pointer]
+                - listitem [ref=e104]:
+                  - button "Git" [ref=e105] [cursor=pointer]
+                - listitem [ref=e108]:
+                  - button "Pull requests" [ref=e109] [cursor=pointer]
+            - generic [ref=e113]:
+              - generic [ref=e115]:
+                - generic [ref=e116]:
+                  - heading "Pull requests" [level=3] [ref=e117]
+                  - generic [ref=e119]:
+                    - link "View all pull requests" [ref=e120] [cursor=pointer]:
+                      - /url: /pulls
+                      - text: View all
+                      - generic [ref=e121]: pull requests
+                    - button "Pull request options" [ref=e122] [cursor=pointer]
+                - list "Pull requests" [ref=e125]:
+                  - listitem "No pull requests found, try a different filter." [ref=e126]:
+                    - paragraph [ref=e128]:
+                      - generic [ref=e129]: No pull requests found, try a different filter.
+              - generic [ref=e131]:
+                - generic [ref=e132]:
+                  - heading "Issues" [level=3] [ref=e133]
+                  - generic [ref=e135]:
+                    - link "View all issues" [ref=e136] [cursor=pointer]:
+                      - /url: /issues
+                      - text: View all
+                      - generic [ref=e137]: issues
+                    - button "Issue options" [ref=e138] [cursor=pointer]
+                - list "Issues" [ref=e141]:
+                  - listitem "No issues found, try a different filter." [ref=e142]:
+                    - paragraph [ref=e144]:
+                      - generic [ref=e145]: No issues found, try a different filter.
+      - complementary "Explore"
+    - contentinfo [ref=e146]:
+      - heading "Footer" [level=2] [ref=e147]
+      - generic [ref=e148]:
+        - generic [ref=e149]:
+          - link "GitHub Homepage" [ref=e150] [cursor=pointer]:
+            - /url: https://github.com
+          - generic [ref=e153]: © 2026 GitHub, Inc.
+        - navigation "Footer" [ref=e154]:
+          - heading "Footer navigation" [level=3] [ref=e155]
+          - list "Footer navigation" [ref=e156]:
+            - listitem [ref=e157]:
+              - link "Terms" [ref=e158] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+            - listitem [ref=e159]:
+              - link "Privacy" [ref=e160] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+            - listitem [ref=e161]:
+              - link "Security" [ref=e162] [cursor=pointer]:
+                - /url: https://github.com/security
+            - listitem [ref=e163]:
+              - link "Status" [ref=e164] [cursor=pointer]:
+                - /url: https://www.githubstatus.com/
+            - listitem [ref=e165]:
+              - link "Community" [ref=e166] [cursor=pointer]:
+                - /url: https://github.community/
+            - listitem [ref=e167]:
+              - link "Docs" [ref=e168] [cursor=pointer]:
+                - /url: https://docs.github.com/
+            - listitem [ref=e169]:
+              - link "Contact" [ref=e170] [cursor=pointer]:
+                - /url: https://support.github.com?tags=dotcom-footer
+            - listitem [ref=e171]:
+              - button "Manage cookies" [ref=e173] [cursor=pointer]
+            - listitem [ref=e174]:
+              - button "Do not share my personal information" [ref=e176] [cursor=pointer]

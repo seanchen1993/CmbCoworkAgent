@@ -176,8 +176,8 @@ export function RequirementEntryView(): React.JSX.Element {
             setRequirementDialogOpen(true)
           }}
           title="新增需求 · 选择业务系统"
-          description="先关联需求使用的业务系统，需求文件和规范 PRD 将归档到对应目录。"
-          confirmLabel="确认并上传需求"
+          description="先关联需求使用的业务系统，需求内容和规范 PRD 将归档到对应目录。"
+          confirmLabel="确认并创建需求"
         />
       )}
 
@@ -186,12 +186,12 @@ export function RequirementEntryView(): React.JSX.Element {
           open
           system={selectedSystem}
           onOpenChange={setRequirementDialogOpen}
-          onStartConversation={async (requirement) => {
+          onStartConversation={async (requirement, options) => {
             const nextRequirement = await ensureRequirementThread(requirement)
             replaceRequirement(nextRequirement)
             setRequirementDialogOpen(false)
             setSelectedRequirement(nextRequirement)
-            setAutoGeneratePrd(true)
+            setAutoGeneratePrd(options?.autoGeneratePrd ?? true)
             setScreen("conversation")
           }}
         />

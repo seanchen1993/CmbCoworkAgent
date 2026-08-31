@@ -1,0 +1,52 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e5]:
+    - button "🇨🇳" [ref=f1e8] [cursor=pointer]
+    - link "Link API" [ref=f1e12] [cursor=pointer]:
+      - /url: /home
+      - generic [ref=f1e13]:
+        - img "Link API logo" [ref=f1e15]
+        - strong [ref=f1e17]: Link API
+    - generic [ref=f1e19]:
+      - generic [ref=f1e20]:
+        - heading "欢迎回来" [level=2] [ref=f1e21]
+        - paragraph [ref=f1e22]: 登录您的账户以继续
+      - generic [ref=f1e23]:
+        - generic [ref=f1e24]:
+          - generic [ref=f1e25]: 邮箱
+          - textbox "邮箱" [ref=f1e27]:
+            - /placeholder: 请输入邮箱
+            - text: test@qq.com
+        - generic [ref=f1e28]:
+          - generic [ref=f1e29]: 密码
+          - generic [ref=f1e30]:
+            - textbox "密码" [ref=f1e31]:
+              - /placeholder: 请输入密码
+              - text: "123456"
+            - button [ref=f1e32] [cursor=pointer]
+        - button "登录" [ref=f1e35] [cursor=pointer]
+        - generic [ref=f1e45]:
+          - checkbox "我已阅读并同意" [checked] [ref=f1e46]
+          - paragraph [ref=f1e48]:
+            - text: 我已阅读并同意
+            - link "服务条款" [ref=f1e49] [cursor=pointer]:
+              - /url: /legal/terms
+            - text: 、
+            - link "使用政策" [ref=f1e50] [cursor=pointer]:
+              - /url: /legal/usage-policy
+            - text: 、
+            - link "支持的国家和地区" [ref=f1e51] [cursor=pointer]:
+              - /url: /legal/supported-regions
+            - text: 、
+            - link "服务特定条款" [ref=f1e52] [cursor=pointer]:
+              - /url: /legal/service-specific-terms
+    - generic [ref=f1e39]:
+      - link "返回首页" [ref=f1e40] [cursor=pointer]:
+        - /url: /home
+      - generic [ref=f1e41]:
+        - text: 还没有账户？
+        - link "注册" [ref=f1e42] [cursor=pointer]:
+          - /url: /register
+    - paragraph [ref=f1e43]: © 2026 Link API. 保留所有权利。
+  - generic [ref=f1e57]:
+    - paragraph [ref=f1e62]: invalid email or password
+    - button "Close notification" [ref=f1e63] [cursor=pointer]

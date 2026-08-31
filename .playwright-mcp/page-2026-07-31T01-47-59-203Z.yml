@@ -1,0 +1,96 @@
+- generic [ref=f1e5]:
+  - banner [ref=f1e6]:
+    - heading "创建你的账户" [level=1] [ref=f1e7]
+    - paragraph [ref=f1e8]: 加入探索者社区，开启你的旅程
+  - generic [ref=f1e12]:
+    - progressbar [ref=f1e13]
+    - generic [ref=f1e14]:
+      - generic [ref=f1e15]: 基本信息
+      - generic [ref=f1e16]: 个人资料
+      - generic [ref=f1e17]: 偏好设置
+      - generic [ref=f1e18]: 完成
+  - generic [ref=f1e19]:
+    - tablist [ref=f1e20]:
+      - tab "基本信息" [ref=f1e21] [cursor=pointer]
+      - tab "个人资料" [ref=f1e22] [cursor=pointer]
+      - tab "偏好设置" [ref=f1e23] [cursor=pointer]
+    - generic [ref=f1e75]:
+      - generic [ref=f1e76]:
+        - generic [ref=f1e77]: 头像上传
+        - generic [ref=f1e78] [cursor=pointer]:
+          - button "Choose File" [active] [ref=f1e79]
+          - generic [ref=f1e80]: 📁
+          - generic [ref=f1e81]:
+            - text: 拖拽图片到此处或
+            - strong [ref=f1e82]: 点击上传
+      - generic [ref=f1e83]:
+        - generic [ref=f1e84]:
+          - generic [ref=f1e85]: 昵称
+          - textbox "昵称" [ref=f1e86]:
+            - /placeholder: 显示名称
+            - text: 测试
+        - generic [ref=f1e87]:
+          - generic [ref=f1e88]: 性别
+          - combobox "性别" [ref=f1e89] [cursor=pointer]:
+            - option "请选择"
+            - option "男"
+            - option "女" [selected]
+            - option "其他"
+            - option "不愿透露"
+      - generic [ref=f1e90]:
+        - generic [ref=f1e91]:
+          - generic [ref=f1e92]: 出生日期
+          - textbox "出生日期" [ref=f1e93]: 1995-12-12
+        - generic [ref=f1e94]:
+          - generic [ref=f1e95]: 出生时间 (可选)
+          - textbox "出生时间 (可选)" [ref=f1e96]: 12:10
+      - generic [ref=f1e97]:
+        - generic [ref=f1e98]: 所在地区
+        - combobox "所在地区" [ref=f1e99] [cursor=pointer]:
+          - option "请选择"
+          - option "北京"
+          - option "天津"
+          - option "河北"
+          - option "上海"
+          - option "江苏"
+          - option "浙江"
+          - option "广东"
+          - option "福建"
+          - option "四川" [selected]
+          - option "陕西"
+      - generic [ref=f1e100]:
+        - generic [ref=f1e101]: 个人简介 (最多200字)
+        - textbox "个人简介 (最多200字)" [ref=f1e102]:
+          - /placeholder: 简单介绍一下自己吧...
+          - text: 你好呀～
+      - generic [ref=f1e103]:
+        - generic [ref=f1e104]: 年龄
+        - generic [ref=f1e105]:
+          - spinbutton "年龄" [ref=f1e106]
+          - generic [ref=f1e107]:
+            - text: 你的年龄是：
+            - status [ref=f1e108]: "--"
+            - text: 岁
+      - generic [ref=f1e109]:
+        - generic [ref=f1e110]: 编程经验（年）
+        - generic [ref=f1e111]:
+          - slider "编程经验（年）" [ref=f1e112]: "10"
+          - generic [ref=f1e113]: 10年
+      - generic [ref=f1e115]:
+        - generic [ref=f1e116]: 技能评估（移动滑块查看）
+        - meter [ref=f1e117]
+      - generic [ref=f1e118]:
+        - generic [ref=f1e119]: 手写签名 (在下方区域绘制)
+        - generic [ref=f1e120]: 按住鼠标绘制签名
+        - button "清除签名" [ref=f1e122] [cursor=pointer]
+    - text: 增强账户安全性 ▸ ▸ ▸
+    - generic [ref=f1e66]: 或使用以下方式注册
+    - generic [ref=f1e67]:
+      - button "微信" [ref=f1e68] [cursor=pointer]
+      - button "GitHub" [ref=f1e69] [cursor=pointer]
+      - button "Google" [ref=f1e70] [cursor=pointer]
+    - button "完成注册" [ref=f1e72] [cursor=pointer]
+  - contentinfo [ref=f1e73]:
+    - text: 已有账户？
+    - link "立即登录" [ref=f1e74] [cursor=pointer]:
+      - /url: "#"

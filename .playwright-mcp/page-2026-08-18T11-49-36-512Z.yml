@@ -1,0 +1,63 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner "Global navigation menu" [ref=e8]:
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - button "Open menu" [ref=e12] [cursor=pointer]
+          - link "Homepage (g then d)" [ref=e15] [cursor=pointer]:
+            - /url: /
+        - generic [ref=e18]:
+          - navigation "Breadcrumbs" [ref=e19]:
+            - list [ref=e20]:
+              - listitem [ref=e21]:
+                - link "Dashboard" [ref=e22] [cursor=pointer]:
+                  - /url: https://github.com/
+          - button "Open quick search dialog, type / to search (forward slash)" [ref=e24] [cursor=pointer]
+        - generic [ref=e27]:
+          - link "You have no unread notifications (g then n)" [ref=e28] [cursor=pointer]:
+            - /url: /notifications
+          - button "Open user navigation menu" [ref=e32] [cursor=pointer]:
+            - img "User avatar" [ref=e33]
+  - generic [ref=e38]:
+    - generic [ref=e40]:
+      - generic [ref=e41]: Loading
+      - complementary "Explore" [ref=e48]:
+        - img "GitHub Universe Banner" [ref=e51]
+        - generic [ref=e52]: Loading
+    - contentinfo [ref=e59]:
+      - heading "Footer" [level=2] [ref=e60]
+      - generic [ref=e61]:
+        - generic [ref=e62]:
+          - link "GitHub Homepage" [ref=e63] [cursor=pointer]:
+            - /url: https://github.com
+          - generic [ref=e66]: © 2026 GitHub, Inc.
+        - navigation "Footer" [ref=e67]:
+          - heading "Footer navigation" [level=3] [ref=e68]
+          - list "Footer navigation" [ref=e69]:
+            - listitem [ref=e70]:
+              - link "Terms" [ref=e71] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+            - listitem [ref=e72]:
+              - link "Privacy" [ref=e73] [cursor=pointer]:
+                - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+            - listitem [ref=e74]:
+              - link "Security" [ref=e75] [cursor=pointer]:
+                - /url: https://github.com/security
+            - listitem [ref=e76]:
+              - link "Status" [ref=e77] [cursor=pointer]:
+                - /url: https://www.githubstatus.com/
+            - listitem [ref=e78]:
+              - link "Community" [ref=e79] [cursor=pointer]:
+                - /url: https://github.community/
+            - listitem [ref=e80]:
+              - link "Docs" [ref=e81] [cursor=pointer]:
+                - /url: https://docs.github.com/
+            - listitem [ref=e82]:
+              - link "Contact" [ref=e83] [cursor=pointer]:
+                - /url: https://support.github.com?tags=dotcom-footer
+            - listitem [ref=e84]:
+              - button "Manage cookies" [ref=e86] [cursor=pointer]
+            - listitem [ref=e87]:
+              - button "Do not share my personal information" [ref=e89] [cursor=pointer]

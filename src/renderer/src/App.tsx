@@ -37,8 +37,10 @@ const CustomizeView = lazy(() =>
 const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
-const DesignView = lazy(() =>
-  import("@/components/design/DesignView").then((m) => ({ default: m.DesignView }))
+const DesignModeEntryView = lazy(() =>
+  import("@/components/design/DesignModeEntryView").then((m) => ({
+    default: m.DesignModeEntryView
+  }))
 )
 const RequirementEntryView = lazy(() =>
   import("@/components/requirement/RequirementEntryView").then((m) => ({
@@ -254,6 +256,9 @@ function App(): React.JSX.Element {
     setShowHarnessBoardView(true)
   }, [projectModeEnabled, setShowHarnessBoardView])
   const selectDesignHistory = useCallback(() => {
+    // Design mode opens on the history list; DesignView still restores the
+    // last session after an explicit session is created or opened.
+    localStorage.removeItem("design_last_session")
     setActiveModeTab("design")
     setShowDesignView(true)
   }, [setShowDesignView])
@@ -1196,7 +1201,7 @@ function App(): React.JSX.Element {
                   </div>
                 }
               >
-                {activeModeTab === "requirements" ? <RequirementEntryView /> : <DesignView />}
+                {activeModeTab === "requirements" ? <RequirementEntryView /> : <DesignModeEntryView />}
               </Suspense>
             </main>
           </div>

@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "CmbCoworkAgent Browser Importer",
+  "version": "0.1.2",
+  "description": "Import Chrome cookies into CmbCoworkAgent without reading Chrome profile files.",
+  "permissions": ["cookies", "nativeMessaging", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "service-worker.js" },
+  "action": {
+    "default_title": "CmbCoworkAgent Cookie Importer",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu3nElRWtsYyNrQrxZs8BqwJdvwIfYTDUYCivsJ4BnouEcpPcGkkSD9NXhgIjL2cRj5O9Q93SJFZ/kPQIxoqfMHql6qM6Vp0I1aG/0n7SVvbIOt5Ob+F/+MJQlyRCmVUmO3Vk4VZ5O15wv0/hFoBo5mX5vnRz2i611Ybzbf1ihJ0NAyoQ9a/ISxYWRf9W4LrNpXr7TeRcy47ykTQKPAXil5ZicUV1O5T0FnsF4Bo5bWpUnuZK9Qj+4csM1b4XyLh/d6JHEmQ9HerXSFs5rpP155ncYpkmgMcLYj7JOUmsLyCg2RLcYjUsANo8rIJsfJ7UD47+4qDfl8Cj0nOs7+K4WwIDAQAB"
+}

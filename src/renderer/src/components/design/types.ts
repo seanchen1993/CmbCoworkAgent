@@ -54,6 +54,27 @@ export type GenerationState =
 export type DesignSessionKind = "prompt" | "import_url" | "import_html" | "prototype_zip"
 export type AnswerValue = string | string[]
 
+/**
+ * Payload passed from the standalone new-design page to the editor.
+ * Keep this transport shape small so the legacy create dialog can be restored
+ * without changing the editor's session model.
+ */
+export interface DesignCreationRequest {
+  kind: DesignSessionKind
+  workspacePath: string | null
+  title: string
+  templateMode?: "select" | "upload" | "none"
+  template?: string
+  templateUploadPath?: string
+  requirementMode?: "select" | "upload" | "none"
+  requirementId?: string
+  requirementModuleId?: string
+  requirementUploadPath?: string
+  prompt: string
+  url?: string
+  designSystemId?: string | null
+}
+
 export interface VariationItem {
   id: string
   label: string

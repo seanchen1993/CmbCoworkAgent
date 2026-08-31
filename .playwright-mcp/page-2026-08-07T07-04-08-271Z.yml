@@ -1,0 +1,1231 @@
+- generic [ref=f13e5]:
+  - banner [ref=f13e6]:
+    - heading "创建你的账户" [level=1] [ref=f13e7]
+    - paragraph [ref=f13e8]: 加入探索者社区，开启你的旅程
+  - generic [ref=f13e12]: 编辑
+  - button "打开" [ref=f13e28] [cursor=pointer]
+  - link [ref=f13e31] [cursor=pointer]:
+    - /url: https://www.baidu.com
+  - generic [ref=f13e36]:
+    - progressbar [ref=f13e37]
+    - generic [ref=f13e38]:
+      - generic [ref=f13e39]: 基本信息
+      - generic [ref=f13e40]: 个人资料
+      - generic [ref=f13e41]: 偏好设置
+      - generic [ref=f13e42]: 完成
+  - generic [ref=f13e43]:
+    - tablist [ref=f13e44]:
+      - tab "基本信息" [ref=f13e45] [cursor=pointer]
+      - tab "个人资料" [ref=f13e46] [cursor=pointer]
+      - tab "偏好设置" [ref=f13e47] [cursor=pointer]
+    - generic [ref=f13e48]:
+      - generic [ref=f13e49]:
+        - generic [ref=f13e50]: 用户名 (支持自动补全)
+        - combobox "用户名 (支持自动补全)" [ref=f13e51]
+      - generic [ref=f13e52]:
+        - generic [ref=f13e53]:
+          - generic [ref=f13e54]: 邮箱
+          - textbox "邮箱" [ref=f13e55]:
+            - /placeholder: you@example.com
+        - generic [ref=f13e56]:
+          - generic [ref=f13e57]: 手机号
+          - textbox "手机号" [ref=f13e58]:
+            - /placeholder: "13800138000"
+      - generic [ref=f13e59]:
+        - generic [ref=f13e60]: 密码
+        - generic [ref=f13e61]:
+          - textbox "密码" [ref=f13e62]:
+            - /placeholder: 至少8位，含字母和数字
+          - button "显示" [ref=f13e63] [cursor=pointer]
+        - paragraph [ref=f13e69]: 密码强度：未输入
+      - generic [ref=f13e70]:
+        - generic [ref=f13e71]: 确认密码
+        - textbox "确认密码" [ref=f13e72]:
+          - /placeholder: 再次输入密码
+      - generic [ref=f13e73]:
+        - generic [ref=f13e74]: 个人网站 (可选)
+        - textbox "个人网站 (可选)" [ref=f13e75]:
+          - /placeholder: https://yoursite.com
+      - generic [ref=f13e76]:
+        - generic [ref=f13e77]: 验证码
+        - generic [ref=f13e78]:
+          - textbox "验证码" [ref=f13e79]:
+            - /placeholder: 输入右侧验证码
+          - generic "点击刷新" [ref=f13e80] [cursor=pointer]
+      - generic [ref=f13e82]:
+        - generic [ref=f13e83] [cursor=pointer]:
+          - checkbox "我已阅读并同意 《用户协议》 和 《隐私政策》" [ref=f13e84]
+          - generic [ref=f13e85]:
+            - text: 我已阅读并同意
+            - link "《用户协议》" [ref=f13e86]:
+              - /url: "#"
+            - text: 和
+            - link "《隐私政策》" [ref=f13e87]:
+              - /url: "#"
+        - generic [ref=f13e88] [cursor=pointer]:
+          - checkbox "愿意接收产品更新和活动邮件通知" [ref=f13e89]
+          - text: 愿意接收产品更新和活动邮件通知
+    - text: 增强账户安全性 ▸ ▸ ▸
+    - generic [ref=f13e90]: 或使用以下方式注册
+    - generic [ref=f13e91]:
+      - button "微信" [ref=f13e92] [cursor=pointer]
+      - button "GitHub" [ref=f13e93] [cursor=pointer]
+      - button "Google" [ref=f13e94] [cursor=pointer]
+    - button "完成注册" [ref=f13e96] [cursor=pointer]
+  - contentinfo [ref=f13e97]:
+    - text: 已有账户？
+    - link "立即登录" [ref=f13e98] [cursor=pointer]:
+      - /url: "#"
+  - iframe [ref=f13e99]:
+    - generic [ref=f14e5]:
+      - banner [ref=f14e6]:
+        - heading "创建你的账户" [level=1] [ref=f14e7]
+        - paragraph [ref=f14e8]: 加入探索者社区，开启你的旅程
+      - generic [ref=f14e12]: 编辑
+      - button "打开" [ref=f14e28] [cursor=pointer]
+      - link [ref=f14e31] [cursor=pointer]:
+        - /url: https://www.baidu.com
+      - generic [ref=f14e36]:
+        - progressbar [ref=f14e37]
+        - generic [ref=f14e38]:
+          - generic [ref=f14e39]: 基本信息
+          - generic [ref=f14e40]: 个人资料
+          - generic [ref=f14e41]: 偏好设置
+          - generic [ref=f14e42]: 完成
+      - generic [ref=f14e43]:
+        - tablist [ref=f14e44]:
+          - tab "基本信息" [ref=f14e45] [cursor=pointer]
+          - tab "个人资料" [ref=f14e46] [cursor=pointer]
+          - tab "偏好设置" [ref=f14e47] [cursor=pointer]
+        - generic [ref=f14e48]:
+          - generic [ref=f14e49]:
+            - generic [ref=f14e50]: 用户名 (支持自动补全)
+            - combobox "用户名 (支持自动补全)" [ref=f14e51]
+          - generic [ref=f14e52]:
+            - generic [ref=f14e53]:
+              - generic [ref=f14e54]: 邮箱
+              - textbox "邮箱" [ref=f14e55]:
+                - /placeholder: you@example.com
+            - generic [ref=f14e56]:
+              - generic [ref=f14e57]: 手机号
+              - textbox "手机号" [ref=f14e58]:
+                - /placeholder: "13800138000"
+          - generic [ref=f14e59]:
+            - generic [ref=f14e60]: 密码
+            - generic [ref=f14e61]:
+              - textbox "密码" [ref=f14e62]:
+                - /placeholder: 至少8位，含字母和数字
+              - button "显示" [ref=f14e63] [cursor=pointer]
+            - paragraph [ref=f14e69]: 密码强度：未输入
+          - generic [ref=f14e70]:
+            - generic [ref=f14e71]: 确认密码
+            - textbox "确认密码" [ref=f14e72]:
+              - /placeholder: 再次输入密码
+          - generic [ref=f14e73]:
+            - generic [ref=f14e74]: 个人网站 (可选)
+            - textbox "个人网站 (可选)" [ref=f14e75]:
+              - /placeholder: https://yoursite.com
+          - generic [ref=f14e76]:
+            - generic [ref=f14e77]: 验证码
+            - generic [ref=f14e78]:
+              - textbox "验证码" [ref=f14e79]:
+                - /placeholder: 输入右侧验证码
+              - generic "点击刷新" [ref=f14e80] [cursor=pointer]
+          - generic [ref=f14e82]:
+            - generic [ref=f14e83] [cursor=pointer]:
+              - checkbox "我已阅读并同意 《用户协议》 和 《隐私政策》" [ref=f14e84]
+              - generic [ref=f14e85]:
+                - text: 我已阅读并同意
+                - link "《用户协议》" [ref=f14e86]:
+                  - /url: "#"
+                - text: 和
+                - link "《隐私政策》" [ref=f14e87]:
+                  - /url: "#"
+            - generic [ref=f14e88] [cursor=pointer]:
+              - checkbox "愿意接收产品更新和活动邮件通知" [ref=f14e89]
+              - text: 愿意接收产品更新和活动邮件通知
+        - text: 增强账户安全性 ▸ ▸ ▸
+        - generic [ref=f14e90]: 或使用以下方式注册
+        - generic [ref=f14e91]:
+          - button "微信" [ref=f14e92] [cursor=pointer]
+          - button "GitHub" [ref=f14e93] [cursor=pointer]
+          - button "Google" [ref=f14e94] [cursor=pointer]
+        - button "完成注册" [ref=f14e96] [cursor=pointer]
+      - contentinfo [ref=f14e97]:
+        - text: 已有账户？
+        - link "立即登录" [ref=f14e98] [cursor=pointer]:
+          - /url: "#"
+      - iframe [ref=f14e99]:
+        
+      - iframe [ref=f14e100]:
+        
+      - iframe [ref=f14e101]:
+        - generic [ref=f20e1]:
+          - generic [ref=f20e2]: 欢迎你
+          - heading "综合测试表单" [level=2] [ref=f20e3]
+          - generic [ref=f20e4]:
+            - generic [ref=f20e5]:
+              - generic [ref=f20e6]: 姓名(input文本框)：
+              - textbox "姓名(input文本框)：" [ref=f20e7]:
+                - /placeholder: 请输入姓名
+            - generic [ref=f20e8]:
+              - generic [ref=f20e9]: 个人简介(textarea)：
+              - textbox "个人简介(textarea)：" [ref=f20e10]:
+                - /placeholder: 请输入自我介绍
+            - generic [ref=f20e11]:
+              - generic [ref=f20e12]: 城市(select下拉)：
+              - combobox "城市(select下拉)：" [ref=f20e13]:
+                - option "请选择城市" [selected]
+                - option "北京"
+                - option "上海"
+                - option "广州"
+                - option "深圳"
+            - generic [ref=f20e14]:
+              - generic [ref=f20e15]: 爱好(checkbox多选)：
+              - generic [ref=f20e16]:
+                - checkbox "读书" [ref=f20e17]
+                - text: 读书
+              - generic [ref=f20e18]:
+                - checkbox "游戏" [ref=f20e19]
+                - text: 游戏
+              - generic [ref=f20e20]:
+                - checkbox "运动" [ref=f20e21]
+                - text: 运动
+            - generic [ref=f20e22]:
+              - generic [ref=f20e23]: 性别(radio单选)：
+              - generic [ref=f20e24]:
+                - radio "男" [ref=f20e25]
+                - text: 男
+              - generic [ref=f20e26]:
+                - radio "女" [ref=f20e27]
+                - text: 女
+            - generic [ref=f20e28]:
+              - button "提交表单" [ref=f20e29] [cursor=pointer]
+              - button "禁用按钮(disable)" [disabled] [ref=f20e30]
+      - iframe [ref=f14e102]:
+        - generic [ref=f21e1]:
+          - generic [ref=f21e3]:
+            - generic [ref=f21e4]:
+              - generic [ref=f21e6]:
+                - generic [ref=f21e7]:
+                  - link "Home" [ref=f21e8] [cursor=pointer]:
+                    - /url: /
+                  - button "Select version of library" [ref=f21e12]: v4.3
+                - generic [ref=f21e15]:
+                  - button "Search" [ref=f21e16]
+                  - button "Navigation" [ref=f21e19]
+              - generic [ref=f21e22]:
+                - button "Open navigation menu" [ref=f21e23]
+                - list [ref=f21e26]:
+                  - listitem [ref=f21e27]:
+                    - generic [ref=f21e28]: Transforms
+                  - listitem [ref=f21e31]: scale
+            - generic [ref=f21e32]:
+              - generic [ref=f21e35]:
+                - paragraph [ref=f21e36]: Transforms
+                - heading "scale" [level=1] [ref=f21e37]
+                - paragraph [ref=f21e38]: Utilities for scaling elements.
+                - generic [ref=f21e39]:
+                  - generic [ref=f21e40]:
+                    - table [ref=f21e42]:
+                      - rowgroup [ref=f21e43]:
+                        - row [ref=f21e44]:
+                          - columnheader "Class" [ref=f21e45]
+                          - columnheader "Styles" [ref=f21e46]
+                      - rowgroup [ref=f21e47]:
+                        - row [ref=f21e48]:
+                          - cell [ref=f21e49]:
+                            - code [ref=f21e50]: scale-none
+                          - cell [ref=f21e51]:
+                            - code [ref=f21e53]: "scale: none;"
+                        - row [ref=f21e54]:
+                          - cell [ref=f21e55]:
+                            - code [ref=f21e56]: scale-<number>
+                          - cell [ref=f21e57]:
+                            - code [ref=f21e59]: "scale: <number>% <number>%;"
+                        - row [ref=f21e60]:
+                          - cell [ref=f21e61]:
+                            - code [ref=f21e62]: "-scale-<number>"
+                          - cell [ref=f21e63]:
+                            - code [ref=f21e65]: "scale: calc(<number>% * -1) calc(<number>% * -1);"
+                        - row [ref=f21e66]:
+                          - cell [ref=f21e67]:
+                            - code [ref=f21e68]: scale-(<custom-property>)
+                          - cell [ref=f21e69]:
+                            - code [ref=f21e71]: "scale: var(<custom-property>) var(<custom-property>);"
+                        - row [ref=f21e72]:
+                          - cell [ref=f21e73]:
+                            - code [ref=f21e74]: scale-[<value>]
+                          - cell [ref=f21e75]:
+                            - code [ref=f21e77]: "scale: <value>;"
+                        - row [ref=f21e78]:
+                          - cell [ref=f21e79]:
+                            - code [ref=f21e80]: scale-x-<number>
+                          - cell [ref=f21e81]:
+                            - code [ref=f21e83]: "scale: <number>% var(--tw-scale-y);"
+                        - row [ref=f21e84]:
+                          - cell [ref=f21e85]:
+                            - code [ref=f21e86]: "-scale-x-<number>"
+                          - cell [ref=f21e87]:
+                            - code [ref=f21e89]: "scale: calc(<number>% * -1) var(--tw-scale-y);"
+                        - row [ref=f21e90]:
+                          - cell [ref=f21e91]:
+                            - code [ref=f21e92]: scale-x-(<custom-property>)
+                          - cell [ref=f21e93]:
+                            - code [ref=f21e95]: "scale: var(<custom-property>) var(--tw-scale-y);"
+                        - row [ref=f21e96]:
+                          - cell [ref=f21e97]:
+                            - code [ref=f21e98]: scale-x-[<value>]
+                          - cell [ref=f21e99]:
+                            - code [ref=f21e101]: "scale: <value> var(--tw-scale-y);"
+                        - row [ref=f21e102]:
+                          - cell [ref=f21e103]:
+                            - code [ref=f21e104]: scale-y-<number>
+                          - cell [ref=f21e105]:
+                            - code [ref=f21e107]: "scale: var(--tw-scale-x) <number>%;"
+                      - rowgroup
+                    - button "Show more" [ref=f21e109]
+                  - heading [level=2] [ref=f21e110]:
+                    - link "Examples" [ref=f21e111] [cursor=pointer]:
+                      - /url: "#examples"
+                  - heading [level=3] [ref=f21e112]:
+                    - link "Basic example" [ref=f21e113] [cursor=pointer]:
+                      - /url: "#basic-example"
+                  - paragraph [ref=f21e114]:
+                    - text: Use
+                    - code [ref=f21e115]: "`scale-<number>`"
+                    - text: utilities like
+                    - code [ref=f21e116]: "`scale-75`"
+                    - text: and
+                    - code [ref=f21e117]: "`scale-150`"
+                    - text: "to scale an element by a percentage of its original size:"
+                  - figure [ref=f21e120]:
+                    - generic [ref=f21e123]:
+                      - paragraph [ref=f21e125]: scale-75
+                      - paragraph [ref=f21e133]: scale-100
+                      - paragraph [ref=f21e141]: scale-125
+                    - code [ref=f21e153]:
+                      - generic [ref=f21e154]: <img class=" scale-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e155]: <img class=" scale-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e156]: <img class=" scale-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f21e157]:
+                    - link "Scaling on the x-axis" [ref=f21e158] [cursor=pointer]:
+                      - /url: "#scaling-on-the-x-axis"
+                  - paragraph [ref=f21e159]:
+                    - text: Use the
+                    - code [ref=f21e160]: "`scale-x-<number>`"
+                    - text: utilities like
+                    - code [ref=f21e161]: "`scale-x-75`"
+                    - text: and
+                    - code [ref=f21e162]: "`-scale-x-150`"
+                    - text: "to scale an element on the x-axis by a percentage of its original width:"
+                  - figure [ref=f21e165]:
+                    - generic [ref=f21e168]:
+                      - paragraph [ref=f21e170]: scale-x-75
+                      - paragraph [ref=f21e178]: scale-x-100
+                      - paragraph [ref=f21e186]: scale-x-125
+                    - code [ref=f21e198]:
+                      - generic [ref=f21e199]: <img class=" scale-x-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e200]: <img class=" scale-x-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e201]: <img class=" scale-x-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f21e202]:
+                    - link "Scaling on the y-axis" [ref=f21e203] [cursor=pointer]:
+                      - /url: "#scaling-on-the-y-axis"
+                  - paragraph [ref=f21e204]:
+                    - text: Use the
+                    - code [ref=f21e205]: "`scale-y-<number>`"
+                    - text: utilities like
+                    - code [ref=f21e206]: "`scale-y-75`"
+                    - text: and
+                    - code [ref=f21e207]: "`scale-y-150`"
+                    - text: "to scale an element on the y-axis by a percentage of its original height:"
+                  - figure [ref=f21e210]:
+                    - generic [ref=f21e213]:
+                      - paragraph [ref=f21e215]: scale-y-75
+                      - paragraph [ref=f21e223]: scale-y-100
+                      - paragraph [ref=f21e231]: scale-y-125
+                    - code [ref=f21e243]:
+                      - generic [ref=f21e244]: <img class=" scale-y-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e245]: <img class=" scale-y-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e246]: <img class=" scale-y-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f21e247]:
+                    - link "Using negative values" [ref=f21e248] [cursor=pointer]:
+                      - /url: "#using-negative-values"
+                  - paragraph [ref=f21e249]:
+                    - text: Use
+                    - code [ref=f21e250]: "`-scale-<number>`"
+                    - text: ","
+                    - code [ref=f21e251]: "`-scale-x-<number>`"
+                    - text: or
+                    - code [ref=f21e252]: "`-scale-y-<number>`"
+                    - text: utilities like
+                    - code [ref=f21e253]: "`-scale-x-75`"
+                    - text: and
+                    - code [ref=f21e254]: "`-scale-125`"
+                    - text: "to mirror and scale down an element by a percentage of its original size:"
+                  - figure [ref=f21e257]:
+                    - generic [ref=f21e260]:
+                      - paragraph [ref=f21e262]: "-scale-x-75"
+                      - paragraph [ref=f21e270]: "-scale-100"
+                      - paragraph [ref=f21e278]: "-scale-y-125"
+                    - code [ref=f21e290]:
+                      - generic [ref=f21e291]: <img class=" -scale-x-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e292]: <img class=" -scale-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f21e293]: <img class=" -scale-y-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f21e294]:
+                    - link "Using a custom value" [ref=f21e295] [cursor=pointer]:
+                      - /url: "#using-a-custom-value"
+                  - paragraph [ref=f21e296]:
+                    - text: Use the
+                    - code [ref=f21e297]: "`scale-[<value>]`"
+                    - text: "syntax to set the scale based on a completely custom value:"
+                  - code [ref=f21e304]:
+                    - generic [ref=f21e305]: <img class=" scale-[1.7] ..." src="/img/mountains.jpg" />
+                  - paragraph [ref=f21e306]:
+                    - text: For CSS variables, you can also use the
+                    - code [ref=f21e307]: "`scale-(<custom-property>)`"
+                    - text: "syntax:"
+                  - code [ref=f21e314]:
+                    - generic [ref=f21e315]: <img class=" scale-(--my-scale) ..." src="/img/mountains.jpg" />
+                  - paragraph [ref=f21e316]:
+                    - text: This is just a shorthand for
+                    - code [ref=f21e317]: "`scale-[var(<custom-property>)]`"
+                    - text: that adds the
+                    - code [ref=f21e318]: "`var()`"
+                    - text: function for you automatically.
+                  - heading [level=3] [ref=f21e319]:
+                    - link "Applying on hover" [ref=f21e320] [cursor=pointer]:
+                      - /url: "#applying-on-hover"
+                  - paragraph [ref=f21e321]:
+                    - text: Prefix a
+                    - code [ref=f21e322]: "`scale`"
+                    - text: utility with a variant like
+                    - code [ref=f21e323]: "`hover:*`"
+                    - text: "to only apply the utility in that state:"
+                  - code [ref=f21e330]:
+                    - generic [ref=f21e331]: <img class="scale-95 hover:scale-120 ..." src="/img/mountains.jpg" />
+                  - paragraph [ref=f21e332]:
+                    - text: Learn more about using variants in the
+                    - link "variants documentation" [ref=f21e333] [cursor=pointer]:
+                      - /url: /docs/hover-focus-and-other-states
+                    - text: .
+                - contentinfo [ref=f21e334]:
+                  - generic [ref=f21e335]:
+                    - link "rotate" [ref=f21e336] [cursor=pointer]:
+                      - /url: /docs/rotate
+                    - link "skew" [ref=f21e340] [cursor=pointer]:
+                      - /url: /docs/skew
+              - contentinfo [ref=f21e345]:
+                - generic [ref=f21e346]:
+                  - generic [ref=f21e347]:
+                    - generic [ref=f21e348]:
+                      - heading "Tailwind CSS" [level=3] [ref=f21e349]
+                      - list [ref=f21e350]:
+                        - listitem [ref=f21e351]:
+                          - link "Documentation" [ref=f21e352] [cursor=pointer]:
+                            - /url: /docs
+                        - listitem [ref=f21e353]:
+                          - link "Playground" [ref=f21e354] [cursor=pointer]:
+                            - /url: https://play.tailwindcss.com/
+                        - listitem [ref=f21e355]:
+                          - link "Blog" [ref=f21e356] [cursor=pointer]:
+                            - /url: /blog
+                        - listitem [ref=f21e357]:
+                          - link "Showcase" [ref=f21e358] [cursor=pointer]:
+                            - /url: /showcase
+                        - listitem [ref=f21e359]:
+                          - link "Sponsor" [ref=f21e360] [cursor=pointer]:
+                            - /url: /partners
+                    - generic [ref=f21e361]:
+                      - heading "Resources" [level=3] [ref=f21e362]
+                      - list [ref=f21e363]:
+                        - listitem [ref=f21e364]:
+                          - link "Refactoring UI" [ref=f21e365] [cursor=pointer]:
+                            - /url: https://www.refactoringui.com
+                        - listitem [ref=f21e366]:
+                          - link "Headless UI" [ref=f21e367] [cursor=pointer]:
+                            - /url: https://headlessui.com
+                        - listitem [ref=f21e368]:
+                          - link "Heroicons" [ref=f21e369] [cursor=pointer]:
+                            - /url: https://heroicons.com
+                        - listitem [ref=f21e370]:
+                          - link "Hero Patterns" [ref=f21e371] [cursor=pointer]:
+                            - /url: https://heropatterns.com
+                  - generic [ref=f21e372]:
+                    - generic [ref=f21e373]:
+                      - heading [level=3] [ref=f21e374]:
+                        - link "Tailwind Plus" [ref=f21e375] [cursor=pointer]:
+                          - /url: /plus?ref=footer
+                      - list [ref=f21e376]:
+                        - listitem [ref=f21e377]:
+                          - link "UI Blocks" [ref=f21e378] [cursor=pointer]:
+                            - /url: /plus/ui-blocks?ref=footer
+                        - listitem [ref=f21e379]:
+                          - link "Templates" [ref=f21e380] [cursor=pointer]:
+                            - /url: /plus/templates?ref=footer
+                        - listitem [ref=f21e381]:
+                          - link "UI Kit" [ref=f21e382] [cursor=pointer]:
+                            - /url: /plus/ui-kit?ref=footer
+                    - generic [ref=f21e383]:
+                      - heading "Community" [level=3] [ref=f21e384]
+                      - list [ref=f21e385]:
+                        - listitem [ref=f21e386]:
+                          - link "GitHub" [ref=f21e387] [cursor=pointer]:
+                            - /url: https://github.com/tailwindlabs/tailwindcss
+                        - listitem [ref=f21e388]:
+                          - link "Discord" [ref=f21e389] [cursor=pointer]:
+                            - /url: /partners#insiders
+                        - listitem [ref=f21e390]:
+                          - link "X" [ref=f21e391] [cursor=pointer]:
+                            - /url: https://x.com/tailwindcss
+              - generic [ref=f21e394]:
+                - radiogroup [ref=f21e395]:
+                  - radio "System theme" [checked] [ref=f21e396]
+                  - radio "Light theme" [ref=f21e401]
+                  - radio "Dark theme" [ref=f21e408]
+                - generic [ref=f21e413]:
+                  - generic [ref=f21e414]: Copyright © 2026 Tailwind Labs Inc.
+                  - link "Trademark Policy" [ref=f21e415] [cursor=pointer]:
+                    - /url: /brand
+          - alert [ref=f21e416]
+  - iframe [ref=f13e100]:
+    - generic [ref=f15e5]:
+      - banner [ref=f15e6]:
+        - heading "创建你的账户" [level=1] [ref=f15e7]
+        - paragraph [ref=f15e8]: 加入探索者社区，开启你的旅程
+      - generic [ref=f15e12]: 编辑
+      - button "打开" [ref=f15e28] [cursor=pointer]
+      - link [ref=f15e31] [cursor=pointer]:
+        - /url: https://www.baidu.com
+      - generic [ref=f15e36]:
+        - progressbar [ref=f15e37]
+        - generic [ref=f15e38]:
+          - generic [ref=f15e39]: 基本信息
+          - generic [ref=f15e40]: 个人资料
+          - generic [ref=f15e41]: 偏好设置
+          - generic [ref=f15e42]: 完成
+      - generic [ref=f15e43]:
+        - tablist [ref=f15e44]:
+          - tab "基本信息" [ref=f15e45] [cursor=pointer]
+          - tab "个人资料" [ref=f15e46] [cursor=pointer]
+          - tab "偏好设置" [ref=f15e47] [cursor=pointer]
+        - generic [ref=f15e48]:
+          - generic [ref=f15e49]:
+            - generic [ref=f15e50]: 用户名 (支持自动补全)
+            - combobox "用户名 (支持自动补全)" [ref=f15e51]
+          - generic [ref=f15e52]:
+            - generic [ref=f15e53]:
+              - generic [ref=f15e54]: 邮箱
+              - textbox "邮箱" [ref=f15e55]:
+                - /placeholder: you@example.com
+            - generic [ref=f15e56]:
+              - generic [ref=f15e57]: 手机号
+              - textbox "手机号" [ref=f15e58]:
+                - /placeholder: "13800138000"
+          - generic [ref=f15e59]:
+            - generic [ref=f15e60]: 密码
+            - generic [ref=f15e61]:
+              - textbox "密码" [ref=f15e62]:
+                - /placeholder: 至少8位，含字母和数字
+              - button "显示" [ref=f15e63] [cursor=pointer]
+            - paragraph [ref=f15e69]: 密码强度：未输入
+          - generic [ref=f15e70]:
+            - generic [ref=f15e71]: 确认密码
+            - textbox "确认密码" [ref=f15e72]:
+              - /placeholder: 再次输入密码
+          - generic [ref=f15e73]:
+            - generic [ref=f15e74]: 个人网站 (可选)
+            - textbox "个人网站 (可选)" [ref=f15e75]:
+              - /placeholder: https://yoursite.com
+          - generic [ref=f15e76]:
+            - generic [ref=f15e77]: 验证码
+            - generic [ref=f15e78]:
+              - textbox "验证码" [ref=f15e79]:
+                - /placeholder: 输入右侧验证码
+              - generic "点击刷新" [ref=f15e80] [cursor=pointer]
+          - generic [ref=f15e82]:
+            - generic [ref=f15e83] [cursor=pointer]:
+              - checkbox "我已阅读并同意 《用户协议》 和 《隐私政策》" [ref=f15e84]
+              - generic [ref=f15e85]:
+                - text: 我已阅读并同意
+                - link "《用户协议》" [ref=f15e86]:
+                  - /url: "#"
+                - text: 和
+                - link "《隐私政策》" [ref=f15e87]:
+                  - /url: "#"
+            - generic [ref=f15e88] [cursor=pointer]:
+              - checkbox "愿意接收产品更新和活动邮件通知" [ref=f15e89]
+              - text: 愿意接收产品更新和活动邮件通知
+        - text: 增强账户安全性 ▸ ▸ ▸
+        - generic [ref=f15e90]: 或使用以下方式注册
+        - generic [ref=f15e91]:
+          - button "微信" [ref=f15e92] [cursor=pointer]
+          - button "GitHub" [ref=f15e93] [cursor=pointer]
+          - button "Google" [ref=f15e94] [cursor=pointer]
+        - button "完成注册" [ref=f15e96] [cursor=pointer]
+      - contentinfo [ref=f15e97]:
+        - text: 已有账户？
+        - link "立即登录" [ref=f15e98] [cursor=pointer]:
+          - /url: "#"
+      - iframe [ref=f15e99]:
+        
+      - iframe [ref=f15e100]:
+        
+      - iframe [ref=f15e101]:
+        - generic [ref=f24e1]:
+          - generic [ref=f24e2]: 欢迎你
+          - heading "综合测试表单" [level=2] [ref=f24e3]
+          - generic [ref=f24e4]:
+            - generic [ref=f24e5]:
+              - generic [ref=f24e6]: 姓名(input文本框)：
+              - textbox "姓名(input文本框)：" [ref=f24e7]:
+                - /placeholder: 请输入姓名
+            - generic [ref=f24e8]:
+              - generic [ref=f24e9]: 个人简介(textarea)：
+              - textbox "个人简介(textarea)：" [ref=f24e10]:
+                - /placeholder: 请输入自我介绍
+            - generic [ref=f24e11]:
+              - generic [ref=f24e12]: 城市(select下拉)：
+              - combobox "城市(select下拉)：" [ref=f24e13]:
+                - option "请选择城市" [selected]
+                - option "北京"
+                - option "上海"
+                - option "广州"
+                - option "深圳"
+            - generic [ref=f24e14]:
+              - generic [ref=f24e15]: 爱好(checkbox多选)：
+              - generic [ref=f24e16]:
+                - checkbox "读书" [ref=f24e17]
+                - text: 读书
+              - generic [ref=f24e18]:
+                - checkbox "游戏" [ref=f24e19]
+                - text: 游戏
+              - generic [ref=f24e20]:
+                - checkbox "运动" [ref=f24e21]
+                - text: 运动
+            - generic [ref=f24e22]:
+              - generic [ref=f24e23]: 性别(radio单选)：
+              - generic [ref=f24e24]:
+                - radio "男" [ref=f24e25]
+                - text: 男
+              - generic [ref=f24e26]:
+                - radio "女" [ref=f24e27]
+                - text: 女
+            - generic [ref=f24e28]:
+              - button "提交表单" [ref=f24e29] [cursor=pointer]
+              - button "禁用按钮(disable)" [disabled] [ref=f24e30]
+      - iframe [ref=f15e102]:
+        - generic [ref=f25e1]:
+          - generic [ref=f25e3]:
+            - generic [ref=f25e4]:
+              - generic [ref=f25e6]:
+                - generic [ref=f25e7]:
+                  - link "Home" [ref=f25e8] [cursor=pointer]:
+                    - /url: /
+                  - button "Select version of library" [ref=f25e12]: v4.3
+                - generic [ref=f25e15]:
+                  - button "Search" [ref=f25e16]
+                  - button "Navigation" [ref=f25e19]
+              - generic [ref=f25e22]:
+                - button "Open navigation menu" [ref=f25e23]
+                - list [ref=f25e26]:
+                  - listitem [ref=f25e27]:
+                    - generic [ref=f25e28]: Transforms
+                  - listitem [ref=f25e31]: scale
+            - generic [ref=f25e32]:
+              - generic [ref=f25e35]:
+                - paragraph [ref=f25e36]: Transforms
+                - heading "scale" [level=1] [ref=f25e37]
+                - paragraph [ref=f25e38]: Utilities for scaling elements.
+                - generic [ref=f25e39]:
+                  - generic [ref=f25e40]:
+                    - table [ref=f25e42]:
+                      - rowgroup [ref=f25e43]:
+                        - row [ref=f25e44]:
+                          - columnheader "Class" [ref=f25e45]
+                          - columnheader "Styles" [ref=f25e46]
+                      - rowgroup [ref=f25e47]:
+                        - row [ref=f25e48]:
+                          - cell [ref=f25e49]:
+                            - code [ref=f25e50]: scale-none
+                          - cell [ref=f25e51]:
+                            - code [ref=f25e53]: "scale: none;"
+                        - row [ref=f25e54]:
+                          - cell [ref=f25e55]:
+                            - code [ref=f25e56]: scale-<number>
+                          - cell [ref=f25e57]:
+                            - code [ref=f25e59]: "scale: <number>% <number>%;"
+                        - row [ref=f25e60]:
+                          - cell [ref=f25e61]:
+                            - code [ref=f25e62]: "-scale-<number>"
+                          - cell [ref=f25e63]:
+                            - code [ref=f25e65]: "scale: calc(<number>% * -1) calc(<number>% * -1);"
+                        - row [ref=f25e66]:
+                          - cell [ref=f25e67]:
+                            - code [ref=f25e68]: scale-(<custom-property>)
+                          - cell [ref=f25e69]:
+                            - code [ref=f25e71]: "scale: var(<custom-property>) var(<custom-property>);"
+                        - row [ref=f25e72]:
+                          - cell [ref=f25e73]:
+                            - code [ref=f25e74]: scale-[<value>]
+                          - cell [ref=f25e75]:
+                            - code [ref=f25e77]: "scale: <value>;"
+                        - row [ref=f25e78]:
+                          - cell [ref=f25e79]:
+                            - code [ref=f25e80]: scale-x-<number>
+                          - cell [ref=f25e81]:
+                            - code [ref=f25e83]: "scale: <number>% var(--tw-scale-y);"
+                        - row [ref=f25e84]:
+                          - cell [ref=f25e85]:
+                            - code [ref=f25e86]: "-scale-x-<number>"
+                          - cell [ref=f25e87]:
+                            - code [ref=f25e89]: "scale: calc(<number>% * -1) var(--tw-scale-y);"
+                        - row [ref=f25e90]:
+                          - cell [ref=f25e91]:
+                            - code [ref=f25e92]: scale-x-(<custom-property>)
+                          - cell [ref=f25e93]:
+                            - code [ref=f25e95]: "scale: var(<custom-property>) var(--tw-scale-y);"
+                        - row [ref=f25e96]:
+                          - cell [ref=f25e97]:
+                            - code [ref=f25e98]: scale-x-[<value>]
+                          - cell [ref=f25e99]:
+                            - code [ref=f25e101]: "scale: <value> var(--tw-scale-y);"
+                        - row [ref=f25e102]:
+                          - cell [ref=f25e103]:
+                            - code [ref=f25e104]: scale-y-<number>
+                          - cell [ref=f25e105]:
+                            - code [ref=f25e107]: "scale: var(--tw-scale-x) <number>%;"
+                      - rowgroup
+                    - button "Show more" [ref=f25e109]
+                  - heading [level=2] [ref=f25e110]:
+                    - link "Examples" [ref=f25e111] [cursor=pointer]:
+                      - /url: "#examples"
+                  - heading [level=3] [ref=f25e112]:
+                    - link "Basic example" [ref=f25e113] [cursor=pointer]:
+                      - /url: "#basic-example"
+                  - paragraph [ref=f25e114]:
+                    - text: Use
+                    - code [ref=f25e115]: "`scale-<number>`"
+                    - text: utilities like
+                    - code [ref=f25e116]: "`scale-75`"
+                    - text: and
+                    - code [ref=f25e117]: "`scale-150`"
+                    - text: "to scale an element by a percentage of its original size:"
+                  - figure [ref=f25e120]:
+                    - generic [ref=f25e123]:
+                      - paragraph [ref=f25e125]: scale-75
+                      - paragraph [ref=f25e133]: scale-100
+                      - paragraph [ref=f25e141]: scale-125
+                    - code [ref=f25e153]:
+                      - generic [ref=f25e154]: <img class=" scale-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e155]: <img class=" scale-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e156]: <img class=" scale-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f25e157]:
+                    - link "Scaling on the x-axis" [ref=f25e158] [cursor=pointer]:
+                      - /url: "#scaling-on-the-x-axis"
+                  - paragraph [ref=f25e159]:
+                    - text: Use the
+                    - code [ref=f25e160]: "`scale-x-<number>`"
+                    - text: utilities like
+                    - code [ref=f25e161]: "`scale-x-75`"
+                    - text: and
+                    - code [ref=f25e162]: "`-scale-x-150`"
+                    - text: "to scale an element on the x-axis by a percentage of its original width:"
+                  - figure [ref=f25e165]:
+                    - generic [ref=f25e168]:
+                      - paragraph [ref=f25e170]: scale-x-75
+                      - paragraph [ref=f25e178]: scale-x-100
+                      - paragraph [ref=f25e186]: scale-x-125
+                    - code [ref=f25e198]:
+                      - generic [ref=f25e199]: <img class=" scale-x-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e200]: <img class=" scale-x-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e201]: <img class=" scale-x-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f25e202]:
+                    - link "Scaling on the y-axis" [ref=f25e203] [cursor=pointer]:
+                      - /url: "#scaling-on-the-y-axis"
+                  - paragraph [ref=f25e204]:
+                    - text: Use the
+                    - code [ref=f25e205]: "`scale-y-<number>`"
+                    - text: utilities like
+                    - code [ref=f25e206]: "`scale-y-75`"
+                    - text: and
+                    - code [ref=f25e207]: "`scale-y-150`"
+                    - text: "to scale an element on the y-axis by a percentage of its original height:"
+                  - figure [ref=f25e210]:
+                    - generic [ref=f25e213]:
+                      - paragraph [ref=f25e215]: scale-y-75
+                      - paragraph [ref=f25e223]: scale-y-100
+                      - paragraph [ref=f25e231]: scale-y-125
+                    - code [ref=f25e243]:
+                      - generic [ref=f25e244]: <img class=" scale-y-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e245]: <img class=" scale-y-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e246]: <img class=" scale-y-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f25e247]:
+                    - link "Using negative values" [ref=f25e248] [cursor=pointer]:
+                      - /url: "#using-negative-values"
+                  - paragraph [ref=f25e249]:
+                    - text: Use
+                    - code [ref=f25e250]: "`-scale-<number>`"
+                    - text: ","
+                    - code [ref=f25e251]: "`-scale-x-<number>`"
+                    - text: or
+                    - code [ref=f25e252]: "`-scale-y-<number>`"
+                    - text: utilities like
+                    - code [ref=f25e253]: "`-scale-x-75`"
+                    - text: and
+                    - code [ref=f25e254]: "`-scale-125`"
+                    - text: "to mirror and scale down an element by a percentage of its original size:"
+                  - figure [ref=f25e257]:
+                    - generic [ref=f25e260]:
+                      - paragraph [ref=f25e262]: "-scale-x-75"
+                      - paragraph [ref=f25e270]: "-scale-100"
+                      - paragraph [ref=f25e278]: "-scale-y-125"
+                    - code [ref=f25e290]:
+                      - generic [ref=f25e291]: <img class=" -scale-x-75 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e292]: <img class=" -scale-100 ..." src="/img/mountains.jpg" />
+                      - generic [ref=f25e293]: <img class=" -scale-y-125 ..." src="/img/mountains.jpg" />
+                  - heading [level=3] [ref=f25e294]:
+                    - link "Using a custom value" [ref=f25e295] [cursor=pointer]:
+                      - /url: "#using-a-custom-value"
+                  - paragraph [ref=f25e296]:
+                    - text: Use the
+                    - code [ref=f25e297]: "`scale-[<value>]`"
+                    - text: "syntax to set the scale based on a completely custom value:"
+                  - code [ref=f25e304]:
+                    - generic [ref=f25e305]: <img class=" scale-[1.7] ..." src="/img/mountains.jpg" />
+                  - paragraph [ref=f25e306]:
+                    - text: For CSS variables, you can also use the
+                    - code [ref=f25e307]: "`scale-(<custom-property>)`"
+                    - text: "syntax:"
+                  - code [ref=f25e314]:
+                    - generic [ref=f25e315]: <img class=" scale-(--my-scale) ..." src="/img/mountains.jpg" />
+                  - paragraph [ref=f25e316]:
+                    - text: This is just a shorthand for
+                    - code [ref=f25e317]: "`scale-[var(<custom-property>)]`"
+                    - text: that adds the
+                    - code [ref=f25e318]: "`var()`"
+                    - text: function for you automatically.
+                  - heading [level=3] [ref=f25e319]:
+                    - link "Applying on hover" [ref=f25e320] [cursor=pointer]:
+                      - /url: "#applying-on-hover"
+                  - paragraph [ref=f25e321]:
+                    - text: Prefix a
+                    - code [ref=f25e322]: "`scale`"
+                    - text: utility with a variant like
+                    - code [ref=f25e323]: "`hover:*`"
+                    - text: "to only apply the utility in that state:"
+                  - code [ref=f25e330]:
+                    - generic [ref=f25e331]: <img class="scale-95 hover:scale-120 ..." src="/img/mountains.jpg" />
+                  - paragraph [ref=f25e332]:
+                    - text: Learn more about using variants in the
+                    - link "variants documentation" [ref=f25e333] [cursor=pointer]:
+                      - /url: /docs/hover-focus-and-other-states
+                    - text: .
+                - contentinfo [ref=f25e334]:
+                  - generic [ref=f25e335]:
+                    - link "rotate" [ref=f25e336] [cursor=pointer]:
+                      - /url: /docs/rotate
+                    - link "skew" [ref=f25e340] [cursor=pointer]:
+                      - /url: /docs/skew
+              - contentinfo [ref=f25e345]:
+                - generic [ref=f25e346]:
+                  - generic [ref=f25e347]:
+                    - generic [ref=f25e348]:
+                      - heading "Tailwind CSS" [level=3] [ref=f25e349]
+                      - list [ref=f25e350]:
+                        - listitem [ref=f25e351]:
+                          - link "Documentation" [ref=f25e352] [cursor=pointer]:
+                            - /url: /docs
+                        - listitem [ref=f25e353]:
+                          - link "Playground" [ref=f25e354] [cursor=pointer]:
+                            - /url: https://play.tailwindcss.com/
+                        - listitem [ref=f25e355]:
+                          - link "Blog" [ref=f25e356] [cursor=pointer]:
+                            - /url: /blog
+                        - listitem [ref=f25e357]:
+                          - link "Showcase" [ref=f25e358] [cursor=pointer]:
+                            - /url: /showcase
+                        - listitem [ref=f25e359]:
+                          - link "Sponsor" [ref=f25e360] [cursor=pointer]:
+                            - /url: /partners
+                    - generic [ref=f25e361]:
+                      - heading "Resources" [level=3] [ref=f25e362]
+                      - list [ref=f25e363]:
+                        - listitem [ref=f25e364]:
+                          - link "Refactoring UI" [ref=f25e365] [cursor=pointer]:
+                            - /url: https://www.refactoringui.com
+                        - listitem [ref=f25e366]:
+                          - link "Headless UI" [ref=f25e367] [cursor=pointer]:
+                            - /url: https://headlessui.com
+                        - listitem [ref=f25e368]:
+                          - link "Heroicons" [ref=f25e369] [cursor=pointer]:
+                            - /url: https://heroicons.com
+                        - listitem [ref=f25e370]:
+                          - link "Hero Patterns" [ref=f25e371] [cursor=pointer]:
+                            - /url: https://heropatterns.com
+                  - generic [ref=f25e372]:
+                    - generic [ref=f25e373]:
+                      - heading [level=3] [ref=f25e374]:
+                        - link "Tailwind Plus" [ref=f25e375] [cursor=pointer]:
+                          - /url: /plus?ref=footer
+                      - list [ref=f25e376]:
+                        - listitem [ref=f25e377]:
+                          - link "UI Blocks" [ref=f25e378] [cursor=pointer]:
+                            - /url: /plus/ui-blocks?ref=footer
+                        - listitem [ref=f25e379]:
+                          - link "Templates" [ref=f25e380] [cursor=pointer]:
+                            - /url: /plus/templates?ref=footer
+                        - listitem [ref=f25e381]:
+                          - link "UI Kit" [ref=f25e382] [cursor=pointer]:
+                            - /url: /plus/ui-kit?ref=footer
+                    - generic [ref=f25e383]:
+                      - heading "Community" [level=3] [ref=f25e384]
+                      - list [ref=f25e385]:
+                        - listitem [ref=f25e386]:
+                          - link "GitHub" [ref=f25e387] [cursor=pointer]:
+                            - /url: https://github.com/tailwindlabs/tailwindcss
+                        - listitem [ref=f25e388]:
+                          - link "Discord" [ref=f25e389] [cursor=pointer]:
+                            - /url: /partners#insiders
+                        - listitem [ref=f25e390]:
+                          - link "X" [ref=f25e391] [cursor=pointer]:
+                            - /url: https://x.com/tailwindcss
+              - generic [ref=f25e394]:
+                - radiogroup [ref=f25e395]:
+                  - radio "System theme" [checked] [ref=f25e396]
+                  - radio "Light theme" [ref=f25e401]
+                  - radio "Dark theme" [ref=f25e408]
+                - generic [ref=f25e413]:
+                  - generic [ref=f25e414]: Copyright © 2026 Tailwind Labs Inc.
+                  - link "Trademark Policy" [ref=f25e415] [cursor=pointer]:
+                    - /url: /brand
+          - alert [ref=f25e416]
+  - iframe [ref=f13e101]:
+    - generic [ref=f16e1]:
+      - generic [ref=f16e2]: 欢迎你
+      - heading "综合测试表单" [level=2] [ref=f16e3]
+      - generic [ref=f16e4]:
+        - generic [ref=f16e5]:
+          - generic [ref=f16e6]: 姓名(input文本框)：
+          - textbox "姓名(input文本框)：" [ref=f16e7]:
+            - /placeholder: 请输入姓名
+        - generic [ref=f16e8]:
+          - generic [ref=f16e9]: 个人简介(textarea)：
+          - textbox "个人简介(textarea)：" [ref=f16e10]:
+            - /placeholder: 请输入自我介绍
+        - generic [ref=f16e11]:
+          - generic [ref=f16e12]: 城市(select下拉)：
+          - combobox "城市(select下拉)：" [ref=f16e13]:
+            - option "请选择城市" [selected]
+            - option "北京"
+            - option "上海"
+            - option "广州"
+            - option "深圳"
+        - generic [ref=f16e14]:
+          - generic [ref=f16e15]: 爱好(checkbox多选)：
+          - generic [ref=f16e16]:
+            - checkbox "读书" [ref=f16e17]
+            - text: 读书
+          - generic [ref=f16e18]:
+            - checkbox "游戏" [ref=f16e19]
+            - text: 游戏
+          - generic [ref=f16e20]:
+            - checkbox "运动" [ref=f16e21]
+            - text: 运动
+        - generic [ref=f16e22]:
+          - generic [ref=f16e23]: 性别(radio单选)：
+          - generic [ref=f16e24]:
+            - radio "男" [ref=f16e25]
+            - text: 男
+          - generic [ref=f16e26]:
+            - radio "女" [ref=f16e27]
+            - text: 女
+        - generic [ref=f16e28]:
+          - button "提交表单" [ref=f16e29] [cursor=pointer]
+          - button "禁用按钮(disable)" [disabled] [ref=f16e30]
+  - iframe [ref=f13e102]:
+    - generic [ref=f17e1]:
+      - generic [ref=f17e3]:
+        - generic [ref=f17e4]:
+          - generic [ref=f17e6]:
+            - generic [ref=f17e7]:
+              - link "Home" [ref=f17e8] [cursor=pointer]:
+                - /url: /
+              - button "Select version of library" [ref=f17e12]: v4.3
+            - generic [ref=f17e15]:
+              - button "Search" [ref=f17e16]
+              - button "Navigation" [ref=f17e19]
+          - generic [ref=f17e22]:
+            - button "Open navigation menu" [ref=f17e23]
+            - list [ref=f17e26]:
+              - listitem [ref=f17e27]:
+                - generic [ref=f17e28]: Transforms
+              - listitem [ref=f17e31]: scale
+        - generic [ref=f17e32]:
+          - generic [ref=f17e35]:
+            - paragraph [ref=f17e36]: Transforms
+            - heading "scale" [level=1] [ref=f17e37]
+            - paragraph [ref=f17e38]: Utilities for scaling elements.
+            - generic [ref=f17e39]:
+              - generic [ref=f17e40]:
+                - table [ref=f17e42]:
+                  - rowgroup [ref=f17e43]:
+                    - row [ref=f17e44]:
+                      - columnheader "Class" [ref=f17e45]
+                      - columnheader "Styles" [ref=f17e46]
+                  - rowgroup [ref=f17e47]:
+                    - row [ref=f17e48]:
+                      - cell [ref=f17e49]:
+                        - code [ref=f17e50]: scale-none
+                      - cell [ref=f17e51]:
+                        - code [ref=f17e53]: "scale: none;"
+                    - row [ref=f17e54]:
+                      - cell [ref=f17e55]:
+                        - code [ref=f17e56]: scale-<number>
+                      - cell [ref=f17e57]:
+                        - code [ref=f17e59]: "scale: <number>% <number>%;"
+                    - row [ref=f17e60]:
+                      - cell [ref=f17e61]:
+                        - code [ref=f17e62]: "-scale-<number>"
+                      - cell [ref=f17e63]:
+                        - code [ref=f17e65]: "scale: calc(<number>% * -1) calc(<number>% * -1);"
+                    - row [ref=f17e66]:
+                      - cell [ref=f17e67]:
+                        - code [ref=f17e68]: scale-(<custom-property>)
+                      - cell [ref=f17e69]:
+                        - code [ref=f17e71]: "scale: var(<custom-property>) var(<custom-property>);"
+                    - row [ref=f17e72]:
+                      - cell [ref=f17e73]:
+                        - code [ref=f17e74]: scale-[<value>]
+                      - cell [ref=f17e75]:
+                        - code [ref=f17e77]: "scale: <value>;"
+                    - row [ref=f17e78]:
+                      - cell [ref=f17e79]:
+                        - code [ref=f17e80]: scale-x-<number>
+                      - cell [ref=f17e81]:
+                        - code [ref=f17e83]: "scale: <number>% var(--tw-scale-y);"
+                    - row [ref=f17e84]:
+                      - cell [ref=f17e85]:
+                        - code [ref=f17e86]: "-scale-x-<number>"
+                      - cell [ref=f17e87]:
+                        - code [ref=f17e89]: "scale: calc(<number>% * -1) var(--tw-scale-y);"
+                    - row [ref=f17e90]:
+                      - cell [ref=f17e91]:
+                        - code [ref=f17e92]: scale-x-(<custom-property>)
+                      - cell [ref=f17e93]:
+                        - code [ref=f17e95]: "scale: var(<custom-property>) var(--tw-scale-y);"
+                    - row [ref=f17e96]:
+                      - cell [ref=f17e97]:
+                        - code [ref=f17e98]: scale-x-[<value>]
+                      - cell [ref=f17e99]:
+                        - code [ref=f17e101]: "scale: <value> var(--tw-scale-y);"
+                    - row [ref=f17e102]:
+                      - cell [ref=f17e103]:
+                        - code [ref=f17e104]: scale-y-<number>
+                      - cell [ref=f17e105]:
+                        - code [ref=f17e107]: "scale: var(--tw-scale-x) <number>%;"
+                  - rowgroup
+                - button "Show more" [ref=f17e109]
+              - heading [level=2] [ref=f17e110]:
+                - link "Examples" [ref=f17e111] [cursor=pointer]:
+                  - /url: "#examples"
+              - heading [level=3] [ref=f17e112]:
+                - link "Basic example" [ref=f17e113] [cursor=pointer]:
+                  - /url: "#basic-example"
+              - paragraph [ref=f17e114]:
+                - text: Use
+                - code [ref=f17e115]: "`scale-<number>`"
+                - text: utilities like
+                - code [ref=f17e116]: "`scale-75`"
+                - text: and
+                - code [ref=f17e117]: "`scale-150`"
+                - text: "to scale an element by a percentage of its original size:"
+              - figure [ref=f17e120]:
+                - generic [ref=f17e123]:
+                  - paragraph [ref=f17e125]: scale-75
+                  - paragraph [ref=f17e133]: scale-100
+                  - paragraph [ref=f17e141]: scale-125
+                - code [ref=f17e153]:
+                  - generic [ref=f17e154]: <img class=" scale-75 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e155]: <img class=" scale-100 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e156]: <img class=" scale-125 ..." src="/img/mountains.jpg" />
+              - heading [level=3] [ref=f17e157]:
+                - link "Scaling on the x-axis" [ref=f17e158] [cursor=pointer]:
+                  - /url: "#scaling-on-the-x-axis"
+              - paragraph [ref=f17e159]:
+                - text: Use the
+                - code [ref=f17e160]: "`scale-x-<number>`"
+                - text: utilities like
+                - code [ref=f17e161]: "`scale-x-75`"
+                - text: and
+                - code [ref=f17e162]: "`-scale-x-150`"
+                - text: "to scale an element on the x-axis by a percentage of its original width:"
+              - figure [ref=f17e165]:
+                - generic [ref=f17e168]:
+                  - paragraph [ref=f17e170]: scale-x-75
+                  - paragraph [ref=f17e178]: scale-x-100
+                  - paragraph [ref=f17e186]: scale-x-125
+                - code [ref=f17e198]:
+                  - generic [ref=f17e199]: <img class=" scale-x-75 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e200]: <img class=" scale-x-100 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e201]: <img class=" scale-x-125 ..." src="/img/mountains.jpg" />
+              - heading [level=3] [ref=f17e202]:
+                - link "Scaling on the y-axis" [ref=f17e203] [cursor=pointer]:
+                  - /url: "#scaling-on-the-y-axis"
+              - paragraph [ref=f17e204]:
+                - text: Use the
+                - code [ref=f17e205]: "`scale-y-<number>`"
+                - text: utilities like
+                - code [ref=f17e206]: "`scale-y-75`"
+                - text: and
+                - code [ref=f17e207]: "`scale-y-150`"
+                - text: "to scale an element on the y-axis by a percentage of its original height:"
+              - figure [ref=f17e210]:
+                - generic [ref=f17e213]:
+                  - paragraph [ref=f17e215]: scale-y-75
+                  - paragraph [ref=f17e223]: scale-y-100
+                  - paragraph [ref=f17e231]: scale-y-125
+                - code [ref=f17e243]:
+                  - generic [ref=f17e244]: <img class=" scale-y-75 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e245]: <img class=" scale-y-100 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e246]: <img class=" scale-y-125 ..." src="/img/mountains.jpg" />
+              - heading [level=3] [ref=f17e247]:
+                - link "Using negative values" [ref=f17e248] [cursor=pointer]:
+                  - /url: "#using-negative-values"
+              - paragraph [ref=f17e249]:
+                - text: Use
+                - code [ref=f17e250]: "`-scale-<number>`"
+                - text: ","
+                - code [ref=f17e251]: "`-scale-x-<number>`"
+                - text: or
+                - code [ref=f17e252]: "`-scale-y-<number>`"
+                - text: utilities like
+                - code [ref=f17e253]: "`-scale-x-75`"
+                - text: and
+                - code [ref=f17e254]: "`-scale-125`"
+                - text: "to mirror and scale down an element by a percentage of its original size:"
+              - figure [ref=f17e257]:
+                - generic [ref=f17e260]:
+                  - paragraph [ref=f17e262]: "-scale-x-75"
+                  - paragraph [ref=f17e270]: "-scale-100"
+                  - paragraph [ref=f17e278]: "-scale-y-125"
+                - code [ref=f17e290]:
+                  - generic [ref=f17e291]: <img class=" -scale-x-75 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e292]: <img class=" -scale-100 ..." src="/img/mountains.jpg" />
+                  - generic [ref=f17e293]: <img class=" -scale-y-125 ..." src="/img/mountains.jpg" />
+              - heading [level=3] [ref=f17e294]:
+                - link "Using a custom value" [ref=f17e295] [cursor=pointer]:
+                  - /url: "#using-a-custom-value"
+              - paragraph [ref=f17e296]:
+                - text: Use the
+                - code [ref=f17e297]: "`scale-[<value>]`"
+                - text: "syntax to set the scale based on a completely custom value:"
+              - code [ref=f17e304]:
+                - generic [ref=f17e305]: <img class=" scale-[1.7] ..." src="/img/mountains.jpg" />
+              - paragraph [ref=f17e306]:
+                - text: For CSS variables, you can also use the
+                - code [ref=f17e307]: "`scale-(<custom-property>)`"
+                - text: "syntax:"
+              - code [ref=f17e314]:
+                - generic [ref=f17e315]: <img class=" scale-(--my-scale) ..." src="/img/mountains.jpg" />
+              - paragraph [ref=f17e316]:
+                - text: This is just a shorthand for
+                - code [ref=f17e317]: "`scale-[var(<custom-property>)]`"
+                - text: that adds the
+                - code [ref=f17e318]: "`var()`"
+                - text: function for you automatically.
+              - heading [level=3] [ref=f17e319]:
+                - link "Applying on hover" [ref=f17e320] [cursor=pointer]:
+                  - /url: "#applying-on-hover"
+              - paragraph [ref=f17e321]:
+                - text: Prefix a
+                - code [ref=f17e322]: "`scale`"
+                - text: utility with a variant like
+                - code [ref=f17e323]: "`hover:*`"
+                - text: "to only apply the utility in that state:"
+              - code [ref=f17e330]:
+                - generic [ref=f17e331]: <img class="scale-95 hover:scale-120 ..." src="/img/mountains.jpg" />
+              - paragraph [ref=f17e332]:
+                - text: Learn more about using variants in the
+                - link "variants documentation" [ref=f17e333] [cursor=pointer]:
+                  - /url: /docs/hover-focus-and-other-states
+                - text: .
+            - contentinfo [ref=f17e334]:
+              - generic [ref=f17e335]:
+                - link "rotate" [ref=f17e336] [cursor=pointer]:
+                  - /url: /docs/rotate
+                - link "skew" [ref=f17e340] [cursor=pointer]:
+                  - /url: /docs/skew
+          - contentinfo [ref=f17e345]:
+            - generic [ref=f17e346]:
+              - generic [ref=f17e347]:
+                - generic [ref=f17e348]:
+                  - heading "Tailwind CSS" [level=3] [ref=f17e349]
+                  - list [ref=f17e350]:
+                    - listitem [ref=f17e351]:
+                      - link "Documentation" [ref=f17e352] [cursor=pointer]:
+                        - /url: /docs
+                    - listitem [ref=f17e353]:
+                      - link "Playground" [ref=f17e354] [cursor=pointer]:
+                        - /url: https://play.tailwindcss.com/
+                    - listitem [ref=f17e355]:
+                      - link "Blog" [ref=f17e356] [cursor=pointer]:
+                        - /url: /blog
+                    - listitem [ref=f17e357]:
+                      - link "Showcase" [ref=f17e358] [cursor=pointer]:
+                        - /url: /showcase
+                    - listitem [ref=f17e359]:
+                      - link "Sponsor" [ref=f17e360] [cursor=pointer]:
+                        - /url: /partners
+                - generic [ref=f17e361]:
+                  - heading "Resources" [level=3] [ref=f17e362]
+                  - list [ref=f17e363]:
+                    - listitem [ref=f17e364]:
+                      - link "Refactoring UI" [ref=f17e365] [cursor=pointer]:
+                        - /url: https://www.refactoringui.com
+                    - listitem [ref=f17e366]:
+                      - link "Headless UI" [ref=f17e367] [cursor=pointer]:
+                        - /url: https://headlessui.com
+                    - listitem [ref=f17e368]:
+                      - link "Heroicons" [ref=f17e369] [cursor=pointer]:
+                        - /url: https://heroicons.com
+                    - listitem [ref=f17e370]:
+                      - link "Hero Patterns" [ref=f17e371] [cursor=pointer]:
+                        - /url: https://heropatterns.com
+              - generic [ref=f17e372]:
+                - generic [ref=f17e373]:
+                  - heading [level=3] [ref=f17e374]:
+                    - link "Tailwind Plus" [ref=f17e375] [cursor=pointer]:
+                      - /url: /plus?ref=footer
+                  - list [ref=f17e376]:
+                    - listitem [ref=f17e377]:
+                      - link "UI Blocks" [ref=f17e378] [cursor=pointer]:
+                        - /url: /plus/ui-blocks?ref=footer
+                    - listitem [ref=f17e379]:
+                      - link "Templates" [ref=f17e380] [cursor=pointer]:
+                        - /url: /plus/templates?ref=footer
+                    - listitem [ref=f17e381]:
+                      - link "UI Kit" [ref=f17e382] [cursor=pointer]:
+                        - /url: /plus/ui-kit?ref=footer
+                - generic [ref=f17e383]:
+                  - heading "Community" [level=3] [ref=f17e384]
+                  - list [ref=f17e385]:
+                    - listitem [ref=f17e386]:
+                      - link "GitHub" [ref=f17e387] [cursor=pointer]:
+                        - /url: https://github.com/tailwindlabs/tailwindcss
+                    - listitem [ref=f17e388]:
+                      - link "Discord" [ref=f17e389] [cursor=pointer]:
+                        - /url: /partners#insiders
+                    - listitem [ref=f17e390]:
+                      - link "X" [ref=f17e391] [cursor=pointer]:
+                        - /url: https://x.com/tailwindcss
+          - generic [ref=f17e394]:
+            - radiogroup [ref=f17e395]:
+              - radio "System theme" [checked] [ref=f17e396]
+              - radio "Light theme" [ref=f17e401]
+              - radio "Dark theme" [ref=f17e408]
+            - generic [ref=f17e413]:
+              - generic [ref=f17e414]: Copyright © 2026 Tailwind Labs Inc.
+              - link "Trademark Policy" [ref=f17e415] [cursor=pointer]:
+                - /url: /brand
+      - alert [ref=f17e416]

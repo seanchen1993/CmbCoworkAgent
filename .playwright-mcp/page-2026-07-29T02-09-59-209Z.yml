@@ -1,0 +1,31 @@
+- generic [ref=e5]:
+  - button "🇨🇳" [ref=e8] [cursor=pointer]
+  - link "Link API" [ref=e12] [cursor=pointer]:
+    - /url: /home
+    - generic [ref=e13]:
+      - img "Link API logo" [ref=e15]
+      - strong [ref=e17]: Link API
+  - generic [ref=e19]:
+    - generic [ref=e20]:
+      - heading "欢迎回来" [level=2] [ref=e21]
+      - paragraph [ref=e22]: 登录您的账户以继续
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - generic [ref=e25]: 邮箱
+        - textbox "邮箱" [disabled] [ref=e27]:
+          - /placeholder: 请输入邮箱
+      - generic [ref=e28]:
+        - generic [ref=e29]: 密码
+        - generic [ref=e30]:
+          - textbox "密码" [disabled] [ref=e31]:
+            - /placeholder: 请输入密码
+          - button [disabled] [ref=e32]
+      - button "登录" [disabled] [ref=e35]
+  - generic [ref=e39]:
+    - link "返回首页" [ref=e40] [cursor=pointer]:
+      - /url: /home
+    - generic [ref=e41]:
+      - text: 还没有账户？
+      - link "注册" [ref=e42] [cursor=pointer]:
+        - /url: /register
+  - paragraph [ref=e43]: © 2026 Link API. 保留所有权利。

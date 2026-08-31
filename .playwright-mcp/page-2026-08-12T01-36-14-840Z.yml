@@ -1,0 +1,145 @@
+- generic [ref=e4]:
+  - generic:
+    - generic [ref=e7]:
+      - link "新闻" [ref=e8] [cursor=pointer]:
+        - /url: http://news.baidu.com
+      - link "hao123" [ref=e9] [cursor=pointer]:
+        - /url: https://www.hao123.com?src=from_pc_logon
+      - link "地图" [ref=e10] [cursor=pointer]:
+        - /url: http://map.baidu.com
+      - link "贴吧" [ref=e11] [cursor=pointer]:
+        - /url: http://tieba.baidu.com/
+      - link "视频" [ref=e12] [cursor=pointer]:
+        - /url: https://haokan.baidu.com/?sfrom=baidu-top
+      - link "图片" [ref=e13] [cursor=pointer]:
+        - /url: http://image.baidu.com/
+      - link "网盘" [ref=e14] [cursor=pointer]:
+        - /url: https://pan.baidu.com?from=1026962h
+      - link "文库" [ref=e15] [cursor=pointer]:
+        - /url: https://wenku.baidu.com/?fr=bdpcindex
+      - link "文心" [ref=e16] [cursor=pointer]:
+        - /url: https://chat.baidu.com/search?isShowHello=1&pd=csaitab&setype=csaitab&extParamsJson=%7B%22enter_type%22%3A%22home_tab%22%7D
+      - link "百度搭子" [ref=e17] [cursor=pointer]:
+        - /url: https://dumate.cn?track=bdsy
+      - link "更多" [ref=e19] [cursor=pointer]:
+        - /url: http://www.baidu.com/more/
+    - generic [ref=e20]:
+      - generic [ref=e23]:
+        - link "成都 27°" [ref=e24] [cursor=pointer]:
+          - /url: //www.baidu.com/s?tn=baidutop10&rsv_idx=2&rsv_dl=iweather&wd=成都天气预报
+          - generic [ref=e25]:
+            - generic [ref=e26]: 成都
+            - generic [ref=e27]: 27°
+        - generic [ref=e29]: 优
+      - generic [ref=e33] [cursor=pointer]: 通知
+      - generic [ref=e37] [cursor=pointer]: 设置
+      - link "asmmlions" [ref=e38] [cursor=pointer]:
+        - /url: https://www.baidu.com/my/index
+  - generic [ref=e42]:
+    - generic [ref=e44]:
+      - generic [ref=e45]:
+        - generic:
+          - link "点击一下，了解更多":
+            - /url: //www.baidu.com/s?wd=%E7%99%BE%E5%BA%A6%E7%83%AD%E6%90%9C&sa=ire_dl_gh_logo_texing&rsv_dl=igh_logo_pc
+      - generic [ref=e51]:
+        - generic [ref=e54]:
+          - textbox "非洲媒体人走进大泽湖" [ref=e56]
+          - generic [ref=e58]:
+            - generic [ref=e59]:
+              - generic [ref=e61] [cursor=pointer]
+              - generic [ref=e70]:
+                - generic [ref=e71] [cursor=pointer]
+                - generic [ref=e76] [cursor=pointer]
+            - button "百度一下" [ref=e83] [cursor=pointer]
+        - link "复杂问题就找文心助手，深入思考回答更优 " [ref=e87] [cursor=pointer]:
+          - /url: https://chat.baidu.com/search?extParams=%7B%22enter_type%22%3A%22home_operate%22%7D&isShowHello=1
+          - generic [ref=e89]:
+            - generic [ref=e90]: 复杂问题就找文心助手，深入思考回答更优
+            - generic [ref=e91]: 
+    - paragraph
+  - generic [ref=e97]:
+    - generic [ref=e102]:
+      - generic [ref=e103] [cursor=pointer]: 常用应用
+      - generic [ref=e104] [cursor=pointer]
+    - generic [ref=e107]:
+      - generic [ref=e108]:
+        - link "百度热搜" [ref=e109] [cursor=pointer]:
+          - /url: https://top.baidu.com/board?platform=pc&sa=pcindex_entry
+          - generic "百度热搜" [ref=e110]: 
+        - generic [ref=e111] [cursor=pointer]:
+          - generic [ref=e112]: 
+          - text: 换一换
+      - list:
+        - listitem [ref=e113]:
+          - link " 总书记多次强调因地制宜" [ref=e114] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E6%80%BB%E4%B9%A6%E8%AE%B0%E5%A4%9A%E6%AC%A1%E5%BC%BA%E8%B0%83%E5%9B%A0%E5%9C%B0%E5%88%B6%E5%AE%9C&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e115]: 
+            - text: 总书记多次强调因地制宜
+        - listitem [ref=e117]:
+          - link "5 C罗晒照官宣完婚" [ref=e118] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=C%E7%BD%97%E6%99%92%E7%85%A7%E5%AE%98%E5%AE%A3%E5%AE%8C%E5%A9%9A&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e119]: "5"
+            - text: C罗晒照官宣完婚
+          - generic [ref=e120]: 热
+        - listitem [ref=e121]:
+          - link "1 郭兰英逝世 享年97岁" [ref=e122] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E9%83%AD%E5%85%B0%E8%8B%B1%E9%80%9D%E4%B8%96+%E4%BA%AB%E5%B9%B497%E5%B2%81&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e123]: "1"
+            - text: 郭兰英逝世 享年97岁
+          - generic [ref=e124]: 热
+        - listitem [ref=e125]:
+          - link "6 北京暴雨" [ref=e126] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%8C%97%E4%BA%AC%E6%9A%B4%E9%9B%A8&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e127]: "6"
+            - text: 北京暴雨
+        - listitem [ref=e129]:
+          - link "2 多地试点：直升高中" [ref=e130] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%A4%9A%E5%9C%B0%E8%AF%95%E7%82%B9%EF%BC%9A%E7%9B%B4%E5%8D%87%E9%AB%98%E4%B8%AD&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e131]: "2"
+            - text: 多地试点：直升高中
+          - generic [ref=e132]: 新
+        - listitem [ref=e133]:
+          - link "7 借用30多年 兰州拉面还给兰州了" [ref=e134] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E5%80%9F%E7%94%A830%E5%A4%9A%E5%B9%B4+%E5%85%B0%E5%B7%9E%E6%8B%89%E9%9D%A2%E8%BF%98%E7%BB%99%E5%85%B0%E5%B7%9E%E4%BA%86&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e135]: "7"
+            - text: 借用30多年 兰州拉面还给兰州了
+          - generic [ref=e136]: 热
+        - listitem [ref=e137]:
+          - link "3 这个时代我们该追什么样的星" [ref=e138] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E8%BF%99%E4%B8%AA%E6%97%B6%E4%BB%A3%E6%88%91%E4%BB%AC%E8%AF%A5%E8%BF%BD%E4%BB%80%E4%B9%88%E6%A0%B7%E7%9A%84%E6%98%9F&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e139]: "3"
+            - text: 这个时代我们该追什么样的星
+        - listitem [ref=e141]:
+          - link "8 郭兰英1994年将演唱版权无偿捐国家" [ref=e142] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E9%83%AD%E5%85%B0%E8%8B%B11994%E5%B9%B4%E5%B0%86%E6%BC%94%E5%94%B1%E7%89%88%E6%9D%83%E6%97%A0%E5%81%BF%E6%8D%90%E5%9B%BD%E5%AE%B6&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e143]: "8"
+            - text: 郭兰英1994年将演唱版权无偿捐国家
+          - generic [ref=e144]: 新
+        - listitem [ref=e145]:
+          - link "4 赵一鸣4块牛肉干64元复称仅17元" [ref=e146] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E8%B5%B5%E4%B8%80%E9%B8%A34%E5%9D%97%E7%89%9B%E8%82%89%E5%B9%B264%E5%85%83%E5%A4%8D%E7%A7%B0%E4%BB%8517%E5%85%83&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e147]: "4"
+            - text: 赵一鸣4块牛肉干64元复称仅17元
+        - listitem [ref=e149]:
+          - link "9 两张照片沈腾能玩出100个梗" [ref=e150] [cursor=pointer]:
+            - /url: https://www.baidu.com/s?wd=%E4%B8%A4%E5%BC%A0%E7%85%A7%E7%89%87%E6%B2%88%E8%85%BE%E8%83%BD%E7%8E%A9%E5%87%BA100%E4%B8%AA%E6%A2%97&sa=fyb_n_homepage&rsv_dl=fyb_n_homepage&from=super&cl=3&tn=baidutop10&fr=top1000&rsv_idx=2&hisfilter=1
+            - generic [ref=e151]: "9"
+            - text: 两张照片沈腾能玩出100个梗
+  - generic [ref=e156]:
+    - paragraph [ref=e157]:
+      - link "关于百度" [ref=e158] [cursor=pointer]:
+        - /url: //home.baidu.com
+    - paragraph [ref=e159]:
+      - link "About Baidu" [ref=e160] [cursor=pointer]:
+        - /url: http://ir.baidu.com
+    - paragraph [ref=e161]:
+      - link "使用百度前必读" [ref=e162] [cursor=pointer]:
+        - /url: //www.baidu.com/duty
+    - paragraph [ref=e163]:
+      - link "帮助中心" [ref=e164] [cursor=pointer]:
+        - /url: https://help.baidu.com/question?prod_id=1
+    - paragraph [ref=e165]:
+      - link "企业推广" [ref=e166] [cursor=pointer]:
+        - /url: https://e.baidu.com/?refer=1271
+    - generic [ref=e167]: 
+    - generic [ref=e168]: 

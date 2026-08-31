@@ -21,7 +21,7 @@ import {
 import { fromPersistedRequirement, type RequirementRecord } from "./requirement-data"
 import type { DesignSystemInfo } from "../design/types"
 
-type UploadSource = "file" | "link"
+type UploadSource = "file" | "link" | "blank"
 const REQUIRED_PRD_SKILL_NAME = "requirement-to-prd"
 
 async function ensureRequirementToPrdSkill(): Promise<void> {
@@ -100,7 +100,10 @@ export function NewRequirementDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
   system: DesignSystemInfo
-  onStartConversation: (requirement: RequirementRecord) => void | Promise<void>
+  onStartConversation: (
+    requirement: RequirementRecord,
+    options?: { autoGeneratePrd?: boolean }
+  ) => void | Promise<void>
 }): React.JSX.Element {
   const [source, setSource] = useState<UploadSource>("file")
   const [file, setFile] = useState<File | null>(null)
@@ -168,26 +171,33 @@ export function NewRequirementDialog({
 
     setSaving(true)
     try {
-      setPreparingSkill(true)
-      await ensureRequirementToPrdSkill()
-      setPreparingSkill(false)
+      if (source !== "blank") {
+        setPreparingSkill(true)
+        await ensureRequirementToPrdSkill()
+        setPreparingSkill(false)
+      }
       const sourcePayload =
         source === "file"
           ? {
               fileName: sourceName || "新需求草稿.docx",
               sourcePath: file ? window.api.file.getFilePath(file) : undefined
             }
-          : {
-              fileName: "原始需求链接.md",
-              url: normalizedUrl,
-              content: getLinkSnapshot(normalizedUrl, system.name)
-            }
+          : source === "link"
+            ? {
+                fileName: "原始需求链接.md",
+                url: normalizedUrl,
+                content: getLinkSnapshot(normalizedUrl, system.name)
+              }
+            : {
+                fileName: "从零开始.md",
+                content: ""
+              }
       const result = await window.api.requirements.create({
         systemId: system.id,
         title: normalizedTitle,
         workDir,
         source: {
-          type: source,
+          type: source === "link" ? "link" : "file",
           ...sourcePayload
         }
       })
@@ -198,7 +208,7 @@ export function NewRequirementDialog({
       const requirement = fromPersistedRequirement(result.requirement, system.name)
       onOpenChange(false)
       toast.success("需求草稿已归档")
-      await onStartConversation(requirement)
+      await onStartConversation(requirement, { autoGeneratePrd: source !== "blank" })
     } catch (error) {
       setPreparingSkill(false)
       toast.error(error instanceof Error ? error.message : "保存需求草稿失败")
@@ -227,9 +237,12 @@ export function NewRequirementDialog({
       <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-[680px]">
         <DialogHeader>
           <div className="px-6 pt-5">
-            <DialogTitle>新增需求 · 上传草稿</DialogTitle>
+            <DialogTitle>
+              {source === "blank" ? "新增需求 · 从零开始" : "新增需求 · 上传草稿"}
+            </DialogTitle>
             <DialogDescription className="mt-1.5">
-              已选择「{system.name}」；先选择归档工作目录，再上传草稿文件或填写需求链接。
+              已选择「{system.name}
+              」；先选择归档工作目录，再上传草稿、填写链接，或直接开始描述需求。
             </DialogDescription>
           </div>
         </DialogHeader>
@@ -265,7 +278,8 @@ export function NewRequirementDialog({
           <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
             {[
               { id: "file" as const, label: "上传文件", icon: Upload },
-              { id: "link" as const, label: "填写链接", icon: Link }
+              { id: "link" as const, label: "填写链接", icon: Link },
+              { id: "blank" as const, label: "从零开始", icon: ArrowRight }
             ].map((item) => {
               const Icon = item.icon
               return (
@@ -331,7 +345,7 @@ export function NewRequirementDialog({
                 }}
               />
             </button>
-          ) : (
+          ) : source === "link" ? (
             <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
               <label
                 className="mb-2 block text-sm font-semibold text-foreground"
@@ -352,6 +366,14 @@ export function NewRequirementDialog({
               <p className="mt-3 text-sm leading-5 text-muted-foreground">
                 支持飞书文档、腾讯文档、语雀、Confluence 和普通网页链接，链接信息会一起归档。
               </p>
+            </div>
+          ) : (
+            <div className="flex min-h-44 flex-col items-center justify-center rounded-xl border border-dashed border-primary/30 bg-primary/5 px-6 text-center">
+              <ArrowRight className="mb-3 size-7 text-primary" />
+              <span className="text-sm font-semibold text-foreground">从空白需求开始</span>
+              <span className="mt-1 max-w-md text-sm leading-5 text-muted-foreground">
+                创建后会进入需求会话，你可以直接描述背景、目标和期望，由会话逐步帮你整理成完整需求。
+              </span>
             </div>
           )}
           <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-5">
@@ -382,7 +404,9 @@ export function NewRequirementDialog({
           <span className="mr-auto text-[12px] text-muted-foreground">
             {source === "file"
               ? "草稿与后续 PRD 会归档到已选需求工作目录"
-              : "链接快照与后续 PRD 会归档到已选需求工作目录"}
+              : source === "link"
+                ? "链接快照与后续 PRD 会归档到已选需求工作目录"
+                : "会话内容与后续 PRD 会归档到已选需求工作目录"}
           </span>
           <Button
             type="button"
@@ -398,7 +422,9 @@ export function NewRequirementDialog({
               ? "正在检查 PRD 技能..."
               : source === "file"
                 ? "上传并开始沟通"
-                : "保存并开始沟通"}
+                : source === "link"
+                  ? "保存并开始沟通"
+                  : "创建并开始沟通"}
             {!saving ? <ArrowRight className="size-4" /> : null}
           </Button>
         </DialogFooter>

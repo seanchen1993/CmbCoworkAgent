@@ -25,6 +25,7 @@ import {
   type ResolvedDrawStroke
 } from "./DesignDraw"
 import { DesignGallery } from "./DesignGallery"
+import { DesignCreationPage } from "./DesignCreationPage"
 import { CreateDesignModal, ExportDesignModal, LinkModal } from "./DesignModals"
 import { ElementPropsPanel } from "./ElementPropsPanel"
 import { getDrawElementLabel, pickStrokeIdForNotePoint } from "./drawUtils"
@@ -4841,17 +4842,24 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
   if (currentSessionId === null) {
     return (
       <>
-        <DesignGallery
-          sessionIndex={sessionIndex}
-          onOpen={openSession}
-          onNew={() => setCreateModalOpen(true)}
-          onDelete={deleteSession}
-          workspacePath={workspacePath}
-          workspaceLoading={workspaceLoading}
-          onSelectWorkspace={() => {
-            void handleSelectWorkspace()
-          }}
-        />
+        {createModalOpen ? (
+          <DesignCreationPage onBack={() => setCreateModalOpen(false)} />
+        ) : (
+          <DesignGallery
+            sessionIndex={sessionIndex}
+            onOpen={openSession}
+            onNew={() => setCreateModalOpen(true)}
+            onDelete={deleteSession}
+            workspacePath={workspacePath}
+            workspaceLoading={workspaceLoading}
+            onSelectWorkspace={() => {
+              void handleSelectWorkspace()
+            }}
+          />
+        )}
+        {/*
+          TODO(design-entry): the standalone DesignCreationPage replaces this
+          gallery modal. Keep the legacy block in source for an easy rollback.
         <CreateDesignModal
           open={createModalOpen}
           loadingKind={importingSource}
@@ -4877,7 +4885,7 @@ ${regionBlocks || "无"}${looseSection}${variantNote}`
             void handleImportPrototypeZip("gallery")
           }}
           onClose={() => setCreateModalOpen(false)}
-        />
+        /> */}
         <LinkModal
           open={linkModalOpen}
           mode={linkModalMode}

@@ -1,0 +1,96 @@
+- generic [ref=e5]:
+  - banner [ref=e6]:
+    - heading "创建你的账户" [level=1] [ref=e7]
+    - paragraph [ref=e8]: 加入探索者社区，开启你的旅程
+  - generic [ref=e12]:
+    - progressbar [ref=e13]
+    - generic [ref=e14]:
+      - generic [ref=e15]: 基本信息
+      - generic [ref=e16]: 个人资料
+      - generic [ref=e17]: 偏好设置
+      - generic [ref=e18]: 完成
+  - generic [ref=e19]:
+    - tablist [ref=e20]:
+      - tab "基本信息" [ref=e21] [cursor=pointer]
+      - tab "个人资料" [ref=e22] [cursor=pointer]
+      - tab "偏好设置" [ref=e23] [cursor=pointer]
+    - generic [ref=e75]:
+      - generic [ref=e76]:
+        - generic [ref=e77]: 头像上传
+        - generic [ref=e78] [cursor=pointer]:
+          - button "Choose File" [ref=e79]
+          - generic [ref=e80]: 📁
+          - generic [ref=e81]:
+            - text: 拖拽图片到此处或
+            - strong [ref=e82]: 点击上传
+      - generic [ref=e83]:
+        - generic [ref=e84]:
+          - generic [ref=e85]: 昵称
+          - textbox "昵称" [ref=e86]:
+            - /placeholder: 显示名称
+            - text: 测试
+        - generic [ref=e87]:
+          - generic [ref=e88]: 性别
+          - combobox "性别" [ref=e89] [cursor=pointer]:
+            - option "请选择"
+            - option "男" [selected]
+            - option "女"
+            - option "其他"
+            - option "不愿透露"
+      - generic [ref=e90]:
+        - generic [ref=e91]:
+          - generic [ref=e92]: 出生日期
+          - textbox "出生日期" [ref=e93]: 1995-12-12
+        - generic [ref=e94]:
+          - generic [ref=e95]: 出生时间 (可选)
+          - textbox "出生时间 (可选)" [ref=e96]: 12:10
+      - generic [ref=e97]:
+        - generic [ref=e98]: 所在地区
+        - combobox "所在地区" [ref=e99] [cursor=pointer]:
+          - option "请选择"
+          - option "北京"
+          - option "天津"
+          - option "河北"
+          - option "上海"
+          - option "江苏"
+          - option "浙江"
+          - option "广东"
+          - option "福建"
+          - option "四川" [selected]
+          - option "陕西"
+      - generic [ref=e100]:
+        - generic [ref=e101]: 个人简介 (最多200字)
+        - textbox "个人简介 (最多200字)" [active] [ref=e102]:
+          - /placeholder: 简单介绍一下自己吧...
+          - text: 你好呀～
+      - generic [ref=e103]:
+        - generic [ref=e104]: 年龄
+        - generic [ref=e105]:
+          - spinbutton "年龄" [ref=e106]
+          - generic [ref=e107]:
+            - text: 你的年龄是：
+            - status [ref=e108]: "--"
+            - text: 岁
+      - generic [ref=e109]:
+        - generic [ref=e110]: 编程经验（年）
+        - generic [ref=e111]:
+          - slider "编程经验（年）" [ref=e112]: "3"
+          - generic [ref=e113]: 3年
+      - generic [ref=e115]:
+        - generic [ref=e116]: 技能评估（移动滑块查看）
+        - meter [ref=e117]
+      - generic [ref=e118]:
+        - generic [ref=e119]: 手写签名 (在下方区域绘制)
+        - generic [ref=e120]: 按住鼠标绘制签名
+        - button "清除签名" [ref=e122] [cursor=pointer]
+    - text: 增强账户安全性 ▸ ▸ ▸
+    - generic [ref=e66]: 或使用以下方式注册
+    - generic [ref=e67]:
+      - button "微信" [ref=e68] [cursor=pointer]
+      - button "GitHub" [ref=e69] [cursor=pointer]
+      - button "Google" [ref=e70] [cursor=pointer]
+    - button "完成注册" [ref=e72] [cursor=pointer]
+  - contentinfo [ref=e73]:
+    - text: 已有账户？
+    - link "立即登录" [ref=e74] [cursor=pointer]:
+      - /url: "#"
