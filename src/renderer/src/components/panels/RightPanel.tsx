@@ -1,4 +1,14 @@
-import { useState, useRef, useCallback, useEffect, useMemo, memo, lazy, Suspense } from "react"
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useSyncExternalStore,
+  memo,
+  lazy,
+  Suspense
+} from "react"
 import {
   ListTodo,
   FolderTree,
@@ -33,36 +43,102 @@ import {
   Copy,
   Check,
   ShieldCheck,
-  Eye
+  Eye,
+  PackageOpen
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
 import { useAppStore, selectSkillGenerationAgent, selectSkillRetryContext } from "@/lib/store"
 import { useShallow } from "zustand/react/shallow"
 import {
-  useThreadState,
+  useThreadActions,
+  useThreadStateSelector,
   useThreadStream,
   type CoordinatorWorkerView
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
+import { getToolLabel } from "@/lib/tool-labels"
 import {
   hasLoadedWorkspaceFiles,
+  continueWorkspaceFilesDeduped,
+  getWorkspaceFilePathRevision,
   loadWorkspaceFilesDeduped,
-  markWorkspaceFilesStale
+  markWorkspaceFilesStale,
+  normalizeWorkspaceFileKey,
+  readWorkspacePathWithFallback,
+  subscribeWorkspaceFilePathChanges,
+  subscribeWorkspaceFileResults
 } from "@/lib/workspace-file-load"
+import { WorkspaceFileRequestFence } from "@/lib/workspace-file-request-fence"
+import {
+  buildWorkspaceFileTreeProjection,
+  getWorkspaceFileTreeProjection,
+  type WorkspaceFileTreeFile,
+  type WorkspaceFileTreeNode
+} from "@/lib/workspace-file-tree-projection"
 import { Badge } from "@/components/ui/badge"
 import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
 import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
-import { isSkillDisabled, normalizeSkillId } from "@/lib/skill-ids"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
-import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
+import {
+  ensureDisabledSkillsChangedInvalidationSource,
+  ensureSkillsChangedInvalidationSource,
+  ensureWorkspaceHooksChangedInvalidationSource,
+  getGlobalHookCatalogRevision,
+  getPluginCatalogRevision,
+  getSkillCatalogRevision,
+  getWorkspaceHookCatalogRevision,
+  readMarketSkillCatalogCache,
+  readPluginCatalogCache,
+  readSkillCatalogCache,
+  revalidateMarketSkillCatalog,
+  revalidatePluginCatalog,
+  revalidateSkillCatalog,
+  subscribeGlobalHookCatalogInvalidation,
+  subscribePluginCatalogInvalidation,
+  subscribeSkillCatalogInvalidation,
+  subscribeWorkspaceHookCatalogInvalidation
+} from "@/lib/app-catalog-cache"
+import { getHookCatalogIdentity } from "@/lib/hook-catalog-identity"
+import {
+  resolveResourcePreviewPaths,
+  selectResourcePreviewFileSource
+} from "@/lib/resource-preview-paths"
+import type { WorkspaceFilePreviewWorkspacePathKind } from "../../../../shared/workspace-file-preview"
+import {
+  getRightPanelSkillProjection,
+  getRightPanelSkillProjectionAsync,
+  type RightPanelSkillGroupProjection,
+  type RightPanelSkillProjection,
+  type RightPanelSkillTreeNode
+} from "@/components/panels/right-panel-skill-projection"
+import {
+  RIGHT_PANEL_INITIAL_RENDER_ITEMS,
+  RIGHT_PANEL_RENDER_PAGE_ITEMS,
+  selectRightPanelPrioritizedWindow,
+  selectRightPanelWindow
+} from "@/components/panels/right-panel-render-window"
+import {
+  ensureHarnessPluginRunArtifactPreviewAuthorization,
+  getHarnessPluginRunArtifactsSnapshot,
+  isHarnessPluginRunArtifactGrantFresh,
+  subscribeHarnessPluginRunArtifacts,
+  resolveHarnessPluginRunArtifactPath,
+  type HarnessPluginRunArtifactPreviewAuthorization,
+  type HarnessPluginRunArtifactsContext
+} from "@/lib/harness-plugin-run-artifacts"
 import {
   getSystemConstraintsLoadCounts,
   SystemConstraintsPanel
 } from "@/components/panels/SystemConstraintsPanel"
+import {
+  createCompletedResourceProjector,
+  getPathExtension,
+  type ResourceMessage
+} from "@/lib/latest-completed-resource"
 
 type HookConfig = Awaited<ReturnType<typeof window.api.hooks.list>>[number]
 type PluginHookMetadata = Awaited<ReturnType<typeof window.api.plugins.listHooks>>[number]
@@ -83,6 +159,9 @@ const FileViewer = lazy(() =>
 const GitPanelView = lazy(() =>
   import("@/components/panels/GitPanelView").then((m) => ({ default: m.GitPanelView }))
 )
+const BrowserPanel = lazy(() =>
+  import("@/components/browser/BrowserPanel").then((m) => ({ default: m.BrowserPanel }))
+)
 
 const HEADER_HEIGHT = 52 // px
 const HANDLE_HEIGHT = 6 // px
@@ -90,10 +169,35 @@ const SECTION_GAP = 8 // px
 const MIN_CONTENT_HEIGHT = 60 // px
 const COLLAPSE_THRESHOLD = 55 // px - auto-collapse when below this
 const PREVIEW_MAX_HEIGHT = "100vh"
+const RIGHT_PANEL_SYNC_SKILL_PROJECTION_LIMIT = 256
+const RIGHT_PANEL_HOOK_SCOPE = "right-panel"
+const RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE = "right-panel-global-summary"
+const RIGHT_PANEL_HOOK_SUMMARY_SCOPE = "right-panel-hook-summary"
+const RIGHT_PANEL_HOOK_REFRESH_DEBOUNCE_MS = 50
+
+interface CatalogHeaderValue {
+  total: number
+  enabled?: number
+  truncated: boolean
+  truncatedReasons: string[]
+}
+
+interface HeaderSummaryState {
+  value: CatalogHeaderValue | null
+  loading: boolean
+  error: boolean
+}
+
+interface HookDetailState {
+  key: string
+  hooks: DisplayHook[]
+  truncated: boolean
+}
 
 type PanelHeights = {
   tasks: number
   files: number
+  pluginRunArtifacts: number
   systemConstraints: number
   agents: number
   skills: number
@@ -105,8 +209,12 @@ type PanelHeights = {
 interface SectionHeaderProps {
   title: string
   icon: React.ElementType
-  badge?: number
+  badge?: number | null
+  badgeTitle?: string
+  badgeTruncated?: boolean
   detail?: React.ReactNode
+  loading?: boolean
+  error?: boolean
   isOpen: boolean
   onToggle: () => void
 }
@@ -115,7 +223,11 @@ function SectionHeader({
   title,
   icon: Icon,
   badge,
+  badgeTitle,
+  badgeTruncated = false,
   detail,
+  loading = false,
+  error = false,
   isOpen,
   onToggle
 }: SectionHeaderProps): React.JSX.Element {
@@ -133,9 +245,27 @@ function SectionHeader({
       />
       <Icon className="size-4.5 text-foreground/70" />
       <span className="flex-1 text-left text-[16px] font-semibold leading-none">{title}</span>
-      {detail && <div className="shrink-0">{detail}</div>}
-      {badge !== undefined && badge > 0 && (
-        <span className="text-xs text-muted-foreground tabular-nums">{badge}</span>
+      {detail != null && <div className="shrink-0">{detail}</div>}
+      {badge !== undefined && badge !== null && (
+        <span
+          className="text-xs text-muted-foreground tabular-nums"
+          title={badgeTitle}
+        >
+          {badge}
+          {badgeTruncated ? "+" : ""}
+        </span>
+      )}
+      {loading && (
+        <Loader2
+          className="size-3.5 shrink-0 animate-spin text-muted-foreground"
+          aria-label={`${title}摘要加载中`}
+        />
+      )}
+      {!loading && error && (
+        <AlertCircle
+          className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+          aria-label={`${title}摘要加载失败`}
+        />
       )}
     </button>
   )
@@ -206,11 +336,53 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 
 interface RightPanelProps {
   threadId?: string | null
-  moduleMode: "work" | "preview" | "git"
+  moduleMode: "work" | "preview" | "git" | "browser"
   showSystemConstraints?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
+  onRequestBrowserMode?: () => void
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
+  onBrowserFullscreenChange?: (isFullscreen: boolean) => void
+}
+
+interface PreviewExternalAuthorization {
+  threadId: string
+  filePath: string
+  grant: string
+  expiresAt?: number
+  projectId?: string
+  slug?: string
+}
+
+function toHarnessArtifactPreviewAuthorization(
+  authorization: PreviewExternalAuthorization
+): HarnessPluginRunArtifactPreviewAuthorization | null {
+  if (
+    typeof authorization.expiresAt !== "number" ||
+    !Number.isFinite(authorization.expiresAt) ||
+    !authorization.projectId ||
+    !authorization.slug
+  ) {
+    return null
+  }
+  return {
+    grant: authorization.grant,
+    expiresAt: authorization.expiresAt,
+    projectId: authorization.projectId,
+    slug: authorization.slug,
+    filePath: authorization.filePath
+  }
+}
+
+function previewExternalAuthorizationIdentity(
+  authorization: PreviewExternalAuthorization
+): string {
+  return [
+    authorization.threadId,
+    authorization.projectId ?? "",
+    authorization.slug ?? "",
+    authorization.filePath
+  ].join("\u0000")
 }
 
 function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
@@ -222,13 +394,88 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
   )
 }
 
+const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
+  threadId,
+  moduleMode,
+  onApplyPreview
+}: {
+  threadId: string
+  moduleMode: RightPanelProps["moduleMode"]
+  onApplyPreview: (
+    path: string,
+    workspacePathKind: WorkspaceFilePreviewWorkspacePathKind,
+    switchToPreview: boolean
+  ) => void
+}): null {
+  const streamData = useThreadStream(threadId)
+  const persistedMessages = useThreadStateSelector(threadId, (state) => state.messages) ?? []
+  const [projectCompletedResources] = useState(() =>
+    createCompletedResourceProjector(window.electron.process.platform)
+  )
+  const previousLoadingRef = useRef(false)
+  const lastAppliedPreviewKeyRef = useRef<string | null>(null)
+  const lastRecordedBatchKeyRef = useRef<string | null>(null)
+  const lastAutoSwitchedBatchKeyRef = useRef<string | null>(null)
+  const { latestResourceEvent, latestCompletedLlmBatch } = projectCompletedResources(
+    persistedMessages,
+    (streamData.messages as ResourceMessage[] | undefined) ?? []
+  )
+
+  useEffect(() => {
+    const wasLoading = previousLoadingRef.current
+    const isLoading = streamData.isLoading
+    previousLoadingRef.current = isLoading
+    if (!(wasLoading && !isLoading) || !latestResourceEvent) return
+
+    const applyPreviewUpdate = (switchToPreview: boolean): void => {
+      if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
+      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
+      onApplyPreview(
+        latestResourceEvent.path,
+        latestResourceEvent.workspacePathKind,
+        switchToPreview
+      )
+    }
+    if (
+      latestCompletedLlmBatch?.files.length &&
+      lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
+    ) {
+      lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
+      applyPreviewUpdate(moduleMode !== "git" && moduleMode !== "browser")
+      return
+    }
+    applyPreviewUpdate(moduleMode !== "git" && moduleMode !== "browser")
+  }, [
+    latestCompletedLlmBatch,
+    latestResourceEvent,
+    moduleMode,
+    onApplyPreview,
+    streamData.isLoading
+  ])
+
+  useEffect(() => {
+    if (!latestCompletedLlmBatch?.files.length) return
+    if (lastRecordedBatchKeyRef.current === latestCompletedLlmBatch.batchKey) return
+    lastRecordedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
+    window.api.workspace
+      .recordLlmModifiedFiles(threadId, latestCompletedLlmBatch.files)
+      .catch((error) => {
+        console.error("[RightPanel] Failed to record LLM modified files:", error)
+      })
+  }, [latestCompletedLlmBatch, threadId])
+
+  return null
+})
+
 export function RightPanel({
   threadId,
   moduleMode,
   showSystemConstraints = false,
   onRequestPreviewMode,
   onRequestWorkMode,
-  onPreviewFullscreenChange
+  onRequestBrowserMode,
+  onPreviewFullscreenChange,
+  onBrowserFullscreenChange
 }: RightPanelProps): React.JSX.Element {
   const {
     currentThreadId: storeCurrentThreadId,
@@ -236,35 +483,49 @@ export function RightPanel({
     rightPanelWorkRequest,
     skillGenerationByThread,
     setSkillGenerationPhase
-  } =
-    useAppStore(
-      useShallow((s) => ({
-        currentThreadId: s.currentThreadId,
-        pluginVersion: s.pluginVersion,
-        rightPanelWorkRequest: s.rightPanelWorkRequest,
-        // Subscribe to the whole map so we re-render when any thread's card changes
-        skillGenerationByThread: s.skillGenerationByThread,
-        setSkillGenerationPhase: s.setSkillGenerationPhase
-      }))
-    )
+  } = useAppStore(
+    useShallow((s) => ({
+      currentThreadId: s.currentThreadId,
+      pluginVersion: s.pluginVersion,
+      rightPanelWorkRequest: s.rightPanelWorkRequest,
+      // Subscribe to the whole map so we re-render when any thread's card changes
+      skillGenerationByThread: s.skillGenerationByThread,
+      setSkillGenerationPhase: s.setSkillGenerationPhase
+    }))
+  )
   const currentThreadId = threadId ?? storeCurrentThreadId
+  const pluginRunArtifacts = useSyncExternalStore(
+    subscribeHarnessPluginRunArtifacts,
+    getHarnessPluginRunArtifactsSnapshot,
+    getHarnessPluginRunArtifactsSnapshot
+  )
+  const activePluginRunArtifacts = useMemo(
+    () =>
+      currentThreadId && pluginRunArtifacts?.threadIds.includes(currentThreadId)
+        ? pluginRunArtifacts
+        : null,
+    [currentThreadId, pluginRunArtifacts]
+  )
   const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
   // Derive the current thread's card state from the per-thread map
   const skillGenerationAgent = selectSkillGenerationAgent(
     { skillGenerationByThread } as Parameters<typeof selectSkillGenerationAgent>[0],
     currentThreadId
   )
-  const threadState = useThreadState(currentThreadId)
-  const streamData = useThreadStream(currentThreadId ?? "")
-  const todos = threadState?.todos ?? []
-  const workspaceFiles = threadState?.workspaceFiles ?? []
-  const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
-  const coordinatorWorkers = useMemo(
-    () => threadState?.coordinatorWorkers ?? [],
-    [threadState?.coordinatorWorkers]
+  const todos = useThreadStateSelector(currentThreadId, (state) => state.todos) ?? []
+  const workspaceFiles =
+    useThreadStateSelector(currentThreadId, (state) => state.workspaceFiles) ?? []
+  const subagents = useThreadStateSelector(currentThreadId, (state) => state.subagents) ?? []
+  const coordinatorWorkers =
+    useThreadStateSelector(currentThreadId, (state) => state.coordinatorWorkers) ?? []
+  const workspacePath = useThreadStateSelector(currentThreadId, (state) => state.workspacePath)
+  const gitContext = useThreadStateSelector(currentThreadId, (state) => state.gitContext)
+  const harnessAgentmdLoadStatus = useThreadStateSelector(
+    currentThreadId,
+    (state) => state.harnessAgentmdLoadStatus
   )
   const systemConstraintCounts = getSystemConstraintsLoadCounts(
-    showSystemConstraints ? threadState?.harnessAgentmdLoadStatus : null
+    showSystemConstraints ? harnessAgentmdLoadStatus : null
   )
   const runningSubagentIdsRef = useRef<Set<string>>(new Set())
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
@@ -272,14 +533,86 @@ export function RightPanel({
   const containerRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
+  const [previewWorkspacePathKind, setPreviewWorkspacePathKind] =
+    useState<WorkspaceFilePreviewWorkspacePathKind>("relative")
+  const previewThreadIdRef = useRef<string | null>(null)
+  const [previewExternalAuthorization, setPreviewExternalAuthorization] =
+    useState<PreviewExternalAuthorization | null>(null)
+  const previewExternalAuthorizationRef = useRef<PreviewExternalAuthorization | null>(null)
+  const previewExternalGrantRefreshPromiseRef = useRef<{
+    identity: string
+    marker: object
+    promise: Promise<PreviewExternalAuthorization>
+  } | null>(null)
+  const replacePreviewExternalAuthorization = useCallback(
+    (authorization: PreviewExternalAuthorization | null): void => {
+      previewExternalAuthorizationRef.current = authorization
+      setPreviewExternalAuthorization(authorization)
+    },
+    []
+  )
+  const resolveCurrentExternalPreviewGrant = useCallback(async (): Promise<string> => {
+    const current = previewExternalAuthorizationRef.current
+    if (!current) throw new Error("当前外部文件预览没有可信来源授权")
+    const renewable = toHarnessArtifactPreviewAuthorization(current)
+    if (!renewable) return current.grant
+    if (
+      isHarnessPluginRunArtifactGrantFresh(
+        renewable.grant,
+        renewable.expiresAt
+      )
+    ) {
+      return renewable.grant
+    }
+
+    const identity = previewExternalAuthorizationIdentity(current)
+    let pending = previewExternalGrantRefreshPromiseRef.current
+    if (!pending || pending.identity !== identity) {
+      const marker = {}
+      const promise = (async (): Promise<PreviewExternalAuthorization> => {
+        try {
+          const refreshed = await ensureHarnessPluginRunArtifactPreviewAuthorization(
+            renewable,
+            (input) => window.api.harnessBoard.refreshRunArtifactGrant(input)
+          )
+          const latest = previewExternalAuthorizationRef.current
+          if (!latest || previewExternalAuthorizationIdentity(latest) !== identity) {
+            throw new Error("产物预览已切换，已忽略过期授权续签")
+          }
+          const next = {
+            ...latest,
+            grant: refreshed.grant,
+            expiresAt: refreshed.expiresAt
+          }
+          replacePreviewExternalAuthorization(next)
+          return next
+        } finally {
+          if (previewExternalGrantRefreshPromiseRef.current?.marker === marker) {
+            previewExternalGrantRefreshPromiseRef.current = null
+          }
+        }
+      })()
+      pending = { identity, marker, promise }
+      previewExternalGrantRefreshPromiseRef.current = pending
+    }
+    return (await pending.promise).grant
+  }, [replacePreviewExternalAuthorization])
   const [previewReloadToken, setPreviewReloadToken] = useState(0)
-  const lastAppliedPreviewKeyRef = useRef<string | null>(null)
-  const lastRecordedBatchKeyRef = useRef<string | null>(null)
-  const lastAutoSwitchedBatchKeyRef = useRef<string | null>(null)
   const lastThreadIdRef = useRef<string | null>(null)
-  const prevStreamLoadingRef = useRef(false)
+  // A thread switch renders before its cleanup effect runs. Gate the preview
+  // synchronously so the new thread never receives the previous thread's path
+  // or external capability during that transition frame.
+  const previewPathForCurrentThread =
+    currentThreadId && previewThreadIdRef.current === currentThreadId ? previewPath : null
+  const previewExternalAuthorizationForCurrentThread =
+    previewPathForCurrentThread &&
+    previewExternalAuthorization?.threadId === currentThreadId &&
+    previewExternalAuthorization.filePath === previewPathForCurrentThread
+      ? previewExternalAuthorization
+      : null
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [pluginRunArtifactsOpen, setPluginRunArtifactsOpen] = useState(false)
   const [systemConstraintsOpen, setSystemConstraintsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
@@ -288,69 +621,197 @@ export function RightPanel({
   const [lspOpen, setLspOpen] = useState(false)
   const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
-  const [skills, setSkills] = useState<SkillMetadata[]>([])
-  const [marketSkillMap, setMarketSkillMap] = useState<Record<string, RightPanelSkillMarketInfo>>(
-    {}
+  const [skills, setSkills] = useState<SkillMetadata[]>(
+    () => readSkillCatalogCache()?.rightPanelSkills ?? []
   )
-  const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set())
-  const [plugins, setPlugins] = useState<PluginMetadata[]>([])
-  const [hooks, setHooks] = useState<DisplayHook[]>([])
-
-  useEffect(() => {
-    async function load(): Promise<void> {
-      try {
-        const [loaded, pluginLoaded, disabled] = await Promise.all([
-          window.api.skills.list(),
-          window.api.skills.listPlugins(),
-          window.api.skills.getDisabled()
-        ])
-        // Plugin skills carry the same SkillMetadata shape but with pluginId/pluginName set;
-        // merge them in so the right panel reflects the full set the agent can use, and
-        // de-dup by id (custom/built-in wins on collision — same precedence as other UIs).
-        const byId = new Map<string, SkillMetadata>()
-        for (const s of pluginLoaded) byId.set(normalizeSkillId(s.id || s.name), s)
-        for (const s of loaded) byId.set(normalizeSkillId(s.id || s.name), s)
-        setSkills(Array.from(byId.values()))
-        setDisabledSkills(new Set(disabled.map(normalizeSkillId)))
-      } catch (e) {
-        console.error("[RightPanel] Failed to load skills:", e)
-      }
+  const [marketSkillMap, setMarketSkillMap] = useState<Record<string, RightPanelSkillMarketInfo>>(
+    () => readMarketSkillCatalogCache()?.skillMap ?? {}
+  )
+  const [disabledSkills, setDisabledSkills] = useState<Set<string>>(
+    () => readSkillCatalogCache()?.disabledSkillIds ?? new Set()
+  )
+  const [skillSummary, setSkillSummary] = useState<HeaderSummaryState>(() => {
+    const snapshot = readSkillCatalogCache()
+    return {
+      value: snapshot
+        ? {
+            total: snapshot.total,
+            enabled: snapshot.rightPanelEnabledSkillCount,
+            truncated: snapshot.truncated,
+            truncatedReasons: snapshot.truncatedReasons
+          }
+        : null,
+      loading: false,
+      error: false
     }
-    void load()
-    // Re-pull whenever main signals a skill-set change (skill evolution,
-    // optimizer patches, plugin SKILL.md edits via the file editor). Without
-    // this the right panel only refreshes when pluginVersion bumps on
-    // install/enable actions and misses content-only edits entirely.
-    return window.api.skills.onChanged(() => {
-      void load()
-    })
-  }, [])
+  })
+  const [plugins, setPlugins] = useState<PluginMetadata[]>(
+    () => readPluginCatalogCache()?.plugins ?? []
+  )
+  const [pluginSummary, setPluginSummary] = useState<HeaderSummaryState>(() => {
+    const snapshot = readPluginCatalogCache()
+    return {
+      value: snapshot
+        ? {
+            total: snapshot.total,
+            truncated: snapshot.truncated,
+            truncatedReasons: snapshot.truncatedReasons
+          }
+        : null,
+      loading: false,
+      error: false
+    }
+  })
+  const [, setHookCatalogRevision] = useState(0)
+  const currentGlobalHookWorkerRevision =
+    `${getSkillCatalogRevision(pluginVersion)}:${getPluginCatalogRevision(pluginVersion)}:` +
+    `${getGlobalHookCatalogRevision()}`
+  const currentHookWorkerRevision =
+    `${currentGlobalHookWorkerRevision}:${getWorkspaceHookCatalogRevision(workspacePath)}`
+  const currentHookCatalogKey = useMemo(
+    () =>
+      JSON.stringify([
+        currentHookWorkerRevision,
+        workspacePath ? normalizeWorkspaceFileKey(workspacePath) : ""
+      ]),
+    [currentHookWorkerRevision, workspacePath]
+  )
+  const [hookSummary, setHookSummary] = useState<HeaderSummaryState & { key: string }>({
+    key: "",
+    value: null,
+    loading: false,
+    error: false
+  })
+  const [globalHookSummary, setGlobalHookSummary] = useState<HeaderSummaryState>({
+    value: null,
+    loading: false,
+    error: false
+  })
+  const [hookDetail, setHookDetail] = useState<HookDetailState>({
+    key: "",
+    hooks: [],
+    truncated: false
+  })
+  const [lspConfigLoading, setLspConfigLoading] = useState(false)
+  const [lspConfigError, setLspConfigError] = useState(false)
+  const skillsCatalogRequestIdRef = useRef(0)
+  const pluginCatalogRequestIdRef = useRef(0)
+  const hooksCatalogRequestIdRef = useRef(0)
+  const globalSummaryRequestIdRef = useRef(0)
+  const hookSummaryRequestIdRef = useRef(0)
+  const globalSummaryPromiseRef = useRef<Promise<void>>(Promise.resolve())
+  const lspConfigRequestIdRef = useRef(0)
 
   useEffect(() => {
-    window.api.plugins.list().then(setPlugins).catch(console.error)
+    setHookDetail({ key: currentHookCatalogKey, hooks: [], truncated: false })
+  }, [currentHookCatalogKey])
+
+  useEffect(() => {
+    setLspStatus(null)
+  }, [lspOpen, workspacePath])
+
+  const loadSkillCatalog = useCallback(async (): Promise<void> => {
+    const requestId = ++skillsCatalogRequestIdRef.current
+    try {
+      const snapshot = await revalidateSkillCatalog(pluginVersion)
+      if (requestId !== skillsCatalogRequestIdRef.current) return
+      setSkills(snapshot.rightPanelSkills)
+      setDisabledSkills(snapshot.disabledSkillIds)
+      setSkillSummary({
+        value: {
+          total: snapshot.total,
+          enabled: snapshot.rightPanelEnabledSkillCount,
+          truncated: snapshot.truncated,
+          truncatedReasons: snapshot.truncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      console.error("[RightPanel] Failed to load skills:", error)
+    }
   }, [pluginVersion])
 
   useEffect(() => {
+    if (!skillsOpen) return undefined
+    if (moduleMode !== "work") return undefined
+    void loadSkillCatalog()
+    return () => {
+      skillsCatalogRequestIdRef.current += 1
+    }
+  }, [loadSkillCatalog, moduleMode, skillsOpen])
+
+  useEffect(() => {
+    ensureSkillsChangedInvalidationSource((listener) => window.api.skills.onChanged(listener))
+    ensureDisabledSkillsChangedInvalidationSource((listener) =>
+      window.api.hooks.onChanged(listener)
+    )
+    ensureWorkspaceHooksChangedInvalidationSource((listener) =>
+      window.api.hooks.workspace.onChanged(listener)
+    )
+  }, [])
+
+  useEffect(() => {
+    if (!skillsOpen) return undefined
+    if (moduleMode !== "work") return undefined
+    const unsubscribe = subscribeSkillCatalogInvalidation(() => {
+      void loadSkillCatalog()
+    })
+    return unsubscribe
+  }, [loadSkillCatalog, moduleMode, skillsOpen])
+
+  const loadPluginCatalog = useCallback(async (): Promise<void> => {
+    const requestId = ++pluginCatalogRequestIdRef.current
+    try {
+      const snapshot = await revalidatePluginCatalog(pluginVersion)
+      if (requestId !== pluginCatalogRequestIdRef.current) return
+      setPlugins(snapshot.plugins)
+      setPluginSummary({
+        value: {
+          total: snapshot.total,
+          truncated: snapshot.truncated,
+          truncatedReasons: snapshot.truncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      console.error("[RightPanel] Failed to load plugins:", error)
+    }
+  }, [pluginVersion])
+
+  useEffect(() => {
+    if (!pluginsOpen) return undefined
+    if (moduleMode !== "work") return undefined
+    void loadPluginCatalog()
+    return () => {
+      pluginCatalogRequestIdRef.current += 1
+    }
+  }, [loadPluginCatalog, moduleMode, pluginsOpen])
+
+  useEffect(() => {
+    if (!pluginsOpen) return undefined
+    if (moduleMode !== "work") return undefined
+    return subscribePluginCatalogInvalidation(() => {
+      void loadPluginCatalog()
+    })
+  }, [loadPluginCatalog, moduleMode, pluginsOpen])
+
+  useEffect(() => {
+    if (!skillsOpen) return undefined
+    if (moduleMode !== "work") return undefined
     let cancelled = false
 
     const loadMarketSkills = async (): Promise<void> => {
       try {
-        const res = await marketApi.getSkills()
-        if (!res.success || !res.data || cancelled) return
-
-        const next: Record<string, RightPanelSkillMarketInfo> = {}
-        for (const item of res.data) {
-          const normalized = normalizeRightPanelSkillName(item.name)
-          if (!normalized) continue
-          next[normalized] = {
-            name: item.name,
-            chinese_name: item.chinese_name
+        const snapshot = await revalidateMarketSkillCatalog(async () => {
+          const response = await marketApi.getSkills()
+          if (!response.success || !response.data) {
+            throw new Error(response.error || "Failed to load market skills")
           }
-        }
-
-        if (!cancelled) {
-          setMarketSkillMap(next)
-        }
+          return response.data
+        })
+        if (!cancelled) setMarketSkillMap(snapshot.skillMap)
       } catch (error) {
         console.warn("[RightPanel] Failed to load market skills:", error)
       }
@@ -361,37 +822,53 @@ export function RightPanel({
     return () => {
       cancelled = true
     }
+  }, [moduleMode, skillsOpen])
+
+  const refreshLspConfig = useCallback(async (): Promise<void> => {
+    const requestId = ++lspConfigRequestIdRef.current
+    setLspConfigLoading(true)
+    setLspConfigError(false)
+    try {
+      const config = await window.api.lsp.getConfig()
+      if (requestId !== lspConfigRequestIdRef.current) return
+      setLspConfig(config)
+      setLspConfigLoading(false)
+    } catch (error) {
+      if (requestId !== lspConfigRequestIdRef.current) return
+      console.error("[RightPanel] Failed to load LSP config summary:", error)
+      setLspConfigLoading(false)
+      setLspConfigError(true)
+    }
   }, [])
 
   useEffect(() => {
-    let cancelled = false
-
-    const loadLspSummary = async (): Promise<void> => {
-      try {
-        const cfg = await window.api.lsp.getConfig()
-        if (cancelled) return
-        setLspConfig(cfg)
-
-        const workspacePath = cfg.enabled ? (threadState?.workspacePath ?? null) : null
-        const currentStatus = await window.api.lsp.getStatus(workspacePath)
-        if (!cancelled) {
-          setLspStatus(currentStatus)
-        }
-      } catch (error) {
-        console.error("[RightPanel] Failed to load LSP summary:", error)
-      }
-    }
-
-    void loadLspSummary()
-    const unsubscribe = window.api.lsp.onChanged(() => {
-      void loadLspSummary()
-    })
-
+    if (moduleMode !== "work") return undefined
+    const timer = window.setTimeout(() => void refreshLspConfig(), 0)
+    const unsubscribe = window.api.lsp.onChanged(() => void refreshLspConfig())
     return () => {
-      cancelled = true
+      window.clearTimeout(timer)
+      lspConfigRequestIdRef.current += 1
       unsubscribe()
     }
-  }, [threadState?.workspacePath])
+  }, [moduleMode, refreshLspConfig])
+
+  const handleLspSummaryChange = useCallback(
+    ({ config, status }: { config: LspConfig; status: LspStatus | null }): void => {
+      setLspConfig(config)
+      setLspConfigLoading(false)
+      setLspConfigError(false)
+      const expectedProjectRoot = config.enabled ? (workspacePath ?? null) : null
+      const matchesWorkspace =
+        status !== null &&
+        ((status.projectRoot === null && expectedProjectRoot === null) ||
+          (status.projectRoot !== null &&
+            expectedProjectRoot !== null &&
+            normalizeWorkspaceFileKey(status.projectRoot) ===
+              normalizeWorkspaceFileKey(expectedProjectRoot)))
+      setLspStatus(matchesWorkspace ? status : null)
+    },
+    [workspacePath]
+  )
 
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
@@ -453,27 +930,37 @@ export function RightPanel({
   const lspHeaderStatus = useMemo(() => {
     if (!lspConfig) return null
 
+    const expectedProjectRoot = lspConfig.enabled ? (workspacePath ?? null) : null
+    const statusMatchesWorkspace =
+      lspStatus !== null &&
+      ((lspStatus.projectRoot === null && expectedProjectRoot === null) ||
+        (lspStatus.projectRoot !== null &&
+          expectedProjectRoot !== null &&
+          normalizeWorkspaceFileKey(lspStatus.projectRoot) ===
+            normalizeWorkspaceFileKey(expectedProjectRoot)))
+    const currentStatus = statusMatchesWorkspace ? lspStatus : null
+
     const statusText = !lspConfig.enabled
       ? "已禁用"
-      : currentThreadId && !threadState?.workspacePath
+      : currentThreadId && !workspacePath
         ? "未关联工作目录"
-        : (lspStatus?.statusText ?? "已停止")
+        : (currentStatus?.statusText ?? "已启用")
 
     const statusClass = cn(
       "text-xs font-medium tabular-nums",
-      lspStatus?.lifecycle === "ready"
+      currentStatus?.lifecycle === "ready"
         ? "text-green-500"
-        : lspStatus?.lifecycle === "degraded"
+        : currentStatus?.lifecycle === "degraded"
           ? "text-amber-600 dark:text-amber-400"
-          : lspStatus?.lifecycle === "starting" || lspStatus?.lifecycle === "importing"
+          : currentStatus?.lifecycle === "starting" || currentStatus?.lifecycle === "importing"
             ? "text-sky-600 dark:text-sky-400"
-            : lspStatus?.lifecycle === "error"
+            : currentStatus?.lifecycle === "error"
               ? "text-destructive"
               : "text-muted-foreground"
     )
 
     return <span className={statusClass}>{statusText}</span>
-  }, [currentThreadId, lspConfig, lspStatus, threadState?.workspacePath])
+  }, [currentThreadId, lspConfig, lspStatus, workspacePath])
 
   // Auto-clear only for "done" phase (3 s brief confirmation).
   // "error" is intentionally NOT auto-cleared — it stays visible so the user
@@ -493,16 +980,165 @@ export function RightPanel({
     }
   }, [skillGenerationAgent.phase, skillGenerationAgent.errorText])
 
-  const loadHooks = useCallback(async (): Promise<void> => {
+  const refreshGlobalCatalogSummary = useCallback(async (): Promise<void> => {
+    const requestId = ++globalSummaryRequestIdRef.current
+    setSkillSummary((previous) => ({ ...previous, loading: true, error: false }))
+    setPluginSummary((previous) => ({ ...previous, loading: true, error: false }))
+    setGlobalHookSummary((previous) => ({ ...previous, loading: true, error: false }))
     try {
-      const workspacePath = threadState?.workspacePath ?? null
-      const [globalHooks, workspaceHooks, pluginHooks, skillHooks] = await Promise.all([
-        window.api.hooks.list(),
-        workspacePath ? window.api.hooks.workspace.list(workspacePath) : Promise.resolve([]),
-        window.api.plugins.listHooks(),
-        window.api.hooks.skills.list()
-      ])
-      setHooks([
+      const page = await window.api.hooks.catalog.read({
+        requestScope: RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE,
+        revision: currentGlobalHookWorkerRevision,
+        limit: 1
+      })
+      if (requestId !== globalSummaryRequestIdRef.current) return
+      setSkillSummary({
+        value: {
+          total: page.relatedSummary.skillEntries,
+          enabled: page.relatedSummary.enabledSkillEntries,
+          truncated: page.relatedSummary.skillTruncated,
+          truncatedReasons: page.relatedSummary.skillTruncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+      setPluginSummary({
+        value: {
+          total: page.relatedSummary.pluginEntries,
+          truncated: page.relatedSummary.pluginTruncated,
+          truncatedReasons: page.relatedSummary.pluginTruncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+      setGlobalHookSummary({
+        value: {
+          total: page.totalEntries,
+          enabled: page.enabledEntries,
+          truncated: page.truncated,
+          truncatedReasons: page.truncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      if (requestId !== globalSummaryRequestIdRef.current) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
+      console.error("[RightPanel] Failed to load global catalog summary:", error)
+      setSkillSummary((previous) => ({ ...previous, loading: false, error: true }))
+      setPluginSummary((previous) => ({ ...previous, loading: false, error: true }))
+      setGlobalHookSummary((previous) => ({ ...previous, loading: false, error: true }))
+    }
+  }, [currentGlobalHookWorkerRevision])
+
+  useEffect(() => {
+    if (moduleMode !== "work") return undefined
+    const promise = refreshGlobalCatalogSummary()
+    globalSummaryPromiseRef.current = promise
+    return () => {
+      globalSummaryRequestIdRef.current += 1
+      void window.api.hooks.catalog.cancel(RIGHT_PANEL_GLOBAL_SUMMARY_SCOPE).catch(() => undefined)
+    }
+  }, [moduleMode, refreshGlobalCatalogSummary])
+
+  const refreshWorkspaceHookSummary = useCallback(async (): Promise<void> => {
+    if (!workspacePath) return
+    const requestId = ++hookSummaryRequestIdRef.current
+    const key = currentHookCatalogKey
+    setHookSummary((previous) => ({
+      key,
+      value: previous.key === key ? previous.value : null,
+      loading: true,
+      error: false
+    }))
+    await globalSummaryPromiseRef.current
+    if (requestId !== hookSummaryRequestIdRef.current) return
+    try {
+      const page = await window.api.hooks.catalog.read({
+        requestScope: RIGHT_PANEL_HOOK_SUMMARY_SCOPE,
+        workspacePath,
+        revision: currentHookWorkerRevision,
+        limit: 1
+      })
+      if (requestId !== hookSummaryRequestIdRef.current) return
+      setHookSummary({
+        key,
+        value: {
+          total: page.totalEntries,
+          enabled: page.enabledEntries,
+          truncated: page.truncated,
+          truncatedReasons: page.truncatedReasons
+        },
+        loading: false,
+        error: false
+      })
+    } catch (error) {
+      if (requestId !== hookSummaryRequestIdRef.current) return
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
+      console.error("[RightPanel] Failed to load workspace hook summary:", error)
+      setHookSummary((previous) =>
+        previous.key === key ? { ...previous, loading: false, error: true } : previous
+      )
+    }
+  }, [currentHookCatalogKey, currentHookWorkerRevision, workspacePath])
+
+  useEffect(() => {
+    if (moduleMode !== "work" || !workspacePath) return undefined
+    void refreshWorkspaceHookSummary()
+    return () => {
+      hookSummaryRequestIdRef.current += 1
+      void window.api.hooks.catalog.cancel(RIGHT_PANEL_HOOK_SUMMARY_SCOPE).catch(() => undefined)
+    }
+  }, [moduleMode, refreshWorkspaceHookSummary, workspacePath])
+
+  const loadHooks = useCallback(async (): Promise<void> => {
+    const requestId = ++hooksCatalogRequestIdRef.current
+    const key = currentHookCatalogKey
+    setHookDetail((previous) =>
+      previous.key === key ? previous : { key, hooks: [], truncated: false }
+    )
+    try {
+      await globalSummaryPromiseRef.current
+      if (requestId !== hooksCatalogRequestIdRef.current) return
+      const globalHooks: HookConfig[] = []
+      const workspaceHooks: HookConfig[] = []
+      const pluginHooks: PluginHookMetadata[] = []
+      const skillHooks: SkillHookMetadata[] = []
+      let cursor: string | undefined
+      let truncated = false
+      const truncatedReasons = new Set<string>()
+      let totalEntries = 0
+      let enabledEntries = 0
+      do {
+        const previousCursor = cursor
+        const page = await window.api.hooks.catalog.read({
+          requestScope: RIGHT_PANEL_HOOK_SCOPE,
+          ...(workspacePath ? { workspacePath } : {}),
+          revision: currentHookWorkerRevision,
+          ...(cursor ? { cursor } : {}),
+          limit: RIGHT_PANEL_INITIAL_RENDER_ITEMS
+        })
+        if (requestId !== hooksCatalogRequestIdRef.current) return
+        globalHooks.push(...page.globalHooks)
+        workspaceHooks.push(...page.workspaceHooks)
+        pluginHooks.push(...page.pluginHooks)
+        skillHooks.push(...page.skillHooks)
+        truncated ||= page.truncated
+        for (const reason of page.truncatedReasons) truncatedReasons.add(reason)
+        totalEntries = page.totalEntries
+        enabledEntries = page.enabledEntries
+        cursor = page.nextCursor
+        if (cursor && cursor === previousCursor) {
+          truncated = true
+          truncatedReasons.add("cursor-no-progress")
+          console.warn("[RightPanel] Hook catalog cursor made no progress")
+          break
+        }
+      } while (cursor)
+
+      const nextHooks: DisplayHook[] = [
         ...globalHooks.map((hook): DisplayHook => ({ ...hook, source: "global" })),
         ...workspaceHooks.map((hook): DisplayHook => ({ ...hook, source: "workspace" })),
         ...skillHooks.map(
@@ -523,211 +1159,171 @@ export function RightPanel({
             hookPath: hook.hookPath
           })
         )
-      ])
+      ]
+      setHookDetail({ key, hooks: nextHooks, truncated })
+      setHookSummary({
+        key,
+        value: {
+          total: totalEntries,
+          enabled: enabledEntries,
+          truncated,
+          truncatedReasons: [...truncatedReasons]
+        },
+        loading: false,
+        error: false
+      })
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/cancel|supersed|HOOK_CATALOG_CANCELLED/i.test(message)) return
       console.error("[RightPanel] Failed to load hooks:", error)
     }
-  }, [threadState?.workspacePath])
+  }, [currentHookCatalogKey, currentHookWorkerRevision, workspacePath])
 
   useEffect(() => {
-    void loadHooks()
-  }, [loadHooks, pluginVersion])
+    if (!hooksOpen) return undefined
+    if (moduleMode !== "work") return undefined
+    const timer = window.setTimeout(
+      () => void loadHooks(),
+      RIGHT_PANEL_HOOK_REFRESH_DEBOUNCE_MS
+    )
+    return () => {
+      window.clearTimeout(timer)
+      hooksCatalogRequestIdRef.current += 1
+      void window.api.hooks.catalog.cancel(RIGHT_PANEL_HOOK_SCOPE).catch(() => undefined)
+    }
+  }, [hooksOpen, loadHooks, moduleMode])
 
   useEffect(() => {
-    return window.api.hooks.onChanged(() => {
-      void loadHooks()
-    })
-  }, [loadHooks])
-
-  useEffect(() => {
-    if (!currentThreadId) return
-    const cleanup = window.api.hooks.workspace.onChanged((data) => {
-      if (data.threadId === currentThreadId) {
-        void loadHooks()
-      }
-    })
-    return cleanup
-  }, [currentThreadId, loadHooks])
-
-  const latestResourceEvent = useMemo(() => {
-    const persisted = threadState?.messages ?? []
-    const streaming =
-      (streamData.messages as
-        | Array<{
-            id?: string
-            tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }>
-          }>
-        | undefined) ?? []
-    const all = [
-      ...persisted.map((m) => ({ source: "persisted" as const, message: m })),
-      ...streaming.map((m) => ({ source: "streaming" as const, message: m }))
+    const advanceRevision = (): void => {
+      setHookCatalogRevision((revision) => revision + 1)
+    }
+    const unsubscribes = [
+      subscribeGlobalHookCatalogInvalidation(advanceRevision),
+      subscribeSkillCatalogInvalidation(advanceRevision),
+      subscribePluginCatalogInvalidation(advanceRevision)
     ]
-
-    const completedToolCallIds = new Set<string>()
-    for (const item of all) {
-      const message = item.message as {
-        role?: string
-        type?: string
-        tool_call_id?: string
-      }
-      if ((message.role === "tool" || message.type === "tool") && message.tool_call_id) {
-        completedToolCallIds.add(message.tool_call_id)
-      }
+    return () => {
+      for (const unsubscribe of unsubscribes) unsubscribe()
     }
-
-    for (let i = all.length - 1; i >= 0; i--) {
-      const current = all[i]
-      const toolCalls = current.message?.tool_calls || []
-      for (let j = toolCalls.length - 1; j >= 0; j--) {
-        const tool = toolCalls[j] as { id?: string; name: string; args?: Record<string, unknown> }
-        if (!tool.id || !completedToolCallIds.has(tool.id)) {
-          continue
-        }
-        const event = buildPreviewEvent(tool, current.message?.id ?? `m-${i}`, j)
-        if (event) {
-          return { ...event, source: current.source }
-        }
-      }
-    }
-    return null
-  }, [threadState?.messages, streamData.messages])
-
-  const latestCompletedLlmBatch = useMemo(() => {
-    const persisted = threadState?.messages ?? []
-    const streaming =
-      (streamData.messages as
-        | Array<{
-            id?: string
-            tool_calls?: Array<{ id?: string; name: string; args?: Record<string, unknown> }>
-          }>
-        | undefined) ?? []
-    const all = [
-      ...persisted.map((m) => ({ message: m })),
-      ...streaming.map((m) => ({ message: m }))
-    ]
-    const completedToolCallIds = new Set<string>()
-    for (const item of all) {
-      const message = item.message as { role?: string; type?: string; tool_call_id?: string }
-      if ((message.role === "tool" || message.type === "tool") && message.tool_call_id) {
-        completedToolCallIds.add(message.tool_call_id)
-      }
-    }
-    for (let i = all.length - 1; i >= 0; i--) {
-      const msg = all[i].message
-      const toolCalls = msg?.tool_calls || []
-      const files = new Set<string>()
-      const toolIds: string[] = []
-      for (const tool of toolCalls) {
-        if (!tool?.id || !completedToolCallIds.has(tool.id)) continue
-        const filePath = getToolCallFilePath(tool)
-        if (filePath) {
-          files.add(filePath)
-          toolIds.push(tool.id)
-        }
-      }
-      if (files.size > 0) {
-        const messageId = msg?.id || `m-${i}`
-        return {
-          batchKey: `${messageId}:${toolIds.sort().join(",")}`,
-          files: Array.from(files)
-        }
-      }
-    }
-    return null
-  }, [threadState?.messages, streamData.messages])
+  }, [])
 
   useEffect(() => {
-    const wasLoading = prevStreamLoadingRef.current
-    const isLoading = streamData.isLoading
-    prevStreamLoadingRef.current = isLoading
+    if (!workspacePath) return undefined
+    const workspaceKey = normalizeWorkspaceFileKey(workspacePath)
+    return subscribeWorkspaceHookCatalogInvalidation((data) => {
+      if (normalizeWorkspaceFileKey(data.workspacePath) === workspaceKey) {
+        setHookCatalogRevision((revision) => revision + 1)
+      }
+    })
+  }, [workspacePath])
 
-    const applyPreviewUpdate = (switchToPreview: boolean): void => {
-      if (!latestResourceEvent) return
-      if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
-      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-      setPreviewPath(latestResourceEvent.path)
-      setPreviewReloadToken((v) => v + 1)
-      if (switchToPreview) {
+  const applyStreamPreview = useCallback(
+    (
+      path: string,
+      workspacePathKind: WorkspaceFilePreviewWorkspacePathKind,
+      switchToPreview: boolean
+    ): void => {
+      if (!currentThreadId) return
+      previewThreadIdRef.current = currentThreadId
+      setPreviewPath(path)
+      setPreviewWorkspacePathKind(workspacePathKind)
+      previewExternalGrantRefreshPromiseRef.current = null
+      replacePreviewExternalAuthorization(null)
+      setPreviewReloadToken((version) => version + 1)
+      if (!switchToPreview) return
+      if (isHtmlPreviewPath(path)) {
+        onRequestBrowserMode?.()
+      } else {
         onRequestPreviewMode?.()
       }
-    }
-
-    // Render preview when this round finishes: true -> false
-    if (!(wasLoading && !isLoading)) return
-    if (
-      latestCompletedLlmBatch?.files?.length &&
-      lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
-    ) {
-      lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-      // Never auto-open git panel. If user is already on git, only refresh preview data silently.
-      applyPreviewUpdate(moduleMode !== "git")
-      return
-    }
-
-    // For non-edit resource events, respect current panel choice:
-    // if user stays on git panel, don't switch away; otherwise keep preview behavior.
-    applyPreviewUpdate(moduleMode !== "git")
-  }, [
-    streamData.isLoading,
-    latestResourceEvent,
-    latestCompletedLlmBatch,
-    onRequestPreviewMode,
-    moduleMode
-  ])
+    },
+    [
+      currentThreadId,
+      onRequestBrowserMode,
+      onRequestPreviewMode,
+      replacePreviewExternalAuthorization
+    ]
+  )
 
   useEffect(() => {
-    if (!currentThreadId) return
     if (lastThreadIdRef.current !== currentThreadId) {
       lastThreadIdRef.current = currentThreadId
+      previewThreadIdRef.current = null
       setPreviewPath(null)
-      lastAppliedPreviewKeyRef.current = null
-      lastRecordedBatchKeyRef.current = null
-      lastAutoSwitchedBatchKeyRef.current = null
-      prevStreamLoadingRef.current = false
+      setPreviewWorkspacePathKind("relative")
+      previewExternalGrantRefreshPromiseRef.current = null
+      replacePreviewExternalAuthorization(null)
     }
-  }, [currentThreadId])
+  }, [currentThreadId, replacePreviewExternalAuthorization])
 
   useEffect(() => {
     if (!currentThreadId) return
     const cleanup = window.api.workspace.onFilesChanged((data) => {
-      if (data.threadId === currentThreadId && previewPath) {
+      if (data.threadIds.includes(currentThreadId) && previewPathForCurrentThread) {
         setPreviewReloadToken((v) => v + 1)
       }
     })
     return cleanup
-  }, [currentThreadId, previewPath])
+  }, [currentThreadId, previewPathForCurrentThread])
 
   useEffect(() => {
-    const cleanup = onOpenResourcePreview(({ threadId, filePath }) => {
-      if (!currentThreadId || threadId !== currentThreadId) return
-      setPreviewPath(filePath)
-      setPreviewReloadToken((v) => v + 1)
-      onRequestPreviewMode?.()
-    })
+    const cleanup = onOpenResourcePreview(
+      ({
+        threadId,
+        filePath,
+        workspacePathKind,
+        externalPreviewGrant,
+        externalPreviewGrantExpiresAt,
+        externalPreviewProjectId,
+        externalPreviewSlug
+      }) => {
+        if (!currentThreadId || threadId !== currentThreadId) return
+        previewThreadIdRef.current = threadId
+        setPreviewPath(filePath)
+        setPreviewWorkspacePathKind(workspacePathKind)
+        previewExternalGrantRefreshPromiseRef.current = null
+        replacePreviewExternalAuthorization(
+          externalPreviewGrant
+            ? {
+                threadId,
+                filePath,
+                grant: externalPreviewGrant,
+                expiresAt: externalPreviewGrantExpiresAt,
+                projectId: externalPreviewProjectId,
+                slug: externalPreviewSlug
+              }
+            : null
+        )
+        setPreviewReloadToken((v) => v + 1)
+        if (isHtmlPreviewPath(filePath) && !externalPreviewGrant) {
+          onRequestBrowserMode?.()
+        } else {
+          onRequestPreviewMode?.()
+        }
+      }
+    )
     return cleanup
-  }, [currentThreadId, onRequestPreviewMode])
+  }, [
+    currentThreadId,
+    onRequestBrowserMode,
+    onRequestPreviewMode,
+    replacePreviewExternalAuthorization
+  ])
 
   useEffect(() => {
-    if (moduleMode !== "preview" || !previewPath) {
+    if (moduleMode !== "preview" || !previewPathForCurrentThread) {
       onPreviewFullscreenChange?.(false)
     }
-  }, [moduleMode, previewPath, onPreviewFullscreenChange])
+  }, [moduleMode, previewPathForCurrentThread, onPreviewFullscreenChange])
 
   useEffect(() => {
-    if (!currentThreadId || !latestCompletedLlmBatch || latestCompletedLlmBatch.files.length === 0)
-      return
-    if (lastRecordedBatchKeyRef.current === latestCompletedLlmBatch.batchKey) return
-    lastRecordedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-    window.api.workspace
-      .recordLlmModifiedFiles(currentThreadId, latestCompletedLlmBatch.files)
-      .catch((error) => {
-        console.error("[RightPanel] Failed to record LLM modified files:", error)
-      })
-  }, [currentThreadId, latestCompletedLlmBatch])
+    if (moduleMode !== "browser") onBrowserFullscreenChange?.(false)
+  }, [moduleMode, onBrowserFullscreenChange])
 
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
   const [filesHeight, setFilesHeight] = useState<number | null>(null)
+  const [pluginRunArtifactsHeight, setPluginRunArtifactsHeight] = useState<number | null>(null)
   const [systemConstraintsHeight, setSystemConstraintsHeight] = useState<number | null>(null)
   const [agentsHeight, setAgentsHeight] = useState<number | null>(null)
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
@@ -739,6 +1335,7 @@ export function RightPanel({
   const dragStartHeights = useRef<{
     tasks: number
     files: number
+    pluginRunArtifacts: number
     systemConstraints: number
     agents: number
     skills: number
@@ -756,6 +1353,7 @@ export function RightPanel({
     const openPanels = [
       tasksOpen,
       filesOpen,
+      Boolean(activePluginRunArtifacts && pluginRunArtifactsOpen),
       showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
@@ -763,7 +1361,7 @@ export function RightPanel({
       hooksOpen,
       lspOpen
     ]
-    const sectionCount = showSystemConstraints ? 8 : 7
+    const sectionCount = (showSystemConstraints ? 8 : 7) + (activePluginRunArtifacts ? 1 : 0)
     let used = HEADER_HEIGHT * sectionCount
     // Fixed visual gaps between section blocks
     used += SECTION_GAP * (sectionCount - 1)
@@ -782,6 +1380,8 @@ export function RightPanel({
     moduleMode,
     tasksOpen,
     filesOpen,
+    activePluginRunArtifacts,
+    pluginRunArtifactsOpen,
     showSystemConstraints,
     systemConstraintsOpen,
     agentsOpen,
@@ -797,6 +1397,7 @@ export function RightPanel({
     const openCount = [
       tasksOpen,
       filesOpen,
+      Boolean(activePluginRunArtifacts && pluginRunArtifactsOpen),
       showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
@@ -809,6 +1410,7 @@ export function RightPanel({
       return {
         tasks: 0,
         files: 0,
+        pluginRunArtifacts: 0,
         systemConstraints: 0,
         agents: 0,
         skills: 0,
@@ -823,6 +1425,10 @@ export function RightPanel({
     return {
       tasks: tasksOpen ? (tasksHeight ?? defaultHeight) : 0,
       files: filesOpen ? (filesHeight ?? defaultHeight) : 0,
+      pluginRunArtifacts:
+        activePluginRunArtifacts && pluginRunArtifactsOpen
+          ? (pluginRunArtifactsHeight ?? defaultHeight)
+          : 0,
       systemConstraints:
         showSystemConstraints && systemConstraintsOpen
           ? (systemConstraintsHeight ?? defaultHeight)
@@ -837,6 +1443,8 @@ export function RightPanel({
     getAvailableContentHeight,
     tasksOpen,
     filesOpen,
+    activePluginRunArtifacts,
+    pluginRunArtifactsOpen,
     showSystemConstraints,
     systemConstraintsOpen,
     agentsOpen,
@@ -846,6 +1454,7 @@ export function RightPanel({
     lspOpen,
     tasksHeight,
     filesHeight,
+    pluginRunArtifactsHeight,
     systemConstraintsHeight,
     agentsHeight,
     skillsHeight,
@@ -1185,6 +1794,7 @@ export function RightPanel({
   useEffect(() => {
     setTasksHeight(null)
     setFilesHeight(null)
+    setPluginRunArtifactsHeight(null)
     setSystemConstraintsHeight(null)
     setAgentsHeight(null)
     setSkillsHeight(null)
@@ -1194,6 +1804,7 @@ export function RightPanel({
   }, [
     tasksOpen,
     filesOpen,
+    pluginRunArtifactsOpen,
     systemConstraintsOpen,
     agentsOpen,
     skillsOpen,
@@ -1206,6 +1817,7 @@ export function RightPanel({
   const [heights, setHeights] = useState<PanelHeights>({
     tasks: 0,
     files: 0,
+    pluginRunArtifacts: 0,
     systemConstraints: 0,
     agents: 0,
     skills: 0,
@@ -1221,50 +1833,180 @@ export function RightPanel({
     moduleMode === "work" &&
     !tasksOpen &&
     !filesOpen &&
+    !(activePluginRunArtifacts && pluginRunArtifactsOpen) &&
     !(showSystemConstraints && systemConstraintsOpen) &&
     !agentsOpen &&
     !skillsOpen &&
     !pluginsOpen &&
     !hooksOpen &&
     !lspOpen
+  const browserPreviewUrl = useMemo(() => {
+    if (!previewPathForCurrentThread || !isHtmlPreviewPath(previewPathForCurrentThread)) {
+      return null
+    }
+    return previewPathForCurrentThread
+  }, [previewPathForCurrentThread])
+
+  const handleOpenGitFileFolder = useCallback(
+    async (filePath: string): Promise<void> => {
+      try {
+        const resolved = resolveResourcePreviewPaths(
+          filePath,
+          workspacePath ?? null,
+          window.electron.process.platform,
+          "relative"
+        )
+        const platform = await window.electron.ipcRenderer.invoke("get-platform")
+        const normalizedPath =
+          platform === "win32" ? resolved.fullPath.replace(/\//g, "\\") : resolved.fullPath
+        await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
+      } catch (error) {
+        console.error("[GitPanel] Failed to show item in folder:", error)
+      }
+    },
+    [workspacePath]
+  )
+
+  const hookSummaryValue = workspacePath
+    ? hookSummary.key === currentHookCatalogKey
+      ? hookSummary.value
+      : null
+    : globalHookSummary.value
+  const hookSummaryLoading = workspacePath
+    ? hookSummary.key !== currentHookCatalogKey || hookSummary.loading
+    : globalHookSummary.loading
+  const hookSummaryError = workspacePath
+    ? hookSummary.key === currentHookCatalogKey && hookSummary.error
+    : globalHookSummary.error
+  const currentHookDetail =
+    hookDetail.key === currentHookCatalogKey
+      ? hookDetail
+      : { key: currentHookCatalogKey, hooks: [], truncated: false }
+  const workspaceFileSummaryReady = Boolean(
+    currentThreadId &&
+      workspacePath &&
+      hasLoadedWorkspaceFiles(currentThreadId, workspacePath)
+  )
+  const workspaceFileBadge =
+    workspacePath && workspaceFileSummaryReady ? workspaceFiles.length : null
+  const workspaceFileDetail = !workspacePath
+    ? "未关联"
+    : workspaceFileBadge === null
+      ? "待加载"
+      : null
+  const previewExternalGrant =
+    previewExternalAuthorizationForCurrentThread?.grant ?? null
 
   return (
     <aside
       ref={containerRef}
       className={cn(
-        "flex w-full flex-col bg-transparent overflow-hidden",
+        "flex w-full flex-col bg-transparent overflow-hidden border-l",
         allPanelsClosed ? "h-auto self-start" : "h-full"
       )}
     >
+      {currentThreadId && (
+        <RightPanelStreamEffects
+          key={currentThreadId}
+          threadId={currentThreadId}
+          moduleMode={moduleMode}
+          onApplyPreview={applyStreamPreview}
+        />
+      )}
+      {moduleMode === "browser" && (
+        <div className="flex h-full min-h-0 flex-col bg-background">
+          <Suspense fallback={<LazySectionFallback label="加载 Browser..." />}>
+            <BrowserPanel
+              threadId={currentThreadId ?? null}
+              workspacePath={workspacePath ?? null}
+              initialUrl={browserPreviewUrl}
+              reloadToken={previewReloadToken}
+              onFullscreenChange={onBrowserFullscreenChange}
+            />
+          </Suspense>
+        </div>
+      )}
+
       {moduleMode === "preview" && (
         <div className="flex h-full min-h-0 flex-col  rounded-2xl bg-background">
           <div className="bg-background h-full min-h-0" style={{ height: PREVIEW_MAX_HEIGHT }}>
-            {previewPath ? (
+            {previewPathForCurrentThread ? (
               <ResourcePreview
-                key={`${previewPath}:${previewReloadToken}`}
-                filePath={previewPath}
-                workspacePath={threadState?.workspacePath ?? null}
+                key={`${currentThreadId}:${previewPathForCurrentThread}:${previewWorkspacePathKind}:${previewReloadToken}`}
+                filePath={previewPathForCurrentThread}
+                workspacePathKind={previewWorkspacePathKind}
+                workspacePath={workspacePath ?? null}
                 threadId={currentThreadId ?? ""}
+                externalPreviewGrant={previewExternalGrant ?? undefined}
+                resolveExternalPreviewGrant={
+                  previewExternalAuthorizationForCurrentThread
+                    ? resolveCurrentExternalPreviewGrant
+                    : undefined
+                }
                 reloadToken={previewReloadToken}
                 onReload={() => setPreviewReloadToken((v) => v + 1)}
                 onFullscreenChange={onPreviewFullscreenChange}
                 onHidePreview={onRequestWorkMode}
               />
             ) : (
-              <div className="h-full min-h-0 flex items-center justify-center p-4">
-                <div className="w-full max-w-sm rounded-2xl border border-border/70 bg-background-elevated/80 px-5 py-6 text-center shadow-sm">
-                  <div className="mx-auto mb-3 flex size-11 items-center justify-center rounded-xl border border-border bg-muted/30">
-                    <FileText className="size-5 text-muted-foreground" />
+              <div className="flex h-full min-h-0 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+                <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-4 py-5">
+                  <div className="mb-3">
+                    <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
+                      <FileText className="size-7" strokeWidth={1.7} />
+                    </div>
+                    <p className="text-[10px] font-semibold tracking-[0.18em] text-stone-500">
+                      FILE PREVIEW
+                    </p>
+                    <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
+                      从一个文件开始预览
+                    </h2>
+                    <p className="mt-2 text-xs leading-5 text-stone-600">
+                      生成或编辑文件后，新的可预览内容会自动在这里展示。
+                    </p>
                   </div>
-                  <div className="text-sm font-semibold text-foreground">暂无可预览文件</div>
-                  <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                    生成或编辑文件后会自动在这里展示预览。 也可以在工具调用里点击预览图标快速打开。
-                  </p>
-                  <div className="mt-4 flex items-center justify-center gap-2">
+
+                  <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
+                    <div className="border-b border-stone-100 px-4 py-3">
+                      <p className="text-xs font-semibold text-stone-800">预览使用提示</p>
+                      <p className="mt-0.5 text-[11px] text-stone-500">
+                        把文件查看、跳转和验证集中到同一处。
+                      </p>
+                    </div>
+
+                    <div className="divide-y divide-stone-100">
+                      <div className="flex gap-3 px-4 py-3">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700">
+                          <Eye className="size-3.5" strokeWidth={1.8} />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-stone-800">在工具调用里快速打开</p>
+                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                            点击预览图标，就能把对应文件直接切到这里查看完整内容。
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-3 px-4 py-3">
+                        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
+                          <Sparkles className="size-3.5" strokeWidth={1.8} />
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-stone-800">生成后自动接管预览区</p>
+                          <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                            当任务产出新的可预览文件时，这里会自动更新，不需要手动切换。
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between gap-3">
+                    <p className="text-[11px] text-stone-500">准备好后，回到工作区继续生成内容。</p>
                     <button
                       type="button"
                       onClick={onRequestWorkMode}
-                      className="inline-flex items-center justify-center rounded-md border border-border/80 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-background-interactive transition-colors"
+                      className="inline-flex h-9 shrink-0 items-center justify-center rounded-xl border border-stone-200/90 bg-white px-4 text-xs font-medium text-stone-700 shadow-[0_8px_20px_rgba(41,37,36,0.06)] transition-[transform,background-color,color,box-shadow] hover:bg-stone-50 hover:text-stone-900 hover:shadow-[0_12px_28px_rgba(41,37,36,0.1)] active:scale-[0.98]"
                     >
                       返回工作目录
                     </button>
@@ -1283,24 +2025,9 @@ export function RightPanel({
               <GitPanelView
                 key={currentThreadId ?? "git-panel-empty-thread"}
                 threadId={currentThreadId ?? ""}
-                workspacePath={threadState?.workspacePath ?? null}
-                initialGitContext={threadState?.gitContext ?? null}
-                onOpenFileFolder={async (filePath) => {
-                  try {
-                    const resolved = resolvePreviewPaths(
-                      filePath,
-                      threadState?.workspacePath ?? null
-                    )
-                    const platform = await window.electron.ipcRenderer.invoke("get-platform")
-                    const normalizedPath =
-                      platform === "win32"
-                        ? resolved.fullPath.replace(/\//g, "\\")
-                        : resolved.fullPath
-                    await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
-                  } catch (error) {
-                    console.error("[GitPanel] Failed to show item in folder:", error)
-                  }
-                }}
+                workspacePath={workspacePath ?? null}
+                initialGitContext={gitContext ?? null}
+                onOpenFileFolder={handleOpenGitFileFolder}
               />
             </Suspense>
           </div>
@@ -1335,7 +2062,15 @@ export function RightPanel({
             <SectionHeader
               title="文件"
               icon={FolderTree}
-              badge={workspaceFiles.length}
+              badge={workspaceFileBadge}
+              badgeTitle={
+                workspaceFileBadge === null ? undefined : `已加载 ${workspaceFileBadge} 项`
+              }
+              detail={
+                workspaceFileDetail ? (
+                  <span className="text-xs text-muted-foreground">{workspaceFileDetail}</span>
+                ) : undefined
+              }
               isOpen={filesOpen}
               onToggle={() => setFilesOpen((prev) => !prev)}
             />
@@ -1345,6 +2080,41 @@ export function RightPanel({
               </div>
             )}
           </div>
+
+          {activePluginRunArtifacts && (
+            <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+              <SectionHeader
+                title="插件运行产物"
+                icon={PackageOpen}
+                badge={activePluginRunArtifacts.files.length}
+                badgeTitle={
+                  activePluginRunArtifacts.truncated
+                    ? `仅展示前 ${activePluginRunArtifacts.files.length} 项`
+                    : `共 ${activePluginRunArtifacts.files.length} 项`
+                }
+                badgeTruncated={activePluginRunArtifacts.truncated}
+                isOpen={pluginRunArtifactsOpen}
+                onToggle={() => setPluginRunArtifactsOpen((prev) => !prev)}
+              />
+              {pluginRunArtifactsOpen && (
+                <div
+                  className="overflow-auto right-panel-scroll"
+                  style={{ height: heights.pluginRunArtifacts }}
+                >
+                  <PluginRunArtifactsContent
+                    key={JSON.stringify([
+                      activePluginRunArtifacts.projectId,
+                      activePluginRunArtifacts.slug,
+                      activePluginRunArtifacts.projectRootPath,
+                      currentThreadId
+                    ])}
+                    context={activePluginRunArtifacts}
+                    threadId={currentThreadId}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Resize handle after FILES */}
           {!showSystemConstraints && filesOpen && agentsOpen && (
@@ -1369,7 +2139,7 @@ export function RightPanel({
                   className="overflow-auto right-panel-scroll"
                   style={{ height: heights.systemConstraints }}
                 >
-                  <SystemConstraintsPanel state={threadState?.harnessAgentmdLoadStatus} />
+                  <SystemConstraintsPanel state={harnessAgentmdLoadStatus} />
                 </div>
               )}
             </div>
@@ -1403,7 +2173,15 @@ export function RightPanel({
             <SectionHeader
               title="技能"
               icon={Sparkles}
-              badge={splitRightPanelSkillsByEnabled(skills, disabledSkills).enabled.length}
+              badge={skillSummary.value?.enabled ?? null}
+              badgeTitle={
+                skillSummary.value
+                  ? `已启用 ${skillSummary.value.enabled ?? 0}，共 ${skillSummary.value.total}`
+                  : undefined
+              }
+              badgeTruncated={skillSummary.value?.truncated}
+              loading={skillSummary.loading || (!skillSummary.value && !skillSummary.error)}
+              error={skillSummary.error}
               isOpen={skillsOpen}
               onToggle={() => setSkillsOpen((prev) => !prev)}
             />
@@ -1427,7 +2205,15 @@ export function RightPanel({
             <SectionHeader
               title="插件"
               icon={Puzzle}
-              badge={plugins.length}
+              badge={pluginSummary.value?.total ?? null}
+              badgeTitle={
+                pluginSummary.value ? `已安装 ${pluginSummary.value.total} 个插件` : undefined
+              }
+              badgeTruncated={pluginSummary.value?.truncated}
+              loading={
+                pluginSummary.loading || (!pluginSummary.value && !pluginSummary.error)
+              }
+              error={pluginSummary.error}
               isOpen={pluginsOpen}
               onToggle={() => setPluginsOpen((prev) => !prev)}
             />
@@ -1446,17 +2232,23 @@ export function RightPanel({
             <SectionHeader
               title="钩子"
               icon={Webhook}
-              badge={hooks.filter((h) => h.enabled).length}
+              badge={hookSummaryValue?.enabled ?? null}
+              badgeTitle={
+                hookSummaryValue
+                  ? `已启用 ${hookSummaryValue.enabled ?? 0}，共 ${hookSummaryValue.total}`
+                  : undefined
+              }
+              badgeTruncated={hookSummaryValue?.truncated}
+              loading={hookSummaryLoading}
+              error={hookSummaryError}
               isOpen={hooksOpen}
               onToggle={() => setHooksOpen((prev) => !prev)}
             />
             {hooksOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.hooks }}>
                 <HooksContent
-                  hooks={hooks}
-                  onChange={() => {
-                    void loadHooks()
-                  }}
+                  hooks={currentHookDetail.hooks}
+                  truncated={currentHookDetail.truncated}
                 />
               </div>
             )}
@@ -1471,12 +2263,19 @@ export function RightPanel({
               title="LSP"
               icon={Code2}
               detail={lspHeaderStatus}
+              loading={lspConfigLoading || (!lspConfig && !lspConfigError)}
+              error={lspConfigError}
               isOpen={lspOpen}
               onToggle={() => setLspOpen((prev) => !prev)}
             />
             {lspOpen && (
               <div className="overflow-auto right-panel-scroll" style={{ height: heights.lsp }}>
-                <LspPanel threadId={currentThreadId} embedded statusOnly />
+                <LspPanel
+                  threadId={currentThreadId}
+                  embedded
+                  statusOnly
+                  onSummaryChange={handleLspSummaryChange}
+                />
               </div>
             )}
           </div>
@@ -1516,8 +2315,7 @@ const STATUS_CONFIG = {
 }
 
 function TasksContent({ threadId }: { threadId: string | null }): React.JSX.Element {
-  const threadState = useThreadState(threadId)
-  const todos = threadState?.todos ?? []
+  const todos = useThreadStateSelector(threadId, (state) => state.todos) ?? []
   const [completedExpanded, setCompletedExpanded] = useState(false)
 
   if (todos.length === 0) {
@@ -1621,230 +2419,196 @@ function TaskItem({ todo }: { todo: Todo }): React.JSX.Element {
   )
 }
 
-const RESOURCE_PREVIEW_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "svg",
-  "bmp",
-  "ico",
-  "pdf",
-  "doc",
-  "docx",
-  "md",
-  "markdown",
-  "mdx",
-  "html",
-  "htm"
-])
-
-function getPathExtension(filePath: string): string {
-  const fileName = filePath.split(/[\\/]/).pop() || filePath
-  const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : ""
-  return ext || ""
-}
-
-function isResourcePreviewPath(filePath: string): boolean {
+function isHtmlPreviewPath(filePath: string): boolean {
   const ext = getPathExtension(filePath)
-  return RESOURCE_PREVIEW_EXTENSIONS.has(ext)
-}
-
-function getToolCallFilePath(toolCall: {
-  name: string
-  args?: Record<string, unknown>
-}): string | null {
-  if (toolCall.name !== "write_file" && toolCall.name !== "edit_file") return null
-  const raw = toolCall.args?.path ?? toolCall.args?.file_path
-  if (typeof raw !== "string" || !raw.trim()) return null
-  return raw
+  return ext === "html" || ext === "htm"
 }
 
 function isAbsolutePath(filePath: string): boolean {
-  return /^(?:[a-zA-Z]:[\\/]|\/)/.test(filePath)
-}
-
-function resolvePreviewPaths(
-  filePath: string,
-  workspacePath: string | null
-): {
-  fullPath: string
-  workspaceFilePath: string
-  inWorkspace: boolean
-} {
-  const input = filePath.trim().replace(/\\/g, "/")
-  if (!workspacePath) {
-    return { fullPath: input, workspaceFilePath: input, inWorkspace: false }
-  }
-
-  const ws = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "")
-  const fullPath = isAbsolutePath(input) ? input : `${ws}/${input.replace(/^\/+/, "")}`
-
-  const inWorkspace = fullPath === ws || fullPath.startsWith(`${ws}/`)
-  if (!inWorkspace) {
-    return { fullPath, workspaceFilePath: input, inWorkspace: false }
-  }
-
-  const rel = fullPath.slice(ws.length).replace(/^\/+/, "")
-  return {
-    fullPath,
-    workspaceFilePath: `/${rel}`,
-    inWorkspace: true
-  }
-}
-
-interface CodeDiffPayload {
-  oldValue: string
-  newValue: string
-}
-
-interface PreviewEvent {
-  path: string
-  key: string
-  codeDiff?: CodeDiffPayload
-}
-
-function buildPreviewEvent(
-  toolCall: { id?: string; name: string; args?: Record<string, unknown> },
-  messageId: string,
-  toolIndex: number
-): PreviewEvent | null {
-  const filePath = getToolCallFilePath(toolCall)
-  if (!filePath) return null
-
-  const ext = getPathExtension(filePath).toLowerCase()
-  const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
-  const htmlLike = ext === "html" || ext === "htm"
-  const typeInfo = getFileType(filePath.split(/[\\/]/).pop() || filePath)
-  const codeLike = typeInfo.type === "code" && !markdownLike && !htmlLike
-
-  const isResource = isResourcePreviewPath(filePath)
-  if (!isResource && !codeLike) return null
-
-  const key = `${messageId}:${toolCall.id ?? `t-${toolIndex}`}:${filePath}`
-
-  if (!codeLike) {
-    return { path: filePath, key }
-  }
-
-  const args = toolCall.args || {}
-  const oldValue = ((args.old_string ?? args.old_str) as string | undefined) || ""
-  const newValue = ((args.new_string ?? args.new_str ?? args.content) as string | undefined) || ""
-
-  if (toolCall.name === "write_file") {
-    return {
-      path: filePath,
-      key,
-      codeDiff: { oldValue: "", newValue }
-    }
-  }
-
-  return {
-    path: filePath,
-    key,
-    codeDiff: { oldValue, newValue }
-  }
+  return /^(?:[a-zA-Z]:[\\/]|[/\\]{2}|\/)/.test(filePath)
 }
 
 function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Element {
-  const threadState = useThreadState(threadId)
-  const workspaceFiles = threadState?.workspaceFiles ?? []
-  const workspacePath = threadState?.workspacePath ?? null
-  const setWorkspacePath = threadState?.setWorkspacePath
-  const setWorkspaceFiles = threadState?.setWorkspaceFiles
+  const workspaceFiles = useThreadStateSelector(threadId, (state) => state.workspaceFiles) ?? []
+  const workspacePath = useThreadStateSelector(threadId, (state) => state.workspacePath)
+  const threadActions = useThreadActions(threadId)
+  const setWorkspacePath = threadActions?.setWorkspacePath
+  const setWorkspaceFiles = threadActions?.setWorkspaceFiles
+  const [scanState, setScanState] = useState<{ threadId: string; count: number } | null>(null)
+  const [loadBoundary, setLoadBoundary] = useState<{
+    threadId: string
+    workspacePath: string
+    truncated: boolean
+    continuationAvailable: boolean
+  } | null>(null)
+  const [continuationLoading, setContinuationLoading] = useState(false)
+  const continuationControllerRef = useRef<AbortController | null>(null)
+  const requestFenceRef = useRef(new WorkspaceFileRequestFence())
+  const workspaceKey = workspacePath ? normalizeWorkspaceFileKey(workspacePath) : ""
+  requestFenceRef.current.observe(threadId, workspacePath)
+  const scanProgress = scanState?.threadId === threadId ? scanState.count : null
 
   // Load workspace path and files for current thread
   useEffect(() => {
     let cancelled = false
+    const scanController = new AbortController()
+    const requestToken = requestFenceRef.current.begin(threadId, workspacePath)
+    const isCurrentRequest = (): boolean =>
+      !cancelled && requestFenceRef.current.isCurrent(requestToken)
 
     async function loadWorkspace(): Promise<void> {
       if (threadId && setWorkspacePath && setWorkspaceFiles) {
-        const path = await window.api.workspace.get(threadId)
-        if (cancelled) return
-        setWorkspacePath(path)
+        const path =
+          workspacePath ??
+          (await readWorkspacePathWithFallback({
+            read: () => window.api.workspace.get(threadId),
+            getFallback: () => workspacePath,
+            signal: scanController.signal
+          }))
+        if (!isCurrentRequest()) return
 
         if (!path) return
+        if (!workspacePath) {
+          // Publishing the resolved path changes the normalized request key.
+          // Let the next keyed effect own the scan instead of continuing under
+          // the pathless epoch and racing a later workspace selection.
+          setWorkspacePath(path)
+          return
+        }
 
         if (hasLoadedWorkspaceFiles(threadId, path)) {
           // A cached tree may have missed changes while its watcher was evicted.
           // Re-arm the watcher and refresh once only when it had to be recreated.
           const watcherResult = await window.api.workspace.ensureWatching(threadId)
-          if (cancelled || !watcherResult.success || !watcherResult.restarted) return
-          markWorkspaceFilesStale(threadId, path)
+          if (!isCurrentRequest()) return
+          if (watcherResult.success && watcherResult.restarted) {
+            markWorkspaceFilesStale(threadId, path)
+          }
         }
 
-        // No successful scan for this exact thread/path, or the watcher was
-        // recreated after eviction. Share an in-flight background scan.
-        const result = await loadWorkspaceFilesDeduped(threadId, path)
-        if (cancelled) return
+        // Reuse the path-level cached tree (including its files array), or
+        // share an in-flight scan. A recreated watcher invalidates the cache
+        // above because changes may have been missed while it was evicted.
+        setScanState({ threadId, count: 0 })
+        const result = await loadWorkspaceFilesDeduped(threadId, path, {
+          signal: scanController.signal,
+          onProgress: (loadedCount) => {
+            if (isCurrentRequest()) setScanState({ threadId, count: loadedCount })
+          }
+        })
+        if (!isCurrentRequest()) return
         // Guard against writing a stale scan (workspace switched mid-load):
         // only accept results that match the path we resolved.
-        if (result.success && result.files && result.workspacePath === path) {
+        if (
+          result.success &&
+          result.files &&
+          result.workspacePath &&
+          normalizeWorkspaceFileKey(result.workspacePath) === requestToken.workspaceKey
+        ) {
           setWorkspaceFiles(result.files)
+          setLoadBoundary({
+            threadId,
+            workspacePath: path,
+            truncated: result.truncated === true,
+            continuationAvailable: result.continuationAvailable === true
+          })
         }
+        setScanState(null)
       }
     }
     void loadWorkspace().catch((error) => {
-      if (!cancelled) {
+      if (isCurrentRequest() && (!(error instanceof Error) || error.name !== "AbortError")) {
         console.error("[FilesContent] Failed to load workspace files:", error)
       }
+      if (isCurrentRequest()) setScanState(null)
     })
 
     return () => {
       cancelled = true
+      requestFenceRef.current.invalidate(requestToken)
+      scanController.abort()
+      continuationControllerRef.current?.abort()
+      continuationControllerRef.current = null
+      setContinuationLoading(false)
+      setScanState(null)
     }
-    // The effect intentionally initializes once per thread. Successful scan
-    // state is tracked by threadId + workspacePath instead of array length, so
-    // an empty workspace is still considered loaded.
+    // The normalized workspace key is part of the lifecycle: switching A -> B
+    // within one thread invalidates every late A read/scan/continuation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId])
+  }, [threadId, workspaceKey])
 
-  // Listen for file changes from the workspace watcher
   useEffect(() => {
-    if (!threadId || !setWorkspaceFiles) return
-    // Guards against an in-flight callback (started before a workspace switch)
-    // writing back after the effect re-ran for the new path. The closure's
-    // `workspacePath === result.workspacePath` check passes for the old path,
-    // so a flag set in cleanup is required to actually discard the stale write.
-    let cancelled = false
-
-    const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only reload if the event is for the current thread and its workspace.
-      if (data.threadId !== threadId) return
-      if (workspacePath && data.workspacePath && data.workspacePath !== workspacePath) return
-
-      const targetPath = workspacePath ?? data.workspacePath
-      if (!targetPath) return
-
-      console.log("[FilesContent] Files changed, reloading...", {
-        threadId: data.threadId,
-        workspacePath: data.workspacePath
-      })
-      // A real file-change notification requests one trailing pass if another
-      // scan is already in progress, so changes that landed mid-scan are kept.
-      markWorkspaceFilesStale(threadId, targetPath)
-      try {
-        const result = await loadWorkspaceFilesDeduped(threadId, targetPath, {
-          requestTrailingRescan: true
-        })
-        if (cancelled) return
-        if (result.success && result.files && result.workspacePath === targetPath) {
-          setWorkspaceFiles(result.files)
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error("[FilesContent] Failed to refresh workspace files:", error)
-        }
+    if (!threadId || !workspacePath) return
+    const workspaceKey = normalizeWorkspaceFileKey(workspacePath)
+    return subscribeWorkspaceFileResults((publishedKey, _files, result) => {
+      if (publishedKey !== workspaceKey || !result) return
+      if (
+        result.workspacePath &&
+        normalizeWorkspaceFileKey(result.workspacePath) !== workspaceKey
+      ) {
+        return
       }
+      setLoadBoundary({
+        threadId,
+        workspacePath,
+        truncated: result.truncated === true,
+        continuationAvailable: result.continuationAvailable === true
+      })
     })
-
-    return () => {
-      cancelled = true
-      cleanup()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, workspacePath])
+
+  const handleContinueWorkspace = useCallback(async (): Promise<void> => {
+    if (!threadId || !workspacePath || !setWorkspaceFiles || continuationLoading) return
+    const controller = new AbortController()
+    const requestToken = requestFenceRef.current.begin(threadId, workspacePath)
+    continuationControllerRef.current?.abort()
+    continuationControllerRef.current = controller
+    setContinuationLoading(true)
+    setScanState({ threadId, count: workspaceFiles.length })
+    try {
+      const result = await continueWorkspaceFilesDeduped(threadId, workspacePath, {
+        onProgress: (count) => {
+          if (
+            !controller.signal.aborted &&
+            requestFenceRef.current.isCurrent(requestToken)
+          ) {
+            setScanState({ threadId, count })
+          }
+        }
+      })
+      if (
+        controller.signal.aborted ||
+        !requestFenceRef.current.isCurrent(requestToken)
+      ) {
+        return
+      }
+      if (result.success) {
+        setWorkspaceFiles(result.files)
+        setLoadBoundary({
+          threadId,
+          workspacePath,
+          truncated: result.truncated === true,
+          continuationAvailable: result.continuationAvailable === true
+        })
+      }
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== "AbortError") {
+        console.error("[FilesContent] Failed to continue workspace scan:", error)
+      }
+    } finally {
+      if (continuationControllerRef.current === controller) {
+        requestFenceRef.current.invalidate(requestToken)
+        continuationControllerRef.current = null
+        setContinuationLoading(false)
+        setScanState(null)
+      }
+    }
+  }, [continuationLoading, setWorkspaceFiles, threadId, workspaceFiles.length, workspacePath])
+
+  const currentLoadBoundary =
+    loadBoundary?.threadId === threadId && loadBoundary.workspacePath === workspacePath
+      ? loadBoundary
+      : null
 
   return (
     <div className="flex flex-col h-full">
@@ -1859,7 +2623,13 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
       </div>
 
       {/* File tree or empty state */}
-      {workspaceFiles.length === 0 ? (
+      {workspaceFiles.length === 0 && scanProgress !== null ? (
+        <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4 flex-1">
+          <Loader2 className="size-7 mb-2 animate-spin opacity-60" />
+          <span>正在加载工作区文件</span>
+          <span className="text-xs mt-1 tabular-nums">已扫描 {scanProgress} 项</span>
+        </div>
+      ) : workspaceFiles.length === 0 ? (
         <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4 flex-1">
           <FolderTree className="size-8 mb-2 opacity-50" />
           <span>暂无工作区文件</span>
@@ -1870,8 +2640,224 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
           </span>
         </div>
       ) : (
-        <div className="py-1 overflow-auto flex-1">
-          <FileTree files={workspaceFiles} threadId={threadId} />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="py-1 overflow-auto flex-1">
+            <FileTree files={workspaceFiles} threadId={threadId} />
+          </div>
+          {currentLoadBoundary?.truncated && (
+            <div className="shrink-0 border-t border-border/50 bg-background/80 px-3 py-2 text-xs text-muted-foreground">
+              <div className="flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate">
+                  目录较大，当前已加载 {workspaceFiles.length} 项
+                </span>
+                {currentLoadBoundary.continuationAvailable && (
+                  <button
+                    type="button"
+                    className="inline-flex shrink-0 items-center gap-1 rounded-sm border border-border px-2 py-1 hover:bg-muted/50 disabled:cursor-wait disabled:opacity-60"
+                    disabled={continuationLoading}
+                    onClick={() => void handleContinueWorkspace()}
+                  >
+                    {continuationLoading && <Loader2 className="size-3 animate-spin" />}
+                    {continuationLoading ? "加载中" : "继续加载"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PluginRunArtifactsContent({
+  context,
+  threadId
+}: {
+  context: HarnessPluginRunArtifactsContext
+  threadId: string | null
+}): React.JSX.Element {
+  const [visibleArtifactCount, setVisibleArtifactCount] = useState(
+    RIGHT_PANEL_INITIAL_RENDER_ITEMS
+  )
+  const previewGrantRef = useRef<{ grant: string; expiresAt: number } | null>(null)
+  const grantRefreshPromiseRef = useRef<Promise<{
+    grant: string
+    expiresAt: number
+  }> | null>(null)
+  const artifactActionGenerationRef = useRef(0)
+  useEffect(() => {
+    const mountedGeneration = artifactActionGenerationRef.current
+    return () => {
+      if (artifactActionGenerationRef.current === mountedGeneration) {
+        artifactActionGenerationRef.current += 1
+      }
+    }
+  }, [])
+  if (
+    context.previewGrant &&
+    typeof context.previewGrantExpiresAt === "number" &&
+    Number.isFinite(context.previewGrantExpiresAt) &&
+    (!previewGrantRef.current ||
+      context.previewGrant !== previewGrantRef.current.grant ||
+      context.previewGrantExpiresAt > previewGrantRef.current.expiresAt)
+  ) {
+    previewGrantRef.current = {
+      grant: context.previewGrant,
+      expiresAt: context.previewGrantExpiresAt
+    }
+  }
+  const visibleArtifacts = useMemo(
+    () => selectRightPanelWindow(context.files, visibleArtifactCount),
+    [context.files, visibleArtifactCount]
+  )
+
+  const getCurrentPreviewGrant = useCallback(
+    async (filePath: string): Promise<{ grant: string; expiresAt: number }> => {
+      const current = previewGrantRef.current
+      if (
+        current &&
+        isHarnessPluginRunArtifactGrantFresh(current.grant, current.expiresAt)
+      ) {
+        return current
+      }
+
+      if (!grantRefreshPromiseRef.current) {
+        const refresh = (async (): Promise<{ grant: string; expiresAt: number }> => {
+          try {
+            const result = await window.api.harnessBoard.refreshRunArtifactGrant({
+              projectId: context.projectId,
+              slug: context.slug,
+              filePath
+            })
+            if (!result.success) throw new Error(result.error)
+            const next = { grant: result.grant, expiresAt: result.expiresAt }
+            previewGrantRef.current = next
+            return next
+          } finally {
+            grantRefreshPromiseRef.current = null
+          }
+        })()
+        grantRefreshPromiseRef.current = refresh
+      }
+
+      return await grantRefreshPromiseRef.current
+    },
+    [context.projectId, context.slug]
+  )
+
+  const openArtifact = useCallback(
+    async (artifact: HarnessPluginRunArtifactsContext["files"][number]): Promise<void> => {
+      if (!threadId) return
+      const actionGeneration = artifactActionGenerationRef.current
+      const filePath = resolveHarnessPluginRunArtifactPath(
+        context.projectRootPath,
+        artifact.path
+      )
+      if (!filePath) {
+        toast.error("产物路径超出项目目录，已阻止打开")
+        return
+      }
+      let previewAuthorization: { grant: string; expiresAt: number }
+      try {
+        previewAuthorization = await getCurrentPreviewGrant(filePath)
+      } catch (error) {
+        if (artifactActionGenerationRef.current !== actionGeneration) return
+        toast.error(error instanceof Error ? error.message : "产物预览授权续签失败")
+        return
+      }
+      // A near-expiry renewal can outlive this project/feature/thread surface.
+      // The keyed remount plus generation fence prevents its continuation from
+      // revealing or reopening an artifact that belongs to the previous view.
+      if (artifactActionGenerationRef.current !== actionGeneration) return
+
+      if (artifact.artifactType === "directory") {
+        try {
+          const result = await window.api.harnessBoard.revealRunArtifact({
+            grant: previewAuthorization.grant,
+            filePath
+          })
+          if (
+            artifactActionGenerationRef.current === actionGeneration &&
+            !result.success
+          ) {
+            toast.error(result.error)
+          }
+        } catch (error) {
+          if (artifactActionGenerationRef.current !== actionGeneration) return
+          toast.error(error instanceof Error ? error.message : "无法打开产物位置")
+        }
+        return
+      }
+
+      emitOpenResourcePreview({
+        threadId,
+        filePath,
+        externalPreviewGrant: previewAuthorization.grant,
+        externalPreviewGrantExpiresAt: previewAuthorization.expiresAt,
+        externalPreviewProjectId: context.projectId,
+        externalPreviewSlug: context.slug
+      })
+    },
+    [context.projectRootPath, getCurrentPreviewGrant, threadId]
+  )
+
+  if (context.files.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
+        <PackageOpen className="mb-2 size-8 opacity-50" />
+        <span>暂无已生成的插件运行产物</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="select-none py-1">
+      {visibleArtifacts.map((artifact) => {
+        const fileName = artifact.path.split(/[\\/]/).pop() || artifact.path
+        const isDirectory = artifact.artifactType === "directory"
+        return (
+          <button
+            key={artifact.path}
+            type="button"
+            className="group flex w-full min-w-0 items-start gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-background-interactive focus-visible:bg-background-interactive focus-visible:outline-none"
+            title={artifact.path}
+            onClick={() => void openArtifact(artifact)}
+          >
+            <span className="mt-0.5 shrink-0">
+              <FileIcon name={fileName} isDir={isDirectory} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium text-foreground">{fileName}</span>
+              <span className="mt-0.5 block break-all font-mono text-[10px] leading-4 text-muted-foreground">
+                {artifact.path}
+              </span>
+            </span>
+            {isDirectory ? (
+              <FolderOpen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            ) : (
+              <Eye className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            )}
+          </button>
+        )
+      })}
+      {visibleArtifacts.length < context.files.length && (
+        <button
+          type="button"
+          className="mx-3 my-2 w-[calc(100%-1.5rem)] rounded-md border border-border px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-background-interactive hover:text-foreground"
+          onClick={() =>
+            setVisibleArtifactCount((count) => count + RIGHT_PANEL_RENDER_PAGE_ITEMS)
+          }
+        >
+          再显示 {Math.min(
+            RIGHT_PANEL_RENDER_PAGE_ITEMS,
+            context.files.length - visibleArtifacts.length
+          )} 项
+        </button>
+      )}
+      {context.truncated && (
+        <div className="border-t border-border/50 px-3 py-2 text-xs text-muted-foreground">
+          产物较多，仅展示前 {context.files.length} 项
         </div>
       )}
     </div>
@@ -1880,16 +2866,22 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
 
 function ResourcePreview({
   filePath,
+  workspacePathKind,
   workspacePath,
   threadId,
+  externalPreviewGrant,
+  resolveExternalPreviewGrant,
   reloadToken,
   onReload,
   onFullscreenChange,
   onHidePreview
 }: {
   filePath: string
+  workspacePathKind: WorkspaceFilePreviewWorkspacePathKind
   workspacePath: string | null
   threadId: string
+  externalPreviewGrant?: string
+  resolveExternalPreviewGrant?: () => Promise<string>
   reloadToken: number
   onReload?: () => void
   onFullscreenChange?: (isFullscreen: boolean) => void
@@ -1903,27 +2895,55 @@ function ResourcePreview({
   const supportsSourceView =
     extension === "md" ||
     extension === "markdown" ||
-    extension === "mdx" ||
-    extension === "html" ||
-    extension === "htm"
+    extension === "mdx"
   const previewFileType = useMemo(() => getFileType(fileName), [fileName])
-  const canCopyContent = previewFileType.type === "code" || previewFileType.type === "text"
 
   const resolved = useMemo(
-    () => resolvePreviewPaths(filePath, workspacePath),
-    [filePath, workspacePath]
+    () =>
+      resolveResourcePreviewPaths(
+        filePath,
+        workspacePath,
+        window.electron.process.platform,
+        workspacePathKind
+      ),
+    [filePath, workspacePath, workspacePathKind]
   )
+  const previewFileSource = useMemo(
+    () =>
+      selectResourcePreviewFileSource(
+        resolved,
+        Boolean(externalPreviewGrant || resolveExternalPreviewGrant)
+      ),
+    [externalPreviewGrant, resolveExternalPreviewGrant, resolved]
+  )
+  const isCopyableText = previewFileType.type === "code" || previewFileType.type === "text"
+  const canCopyContent =
+    isCopyableText && (resolved.inWorkspace || Boolean(externalPreviewGrant))
+  const copyUnavailableReason = isCopyableText
+    ? "外部文件未获得可信来源授权"
+    : "当前文件类型不支持复制"
   const fullPath = resolved.fullPath
 
   const openInFolder = useCallback(async () => {
     try {
+      if (externalPreviewGrant) {
+        const grant = resolveExternalPreviewGrant
+          ? await resolveExternalPreviewGrant()
+          : externalPreviewGrant
+        const result = await window.api.harnessBoard.revealRunArtifact({
+          grant,
+          filePath: fullPath
+        })
+        if (!result.success) throw new Error(result.error)
+        return
+      }
       const platform = await window.electron.ipcRenderer.invoke("get-platform")
       const normalizedPath = platform === "win32" ? fullPath.replace(/\//g, "\\") : fullPath
       await window.electron.ipcRenderer.invoke("show-item-in-folder", normalizedPath)
     } catch (error) {
       console.error("[ResourcePreview] Failed to show item in folder:", error)
     }
-  }, [fullPath])
+  }, [externalPreviewGrant, fullPath, resolveExternalPreviewGrant])
 
   const toggleFullscreen = (): void => {
     setIsFullscreen((prev) => !prev)
@@ -1937,30 +2957,56 @@ function ResourcePreview({
 
   const handleCopyFileContent = useCallback(async () => {
     if (!canCopyContent) {
-      toast.error("当前文件类型不支持复制内容")
+      toast.error(
+        resolved.inWorkspace ? "当前文件类型不支持复制内容" : "外部文件未获得可信来源授权"
+      )
       return
     }
 
     try {
-      if (resolved.inWorkspace) {
-        const result = await window.api.workspace.readFile(threadId, resolved.workspaceFilePath)
-        if (!result.success || result.content === undefined) {
-          toast.error(result.error || "复制失败，请重试")
-          return
+      const requestToken =
+        globalThis.crypto?.randomUUID?.() ??
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      const lane = `right-panel-copy:${threadId}`
+      const source = resolved.inWorkspace
+        ? { threadId, filePath: resolved.workspaceFilePath }
+        : {
+            externalGrant: resolveExternalPreviewGrant
+              ? await resolveExternalPreviewGrant()
+              : externalPreviewGrant!,
+            filePath: resolved.fullPath
+          }
+      const chunks: string[] = []
+      let totalBytes = 0
+      let offset = 0
+      let pageCount = 0
+      let complete = false
+      try {
+        while (pageCount < 64) {
+          const page = await window.api.workspace.readFilePreview({
+            source,
+            offset,
+            lane,
+            requestToken
+          })
+          if (!page.success) throw new Error(page.error || "复制失败，请重试")
+          pageCount += 1
+          totalBytes += page.contentBytes
+          if (totalBytes > 1024 * 1024) {
+            throw new Error("文件超过 1MiB，无法一次复制全部内容")
+          }
+          chunks.push(page.content)
+          if (!page.hasMore || page.nextOffset === null) {
+            complete = true
+            break
+          }
+          if (page.nextOffset <= offset) throw new Error("文件分页游标未推进")
+          offset = page.nextOffset
         }
-        await navigator.clipboard.writeText(result.content)
-      } else {
-        const tokenRes = await window.api.workspace.requestExternalFileRead(resolved.fullPath)
-        if (!tokenRes.success || !tokenRes.token) {
-          toast.error(tokenRes.error || "复制失败，请重试")
-          return
-        }
-        const result = await window.api.workspace.readExternalFile(tokenRes.token)
-        if (!result.success || result.content === undefined) {
-          toast.error(result.error || "复制失败，请重试")
-          return
-        }
-        await navigator.clipboard.writeText(result.content)
+        if (!complete) throw new Error("文件行数过多，超过复制分页上限")
+        await navigator.clipboard.writeText(chunks.join(""))
+      } finally {
+        void window.api.workspace.cancelFilePreview({ lanePrefix: lane, requestToken })
       }
       setCopySuccess(true)
       setTimeout(() => setCopySuccess(false), 2000)
@@ -1969,7 +3015,13 @@ function ResourcePreview({
       console.error("[ResourcePreview] Failed to copy file content:", error)
       toast.error("复制失败，请重试")
     }
-  }, [canCopyContent, resolved, threadId])
+  }, [
+    canCopyContent,
+    externalPreviewGrant,
+    resolveExternalPreviewGrant,
+    resolved,
+    threadId
+  ])
 
   useEffect(() => {
     if (!isFullscreen) return
@@ -2037,8 +3089,8 @@ function ResourcePreview({
             onClick={handleCopyFileContent}
             disabled={!canCopyContent}
             className="inline-flex items-center justify-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground enabled:hover:text-foreground enabled:hover:bg-background-interactive transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            title={canCopyContent ? "复制文件内容" : "当前文件类型不支持复制"}
-            aria-label={canCopyContent ? "复制文件内容" : "当前文件类型不支持复制"}
+            title={canCopyContent ? "复制文件内容" : copyUnavailableReason}
+            aria-label={canCopyContent ? "复制文件内容" : copyUnavailableReason}
           >
             {copySuccess ? (
               <Check className="size-3.5 text-status-nominal" />
@@ -2085,8 +3137,11 @@ function ResourcePreview({
         <Suspense fallback={<LazySectionFallback label="加载文件预览..." />}>
           <FileViewer
             threadId={threadId}
-            filePath={resolved.inWorkspace ? resolved.workspaceFilePath : resolved.fullPath}
-            externalFullPath={resolved.inWorkspace ? undefined : resolved.fullPath}
+            filePath={previewFileSource.filePath}
+            externalFullPath={previewFileSource.externalFullPath}
+            workspacePathKind={previewFileSource.workspacePathKind}
+            externalPreviewGrant={externalPreviewGrant}
+            resolveExternalPreviewGrant={resolveExternalPreviewGrant}
             htmlFillHeight
             reloadToken={reloadToken}
             previewMode={supportsSourceView ? previewMode : undefined}
@@ -2099,100 +3154,44 @@ function ResourcePreview({
 
 // ============ File Tree Components ============
 
-interface FileInfo {
-  path: string
-  is_dir?: boolean
-  size?: number
-  modified_at?: string
-}
+interface FileInfo extends WorkspaceFileTreeFile {}
+type TreeNode = WorkspaceFileTreeNode
 
-interface TreeNode {
-  name: string
-  path: string
-  is_dir: boolean
-  size?: number
-  children: TreeNode[]
-}
+// File arrays are shared by every task on the same physical workspace. Cache
+// their immutable tree structure too, so switching tasks or reopening the
+// panel does not rebuild/sort a 50k-file tree.
+const fileTreeCache = new WeakMap<FileInfo[], TreeNode[]>()
 
-function buildFileTree(files: FileInfo[]): TreeNode[] {
-  const root: TreeNode[] = []
-  const nodeMap = new Map<string, TreeNode>()
-
-  // Sort files so directories come first, then alphabetically
-  const sortedFiles = [...files].sort((a, b) => {
-    const aIsDir = a.is_dir ?? false
-    const bIsDir = b.is_dir ?? false
-    if (aIsDir && !bIsDir) return -1
-    if (!aIsDir && bIsDir) return 1
-    return a.path.localeCompare(b.path)
-  })
-
-  for (const file of sortedFiles) {
-    // Normalize path - remove leading slash
-    const normalizedPath = file.path.startsWith("/") ? file.path.slice(1) : file.path
-    const parts = normalizedPath.split("/")
-    const fileName = parts[parts.length - 1]
-
-    const node: TreeNode = {
-      name: fileName,
-      path: file.path,
-      is_dir: file.is_dir ?? false,
-      size: file.size,
-      children: []
-    }
-
-    if (parts.length === 1) {
-      // Root level item
-      root.push(node)
-      nodeMap.set(normalizedPath, node)
-    } else {
-      // Nested item - find or create parent directories
-      let currentPath = ""
-      let parentChildren = root
-
-      for (let i = 0; i < parts.length - 1; i++) {
-        currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i]
-
-        let parentNode = nodeMap.get(currentPath)
-        if (!parentNode) {
-          // Create implicit directory node
-          parentNode = {
-            name: parts[i],
-            path: "/" + currentPath,
-            is_dir: true,
-            children: []
-          }
-          parentChildren.push(parentNode)
-          nodeMap.set(currentPath, parentNode)
-        }
-        parentChildren = parentNode.children
-      }
-
-      // Add node to parent
-      parentChildren.push(node)
-      nodeMap.set(normalizedPath, node)
-    }
-  }
-
-  // Sort children of each node (dirs first, then alphabetically)
-  function sortChildren(nodes: TreeNode[]): void {
-    nodes.sort((a, b) => {
-      if (a.is_dir && !b.is_dir) return -1
-      if (!a.is_dir && b.is_dir) return 1
-      return a.name.localeCompare(b.name)
-    })
-    nodes.forEach((n) => sortChildren(n.children))
-  }
-  sortChildren(root)
-
-  return root
-}
-
-function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | null }): React.JSX.Element {
-  const threadState = useThreadState(threadId)
-  const openFile = threadState?.openFile
-  const tree = useMemo(() => buildFileTree(files), [files])
+function FileTree({
+  files,
+  threadId
+}: {
+  files: FileInfo[]
+  threadId: string | null
+}): React.JSX.Element {
+  const openFile = useThreadActions(threadId)?.openFile
+  const workspacePath = useThreadStateSelector(threadId, (state) => state.workspacePath) ?? ""
+  const projectedTree = getWorkspaceFileTreeProjection(files)?.tree ?? fileTreeCache.get(files)
+  const [fallbackProjection, setFallbackProjection] = useState<{
+    files: FileInfo[]
+    tree: TreeNode[]
+  } | null>(null)
+  const tree =
+    projectedTree ?? (fallbackProjection?.files === files ? fallbackProjection.tree : null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (projectedTree) return
+    let cancelled = false
+    void buildWorkspaceFileTreeProjection(files).then((projection) => {
+      if (cancelled) return
+      fileTreeCache.set(files, projection.tree)
+      setFallbackProjection({ files, tree: projection.tree })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [files, projectedTree])
 
   const toggleExpand = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -2206,19 +3205,99 @@ function FileTree({ files, threadId }: { files: FileInfo[]; threadId: string | n
     })
   }, [])
 
+  if (!tree) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" />
+        正在整理文件树
+      </div>
+    )
+  }
+
   return (
     <div className="select-none">
-      {tree.map((node) => (
+      <FileTreeNodeList
+        nodes={tree}
+        depth={0}
+        expanded={expanded}
+        onToggle={toggleExpand}
+        openFile={openFile}
+        workspacePath={workspacePath}
+      />
+    </div>
+  )
+}
+
+const FILE_TREE_NODE_PAGE_SIZE = 200
+
+function FileTreeNodeList({
+  nodes,
+  depth,
+  expanded,
+  onToggle,
+  openFile,
+  workspacePath
+}: {
+  nodes: TreeNode[]
+  depth: number
+  expanded: Set<string>
+  onToggle: (path: string) => void
+  openFile?: (path: string, name: string) => void
+  workspacePath: string
+}): React.JSX.Element {
+  const nodesPageKey = `${nodes.length}:${nodes[0]?.path ?? ""}:${nodes.at(-1)?.path ?? ""}`
+  const [pageState, setPageState] = useState({ nodesPageKey, requestedPage: 0 })
+  const requestedPage = pageState.nodesPageKey === nodesPageKey ? pageState.requestedPage : 0
+  const pageCount = Math.max(1, Math.ceil(nodes.length / FILE_TREE_NODE_PAGE_SIZE))
+  const page = Math.min(requestedPage, pageCount - 1)
+  const pageStart = page * FILE_TREE_NODE_PAGE_SIZE
+  const pageEnd = Math.min(pageStart + FILE_TREE_NODE_PAGE_SIZE, nodes.length)
+  const visibleNodes = nodes.slice(pageStart, pageEnd)
+  return (
+    <>
+      {visibleNodes.map((node) => (
         <FileTreeNode
           key={node.path}
           node={node}
-          depth={0}
+          depth={depth}
           expanded={expanded}
-          onToggle={toggleExpand}
+          onToggle={onToggle}
           openFile={openFile}
+          workspacePath={workspacePath}
         />
       ))}
-    </div>
+      {pageCount > 1 ? (
+        <div
+          className="flex items-center justify-between gap-2 py-1.5 pr-3 text-[11px] text-muted-foreground"
+          style={{ paddingLeft: 8 + depth * 16 }}
+        >
+          <button
+            type="button"
+            disabled={page === 0}
+            className="hover:text-foreground disabled:opacity-35"
+            onClick={() => setPageState({ nodesPageKey, requestedPage: Math.max(0, page - 1) })}
+          >
+            上一页
+          </button>
+          <span className="tabular-nums">
+            {pageStart + 1}-{pageEnd} / {nodes.length}
+          </span>
+          <button
+            type="button"
+            disabled={page >= pageCount - 1}
+            className="hover:text-foreground disabled:opacity-35"
+            onClick={() =>
+              setPageState({
+                nodesPageKey,
+                requestedPage: Math.min(pageCount - 1, page + 1)
+              })
+            }
+          >
+            下一页
+          </button>
+        </div>
+      ) : null}
+    </>
   )
 }
 
@@ -2228,14 +3307,33 @@ const FileTreeNode = memo(
     depth,
     expanded,
     onToggle,
-    openFile
+    openFile,
+    workspacePath
   }: {
     node: TreeNode
     depth: number
     expanded: Set<string>
     onToggle: (path: string) => void
     openFile?: (path: string, name: string) => void
+    workspacePath: string
   }): React.JSX.Element {
+    useSyncExternalStore(
+      useCallback(
+        (listener) =>
+          node.is_dir || !workspacePath
+            ? () => undefined
+            : subscribeWorkspaceFilePathChanges(workspacePath, node.path, listener),
+        [node.is_dir, node.path, workspacePath]
+      ),
+      useCallback(
+        () =>
+          node.is_dir || !workspacePath
+            ? 0
+            : getWorkspaceFilePathRevision(workspacePath, node.path),
+        [node.is_dir, node.path, workspacePath]
+      ),
+      () => 0
+    )
     const isExpanded = expanded.has(node.path)
     const hasChildren = node.children.length > 0
     const paddingLeft = 8 + depth * 16
@@ -2279,26 +3377,24 @@ const FileTreeNode = memo(
           <span className="truncate flex-1">{node.name}</span>
 
           {/* Size for files */}
-          {!node.is_dir && node.size !== undefined && (
+          {!node.is_dir && node.file?.size !== undefined && (
             <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
-              {formatSize(node.size)}
+              {formatSize(node.file.size)}
             </span>
           )}
         </div>
 
         {/* Children */}
-        {node.is_dir &&
-          isExpanded &&
-          node.children.map((child) => (
-            <FileTreeNode
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              expanded={expanded}
-              onToggle={onToggle}
-              openFile={openFile}
-            />
-          ))}
+        {node.is_dir && isExpanded && (
+          <FileTreeNodeList
+            nodes={node.children}
+            depth={depth + 1}
+            expanded={expanded}
+            onToggle={onToggle}
+            openFile={openFile}
+            workspacePath={workspacePath}
+          />
+        )}
       </>
     )
   },
@@ -2312,6 +3408,7 @@ const FileTreeNode = memo(
       (!isExpanded || prevProps.expanded === nextProps.expanded) &&
       prevProps.openFile === nextProps.openFile &&
       prevProps.onToggle === nextProps.onToggle &&
+      prevProps.workspacePath === nextProps.workspacePath &&
       prevProps.depth === nextProps.depth
     )
   }
@@ -2521,9 +3618,9 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   )
   const canMutateCurrentThreadState = threadId === storeCurrentThreadId
   const retryInFlightRef = useRef(false)
-  const threadState = useThreadState(threadId)
-  const subagents = threadState?.subagents ?? []
-  const coordinatorWorkers = threadState?.coordinatorWorkers ?? []
+  const subagents = useThreadStateSelector(threadId, (state) => state.subagents) ?? []
+  const coordinatorWorkers =
+    useThreadStateSelector(threadId, (state) => state.coordinatorWorkers) ?? []
   const hasRunningCoordinatorWorker = coordinatorWorkers.some(
     (worker) => worker.status === "running"
   )
@@ -2552,11 +3649,7 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
     return () => window.clearInterval(timer)
   }, [hasRunningCoordinatorWorker])
 
-  if (
-    subagents.length === 0 &&
-    coordinatorWorkers.length === 0 &&
-    !hasSkillGen
-  ) {
+  if (subagents.length === 0 && coordinatorWorkers.length === 0 && !hasSkillGen) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <GitBranch className="size-8 mb-2 opacity-50" />
@@ -2645,7 +3738,8 @@ function CoordinatorWorkerCard({
       }
       emitOpenResourcePreview({
         threadId,
-        filePath: resolvedPath
+        filePath: resolvedPath,
+        workspacePathKind: "relative"
       })
     },
     [threadId, worker.parent_thread_id]
@@ -2756,7 +3850,11 @@ function CoordinatorWorkerCard({
           <div className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2 font-medium text-foreground/90">
               <Code2 className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate">{worker.last_tool_name || "等待工具调用"}</span>
+              <span className="truncate">
+                {worker.last_tool_name
+                  ? getToolLabel(worker.last_tool_name, { showToolName: false })
+                  : "等待工具调用"}
+              </span>
             </span>
             <span className="shrink-0 rounded-md border border-border/70 bg-background px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
               {worker.tool_call_count} 次
@@ -2774,7 +3872,9 @@ function CoordinatorWorkerCard({
             {(worker.summary || worker.error || worker.result_path || worker.report_path) && (
               <div className="truncate">
                 <span className="text-foreground/70">
-                  {worker.status === "failed" || worker.status === "cancelled" ? "结果：" : "摘要："}
+                  {worker.status === "failed" || worker.status === "cancelled"
+                    ? "结果："
+                    : "摘要："}
                 </span>
                 {compactInline(
                   worker.error || worker.summary || worker.result_path || worker.report_path || ""
@@ -2962,75 +4062,6 @@ function formatCompactElapsed(ms: number): string {
   return `${hours} 小时+`
 }
 
-type RightPanelSkillTreeNode = {
-  key: string
-  label: string
-  title?: string
-  skill?: SkillMetadata
-  children: RightPanelSkillTreeNode[]
-}
-
-function buildRightPanelSkillTree(skills: SkillMetadata[]): RightPanelSkillTreeNode[] {
-  const root: RightPanelSkillTreeNode = { key: "root", label: "root", children: [] }
-  const indexByNode = new WeakMap<RightPanelSkillTreeNode, Map<string, RightPanelSkillTreeNode>>()
-
-  const getIndex = (node: RightPanelSkillTreeNode): Map<string, RightPanelSkillTreeNode> => {
-    let index = indexByNode.get(node)
-    if (!index) {
-      index = new Map(node.children.map((child) => [child.key, child]))
-      indexByNode.set(node, index)
-    }
-    return index
-  }
-
-  for (const skill of skills) {
-    const segments = getRightPanelSkillPathSegments(skill)
-    const fallbackSegments =
-      segments.length > 0
-        ? segments
-        : [{ key: skill.name, label: skill.name }]
-    let current = root
-
-    for (const segment of fallbackSegments) {
-      const normalized = normalizeSkillId(segment.key || segment.label)
-      const childIndex = getIndex(current)
-      const nodeKey = `${current.key}/${normalized}`
-      let child = childIndex.get(nodeKey)
-      if (!child) {
-        child = {
-          key: nodeKey,
-          label: segment.label,
-          title: segment.title,
-          children: []
-        }
-        current.children.push(child)
-        childIndex.set(nodeKey, child)
-      }
-      current = child
-    }
-
-    current.skill = skill
-  }
-
-  const sortNodes = (nodes: RightPanelSkillTreeNode[]): RightPanelSkillTreeNode[] =>
-    [...nodes]
-      .sort((a, b) => {
-        const labelA = a.skill?.name || a.label
-        const labelB = b.skill?.name || b.label
-        return labelA.localeCompare(labelB, "zh-CN")
-      })
-      .map((node) => ({ ...node, children: sortNodes(node.children) }))
-
-  return sortNodes(root.children)
-}
-
-function countRightPanelTreeSkills(node: RightPanelSkillTreeNode): number {
-  return (
-    (node.skill ? 1 : 0) +
-    node.children.reduce((sum, child) => sum + countRightPanelTreeSkills(child), 0)
-  )
-}
-
 function normalizeRightPanelSkillName(value?: string): string {
   return String(value || "")
     .trim()
@@ -3060,21 +4091,6 @@ function getRightPanelSkillDisplayName(
   return metadataChinese || skill.name
 }
 
-function splitRightPanelSkillsByEnabled(
-  skills: SkillMetadata[],
-  disabledSkills: ReadonlySet<string>
-): { enabled: SkillMetadata[]; disabled: SkillMetadata[] } {
-  const enabled: SkillMetadata[] = []
-  const disabled: SkillMetadata[] = []
-
-  for (const skill of skills) {
-    if (isSkillDisabled(skill, disabledSkills)) disabled.push(skill)
-    else enabled.push(skill)
-  }
-
-  return { enabled, disabled }
-}
-
 function SkillsContent({
   skills,
   disabledSkills,
@@ -3086,7 +4102,48 @@ function SkillsContent({
   marketSkillMap: Record<string, RightPanelSkillMarketInfo>
   threadId?: string | null
 }): React.JSX.Element {
+  const [asyncProjectionState, setAsyncProjectionState] = useState<{
+    skills: SkillMetadata[]
+    disabledSkills: Set<string>
+    projection: RightPanelSkillProjection | null
+  }>({ skills: [], disabledSkills: new Set(), projection: null })
+  const synchronousProjection =
+    skills.length <= RIGHT_PANEL_SYNC_SKILL_PROJECTION_LIMIT
+      ? getRightPanelSkillProjection(skills, disabledSkills)
+      : null
+  const projection =
+    synchronousProjection ??
+    (asyncProjectionState.skills === skills &&
+    asyncProjectionState.disabledSkills === disabledSkills
+      ? asyncProjectionState.projection
+      : null)
   const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set())
+  const [visibleTreeNodeCounts, setVisibleTreeNodeCounts] = useState<Map<string, number>>(new Map())
+  const previewGrantGenerationRef = useRef(0)
+
+  useEffect(() => {
+    return () => {
+      previewGrantGenerationRef.current += 1
+      void window.api.skills.cancelPreviewGrant().catch(() => undefined)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    if (skills.length <= RIGHT_PANEL_SYNC_SKILL_PROJECTION_LIMIT) {
+      return undefined
+    }
+
+    void getRightPanelSkillProjectionAsync(skills, disabledSkills).then((nextProjection) => {
+      if (!cancelled) {
+        setAsyncProjectionState({ skills, disabledSkills, projection: nextProjection })
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [disabledSkills, skills])
+
   const toggleTreeNode = useCallback((nodeKey: string) => {
     setExpandedTreeNodes((prev) => {
       const next = new Set(prev)
@@ -3096,7 +4153,7 @@ function SkillsContent({
     })
   }, [])
   const openSkillPreview = useCallback(
-    (skill: SkillMetadata) => {
+    async (skill: SkillMetadata): Promise<void> => {
       if (!threadId) {
         toast.error("当前线程不可用，无法预览技能文件")
         return
@@ -3105,15 +4162,52 @@ function SkillsContent({
         toast.error("未找到技能文件路径")
         return
       }
-      emitOpenResourcePreview({
-        threadId,
-        filePath: skill.path
-      })
+      if (!skill.id) {
+        toast.error("技能身份不完整，无法安全预览")
+        return
+      }
+      const generation = previewGrantGenerationRef.current + 1
+      previewGrantGenerationRef.current = generation
+      try {
+        const authorized = await window.api.skills.requestPreviewGrant({
+          id: skill.id,
+          name: skill.name,
+          source: skill.source,
+          ...(skill.pluginId ? { pluginId: skill.pluginId } : {})
+        })
+        if (generation !== previewGrantGenerationRef.current) return
+        if (!authorized.success) {
+          toast.error(authorized.error || "技能文件未获得可信来源授权")
+          return
+        }
+        emitOpenResourcePreview({
+          threadId,
+          filePath: authorized.filePath,
+          externalPreviewGrant: authorized.grant
+        })
+      } catch (error) {
+        if (generation !== previewGrantGenerationRef.current) return
+        console.error("[RightPanel] Failed to authorize skill preview:", error)
+        toast.error("技能预览授权失败")
+      }
     },
     [threadId]
   )
 
-  if (skills.length === 0) {
+  if (!projection) {
+    return (
+      <div
+        className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-sm text-muted-foreground"
+        aria-live="polite"
+        aria-busy="true"
+      >
+        <Loader2 className="size-6 animate-spin opacity-60" />
+        <span>正在整理技能目录…</span>
+      </div>
+    )
+  }
+
+  if (projection.enabled.length + projection.disabled.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
         <Sparkles className="size-8 mb-2 opacity-50" />
@@ -3122,171 +4216,161 @@ function SkillsContent({
     )
   }
 
-  const programmingSkillIds = new Set([
-    "security-review",
-    "code-review-expert",
-    "vercel-react-best-practices",
-    "audit-website",
-    "supabase-postgres-best-practices",
-    "typescript-advanced-types",
-    "api-design-principles",
-    "architecture-patterns",
-    "error-handling-patterns",
-    "planning-with-files",
-    "mcp-builder",
-    "webapp-testing",
-    "frontend-design"
-  ])
-  const isProgrammingSkill = (skill: SkillMetadata): boolean => {
-    return programmingSkillIds.has(skill.name.trim().toLowerCase())
-  }
-
-  const { enabled, disabled } = splitRightPanelSkillsByEnabled(skills, disabledSkills)
-  const enabledProgrammingSkills = enabled.filter(isProgrammingSkill)
-  const enabledGeneralSkills = enabled.filter((skill) => !isProgrammingSkill(skill))
-  const disabledProgrammingSkills = disabled.filter(isProgrammingSkill)
-  const disabledGeneralSkills = disabled.filter((skill) => !isProgrammingSkill(skill))
-
   const renderSkillTree = (
-    treeSkills: SkillMetadata[],
-    disabled: boolean
+    group: RightPanelSkillGroupProjection,
+    disabled: boolean,
+    rootScopeKey: string
   ): React.JSX.Element | null => {
-    if (treeSkills.length === 0) return null
-    const tree = buildRightPanelSkillTree(treeSkills)
+    if (group.skills.length === 0) return null
 
-    const renderNodes = (nodes: RightPanelSkillTreeNode[]): React.JSX.Element => (
-      <div className="space-y-2">
-        {nodes.map((node) => {
-          const childCount = node.children.reduce(
-            (sum, child) => sum + countRightPanelTreeSkills(child),
-            0
-          )
-          const childrenExpanded = expandedTreeNodes.has(node.key)
-          const displayName = node.skill
-            ? getRightPanelSkillDisplayName(node.skill, marketSkillMap)
-            : node.label
-          return (
-            <div key={node.key} className="space-y-2">
-              {node.skill ? (
-                <div
-                  className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}
-                >
-                  <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
-                    <Sparkles
-                      className={cn(
-                        "size-3.5 shrink-0",
-                        disabled ? "text-muted-foreground" : "text-amber-500"
+    const renderNodes = (nodes: RightPanelSkillTreeNode[], scopeKey: string): React.JSX.Element => {
+      const visibleCount = visibleTreeNodeCounts.get(scopeKey) ?? RIGHT_PANEL_INITIAL_RENDER_ITEMS
+      const visibleNodes = selectRightPanelWindow(nodes, visibleCount)
+      const remainingCount = Math.max(0, nodes.length - visibleNodes.length)
+      return (
+        <div className="space-y-2">
+          {visibleNodes.map((node) => {
+            const childCount = node.children.reduce((sum, child) => sum + child.skillCount, 0)
+            const childrenExpanded = expandedTreeNodes.has(node.key)
+            const displayName = node.skill
+              ? getRightPanelSkillDisplayName(node.skill, marketSkillMap)
+              : node.label
+            return (
+              <div key={node.key} className="space-y-2">
+                {node.skill ? (
+                  <div
+                    className={cn("p-3 rounded-sm border border-border", disabled && "opacity-60")}
+                  >
+                    <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                      <Sparkles
+                        className={cn(
+                          "size-3.5 shrink-0",
+                          disabled ? "text-muted-foreground" : "text-amber-500"
+                        )}
+                      />
+                      <span
+                        className={cn(
+                          "min-w-0 flex-1 truncate",
+                          disabled && "text-muted-foreground line-through"
+                        )}
+                      >
+                        {displayName}
+                      </span>
+                      <IconPopoverButton
+                        icon={<Eye className="size-3.5" />}
+                        popoverContent="可以预览完整信息"
+                        aria-label="预览完整技能信息"
+                        className="shrink-0 rounded-md p-1"
+                        stopPropagation
+                        onClick={() => {
+                          if (!node.skill) return
+                          void openSkillPreview(node.skill)
+                        }}
+                      />
+                      {(node.skill.pluginName || node.skill.pluginId) && (
+                        <div className="mt-1 flex min-w-0 items-center gap-1">
+                          <Badge
+                            variant="outline"
+                            className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
+                            title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
+                          >
+                            <span className="truncate">插件</span>
+                          </Badge>
+                        </div>
                       )}
-                    />
-                    <span
-                      className={cn(
-                        "min-w-0 flex-1 truncate",
-                        disabled && "text-muted-foreground line-through"
-                      )}
-                    >
-                      {displayName}
-                    </span>
-                    <IconPopoverButton
-                      icon={<Eye className="size-3.5" />}
-                      popoverContent="可以预览完整信息"
-                      aria-label="预览完整技能信息"
-                      className="shrink-0 rounded-md p-1"
-                      stopPropagation
-                      onClick={() => {
-                        if (!node.skill) return
-                        openSkillPreview(node.skill)
-                      }}
-                    />
-                    {(node.skill.pluginName || node.skill.pluginId) && (
-                      <div className="mt-1 flex min-w-0 items-center gap-1">
-                        <Badge
-                          variant="outline"
-                          className="min-w-0 max-w-full text-[10px] h-4 px-1.5 border-violet-300/70 bg-violet-500/10 text-violet-700 dark:border-violet-500/30 dark:text-violet-300"
-                          title={`来自插件：${node.skill.pluginName ?? node.skill.pluginId}`}
-                        >
-                        <span className="truncate">
-                          插件
-                        </span>
+
+                      {childCount > 0 && (
+                        <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
+                          <Folder className="mr-1 size-2.5" />
+                          {childCount}
                         </Badge>
-                      </div>
-                    )}
+                      )}
+                      {disabled && (
+                        <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                          已禁用
+                        </Badge>
+                      )}
+                    </div>
 
-                    {childCount > 0 && (
-                      <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0 gap-1">
-                        <Folder className="mr-1 size-2.5" />
-                        {childCount}
-                      </Badge>
-                    )}
-                    {disabled && (
-                      <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
-                        已禁用
-                      </Badge>
+                    {node.skill.description && (
+                      <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                        {node.skill.description}
+                      </p>
                     )}
                   </div>
+                ) : (
+                  <button
+                    className="flex min-h-9 w-full items-center gap-2 rounded-sm border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35"
+                    onClick={() => toggleTreeNode(node.key)}
+                    title={node.title ?? node.label}
+                  >
+                    {childrenExpanded ? (
+                      <ChevronDown className="size-3 shrink-0" />
+                    ) : (
+                      <ChevronRight className="size-3 shrink-0" />
+                    )}
+                    <Folder className="size-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{node.label}</span>
+                    <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                      {node.skillCount}
+                    </Badge>
+                  </button>
+                )}
 
-                  {node.skill.description && (
-                    <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                      {node.skill.description}
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <button
-                  className="flex min-h-9 w-full items-center gap-2 rounded-sm border border-dashed border-border/70 bg-muted/20 px-3 py-2 text-left text-xs text-muted-foreground hover:bg-muted/35"
-                  onClick={() => toggleTreeNode(node.key)}
-                  title={node.title ?? node.label}
-                >
-                  {childrenExpanded ? (
-                    <ChevronDown className="size-3 shrink-0" />
-                  ) : (
-                    <ChevronRight className="size-3 shrink-0" />
-                  )}
-                  <Folder className="size-3.5 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{node.label}</span>
-                  <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
-                    {countRightPanelTreeSkills(node)}
-                  </Badge>
-                </button>
-              )}
+                {node.skill && node.children.length > 0 && (
+                  <button
+                    className="ml-3 flex min-h-7 w-[calc(100%-0.75rem)] items-center gap-2 rounded-sm border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
+                    onClick={() => toggleTreeNode(node.key)}
+                  >
+                    {childrenExpanded ? (
+                      <ChevronDown className="size-3 shrink-0" />
+                    ) : (
+                      <ChevronRight className="size-3 shrink-0" />
+                    )}
+                    <Folder className="size-3 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">子技能</span>
+                    <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
+                      {childCount}
+                    </Badge>
+                  </button>
+                )}
 
-              {node.skill && node.children.length > 0 && (
-                <button
-                  className="ml-3 flex min-h-7 w-[calc(100%-0.75rem)] items-center gap-2 rounded-sm border border-dashed border-border/60 bg-muted/15 px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/30"
-                  onClick={() => toggleTreeNode(node.key)}
-                >
-                  {childrenExpanded ? (
-                    <ChevronDown className="size-3 shrink-0" />
-                  ) : (
-                    <ChevronRight className="size-3 shrink-0" />
-                  )}
-                  <Folder className="size-3 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">子技能</span>
-                  <Badge variant="outline" className="text-[10px] h-4 px-1.5 shrink-0">
-                    {childCount}
-                  </Badge>
-                </button>
-              )}
+                {node.children.length > 0 && childrenExpanded && (
+                  <div className="ml-3 border-l border-border/60 pl-2">
+                    {renderNodes(node.children, node.key)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          {remainingCount > 0 && (
+            <button
+              type="button"
+              className="w-full rounded-sm border border-dashed border-border/70 px-3 py-2 text-xs text-muted-foreground hover:bg-muted/35"
+              onClick={() => {
+                setVisibleTreeNodeCounts((current) => {
+                  const next = new Map(current)
+                  next.set(scopeKey, visibleCount + RIGHT_PANEL_RENDER_PAGE_ITEMS)
+                  return next
+                })
+              }}
+            >
+              继续显示（剩余 {remainingCount} 项）
+            </button>
+          )}
+        </div>
+      )
+    }
 
-              {node.children.length > 0 && childrenExpanded && (
-                <div className="ml-3 border-l border-border/60 pl-2">
-                  {renderNodes(node.children)}
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    )
-
-    return renderNodes(tree)
+    return renderNodes(group.tree, rootScopeKey)
   }
 
   const renderSceneGroup = (
     title: string,
-    groupSkills: SkillMetadata[],
+    group: RightPanelSkillGroupProjection,
     isDisabledGroup: boolean
   ): React.JSX.Element | null => {
-    if (groupSkills.length === 0) return null
+    if (group.skills.length === 0) return null
     return (
       <div className="space-y-2">
         <div className="flex items-center justify-between px-1">
@@ -3294,10 +4378,14 @@ function SkillsContent({
             {title}
           </span>
           <Badge variant="outline" className="text-[10px] h-5">
-            {groupSkills.length}
+            {group.skills.length}
           </Badge>
         </div>
-        {renderSkillTree(groupSkills, isDisabledGroup)}
+        {renderSkillTree(
+          group,
+          isDisabledGroup,
+          `${isDisabledGroup ? "disabled" : "enabled"}:${title}`
+        )}
       </div>
     )
   }
@@ -3305,22 +4393,16 @@ function SkillsContent({
   const renderStatusSection = (
     title: string,
     sectionSkills: SkillMetadata[],
+    generalGroup: RightPanelSkillGroupProjection,
+    programmingGroup: RightPanelSkillGroupProjection,
     isDisabledGroup: boolean,
     defaultOpen: boolean
   ): React.JSX.Element | null => {
     if (sectionSkills.length === 0) return null
     const content = (
       <div className="space-y-3 pt-2">
-        {renderSceneGroup(
-          "通用场景",
-          isDisabledGroup ? disabledGeneralSkills : enabledGeneralSkills,
-          isDisabledGroup
-        )}
-        {renderSceneGroup(
-          "编程场景",
-          isDisabledGroup ? disabledProgrammingSkills : enabledProgrammingSkills,
-          isDisabledGroup
-        )}
+        {renderSceneGroup("通用场景", generalGroup, isDisabledGroup)}
+        {renderSceneGroup("编程场景", programmingGroup, isDisabledGroup)}
       </div>
     )
 
@@ -3356,13 +4438,34 @@ function SkillsContent({
 
   return (
     <div className="p-3 space-y-2">
-      {renderStatusSection("已启用技能", enabled, false, true)}
-      {renderStatusSection("已禁用技能", disabled, true, false)}
+      {renderStatusSection(
+        "已启用技能",
+        projection.enabled,
+        projection.enabledGeneral,
+        projection.enabledProgramming,
+        false,
+        true
+      )}
+      {renderStatusSection(
+        "已禁用技能",
+        projection.disabled,
+        projection.disabledGeneral,
+        projection.disabledProgramming,
+        true,
+        false
+      )}
     </div>
   )
 }
 
 function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.Element {
+  const [visiblePluginCount, setVisiblePluginCount] = useState(RIGHT_PANEL_INITIAL_RENDER_ITEMS)
+  const pluginWindow = useMemo(
+    () =>
+      selectRightPanelPrioritizedWindow(plugins, visiblePluginCount, (plugin) => plugin.enabled),
+    [plugins, visiblePluginCount]
+  )
+
   if (plugins.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
@@ -3372,9 +4475,6 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
       </div>
     )
   }
-
-  const enabled = plugins.filter((p) => p.enabled)
-  const disabled = plugins.filter((p) => !p.enabled)
 
   const renderPluginCard = (plugin: PluginMetadata): React.JSX.Element => (
     <div
@@ -3426,19 +4526,28 @@ function PluginsContent({ plugins }: { plugins: PluginMetadata[] }): React.JSX.E
 
   return (
     <div className="p-3 space-y-2">
-      {enabled.length > 0 && enabled.map(renderPluginCard)}
-      {disabled.length > 0 && (
+      {pluginWindow.enabled.length > 0 && pluginWindow.enabled.map(renderPluginCard)}
+      {pluginWindow.disabled.length > 0 && (
         <div className="space-y-2 pt-1">
           <div className="flex items-center justify-between px-1">
             <span className="text-[11px] text-muted-foreground tracking-wider font-medium">
               已禁用
             </span>
             <Badge variant="outline" className="text-[10px] h-5">
-              {disabled.length}
+              {pluginWindow.disabledCount}
             </Badge>
           </div>
-          {disabled.map(renderPluginCard)}
+          {pluginWindow.disabled.map(renderPluginCard)}
         </div>
+      )}
+      {pluginWindow.remainingCount > 0 && (
+        <button
+          type="button"
+          className="w-full rounded-sm border border-dashed border-border/70 px-3 py-2 text-xs text-muted-foreground hover:bg-muted/35"
+          onClick={() => setVisiblePluginCount((count) => count + RIGHT_PANEL_RENDER_PAGE_ITEMS)}
+        >
+          继续显示（剩余 {pluginWindow.remainingCount} 项）
+        </button>
       )}
     </div>
   )
@@ -3590,11 +4699,19 @@ function buildHookSourceGroups(hooks: DisplayHook[]): HookSourceGroup[] {
 
 function HooksContent({
   hooks,
-  onChange
+  truncated
 }: {
   hooks: DisplayHook[]
-  onChange: () => void
+  truncated: boolean
 }): React.JSX.Element {
+  const [visibleHookCount, setVisibleHookCount] = useState(RIGHT_PANEL_INITIAL_RENDER_ITEMS)
+  const hookWindow = useMemo(
+    () => selectRightPanelPrioritizedWindow(hooks, visibleHookCount, (hook) => hook.enabled),
+    [hooks, visibleHookCount]
+  )
+  const enabledGroups = useMemo(() => buildHookSourceGroups(hookWindow.enabled), [hookWindow])
+  const disabledGroups = useMemo(() => buildHookSourceGroups(hookWindow.disabled), [hookWindow])
+
   if (hooks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center text-sm text-muted-foreground py-8 px-4">
@@ -3605,16 +4722,10 @@ function HooksContent({
     )
   }
 
-  const enabledHooks = hooks.filter((h) => h.enabled)
-  const disabledHooks = hooks.filter((h) => !h.enabled)
-  const enabledGroups = buildHookSourceGroups(enabledHooks)
-  const disabledGroups = buildHookSourceGroups(disabledHooks)
-
   const handleToggle = async (hook: DisplayHook): Promise<void> => {
     try {
       if (hook.source !== "global") return
       await window.api.hooks.setEnabled(hook.id, !hook.enabled)
-      onChange()
     } catch (e) {
       console.error("[HooksContent] Failed to toggle hook:", e)
     }
@@ -3646,7 +4757,7 @@ function HooksContent({
           : ""
     return (
       <div
-        key={hook.id}
+        key={getHookCatalogIdentity(hook)}
         className={cn(
           "min-w-0 overflow-hidden p-3 rounded-sm border border-border",
           !hook.enabled && "opacity-60"
@@ -3796,6 +4907,11 @@ function HooksContent({
 
   return (
     <div className="p-3 space-y-2">
+      {truncated && (
+        <div className="rounded-sm border border-amber-500/35 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-700 dark:text-amber-300">
+          钩子目录过大，已按安全上限显示部分结果。
+        </div>
+      )}
       {enabledGroups.map(renderHookGroup)}
       {disabledGroups.length > 0 && (
         <details
@@ -3808,11 +4924,20 @@ function HooksContent({
               <span>已禁用</span>
             </span>
             <Badge variant="outline" className="h-5 shrink-0 text-[10px]">
-              {disabledHooks.length}
+              {hookWindow.disabledCount}
             </Badge>
           </summary>
           <div className="space-y-2 pt-2">{disabledGroups.map(renderHookGroup)}</div>
         </details>
+      )}
+      {hookWindow.remainingCount > 0 && (
+        <button
+          type="button"
+          className="w-full rounded-sm border border-dashed border-border/70 px-3 py-2 text-xs text-muted-foreground hover:bg-muted/35"
+          onClick={() => setVisibleHookCount((count) => count + RIGHT_PANEL_RENDER_PAGE_ITEMS)}
+        >
+          继续显示（剩余 {hookWindow.remainingCount} 项）
+        </button>
       )}
     </div>
   )

@@ -12,6 +12,10 @@ import type { Checkpoint, CheckpointMetadata } from "@langchain/langgraph-checkp
 import type { RunnableConfig } from "@langchain/core/runnables"
 import type { Message } from "../src/main/types.ts"
 import {
+  resolveStreamTranscriptFlush,
+  type QueuedStreamTranscriptMessage
+} from "../src/main/ipc/stream-transcript-flush.ts"
+import {
   clearCurrentRunMessageQueue,
   registerCurrentRunCompletedAssistantRoute,
   resolveCurrentRunCompletedAssistantIdentity,
@@ -90,7 +94,15 @@ async function withTempHome(run: () => Promise<void>): Promise<void> {
     else process.env.HOME = previousHome
     if (previousUserProfile === undefined) delete process.env.USERPROFILE
     else process.env.USERPROFILE = previousUserProfile
+    await removeTempHome(home)
+  }
+}
+
+async function removeTempHome(home: string): Promise<void> {
+  try {
     await rm(home, { recursive: true, force: true })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EBUSY") throw error
   }
 }
 
@@ -474,6 +486,24 @@ async function testDurableTailFeedsRuntimeContext(): Promise<void> {
 
   await db.initializeDatabase()
   db.createThread(threadId, { title: "Runtime tail" })
+  db.getDb().run(
+    `WITH digits(d) AS (
+       VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+     ), numbers(value) AS (
+       SELECT ones.d + tens.d * 10 + hundreds.d * 100 + thousands.d * 1000
+       FROM digits AS ones
+       CROSS JOIN digits AS tens
+       CROSS JOIN digits AS hundreds
+       CROSS JOIN digits AS thousands
+     )
+     INSERT INTO thread_messages (
+       thread_id, message_id, role, content_json, created_at, ordinal
+     )
+     SELECT ?, printf('runtime-prefix-%05d', value), 'assistant',
+       '"RUNTIME_TAIL_PREFIX_POISON"', value, value
+     FROM numbers`,
+    [threadId]
+  )
   db.upsertThreadMessages(threadId, [
     {
       id: "user-1",
@@ -515,7 +545,19 @@ async function testDurableTailFeedsRuntimeContext(): Promise<void> {
     await saver.flushStrict()
   })
 
-  const tail = await getDurableRuntimeTail(threadId)
+  const originalJsonParse = JSON.parse
+  JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    if (text.includes("RUNTIME_TAIL_PREFIX_POISON")) {
+      throw new Error("runtime tail parsed the stable durable transcript prefix")
+    }
+    return originalJsonParse(text, reviver)
+  }) as typeof JSON.parse
+  let tail: Awaited<ReturnType<typeof getDurableRuntimeTail>>
+  try {
+    tail = await getDurableRuntimeTail(threadId)
+  } finally {
+    JSON.parse = originalJsonParse
+  }
   assertEqual(tail.checkpointHasInterrupt, true, "checkpoint interrupt flag should be detected")
   assertEqual(tail.persistedMessages.length, 2, "only messages after checkpoint should be tail")
   assertEqual(tail.persistedMessages[0].id, "user-2", "tail should start after checkpoint ids")
@@ -3157,6 +3199,513 @@ async function testCrossRoleProviderIdCollisionPersistsBothRows(): Promise<void>
   await db.closeDatabase()
 }
 
+async function testStreamingUpsertAvoidsTranscriptWideQueries(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-streaming-incremental-upsert"
+
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Streaming incremental upsert" })
+  db.upsertThreadMessages(threadId, [
+    {
+      id: "stream-provider-id",
+      role: "assistant",
+      content: "draft",
+      created_at: new Date("2026-07-20T06:00:00.000Z")
+    }
+  ])
+
+  const database = db.getDb()
+  const indexNames = database
+    .exec("PRAGMA index_list(thread_messages)")[0]
+    ?.values.map((row) => String(row[1]))
+  assert(
+    indexNames?.includes("idx_thread_messages_provider_occurrence_order"),
+    "provider occurrence lookups should have a composite index"
+  )
+
+  const originalPrepare = database.prepare.bind(database)
+  database.prepare = ((sql: string, params?: Parameters<typeof originalPrepare>[1]) => {
+    const normalizedSql = sql.replace(/\s+/g, " ").trim()
+    if (
+      normalizedSql === "SELECT * FROM thread_messages WHERE thread_id = ?" ||
+      normalizedSql ===
+        "SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY ordinal ASC, created_at ASC, message_id ASC"
+    ) {
+      throw new Error(`streaming upsert issued a transcript-wide query: ${normalizedSql}`)
+    }
+    return originalPrepare(sql, params)
+  }) as typeof database.prepare
+
+  try {
+    assertEqual(
+      db.upsertThreadMessages(
+        threadId,
+        [
+          {
+            id: "stream-canonical-id",
+            provider_source_id: "stream-provider-id",
+            provider_occurrence: 1,
+            role: "assistant",
+            content: "final",
+            content_priority: 1,
+            created_at: new Date("2026-07-20T06:00:01.000Z")
+          },
+          {
+            id: "stream-user-two",
+            role: "user",
+            content: "next question",
+            created_at: new Date("2026-07-20T06:00:02.000Z")
+          }
+        ],
+        { preserveExistingOrder: true }
+      ),
+      2,
+      "streaming upsert should update the current provider occurrence and append the new turn"
+    )
+  } finally {
+    database.prepare = originalPrepare
+  }
+
+  const messages = db.getThreadMessages(threadId)
+  assertEqual(messages.length, 2, "streaming upsert should reuse the existing provider row")
+  assertEqual(
+    messages.map((message) => message.id).join(","),
+    "stream-provider-id,stream-user-two",
+    "streaming upsert should preserve existing ordinals and append new rows"
+  )
+  assertEqual(messages[0]?.content, "final", "the targeted provider row should still be updated")
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
+async function testSecondOrdinaryStreamBatchAvoidsLongTranscriptRead(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-run-scoped-stream-identity"
+
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Run-scoped stream identity" })
+  const longHistory: Message[] = []
+  for (let index = 0; index < 500; index += 1) {
+    longHistory.push(
+      {
+        id: `identity-user-${index}`,
+        role: "user",
+        content: `question ${index}`,
+        created_at: new Date(index * 2)
+      },
+      {
+        id: `identity-assistant-${index}`,
+        role: "assistant",
+        content: `answer ${index}`,
+        created_at: new Date(index * 2 + 1)
+      }
+    )
+  }
+  longHistory.push(
+    {
+      id: "identity-reused-provider-id",
+      role: "assistant",
+      content: "calling tool",
+      tool_calls: [{ id: "identity-tool-call", name: "lookup", args: {} }],
+      created_at: new Date(2_000)
+    },
+    {
+      id: "identity-tool-result",
+      role: "tool",
+      content: "done",
+      tool_call_id: "identity-tool-call",
+      created_at: new Date(2_001)
+    }
+  )
+  db.upsertThreadMessages(threadId, longHistory)
+
+  const queued = (content: string): QueuedStreamTranscriptMessage => ({
+    id: "identity-reused-provider-id",
+    role: "assistant",
+    content,
+    created_at: new Date("2026-08-21T00:00:00.000Z"),
+    streamContentMode: "delta",
+    streamToolCallChunks: []
+  })
+  let baselineReads = 0
+  const first = resolveStreamTranscriptFlush({
+    queuedMessages: [queued("Hel")],
+    loadBaselineMessages: () => {
+      baselineReads += 1
+      return db.getThreadMessages(threadId)
+    }
+  })
+  assertEqual(baselineReads, 1, "the first ambiguous batch should read durable history once")
+  assertEqual(
+    first.preserveExistingOrder,
+    true,
+    "the first ambiguous batch should preserve durable append order after bounded identity resolution"
+  )
+  assertEqual(
+    first.messages[0]?.provider_occurrence,
+    2,
+    "full normalization should stabilize the reused provider occurrence"
+  )
+  db.upsertThreadMessages(threadId, first.messages, {
+    preserveExistingOrder: first.preserveExistingOrder
+  })
+  const afterFirstFlush = db.getThreadMessages(threadId)
+  const originalProviderIndex = afterFirstFlush.findIndex(
+    (message) =>
+      message.id === "identity-reused-provider-id" &&
+      message.tool_calls?.[0]?.id === "identity-tool-call"
+  )
+  const toolBoundaryIndex = afterFirstFlush.findIndex(
+    (message) => message.id === "identity-tool-result"
+  )
+  const secondOccurrenceIndex = afterFirstFlush.findIndex(
+    (message) =>
+      message.provider_source_id === "identity-reused-provider-id" &&
+      message.provider_occurrence === 2
+  )
+  assert(
+    originalProviderIndex >= 0 &&
+      originalProviderIndex < toolBoundaryIndex &&
+      toolBoundaryIndex < secondOccurrenceIndex,
+    "append-only fallback must keep the provider collision and tool boundary in durable order"
+  )
+
+  const database = db.getDb()
+  const originalPrepare = database.prepare.bind(database)
+  database.prepare = ((sql: string, params?: Parameters<typeof originalPrepare>[1]) => {
+    const normalizedSql = sql.replace(/\s+/g, " ").trim()
+    if (
+      normalizedSql === "SELECT * FROM thread_messages WHERE thread_id = ?" ||
+      normalizedSql ===
+        "SELECT * FROM thread_messages WHERE thread_id = ? ORDER BY ordinal ASC, created_at ASC, message_id ASC"
+    ) {
+      throw new Error(`second stream batch issued a transcript-wide query: ${normalizedSql}`)
+    }
+    return originalPrepare(sql, params)
+  }) as typeof database.prepare
+
+  try {
+    const second = resolveStreamTranscriptFlush({
+      queuedMessages: [queued("lo")],
+      currentAssistantIdentity: first.nextAssistantIdentity,
+      loadBaselineMessages: () => {
+        baselineReads += 1
+        return db.getThreadMessages(threadId)
+      }
+    })
+    assertEqual(
+      baselineReads,
+      1,
+      "the second ordinary chunk batch must reuse the run-scoped identity"
+    )
+    assertEqual(
+      second.preserveExistingOrder,
+      true,
+      "the second ordinary chunk batch should use the targeted upsert path"
+    )
+    assertEqual(
+      db.upsertThreadMessages(threadId, second.messages, {
+        preserveExistingOrder: second.preserveExistingOrder
+      }),
+      1,
+      "the targeted second batch should update exactly one durable row"
+    )
+  } finally {
+    database.prepare = originalPrepare
+  }
+
+  const persisted = db
+    .getThreadMessages(threadId)
+    .filter((message) => message.provider_source_id === "identity-reused-provider-id")
+  assertEqual(persisted.length, 1, "the fast path should retain one second-occurrence row")
+  assertEqual(persisted[0]?.provider_occurrence, 2, "the fast path should retain occurrence two")
+  assertEqual(persisted[0]?.content, "Hello", "the fast path should merge both token batches")
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
+async function testLatestMessagePageDoesNotReadOrParseStablePrefix(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-message-page-long-history"
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Paged transcript" })
+
+  let database = db.getDb()
+  database.run(
+    `WITH digits(d) AS (
+       VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+     ), numbers(value) AS (
+       SELECT ones.d + tens.d * 10 + hundreds.d * 100 + thousands.d * 1000
+       FROM digits AS ones
+       CROSS JOIN digits AS tens
+       CROSS JOIN digits AS hundreds
+       CROSS JOIN digits AS thousands
+     )
+     INSERT INTO thread_messages (
+       thread_id, message_id, role, content_json, created_at, ordinal
+     )
+     SELECT
+       ?,
+       printf('page-%05d', value),
+       'assistant',
+       CASE
+         WHEN value < 9500 THEN '"PAGE_JSON_POISON"'
+         ELSE printf('"safe-%d"', value)
+       END,
+       value,
+       value
+     FROM numbers`,
+    [threadId]
+  )
+  // Deliberately put a duplicate ordinal across the first page boundary. The
+  // compound cursor must return the base row on page two without repeating the
+  // extra row from page one.
+  database.run(
+    `INSERT INTO thread_messages (
+       thread_id, message_id, role, content_json, created_at, ordinal
+     ) VALUES (?, ?, 'assistant', '"safe-extra"', ?, ?)`,
+    [threadId, "page-09500-extra", 9500, 9500]
+  )
+  database.run(
+    `INSERT INTO thread_message_buckets (
+       thread_id, message_count, next_ordinal, updated_at
+     ) VALUES (?, ?, ?, ?)`,
+    [threadId, 10_001, 10_000, Date.now()]
+  )
+  database.run("DELETE FROM thread_message_buckets WHERE thread_id = ?", [threadId])
+  database.run(
+    "DELETE FROM db_schema_migrations WHERE migration_id = 'thread-message-buckets-v1'"
+  )
+  await db.closeDatabase()
+  await db.initializeDatabase()
+  database = db.getDb()
+  assertEqual(
+    Number(
+      database.exec(
+        "SELECT message_count FROM thread_message_buckets WHERE thread_id = ?",
+        [threadId]
+      )[0]?.values[0]?.[0]
+    ),
+    10_001,
+    "reopen should self-repair a preexisting-but-empty message summary table"
+  )
+
+  const originalPrepare = database.prepare.bind(database)
+  const originalJsonParse = JSON.parse
+  let pageRowSteps = 0
+  let parsedPageValues = 0
+  database.prepare = ((sql: string, params?: Parameters<typeof originalPrepare>[1]) => {
+    const normalizedSql = sql.replace(/\s+/g, " ")
+    if (
+      normalizedSql.includes("FROM thread_messages") &&
+      /\bCOUNT\s*\(/i.test(normalizedSql)
+    ) {
+      throw new Error(`paged hydration counted the lifetime transcript: ${normalizedSql}`)
+    }
+    const statement = originalPrepare(sql, params)
+    if (/ORDER BY (?:m\.)?ordinal DESC, (?:m\.)?message_id DESC/.test(normalizedSql)) {
+      const originalStep = statement.step.bind(statement)
+      statement.step = (() => {
+        const hasRow = originalStep()
+        if (hasRow) pageRowSteps += 1
+        return hasRow
+      }) as typeof statement.step
+    }
+    return statement
+  }) as typeof database.prepare
+  JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    if (text.includes("PAGE_JSON_POISON")) {
+      throw new Error("stable transcript prefix JSON was parsed")
+    }
+    parsedPageValues += 1
+    return originalJsonParse(text, reviver)
+  }) as typeof JSON.parse
+
+  let latestPage: ReturnType<typeof db.getThreadMessagesPage>
+  try {
+    latestPage = db.getThreadMessagesPage(threadId)
+  } finally {
+    database.prepare = originalPrepare
+    JSON.parse = originalJsonParse
+  }
+
+  assertEqual(latestPage.total, 10_001, "page result should expose the complete transcript count")
+  assertEqual(latestPage.messages.length, 500, "the default page should contain 500 messages")
+  assertEqual(pageRowSteps, 501, "the page query should step only limit + one cursor row")
+  assertEqual(parsedPageValues, 500, "only returned page rows should have their JSON parsed")
+  assertEqual(latestPage.hasMore, true, "a 10k transcript should expose an older page")
+  assertEqual(latestPage.beforeOrdinal, 9500, "the page cursor should retain the boundary ordinal")
+  assertEqual(
+    latestPage.beforeMessageId,
+    "page-09500-extra",
+    "the page cursor should retain the duplicate-ordinal message id"
+  )
+  assertEqual(
+    latestPage.messages[0]?.id,
+    "page-09500-extra",
+    "the newest page should be returned in ascending transcript order"
+  )
+
+  const olderPage = db.getThreadMessagesPage(threadId, {
+    beforeOrdinal: latestPage.beforeOrdinal ?? undefined,
+    beforeMessageId: latestPage.beforeMessageId ?? undefined
+  })
+  assert(
+    olderPage.messages.some((message) => message.id === "page-09500"),
+    "the next page should include the other row at the duplicate ordinal"
+  )
+  assert(
+    olderPage.messages.every((message) => message.id !== "page-09500-extra"),
+    "the next page must not repeat the compound cursor row"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
+async function testRuntimeIdentityContextDoesNotReadStablePrefix(): Promise<void> {
+  const db = await import("../src/main/db/index.ts")
+  const threadId = "thread-runtime-identity-context"
+  await db.initializeDatabase()
+  db.createThread(threadId, { title: "Runtime identity context" })
+  const database = db.getDb()
+  database.run(
+    `WITH digits(d) AS (
+       VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+     ), numbers(value) AS (
+       SELECT ones.d + tens.d * 10 + hundreds.d * 100 + thousands.d * 1000
+       FROM digits AS ones
+       CROSS JOIN digits AS tens
+       CROSS JOIN digits AS hundreds
+       CROSS JOIN digits AS thousands
+     )
+     INSERT INTO thread_messages (
+       thread_id, message_id, role, content_json, created_at, ordinal
+     )
+     SELECT
+       ?, printf('identity-%05d', value), 'assistant',
+       CASE WHEN value < 9872 THEN '"IDENTITY_CONTEXT_POISON"'
+            ELSE printf('"safe-%d"', value) END,
+       value, value
+     FROM numbers`,
+    [threadId]
+  )
+  database.run(
+    `UPDATE thread_messages
+     SET message_id = 'runtime-provider', content_json = '"safe-first"'
+     WHERE thread_id = ? AND ordinal = 100`,
+    [threadId]
+  )
+  database.run(
+    `UPDATE thread_messages
+     SET message_id = 'runtime-provider::cmb-same-role-duplicate:assistant:2',
+         provider_source_id = 'runtime-provider', provider_occurrence = 2,
+         content_json = '"safe-second"'
+     WHERE thread_id = ? AND ordinal = 9700`,
+    [threadId]
+  )
+  database.run(
+    `UPDATE thread_messages
+     SET role = 'user', content_json = '"safe-boundary"'
+     WHERE thread_id = ? AND ordinal = 9800`,
+    [threadId]
+  )
+  database.run(
+    `UPDATE thread_messages
+     SET role = 'tool', content_json = '"safe-tool"'
+     WHERE thread_id = ? AND ordinal = 9850`,
+    [threadId]
+  )
+
+  const providerPlan = database
+    .exec(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM thread_messages
+       WHERE thread_id = ? AND provider_source_id = ? AND role = ?
+         AND provider_occurrence = ?
+       ORDER BY ordinal DESC, created_at DESC, message_id DESC
+       LIMIT 1`,
+      [threadId, "runtime-provider", "assistant", 2]
+    )
+    .flatMap((result) => result.values)
+    .map((row) => String(row[3] ?? ""))
+    .join("\n")
+  assert(
+    /SEARCH thread_messages USING INDEX idx_thread_messages_provider_occurrence_order.*provider_occurrence/i.test(
+      providerPlan
+    ),
+    `provider occurrence lookup must use the full equality index: ${providerPlan}`
+  )
+  const roleBoundaryPlan = database
+    .exec(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM thread_messages
+       WHERE thread_id = ? AND role = ?
+       ORDER BY ordinal DESC, created_at DESC, message_id DESC
+       LIMIT 1`,
+      [threadId, "tool"]
+    )
+    .flatMap((result) => result.values)
+    .map((row) => String(row[3] ?? ""))
+    .join("\n")
+  assert(
+    /SEARCH thread_messages USING INDEX idx_thread_messages_role_order.*thread_id.*role/i.test(
+      roleBoundaryPlan
+    ),
+    `role boundary lookup must not scan a no-tool lifetime transcript: ${roleBoundaryPlan}`
+  )
+
+  const originalJsonParse = JSON.parse
+  JSON.parse = ((text: string, reviver?: (this: unknown, key: string, value: unknown) => unknown) => {
+    if (text.includes("IDENTITY_CONTEXT_POISON")) {
+      throw new Error("runtime identity lookup parsed the stable transcript prefix")
+    }
+    return originalJsonParse(text, reviver)
+  }) as typeof JSON.parse
+  let context: ReturnType<typeof db.getThreadMessageIdentityContext>
+  try {
+    context = db.getThreadMessageIdentityContext(
+      threadId,
+      [
+        {
+          messageId: "current-run-assistant:new",
+          providerSourceId: "runtime-provider",
+          role: "assistant"
+        }
+      ],
+      128
+    )
+  } finally {
+    JSON.parse = originalJsonParse
+  }
+  assert(
+    context.some((message) => message.id === "runtime-provider"),
+    "the first implicit provider occurrence should be available by exact source id"
+  )
+  assert(
+    context.some((message) => message.provider_occurrence === 2),
+    "the latest indexed provider occurrence should be available outside the bounded tail"
+  )
+  assert(context.some((message) => message.role === "user"), "the latest user boundary is retained")
+  assert(context.some((message) => message.role === "tool"), "the latest tool boundary is retained")
+  assert(context.length <= 132, "runtime identity context must remain bounded on a 10k transcript")
+  const resolved = resolveCurrentRunCompletedAssistantIdentity(context, {
+    id: "current-run-assistant:new",
+    sourceId: "runtime-provider",
+    content: "safe-third"
+  })
+  assertEqual(
+    resolved.providerOccurrence,
+    3,
+    "bounded identity context must reserve the next provider occurrence after the latest user boundary"
+  )
+
+  db.deleteThread(threadId)
+  await db.closeDatabase()
+}
+
 async function main(): Promise<void> {
   await withTempHome(async () => {
     await testMessagesPersistAcrossReopen()
@@ -3187,6 +3736,10 @@ async function main(): Promise<void> {
     await testAliasCollisionRecoveryPreservesAssistantToolOrder()
     await testCanonicalTupleRebasesImplicitRawOccurrence()
     await testCrossRoleProviderIdCollisionPersistsBothRows()
+    await testStreamingUpsertAvoidsTranscriptWideQueries()
+    await testSecondOrdinaryStreamBatchAvoidsLongTranscriptRead()
+    await testLatestMessagePageDoesNotReadOrParseStablePrefix()
+    await testRuntimeIdentityContextDoesNotReadStablePrefix()
   })
   console.log("thread-messages-db.spec.ts passed")
 }

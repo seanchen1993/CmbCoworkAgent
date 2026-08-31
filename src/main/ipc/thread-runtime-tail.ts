@@ -1,96 +1,28 @@
+import type { BaseMessage } from "@langchain/core/messages"
 import {
-  AIMessage,
-  HumanMessage,
-  SystemMessage,
-  ToolMessage,
-  type BaseMessage,
-  type ToolCall as LangChainToolCall
-} from "@langchain/core/messages"
-import { getThreadMessages } from "../db"
+  getThreadMessages,
+  getThreadMessagesAfterAnyId,
+  getThreadMessagesByIds
+} from "../db"
 import { withCheckpointer } from "../agent/runtime"
 import type { Message } from "../types"
-import {
-  MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY,
-  MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY
-} from "../../shared/message-role-collision"
 import {
   checkpointHasInterrupt,
   type CheckpointTranscriptMessage,
   deriveCheckpointTranscriptIndex,
-  findMessagesAfterCheckpointVisibleIds,
-  isWorkflowPlumbingTranscriptContent
+  findMessagesAfterCheckpointVisibleIds
 } from "../../shared/checkpoint-transcript"
+import {
+  isRuntimeVisiblePersistedMessage,
+  persistedMessageToRuntimeMessage
+} from "./persisted-runtime-message"
+
+export { persistedMessageToRuntimeMessage } from "./persisted-runtime-message"
 
 export interface DurableRuntimeTail {
   messages: BaseMessage[]
   persistedMessages: Message[]
   checkpointHasInterrupt: boolean
-}
-
-function stringifyMessageContent(content: Message["content"]): string {
-  if (typeof content === "string") return content
-  return content
-    .map((block) => {
-      if (typeof block.text === "string") return block.text
-      if (typeof block.content === "string") return block.content
-      return ""
-    })
-    .filter(Boolean)
-    .join("\n")
-}
-
-function isRuntimeVisiblePersistedMessage(message: Message): boolean {
-  return !isWorkflowPlumbingTranscriptContent(stringifyMessageContent(message.content))
-}
-
-export function persistedMessageToRuntimeMessage(message: Message): BaseMessage | null {
-  const content = stringifyMessageContent(message.content)
-  if (message.role === "user") {
-    return new HumanMessage({ id: message.id, content })
-  }
-  if (message.role === "assistant") {
-    const providerSourceId = message.provider_source_id?.trim()
-    const providerOccurrence = message.provider_occurrence
-    const additionalKwargs = {
-      ...(message.reasoning ? { reasoning: message.reasoning } : {}),
-      ...(providerSourceId &&
-      typeof providerOccurrence === "number" &&
-      Number.isInteger(providerOccurrence) &&
-      providerOccurrence >= 1
-        ? {
-            [MESSAGE_PROVIDER_SOURCE_ID_METADATA_KEY]: providerSourceId,
-            [MESSAGE_PROVIDER_OCCURRENCE_METADATA_KEY]: providerOccurrence
-          }
-        : {})
-    }
-    return new AIMessage({
-      id: message.id,
-      content,
-      ...(message.tool_calls
-        ? { tool_calls: message.tool_calls as LangChainToolCall[] }
-        : {}),
-      ...(Object.keys(additionalKwargs).length > 0
-        ? { additional_kwargs: additionalKwargs }
-        : {})
-    })
-  }
-  if (message.role === "system") {
-    return new SystemMessage({ id: message.id, content })
-  }
-  if (message.role === "tool") {
-    if (!message.tool_call_id) return null
-    const status =
-      message.status === "success" || message.status === "error" ? message.status : undefined
-    return new ToolMessage({
-      id: message.id,
-      content,
-      tool_call_id: message.tool_call_id,
-      ...(message.name ? { name: message.name } : {}),
-      ...(status ? { status } : {}),
-      ...(message.is_error ? { additional_kwargs: { is_error: true } } : {})
-    })
-  }
-  return null
 }
 
 export function findDurableTailMessagesAfterCheckpoint(
@@ -105,9 +37,17 @@ export function findDurableTailMessagesAfterCheckpoint(
   return findMessagesAfterCheckpointVisibleIds(visibleMessages, checkpointVisibleMessages, options)
 }
 
-async function getLatestCheckpoint(threadId: string): Promise<unknown | null> {
+async function getLatestCheckpoint(
+  threadId: string,
+  allowBoundedCheckpointRecovery: boolean
+): Promise<unknown | null> {
   try {
     return await withCheckpointer(threadId, async (checkpointer) => {
+      if (allowBoundedCheckpointRecovery) {
+        return (
+          (await checkpointer.getLatestTupleForDurableTailRecovery(threadId))?.checkpoint ?? null
+        )
+      }
       const config = { configurable: { thread_id: threadId } }
       for await (const checkpoint of checkpointer.list(config, { limit: 1 })) {
         return checkpoint.checkpoint
@@ -125,16 +65,47 @@ export async function getDurableRuntimeTail(
   options: {
     excludeMessageIds?: readonly string[]
     excludeMessages?: readonly Pick<Message, "id" | "role">[]
+    /** Set only after invoke replacement proves every predecessor settled. */
+    allowBoundedCheckpointRecovery?: boolean
   } = {}
 ): Promise<DurableRuntimeTail> {
-  const checkpoint = await getLatestCheckpoint(threadId)
+  const checkpoint = await getLatestCheckpoint(
+    threadId,
+    options.allowBoundedCheckpointRecovery === true
+  )
   if (!checkpoint) {
     return { messages: [], persistedMessages: [], checkpointHasInterrupt: false }
   }
 
   const transcript = deriveCheckpointTranscriptIndex(checkpoint)
+  if (transcript.visibleMessages.length === 0) {
+    return {
+      messages: [],
+      persistedMessages: [],
+      checkpointHasInterrupt: checkpointHasInterrupt(checkpoint)
+    }
+  }
+  // The latest checkpoint boundary is normally an exact durable render id. Probe
+  // only a bounded suffix, then ask SQLite for rows after the newest match. A full
+  // transcript read remains a compatibility fallback for legacy/corrupt identity
+  // metadata, not the ordinary start/resume path.
+  const recentCheckpointIds = Array.from(
+    new Set(
+      transcript.visibleMessages.slice(-32).flatMap((message) =>
+        [message.renderId, message.id].filter((id): id is string => Boolean(id))
+      )
+    )
+  )
+  const durableCheckpointBoundaries = getThreadMessagesByIds(threadId, recentCheckpointIds)
+  const persistedMessages =
+    durableCheckpointBoundaries.length > 0
+      ? getThreadMessagesAfterAnyId(
+          threadId,
+          durableCheckpointBoundaries.map((message) => message.id)
+        )
+      : getThreadMessages(threadId)
   const persistedTail = findDurableTailMessagesAfterCheckpoint(
-    getThreadMessages(threadId),
+    persistedMessages,
     transcript.visibleMessages,
     options
   )

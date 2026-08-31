@@ -700,7 +700,9 @@ function testRegistryAgentBlockedTools(): void {
 
   const vf = registryAgentBlockedTools(["write_file", "edit_file"], "full") // verify-like
   assert(
-    vf.has("code_exec") && vf.has("manage_scheduler") && vf.has("manage_skill"),
+    vf.has("code_exec") &&
+      vf.has("manage_scheduler") &&
+      vf.has("manage_skill"),
     "verify blocks code-exec + orchestration meta tools"
   )
   assert(!vf.has("execute"), "verify keeps execute (full shell)")
@@ -711,7 +713,9 @@ function testRegistryAgentBlockedTools(): void {
 
   const wr = registryAgentBlockedTools([], "full") // write custom agent
   assert(
-    wr.has("code_exec") && wr.has("manage_scheduler") && wr.has("manage_skill"),
+    wr.has("code_exec") &&
+      wr.has("manage_scheduler") &&
+      wr.has("manage_skill"),
     "even a write subagent blocks code-exec + orchestration meta tools"
   )
   assert(
@@ -882,7 +886,8 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
 
 function testEngineResolvesAndHashesAgentType(): void {
   assert(
-    ENGINE_SRC.includes("loadAgentProfiles(context.workspacePath)") &&
+    ENGINE_SRC.includes("await loadAgentProfilesAsync(options.workspacePath)") &&
+      ENGINE_SRC.includes("resolveProfileFromList(registryProfiles, name)") &&
       ENGINE_SRC.includes("resolveProfile(request.agentType)"),
     "engine resolves agentType against the run-cached workspace registry"
   )

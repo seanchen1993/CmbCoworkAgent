@@ -12,9 +12,10 @@
  * Failures are logged as warnings and never re-thrown — upload errors
  * must not interrupt the agent's main execution flow.
  *
- * Timeout: if the upload does not complete within REPORT_TIMEOUT_MS (10 s),
- * it is treated as a silent failure.  The Promise.race sentinel pattern is
- * used (resolve-based, not reject-based) to avoid unhandled-rejection noise.
+ * Timeout: the complete queue-wait + upload operation gets at most
+ * REPORT_TIMEOUT_MS (10 s). A timed-out fetch is aborted before its admission
+ * slot is released, so congestion cannot leave network work running behind a
+ * settled report Promise.
  */
 
 import type { AgentTrace, ITraceReporter } from "./types"
@@ -25,6 +26,8 @@ import type { AgentTrace, ITraceReporter } from "./types"
 
 /** Maximum time (ms) to wait for a single trace upload before giving up. */
 const REPORT_TIMEOUT_MS = 10_000
+const REPORT_MAX_CONCURRENT = 2
+const REPORT_MAX_WAITERS = 16
 
 /**
  * Sentinel object returned by the timeout branch of Promise.race.
@@ -33,6 +36,10 @@ const REPORT_TIMEOUT_MS = 10_000
  */
 const FETCH_TIMEOUT = { kind: "fetch-timeout" } as const
 type FetchTimeout = typeof FETCH_TIMEOUT
+
+interface ReportWaiter {
+  grant: () => void
+}
 
 // ─────────────────────────────────────────────────────────
 // Helpers
@@ -59,15 +66,112 @@ function formatLocalDate(isoTimestamp: string): string | null {
 
 export class CloudTraceReporter implements ITraceReporter {
   private readonly baseUrl: string
+  private readonly timeoutMs: number
+  private readonly maxConcurrent: number
+  private readonly maxWaiters: number
+  private active = 0
+  private dropped = 0
+  private readonly waiters: ReportWaiter[] = []
 
-  constructor(baseUrl: string) {
+  constructor(
+    baseUrl: string,
+    options: { timeoutMs?: number; maxConcurrent?: number; maxWaiters?: number } = {}
+  ) {
     // Normalise trailing slashes so URL concatenation is always clean
     this.baseUrl = baseUrl.trim().replace(/\/+$/, "")
+    this.timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? REPORT_TIMEOUT_MS))
+    this.maxConcurrent = Math.max(
+      1,
+      Math.floor(options.maxConcurrent ?? REPORT_MAX_CONCURRENT)
+    )
+    this.maxWaiters = Math.max(0, Math.floor(options.maxWaiters ?? REPORT_MAX_WAITERS))
   }
 
   async report(trace: AgentTrace): Promise<void> {
     if (!this.baseUrl) return
+    const deadline = Date.now() + this.timeoutMs
+    const release = await this.acquire(this.timeoutMs)
+    if (!release) return
+    try {
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        this.recordDrop("queue wait reached the report deadline")
+        return
+      }
+      await this.reportAdmitted(trace, remainingMs)
+    } finally {
+      release()
+    }
+  }
 
+  getDiagnosticsForTest(): {
+    active: number
+    waiters: number
+    dropped: number
+    maxConcurrent: number
+    maxWaiters: number
+  } {
+    return {
+      active: this.active,
+      waiters: this.waiters.length,
+      dropped: this.dropped,
+      maxConcurrent: this.maxConcurrent,
+      maxWaiters: this.maxWaiters
+    }
+  }
+
+  private recordDrop(reason: string): void {
+    this.dropped += 1
+    if (this.dropped === 1 || this.dropped % 100 === 0) {
+      console.warn(`[CloudReporter] Dropped ${this.dropped} trace upload(s): ${reason}`)
+    }
+  }
+
+  private createRelease(): () => void {
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const next = this.waiters.shift()
+      if (next) next.grant()
+      else this.active -= 1
+    }
+  }
+
+  private async acquire(waitMs: number): Promise<(() => void) | null> {
+    if (this.active < this.maxConcurrent) {
+      this.active += 1
+      return this.createRelease()
+    } else {
+      if (this.waiters.length >= this.maxWaiters) {
+        this.recordDrop("queue is full")
+        return null
+      }
+      return await new Promise<(() => void) | null>((resolvePermit) => {
+        let settled = false
+        const waiter: ReportWaiter = {
+          grant: () => {
+            if (settled) return
+            settled = true
+            clearTimeout(timeoutId)
+            resolvePermit(this.createRelease())
+          }
+        }
+        this.waiters.push(waiter)
+        const timeoutId = setTimeout(() => {
+          if (settled) return
+          settled = true
+          const index = this.waiters.indexOf(waiter)
+          if (index >= 0) this.waiters.splice(index, 1)
+          this.recordDrop("queue wait timed out")
+          resolvePermit(null)
+        }, Math.max(1, waitMs))
+        timeoutId.unref?.()
+      })
+    }
+  }
+
+  private async reportAdmitted(trace: AgentTrace, timeoutMs: number): Promise<void> {
     // ── Build uniqueId ──────────────────────────────────────
     const datePart = formatLocalDate(trace.startedAt)
     if (!datePart) {
@@ -87,6 +191,7 @@ export class CloudTraceReporter implements ITraceReporter {
     // timeoutId is declared outside try so that the finally block can
     // always clear it, whether the fetch succeeded, failed, or timed out.
     let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
 
     try {
       const formData = new FormData()
@@ -101,13 +206,18 @@ export class CloudTraceReporter implements ITraceReporter {
       // We never reject from the timeout side, so there is no risk of an
       // unhandled-rejection warning if the fetch later settles.
       const timeoutPromise = new Promise<FetchTimeout>((resolve) => {
-        timeoutId = setTimeout(() => resolve(FETCH_TIMEOUT), REPORT_TIMEOUT_MS)
+        timeoutId = setTimeout(() => {
+          controller.abort()
+          resolve(FETCH_TIMEOUT)
+        }, timeoutMs)
+        timeoutId.unref?.()
       })
 
       const result = await Promise.race<Response | FetchTimeout>([
         fetch(`${this.baseUrl}/api/traces/upload`, {
           method: "POST",
-          body: formData
+          body: formData,
+          signal: controller.signal
         }),
         timeoutPromise
       ])
@@ -116,7 +226,7 @@ export class CloudTraceReporter implements ITraceReporter {
       if (result === FETCH_TIMEOUT || !("ok" in result)) {
         console.warn(
           `[CloudReporter] Upload timed out for trace ${trace.traceId} ` +
-            `after ${REPORT_TIMEOUT_MS}ms`
+            `after ${timeoutMs}ms of remaining report time`
         )
         return
       }

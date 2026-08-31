@@ -545,15 +545,21 @@ function notifyWorkspaceFilesChanged(threadId: string, workspacePath: string): v
   if (typeof getAllWindows !== "function") return
   for (const win of getAllWindows.call(BrowserWindow)) {
     if (!win.isDestroyed()) {
-      win.webContents.send("workspace:files-changed", { threadId, workspacePath })
+      win.webContents.send("workspace:files-changed", {
+        threadIds: [threadId],
+        workspacePath,
+        // A commit only changes Git metadata. File contents were already
+        // delivered by the watcher as path patches; do not rescan the tree.
+        changeType: "meta"
+      })
     }
   }
 }
 
 async function clearLlmModifiedMetadata(threadId: string): Promise<void> {
   try {
-    const { getThread, updateThread } = await import("../db")
-    const thread = getThread(threadId)
+    const { getThreadCore, updateThread } = await import("../db")
+    const thread = getThreadCore(threadId)
     if (!thread) return
     let metadata: Record<string, unknown> = {}
     try {
@@ -573,8 +579,8 @@ async function clearLlmModifiedMetadata(threadId: string): Promise<void> {
 
 async function readThreadLlmModifiedFileItems(threadId: string): Promise<string[]> {
   try {
-    const { getThread } = await import("../db")
-    const thread = getThread(threadId)
+    const { getThreadCore } = await import("../db")
+    const thread = getThreadCore(threadId)
     if (!thread) return []
     let metadata: Record<string, unknown> = {}
     try {

@@ -4,7 +4,8 @@ import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
 import {
   extractTextFromUnknownContent,
-  observeSkillUsageFromStream
+  observeSkillUsageFromStream,
+  WorkerValuesSnapshotAccumulator
 } from "../coordinator-worker-stream"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
 import {
@@ -339,6 +340,9 @@ async function runOnce(
   let traceOutcome: TraceOutcome = "success"
   let traceError: string | undefined
   const skillUsageDetector = new SkillUsageDetector()
+  const valuesSnapshotAccumulator = new WorkerValuesSnapshotAccumulator(request.prompt, {
+    deriveWorkerState: false
+  })
   const syncSkillAttribution = (): void => {
     if (!tracer) return
     const usedSkills = skillUsageDetector.getUsedSkillNames()
@@ -350,14 +354,14 @@ async function runOnce(
   }
   const recordValuesSnapshot = (snapshot: unknown): void => {
     latestSnapshot = snapshot
+    const valuesContext = valuesSnapshotAccumulator.createContext("values", snapshot)
     runTraceSideEffect("Workflow Skill observer", () => {
       if (
         observeSkillUsageFromStream(
           "values",
           snapshot,
           skillUsageDetector,
-          undefined,
-          request.prompt
+          valuesContext
         )
       ) {
         syncSkillAttribution()
@@ -397,7 +401,7 @@ async function runOnce(
       ? `${request.roleSystemPrompt}\n\n${baseExtraPrompt}`
       : baseExtraPrompt
     const extraSystemPrompt = request.worktreeIsolation
-      ? `${rolePrompt}\n\nYou are running in an isolated Git worktree at \`${request.worktreeIsolation.workspaceRoot}\` on branch \`${request.worktreeIsolation.branch}\`, separate from the source working directory and other agents. Work normally; the checkout is removed if unchanged or preserved for review if changed. Commit deliverable changes with \`git commit -m "..."\` and do not push the transient branch.`
+      ? `${rolePrompt}\n\nYou are running in an isolated Git worktree at \`${request.worktreeIsolation.workspaceRoot}\` on branch \`${request.worktreeIsolation.branch}\`, separate from the source working directory and other agents. It starts from the frozen committed source HEAD; staged, unstaged, and untracked changes in the source checkout are not present. For this isolated worktree, these native Git instructions override the ordinary task-card commit workflow. Work normally with native Git: use \`git add\` and \`git commit\` to commit exactly the changes you intend to deliver, and leave the worktree clean. Never commit sensitive files such as \`.env\` files, credentials, API keys, or private keys; before force-adding an ignored file, verify that it contains no sensitive data. Do not switch to or modify another existing branch, and do not merge back into the source branch yourself. Do not push unless the task explicitly requires publishing this transient branch and the user approves it. The checkout is removed if unchanged or preserved for review if changed.`
       : rolePrompt
 
     const { runtime, modelFellBack } = await createRuntimeWithModelFallback(deps, {
@@ -605,6 +609,7 @@ async function runOnce(
     traceError = describeWorkflowTraceError(error)
     throw error
   } finally {
+    valuesSnapshotAccumulator.reset()
     if (tracer) {
       const tracerToFinish = tracer
       runTraceSideEffect("Workflow", () => {

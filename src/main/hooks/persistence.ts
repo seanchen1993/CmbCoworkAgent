@@ -3,9 +3,10 @@ import { existsSync } from "fs"
 import { join, basename } from "path"
 import { getHookLogFilePath, getHookLoggingConfig, resolveHookLogDir } from "../storage"
 import { redactLogValue } from "../log-redaction"
+import { getHookDateKey, parseHookTimestamp } from "../../shared/hook-time"
 
 /**
- * Hook execution log persistence — jsonl, one file per local calendar day.
+ * Hook execution log persistence — jsonl, one file per Beijing calendar day.
  *
  * Only writes when `HookLoggingConfig.diagnostic === true`. The hook runner
  * owns timing and stdin/payload assembly; this module is intentionally just
@@ -38,11 +39,26 @@ const MAX_WRITE_RETRIES = 3
 const LOG_FILE_PREFIX = "hooks."
 const LOG_FILE_SUFFIX = ".jsonl"
 
-let pendingLines: string[] = []
+interface PendingLogBatch {
+  dateKey: string
+  fileDate: Date
+  lines: string[]
+  bytes: number
+  failedAttempts: number
+}
+
+interface FlushDateQueueResult {
+  dateKey: string
+  remaining: PendingLogBatch[]
+  error?: unknown
+  dropped?: PendingLogBatch
+}
+
+let pendingBatches = new Map<string, PendingLogBatch[]>()
 let pendingBytes = 0
 let flushTimer: NodeJS.Timeout | null = null
 let flushPromise: Promise<void> | null = null
-let consecutiveFlushFailures = 0
+let terminalFlushError: unknown
 
 function scheduleFlush(): void {
   if (flushTimer) return
@@ -52,41 +68,72 @@ function scheduleFlush(): void {
   }, FLUSH_INTERVAL_MS)
 }
 
+async function flushDateQueue(batches: PendingLogBatch[]): Promise<FlushDateQueueResult> {
+  const dateKey = batches[0].dateKey
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index]
+    try {
+      await appendFile(getHookLogFilePath(batch.fileDate), batch.lines.join(""), {
+        encoding: "utf-8",
+        mode: 0o600
+      })
+    } catch (error) {
+      const canRetry = batch.failedAttempts < MAX_WRITE_RETRIES
+      const remaining = [
+        ...(canRetry ? [{ ...batch, failedAttempts: batch.failedAttempts + 1 }] : []),
+        ...batches.slice(index + 1)
+      ]
+      return {
+        dateKey,
+        remaining,
+        error,
+        ...(canRetry ? {} : { dropped: batch })
+      }
+    }
+  }
+  return { dateKey, remaining: [] }
+}
+
+function prependPendingBatches(dateKey: string, batches: PendingLogBatch[]): void {
+  if (batches.length === 0) return
+  const current = pendingBatches.get(dateKey) ?? []
+  pendingBatches.set(dateKey, [...batches, ...current])
+  pendingBytes += batches.reduce((sum, batch) => sum + batch.bytes, 0)
+}
+
 async function flushNow(): Promise<void> {
   if (flushPromise) return flushPromise
-  if (pendingLines.length === 0) return
+  if (pendingBatches.size === 0) return
 
   flushPromise = (async () => {
     // Snapshot and clear before the await so new writes during flush don't get
     // dropped if appendFile throws — they end up in the next batch.
-    const batchLines = pendingLines
-    const batchBytes = pendingBytes
-    const batch = batchLines.join("")
-    pendingLines = []
+    const dateQueues = [...pendingBatches.values()]
+    pendingBatches = new Map()
     pendingBytes = 0
+
     try {
-      await appendFile(getHookLogFilePath(), batch, {
-        encoding: "utf-8",
-        mode: 0o600
-      })
-      consecutiveFlushFailures = 0
-    } catch (e) {
-      if (consecutiveFlushFailures < MAX_WRITE_RETRIES) {
-        consecutiveFlushFailures += 1
-        pendingLines = [...batchLines, ...pendingLines]
-        pendingBytes += batchBytes
-        scheduleFlush()
-      } else {
-        consecutiveFlushFailures = 0
-        console.warn(
-          `[Hooks] dropping ${batchLines.length} log lines after ${MAX_WRITE_RETRIES} failed retries:`,
-          e
-        )
+      const results = await Promise.all(dateQueues.map((batches) => flushDateQueue(batches)))
+      let firstError: unknown
+      for (const result of results) {
+        prependPendingBatches(result.dateKey, result.remaining)
+        if (result.error !== undefined && firstError === undefined) firstError = result.error
+        if (result.dropped) {
+          terminalFlushError ??= result.error
+          console.warn(
+            `[Hooks] dropping ${result.dropped.lines.length} log lines for ${result.dateKey} ` +
+              `after ${MAX_WRITE_RETRIES} failed retries:`,
+            result.error
+          )
+        }
       }
-      throw e
+
+      if (firstError === undefined) return
+      if (pendingBatches.size > 0) scheduleFlush()
+      throw firstError
     } finally {
       flushPromise = null
-      if (pendingLines.length > 0 && !flushTimer) {
+      if (pendingBatches.size > 0 && !flushTimer) {
         if (pendingBytes >= FLUSH_BYTES) {
           void flushNow().catch((e) => console.warn("[Hooks] log flush failed:", e))
         } else {
@@ -97,6 +144,41 @@ async function flushNow(): Promise<void> {
   })()
 
   return flushPromise
+}
+
+function resolveRecordDate(record: unknown): Date {
+  if (record && typeof record === "object") {
+    const timestamp = (record as { timestamp?: unknown }).timestamp
+    if (
+      timestamp instanceof Date ||
+      typeof timestamp === "string" ||
+      typeof timestamp === "number"
+    ) {
+      const parsed = parseHookTimestamp(timestamp)
+      if (parsed) return parsed
+    }
+  }
+  return new Date()
+}
+
+function enqueueLine(line: string, fileDate: Date): void {
+  const dateKey = getHookDateKey(fileDate)
+  const dateQueue = pendingBatches.get(dateKey) ?? []
+  const current = dateQueue.at(-1)
+  if (current?.failedAttempts === 0) {
+    current.lines.push(line)
+    current.bytes += line.length
+  } else {
+    dateQueue.push({
+      dateKey,
+      fileDate,
+      lines: [line],
+      bytes: line.length,
+      failedAttempts: 0
+    })
+    pendingBatches.set(dateKey, dateQueue)
+  }
+  pendingBytes += line.length
 }
 
 /**
@@ -115,8 +197,7 @@ export function persistHookExecutionRecord(record: unknown): void {
     console.warn("[Hooks] failed to serialize log record:", e)
     return
   }
-  pendingLines.push(line)
-  pendingBytes += line.length
+  enqueueLine(line, resolveRecordDate(record))
   if (pendingBytes >= FLUSH_BYTES) {
     void flushNow().catch((e) => console.warn("[Hooks] log flush failed:", e))
   } else {
@@ -138,7 +219,12 @@ export async function flushHookLogs(): Promise<void> {
         lastError = undefined
         continue
       }
-      if (pendingLines.length === 0) {
+      if (pendingBatches.size === 0) {
+        if (terminalFlushError !== undefined) {
+          const error = terminalFlushError
+          terminalFlushError = undefined
+          throw error
+        }
         if (lastError) throw lastError
         return
       }
@@ -150,7 +236,11 @@ export async function flushHookLogs(): Promise<void> {
       // cannot rely on the retry timer, so immediately loop and drain whatever
       // remains. If retries are exhausted, the failed batch is dropped and the
       // queue becomes empty; surface that final error to the caller.
-      if (!flushPromise && pendingLines.length === 0) throw e
+      if (!flushPromise && pendingBatches.size === 0) {
+        const error = terminalFlushError ?? e
+        terminalFlushError = undefined
+        throw error
+      }
     }
   }
 }
@@ -158,16 +248,18 @@ export async function flushHookLogs(): Promise<void> {
 interface LogFileEntry {
   name: string
   fullPath: string
-  fileDate: Date
+  dateKey: string
+  dateOrdinal: number
   size: number
 }
 
-function parseLogFileName(name: string): Date | null {
+function parseLogFileName(name: string): { dateKey: string; dateOrdinal: number } | null {
   if (!name.startsWith(LOG_FILE_PREFIX) || !name.endsWith(LOG_FILE_SUFFIX)) return null
-  const dateStr = name.slice(LOG_FILE_PREFIX.length, name.length - LOG_FILE_SUFFIX.length)
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr)
-  if (!match) return null
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  const dateKey = name.slice(LOG_FILE_PREFIX.length, name.length - LOG_FILE_SUFFIX.length)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return null
+  const date = new Date(`${dateKey}T00:00:00.000Z`)
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== dateKey) return null
+  return { dateKey, dateOrdinal: date.getTime() }
 }
 
 async function collectLogFileEntries(dir: string): Promise<LogFileEntry[]> {
@@ -179,8 +271,8 @@ async function collectLogFileEntries(dir: string): Promise<LogFileEntry[]> {
   }
   const entries: LogFileEntry[] = []
   for (const name of names) {
-    const fileDate = parseLogFileName(name)
-    if (!fileDate) continue
+    const parsedDate = parseLogFileName(name)
+    if (!parsedDate) continue
     const fullPath = join(dir, basename(name))
     let size = 0
     try {
@@ -190,7 +282,7 @@ async function collectLogFileEntries(dir: string): Promise<LogFileEntry[]> {
       // Could not stat — skip rather than risk deleting something we can't see.
       continue
     }
-    entries.push({ name, fullPath, fileDate, size })
+    entries.push({ name, fullPath, ...parsedDate, size })
   }
   return entries
 }
@@ -213,14 +305,13 @@ export async function pruneOldHookLogs(): Promise<void> {
   const entries = await collectLogFileEntries(dir)
   if (entries.length === 0) return
 
-  const today = new Date()
-  const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate())
-  cutoff.setDate(cutoff.getDate() - RETENTION_DAYS)
-  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`
+  const todayKey = getHookDateKey()
+  const todayOrdinal = Date.parse(`${todayKey}T00:00:00.000Z`)
+  const cutoffOrdinal = todayOrdinal - RETENTION_DAYS * 24 * 60 * 60 * 1_000
 
   const survivors: LogFileEntry[] = []
   for (const entry of entries) {
-    if (entry.fileDate < cutoff) {
+    if (entry.dateOrdinal < cutoffOrdinal) {
       try {
         await unlink(entry.fullPath)
       } catch (e) {
@@ -235,14 +326,13 @@ export async function pruneOldHookLogs(): Promise<void> {
 
   // Oldest first for size-cap eviction. Stable on equal dates by filename,
   // which doesn't matter in practice since names embed the same date.
-  survivors.sort((a, b) => a.fileDate.getTime() - b.fileDate.getTime())
+  survivors.sort((a, b) => a.dateOrdinal - b.dateOrdinal)
   let totalBytes = survivors.reduce((sum, e) => sum + e.size, 0)
   for (const entry of survivors) {
     if (totalBytes <= MAX_TOTAL_LOG_BYTES) break
     // Never evict today's actively-growing file — would orphan in-memory
     // buffer's intended target and lose this session's debugging data.
-    const entryKey = `${entry.fileDate.getFullYear()}-${String(entry.fileDate.getMonth() + 1).padStart(2, "0")}-${String(entry.fileDate.getDate()).padStart(2, "0")}`
-    if (entryKey === todayKey) continue
+    if (entry.dateKey === todayKey) continue
     try {
       await unlink(entry.fullPath)
       totalBytes -= entry.size

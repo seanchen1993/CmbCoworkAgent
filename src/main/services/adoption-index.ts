@@ -116,6 +116,15 @@ export interface GenIndexRow {
   workflow_agent_index: number | null
   workflow_phase: string | null
   workflow_agent_label: string | null
+  /**
+   * Added-line share of this generation, `generated / (generated + deleted)`.
+   * Persisted raw (not just the derived label) so the bucketing threshold can
+   * be re-tuned later without re-collecting. Null on rows written before the
+   * column existed, and on generations that touched no lines.
+   */
+  new_ratio: number | null
+  /** "new" | "legacy", derived from `new_ratio`. Null on pre-migration rows. */
+  change_kind: string | null
 }
 
 export interface AdoptLineDetailsRow {
@@ -283,7 +292,9 @@ export async function initializeAdoptionIndex(): Promise<void> {
         workflow_run_id TEXT,
         workflow_agent_index INTEGER,
         workflow_phase TEXT,
-        workflow_agent_label TEXT
+        workflow_agent_label TEXT,
+        new_ratio REAL,
+        change_kind TEXT
       )
     `)
 
@@ -340,7 +351,9 @@ export async function initializeAdoptionIndex(): Promise<void> {
       "workflow_run_id TEXT",
       "workflow_agent_index INTEGER",
       "workflow_phase TEXT",
-      "workflow_agent_label TEXT"
+      "workflow_agent_label TEXT",
+      "new_ratio REAL",
+      "change_kind TEXT"
     ]) {
       try {
         db.run(`ALTER TABLE gen_events ADD COLUMN ${col}`)
@@ -484,8 +497,9 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         parent_trace_id, parent_thread_id, parent_span_id, link_type, subagent_kind, subagent_run_id,
         subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
         coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
-        workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+        new_ratio, change_kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.event_id,
         row.file_path,
@@ -532,7 +546,9 @@ export function insertGenEvent(row: GenIndexRow): boolean {
         row.workflow_run_id,
         row.workflow_agent_index,
         row.workflow_phase,
-        row.workflow_agent_label
+        row.workflow_agent_label,
+        row.new_ratio ?? null,
+        row.change_kind ?? null
       ]
     )
     scheduleSave()
@@ -573,6 +589,7 @@ export function findPendingGensForFile(
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
             coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
             workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+            new_ratio, change_kind,
             tool
        FROM gen_events
       WHERE file_path = ? AND measured = 0 AND created_at >= ?${hasMax ? " AND created_at <= ?" : ""}
@@ -609,6 +626,7 @@ export function getGenRowByEventId(eventId: string): GenIndexRow | null {
             subagent_thread_id, handoff_action, handoff_source_agent, handoff_target_agent,
             coordinator_worker_id, coordinator_worker_turn, coordinator_worker_role, coordinator_worker_workload,
             workflow_run_id, workflow_agent_index, workflow_phase, workflow_agent_label,
+            new_ratio, change_kind,
             tool
        FROM gen_events
       WHERE event_id = ?`

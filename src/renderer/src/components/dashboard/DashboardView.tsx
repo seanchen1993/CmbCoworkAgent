@@ -83,6 +83,7 @@ import {
 } from "./use-dashboard"
 import { OverviewPanel } from "./panels/OverviewPanel"
 import { ProjectModePanel } from "./panels/ProjectModePanel"
+import { EfficiencyPanel } from "./panels/EfficiencyPanel"
 import { AwardsPanel, type AwardSkillRow, type TeamBenchmarkRow } from "./panels/AwardsPanel"
 import { STAGE_BUCKET_LABELS, type StageBucket } from "../../../../shared/harness-stage-bucket"
 import { ModelPanel } from "./panels/ModelPanel"
@@ -1103,7 +1104,7 @@ type DashboardSubPage =
       projectMode?: boolean
     }
 
-type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "awards"
+type DashboardMainTab = "overview" | "skill-eval" | "project-mode" | "efficiency" | "awards"
 
 function formatNumber(value: number): string {
   return Math.round(value).toLocaleString("zh-CN")
@@ -1978,6 +1979,8 @@ function DashboardTabBar({
   const tabs: Array<{ id: DashboardMainTab; label: string }> = [
     { id: "overview", label: "平台运营概览" },
     ...(projectModeAllowed ? ([{ id: "project-mode", label: "项目运营概览" }] as const) : []),
+    // 研发效能沿用项目模式的可见性：两者统计范围同源（项目模式 + 精益项目）。
+    ...(projectModeAllowed ? ([{ id: "efficiency", label: "研发效能" }] as const) : []),
     // 评奖辅助看板仅对管理员名单可见。
     ...(awardsAdmin ? ([{ id: "awards", label: "评奖辅助" }] as const) : []),
     // 技能评估 tab 仅对 DASHBOARD_SKILL_EVAL 白名单可见。
@@ -2753,6 +2756,10 @@ export function DashboardView(): React.JSX.Element {
     projectMode,
     projectModeLoading,
     projectModeError,
+    efficiency,
+    efficiencyLoading,
+    efficiencyError,
+    fetchEfficiency,
     projectModeCodeSource,
     projectModeCodeStatsOverride,
     projectModeCodeStatsLoading,
@@ -2774,6 +2781,7 @@ export function DashboardView(): React.JSX.Element {
   } = useDashboard()
 
   const [exporting, setExporting] = useState(false)
+  const [projectMetricRefreshKey, setProjectMetricRefreshKey] = useState(0)
   const [activeMainTab, setActiveMainTab] = useState<DashboardMainTab>("overview")
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [analysisAgentAllowed, setAnalysisAgentAllowed] = useState(false)
@@ -2861,19 +2869,25 @@ export function DashboardView(): React.JSX.Element {
   useEffect(() => {
     let cancelled = false
 
+    // 项目模式与研发效能共用同一道权限门，失去权限时两个 tab 都要退回总览，
+    // 否则停在已经不再渲染的 tab 上会看到一片空白。
+    const leaveProjectModeGatedTabs = (): void => {
+      setActiveMainTab((current) =>
+        current === "project-mode" || current === "efficiency" ? "overview" : current
+      )
+    }
+
     window.api.dashboard
       .isProjectModeAllowed()
       .then((allowed) => {
         if (cancelled) return
         setProjectModeAllowed(allowed)
-        if (!allowed) {
-          setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
-        }
+        if (!allowed) leaveProjectModeGatedTabs()
       })
       .catch(() => {
         if (cancelled) return
         setProjectModeAllowed(false)
-        setActiveMainTab((current) => (current === "project-mode" ? "overview" : current))
+        leaveProjectModeGatedTabs()
       })
 
     return () => {
@@ -3112,6 +3126,13 @@ export function DashboardView(): React.JSX.Element {
     selectedOrgLv1List,
     fromLeanProjectsOnly
   ])
+
+  // 研发效能 tab 懒加载：进入 tab 时拉取，时间范围 / 室筛选变化时重拉。
+  // 不挂「仅精益项目」开关——该范围在后端固定，不随开关变化。
+  useEffect(() => {
+    if (activeMainTab !== "efficiency" || !projectModeAllowed) return
+    void fetchEfficiency(range, selectedOrgLv1List)
+  }, [activeMainTab, fetchEfficiency, projectModeAllowed, range, selectedOrgLv1List])
 
   // 评奖辅助看板懒加载：进入 tab + 名单可见时拉取；时间范围变化重拉。
   // 技能贡献奖需待应用市场技能（个人构建）加载完成后再查。
@@ -3446,9 +3467,7 @@ export function DashboardView(): React.JSX.Element {
     let cancelled = false
 
     async function loadUploaderProfiles(items: MarketItem[]): Promise<void> {
-      // 与技能市场（MarketPanel）一致：用全量用户目录 queryAllUser 反查创建人，
-      // 而不是按使用埋点聚合的 userProfiles —— 否则像精品技能这种作者本人无使用记录的，
-      // 聚合里查不到对应 SAP 桶，创建人就会显示 “—”。
+      // 只按当前市场条目的已知上传者 ID 查询，避免挂载看板时加载完整用户目录。
       // 每个 user_id 对应一组候选 SAP，作为 resolveSkillUploaderExportInfo 的查表 key。
       const candidatesByUserId = new Map<string, string[]>()
       for (const item of items) {
@@ -3472,15 +3491,20 @@ export function DashboardView(): React.JSX.Element {
         return map
       }
 
-      if (typeof window.api?.dashboard?.queryAllUser !== "function") {
+      if (typeof window.api?.dashboard?.userProfiles !== "function") {
         if (!cancelled) setSkillUploaderProfiles(buildFallbackMap())
         return
       }
 
       try {
-        const response = await window.api.dashboard.queryAllUser()
+        const requestedSapIds = Array.from(
+          new Set(Array.from(candidatesByUserId.values()).flat())
+        )
+        const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+          family: "dashboard-market"
+        })
         if (!response.success || !response.data) {
-          throw new Error(response.error || "获取全量用户信息失败")
+          throw new Error(response.error || "获取上传者信息失败")
         }
 
         const allUsers = response.data.filter((user) => user.sapId?.trim())
@@ -3679,10 +3703,15 @@ export function DashboardView(): React.JSX.Element {
     if (activeMainTab === "project-mode") {
       void fetchProjectMode(range, granularity, selectedOrgLv1List, fromLeanProjectsOnly)
     }
+    if (activeMainTab === "efficiency") {
+      void fetchEfficiency(range, selectedOrgLv1List)
+      setProjectMetricRefreshKey((current) => current + 1)
+    }
   }, [
     activeMainTab,
     clearSkillEval,
     fetchProjectMode,
+    fetchEfficiency,
     granularity,
     range,
     refresh,
@@ -5237,6 +5266,15 @@ export function DashboardView(): React.JSX.Element {
                 marketSkillKeys={marketSkillKeys}
               />
             </div>
+          ) : activeMainTab === "efficiency" && projectModeAllowed ? (
+            <EfficiencyPanel
+              data={efficiency}
+              loading={efficiencyLoading}
+              error={efficiencyError}
+              range={range}
+              upperOrgLv1={selectedOrgLv1List}
+              projectMetricRefreshKey={projectMetricRefreshKey}
+            />
           ) : (
             <div className="space-y-6 p-6">
               {/* Overview */}

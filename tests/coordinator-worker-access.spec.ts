@@ -94,7 +94,7 @@ async function testReadOnlyWorkerToolSurface(): Promise<void> {
     ownedFiles: []
   })
 
-  // Direct writes, ad-hoc/deferred execution, and browser stay cut.
+  // Direct writes, ad-hoc/deferred execution stay cut.
   for (const name of [
     "write_file",
     "edit_file",

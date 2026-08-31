@@ -1283,6 +1283,7 @@ function FeatureStageBreakdown({
 
 function ProjectRow({
   project,
+  showSuspectedTechnicalDetailMetric,
   expanded,
   onToggle,
   onOpenTraces,
@@ -1292,6 +1293,7 @@ function ProjectRow({
   loadOperationalDetails
 }: {
   project: DashboardProjectModeProject
+  showSuspectedTechnicalDetailMetric: boolean
   expanded: boolean
   onToggle: () => void
   onOpenTraces: (
@@ -1400,6 +1402,11 @@ function ProjectRow({
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatNumber(project.conversationCount)}
         </td>
+        {showSuspectedTechnicalDetailMetric ? (
+          <td className="px-3 py-2 text-right font-medium tabular-nums">
+            {formatNumber(project.suspectedTechnicalDetailConversationCount ?? 0)}
+          </td>
+        ) : null}
         <td className="px-3 py-2 text-right font-medium tabular-nums">
           {formatLineCount(codeStats?.generatedLines ?? 0)}
         </td>
@@ -1504,7 +1511,7 @@ function ProjectRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/50 bg-muted/20">
-          <td colSpan={15} className="px-3 py-3">
+          <td colSpan={showSuspectedTechnicalDetailMetric ? 16 : 15} className="px-3 py-3">
             <div className="w-full max-w-[1200px] min-w-0 space-y-3">
               {/* 常用技能（生成行数 / 采纳率已下沉到各特性行） */}
               <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -1703,7 +1710,8 @@ function SortableTh({
   order,
   enabled,
   onSort,
-  title
+  title,
+  hint
 }: {
   label: string
   sortKey: DashboardProjectModeProjectSortKey
@@ -1712,11 +1720,15 @@ function SortableTh({
   enabled: boolean
   onSort: (key: DashboardProjectModeProjectSortKey) => void
   title?: string
+  hint?: ReactNode
 }): React.JSX.Element {
   if (!enabled) {
     return (
       <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title={title}>
-        {label}
+        <span className="inline-flex items-center justify-end gap-1">
+          <span>{label}</span>
+          {hint ? <InfoHint hint={hint} /> : null}
+        </span>
       </th>
     )
   }
@@ -1724,18 +1736,21 @@ function SortableTh({
   const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
     <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
-      <button
-        type="button"
-        onClick={() => onSort(sortKey)}
-        title={title ?? `按${label}排序`}
-        className={cn(
-          "ml-auto inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
-          active ? "text-foreground" : "text-muted-foreground"
-        )}
-      >
-        <span>{label}</span>
-        <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
-      </button>
+      <div className="ml-auto flex w-fit items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onSort(sortKey)}
+          title={title ?? `按${label}排序`}
+          className={cn(
+            "inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
+            active ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          <span>{label}</span>
+          <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
+        </button>
+        {hint ? <InfoHint hint={hint} /> : null}
+      </div>
     </th>
   )
 }
@@ -1835,6 +1850,8 @@ function ProjectListSection({
   const effectiveSortBy = useExplicitSort ? sortBy : tabDefaultSort.key
   const effectiveSortOrder = useExplicitSort ? sortOrder : tabDefaultSort.order
   const pageData = projectPages[tab]
+  const showSuspectedTechnicalDetailMetric = pageData?.showSuspectedTechnicalDetailMetric === true
+  const tableColumnCount = showSuspectedTechnicalDetailMetric ? 16 : 15
   const currentError = pageError[tab]
   const tabCount =
     tab === "archived" ? (projectCounts?.archived ?? 0) : (projectCounts?.active ?? 0)
@@ -2045,7 +2062,12 @@ function ProjectListSection({
           effectiveLoading && "opacity-70"
         )}
       >
-        <table className="w-full min-w-[2280px] table-fixed text-xs">
+        <table
+          className={cn(
+            "w-full table-fixed text-xs",
+            showSuspectedTechnicalDetailMetric ? "min-w-[2410px]" : "min-w-[2270px]"
+          )}
+        >
           {/*
            * Keep column allocation deterministic across macOS and Windows.
            * With table-layout:auto, CJK body text has a one-glyph min-content
@@ -2059,6 +2081,7 @@ function ProjectListSection({
             <col className="w-[90px]" />
             <col className="w-[76px]" />
             <col className="w-[76px]" />
+            {showSuspectedTechnicalDetailMetric ? <col className="w-[140px]" /> : null}
             <col className="w-[110px]" />
             <col className="w-[160px]" />
             <col className="w-[160px]" />
@@ -2095,7 +2118,16 @@ function ProjectListSection({
                 order={sortOrder}
                 enabled={metricSortAllowed}
                 onSort={cycleSort}
+                hint="所选时间范围内，仅统计主动触发的主 Agent 会话；不包含定时任务、心跳等后台触发，也不包含子 Agent 会话。"
               />
+              {showSuspectedTechnicalDetailMetric ? (
+                <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
+                  <div className="ml-auto flex w-fit items-center gap-1">
+                    <span>疑似技术细节补充</span>
+                    <InfoHint hint="统计用户输入全文中累计包含 10 个及以上英文字母的会话数量，用于识别疑似补充技术细节的会话。结果基于规则估算，仅供参考。" />
+                  </div>
+                </th>
+              ) : null}
               <SortableTh
                 label="原始生成行数"
                 sortKey="generatedLines"
@@ -2144,6 +2176,7 @@ function ProjectListSection({
               <ProjectRow
                 key={project.projectId}
                 project={project}
+                showSuspectedTechnicalDetailMetric={showSuspectedTechnicalDetailMetric}
                 expanded={expandedId === project.projectId}
                 onToggle={() =>
                   setExpandedId((prev) => (prev === project.projectId ? null : project.projectId))
@@ -2159,7 +2192,10 @@ function ProjectListSection({
             ))}
             {effectiveLoading && pageItems.length === 0 && (
               <tr>
-                <td colSpan={15} className="px-3 py-10 text-center text-muted-foreground">
+                <td
+                  colSpan={tableColumnCount}
+                  className="px-3 py-10 text-center text-muted-foreground"
+                >
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="size-4 animate-spin" />
                     加载项目中...
@@ -2169,7 +2205,7 @@ function ProjectListSection({
             )}
             {!effectiveLoading && currentError && (
               <tr>
-                <td colSpan={15} className="px-3 py-10 text-center text-destructive">
+                <td colSpan={tableColumnCount} className="px-3 py-10 text-center text-destructive">
                   {currentError}
                 </td>
               </tr>
@@ -2177,12 +2213,15 @@ function ProjectListSection({
             {pageItems.length > 0 &&
               Array.from({ length: PROJECT_PAGE_SIZE - pageItems.length }).map((_, i) => (
                 <tr key={`filler-${i}`} aria-hidden className="border-b border-border/50">
-                  <td colSpan={15} className="h-[49px]" />
+                  <td colSpan={tableColumnCount} className="h-[49px]" />
                 </tr>
               ))}
             {!effectiveLoading && !currentError && pageItems.length === 0 && (
               <tr>
-                <td colSpan={15} className="px-3 py-10 text-center text-muted-foreground">
+                <td
+                  colSpan={tableColumnCount}
+                  className="px-3 py-10 text-center text-muted-foreground"
+                >
                   {emptyText}
                 </td>
               </tr>
@@ -2330,9 +2369,7 @@ const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
 }
 
 /**
- * 用 item.user_id（上传者 SAP id）到全量用户目录解析 {负责人, 部门}。
- * 负责人/部门并不在插件列表响应里——应用市场与 Harness 看板都是靠 user_id 二次查
- * queryAllUser 拿到的，这里复用同一口径（queryAllUser + buildUploaderIdCandidates）。
+ * 用 item.user_id（上传者 SAP id）按需解析 {负责人, 部门}，只查询当前列表涉及的候选 ID。
  */
 async function resolvePluginUploaderProfiles(
   items: MarketItem[]
@@ -2342,9 +2379,14 @@ async function resolvePluginUploaderProfiles(
     new Set(items.map((item) => item.user_id?.trim() || "").filter(Boolean))
   )
   if (rawUserIds.length === 0) return result
-  if (typeof window.api?.dashboard?.queryAllUser !== "function") return result
+  if (typeof window.api?.dashboard?.userProfiles !== "function") return result
   try {
-    const response = await window.api.dashboard.queryAllUser()
+    const requestedSapIds = Array.from(
+      new Set(rawUserIds.flatMap((rawUserId) => buildUploaderIdCandidates(rawUserId)))
+    )
+    const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+      family: "project-mode-market"
+    })
     if (!response.success || !response.data) return result
     const allUsers = response.data.filter((user) => user.sapId?.trim())
     for (const rawUserId of rawUserIds) {

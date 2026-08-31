@@ -156,6 +156,8 @@ import type {
   HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
@@ -252,6 +254,8 @@ export type {
   HarnessDynamicWorkflowTemplate,
   HarnessProjectDetailViewModel,
   HarnessProjectListItem,
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult,
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
@@ -297,6 +301,10 @@ export interface Message {
   // Large transcript fields are persisted out-of-line. The renderer keeps the
   // hydrated value for display and the reference for compact subsequent saves.
   content_ref?: SubagentTranscriptBlobRef
+  /** Renderer-only acknowledgement/journal metadata for live subagent text. */
+  content_persisted_length?: number
+  content_pending_delta?: string
+  content_stream_delta?: string
   // Internal transcript aliases used to collapse a provisional subagent
   // assistant row into its stable task-completion row across reloads/replays.
   replaced_message_ids?: string[]
@@ -319,6 +327,9 @@ export interface Message {
   reasoning_is_projection?: boolean
   reasoning_full_length?: number
   reasoning_ref?: SubagentTranscriptBlobRef
+  reasoning_persisted_length?: number
+  reasoning_pending_delta?: string
+  reasoning_stream_delta?: string
   tool_calls?: ToolCall[]
   tool_calls_ref?: SubagentTranscriptBlobRef
   // For tool messages - links result to its tool call
@@ -344,6 +355,7 @@ export interface Message {
  *   - `attachmentModelBlocks`   <attachment>…</attachment> XML appended for the model
  *   - `attachmentDisplayPrefix` "📎 name" lines shown in the user's bubble
  *   - `skillBlock`              trailing slash-command skill block, if any
+ *   - `builtinBrowser`          whether the draft should use the built-in browser prompt
  *   - `modelId`                 model selected when the draft was composed
  *   - `handoffRequestedAt`      set once the message has been steered into the
  *                               current run (awaiting injection); cleared on run end
@@ -354,6 +366,7 @@ export interface QueuedMessage {
   attachmentModelBlocks?: string
   attachmentDisplayPrefix?: string
   skillBlock?: string
+  builtinBrowser?: boolean
   modelId?: string
   handoffRequestedAt?: Date
   created_at: Date

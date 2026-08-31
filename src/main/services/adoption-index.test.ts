@@ -88,6 +88,8 @@ function makeRow(overrides: Partial<GenIndexRow> = {}): GenIndexRow {
     workflow_agent_index: null,
     workflow_phase: null,
     workflow_agent_label: null,
+    new_ratio: null,
+    change_kind: null,
     ...overrides
   }
 }
@@ -120,6 +122,39 @@ describe("adoption-index harness_node_name column", () => {
     expect(fetched?.harness_node_status).toBe("进行中")
     // Existing sibling column must remain intact alongside the new one.
     expect(fetched?.harness_feature_slug).toBe("feature-x")
+  })
+
+  it("round-trips new_ratio / change_kind via getGenRowByEventId", () => {
+    expect(
+      insertGenEvent(makeRow({ event_id: "g_kind_1", new_ratio: 0.25, change_kind: "legacy" }))
+    ).toBe(true)
+    const fetched = getGenRowByEventId("g_kind_1")
+    expect(fetched?.new_ratio).toBeCloseTo(0.25)
+    expect(fetched?.change_kind).toBe("legacy")
+  })
+
+  it("keeps new_ratio / change_kind null for rows that never set them", () => {
+    expect(insertGenEvent(makeRow({ event_id: "g_kind_2" }))).toBe(true)
+    const fetched = getGenRowByEventId("g_kind_2")
+    expect(fetched?.new_ratio ?? null).toBeNull()
+    expect(fetched?.change_kind ?? null).toBeNull()
+  })
+
+  it("surfaces new_ratio / change_kind through findPendingGensForFile", () => {
+    expect(
+      insertGenEvent(
+        makeRow({
+          event_id: "g_kind_3",
+          file_path: "/repo/src/kind.ts",
+          new_ratio: 1,
+          change_kind: "new"
+        })
+      )
+    ).toBe(true)
+    const pending = findPendingGensForFile("/repo/src/kind.ts", 0)
+    expect(pending).toHaveLength(1)
+    expect(pending[0].new_ratio).toBe(1)
+    expect(pending[0].change_kind).toBe("new")
   })
 
   it("reports insertion failure when sqlite rejects the row", () => {

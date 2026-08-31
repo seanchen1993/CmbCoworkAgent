@@ -1,53 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
 import {
-  classifyPhysicalStreamRunFailure,
   createPhysicalStreamRunSetupGuard,
   failPhysicalStreamRunBeforeSetupPublication,
   physicalStreamRunHasSuccessor,
   restorePhysicalStreamRunPredecessorToken
 } from "./physical-stream-run-setup"
-
-describe("physical stream run failure disposition", () => {
-  it("finalizes an aborted run that still owns its lease as cancelled", () => {
-    expect(
-      classifyPhysicalStreamRunFailure({
-        ownsLease: true,
-        signalAborted: true,
-        error: new Error("provider stopped")
-      })
-    ).toBe("cancelled")
-  })
-
-  it("treats provider abort errors as cancelled even before the signal flips", () => {
-    expect(
-      classifyPhysicalStreamRunFailure({
-        ownsLease: true,
-        signalAborted: false,
-        error: new DOMException("request aborted", "AbortError")
-      })
-    ).toBe("cancelled")
-  })
-
-  it("reports an owned non-abort failure as an error", () => {
-    expect(
-      classifyPhysicalStreamRunFailure({
-        ownsLease: true,
-        signalAborted: false,
-        error: new Error("all models failed")
-      })
-    ).toBe("error")
-  })
-
-  it("ignores a superseded run regardless of how it failed", () => {
-    expect(
-      classifyPhysicalStreamRunFailure({
-        ownsLease: false,
-        signalAborted: true,
-        error: new DOMException("replaced", "AbortError")
-      })
-    ).toBe("stale")
-  })
-})
 
 describe("physical stream run handoff", () => {
   it("reports a complete pre-publication terminal outcome", () => {

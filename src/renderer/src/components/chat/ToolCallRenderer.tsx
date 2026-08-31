@@ -48,6 +48,7 @@ interface ToolCallRendererProps {
   isError?: boolean
   status?: ToolCallStatus
   needsApproval?: boolean
+  searchableSummary?: string
   showApprovalButtons?: boolean
   onApprovalDecision?: (
     decision: "approve" | "approve_session" | "approve_permanent" | "reject" | "edit"
@@ -399,6 +400,7 @@ export function ToolCallRenderer({
   isError,
   status,
   needsApproval,
+  searchableSummary,
   showApprovalButtons = true,
   onApprovalDecision,
   retryReason,
@@ -418,18 +420,18 @@ export function ToolCallRenderer({
   }
 
   const Icon = TOOL_ICONS[toolCall.name] || Terminal
-  const label = getToolLabel(toolCall.name)
+  const label = getToolLabel(toolCall.name, { args: toolCall.args })
   const isPanelSynced = PANEL_SYNCED_TOOLS.has(toolCall.name)
-  const effectiveStatus: ToolCallStatus =
+  const statusBadge = getStatusBadge(
     status ||
-    (needsApproval
-      ? "awaiting_approval"
-      : result !== undefined
-        ? (isError ? "failed" : "completed")
-        : isStreaming
-          ? "running"
-          : "interrupted")
-  const statusBadge = getStatusBadge(effectiveStatus)
+      (needsApproval
+        ? "awaiting_approval"
+        : result !== undefined
+          ? "completed"
+          : isStreaming
+            ? "running"
+            : "interrupted")
+  )
 
   const handleReject = (e: React.MouseEvent): void => {
     e.stopPropagation()
@@ -831,9 +833,14 @@ export function ToolCallRenderer({
           className={cn("size-4 shrink-0", needsApproval ? "text-amber-500" : "text-status-info")}
         />
 
-        <span className="text-xs font-medium shrink-0">{label}</span>
+        <span
+          data-chat-search-text={searchableSummary ? true : undefined}
+          className="text-xs font-medium min-w-0 truncate text-left"
+        >
+          {searchableSummary ?? label}
+        </span>
 
-        {displayArg && (
+        {!searchableSummary && displayArg && (
           <span className="flex-1 truncate text-left text-xs text-muted-foreground font-mono">
             {displayArg}
           </span>
