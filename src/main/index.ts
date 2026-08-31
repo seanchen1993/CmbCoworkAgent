@@ -1,4 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, shell } from "electron"
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  powerSaveBlocker,
+  shell
+} from "electron"
 import {
   isBrowserNativeMessagingHostLaunch,
   runBrowserNativeMessagingHost
@@ -267,11 +276,21 @@ import {
 import { registerWorkflowHandlers } from "./ipc/workflows"
 import { registerThreadHandlers } from "./ipc/threads"
 import { registerModelHandlers } from "./ipc/models"
+import { registerWorkspaceFilePreviewHandlers } from "./ipc/file-preview"
+import { closeWorkspaceFilePreviewWorker } from "./workspace-file-preview/client"
+import { closeFileAttachmentParserWorker } from "./file-attachment-parser/client"
+import {
+  closeWorkspaceFilePreviewProtocol,
+  registerWorkspaceFilePreviewProtocol,
+  registerWorkspaceFilePreviewScheme
+} from "./workspace-file-preview/media-protocol"
 import { registerSkillsHandlers } from "./ipc/skills"
+import { closeSkillPluginCatalogWorker } from "./skill-plugin-catalog/client"
 import { registerMcpHandlers } from "./ipc/mcp"
 import { registerScheduledTaskHandlers } from "./ipc/scheduled-tasks"
 import { registerHeartbeatHandlers } from "./ipc/heartbeat"
 import { registerMemoryHandlers } from "./ipc/memory"
+import { closeMemoryCatalogWorker } from "./memory-catalog/client"
 import { registerTaskMmdHandlers } from "./ipc/task-mmd"
 import { registerGitHandlers } from "./ipc/git"
 import { registerPluginHandlers } from "./ipc/plugins"
@@ -279,11 +298,13 @@ import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
 import { registerHooksHandlers } from "./ipc/hooks"
+import { closeHookCatalogWorker } from "./hook-catalog/client"
 import { flushHookLogs, pruneOldHookLogs } from "./hooks/persistence"
 import { registerTerminalHandlers, disposeAllTerminals } from "./ipc/terminal"
 import { registerCodeExecToolsHandlers } from "./ipc/code-exec-tools"
 import { registerRoutingHandlers } from "./ipc/routing"
 import { registerDashboardHandlers } from "./ipc/dashboard"
+import { closeDashboardEsWorker } from "./services/dashboard-es-client"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
@@ -292,7 +313,15 @@ import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
 import { registerTaskCardHandlers } from "./ipc/task-cards"
 import { registerManagedLinkHandlers } from "./ipc/managed-links"
-import { stopAllHarnessWatchRefs } from "./harness-board/watch-ref-watcher"
+import {
+  closeHarnessWatchRefWorker,
+  stopAllHarnessWatchRefs
+} from "./harness-board/watch-ref-watcher"
+import { closeHarnessAdapterDetailWorker } from "./harness-board/adapter-detail-client"
+import { closeHarnessCatalogWorker } from "./harness-board/catalog-client"
+import { closeHarnessKnowledgePreviewWorker } from "./harness-board/knowledge-preview-client"
+import { closeHarnessEnterpriseProjectionWorker } from "./harness-board/enterprise-projection-client"
+import { closeHarnessJsonCodecWorker } from "./harness-board/json-codec-client"
 import { registerUserInputHandlers } from "./ipc/user-input"
 import { registerBuiltinRobotHandlers } from "./ipc/builtin-robot"
 import { registerBuiltinBrowserIpc } from "./ipc/browser"
@@ -302,6 +331,7 @@ import {
 } from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
 import {
+  flushTraceWriteQueue,
   flushPendingTraceReports,
   hasPendingTraceReports,
   initializeTraceStorageSecurity,
@@ -315,7 +345,14 @@ import {
   startRegisteredGitHookEventSync,
   stopRegisteredGitHookEventSync
 } from "./services/git-hook-service"
-import { getAllThreads, initializeDatabase, flush } from "./db"
+import { getAllThreadSummaries, initializeDatabase, flush } from "./db"
+import { closeThreadMessageHydrationWorker } from "./thread-message-hydration/client"
+import { closeCheckpointRuntimeProjectionWorker } from "./checkpointer/runtime-projection-client"
+import { closeThreadMetadataHydrationWorker } from "./thread-metadata-hydration/client"
+import { closeAllWorkspaceFileScans } from "./workspace-file-scan/manager"
+import { stopAllWatching } from "./services/workspace-watcher"
+import { closeLegacySubagentTranscriptMigrations } from "./legacy-subagent-migration/coordinator"
+import { closeSubagentTranscriptStartupWorker } from "./subagent-transcript-startup/client"
 import {
   hasActiveScheduledTaskRuns,
   startScheduler,
@@ -362,6 +399,10 @@ import {
   markPetStartupReady,
   registerPetHandlers
 } from "./pet"
+
+// Custom schemes must be declared before app readiness. The handler itself is
+// installed after readiness, together with the IPC endpoints below.
+registerWorkspaceFilePreviewScheme()
 
 let mainWindow: BrowserWindow | null = null
 let loginWindow: BrowserWindow | null = null
@@ -467,14 +508,16 @@ function applyMacDockIcon(): void {
 
   // 宠物透明窗口会额外创建 BrowserWindow；macOS 下重复应用 Dock 图标可避免开发态图标被重置。
   app.dock.show()
-  const iconPath = getFirstExistingPath([
-    ...(isDev ? [getDevMacDockIconPath()] : []),
-    join(__dirname, "../../resources/icon.png"),
-    join(app.getAppPath(), "resources/icon.png"),
-    join(__dirname, "../resources/icon.png"),
-    join(app.getAppPath(), "build/icon.png"),
-    join(process.cwd(), "build/icon.png")
-  ].filter((path): path is string => Boolean(path)))
+  const iconPath = getFirstExistingPath(
+    [
+      ...(isDev ? [getDevMacDockIconPath()] : []),
+      join(__dirname, "../../resources/icon.png"),
+      join(app.getAppPath(), "resources/icon.png"),
+      join(__dirname, "../resources/icon.png"),
+      join(app.getAppPath(), "build/icon.png"),
+      join(process.cwd(), "build/icon.png")
+    ].filter((path): path is string => Boolean(path))
+  )
 
   if (isDev) {
     console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
@@ -649,8 +692,7 @@ function createWindow(): void {
   // mid-turn reload/reconnect contract, so block browser refresh shortcuts.
   mainWindow.webContents.on("before-input-event", (event, input) => {
     const isRefreshShortcut =
-      input.key === "F5" ||
-      ((input.meta || input.control) && input.key.toLowerCase() === "r")
+      input.key === "F5" || ((input.meta || input.control) && input.key.toLowerCase() === "r")
     if (isRefreshShortcut) event.preventDefault()
   })
 
@@ -662,14 +704,17 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    clearCloseToTrayPromptState()
-    console.error("[Main] Renderer failed to load:", {
-      errorCode,
-      errorDescription,
-      validatedURL
-    })
-  })
+  mainWindow.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL) => {
+      clearCloseToTrayPromptState()
+      console.error("[Main] Renderer failed to load:", {
+        errorCode,
+        errorDescription,
+        validatedURL
+      })
+    }
+  )
 
   mainWindow.webContents.on("did-start-loading", () => {
     clearCloseToTrayPromptState()
@@ -702,7 +747,7 @@ function createWindow(): void {
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
       mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
-    }else{
+    } else {
       mainWindow.loadURL(renderUrl)
     }
   }
@@ -771,7 +816,7 @@ function collectRecentWorkspacePathsForSandboxPrewarm(): string[] {
   const workspaces: string[] = []
   const seen = new Set<string>()
 
-  for (const thread of getAllThreads().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
+  for (const thread of getAllThreadSummaries().slice(0, STARTUP_SANDBOX_PREWARM_WORKSPACE_LIMIT)) {
     if (!thread.metadata) continue
     try {
       const metadata = JSON.parse(thread.metadata)
@@ -820,9 +865,7 @@ if (browserNativeMessagingHostLaunch) {
   app.whenReady().then(async () => {
     configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
     configureWorkflowWorktreeTimeoutMinutes(getStoredWorkflowWorktreeTimeoutMinutes())
-    configureWorkflowWorktreeRemoveTimeoutMinutes(
-      getStoredWorkflowWorktreeRemoveTimeoutMinutes()
-    )
+    configureWorkflowWorktreeRemoveTimeoutMinutes(getStoredWorkflowWorktreeRemoveTimeoutMinutes())
 
     // Set app user model id for windows
     if (process.platform === "win32") {
@@ -836,52 +879,58 @@ if (browserNativeMessagingHostLaunch) {
       applyMacDockIcon
     })
 
-    try {
-      await flushLogs()
-      const logRedaction = initializeLogRedaction()
-      if (logRedaction.failedFiles > 0) {
+    // Historical migration is background maintenance. New writes are already
+    // redacted and the logging layer serializes migration against per-file flush,
+    // so window creation never waits for old log discovery or rewriting.
+    void initializeLogRedaction()
+      .then((logRedaction) => {
+        if (logRedaction.failedFiles > 0) {
+          console.warn(
+            `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+          )
+        } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
+          console.log(
+            `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
+          )
+        }
+      })
+      .catch((error) => {
         console.warn(
-          `[Main] Historical log redaction incomplete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}, failed=${logRedaction.failedFiles}`
+          `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
         )
-      } else if (!logRedaction.alreadyComplete && logRedaction.redactedFiles > 0) {
-        console.log(
-          `[Main] Historical log redaction complete: scanned=${logRedaction.scannedFiles}, redacted=${logRedaction.redactedFiles}`
-        )
-      }
-    } catch (error) {
-      console.warn(
-        `[Main] Historical log redaction failed: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+      })
 
-    try {
-      const traceStorage = initializeTraceStorageSecurity()
-      if (!traceStorage.ready) {
+    // New encrypted writes are safe immediately; legacy inventory/migration is
+    // resumable background maintenance and must not delay first-window startup.
+    void initializeTraceStorageSecurity()
+      .then((traceStorage) => {
+        if (!traceStorage.ready) {
+          console.warn(
+            `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+          )
+        } else if (traceStorage.mode === "plaintext") {
+          console.warn(
+            "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
+          )
+        } else if (traceStorage.migrationSkipped) {
+          console.log(
+            `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
+          )
+        } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
+          console.warn(
+            `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
+          )
+        } else {
+          console.log(
+            `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
+          )
+        }
+      })
+      .catch((error) => {
         console.warn(
-          `[Main] Encrypted trace storage unavailable; local trace writes will fail closed: ${traceStorage.reason ?? "unknown reason"}`
+          `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
         )
-      } else if (traceStorage.mode === "plaintext") {
-        console.warn(
-          "[Main] Trace storage is explicitly configured as plaintext; do not use this mode with sensitive data"
-        )
-      } else if (traceStorage.migrationSkipped) {
-        console.log(
-          `[Main] Trace storage mode=${traceStorage.mode}, migration=already-complete, failed=0`
-        )
-      } else if (traceStorage.failedFiles > 0 || traceStorage.reason) {
-        console.warn(
-          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=${traceStorage.failedFiles}: ${traceStorage.reason ?? "some legacy files could not be protected"}`
-        )
-      } else {
-        console.log(
-          `[Main] Trace storage mode=${traceStorage.mode}, migrated=${traceStorage.migratedFiles}, alreadyProtected=${traceStorage.protectedFiles}, failed=0`
-        )
-      }
-    } catch (error) {
-      console.warn(
-        `[Main] Trace storage initialization failed; local trace writes will fail closed: ${error instanceof Error ? error.message : String(error)}`
-      )
-    }
+      })
 
     // Default open or close DevTools by F12 in development
     if (isDev) {
@@ -928,6 +977,8 @@ if (browserNativeMessagingHostLaunch) {
     registerWorkflowHandlers(ipcMain)
     registerThreadHandlers(ipcMain)
     registerModelHandlers(ipcMain)
+    registerWorkspaceFilePreviewHandlers(ipcMain)
+    registerWorkspaceFilePreviewProtocol()
     registerSkillsHandlers(ipcMain)
     registerMcpHandlers(ipcMain)
     registerScheduledTaskHandlers(ipcMain)
@@ -1237,14 +1288,19 @@ if (browserNativeMessagingHostLaunch) {
             contextIsolation: true,
             nodeIntegration: false,
             webviewTag: true,
-            preload: join(__dirname, "../preload/index.js"),
-          },
+            preload: join(__dirname, "../preload/index.js")
+          }
         })
       }
-      loginWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-        "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-        "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-        "&response_type=code")
+      loginWindow.loadURL(
+        `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+          "&redirect_uri=" +
+          encodeURIComponent(
+            `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+          ) +
+          "&response_type=code"
+      )
     })
 
     ipcMain.handle("close-login-window", async () => {
@@ -1252,22 +1308,27 @@ if (browserNativeMessagingHostLaunch) {
         loginWindow.close()
         loginWindow = null
       }
-      if(mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("notify-login-msg",'login')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("notify-login-msg", "login")
       }
     })
 
     ipcMain.handle("open-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
-        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-          "&response_type=code")
+      if (mainWindow && !mainWindow.isDestroyed() && !isDev) {
+        mainWindow.loadURL(
+          `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+            "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+            "&redirect_uri=" +
+            encodeURIComponent(
+              `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+            ) +
+            "&response_type=code"
+        )
       }
     })
 
     ipcMain.handle("close-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
       }
     })
@@ -1431,6 +1492,7 @@ if (browserNativeMessagingHostLaunch) {
     stopHeartbeat()
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
+    stopAllWatching()
     stopRegisteredGitHookEventSync()
     stopBuiltinModelCatalogRefresh()
     stopUpdateChecker()
@@ -1441,11 +1503,69 @@ if (browserNativeMessagingHostLaunch) {
     }
 
     const cleanup = Promise.all([
-      builtinRobotManager.stop().catch((err) =>
-        console.warn("[Main] stop built-in robot error:", err)
-      ),
+      builtinRobotManager
+        .stop()
+        .catch((err) => console.warn("[Main] stop built-in robot error:", err)),
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
+      closeThreadMessageHydrationWorker().catch((err) =>
+        console.warn("[Main] closeThreadMessageHydrationWorker error:", err)
+      ),
+      closeCheckpointRuntimeProjectionWorker().catch((err) =>
+        console.warn("[Main] closeCheckpointRuntimeProjectionWorker error:", err)
+      ),
+      closeThreadMetadataHydrationWorker().catch((err) =>
+        console.warn("[Main] closeThreadMetadataHydrationWorker error:", err)
+      ),
+      closeAllWorkspaceFileScans().catch((err) =>
+        console.warn("[Main] closeAllWorkspaceFileScans error:", err)
+      ),
+      closeWorkspaceFilePreviewWorker().catch((err) =>
+        console.warn("[Main] closeWorkspaceFilePreviewWorker error:", err)
+      ),
+      closeFileAttachmentParserWorker().catch((err) =>
+        console.warn("[Main] closeFileAttachmentParserWorker error:", err)
+      ),
+      closeLegacySubagentTranscriptMigrations().catch((err) =>
+        console.warn("[Main] closeLegacySubagentTranscriptMigrations error:", err)
+      ),
+      closeSubagentTranscriptStartupWorker().catch((err) =>
+        console.warn("[Main] closeSubagentTranscriptStartupWorker error:", err)
+      ),
+      closeHarnessAdapterDetailWorker().catch((err) =>
+        console.warn("[Main] closeHarnessAdapterDetailWorker error:", err)
+      ),
+      closeHarnessCatalogWorker().catch((err) =>
+        console.warn("[Main] closeHarnessCatalogWorker error:", err)
+      ),
+      closeHarnessKnowledgePreviewWorker().catch((err) =>
+        console.warn("[Main] closeHarnessKnowledgePreviewWorker error:", err)
+      ),
+      closeHarnessEnterpriseProjectionWorker().catch((err) =>
+        console.warn("[Main] closeHarnessEnterpriseProjectionWorker error:", err)
+      ),
+      closeHarnessJsonCodecWorker().catch((err) =>
+        console.warn("[Main] closeHarnessJsonCodecWorker error:", err)
+      ),
+      closeHarnessWatchRefWorker().catch((err) =>
+        console.warn("[Main] closeHarnessWatchRefWorker error:", err)
+      ),
+      closeDashboardEsWorker().catch((err) =>
+        console.warn("[Main] closeDashboardEsWorker error:", err)
+      ),
+      closeSkillPluginCatalogWorker().catch((err) =>
+        console.warn("[Main] closeSkillPluginCatalogWorker error:", err)
+      ),
+      closeHookCatalogWorker().catch((err) =>
+        console.warn("[Main] closeHookCatalogWorker error:", err)
+      ),
+      closeMemoryCatalogWorker().catch((err) =>
+        console.warn("[Main] closeMemoryCatalogWorker error:", err)
+      ),
+      flushTraceWriteQueue().catch((err) =>
+        console.warn("[Main] flushTraceWriteQueue error:", err)
+      ),
+      Promise.resolve().then(() => closeWorkspaceFilePreviewProtocol()),
       flushHookLogs().catch((err) => console.warn("[Main] flushHookLogs error:", err))
     ]).finally(() => {
       disposeBuiltinBrowserAfterAppCleanup()
@@ -1495,11 +1615,13 @@ if (browserNativeMessagingHostLaunch) {
         // grace period, but never let a stalled disk keep the process alive.
         await Promise.all([
           waitBestEffort(flush(), FORCE_FLUSH_GRACE_MS),
+          waitBestEffort(flushTraceWriteQueue(), FORCE_FLUSH_GRACE_MS),
           waitBestEffort(flushLogs(), FORCE_FLUSH_GRACE_MS)
         ])
         hardExit()
       } else {
         await flush()
+        await flushTraceWriteQueue()
         await flushLogs()
         gracefulExit()
       }

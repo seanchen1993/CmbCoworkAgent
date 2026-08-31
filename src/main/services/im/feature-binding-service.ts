@@ -120,8 +120,7 @@ export class ImFeatureBindingService {
     ) {
       return []
     }
-    return this.dependencies
-      .listProjects()
+    return (await this.dependencies.listProjects())
       .filter(
         (project) =>
           project.lifecycle.status === "active" && project.boardCompatibility.compatible === true
@@ -161,9 +160,9 @@ export class ImFeatureBindingService {
       }
     }
 
-    const project = this.dependencies
-      .listProjects()
-      .find((candidate) => candidate.projectId === projectId)
+    const project = (await this.dependencies.listProjects()).find(
+      (candidate) => candidate.projectId === projectId
+    )
     if (
       !project ||
       project.lifecycle.status !== "active" ||

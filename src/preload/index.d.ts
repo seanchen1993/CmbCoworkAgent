@@ -38,6 +38,10 @@ import type {
   PluginDetail,
   PluginMetadata,
   SkillHookMetadata,
+  HookCatalogPage,
+  HookCatalogPageInput,
+  SkillPluginCatalogPage,
+  SkillPluginCatalogPageInput,
   AgentAutoCommitSettings,
   AgentAutoCommitWorkspaceCard,
   UserInputRequest,
@@ -51,6 +55,17 @@ import type {
   ThreadForkCheckpointForMessageParams,
   ThreadForkParams,
   ThreadForkResponse,
+  ThreadMetadataPatch,
+  ThreadMessageSearchOptions,
+  ThreadMessageSearchPage,
+  ThreadSummaryPage,
+  ThreadSummaryPageOptions,
+  ThreadGroupIdsOptions,
+  ThreadGroupIdsResult,
+  ThreadDeleteOptions,
+  ThreadMessagesPage,
+  ThreadMessagesPageOptions,
+  ThreadLegacyCheckpointBootstrapResult,
   SubagentTranscriptPage,
   SubagentTranscriptBlobExportResult,
   SubagentTranscriptBlobField
@@ -91,6 +106,10 @@ import type {
   HarnessProjectMetadata,
   HarnessProjectMetadataUpdateInput,
   HarnessRunDetailViewModel,
+  HarnessRunArtifactGrantRefreshInput,
+  HarnessRunArtifactGrantRefreshResult,
+  HarnessRunArtifactRevealInput,
+  HarnessRunArtifactRevealResult,
   HarnessDeployUnitMapping,
   HarnessLeanTokenConfig,
   HarnessSkipNodeInput,
@@ -98,6 +117,10 @@ import type {
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent
+} from "../shared/harness-board-types"
+import type {
+  HarnessBoardCatalogPageInput,
+  HarnessBoardCatalogPageResult
 } from "../shared/harness-board-types"
 import type {
   FeatureGateCheckOptions,
@@ -112,6 +135,29 @@ import type {
 import type { GitCommitHistoryRecord } from "../shared/git-commit-history"
 import type { TaskCardsListResult, TaskCardsQuery } from "../shared/task-card-types"
 import type { LocalGenAdoptionLines } from "../shared/adoption-trace-types"
+import type { WorkspaceFilesChangedPayload } from "../shared/workspace-files-changed"
+import type {
+  WorkspaceFileScanOpenResult,
+  WorkspaceFileScanPageResult
+} from "../shared/workspace-file-scan"
+import type {
+  WorkspaceFilePreviewCancelRequest,
+  WorkspaceFilePreviewOpenMediaRequest,
+  WorkspaceFilePreviewOpenMediaResult,
+  WorkspaceFilePreviewReadRequest,
+  WorkspaceFilePreviewReadResult,
+  WorkspaceFilePreviewReleaseRequest
+} from "../shared/workspace-file-preview"
+import type {
+  AttachmentBytesParseRequest,
+  AttachmentFileSelectionResult,
+  AttachmentGrantParseRequest
+} from "../shared/file-attachment"
+import type { ParsedAttachment } from "../main/file-parser"
+import type {
+  SkillPreviewGrantRequest,
+  SkillPreviewGrantResult
+} from "../shared/skill-preview"
 import type {
   BrowserRecordingSession,
   BrowserAttachOptions,
@@ -937,6 +983,7 @@ interface CustomAPI {
         mode: "messages" | "values"
         data: unknown
         workerTurn?: number
+        valuesSnapshotKind?: "full" | "append" | "tail"
       }) => void
     ) => () => void
     onCoordinatorWorkerHook: (threadId: string, callback: (envelope: unknown) => void) => () => void
@@ -949,14 +996,17 @@ interface CustomAPI {
         expectedFocusToken?: string | null
       }
     ) => Promise<void>
-    isCoordinatorModeForced: () => Promise<boolean>
+    isCoordinatorModeForced: (threadId?: string) => Promise<boolean>
     canPreviewSystemPrompt: () => Promise<boolean>
     getSystemPromptPreview: (
       threadId: string
     ) => Promise<{ prompt: string | null; updatedAt: number | null }>
   }
   workflows: {
-    listRuns: (threadId: string) => Promise<unknown[]>
+    listRuns: (
+      threadId: string,
+      options?: { cursor?: string | null; limit?: number }
+    ) => Promise<{ runs: unknown[]; nextCursor: string | null }>
     getRun: (threadId: string, runId: string) => Promise<unknown | null>
     cancelRun: (threadId: string, runId?: string) => Promise<boolean>
     worktreeAction: (
@@ -989,7 +1039,12 @@ interface CustomAPI {
   }
   threads: {
     list: () => Promise<Thread[]>
-    get: (threadId: string) => Promise<Thread | null>
+    listPage: (options?: ThreadSummaryPageOptions) => Promise<ThreadSummaryPage>
+    listGroupIds: (options: ThreadGroupIdsOptions) => Promise<ThreadGroupIdsResult>
+    get: (
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
+    ) => Promise<Thread | null>
     create: (metadata?: Record<string, unknown>) => Promise<Thread>
     fork: (params: ThreadForkParams) => Promise<ThreadForkResponse>
     listForkableCheckpoints: (threadId: string) => Promise<ForkableCheckpoint[]>
@@ -997,8 +1052,12 @@ interface CustomAPI {
       params: ThreadForkCheckpointForMessageParams
     ) => Promise<ForkableCheckpoint | null>
     update: (threadId: string, updates: Partial<Thread>) => Promise<Thread>
+    patchMetadata: (threadId: string, patch: ThreadMetadataPatch) => Promise<Thread>
     mergeThreadValues: (threadId: string, patch: Record<string, unknown>) => Promise<Thread>
-    getSubagentTranscripts: (threadId: string) => Promise<Record<string, unknown>>
+    getSubagentTranscripts: (
+      threadId: string,
+      options?: { requestScope?: "foreground-hydration" }
+    ) => Promise<Record<string, unknown>>
     getSubagentTranscript: (
       threadId: string,
       subagentId: string,
@@ -1015,8 +1074,17 @@ interface CustomAPI {
       threadId: string,
       transcripts: Record<string, unknown>
     ) => Promise<Record<string, unknown>>
-    delete: (threadId: string) => Promise<void>
+    delete: (threadId: string, options?: ThreadDeleteOptions) => Promise<void>
     getMessages: (threadId: string) => Promise<Message[]>
+    getMessagesPage: (
+      threadId: string,
+      options?: ThreadMessagesPageOptions
+    ) => Promise<ThreadMessagesPage>
+    searchMessages: (
+      threadId: string,
+      query: string,
+      options?: ThreadMessageSearchOptions
+    ) => Promise<ThreadMessageSearchPage>
     appendMessages: (threadId: string, messages: Message[]) => Promise<{ count: number }>
     replaceMessageId: (
       threadId: string,
@@ -1029,6 +1097,10 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; error?: string }>
     getHistory: (threadId: string) => Promise<unknown[]>
     getLatestCheckpoint: (threadId: string) => Promise<unknown | null>
+    getLatestCheckpointRuntimeState: (threadId: string) => Promise<unknown | null>
+    bootstrapLegacyCheckpointTranscript: (
+      threadId: string
+    ) => Promise<ThreadLegacyCheckpointBootstrapResult | null>
     getGoalEvents: (
       threadId: string,
       options?: { restore?: boolean; limit?: number }
@@ -1084,6 +1156,12 @@ interface CustomAPI {
     onThreadsChanged: (callback: () => void) => () => void
   }
   models: {
+    getCatalog: () => Promise<{
+      models: ModelConfig[]
+      providers: Provider[]
+      defaultModelId: string
+      routingMode: "auto" | "pinned"
+    }>
     list: () => Promise<ModelConfig[]>
     listProviders: () => Promise<Provider[]>
     getDefault: () => Promise<string>
@@ -1250,7 +1328,7 @@ interface CustomAPI {
     get: (threadId?: string) => Promise<string | null>
     set: (threadId: string | undefined, path: string | null) => Promise<string | null>
     select: (threadId?: string) => Promise<string | null>
-    loadFromDisk: (threadId: string) => Promise<{
+    loadFromDisk: (threadId: string, workspacePath?: string) => Promise<{
       success: boolean
       files: Array<{
         path: string
@@ -1260,52 +1338,46 @@ interface CustomAPI {
       }>
       workspacePath?: string
       error?: string
+      truncated?: boolean
+      continuationAvailable?: boolean
     }>
+    fileScanOpen: (
+      threadId: string,
+      workspacePath?: string
+    ) => Promise<WorkspaceFileScanOpenResult>
+    fileScanNext: (
+      scanId: string,
+      threadId: string,
+      continuation?: string
+    ) => Promise<WorkspaceFileScanPageResult>
+    fileScanCancel: (scanId: string) => Promise<{ success: boolean }>
     ensureWatching: (threadId: string) => Promise<{ success: boolean; restarted?: boolean }>
-    setActiveThread: (threadId: string | null) => Promise<{ success: boolean; restarted?: boolean }>
-    readFile: (
-      threadId: string,
-      filePath: string
-    ) => Promise<{
+    setActiveThread: (threadId: string | null) => Promise<{
       success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
+      restarted?: boolean
+      workspacePath?: string | null
     }>
-    readBinaryFile: (
-      threadId: string,
-      filePath: string
-    ) => Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }>
-    readExternalFile: (token: string) => Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }>
-    readExternalBinaryFile: (token: string) => Promise<{
-      success: boolean
-      content?: string
-      size?: number
-      modified_at?: string
-      error?: string
-    }>
-    requestExternalFileRead: (filePath: string) => Promise<{
-      success: boolean
-      token?: string
-      fileName?: string
-      error?: string
-    }>
-    clearWorktreeContext: (threadId: string) => Promise<void>
+    readFilePreview: (
+      request: WorkspaceFilePreviewReadRequest
+    ) => Promise<WorkspaceFilePreviewReadResult>
+    openMediaPreview: (
+      request: WorkspaceFilePreviewOpenMediaRequest
+    ) => Promise<WorkspaceFilePreviewOpenMediaResult>
+    cancelFilePreview: (
+      request: WorkspaceFilePreviewCancelRequest
+    ) => Promise<{ success: boolean }>
+    releaseFilePreview: (
+      request: WorkspaceFilePreviewReleaseRequest
+    ) => Promise<{ success: boolean }>
+    clearWorktreeContext: (expected: {
+      threadId: string
+      workspacePath: string
+      gitRoot: string
+      branch: string
+    }) => Promise<void>
     saveWorktreeContext: (
       threadId: string,
+      expectedWorkspacePath: string,
       gitRoot: string,
       branch: string,
       baseBranch?: string,
@@ -1439,6 +1511,9 @@ interface CustomAPI {
       hasPendingDiff: boolean
       changedFiles: number
     }>
+    cancelGitPanelReads: (
+      family?: "panel" | "changed-summary" | "summary" | "workspace-probe"
+    ) => Promise<void>
     isGit: (
       folderPath: string,
       options?: { includeWorktrees?: boolean; threadId?: string }
@@ -1460,6 +1535,7 @@ interface CustomAPI {
       error?: string
     }>
     createWorktree: (
+      threadId: string,
       gitRoot: string,
       branch: string
     ) => Promise<{
@@ -1518,7 +1594,7 @@ interface CustomAPI {
       error?: string
     }>
     onFilesChanged: (
-      callback: (data: { threadId: string; workspacePath: string; changeType?: "file" | "meta" }) => void
+      callback: (data: WorkspaceFilesChangedPayload) => void
     ) => () => void
   }
   pet: {
@@ -1539,31 +1615,34 @@ interface CustomAPI {
     deleteCustom: (directoryId: string) => Promise<{ success: boolean; error?: string }>
   }
   file: {
-    parse: (
-      filePath: string,
-      maxLength?: number
-    ) => Promise<{
+    parseSelected: (request: AttachmentGrantParseRequest) => Promise<{
       success: boolean
-      attachment?: {
-        filename: string
-        filePath: string
-        content: string
-        mimeType: string
-        size: number
-        truncated: boolean
-      }
+      attachment?: ParsedAttachment
       error?: string
     }>
-    getFilePath: (file: File) => string
-    select: () => Promise<{ canceled: boolean; filePaths: string[] }>
+    parseBytes: (request: AttachmentBytesParseRequest) => Promise<{
+      success: boolean
+      attachment?: ParsedAttachment
+      error?: string
+    }>
+    select: () => Promise<AttachmentFileSelectionResult>
     selectDirectory: (options?: {
       title?: string
     }) => Promise<{ canceled: boolean; filePaths: string[] }>
     supportedExtensions: () => Promise<string[]>
   }
   skills: {
+    catalog: {
+      read: (
+        input: SkillPluginCatalogPageInput,
+        requestScope: string
+      ) => Promise<SkillPluginCatalogPage>
+      cancel: (requestScope: string) => Promise<void>
+    }
     list: () => Promise<SkillMetadata[]>
     listPlugins: () => Promise<SkillMetadata[]>
+    requestPreviewGrant: (request: SkillPreviewGrantRequest) => Promise<SkillPreviewGrantResult>
+    cancelPreviewGrant: () => Promise<void>
     read: (skillPath: string) => Promise<{ success: boolean; content?: string; error?: string }>
     write: (skillPath: string, content: string) => Promise<{ success: boolean; error?: string }>
     readBinary: (
@@ -1580,6 +1659,7 @@ interface CustomAPI {
     }>
     getDisabled: () => Promise<string[]>
     setDisabled: (skillNames: string[]) => Promise<void>
+    setDisabledState: (skillId: string, disabled: boolean) => Promise<string[]>
     backupForCloudEvolution: (payload: {
       skillPath: string
       candidateId: string
@@ -1643,8 +1723,13 @@ interface CustomAPI {
     importConfig: (params: McpImportConfigApplyRequest) => Promise<McpImportApplyResult>
   }
   memory: {
-    listProjects: (request?: { workspacePath?: string | null }) => Promise<
-      Array<{
+    listProjects: (request?: {
+      workspacePath?: string | null
+      requestScope?: string
+      cursor?: string
+      limit?: number
+    }) => Promise<{
+      items: Array<{
         projectId: string
         displayName: string
         memoryDir: string
@@ -1654,13 +1739,22 @@ interface CustomAPI {
         indexSize: number
         isCurrent: boolean
       }>
-    >
+      nextCursor?: string
+      hasMore: boolean
+      totalCount: number
+      truncated: boolean
+      truncatedReasons: string[]
+      scanStats: { scannedEntries: number; scannedFiles: number; readBytes: number }
+    }>
     listFiles: (request?: {
       scope?: "global" | "project"
       workspacePath?: string | null
       projectId?: string | null
-    }) => Promise<
-      Array<{
+      requestScope?: string
+      cursor?: string
+      limit?: number
+    }) => Promise<{
+      items: Array<{
         name: string
         size: number
         modifiedAt: string
@@ -1669,15 +1763,41 @@ interface CustomAPI {
         description: string | null
         recallCount: number
       }>
-    >
+      nextCursor?: string
+      hasMore: boolean
+      totalCount: number
+      truncated: boolean
+      truncatedReasons: string[]
+      scanStats: { scannedEntries: number; scannedFiles: number; readBytes: number }
+      stats: {
+        fileCount: number
+        totalSize: number
+        indexSize: number
+        enabled: boolean
+        dreamEnabled: boolean
+        dreamState: { lastRunAt: number; sessionsSinceLastRun: number }
+        scope: "global" | "project"
+        memoryDir: string
+        projectId?: string
+        gitRoot?: string
+      }
+    }>
     readFile: (
       name: string,
       request?: {
         scope?: "global" | "project"
         workspacePath?: string | null
         projectId?: string | null
+        requestScope?: string
       }
-    ) => Promise<string>
+    ) => Promise<{
+      content: string
+      bytesRead: number
+      totalBytes: number
+      truncated: boolean
+      truncatedReason?: "response-bytes" | "file-size"
+    }>
+    cancelCatalog: (requestScope?: string) => Promise<void>
     deleteFile: (
       name: string,
       request?: {
@@ -1695,6 +1815,7 @@ interface CustomAPI {
       scope?: "global" | "project"
       workspacePath?: string | null
       projectId?: string | null
+      requestScope?: string
     }) => Promise<{
       fileCount: number
       totalSize: number
@@ -2277,6 +2398,10 @@ interface CustomAPI {
     setTurnThreshold: (value: number) => Promise<void>
   }
   hooks: {
+    catalog: {
+      read: (input: HookCatalogPageInput) => Promise<HookCatalogPage>
+      cancel: (requestScope: string) => Promise<void>
+    }
     list: () => Promise<HookConfig[]>
     skills: {
       list: () => Promise<SkillHookMetadata[]>
@@ -2331,6 +2456,7 @@ interface CustomAPI {
     ) => Promise<FeatureGateCheckResult>
   }
   dashboard: {
+    cancelRequests: (families?: string[]) => Promise<{ cancelled: number }>
     isAllowed: () => Promise<boolean>
     isProjectModeAllowed: () => Promise<boolean>
     isAnalysisAgentAllowed: () => Promise<boolean>
@@ -2522,8 +2648,15 @@ interface CustomAPI {
       options?: DashboardSkillEvalOptions
     ) => Promise<{ success: boolean; data?: unknown; error?: string }>
     userProfiles: (
-      sapIds: string[]
-    ) => Promise<{ success: boolean; data?: unknown; error?: string }>
+      sapIds: string[],
+      options?: {
+        family?:
+          | "dashboard-market"
+          | "project-mode-market"
+          | "harness-market"
+          | "customize-market"
+      }
+    ) => Promise<{ success: boolean; data?: DashboardAllUserItem[]; error?: string }>
     queryAllUser: () => Promise<{
       success: boolean
       data?: DashboardAllUserItem[]
@@ -2635,6 +2768,14 @@ interface CustomAPI {
     ) => Promise<{ success: boolean; data?: LocalGenAdoptionLines[]; error?: string }>
   }
   harnessBoard: {
+    catalogPage: (input: HarnessBoardCatalogPageInput) => Promise<HarnessBoardCatalogPageResult>
+    cancelCatalogRequests: (
+      scope?: "board" | "board-registry" | "board-sidebar" | "board-settings" | "chat-binding"
+    ) => Promise<void>
+    catalog: () => Promise<{
+      projects: HarnessProjectListItem[]
+      registry: HarnessAdapterRegistryItem[]
+    }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
     getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
@@ -2645,6 +2786,7 @@ interface CustomAPI {
     saveLeanTokenConfig: (input: HarnessLeanTokenConfig) => Promise<HarnessLeanTokenConfig>
     syncProjectConstraints: (adapterId: string) => Promise<HarnessProjectConstraintSyncResult>
     getKnowledgePreview: (adapterId: string) => Promise<HarnessKnowledgePreviewResult>
+    cancelKnowledgePreviewRequests: () => Promise<void>
     createProject: (input: HarnessProjectCreateInput) => Promise<HarnessProjectMetadata>
     searchEnterpriseProjects: (
       input: HarnessEnterpriseProjectSearchInput
@@ -2660,6 +2802,9 @@ interface CustomAPI {
       input: HarnessEnterpriseProjectDetailInput
     ) => Promise<HarnessEnterpriseProjectDetailResult>
     getProjectReviews: (input: HarnessProjectReviewInput) => Promise<HarnessProjectReviewResult>
+    cancelEnterpriseRequests: (
+      requestScope: "board-batch" | "selected-project" | "reviews"
+    ) => Promise<void>
     createFeature: (input: HarnessFeatureCreateInput) => Promise<HarnessFeatureCreateResult>
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
@@ -2678,9 +2823,17 @@ interface CustomAPI {
       projectIds: string[],
       options?: { watchRefs?: boolean }
     ) => Promise<Record<string, HarnessProjectDetailViewModel>>
+    stopWatchRefs: (scopeKey?: string) => Promise<void>
     getRunDetail: (projectId: string, slug: string) => Promise<HarnessRunDetailViewModel>
+    refreshRunArtifactGrant: (
+      input: HarnessRunArtifactGrantRefreshInput
+    ) => Promise<HarnessRunArtifactGrantRefreshResult>
+    revealRunArtifact: (
+      input: HarnessRunArtifactRevealInput
+    ) => Promise<HarnessRunArtifactRevealResult>
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
+    cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
   }
   app: {

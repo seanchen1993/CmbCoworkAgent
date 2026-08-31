@@ -10,14 +10,22 @@ import {
   RefreshCw,
   Trash2
 } from "lucide-react"
-import { useState, useEffect, memo } from "react"
+import { useState, useEffect, memo, useCallback, useRef } from "react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { useCurrentThread } from "@/lib/thread-context"
+import { useThreadActions, useThreadStateSelector } from "@/lib/thread-context"
 import { useAppStore } from "@/lib/store"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
+import {
+  loadWorkspaceFilesDeduped,
+  hydrateInitialWorkspaceFiles,
+  markWorkspaceFilesStale,
+  normalizeWorkspaceFileKey,
+  readWorkspacePathWithFallback
+} from "@/lib/workspace-file-load"
+import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 
 interface WorkspacePickerProps {
@@ -33,7 +41,15 @@ function getFolderName(path: string | null | undefined): string | undefined {
   return path?.split(/[\\/]/).filter(Boolean).pop()
 }
 
-function PathRow({ label, path, highlight = false }: { label: string; path: string; highlight?: boolean }): React.JSX.Element {
+function PathRow({
+  label,
+  path,
+  highlight = false
+}: {
+  label: string
+  path: string
+  highlight?: boolean
+}): React.JSX.Element {
   const [hovered, setHovered] = useState(false)
 
   async function handleOpenFolder(): Promise<void> {
@@ -94,14 +110,32 @@ function WorkspacePickerImpl({
   threadId,
   onGitStatusChange
 }: WorkspacePickerProps): React.JSX.Element {
-  const { workspacePath, setWorkspacePath, setWorkspaceFiles, messages } = useCurrentThread(threadId)
+  const workspacePath = useThreadStateSelector(
+    threadId,
+    useCallback((state) => state.workspacePath, [])
+  )
+  const canChangeWorkspace =
+    useThreadStateSelector(
+      threadId,
+      useCallback((state) => canChangeThreadWorkspace(state), [])
+    ) ?? false
+  const threadActions = useThreadActions(threadId)
+  const setWorkspacePath = threadActions?.setWorkspacePath
+  const setWorkspaceFiles = threadActions?.setWorkspaceFiles
   const thread = useAppStore(
     (state) => state.threads.find((candidate) => candidate.thread_id === threadId) ?? null
   )
   const concealWorkspacePath = isRemoteInboxThread(thread)
-  const canChangeWorkspace = messages.length === 0
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
+  const worktreeCreateInFlightRef = useRef(false)
+  const workspacePathRef = useRef(workspacePath)
+  const setWorkspaceFilesRef = useRef(setWorkspaceFiles)
+  const workspaceHydrationEpochRef = useRef(0)
+  workspacePathRef.current = workspacePath
+  setWorkspaceFilesRef.current = setWorkspaceFiles
+  const workspaceHydrationKey = workspacePath ? normalizeWorkspaceFileKey(workspacePath) : ""
+  const workspaceHydrationReady = Boolean(setWorkspaceFiles)
 
   // Git detection state
   const [isGit, setIsGit] = useState(false)
@@ -153,7 +187,52 @@ function WorkspacePickerImpl({
   }
 
   useEffect(() => {
+    const requestedWorkspacePath = workspacePathRef.current
+    const setCurrentWorkspaceFiles = setWorkspaceFilesRef.current
+    if (!requestedWorkspacePath || !setCurrentWorkspaceFiles || !workspaceHydrationKey) return
+
+    const hydrationEpoch = workspaceHydrationEpochRef.current + 1
+    workspaceHydrationEpochRef.current = hydrationEpoch
+    const scanController = new AbortController()
+
+    // ThreadState can still be empty on the first render while its persisted
+    // metadata is loading. Key this effect by the normalized path so the later
+    // null -> path transition starts exactly one hydration without subscribing
+    // to the large workspaceFiles array or restarting on file-state updates.
+    void hydrateInitialWorkspaceFiles(threadId, requestedWorkspacePath, {
+      signal: scanController.signal,
+      isCurrentWorkspace: () =>
+        workspaceHydrationEpochRef.current === hydrationEpoch &&
+        normalizeWorkspaceFileKey(workspacePathRef.current ?? "") === workspaceHydrationKey,
+      setWorkspaceFiles: setCurrentWorkspaceFiles
+    }).catch((error) => {
+      if (
+        workspaceHydrationEpochRef.current === hydrationEpoch &&
+        (!(error instanceof Error) || error.name !== "AbortError")
+      ) {
+        console.error("[WorkspacePicker] Failed to load workspace files:", error)
+      }
+    })
+
+    return () => {
+      if (workspaceHydrationEpochRef.current === hydrationEpoch) {
+        workspaceHydrationEpochRef.current += 1
+      }
+      scanController.abort()
+    }
+  }, [threadId, workspaceHydrationKey, workspaceHydrationReady])
+
+  useEffect(() => {
     let cancelled = false
+    const scanController = new AbortController()
+    const requestedWorkspacePath = workspacePathRef.current
+
+    const readWorkspacePath = (): Promise<string | null> =>
+      readWorkspacePathWithFallback({
+        read: () => window.api.workspace.get(threadId),
+        getFallback: () => workspacePathRef.current ?? requestedWorkspacePath,
+        signal: scanController.signal
+      })
 
     async function loadWorkspace(): Promise<void> {
       if (!threadId) return
@@ -170,20 +249,34 @@ function WorkspacePickerImpl({
       setWorktreeError(null)
       setWorktreeList([])
 
-      const p = await window.api.workspace.get(threadId)
+      const loadedPath = await readWorkspacePath()
       if (cancelled) return
-      setWorkspacePath(p)
+      const workspaceChangedWhileReading =
+        normalizeWorkspaceFileKey(workspacePathRef.current ?? "") !==
+        normalizeWorkspaceFileKey(requestedWorkspacePath ?? "")
+      // Folder/worktree selection can finish while the initial metadata read is in flight.
+      // Never let that older response replace the newer choice; hydrate the current path instead.
+      const p = workspaceChangedWhileReading ? workspacePathRef.current : loadedPath
+      if (!workspaceChangedWhileReading) {
+        workspacePathRef.current = p
+        setWorkspacePath?.(p)
+      }
       if (p) {
         const gitInfo = await window.api.workspace.isGit(p, { includeWorktrees: false, threadId })
-        if (cancelled) return
+        if (
+          cancelled ||
+          normalizeWorkspaceFileKey(workspacePathRef.current ?? "") !== normalizeWorkspaceFileKey(p)
+        ) {
+          return
+        }
         setIsGit(gitInfo.isGit)
         setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
         setIsWorktreePath(gitInfo.isWorktreePath)
         onGitStatusChange?.(threadId, gitInfo.isGit)
 
-        // Load worktree context from thread metadata
-        const thread = await window.api.threads.get(threadId)
-        if (cancelled) return
+        // The bounded task directory already contains the worktree projection. Reuse it instead
+        // of issuing a second metadata hydration request on every ChatContainer remount.
+        const thread = useAppStore.getState().threads.find((item) => item.thread_id === threadId)
         const meta = thread?.metadata as Record<string, unknown> | undefined
         if (meta?.isWorktree && meta.gitRoot && meta.worktreeBranch) {
           setIsWorktree(true)
@@ -196,9 +289,16 @@ function WorkspacePickerImpl({
         onGitStatusChange?.(threadId, false)
       }
     }
-    loadWorkspace()
+    void loadWorkspace().catch((error) => {
+      if (cancelled || (error instanceof Error && error.name === "AbortError")) return
+      console.error("[WorkspacePicker] Failed to load workspace:", error)
+    })
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      scanController.abort()
+      void window.api.workspace.cancelGitPanelReads("workspace-probe").catch(() => undefined)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
 
@@ -216,9 +316,13 @@ function WorkspacePickerImpl({
   }, [canChangeWorkspace, isWorktree])
 
   async function handleSelectFolder(): Promise<void> {
+    if (!setWorkspacePath || !setWorkspaceFiles) return
     const selection = await selectWorkspaceFolder(
       threadId,
-      setWorkspacePath,
+      (path) => {
+        workspacePathRef.current = path
+        setWorkspacePath(path)
+      },
       setWorkspaceFiles,
       setLoading,
       setOpen
@@ -226,7 +330,10 @@ function WorkspacePickerImpl({
     if (selection.status !== "success") return
     const newPath = await window.api.workspace.get(threadId)
     if (newPath) {
-      const gitInfo = await window.api.workspace.isGit(newPath, { includeWorktrees: false, threadId })
+      const gitInfo = await window.api.workspace.isGit(newPath, {
+        includeWorktrees: false,
+        threadId
+      })
       setIsGit(gitInfo.isGit)
       setGitRoot(gitInfo.isGit ? gitInfo.gitRoot : null)
       setIsWorktreePath(gitInfo.isWorktreePath)
@@ -242,34 +349,34 @@ function WorkspacePickerImpl({
   }
 
   async function handleCreateWorktree(): Promise<void> {
+    // React state is not visible until the next render, so a button click and
+    // Enter keydown in the same tick need a synchronous re-entry guard.
+    if (worktreeCreateInFlightRef.current) return
     if (!canChangeWorkspace) {
       toast.error(WORKSPACE_SWITCH_LOCKED_MESSAGE)
       return
     }
     if (!gitRoot || !branchName.trim()) return
+    worktreeCreateInFlightRef.current = true
     setLoading(true)
     setWorktreeError(null)
     try {
-      const result = await window.api.workspace.createWorktree(gitRoot, branchName.trim())
+      const result = await window.api.workspace.createWorktree(threadId, gitRoot, branchName.trim())
       if (!result.success || !result.path || !result.branch) {
         setWorktreeError(result.error ?? "创建失败")
         return
       }
-      await window.api.workspace.set(threadId, result.path)
-      await window.api.workspace.saveWorktreeContext(
-        threadId,
-        gitRoot,
-        result.branch,
-        result.baseBranch,
-        result.baseCommit
-      )
-      setWorkspacePath(result.path)
+      setWorkspacePath?.(result.path)
+      workspacePathRef.current = result.path
       setIsWorktree(true)
       setWorktreeBranch(result.branch)
       setWorktreeBaseBranch(result.baseBranch ?? null)
       setMode("worktree")
-      const diskResult = await window.api.workspace.loadFromDisk(threadId)
-      if (diskResult.success && diskResult.files) setWorkspaceFiles(diskResult.files)
+      markWorkspaceFilesStale(threadId, result.path)
+      const diskResult = await loadWorkspaceFilesDeduped(threadId, result.path, {
+        requestTrailingRescan: true
+      })
+      if (diskResult.success && diskResult.files) setWorkspaceFiles?.(diskResult.files)
       setCreatingWorktree(false)
       setBranchName("")
       await refreshWorktreeList(gitRoot)
@@ -277,6 +384,7 @@ function WorkspacePickerImpl({
     } catch (e) {
       setWorktreeError(e instanceof Error ? e.message : "创建失败")
     } finally {
+      worktreeCreateInFlightRef.current = false
       setLoading(false)
     }
   }
@@ -333,16 +441,19 @@ function WorkspacePickerImpl({
   const workspaceName = concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : folderName
 
   return (
-    <Popover open={open} onOpenChange={(v) => {
-      setOpen(v)
-      if (!v) {
-        setBranchName("")
-        setWorktreeError(null)
-      } else {
-        // Restore worktree creation form if mode was already set to worktree
-        if (mode === "worktree" && !isWorktree && canChangeWorkspace) setCreatingWorktree(true)
-      }
-    }}>
+    <Popover
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v)
+        if (!v) {
+          setBranchName("")
+          setWorktreeError(null)
+        } else {
+          // Restore worktree creation form if mode was already set to worktree
+          if (mode === "worktree" && !isWorktree && canChangeWorkspace) setCreatingWorktree(true)
+        }
+      }}
+    >
       <PopoverTrigger asChild>
         <Button
           variant="ghost"
@@ -506,8 +617,12 @@ function WorkspacePickerImpl({
                         {worktreeList.map((item) => (
                           <div key={item.path} className="px-2 py-1.5 flex items-center gap-2">
                             <div className="min-w-0 flex-1">
-                              <div className="text-[11px] truncate text-foreground">{item.branch}</div>
-                              <div className="text-[10px] truncate text-muted-foreground">{item.path}</div>
+                              <div className="text-[11px] truncate text-foreground">
+                                {item.branch}
+                              </div>
+                              <div className="text-[10px] truncate text-muted-foreground">
+                                {item.path}
+                              </div>
                             </div>
                             {item.isMain ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
@@ -559,7 +674,11 @@ function WorkspacePickerImpl({
                   onClick={handleSelectFolder}
                   disabled={loading}
                 >
-                  {loading ? <Loader2 className="size-3 mr-1.5 animate-spin" /> : <Folder className="size-3.5 mr-1.5" />}
+                  {loading ? (
+                    <Loader2 className="size-3 mr-1.5 animate-spin" />
+                  ) : (
+                    <Folder className="size-3.5 mr-1.5" />
+                  )}
                   更换文件夹
                 </Button>
               )}

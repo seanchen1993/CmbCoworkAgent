@@ -1,17 +1,16 @@
 /**
  * 是“输入时”的逻辑。它负责在用户输入框里识别 @ 文件语法，计算当前光标是不是在 mention 里，给 popover 提供候选文件列表，并处理选择状态、关闭状态这些交互。
  */
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { isBinaryFile } from "@/lib/file-types"
 import type { FileInfo } from "@/types"
+import {
+  searchWorkspaceMentionFilesProgressively,
+  type WorkspaceMentionSearchPage,
+  type AtFileSuggestion
+} from "./at-file-mention-index"
 
-export type AtFileSuggestion = {
-  id: string
-  displayPath: string
-  workspaceFilePath: string
-  filename: string
-  size?: number
-}
+export type { AtFileSuggestion } from "./at-file-mention-index"
 
 export type AtFilePopoverMode =
   | { kind: "closed" }
@@ -24,40 +23,53 @@ export type AtFilePopoverMode =
       suggestions: AtFileSuggestion[]
     }
 
+type ActiveAtFileToken =
+  | { kind: "closed" }
+  | {
+      kind: "at-file"
+      key: string
+      query: string
+      startPos: number
+      endPos: number
+      quoted: boolean
+    }
+
 const MAX_SUGGESTIONS = 15
 const QUOTED_AT_RE = /(?:^|\s)@"([^"]*)"?$/u
 const PLAIN_AT_RE = /(?:^|\s)@([^\s"]*)$/u
+const PROGRESSIVE_SEARCH_DEBOUNCE_MS = 120
+
+function waitForProgressiveSearchIntent(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    const error = new Error("Workspace mention search was cancelled")
+    error.name = "AbortError"
+    return Promise.reject(error)
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, PROGRESSIVE_SEARCH_DEBOUNCE_MS)
+    const onAbort = (): void => {
+      clearTimeout(timeout)
+      signal.removeEventListener("abort", onAbort)
+      const error = new Error("Workspace mention search was cancelled")
+      error.name = "AbortError"
+      reject(error)
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
+}
 
 // @文件统一复用共享的文本/二进制文件识别，避免和预览侧扩展名列表漂移。
 export function isSupportedWorkspaceMentionFilePath(filePath: string): boolean {
   return !isBinaryFile(basename(filePath.replace(/\\/g, "/")))
 }
 
-// 把磁盘路径统一成 UI 可展示/可比对的格式，避免 Windows 反斜杠和多余前缀干扰匹配。
-function normalizeWorkspaceDisplayPath(filePath: string): string {
-  return filePath.replace(/\\/g, "/").replace(/^\/+/, "")
-}
-
 // 提取最后一级文件名，用于排序和模糊匹配时优先对齐文件名而不是整条路径。
 function basename(displayPath: string): string {
   const parts = displayPath.split("/")
   return parts[parts.length - 1] || displayPath
-}
-
-// 先按“文件名优先”再按“整条路径优先”做简单打分，保证候选列表更符合用户直觉。
-function scoreSuggestion(displayPath: string, query: string): number {
-  const normalizedPath = displayPath.toLowerCase()
-  const normalizedName = basename(displayPath).toLowerCase()
-  const normalizedQuery = query.toLowerCase()
-
-  if (!normalizedQuery) return displayPath.length
-  if (normalizedPath === normalizedQuery) return 0
-  if (normalizedName === normalizedQuery) return 1
-  if (normalizedName.startsWith(normalizedQuery)) return 2
-  if (normalizedPath.startsWith(normalizedQuery)) return 3
-  if (normalizedName.includes(normalizedQuery)) return 4
-  if (normalizedPath.includes(normalizedQuery)) return 5
-  return Number.POSITIVE_INFINITY
 }
 
 // 从当前光标位置向前回溯，判断是否正处在 @文件 片段中，
@@ -168,14 +180,22 @@ export function useAtFileMentions(params: {
   input: string
   cursorOffset: number
   workspaceFiles: FileInfo[]
+  loadMoreWorkspaceFiles?: (
+    signal: AbortSignal
+  ) => Promise<WorkspaceMentionSearchPage | null>
   disabled?: boolean
 }) {
-  const { input, cursorOffset, workspaceFiles, disabled = false } = params
+  const {
+    input,
+    cursorOffset,
+    workspaceFiles,
+    loadMoreWorkspaceFiles,
+    disabled = false
+  } = params
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [dismissedKey, setDismissedKey] = useState<string | null>(null)
 
-  // 这里专门负责“输入时”的交互态：识别光标所在的 @文件 token，生成候选项并控制弹窗显示。
-  const mode = useMemo<AtFilePopoverMode>(() => {
+  const activeToken = useMemo<ActiveAtFileToken>(() => {
     if (disabled) return { kind: "closed" }
 
     const token = extractAtFileToken(input, cursorOffset)
@@ -184,44 +204,71 @@ export function useAtFileMentions(params: {
     const query = normalizeAtFileMentionPath(token.query)
     const modeKey = `${token.startPos}:${token.endPos}:${token.quoted ? "q" : "p"}:${query}`
     if (dismissedKey === modeKey) return { kind: "closed" }
-
-  const suggestions = workspaceFiles
-      // 输入阶段先把明显不支持的文件类型过滤掉，避免用户选中后又在发送阶段才发现失效。
-      .filter((file) => !file.is_dir && isSupportedWorkspaceMentionFilePath(file.path))
-      .map((file) => {
-        const displayPath = normalizeWorkspaceDisplayPath(file.path)
-        return {
-          id: file.path,
-          displayPath,
-          workspaceFilePath: file.path.startsWith("/") ? file.path : `/${displayPath}`,
-          filename: basename(displayPath),
-          size: file.size
-        } satisfies AtFileSuggestion
-      })
-      .map((suggestion) => ({
-        suggestion,
-        score: scoreSuggestion(suggestion.displayPath, query)
-      }))
-      .filter((entry) => entry.score !== Number.POSITIVE_INFINITY)
-      .sort((left, right) => {
-        if (left.score !== right.score) return left.score - right.score
-        if (left.suggestion.displayPath.length !== right.suggestion.displayPath.length) {
-          return left.suggestion.displayPath.length - right.suggestion.displayPath.length
-        }
-        return left.suggestion.displayPath.localeCompare(right.suggestion.displayPath)
-      })
-      .slice(0, MAX_SUGGESTIONS)
-      .map((entry) => entry.suggestion)
-
     return {
       kind: "at-file",
+      key: modeKey,
       query,
       startPos: token.startPos,
       endPos: token.endPos,
-      quoted: token.quoted,
+      quoted: token.quoted
+    }
+  }, [cursorOffset, disabled, dismissedKey, input])
+
+  const [suggestionResult, setSuggestionResult] = useState<{
+    key: string
+    files: FileInfo[]
+    suggestions: AtFileSuggestion[]
+  } | null>(null)
+
+  useEffect(() => {
+    if (activeToken.kind !== "at-file") return
+    const controller = new AbortController()
+    let delayedContinuation = true
+    void searchWorkspaceMentionFilesProgressively(workspaceFiles, activeToken.query, {
+      limit: MAX_SUGGESTIONS,
+      signal: controller.signal,
+      loadMore: loadMoreWorkspaceFiles
+        ? async (signal) => {
+            if (delayedContinuation) {
+              delayedContinuation = false
+              await waitForProgressiveSearchIntent(signal)
+            }
+            return loadMoreWorkspaceFiles(signal)
+          }
+        : undefined,
+      onUpdate: ({ suggestions }) => {
+        if (!controller.signal.aborted) {
+          setSuggestionResult({ key: activeToken.key, files: workspaceFiles, suggestions })
+        }
+      }
+    }).then(
+      () => undefined,
+      (error) => {
+        if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+          return
+        }
+        console.warn("[AtFileMentions] Failed to build suggestions:", error)
+      },
+    )
+    return () => controller.abort()
+  }, [activeToken, loadMoreWorkspaceFiles, workspaceFiles])
+
+  // 文件索引与 top-N 匹配都在可取消的分片任务中完成；输入渲染只消费结果。
+  const mode = useMemo<AtFilePopoverMode>(() => {
+    if (activeToken.kind !== "at-file") return { kind: "closed" }
+    const suggestions =
+      suggestionResult?.key === activeToken.key && suggestionResult.files === workspaceFiles
+        ? suggestionResult.suggestions
+        : []
+    return {
+      kind: "at-file",
+      query: activeToken.query,
+      startPos: activeToken.startPos,
+      endPos: activeToken.endPos,
+      quoted: activeToken.quoted,
       suggestions
     }
-  }, [cursorOffset, disabled, dismissedKey, input, workspaceFiles])
+  }, [activeToken, suggestionResult, workspaceFiles])
 
   // mode 变化后重置选中项，避免用户切换到新的 @文件 片段时还停留在旧索引。
   const currentKey = useMemo(() => {

@@ -887,7 +887,8 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
 
 function testEngineResolvesAndHashesAgentType(): void {
   assert(
-    ENGINE_SRC.includes("loadAgentProfiles(context.workspacePath)") &&
+    ENGINE_SRC.includes("await loadAgentProfilesAsync(options.workspacePath)") &&
+      ENGINE_SRC.includes("resolveProfileFromList(registryProfiles, name)") &&
       ENGINE_SRC.includes("resolveProfile(request.agentType)"),
     "engine resolves agentType against the run-cached workspace registry"
   )

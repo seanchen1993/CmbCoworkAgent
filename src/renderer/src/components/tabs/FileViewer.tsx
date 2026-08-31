@@ -1,21 +1,43 @@
-import { useEffect, useState, useMemo, useRef, useCallback } from "react"
-import { Loader2, AlertCircle, FileCode } from "lucide-react"
-import { useThreadState } from "@/lib/thread-context"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
+import { AlertCircle, ChevronLeft, ChevronRight, FileCode, Loader2 } from "lucide-react"
+import {
+  type WorkspaceFilePreviewMediaResult,
+  type WorkspaceFilePreviewSource,
+  type WorkspaceFilePreviewTextResult
+} from "../../../../shared/workspace-file-preview"
 import { getFileType, isBinaryFile } from "@/lib/file-types"
+import {
+  clearWorkspaceFilePreviewCachePrefix,
+  readWorkspaceFilePreviewCache,
+  writeWorkspaceFilePreviewCache
+} from "@/lib/workspace-file-preview-cache"
 import { CodeViewer } from "./CodeViewer"
 import { ImageViewer } from "./ImageViewer"
 import { MediaViewer } from "./MediaViewer"
 import { PDFViewer } from "./PDFViewer"
 import { BinaryFileViewer } from "./BinaryFileViewer"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
+import { HtmlPreview } from "@/components/chat/previews/HtmlPreview"
 
 interface FileViewerProps {
   filePath: string
   threadId?: string
   externalFullPath?: string
+  /** Opaque capability issued by a trusted main-process source. */
+  externalPreviewGrant?: string
+  /** Resolve a fresh capability before every external file read. */
+  resolveExternalPreviewGrant?: () => Promise<string>
+  htmlFillHeight?: boolean
   reloadToken?: number
   previewMode?: "preview" | "source"
+  /** Stable per surface so a persisted file tab cancels the prior task's preview. */
+  requestLane?: string
 }
+
+const MAX_HTML_DEPENDENCY_REQUESTS = 8
+const MAX_HTML_DEPENDENCY_BYTES = 256 * 1024
+const MAX_MARKDOWN_IMAGE_REQUESTS = 32
+const MAX_MARKDOWN_IMAGE_SOURCE_BYTES = 32 * 1024 * 1024
 
 function formatFileLoadError(rawError: string): {
   title: string
@@ -25,7 +47,6 @@ function formatFileLoadError(rawError: string): {
 } {
   const trimmed = rawError.trim()
   const missingPathMatch = trimmed.match(/'([^']+)'/)
-
   if (trimmed.includes("ENOENT") || /no such file or directory/i.test(trimmed)) {
     return {
       title: "文件不存在或已被移动",
@@ -34,7 +55,6 @@ function formatFileLoadError(rawError: string): {
       missingPath: missingPathMatch?.[1]
     }
   }
-
   if (/access denied|permission denied|eacces|eperm/i.test(trimmed)) {
     return {
       title: "没有文件访问权限",
@@ -42,7 +62,6 @@ function formatFileLoadError(rawError: string): {
       detail: "请检查文件权限或将文件移动到可访问目录后重试。"
     }
   }
-
   return {
     title: "文件加载失败",
     description: "预览时发生异常，请稍后重试。",
@@ -50,165 +69,302 @@ function formatFileLoadError(rawError: string): {
   }
 }
 
+function createRequestToken(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function shortPathHash(value: string): string {
+  let hash = 5381
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) + hash) ^ value.charCodeAt(index)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
+
 export function FileViewer({
   filePath,
   threadId,
   externalFullPath,
+  externalPreviewGrant,
+  resolveExternalPreviewGrant,
+  htmlFillHeight = true,
   reloadToken,
-  previewMode
+  previewMode,
+  requestLane
 }: FileViewerProps): React.JSX.Element | null {
-  const threadState = useThreadState(threadId ?? null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [binaryContent, setBinaryContent] = useState<string | null>(null)
-  const [externalTextContent, setExternalTextContent] = useState<string | undefined>()
-  const [fileSize, setFileSize] = useState<number | undefined>()
-  const cacheKey = externalFullPath || filePath
+  const generatedLane = useId().replace(/[^a-zA-Z\d_-]/g, "")
+  const lane = requestLane ?? `file-viewer-${generatedLane}`
   const displayPath = externalFullPath || filePath
-  const fileContents = threadState?.fileContents ?? {}
-  const setThreadFileContents = threadState?.setFileContents
-  const content = externalFullPath ? externalTextContent : fileContents[cacheKey]
+  const sourceCachePrefix = externalFullPath
+    ? `external:${externalFullPath}\u0000`
+    : `workspace:${threadId ?? ""}:${filePath}\u0000`
 
-  // Get file type info
-  const fileName = displayPath.split("/").pop() || displayPath
+  const fileName = displayPath.split(/[/\\]/).pop() || displayPath
   const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() ?? "" : ""
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
+  const htmlLike = ext === "html" || ext === "htm"
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
-  const lastLoadedReloadTokenRef = useRef<number | undefined>(undefined)
 
-  // Markdown 本地图片读取：相对路径已解析为可读路径，这里返回 base64 内容。
-  const readBinaryDependencyFile = useCallback(
-    async (resolvedPath: string): Promise<string | null> => {
+  const [textPage, setTextPage] = useState<WorkspaceFilePreviewTextResult | null>(null)
+  const [media, setMedia] = useState<WorkspaceFilePreviewMediaResult | null>(null)
+  const [pageOffsets, setPageOffsets] = useState([0])
+  const [pageIndex, setPageIndex] = useState(0)
+  const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const generationRef = useRef(0)
+  const requestTokenRef = useRef("")
+  const dependencyBudgetRef = useRef({
+    htmlRequests: 0,
+    htmlBytes: 0,
+    imageRequests: 0,
+    imageBytes: 0
+  })
+
+  const previewSourceForPath = useCallback(
+    async (resolvedPath: string): Promise<WorkspaceFilePreviewSource> => {
       if (externalFullPath) {
-        const tokenRes = await window.api.workspace.requestExternalFileRead(resolvedPath)
-        if (!tokenRes.success || !tokenRes.token) {
-          return null
+        const grant = resolveExternalPreviewGrant
+          ? await resolveExternalPreviewGrant()
+          : externalPreviewGrant
+        if (!grant) {
+          throw new Error("Access denied: external file preview has no trusted source grant")
         }
-        const result = await window.api.workspace.readExternalBinaryFile(tokenRes.token)
-        if (result?.success && typeof result.content === "string") {
-          return result.content
-        }
-        return null
+        return { externalGrant: grant, filePath: resolvedPath }
       }
-
-      const result = threadId
-        ? await window.api.workspace.readBinaryFile(threadId, resolvedPath)
-        : null
-
-      if (result?.success && typeof result.content === "string") {
-        return result.content
-      }
-
-      return null
+      return { threadId: threadId ?? "", filePath: resolvedPath }
     },
-    [externalFullPath, threadId]
+    [externalFullPath, externalPreviewGrant, resolveExternalPreviewGrant, threadId]
   )
 
-  // Reset state when filePath changes
-  useEffect(() => {
-    setError(null)
-    setBinaryContent(null)
-    setExternalTextContent(undefined)
-    setFileSize(undefined)
-  }, [cacheKey, reloadToken])
-
-  // Load file content (text or binary depending on file type)
-  useEffect(() => {
-    async function loadFile(): Promise<void> {
-      const shouldForceReload =
-        reloadToken !== undefined && lastLoadedReloadTokenRef.current !== reloadToken
-
-      // Skip if already loaded
-      if (!shouldForceReload && (content !== undefined || binaryContent !== null)) {
-        return
+  const loadTextPage = useCallback(
+    async (
+      offset: number,
+      generation: number,
+      requestToken: string,
+      allowCache: boolean
+    ): Promise<WorkspaceFilePreviewTextResult | null> => {
+      const cacheKey = `${sourceCachePrefix}${offset}`
+      const cached = allowCache ? readWorkspaceFilePreviewCache(cacheKey) : undefined
+      if (cached) {
+        if (generation === generationRef.current) {
+          setTextPage(cached)
+          setIsLoading(false)
+        }
+        return cached
       }
 
-      setIsLoading(true)
-      setError(null)
+      const previewSource = await previewSourceForPath(displayPath)
+      if (generation !== generationRef.current) return null
+      const result = await window.api.workspace.readFilePreview({
+        source: previewSource,
+        offset,
+        lane,
+        requestToken
+      })
+      if (generation !== generationRef.current) return null
+      if (!result.success) {
+        if (!result.cancelled) setError(result.error || "Failed to read file")
+        return null
+      }
+      writeWorkspaceFilePreviewCache(cacheKey, result)
+      setTextPage(result)
+      return result
+    },
+    [displayPath, lane, previewSourceForPath, sourceCachePrefix]
+  )
 
+  useEffect(() => {
+    const generation = generationRef.current + 1
+    generationRef.current = generation
+    const requestToken = createRequestToken()
+    requestTokenRef.current = requestToken
+    dependencyBudgetRef.current = {
+      htmlRequests: 0,
+      htmlBytes: 0,
+      imageRequests: 0,
+      imageBytes: 0
+    }
+    let releasedMediaUrl: string | null = null
+
+    setError(null)
+    setTextPage(null)
+    setMedia(null)
+    setPageOffsets([0])
+    setPageIndex(0)
+    setIsLoading(true)
+    if (reloadToken !== undefined) clearWorkspaceFilePreviewCachePrefix(sourceCachePrefix)
+
+    void (async () => {
       try {
         if (!externalFullPath && !threadId) {
           setError("Missing thread id for workspace file preview")
           return
         }
-
         if (isBinary) {
-          // Read as binary file (base64)
-          if (externalFullPath) {
-            const tokenRes = await window.api.workspace.requestExternalFileRead(externalFullPath)
-            if (!tokenRes.success || !tokenRes.token) {
-              setError(tokenRes.error || "Failed to request file read token")
-              return
+          const previewSource = await previewSourceForPath(displayPath)
+          if (generation !== generationRef.current) return
+          const result = await window.api.workspace.openMediaPreview({
+            source: previewSource,
+            lane,
+            requestToken,
+            mimeType: fileTypeInfo.mimeType
+          })
+          if (generation !== generationRef.current) {
+            if (result.success && result.previewUrl) {
+              void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
             }
-            const result = await window.api.workspace.readExternalBinaryFile(tokenRes.token)
-            if (result.success && result.content !== undefined) {
-              setBinaryContent(result.content)
-              setFileSize(result.size)
-              lastLoadedReloadTokenRef.current = reloadToken
-            } else {
-              setError(result.error || "Failed to read file")
-            }
-          } else {
-            const result = threadId
-              ? await window.api.workspace.readBinaryFile(threadId, filePath)
-              : { success: false, error: "Missing thread id for workspace file preview" }
-            if (result.success && result.content !== undefined) {
-              setBinaryContent(result.content)
-              setFileSize(result.size)
-              lastLoadedReloadTokenRef.current = reloadToken
-            } else {
-              setError(result.error || "Failed to read file")
-            }
+            return
           }
+          if (!result.success) {
+            if (!result.cancelled) setError(result.error || "Failed to read file")
+            return
+          }
+          releasedMediaUrl = result.previewUrl
+          setMedia(result)
         } else {
-          // Read as text file
-          if (externalFullPath) {
-            const tokenRes = await window.api.workspace.requestExternalFileRead(externalFullPath)
-            if (!tokenRes.success || !tokenRes.token) {
-              setError(tokenRes.error || "Failed to request file read token")
-              return
-            }
-            const result = await window.api.workspace.readExternalFile(tokenRes.token)
-            if (result.success && result.content !== undefined) {
-              setExternalTextContent(result.content)
-              setFileSize(result.size)
-              lastLoadedReloadTokenRef.current = reloadToken
-            } else {
-              setError(result.error || "Failed to read file")
-            }
-          } else {
-            const result = threadId
-              ? await window.api.workspace.readFile(threadId, filePath)
-              : { success: false, error: "Missing thread id for workspace file preview" }
-            if (result.success && result.content !== undefined) {
-              setThreadFileContents?.(cacheKey, result.content)
-              setFileSize(result.size)
-              lastLoadedReloadTokenRef.current = reloadToken
-            } else {
-              setError(result.error || "Failed to read file")
-            }
-          }
+          await loadTextPage(0, generation, requestToken, reloadToken === undefined)
         }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to read file")
+      } catch (caught) {
+        if (generation === generationRef.current) {
+          setError(caught instanceof Error ? caught.message : "Failed to read file")
+        }
       } finally {
-        setIsLoading(false)
+        if (generation === generationRef.current) setIsLoading(false)
+      }
+    })()
+
+    return () => {
+      if (generationRef.current === generation) generationRef.current += 1
+      void window.api.workspace.cancelFilePreview({ lanePrefix: lane, requestToken })
+      if (releasedMediaUrl) {
+        void window.api.workspace.releaseFilePreview({ previewUrl: releasedMediaUrl })
       }
     }
-
-    loadFile()
   }, [
-    threadId,
-    filePath,
-    content,
-    binaryContent,
-    setThreadFileContents,
-    isBinary,
     externalFullPath,
-    cacheKey,
-    reloadToken
+    externalPreviewGrant,
+    fileTypeInfo.mimeType,
+    isBinary,
+    lane,
+    loadTextPage,
+    displayPath,
+    previewSourceForPath,
+    reloadToken,
+    sourceCachePrefix,
+    threadId
   ])
+
+  const navigateToOffset = useCallback(
+    async (offset: number, nextIndex: number, nextOffsets: number[]): Promise<void> => {
+      const generation = generationRef.current
+      const requestToken = requestTokenRef.current
+      dependencyBudgetRef.current = {
+        htmlRequests: 0,
+        htmlBytes: 0,
+        imageRequests: 0,
+        imageBytes: 0
+      }
+      void window.api.workspace.cancelFilePreview({
+        lanePrefix: `${lane}:html`,
+        requestToken
+      })
+      void window.api.workspace.cancelFilePreview({
+        lanePrefix: `${lane}:image`,
+        requestToken
+      })
+      setIsLoading(true)
+      setError(null)
+      try {
+        const result = await loadTextPage(offset, generation, requestToken, true)
+        if (!result || generation !== generationRef.current) return
+        setPageOffsets(nextOffsets)
+        setPageIndex(nextIndex)
+      } finally {
+        if (generation === generationRef.current) setIsLoading(false)
+      }
+    },
+    [lane, loadTextPage]
+  )
+
+  const showNextPage = useCallback((): void => {
+    if (!textPage?.hasMore || textPage.nextOffset === null) return
+    const nextIndex = pageIndex + 1
+    const nextOffsets = pageOffsets.slice(0, nextIndex)
+    nextOffsets[nextIndex] = textPage.nextOffset
+    void navigateToOffset(textPage.nextOffset, nextIndex, nextOffsets)
+  }, [navigateToOffset, pageIndex, pageOffsets, textPage])
+
+  const showPreviousPage = useCallback((): void => {
+    if (pageIndex <= 0) return
+    const nextIndex = pageIndex - 1
+    void navigateToOffset(pageOffsets[nextIndex], nextIndex, pageOffsets)
+  }, [navigateToOffset, pageIndex, pageOffsets])
+
+  const readHtmlDependencyFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      const generation = generationRef.current
+      const budget = dependencyBudgetRef.current
+      if (budget.htmlRequests >= MAX_HTML_DEPENDENCY_REQUESTS) return null
+      budget.htmlRequests += 1
+      const previewSource = await previewSourceForPath(resolvedPath)
+      if (generation !== generationRef.current) return null
+      const result = await window.api.workspace.readFilePreview({
+        source: previewSource,
+        offset: 0,
+        lane: `${lane}:html:${shortPathHash(resolvedPath)}`,
+        requestToken: requestTokenRef.current
+      })
+      if (generation !== generationRef.current || !result.success) return null
+      if (budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES) return null
+      budget.htmlBytes += result.contentBytes
+      return result.content
+    },
+    [lane, previewSourceForPath]
+  )
+
+  // Markdown images receive a short-lived protocol URL, never a base64 IPC payload.
+  const readBinaryDependencyFile = useCallback(
+    async (resolvedPath: string): Promise<string | null> => {
+      const generation = generationRef.current
+      const budget = dependencyBudgetRef.current
+      if (budget.imageRequests >= MAX_MARKDOWN_IMAGE_REQUESTS) return null
+      budget.imageRequests += 1
+      const previewSource = await previewSourceForPath(resolvedPath)
+      if (generation !== generationRef.current) return null
+      const result = await window.api.workspace.openMediaPreview({
+        source: previewSource,
+        lane: `${lane}:image:${shortPathHash(resolvedPath)}`,
+        requestToken: requestTokenRef.current
+      })
+      if (generation !== generationRef.current) {
+        if (result.success && result.previewUrl) {
+          void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+        }
+        return null
+      }
+      if (!result.success) return null
+      if (!result.inlineAllowed && result.previewUrl) {
+        void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+        return null
+      }
+      if (budget.imageBytes + result.size > MAX_MARKDOWN_IMAGE_SOURCE_BYTES) {
+        if (result.previewUrl) {
+          void window.api.workspace.releaseFilePreview({ previewUrl: result.previewUrl })
+        }
+        return null
+      }
+      budget.imageBytes += result.size
+      return result.previewUrl
+    },
+    [lane, previewSourceForPath]
+  )
 
   if (isLoading) {
     return (
@@ -230,9 +386,13 @@ export function FileViewer({
             </div>
             <div className="min-w-0 flex-1 space-y-2">
               <div className="text-sm font-semibold text-foreground">{friendlyError.title}</div>
-              <div className="text-sm text-muted-foreground leading-6">{friendlyError.description}</div>
+              <div className="text-sm text-muted-foreground leading-6">
+                {friendlyError.description}
+              </div>
               {friendlyError.detail ? (
-                <div className="text-xs text-muted-foreground/90 leading-5">{friendlyError.detail}</div>
+                <div className="text-xs text-muted-foreground/90 leading-5">
+                  {friendlyError.detail}
+                </div>
               ) : null}
               {friendlyError.missingPath ? (
                 <div className="rounded-md border border-border/60 bg-background/80 px-3 py-2 text-xs text-muted-foreground break-all text-left">
@@ -246,7 +406,7 @@ export function FileViewer({
     )
   }
 
-  if (content === undefined && binaryContent === null) {
+  if (!textPage && !media) {
     return (
       <div className="flex flex-1 items-center justify-center text-muted-foreground">
         <FileCode className="size-6 mr-2" />
@@ -255,49 +415,45 @@ export function FileViewer({
     )
   }
 
-  // Route to appropriate viewer based on file type
-  if (fileTypeInfo.type === "image" && binaryContent) {
-    return (
-      <ImageViewer
-        filePath={displayPath}
-        base64Content={binaryContent}
-        mimeType={fileTypeInfo.mimeType || "image/png"}
-      />
-    )
+  if (media) {
+    const mediaPreviewUrl = media.previewUrl
+    if (!media.inlineAllowed || !mediaPreviewUrl) {
+      return (
+        <BinaryFileViewer
+          filePath={displayPath}
+          size={media.size}
+          reason={media.inlineBlockedReason}
+        />
+      )
+    }
+    if (fileTypeInfo.type === "image") {
+      return (
+        <ImageViewer
+          filePath={displayPath}
+          sourceUrl={mediaPreviewUrl}
+        />
+      )
+    }
+    if (fileTypeInfo.type === "video" || fileTypeInfo.type === "audio") {
+      return (
+        <MediaViewer
+          filePath={displayPath}
+          sourceUrl={mediaPreviewUrl}
+          mimeType={media.mimeType}
+          mediaType={fileTypeInfo.type}
+        />
+      )
+    }
+    if (fileTypeInfo.type === "pdf") {
+      return <PDFViewer filePath={displayPath} sourceUrl={mediaPreviewUrl} />
+    }
+    return <BinaryFileViewer filePath={displayPath} size={media.size} />
   }
 
-  if (fileTypeInfo.type === "video" && binaryContent) {
-    return (
-      <MediaViewer
-        filePath={displayPath}
-        base64Content={binaryContent}
-        mimeType={fileTypeInfo.mimeType || "video/mp4"}
-        mediaType="video"
-      />
-    )
-  }
-
-  if (fileTypeInfo.type === "audio" && binaryContent) {
-    return (
-      <MediaViewer
-        filePath={displayPath}
-        base64Content={binaryContent}
-        mimeType={fileTypeInfo.mimeType || "audio/mpeg"}
-        mediaType="audio"
-      />
-    )
-  }
-
-  if (fileTypeInfo.type === "pdf" && binaryContent) {
-    return <PDFViewer filePath={displayPath} base64Content={binaryContent} />
-  }
-
-  if (fileTypeInfo.type === "binary") {
-    return <BinaryFileViewer filePath={displayPath} size={fileSize} />
-  }
-
-  if (markdownLike && content !== undefined) {
-    return (
+  const content = textPage?.content ?? ""
+  let body: React.JSX.Element
+  if (markdownLike) {
+    body = (
       <div className="h-full min-h-0 overflow-y-auto right-panel-scroll">
         <MarkdownPreview
           content={content}
@@ -311,12 +467,52 @@ export function FileViewer({
         />
       </div>
     )
+  } else if (htmlLike) {
+    body = (
+      <HtmlPreview
+        content={content}
+        path={displayPath}
+        fillHeight={htmlFillHeight}
+        showHeader={false}
+        showModeToggle={false}
+        viewMode={previewMode}
+        readDependencyFile={readHtmlDependencyFile}
+      />
+    )
+  } else {
+    body = <CodeViewer filePath={displayPath} content={content} />
   }
 
-  // Default to code/text viewer
-  if (content !== undefined) {
-    return <CodeViewer filePath={displayPath} content={content} />
-  }
-
-  return null
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {textPage?.truncated ? (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-muted-foreground">
+          <span>
+            大文件按页预览 · 第 {pageIndex + 1} 页 · 文件 {formatBytes(textPage.size)}
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={pageIndex <= 0}
+              onClick={showPreviousPage}
+              className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-background-interactive disabled:opacity-40"
+            >
+              <ChevronLeft className="size-3" />
+              上一页
+            </button>
+            <button
+              type="button"
+              disabled={!textPage.hasMore}
+              onClick={showNextPage}
+              className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-background-interactive disabled:opacity-40"
+            >
+              下一页
+              <ChevronRight className="size-3" />
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{body}</div>
+    </div>
+  )
 }

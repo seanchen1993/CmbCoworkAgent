@@ -13,14 +13,20 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
+import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 import { getWorkspaceSelectionErrorMessage } from "@/lib/workspace-utils"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
+import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
 import type { FileInfo } from "@/types"
 import { toast } from "sonner"
 
 export function FilesystemPanel() {
-  const { currentThreadId, threads } = useAppStore()
-  const currentThread = threads.find((thread) => thread.thread_id === currentThreadId) ?? null
+  const currentThreadId = useAppStore((state) => state.currentThreadId)
+  const currentThread = useAppStore((state) =>
+    currentThreadId
+      ? (state.threads.find((thread) => thread.thread_id === currentThreadId) ?? null)
+      : null
+  )
   const threadState = useThreadState(currentThreadId)
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
@@ -28,7 +34,7 @@ export function FilesystemPanel() {
   const workspaceName = concealWorkspacePath
     ? REMOTE_INBOX_WORKSPACE_NAME
     : workspacePath?.split(/[\\/]/).filter(Boolean).pop()
-  const messages = threadState?.messages ?? []
+  const canChangeWorkspace = canChangeThreadWorkspace(threadState ?? undefined)
   const setWorkspacePath = threadState?.setWorkspacePath
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set())
@@ -59,32 +65,11 @@ export function FilesystemPanel() {
     }
   }, [workspacePath])
 
-  // Listen for file changes from the main process
-  useEffect(() => {
-    if (!setWorkspaceFiles) return
-
-    const cleanup = window.api.workspace.onFilesChanged(async (data) => {
-      // Only refresh if this is the current thread
-      if (data.threadId === currentThreadId) {
-        console.log("[FilesystemPanel] Files changed, refreshing...")
-        try {
-          const result = await window.api.workspace.loadFromDisk(data.threadId)
-          if (result.success) {
-            setWorkspaceFiles(result.files)
-          }
-        } catch (e) {
-          console.error("[FilesystemPanel] Error refreshing files:", e)
-        }
-      }
-    })
-
-    return cleanup
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentThreadId])
-
   // Handle selecting a workspace folder
   async function handleSelectFolder() {
-    if (!currentThreadId || !setWorkspacePath || !setWorkspaceFiles) return
+    if (!canChangeWorkspace || !currentThreadId || !setWorkspacePath || !setWorkspaceFiles) {
+      return
+    }
 
     setLoading(true)
     try {
@@ -92,7 +77,10 @@ export function FilesystemPanel() {
       if (path) {
         setWorkspacePath(path)
         // Load files from disk
-        const result = await window.api.workspace.loadFromDisk(currentThreadId)
+        markWorkspaceFilesStale(currentThreadId, path)
+        const result = await loadWorkspaceFilesDeduped(currentThreadId, path, {
+          requestTrailingRescan: true
+        })
         if (result.success) {
           setWorkspaceFiles(result.files)
         }
@@ -107,11 +95,14 @@ export function FilesystemPanel() {
 
   // Handle refreshing files from disk
   async function handleRefresh() {
-    if (!currentThreadId || !setWorkspaceFiles) return
+    if (!currentThreadId || !setWorkspaceFiles || !workspacePath) return
 
     setLoading(true)
     try {
-      const result = await window.api.workspace.loadFromDisk(currentThreadId)
+      markWorkspaceFilesStale(currentThreadId, workspacePath)
+      const result = await loadWorkspaceFilesDeduped(currentThreadId, workspacePath, {
+        requestTrailingRescan: true
+      })
       if (result.success) {
         setWorkspaceFiles(result.files)
       }
@@ -273,20 +264,22 @@ export function FilesystemPanel() {
           <span className="text-xs text-muted-foreground mb-4">
             Select a folder for the agent to work in
           </span>
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handleSelectFolder}
-            disabled={loading || !currentThreadId}
-            className="h-8 px-4"
-          >
-            {loading ? (
-              <Loader2 className="size-4 mr-2 animate-spin" />
-            ) : (
-              <FolderOpen className="size-4 mr-2" />
-            )}
-            Select Folder
-          </Button>
+          {canChangeWorkspace && (
+            <Button
+              variant="default"
+              size="sm"
+              onClick={handleSelectFolder}
+              disabled={loading || !currentThreadId}
+              className="h-8 px-4"
+            >
+              {loading ? (
+                <Loader2 className="size-4 mr-2 animate-spin" />
+              ) : (
+                <FolderOpen className="size-4 mr-2" />
+              )}
+              Select Folder
+            </Button>
+          )}
         </div>
       </div>
     )
@@ -318,7 +311,7 @@ export function FilesystemPanel() {
                 <RefreshCw className="size-3" />
               )}
             </Button>
-            {messages.length === 0 && !isWorktree && (
+            {canChangeWorkspace && !isWorktree && (
               <Button
                 variant="ghost"
                 size="sm"

@@ -1,41 +1,39 @@
 import { IpcMain } from "electron"
-import { existsSync, readdirSync, readFileSync, unlinkSync, statSync } from "fs"
+import { existsSync, readFileSync, unlinkSync } from "fs"
 import { join, basename } from "path"
 import { isDreamEnabled, isMemoryEnabled, setDreamEnabled, setMemoryEnabled } from "../storage"
 import { getDefaultModelConfig } from "../models/registry"
 import { getMemoryStore } from "../memory/store"
-import { removeEntryFromManifest, parseFrontmatter, type MemoryType } from "../memory/manifest"
+import { removeEntryFromManifest } from "../memory/manifest"
 import { notifyMemoryChanged } from "../memory/events"
 import { consolidateMemories, type ConsolidateResult } from "../memory/consolidate"
 import { ChatOpenAI } from "@langchain/openai"
 import {
-  getProjectMemoryDir,
-  listProjectMemoryDirs,
+  GLOBAL_MEMORY_DIR,
+  PROJECTS_MEMORY_DIR,
+  findCanonicalGitRootAsync,
+  resolveProjectIdAsync,
   resolveScopedMemoryDir,
   type MemoryNamespace,
   type MemoryScope
 } from "../memory/paths"
 import { isProjectModeMemoryEnabled } from "../project-mode-memory"
-
-const DREAM_STATE_FILE = ".dream_state.json"
-
-function readDreamStateInfo(memoryDir: string): DreamStateInfo {
-  try {
-    const p = join(memoryDir, DREAM_STATE_FILE)
-    if (existsSync(p)) {
-      const raw = JSON.parse(readFileSync(p, "utf-8")) as Partial<DreamStateInfo>
-      return {
-        lastRunAt: raw.lastRunAt ?? 0,
-        sessionsSinceLastRun: raw.sessionsSinceLastRun ?? 0
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return { lastRunAt: 0, sessionsSinceLastRun: 0 }
-}
-
-const VALID_TYPES = new Set<MemoryType>(["user", "feedback", "project", "reference"])
+import {
+  cancelMemoryCatalogScope,
+  readMemoryFileInWorker,
+  readMemoryFilesPageInWorker,
+  readMemoryProjectsPageInWorker
+} from "../memory-catalog/client"
+import { memoryCatalogRequestCoordinator } from "../memory-catalog/request-coordinator"
+import type {
+  MemoryCatalogProject,
+  MemoryCatalogStats,
+  MemoryFileContent,
+  MemoryFilesPage,
+  MemoryFilesPageRequest,
+  MemoryProjectsPage,
+  MemoryProjectsPageRequest
+} from "../../shared/memory-catalog"
 
 export interface MemoryScopeRequest {
   scope?: MemoryScope
@@ -43,48 +41,8 @@ export interface MemoryScopeRequest {
   projectId?: string | null
 }
 
-export interface MemoryFileInfo {
-  name: string
-  size: number
-  modifiedAt: string
-  /** Memory category from frontmatter, or null for legacy/index files. */
-  type: MemoryType | null
-  /** Human-readable name from frontmatter. Falls back to filename in the UI. */
-  displayName: string | null
-  /** One-line description from frontmatter. */
-  description: string | null
-  /** How many times this file's chunks were retrieved via memory_search. */
-  recallCount: number
-}
-
-export interface DreamStateInfo {
-  lastRunAt: number
-  sessionsSinceLastRun: number
-}
-
-export interface MemoryStats {
-  fileCount: number
-  totalSize: number
-  indexSize: number
-  enabled: boolean
-  dreamEnabled: boolean
-  dreamState: DreamStateInfo
-  scope: MemoryScope
-  memoryDir: string
-  projectId?: string
-  gitRoot?: string
-}
-
-export interface MemoryProjectInfo {
-  projectId: string
-  displayName: string
-  memoryDir: string
-  gitRoot?: string
-  fileCount: number
-  totalSize: number
-  indexSize: number
-  isCurrent: boolean
-}
+export type MemoryStats = MemoryCatalogStats
+export type MemoryProjectInfo = MemoryCatalogProject
 
 function resolveRequestedNamespace(request?: MemoryScopeRequest): MemoryNamespace | null {
   const namespace = resolveScopedMemoryDir(request)
@@ -97,38 +55,82 @@ function emptyProjectStats(): MemoryStats {
     fileCount: 0,
     totalSize: 0,
     indexSize: 0,
-    enabled: isMemoryEnabled(),
-    dreamEnabled: isDreamEnabled(),
+    enabled: false,
+    dreamEnabled: false,
     dreamState: { lastRunAt: 0, sessionsSinceLastRun: 0 },
     scope: "project",
     memoryDir: ""
   }
 }
 
-function basenameFromPath(value?: string): string {
-  if (!value) return ""
-  return basename(value.replace(/[\\/]+$/, "")) || value
+function requestScope(value: unknown): string {
+  return typeof value === "string" && value.trim()
+    ? value.trim().slice(0, 128)
+    : "customize-memory"
 }
 
-function collectMemoryDirStats(
-  memoryDir: string
-): Pick<MemoryStats, "fileCount" | "totalSize" | "indexSize"> {
-  let fileCount = 0
-  let totalSize = 0
-  let indexSize = 0
-  if (existsSync(memoryDir)) {
-    const files = readdirSync(memoryDir)
-    for (const f of files) {
-      const st = statSync(join(memoryDir, f))
-      if (f.endsWith(".md")) {
-        fileCount++
-        totalSize += st.size
-      } else if (f === "index.sqlite") {
-        indexSize = st.size
-      }
+function requestCursor(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value.slice(0, 512) : undefined
+}
+
+function requestLimit(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : undefined
+}
+
+function workspacePath(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.slice(0, 32_768) : null
+}
+
+function validProjectId(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{12}$/.test(value) ? value : null
+}
+
+async function resolveCatalogNamespace(
+  request: MemoryScopeRequest | undefined,
+  signal: AbortSignal
+): Promise<MemoryNamespace | null> {
+  if (request?.scope !== "project") return { scope: "global", dir: GLOBAL_MEMORY_DIR }
+  const projectId = validProjectId(request.projectId)
+  if (projectId) {
+    const requestedWorkspace = workspacePath(request.workspacePath)
+    const currentGitRoot = await findCanonicalGitRootAsync(requestedWorkspace, signal)
+    const currentProjectId = currentGitRoot ? await resolveProjectIdAsync(currentGitRoot) : null
+    if (signal.aborted) throw new Error("Memory catalog request was cancelled")
+    return {
+      scope: "project",
+      dir: join(PROJECTS_MEMORY_DIR, projectId),
+      projectId,
+      ...(currentGitRoot && currentProjectId === projectId ? { gitRoot: currentGitRoot } : {})
     }
   }
-  return { fileCount, totalSize, indexSize }
+  const gitRoot = await findCanonicalGitRootAsync(workspacePath(request.workspacePath), signal)
+  if (!gitRoot) return null
+  const resolvedProjectId = await resolveProjectIdAsync(gitRoot)
+  if (signal.aborted) throw new Error("Memory catalog request was cancelled")
+  return {
+    scope: "project",
+    dir: join(PROJECTS_MEMORY_DIR, resolvedProjectId),
+    projectId: resolvedProjectId,
+    gitRoot
+  }
+}
+
+async function withWorkerCancellation<T>(
+  signal: AbortSignal,
+  workerScope: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const cancel = (): void => cancelMemoryCatalogScope(workerScope)
+  if (signal.aborted) {
+    cancel()
+    throw new Error("Memory catalog request was cancelled")
+  }
+  signal.addEventListener("abort", cancel, { once: true })
+  try {
+    return await operation()
+  } finally {
+    signal.removeEventListener("abort", cancel)
+  }
 }
 
 export function registerMemoryHandlers(ipcMain: IpcMain): void {
@@ -136,112 +138,111 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "memory:listProjects",
-    async (
-      _event,
-      request?: Pick<MemoryScopeRequest, "workspacePath">
-    ): Promise<MemoryProjectInfo[]> => {
-      const projects = listProjectMemoryDirs(request?.workspacePath)
-      const currentProjectId = getProjectMemoryDir(request?.workspacePath)?.projectId ?? null
-      return projects
-        .map((project) => {
-          const stats = collectMemoryDirStats(project.dir)
-          return {
-            projectId: project.projectId ?? "",
-            displayName:
-              basenameFromPath(project.gitRoot) || project.projectId || "Unknown project",
-            memoryDir: project.dir,
-            gitRoot: project.gitRoot,
-            ...stats,
-            isCurrent: Boolean(project.projectId && project.projectId === currentProjectId)
-          }
-        })
-        .filter((project) => project.projectId)
-        .sort((a, b) => {
-          if (a.isCurrent && !b.isCurrent) return -1
-          if (!a.isCurrent && b.isCurrent) return 1
-          return a.displayName.localeCompare(b.displayName)
-        })
+    async (event, rawRequest?: MemoryProjectsPageRequest): Promise<MemoryProjectsPage> => {
+      const scope = requestScope(rawRequest?.requestScope)
+      const coordinatorScope = `${scope}:projects`
+      const workerScope = `${event.sender.id}:${coordinatorScope}`
+      return memoryCatalogRequestCoordinator.run(event.sender, coordinatorScope, async (signal) => {
+        const requestedWorkspace = workspacePath(rawRequest?.workspacePath)
+        const gitRoot = await findCanonicalGitRootAsync(requestedWorkspace, signal)
+        const projectId = gitRoot ? await resolveProjectIdAsync(gitRoot) : null
+        if (signal.aborted) throw new Error("Memory project request was cancelled")
+        return withWorkerCancellation(signal, workerScope, () =>
+          readMemoryProjectsPageInWorker(
+            {
+              kind: "projects",
+              ...(requestCursor(rawRequest?.cursor) ? { cursor: requestCursor(rawRequest?.cursor) } : {}),
+              ...(requestLimit(rawRequest?.limit) !== undefined
+                ? { limit: requestLimit(rawRequest?.limit) }
+                : {}),
+              ...(gitRoot && projectId
+                ? {
+                    currentProject: {
+                      projectId,
+                      gitRoot,
+                      memoryDir: join(PROJECTS_MEMORY_DIR, projectId)
+                    }
+                  }
+                : {})
+            },
+            workerScope
+          )
+        )
+      })
     }
   )
 
   ipcMain.handle(
     "memory:listFiles",
-    async (_event, request?: MemoryScopeRequest): Promise<MemoryFileInfo[]> => {
-      const namespace = resolveRequestedNamespace(request)
-      if (!namespace) return []
-      const memoryDir = namespace.dir
-      if (!existsSync(memoryDir)) return []
-
-      // Load recall stats once so we can annotate each file without extra I/O.
-      let recallMap: Map<string, { totalRecalls: number }> = new Map()
-      try {
-        const store = await getMemoryStore(memoryDir)
-        recallMap = store.getRecallStats()
-      } catch {
-        /* non-critical */
-      }
-
-      const files: MemoryFileInfo[] = readdirSync(memoryDir)
-        .filter((f) => f.endsWith(".md"))
-        .map((name) => {
-          const fullPath = join(memoryDir, name)
-          const st = statSync(fullPath)
-          let type: MemoryType | null = null
-          let displayName: string | null = null
-          let description: string | null = null
-          // Read just the first ~2KB to extract frontmatter from per-fact files.
-          // MEMORY.md and legacy daily files have no frontmatter — fields stay null.
-          try {
-            const head = readFileSync(fullPath, "utf-8").slice(0, 2048)
-            const { frontmatter } = parseFrontmatter(head)
-            const candidate = frontmatter.type as MemoryType | undefined
-            if (candidate && VALID_TYPES.has(candidate)) type = candidate
-            if (frontmatter.name) displayName = frontmatter.name
-            if (frontmatter.description) description = frontmatter.description
-          } catch {
-            /* unreadable file — leave fields null */
-          }
-          const recallCount = recallMap.get(fullPath)?.totalRecalls ?? 0
+    async (event, rawRequest?: MemoryFilesPageRequest): Promise<MemoryFilesPage> => {
+      const scope = requestScope(rawRequest?.requestScope)
+      const coordinatorScope = `${scope}:files`
+      const workerScope = `${event.sender.id}:${coordinatorScope}`
+      return memoryCatalogRequestCoordinator.run(event.sender, coordinatorScope, async (signal) => {
+        const namespace = await resolveCatalogNamespace(rawRequest, signal)
+        if (!namespace) {
           return {
-            name,
-            size: st.size,
-            modifiedAt: st.mtime.toISOString(),
-            type,
-            displayName,
-            description,
-            recallCount
+            items: [],
+            hasMore: false,
+            totalCount: 0,
+            truncated: false,
+            truncatedReasons: [],
+            scanStats: { scannedEntries: 0, scannedFiles: 0, readBytes: 0 },
+            stats: emptyProjectStats()
           }
-        })
-      // MEMORY.md first, then per-fact files by mtime desc, then legacy daily files by name desc.
-      files.sort((a, b) => {
-        if (a.name === "MEMORY.md") return -1
-        if (b.name === "MEMORY.md") return 1
-        const aIsFact = a.type !== null
-        const bIsFact = b.type !== null
-        if (aIsFact && !bIsFact) return -1
-        if (!aIsFact && bIsFact) return 1
-        if (aIsFact && bIsFact) {
-          return new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime()
         }
-        return b.name.localeCompare(a.name)
+        return withWorkerCancellation(signal, workerScope, () =>
+          readMemoryFilesPageInWorker(
+            {
+              kind: "files",
+              scope: namespace.scope,
+              memoryDir: namespace.dir,
+              ...(namespace.projectId ? { projectId: namespace.projectId } : {}),
+              ...(namespace.gitRoot ? { gitRoot: namespace.gitRoot } : {}),
+              ...(requestCursor(rawRequest?.cursor) ? { cursor: requestCursor(rawRequest?.cursor) } : {}),
+              ...(requestLimit(rawRequest?.limit) !== undefined
+                ? { limit: requestLimit(rawRequest?.limit) }
+                : {})
+            },
+            workerScope
+          )
+        )
       })
-      return files
     }
   )
 
   ipcMain.handle(
     "memory:readFile",
-    async (_, name: string, request?: MemoryScopeRequest): Promise<string> => {
-      const namespace = resolveRequestedNamespace(request)
-      if (!namespace) return ""
-      const memoryDir = namespace.dir
-      const safeName = basename(name)
-      if (!safeName.endsWith(".md")) return ""
-      const fullPath = join(memoryDir, safeName)
-      if (!existsSync(fullPath)) return ""
-      return readFileSync(fullPath, "utf-8")
+    async (
+      event,
+      name: string,
+      rawRequest?: MemoryFilesPageRequest
+    ): Promise<MemoryFileContent> => {
+      const scope = requestScope(rawRequest?.requestScope)
+      const coordinatorScope = `${scope}:file`
+      const workerScope = `${event.sender.id}:${coordinatorScope}`
+      return memoryCatalogRequestCoordinator.run(event.sender, coordinatorScope, async (signal) => {
+        const namespace = await resolveCatalogNamespace(rawRequest, signal)
+        if (!namespace) {
+          return { content: "", bytesRead: 0, totalBytes: 0, truncated: false }
+        }
+        return withWorkerCancellation(signal, workerScope, () =>
+          readMemoryFileInWorker(
+            { kind: "file", memoryDir: namespace.dir, name: String(name).slice(0, 4_096) },
+            workerScope
+          )
+        )
+      })
     }
   )
+
+  ipcMain.handle("memory:cancelCatalog", (event, rawScope?: string): void => {
+    const scope = requestScope(rawScope)
+    memoryCatalogRequestCoordinator.cancel(event.sender.id, scope)
+    for (const kind of ["projects", "files", "file", "stats"] as const) {
+      cancelMemoryCatalogScope(`${event.sender.id}:${scope}:${kind}`)
+    }
+  })
 
   ipcMain.handle(
     "memory:deleteFile",
@@ -330,23 +331,28 @@ export function registerMemoryHandlers(ipcMain: IpcMain): void {
 
   ipcMain.handle(
     "memory:getStats",
-    async (_event, request?: MemoryScopeRequest): Promise<MemoryStats> => {
-      const namespace = resolveRequestedNamespace(request)
-      if (!namespace) return emptyProjectStats()
-      const memoryDir = namespace.dir
-      const { fileCount, totalSize, indexSize } = collectMemoryDirStats(memoryDir)
-      return {
-        fileCount,
-        totalSize,
-        indexSize,
-        enabled: isMemoryEnabled(),
-        dreamEnabled: isDreamEnabled(),
-        dreamState: readDreamStateInfo(memoryDir),
-        scope: namespace.scope,
-        memoryDir,
-        projectId: namespace.projectId,
-        gitRoot: namespace.gitRoot
-      }
+    async (event, rawRequest?: MemoryFilesPageRequest): Promise<MemoryStats> => {
+      const scope = requestScope(rawRequest?.requestScope)
+      const coordinatorScope = `${scope}:stats`
+      const workerScope = `${event.sender.id}:${coordinatorScope}`
+      return memoryCatalogRequestCoordinator.run(event.sender, coordinatorScope, async (signal) => {
+        const namespace = await resolveCatalogNamespace(rawRequest, signal)
+        if (!namespace) return emptyProjectStats()
+        const page = await withWorkerCancellation(signal, workerScope, () =>
+          readMemoryFilesPageInWorker(
+            {
+              kind: "files",
+              scope: namespace.scope,
+              memoryDir: namespace.dir,
+              ...(namespace.projectId ? { projectId: namespace.projectId } : {}),
+              ...(namespace.gitRoot ? { gitRoot: namespace.gitRoot } : {}),
+              limit: 1
+            },
+            workerScope
+          )
+        )
+        return page.stats
+      })
     }
   )
 }

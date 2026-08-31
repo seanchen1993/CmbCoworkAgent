@@ -4,7 +4,8 @@ import { NodeInterrupt } from "@langchain/langgraph"
 import type { AgentShellAccess } from "../agent-registry"
 import {
   extractTextFromUnknownContent,
-  observeSkillUsageFromStream
+  observeSkillUsageFromStream,
+  WorkerValuesSnapshotAccumulator
 } from "../coordinator-worker-stream"
 import { SkillUsageDetector } from "../skill-evolution/usage-detector"
 import {
@@ -339,6 +340,9 @@ async function runOnce(
   let traceOutcome: TraceOutcome = "success"
   let traceError: string | undefined
   const skillUsageDetector = new SkillUsageDetector()
+  const valuesSnapshotAccumulator = new WorkerValuesSnapshotAccumulator(request.prompt, {
+    deriveWorkerState: false
+  })
   const syncSkillAttribution = (): void => {
     if (!tracer) return
     const usedSkills = skillUsageDetector.getUsedSkillNames()
@@ -350,14 +354,14 @@ async function runOnce(
   }
   const recordValuesSnapshot = (snapshot: unknown): void => {
     latestSnapshot = snapshot
+    const valuesContext = valuesSnapshotAccumulator.createContext("values", snapshot)
     runTraceSideEffect("Workflow Skill observer", () => {
       if (
         observeSkillUsageFromStream(
           "values",
           snapshot,
           skillUsageDetector,
-          undefined,
-          request.prompt
+          valuesContext
         )
       ) {
         syncSkillAttribution()
@@ -605,6 +609,7 @@ async function runOnce(
     traceError = describeWorkflowTraceError(error)
     throw error
   } finally {
+    valuesSnapshotAccumulator.reset()
     if (tracer) {
       const tracerToFinish = tracer
       runTraceSideEffect("Workflow", () => {
