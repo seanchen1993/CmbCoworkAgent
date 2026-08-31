@@ -22,6 +22,7 @@ interface ImportMetaEnv {
   readonly VITE_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_SKILL_EVAL_YST_IDS?: string
+  readonly VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS?: string
   readonly VITE_RENDER_URL?: string
   readonly VITE_PROJECT_MODE_MEMORY_ENABLED?: string
   readonly VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?: string

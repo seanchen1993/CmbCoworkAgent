@@ -46,6 +46,7 @@ import type {
   RoutingTrace
 } from "./types"
 import { NoopTraceReporter, TRACE_OBSERVABILITY_SCHEMA_VERSION } from "./types"
+import { hasSuspectedTechnicalDetailSupplement } from "./technical-detail-supplement"
 import { summarizeTraceCacheTokens } from "./token-usage"
 import { app, safeStorage } from "electron"
 import { getLocalIP } from "../../net-utils"
@@ -527,6 +528,7 @@ export class TraceCollector {
   private readonly threadId: string
   private readonly startedAt: string
   private readonly userMessage: string
+  private readonly suspectedTechnicalDetailSupplement: boolean
   private modelId: string
   private modelName: string | undefined
   private routingTrace: RoutingTrace | undefined
@@ -563,6 +565,7 @@ export class TraceCollector {
   ) {
     this.traceId = this.collectionBudget.takeText(options.traceId ?? uuid(), 256)
     this.threadId = this.collectionBudget.takeText(threadId, 256)
+    this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage)
     this.userMessage = this.collectionBudget.takeText(userMessage, 64 * 1024)
     this.modelId = this.collectionBudget.takeText(modelId, 1024)
     this.triggerSource = options.triggerSource ?? "chat"
@@ -1148,6 +1151,7 @@ export class TraceCollector {
       endedAt,
       durationMs,
       userMessage: this.userMessage,
+      suspectedTechnicalDetailSupplement: this.suspectedTechnicalDetailSupplement,
       modelId: this.modelId,
       ...(this.modelName ? { modelName: this.modelName } : {}),
       userIp: this.collectionBudget.takeText(getLocalIP(), 256),
