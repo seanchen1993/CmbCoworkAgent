@@ -50,6 +50,7 @@ describe("project-mode Excel export", () => {
     const [row] = buildProjectModeProjectExportRows([project])
     expect(row).toHaveLength(PROJECT_MODE_PROJECT_EXPORT_HEADER.length)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("特性数")]).toBe(5)
+    expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("主 Agent 主动会话数")]).toBe(12)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV阶段会话数")]).toBe(7)
     expect(row[PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("DEV关联特性数")]).toBe(3)
     const constraintIndex = PROJECT_MODE_PROJECT_EXPORT_HEADER.indexOf("是否加载项目约束")

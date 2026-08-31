@@ -467,6 +467,15 @@ export interface AgentTrace {
   steps: TraceStep[]
   /** Ordered model-call runs (request + response) */
   modelCalls?: TraceModelCall[]
+  /**
+   * Σ cache-hit input tokens, flattened from `modelCalls[].tokenUsage` at
+   * finish time so the operations dashboard can aggregate it directly — a
+   * `sum` agg cannot reach into the nested per-call array.
+   *
+   * A subset of the trace's input tokens, never an addition to them: the
+   * LangChain adapters fold cache counts into `input_tokens`.
+   */
+  cacheReadTokens?: number
   /** Unified LangSmith-style run tree nodes */
   nodes?: TraceNode[]
   /** Total number of tool calls across all steps */

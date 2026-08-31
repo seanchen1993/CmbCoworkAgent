@@ -42,6 +42,17 @@ import {
 } from "./dashboard-code-stats"
 import { countDevAssociatedFeatures, countDevStageConversations } from "./project-mode-metrics"
 import {
+  buildChangeKindAggs,
+  buildComputeEfficiency,
+  buildNewRatioHistogramAgg,
+  buildPendingScalability,
+  computeUnmeasuredRatio,
+  makeMockEfficiency,
+  normalizeChangeKindBuckets,
+  normalizeNewRatioHistogram,
+  type DashboardEfficiencyData
+} from "./dashboard-efficiency"
+import {
   executeDashboardEsQuery,
   type DashboardEsIndexAlias,
   type DashboardEsQueryInput
@@ -81,6 +92,13 @@ import {
   STAGE_IN_PROGRESS_LABEL,
   type StageBucket
 } from "../../shared/harness-stage-bucket"
+import type { ProjectMetricFilters, ProjectMetricListOptions } from "../../shared/project-metrics"
+import {
+  fetchProjectMetricProjects,
+  fetchProjectMetricSummary,
+  makeMockProjectMetricProjects,
+  makeMockProjectMetricSummary
+} from "./dashboard-project-metrics"
 
 // ─────────────────────────────────────────────────────────
 // ES Configuration (from .env)
@@ -102,8 +120,11 @@ function getEsAuth(): { username: string; password: string } | null {
   return { username, password }
 }
 
-function getEsIndex(type: "trace" | "event" | "skillEval"): string {
+function getEsIndex(type: "trace" | "event" | "skillEval" | "projectFact"): string {
   if (type === "trace") return (import.meta.env.VITE_ES_INDEX_TRACE as string) || "devclaw_trace"
+  if (type === "projectFact") {
+    return (import.meta.env.VITE_ES_INDEX_PROJECT_INFO as string) || "devclaw_project_info"
+  }
   if (type === "skillEval") {
     return (import.meta.env.VITE_ES_INDEX_SKILL_EVAL as string) || "devclaw_skill_eval_record"
   }
@@ -11126,6 +11147,42 @@ function projectModeTraceFilters(
   ]
 }
 
+/**
+ * Project-list conversation count = user-initiated main-Agent turns only.
+ *
+ * Child traces inherit `triggerSource=chat` from their root turn, so the active-trigger
+ * filter alone would still count coordinator workers / workflow agents / task agents.
+ * Documents written before multi-Agent observability have no traceKind or parent fields;
+ * treat those legacy records as root turns for backwards-compatible time ranges.
+ */
+function projectModeMainAgentConversationFilter(): Record<string, unknown> {
+  return {
+    bool: {
+      filter: [
+        buildChatTriggeredTraceFilter(),
+        {
+          bool: {
+            should: [
+              { term: { traceKind: "root" } },
+              { term: { "traceKind.keyword": "root" } },
+              {
+                bool: {
+                  must_not: [
+                    { exists: { field: "traceKind" } },
+                    { exists: { field: "parentTraceId" } },
+                    { exists: { field: "subagentKind" } }
+                  ]
+                }
+              }
+            ],
+            minimum_should_match: 1
+          }
+        }
+      ]
+    }
+  }
+}
+
 /** Build the `name@version` key used to merge adapter rows across snapshot + usage. */
 function adapterKey(name: string, version?: string): string {
   return `${name}@@${version ?? ""}`
@@ -12554,6 +12611,7 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
+          main_agent_conversations: { filter: projectModeMainAgentConversationFilter() },
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
           by_node: { terms: { field: "harnessNodeName", size: 100 } },
@@ -12589,7 +12647,7 @@ async function fetchProjectModePageUsage(
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
-    perProject.set(key, asNumber(b.doc_count))
+    perProject.set(key, asNumber(asRecord(b.main_agent_conversations).doc_count))
     perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
     perProjectDevAssociatedFeatures.set(
       key,
@@ -13249,6 +13307,117 @@ async function fetchProjectModeProjectCommits(
     pageSize,
     pushedOnly,
     items: attachCommitAdoption(items, adoptionMap)
+  }
+}
+
+/**
+ * 研发效能面板 payload.
+ *
+ * Scope is fixed rather than user-toggleable: project mode AND bound to a Lean
+ * project. That is the premise the three metrics are defined against, so it is
+ * applied here instead of being exposed as a filter the viewer could turn off
+ * and silently change what the numbers mean.
+ */
+async function fetchDashboardEfficiency(
+  range: TimeRange,
+  opts?: OrgFilterOptions
+): Promise<DashboardEfficiencyData> {
+  const access = requireDashboardProjectModeAccess()
+  const orgFilterClause = buildProjectModeOrgFilter(opts, access)
+
+  // Lean project ids come from the self-healing snapshot (the sole source of
+  // truth for projectFromLean). An empty set is meaningful, not an error: it
+  // means no Lean-bound projects matched, and every terms IN [] below then
+  // aggregates to zero.
+  const { ids: leanProjectIds, truncated } = await fetchProjectModeFilteredProjectIds(
+    projectModeSnapshotFilters(orgFilterClause, true)
+  )
+
+  const codeExtraFilters = [
+    ...(orgFilterClause ? [orgFilterClause] : []),
+    { exists: { field: "properties.harnessProjectId" } },
+    { terms: { "properties.harnessProjectId": leanProjectIds } }
+  ]
+
+  const [changeKindRaw, overallRaw, traceRaw, codeTraceRaw] = await Promise.all([
+    // 指标 2 — adoption split by 新增 / 存量.
+    fetchProjectModeCodeAggs(
+      null,
+      range,
+      (perBucketAggs) => ({
+        ...buildChangeKindAggs(perBucketAggs),
+        ...buildNewRatioHistogramAgg()
+      }),
+      codeExtraFilters
+    ),
+    // Unsplit totals, used for the unmeasured-share credibility indicator.
+    fetchProjectModeCodeAggs(null, range, (perBucketAggs) => perBucketAggs, codeExtraFilters),
+    // 指标 3 numerator — tokens live on the trace index.
+    esQuery(getEsIndex("trace"), {
+      size: 0,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [
+            ...projectModeTraceFilters(range, orgFilterClause),
+            { terms: { harnessProjectId: leanProjectIds } }
+          ]
+        }
+      },
+      aggs: {
+        trace_count: { value_count: { field: "traceId" } },
+        project_count: { cardinality: { field: "harnessProjectId" } },
+        total_input_tokens: { sum: { field: "totalInputTokens" } },
+        total_output_tokens: { sum: { field: "totalOutputTokens" } },
+        total_tokens: { sum: { field: "totalTokens" } },
+        // Flattened at trace-finish time (see summarizeTraceCacheTokens);
+        // a part of the input total, not an addition to it.
+        cache_read_tokens: { sum: { field: "cacheReadTokens" } }
+      }
+    }),
+    // Traces that actually produced code, so the panel can show how much of the
+    // token spend went to conversations that never wrote anything.
+    esQuery(getEsIndex("event"), {
+      size: 0,
+      track_total_hits: false,
+      query: {
+        bool: {
+          filter: [
+            { term: { eventName: "code_gen" } },
+            timeRangeFilter("eventTime", range),
+            ...codeExtraFilters
+          ]
+        }
+      },
+      aggs: { code_traces: { cardinality: { field: "properties.traceId" } } }
+    })
+  ])
+
+  const overall = normalizeCodeStatsFromAggs(overallRaw)
+  const traceAggs = asRecord(asRecord(traceRaw).aggregations)
+  const codeTraceAggs = asRecord(asRecord(codeTraceRaw).aggregations)
+
+  return {
+    scalability: buildPendingScalability(),
+    adoption: {
+      overall,
+      byChangeKind: normalizeChangeKindBuckets(changeKindRaw),
+      newRatioHistogram: normalizeNewRatioHistogram(changeKindRaw),
+      unmeasuredRatio: computeUnmeasuredRatio(overall)
+    },
+    compute: buildComputeEfficiency({
+      totalInputTokens: asNumber(asRecord(traceAggs.total_input_tokens).value),
+      totalOutputTokens: asNumber(asRecord(traceAggs.total_output_tokens).value),
+      totalTokens: asNumber(asRecord(traceAggs.total_tokens).value),
+      cacheReadTokens: asNumber(asRecord(traceAggs.cache_read_tokens).value),
+      pushedAdoptedLines: overall.pushedAdoptedLines,
+      traceCount: asNumber(asRecord(traceAggs.trace_count).value),
+      codeProducingTraceCount: asNumber(asRecord(codeTraceAggs.code_traces).value)
+    }),
+    meta: {
+      projectCount: asNumber(asRecord(traceAggs.project_count).value),
+      truncated
+    }
   }
 }
 
@@ -14064,6 +14233,71 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: await fetchProjectMode(range, opts) }
       } catch (e) {
         logDashboardRequestError("projectMode", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:efficiency",
+    async (_, range: TimeRange, opts?: OrgFilterOptions) => {
+      if (import.meta.env.DEV) return { success: true, data: makeMockEfficiency() }
+      try {
+        requireDashboardProjectModeAccess()
+        return { success: true, data: await fetchDashboardEfficiency(range, opts) }
+      } catch (e) {
+        logDashboardRequestError("efficiency", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricSummary",
+    async (_, filters: ProjectMetricFilters) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricSummary(filters) }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricSummary(filters, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact")
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricSummary", e)
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+  )
+
+  registerLatestDashboardHandler(
+    _ipcMain,
+    "dashboard:projectMetricProjects",
+    async (_, filters: ProjectMetricFilters, options?: ProjectMetricListOptions) => {
+      if (import.meta.env.DEV) {
+        return { success: true, data: makeMockProjectMetricProjects(filters, options) }
+      }
+      try {
+        requireDashboardProjectModeAccess()
+        return {
+          success: true,
+          data: await fetchProjectMetricProjects(filters, options ?? {}, {
+            query: esQuery,
+            eventIndex: getEsIndex("event"),
+            traceIndex: getEsIndex("trace"),
+            factIndex: getEsIndex("projectFact")
+          })
+        }
+      } catch (e) {
+        logDashboardRequestError("projectMetricProjects", e)
         return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
     }
