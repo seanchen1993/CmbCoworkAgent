@@ -61,8 +61,10 @@ export class ImUnifiedBotService {
     })
     this.turnQueue = new ImConversationTurnQueue(createImTurnQueueHandler(this.runner))
     this.commandRouter = new ImCommandRouter({
-      abortCurrent: (conversationKey) => this.turnQueue.abortCurrentImEvent(conversationKey),
-      getCurrentEventId: (conversationKey) => this.turnQueue.getCurrentEventId(conversationKey)
+      abortCurrent: (conversationKey, threadId) =>
+        this.turnQueue.abortCurrentImEvent(conversationKey, undefined, threadId),
+      getCurrentEventId: (conversationKey, threadId) =>
+        this.turnQueue.getCurrentEventId(conversationKey, threadId)
     })
   }
 

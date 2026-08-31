@@ -62,6 +62,10 @@ import {
 } from "./gateway-client"
 import { imTargetReplyPrefix } from "./reply-context"
 import { buildImEventReplies, buildImProactiveReplies, eventShortCode } from "./reply-segmentation"
+import {
+  imRemoteInteractionRouteRegistry,
+  type ImRemoteInteractionRouteRegistry
+} from "./remote-interaction-route"
 import { ImReplyClient } from "./reply-client"
 import { trackEvent } from "../event-reporter"
 
@@ -120,6 +124,7 @@ export interface PreparedRemoteStandardTurnInput {
 export interface ImRemoteRunnerDependencies {
   gateway: ImGatewayClientPort
   eventStore: ImEventStore
+  interactionRoutes: ImRemoteInteractionRouteRegistry
   conversationState: ImConversationStateStore
   capabilityGuard: ImRemoteCapabilityGuard
   replyClient: ImReplyClient
@@ -536,6 +541,7 @@ export class ImRemoteRunner {
     this.dependencies = {
       gateway,
       eventStore,
+      interactionRoutes: dependencies.interactionRoutes ?? imRemoteInteractionRouteRegistry,
       conversationState: dependencies.conversationState ?? imConversationStateStore,
       capabilityGuard: dependencies.capabilityGuard ?? imRemoteCapabilityGuard,
       replyClient: dependencies.replyClient ?? new ImReplyClient(gateway, eventStore),
@@ -575,6 +581,13 @@ export class ImRemoteRunner {
     }
     const claim = claimLocalThreadRunLease({ threadId: target.threadId, owner: "im", runId })
     if (!claim.acquired) return "deferred_thread_busy"
+    const unregisterInteractionRoute = this.dependencies.interactionRoutes.register({
+      eventId: event.eventId,
+      principalId: event.principalId,
+      conversationKey: event.conversationKey,
+      threadId: target.threadId,
+      targetSnapshot: target
+    })
 
     const executionAbort = new AbortController()
     const abortFromQueue = (): void => executionAbort.abort(queueSignal.reason)
@@ -616,28 +629,71 @@ export class ImRemoteRunner {
               throw new Error("IM event cannot enter desktop wait from its current state")
             }
             const waiting = await this.dependencies.eventStore.markWaitingDesktop(latest.eventId)
-            await this.dependencies.setThreadLifecycle(waiting, "waiting_desktop")
+            await this.dependencies
+              .setThreadLifecycle(waiting, "waiting_desktop")
+              .catch((error) => {
+                console.warn(
+                  "[IM] Remote wait lifecycle update failed; interaction remains active",
+                  {
+                    eventId: waiting.eventId,
+                    threadId: interaction.threadId,
+                    interactionKind: interaction.kind,
+                    reason: error instanceof Error ? error.message : String(error)
+                  }
+                )
+              })
             const waitingMinutes = Math.max(
               1,
               Math.ceil(this.dependencies.waitingDesktopTtlMs / 60_000)
             )
-            await this.dependencies.eventStore.enqueueProactiveReplies(
-              buildImProactiveReplies({
-                deliveryId: `${event.eventId}:waiting-desktop`,
-                conversationKey: waiting.conversationKey,
-                text:
-                  interaction.kind === "user_input"
-                    ? `任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可在 ${waitingMinutes} 分钟内到对应桌面会话处理。`
-                    : `任务正在等待桌面确认；如已开启远程审批，也可在 ${waitingMinutes} 分钟内通过招乎审批指令处理。`,
-                prefix: this.targetPrefixForEvent(waiting)
+            await this.dependencies.eventStore
+              .enqueueProactiveReplies(
+                buildImProactiveReplies({
+                  deliveryId: `${event.eventId}:waiting-desktop`,
+                  conversationKey: waiting.conversationKey,
+                  text:
+                    interaction.kind === "user_input"
+                      ? `任务需要补充输入，问题与 /回答 指令将发送到当前招乎会话；也可在 ${waitingMinutes} 分钟内到对应桌面会话处理。`
+                      : `任务正在等待桌面确认；如已开启远程审批，也可在 ${waitingMinutes} 分钟内通过招乎审批指令处理。`,
+                  prefix: this.targetPrefixForEvent(waiting)
+                })
+              )
+              .catch((error) => {
+                console.warn(
+                  "[IM] Remote wait notice could not be queued; interaction remains active",
+                  {
+                    eventId: waiting.eventId,
+                    threadId: interaction.threadId,
+                    interactionKind: interaction.kind,
+                    reason: error instanceof Error ? error.message : String(error)
+                  }
+                )
               })
-            )
-            await this.dependencies.gateway.sendAcknowledgement({
-              type: "waiting_desktop",
-              eventId: waiting.eventId,
-              leaseId: waiting.leaseId
+            await this.dependencies.gateway
+              .sendAcknowledgement({
+                type: "waiting_desktop",
+                eventId: waiting.eventId,
+                leaseId: waiting.leaseId
+              })
+              .catch((error) => {
+                console.warn(
+                  "[IM] Remote wait acknowledgement deferred; interaction remains active",
+                  {
+                    eventId: waiting.eventId,
+                    threadId: interaction.threadId,
+                    interactionKind: interaction.kind,
+                    reason: error instanceof Error ? error.message : String(error)
+                  }
+                )
+              })
+            await this.dependencies.replyClient.sendPending().catch((error) => {
+              console.warn("[IM] Remote wait outbox drain deferred; interaction remains active", {
+                eventId: waiting.eventId,
+                threadId: interaction.threadId,
+                interactionKind: interaction.kind,
+                reason: error instanceof Error ? error.message : String(error)
+              })
             })
-            await this.dependencies.replyClient.sendPending()
             waitingTimer = setTimeout(() => {
               waitingTimeoutReason = "REMOTE_INTERACTION_TIMEOUT"
               abortExecution(new DOMException("Remote desktop interaction timed out", "AbortError"))
@@ -687,7 +743,14 @@ export class ImRemoteRunner {
               throw new Error(`IM capability changed while waiting: ${capability.reasonCode}`)
             }
             const resumed = await this.dependencies.eventStore.resumeFromDesktop(permitted.eventId)
-            await this.dependencies.setThreadLifecycle(resumed, "active")
+            await this.dependencies.setThreadLifecycle(resumed, "active").catch((error) => {
+              console.warn("[IM] Remote resume lifecycle update failed; execution remains active", {
+                eventId: resumed.eventId,
+                threadId: interaction.threadId,
+                interactionKind: interaction.kind,
+                reason: error instanceof Error ? error.message : String(error)
+              })
+            })
             if (waitingTimer) {
               clearTimeout(waitingTimer)
               waitingTimer = undefined
@@ -883,6 +946,7 @@ export class ImRemoteRunner {
       clearInterval(renewTimer)
       if (waitingTimer) clearTimeout(waitingTimer)
       queueSignal.removeEventListener("abort", abortFromQueue)
+      unregisterInteractionRoute()
       releaseLocalThreadRunLease(target.threadId, "im", runId)
     }
   }

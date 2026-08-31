@@ -75,8 +75,8 @@ interface ImCommandRouterDependencies {
   approvals: Pick<ImRemoteApprovalService, "resolveCode">
   userInputs: Pick<ImRemoteUserInputService, "resolveAnswer">
   selections: ImSelectionContextStore
-  abortCurrent: (conversationKey: string) => boolean
-  getCurrentEventId: (conversationKey: string) => string | null
+  abortCurrent: (conversationKey: string, threadId?: string) => boolean
+  getCurrentEventId: (conversationKey: string, threadId?: string) => string | null
 }
 
 function positiveIndex(argument: string): number | null {
@@ -258,7 +258,10 @@ export class ImCommandRouter {
             grantId: selected.grantId,
             grantVersion
           })
-    const currentEventId = this.dependencies.getCurrentEventId(input.conversationKey)
+    const currentEventId = this.dependencies.getCurrentEventId(
+      input.conversationKey,
+      previous?.threadId
+    )
     const switchedDuringRun = Boolean(
       currentEventId && previous?.kind !== "inbox" && previous?.targetId !== target.targetId
     )
@@ -266,14 +269,14 @@ export class ImCommandRouter {
       return [
         `已在【${selected.label}】下新建会话并切换。`,
         switchedDuringRun
-          ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将进入新会话队列。`
+          ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到新会话。`
           : "后续普通消息将发送到这个新会话。"
       ].join("\n")
     }
     return [
       `已绑定并切换到【${targetLabel(target)}】。`,
       switchedDuringRun
-        ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将进入当前会话队列。`
+        ? `上一任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。新消息将发送到当前会话。`
         : "后续普通消息将发送到这个会话。"
     ].join("\n")
   }
@@ -285,10 +288,13 @@ export class ImCommandRouter {
     const previous = this.selectedTarget(input.conversationKey)
     const inbox = await this.dependencies.inbox.ensureInbox(input)
     await this.dependencies.conversations.setActiveTarget(input.conversationKey, inbox.targetId)
-    const currentEventId = this.dependencies.getCurrentEventId(input.conversationKey)
+    const currentEventId = this.dependencies.getCurrentEventId(
+      input.conversationKey,
+      previous?.threadId
+    )
     const switchedDuringRemoteRun = Boolean(currentEventId && previous?.kind !== "inbox")
     return switchedDuringRemoteRun
-      ? `已切换到【收件箱】。\n上一会话任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。\n新消息将进入收件箱队列。`
+      ? `已切换到【收件箱】。\n上一会话任务仍在执行，完成后会以【${targetLabel(previous!)}】标识返回。\n新消息将发送到收件箱。`
       : "已切换到【收件箱】。后续普通消息将进入默认聊天。"
   }
 
@@ -300,7 +306,7 @@ export class ImCommandRouter {
     const queued = this.dependencies.events
       .listConversationEvents(conversationKey)
       .filter((event) => event.state === "queued").length
-    const runningEventId = this.dependencies.getCurrentEventId(conversationKey)
+    const runningEventId = this.dependencies.getCurrentEventId(conversationKey, target.threadId)
     const runningEvent = runningEventId ? this.dependencies.events.getEvent(runningEventId) : null
     const runtimeTarget = runningEvent?.targetSnapshot ?? target
     const lease = getLocalThreadRunLease(runtimeTarget.threadId)
@@ -318,8 +324,10 @@ export class ImCommandRouter {
   }
 
   private stopCurrent(conversationKey: string): string {
-    if (this.dependencies.abortCurrent(conversationKey)) return "已请求停止当前 IM 任务。"
     const target = this.selectedTarget(conversationKey)
+    if (target && this.dependencies.abortCurrent(conversationKey, target.threadId)) {
+      return "已请求停止当前会话的 IM 任务。"
+    }
     const lease = target ? getLocalThreadRunLease(target.threadId) : undefined
     if (lease?.owner === "desktop") return "当前是桌面任务，请在桌面停止。"
     if (lease?.owner === "scheduler") return "当前是定时任务，不能通过 IM 跨来源停止。"

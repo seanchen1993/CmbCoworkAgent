@@ -15,11 +15,24 @@ import {
   subscribePendingUserInput,
   subscribeRemovedUserInput
 } from "../user-input"
-import { imConversationStateStore, type ImConversationStateStore } from "./conversation-state"
+import {
+  imConversationStateStore,
+  type ImConversationStateStore,
+  type ImTargetSnapshot
+} from "./conversation-state"
 import { imEventStore, type ImEventStore } from "./event-store"
+import {
+  imRemoteInteractionRouteRegistry,
+  type ImRemoteInteractionRouteRegistry
+} from "./remote-interaction-route"
 import { imRemoteAccessService, type ImRemoteAccessService } from "./remote-access-service"
 import { imRemoteGrantStore, type ImRemoteGrantStore } from "./remote-grant-store"
-import { imFeatureReplyPrefix, imInboxReplyPrefix, imThreadReplyPrefix } from "./reply-context"
+import {
+  imFeatureReplyPrefix,
+  imInboxReplyPrefix,
+  imTargetReplyPrefix,
+  imThreadReplyPrefix
+} from "./reply-context"
 import { buildImProactiveReplies } from "./reply-segmentation"
 import type { ImReplyClient } from "./reply-client"
 
@@ -56,7 +69,8 @@ interface RemoteUserInputDependencies {
   conversations: ImConversationStateStore
   access: Pick<ImRemoteAccessService, "getThreadGrant">
   grants: ImRemoteGrantStore
-  events: Pick<ImEventStore, "enqueueProactiveReplies" | "markOutboxFailed">
+  events: Pick<ImEventStore, "enqueueProactiveReplies" | "getEvent" | "markOutboxFailed">
+  interactionRoutes: Pick<ImRemoteInteractionRouteRegistry, "get">
   getThread: typeof getThread
   getSettings: typeof getBuiltinRobotSettings
   getPendingForThread: typeof getPendingUserInputForThread
@@ -167,6 +181,7 @@ export class ImRemoteUserInputService {
       access: dependencies.access ?? imRemoteAccessService,
       grants: dependencies.grants ?? imRemoteGrantStore,
       events: dependencies.events ?? imEventStore,
+      interactionRoutes: dependencies.interactionRoutes ?? imRemoteInteractionRouteRegistry,
       getThread: dependencies.getThread ?? getThread,
       getSettings: dependencies.getSettings ?? getBuiltinRobotSettings,
       getPendingForThread: dependencies.getPendingForThread ?? getPendingUserInputForThread,
@@ -287,7 +302,13 @@ export class ImRemoteUserInputService {
     const settings = this.dependencies.getSettings()
     if (!settings.enabled || request.questions.length === 0) return
     const route = this.resolveRoute(request.threadId)
-    if (!route) return
+    if (!route) {
+      this.dependencies.warn(
+        "Remote user-input request has no authorized IM execution route.",
+        new Error(`threadId=${request.threadId}, requestId=${request.requestId}`)
+      )
+      return
+    }
     if (this.sessions.has(request.requestId)) return
     const ttlMinutes = ttlMinutesFromSettings(settings.waitingDesktopTtlMinutes)
     const session: RemoteUserInputSession = {
@@ -336,6 +357,46 @@ export class ImRemoteUserInputService {
     const parsed = parseStandardThreadMetadata(thread.metadata)
     if (!parsed.workspacePath || !canonicalDirectory(parsed.workspacePath)) return null
     if (parsed.agentMode !== "normal") return null
+
+    const registered = this.dependencies.interactionRoutes.get(threadId)
+    if (registered) {
+      const event = this.dependencies.events.getEvent(registered.eventId)
+      const conversation = this.dependencies.conversations.getConversation(
+        registered.conversationKey
+      )
+      const target = this.dependencies.conversations
+        .listTargets(registered.conversationKey)
+        .find(
+          (candidate) =>
+            candidate.state === "active" &&
+            candidate.snapshot.targetId === registered.targetSnapshot.targetId &&
+            candidate.snapshot.threadId === threadId
+        )
+      if (
+        event &&
+        (event.state === "executing" || event.state === "waiting_desktop") &&
+        event.principalId === registered.principalId &&
+        event.conversationKey === registered.conversationKey &&
+        event.targetSnapshot?.targetId === registered.targetSnapshot.targetId &&
+        conversation?.state === "active" &&
+        conversation.principalId === registered.principalId &&
+        target &&
+        this.registeredTargetGrantIsActive(
+          registered.targetSnapshot,
+          registered.principalId,
+          registered.conversationKey
+        )
+      ) {
+        return {
+          principalId: registered.principalId,
+          conversationKey: registered.conversationKey,
+          threadId,
+          prefix: imTargetReplyPrefix(registered.targetSnapshot, {
+            threadTitle: thread.title
+          })
+        }
+      }
+    }
 
     const threadGrant = this.dependencies.access.getThreadGrant(threadId)
     if (threadGrant?.state === "active") {
@@ -397,6 +458,33 @@ export class ImRemoteUserInputService {
       }
     }
     return null
+  }
+
+  private registeredTargetGrantIsActive(
+    target: ImTargetSnapshot,
+    principalId: string,
+    conversationKey: string
+  ): boolean {
+    if (target.kind === "inbox") return true
+    if (target.kind === "thread") {
+      const grant = this.dependencies.access.getThreadGrant(target.threadId)
+      return Boolean(
+        grant &&
+        grant.state === "active" &&
+        grant.grantId === target.grantId &&
+        grant.grantVersion === target.grantVersion &&
+        grant.principalId === principalId &&
+        grant.conversationKey === conversationKey
+      )
+    }
+    if (!target.grantId || !target.grantVersion) return false
+    const grant = this.dependencies.grants.getFeatureGrantById(target.grantId)
+    return Boolean(
+      grant &&
+      grant.state === "active" &&
+      grant.grantVersion === target.grantVersion &&
+      grant.principalId === principalId
+    )
   }
 
   private uniqueCode(excludedCode?: string): string {

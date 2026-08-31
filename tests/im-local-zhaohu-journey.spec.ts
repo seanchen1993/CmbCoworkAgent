@@ -216,8 +216,8 @@ async function createJourney() {
     5 * 60_000
   )
   const broker = new ApprovalDecisionBroker()
-  let pendingUserInput: UserInputRequest | null = null
-  let resolvePendingUserInput: ((response: UserInputResponse) => void) | null = null
+  const pendingUserInputs = new Map<string, UserInputRequest>()
+  const pendingUserInputResolvers = new Map<string, (response: UserInputResponse) => void>()
   const pendingUserListeners = new Set<PendingUserListener>()
   const removedUserListeners = new Set<RemovedUserListener>()
   const userInputResponses: UserInputResponse[] = []
@@ -237,7 +237,7 @@ async function createJourney() {
     },
     workflow: { isBusyForThread: () => false },
     hasPendingApproval: (threadId) => broker.list(threadId).length > 0,
-    hasPendingUserInput: (threadId) => pendingUserInput?.threadId === threadId
+    hasPendingUserInput: (threadId) => pendingUserInputs.has(threadId)
   })
 
   const mockGateway = new MockImGateway({ now: () => clock.now })
@@ -267,6 +267,7 @@ async function createJourney() {
       throw new Error(`${message}: ${String(error ?? "")}`)
     }
   })
+  const userInputCodes = ["D4E5F6", "E5F6A7", "F6A7B8"]
   const userInputService = new ImRemoteUserInputService({
     conversations,
     access: { getThreadGrant: (threadId) => grants.getThreadGrant(threadId) },
@@ -281,16 +282,17 @@ async function createJourney() {
         remoteApprovalEnabled: true,
         waitingDesktopTtlMinutes: 10
       }) as never,
-    getPendingForThread: ((threadId: string) =>
-      pendingUserInput?.threadId === threadId ? pendingUserInput : null) as never,
+    getPendingForThread: ((threadId: string) => pendingUserInputs.get(threadId) ?? null) as never,
     submitResponse: ((response: UserInputResponse) => {
-      if (!pendingUserInput || response.requestId !== pendingUserInput.requestId) return false
-      const removed = pendingUserInput
-      pendingUserInput = null
+      const removed = [...pendingUserInputs.values()].find(
+        (request) => request.requestId === response.requestId
+      )
+      if (!removed) return false
+      pendingUserInputs.delete(removed.threadId)
       userInputResponses.push(response)
       for (const listener of removedUserListeners) listener(removed.requestId, removed.threadId)
-      const resolve = resolvePendingUserInput
-      resolvePendingUserInput = null
+      const resolve = pendingUserInputResolvers.get(removed.requestId)
+      pendingUserInputResolvers.delete(removed.requestId)
       resolve?.(response)
       return true
     }) as never,
@@ -303,7 +305,7 @@ async function createJourney() {
       return () => removedUserListeners.delete(listener)
     }) as never,
     now: () => clock.now,
-    createCode: () => "D4E5F6",
+    createCode: () => userInputCodes.shift() ?? "ABC123",
     warn: (message, error) => {
       throw new Error(`${message}: ${String(error ?? "")}`)
     }
@@ -323,7 +325,7 @@ async function createJourney() {
     },
     workflow: { isBusyForThread: () => false },
     hasPendingApproval: (threadId) => broker.list(threadId).length > 0,
-    hasPendingUserInput: (threadId) => pendingUserInput?.threadId === threadId,
+    hasPendingUserInput: (threadId) => pendingUserInputs.has(threadId),
     validateExistingFeatureThread: (metadata, workspacePath) =>
       featureService.validateExistingFeatureThread(metadata, workspacePath),
     grants
@@ -348,13 +350,14 @@ async function createJourney() {
         }
       ]
     }
-    pendingUserInput = request
+    pendingUserInputs.set(threadId, request)
     for (const listener of pendingUserListeners) listener(request)
     return new Promise<UserInputResponse>((resolve, reject) => {
-      resolvePendingUserInput = resolve
+      pendingUserInputResolvers.set(request.requestId, resolve)
       const onAbort = (): void => {
-        if (pendingUserInput?.requestId === request.requestId) {
-          pendingUserInput = null
+        if (pendingUserInputs.get(threadId)?.requestId === request.requestId) {
+          pendingUserInputs.delete(threadId)
+          pendingUserInputResolvers.delete(request.requestId)
           for (const listener of removedUserListeners) listener(request.requestId, threadId)
         }
         reject(signal.reason ?? new DOMException("Aborted", "AbortError"))
@@ -435,7 +438,7 @@ async function createJourney() {
         })
         return decision.type === "approve" ? "审批通过后任务完成" : "审批拒绝后任务结束"
       }
-      if (event.messageText === "询问发布范围") {
+      if (event.messageText.startsWith("询问发布范围")) {
         assert(interactionWaitHooks)
         const waitId = "user-input-wait-journey"
         await interactionWaitHooks.onWaitStart({
@@ -475,8 +478,10 @@ async function createJourney() {
     approvals: approvalService,
     userInputs: userInputService,
     selections,
-    abortCurrent: (conversationKey) => queue.abortCurrentImEvent(conversationKey),
-    getCurrentEventId: (conversationKey) => queue.getCurrentEventId(conversationKey)
+    abortCurrent: (conversationKey, threadId) =>
+      queue.abortCurrentImEvent(conversationKey, undefined, threadId),
+    getCurrentEventId: (conversationKey, threadId) =>
+      queue.getCurrentEventId(conversationKey, threadId)
   })
   const ingress = new ImIngressSequencer({
     conversationState: conversations,
@@ -655,11 +660,15 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     assert(journey.eventReplyText(switchInbox.event.eventId).includes("上一会话任务仍在执行"))
     assert.equal(journey.conversations.getActiveTarget(CONVERSATION_KEY)?.kind, "inbox")
     const queuedInbox = await journey.send("切换后进入收件箱的消息")
-    assert.equal(journey.events.getEvent(queuedInbox.event.eventId)?.state, "queued")
     assert.equal(journey.events.getEvent(queuedInbox.event.eventId)?.targetSnapshot?.kind, "inbox")
+    await journey.waitForEventState(queuedInbox.event.eventId, "completed")
+    assert.equal(
+      journey.events.getEvent(longTask.event.eventId)?.state,
+      "executing",
+      "a different Thread should complete while the previous task is still running"
+    )
     journey.releaseLongTask()
     await journey.waitForEventState(longTask.event.eventId, "completed")
-    await journey.waitForEventState(queuedInbox.event.eventId, "completed")
     const longReply = journey.eventReplyText(longTask.event.eventId)
     assert(longReply.includes("【会话：检查 Feature 当前状态】"))
     assert(longReply.includes("切换前任务"))
@@ -691,20 +700,43 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     const reusedApproval = await journey.send("/批准 A1B2C3")
     assert(journey.eventReplyText(reusedApproval.event.eventId).includes("已过期或已使用"))
 
-    const userInputTask = await journey.send("询问发布范围")
-    await journey.waitForEventState(userInputTask.event.eventId, "waiting_desktop")
-    const inputRequest = await waitFor(
+    const ordinaryUserInputTask = await journey.send("询问发布范围：普通会话")
+    await journey.waitForEventState(ordinaryUserInputTask.event.eventId, "waiting_desktop")
+    const ordinaryInputRequest = await waitFor(
       () => journey.gateway.replies.find((reply) => reply.message.content.includes("D4E5F6")),
-      "remote user-input prompt"
+      "ordinary Thread remote user-input prompt"
     )
-    assert(inputRequest.message.content.includes("本次发布到哪个环境？"))
-    const answer = await journey.send("/回答 D4E5F6 1")
-    assert(journey.eventReplyText(answer.event.eventId).includes("任务将继续执行"))
-    await journey.waitForEventState(userInputTask.event.eventId, "completed")
+    assert(ordinaryInputRequest.message.content.includes("本次发布到哪个环境？"))
+
+    const switchDuringInput = await journey.send("/收件箱")
+    assert(journey.eventReplyText(switchDuringInput.event.eventId).includes("上一会话任务仍在执行"))
+    const inboxUserInputTask = await journey.send("询问发布范围：收件箱")
+    await journey.waitForEventState(inboxUserInputTask.event.eventId, "waiting_desktop")
+    const inboxInputRequest = await waitFor(
+      () => journey.gateway.replies.find((reply) => reply.message.content.includes("E5F6A7")),
+      "inbox Thread remote user-input prompt"
+    )
+    assert(inboxInputRequest.message.content.includes("【远程收件箱】"))
+
+    const answerInboxFirst = await journey.send("/回答 E5F6A7 2")
+    assert(journey.eventReplyText(answerInboxFirst.event.eventId).includes("任务将继续执行"))
+    await journey.waitForEventState(inboxUserInputTask.event.eventId, "completed")
+    assert(journey.eventReplyText(inboxUserInputTask.event.eventId).includes("已选择：生产"))
+    assert.equal(
+      journey.events.getEvent(ordinaryUserInputTask.event.eventId)?.state,
+      "waiting_desktop",
+      "answering one short code must not resolve another Thread"
+    )
+
+    const answerOrdinary = await journey.send("/回答 D4E5F6 1")
+    assert(journey.eventReplyText(answerOrdinary.event.eventId).includes("任务将继续执行"))
+    await journey.waitForEventState(ordinaryUserInputTask.event.eventId, "completed")
     assert(
-      journey.eventReplyText(userInputTask.event.eventId).includes("已选择：UAT (Recommended)")
+      journey
+        .eventReplyText(ordinaryUserInputTask.event.eventId)
+        .includes("已选择：UAT (Recommended)")
     )
-    assert.equal(journey.userInputResponses.length, 1)
+    assert.equal(journey.userInputResponses.length, 2)
 
     const stoppable = await journey.send("启动可停止任务")
     await journey.waitForEventState(stoppable.event.eventId, "executing")
@@ -753,7 +785,8 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     )
     assert(journey.executedMessages.includes("检查 Feature 当前状态"))
     assert(journey.executedMessages.includes("执行需要审批的命令"))
-    assert(journey.executedMessages.includes("询问发布范围"))
+    assert(journey.executedMessages.includes("询问发布范围：普通会话"))
+    assert(journey.executedMessages.includes("询问发布范围：收件箱"))
   } finally {
     await journey.cleanup()
   }

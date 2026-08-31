@@ -342,6 +342,31 @@ export class ImEventStore {
     return row ? hydrateEvent(row) : null
   }
 
+  listQueuedEvents(conversationKey?: string): ImEventRecord[] {
+    const database = this.dependencies.getDatabase()
+    const rows = conversationKey
+      ? readAll<ImEventRow>(
+          database,
+          `SELECT * FROM im_events
+           WHERE conversation_key = ? AND state = 'queued'
+           ORDER BY created_at ASC, conversation_seq ASC, event_id ASC`,
+          [conversationKey]
+        )
+      : readAll<ImEventRow>(
+          database,
+          `SELECT * FROM im_events
+           WHERE state = 'queued'
+           ORDER BY created_at ASC, conversation_key ASC, conversation_seq ASC, event_id ASC`
+        )
+    return rows.map(hydrateEvent)
+  }
+
+  getNextQueuedEventForThread(threadId: string): ImEventRecord | null {
+    return (
+      this.listQueuedEvents().find((event) => event.targetSnapshot?.threadId === threadId) ?? null
+    )
+  }
+
   listQueuedConversationKeys(): string[] {
     return readAll<{ conversation_key: string }>(
       this.dependencies.getDatabase(),

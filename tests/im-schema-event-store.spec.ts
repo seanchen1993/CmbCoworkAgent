@@ -760,6 +760,55 @@ async function testRestartRecoveryAndConversationQueue(): Promise<void> {
   }
 }
 
+async function testConversationQueueRunsDifferentThreadsInParallel(): Promise<void> {
+  const context = await createContext()
+  try {
+    await seedConversation(context)
+    await context.conversationStore.registerTarget("conversation-1", featureTarget)
+    const first = eventFixture(1)
+    const second = eventFixture(2)
+    await context.eventStore.receiveEvent(first, inboxTarget)
+    await context.eventStore.queueEvent(first.eventId)
+    await context.eventStore.receiveEvent(second, featureTarget)
+    await context.eventStore.queueEvent(second.eventId)
+
+    let releaseInbox: () => void = () => undefined
+    let releaseFeature: () => void = () => undefined
+    const inboxGate = new Promise<void>((resolve) => {
+      releaseInbox = resolve
+    })
+    const featureGate = new Promise<void>((resolve) => {
+      releaseFeature = resolve
+    })
+    const started: string[] = []
+    const queue = new ImConversationTurnQueue(async (event) => {
+      started.push(event.eventId)
+      await (event.targetSnapshot?.threadId === inboxTarget.threadId ? inboxGate : featureGate)
+      await context.eventStore.cancelEvent(event.eventId, "TEST_TERMINAL")
+    }, context.eventStore)
+
+    const draining = queue.notify("conversation-1")
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    assert.deepEqual(
+      new Set(started),
+      new Set([first.eventId, second.eventId]),
+      "different Thread lanes should begin without waiting for each other"
+    )
+
+    releaseFeature()
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    assert.equal(context.eventStore.getEvent(second.eventId)?.state, "cancelled")
+    assert.notEqual(context.eventStore.getEvent(first.eventId)?.state, "cancelled")
+
+    releaseInbox()
+    await draining
+    assert.equal(context.eventStore.getEvent(first.eventId)?.state, "cancelled")
+    await queue.stop()
+  } finally {
+    context.database.close()
+  }
+}
+
 async function testMockGatewayFaultMatrix(): Promise<void> {
   let now = Date.parse("2026-07-23T08:00:00.000Z")
   const gateway = new MockImGateway({ now: () => now })
@@ -957,6 +1006,7 @@ async function main(): Promise<void> {
     testFlushFailureIsNeverAcknowledgedAsDurable,
     testIngressAckBoundariesAndReplay,
     testRestartRecoveryAndConversationQueue,
+    testConversationQueueRunsDifferentThreadsInParallel,
     testRetentionKeepsLiveAndUncertainDeliveryState,
     testMockGatewayFaultMatrix
   ]) {
