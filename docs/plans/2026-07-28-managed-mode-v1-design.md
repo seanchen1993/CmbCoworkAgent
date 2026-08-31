@@ -1,7 +1,7 @@
 # Harness 托管模式 V2 设计与 V3 路线
 
-- 状态：V2 设计已确认，待实施；V3 能力已定边界、暂不实施
-- 更新日期：2026-08-24
+- 状态：V2 设计已确认并实施中；V3 能力已定边界、暂不实施
+- 更新日期：2026-08-31
 - 适用范围：CMBDevClaw 项目模式中的 Harness Feature
 - 当前代码基线：`feature/board_automode`
 - 参考实现：V1 `AutoModeController`、内置 Dynamic Workflow 的 RunStore/Journal/Structured Output
@@ -91,7 +91,7 @@ V2 不实现：
 - 跨会话自动并行和资源冲突调度；
 - worktree 隔离；
 - 精确 Token 硬预算；
-- 运行时长上限；
+- 通用运行时长上限（托管会话 `execute` 固定 20 分钟前台超时除外）；
 - 插件自定义托管策略；
 - 隐藏或降级托管 Thread；
 - 全局跨项目托管运行中心；
@@ -549,7 +549,69 @@ maxProviderRetriesPerNode = 3
 maxBizRetriesPerStage = 3
 ```
 
-Provider Retry 只处理模型服务失败并始终复用原 Thread；Biz Retry 只处理成功结束但当前阶段尚未结束的业务继续执行，并按自适应规则选择复用或新建 Thread。两者预算独立。V2 仍不实现通用会话总数、节点会话数、运行时长或 Token 硬预算，通用计数和硬限制进入 V3。
+Provider Retry 只处理模型服务失败并始终复用原 Thread；Biz Retry 只处理成功结束但当前阶段尚未结束的业务继续执行，并按自适应规则选择复用或新建 Thread。两者预算独立。V2 仍不实现通用会话总数、节点会话数或 Token 硬预算；托管会话仅为 `execute` 提供固定 20 分钟前台超时，不将该常量扩展为 ManagedRun 总时长预算。通用计数和硬限制进入 V3。
+
+### 9.4 托管会话的后台执行边界
+
+V2 将 Agent Turn 作为 Controller 的唯一会话结算输入，但必须避免一个 Turn 启动脱离当前 Turn 的工作后被误判为阶段已完成。平台只对两种内置异步能力制定托管规则：`execute(run_in_background=true)` 和 Dynamic Workflow；插件私有 Task/Batch 仍由插件状态与 `feature_status` 表达。
+
+#### 9.4.1 execute 强制前台与 20 分钟超时
+
+只有当前 Thread 仍是对应 `running` ManagedRun 的 `currentSession` 时，才属于 active Managed Session；历史 metadata 中仅保留非空 `harnessFeature.runId` 不足以启用托管执行。active Managed Session 及其继承运行时中，`execute` 禁止脱离当前 Agent Turn：
+
+```text
+普通会话 execute(run_in_background=true)
+  → 保持现有后台任务、task_id 和 task_output 交互
+
+托管会话 execute(run_in_background=true)
+  → 参数仍可被模型传入，但运行时强制走前台 execute
+  → 当前 Tool Call 等待命令结束
+  → 固定 20 分钟超时
+  → 成功、失败、用户取消和超时沿用现有前台 execute 返回语义
+  → Tool Call 结算后 Agent Turn 才能结束
+```
+
+20 分钟常量只覆盖 active Managed Session 的前台 shell 执行。Controller 启动首个会话或重试时额外携带仅对该次物理 Run 有效的内部 `managedExecution` 授权，用于桥接 Agent handler 先启动、`currentSession` 快照稍后落盘的竞态；该授权不写入 Thread metadata，后续人工 Turn 仍重新检查 active 状态。普通会话、已 completed/failed/cancelled 的历史托管 Thread 后续人工 Turn，保持前台 60 秒、后台任务返回 `task_id` 的现有行为。托管 Workflow 的叶子 Agent 和其他由托管 Runtime 派生、实际承担阶段工作的 Runtime 必须显式继承该约束，避免子 Runtime 再次创建可越过父 Turn 的后台命令。
+
+#### 9.4.2 Workflow launch Turn 与 notification Turn
+
+Dynamic Workflow 的 launched、后台 engine、结果持久化、进度广播和 notification 注入协议保持不变。Managed Controller 不订阅 `workflow_progress`、engine completed/error、取消或其他 Workflow 生命周期事件，只消费 Agent Turn End。
+
+Workflow Tool 在 Run Manager 接受并调度 `launch()` 后，以不改变返回值和异步时序的回调记录当前物理 Agent Run 的事实。回调刻意早于 `whenInitialPersisted`：初始持久化失败不代表 Workflow 生命周期未启动；隔离 worktree 会在 spawn 时 fail closed，并仍通过 error notification 完成结算，因此 launch Turn 仍必须等待 notification：
+
+```ts
+interface AgentTurnExecutionFacts {
+  workflowLaunchedRunIds?: string[]
+}
+```
+
+该事实在一次物理 Agent Run 内跨模型 failover、Goal continuation 等内部 LLM 子调用累积，并随该物理 Run 唯一的 `AgentTurnEndEvent` 进入 Managed Controller。内部 LLM 子调用不是独立的托管结算输入，不能在子调用之间重置该集合。Controller 在确认事件属于当前 ManagedRun/currentSession 后，若 `workflowLaunchedRunIds` 非空，则不写入 `session_completed`、不 Inspect、不重置 Retry、不推进或结束 ManagedRun。判断依据是“本次物理 Agent Run 是否实际启动过 Workflow”，不得在结束时查询 `workflowRunManager.isActive(threadId)`；后者无法覆盖 Workflow 在 Agent Run 结束前已经快速完成并移出 active 表的竞态。
+
+```text
+Workflow launch 所在 Agent Turn 正常结算
+  → 消息、checkpoint、trace、stream、Goal、Memory 和 active run 清理保持不变
+  → 正常产生 AgentTurnEndEvent
+  → Managed Controller 依据 executionFacts 忽略本次托管判断
+
+Workflow engine completed/error/cancelled
+  → Workflow 子系统按现有逻辑持久化和广播
+  → Managed Controller 完全忽略
+
+Workflow notification Turn
+  → Renderer 提交内部 human trigger
+  → Main 将持久化的 Workflow 结果展开为 HumanMessage 加入 LLM 上下文
+  → notification Turn 成功：正常 ack，并将普通 AgentTurnEndEvent 交给 Managed Controller
+  → notification Turn 失败且仍有 re-notify 额度：保持 delivered=false，由 Workflow re-notify，Controller 忽略
+  → notification Turn 失败且 re-notify 已耗尽：active Managed Session 接管最后一次 AgentTurnEndEvent
+```
+
+notification Turn 如果再次成功 launch/resume Workflow，同样携带非空 `workflowLaunchedRunIds`，Controller 继续忽略本次 Turn End，等待后续 notification Turn。用户从 Workflow 面板手动取消后台 Run 不产生托管动作；ManagedRun 保持原状态，直至用户另行停止托管或当前 Session 后续产生新的可结算 Agent Turn。
+
+notification Turn 失败时优先由 Workflow 的 at-least-once 交付机制负责：初始失败后最多自动 re-notify 三次，每次仍有额度时不向 Managed Controller 上报 terminal。第四次失败使 `renotify()` 进入 exhausted；若此时 Thread 仍是 active Managed Session，则标记 notification 已由托管链消费，并把最后一次真实 outcome/endReason 作为普通 Agent Turn End 交给 Controller。若 ManagedRun 已停止、完成、失败或不存在，则不标记 delivered、不交给 Controller，保留普通 Workflow 在 hydrate/重启后的再次投递能力。active 判断在失败交付和最终 terminal 上报前实时执行，不能只检查历史 `runId`。
+
+因此 Managed Provider Retry 只在普通托管 Agent Turn 的 Provider Error，或 Workflow re-notify 已耗尽后交接的最后一次 notification Provider Error 上生效；Workflow 业务执行 `status=error` 但 notification Turn 成功时，Agent outcome 仍为 success，由 Controller 重新 Inspect `feature_status` 决策。
+
+普通 Dynamic Workflow 不读取 ManagedRun 状态，也不改变 launched、engine、notification ack/re-notify 和取消逻辑。所有新增策略以有效 ManagedRun 绑定为边界，不能仅以 `agentMode="workflow"` 判断。
 
 ## 10. V2 并发与恢复边界
 
@@ -712,6 +774,7 @@ src/main/harness-board/managed-run-recovery.ts
 - `auto-mode-action-executor.ts`：执行 Controller 内部 ManagedAction，关联 runId；
 - `agent-run-service.ts`：保持普通会话执行入口，支持 ManagedRun 关联元数据；
 - `agent.ts`：上报稳定 Turn 终态和 Provider Error；
+- `runtime.ts` / `workflow/tool.ts`：托管 Runtime 强制 `execute` 前台 20 分钟超时；Workflow launch 成功时只记录 Turn execution facts，不改变 launched/engine/notification 协议；
 - `service.ts`：提供 async feature_status snapshot、共享 nextAction 解析，并允许 `session_context_inject.agentConfig.agentMode` 配置 `solo/multi/agent_team/workflow`；
 - `harness-board-types.ts`：增加 ManagedRun/Action/Event/View 类型；
 - `thread-service.ts`：创建 Thread 时写入 runId/node/sessionIndex/attempt metadata；当 Thread 未显式指定 agentMode 时，将插件 `workflow` 默认值映射为 `metadata.agentMode="workflow"`；
@@ -923,6 +986,9 @@ V2 不合入或依赖 Harness Workflow MVP 的 Launcher、JS scheduler、Inspect
 - Provider Retry 和 Biz Retry 使用相互独立的三次预算；
 - slashSkill 和 userMessage 任一缺失时 fail closed；
 - 已启用本地 Skill 可用，其他插件 Skill 不可用；
+- 成功 launch Workflow 的 Turn 正常结算，但 Controller 在写入 `session_completed` 前依据 `workflowLaunchedRunIds` 忽略本次托管判断；
+- Workflow 在 Turn 结束前快速完成时仍依据 Turn facts 忽略 launch Turn，不依赖 active 状态查询；
+- Workflow notification Turn 成功时使用普通 Agent Turn 的 Controller 路径；失败且 re-notify 未耗尽时不进入 Controller，耗尽后仅由仍 active 的 ManagedRun 接管最后一次 terminal；notification Turn 再次 launch/resume Workflow 时继续忽略本次判断；
 
 ### 18.3 Provider Retry
 
@@ -972,6 +1038,9 @@ V2 不合入或依赖 Harness Workflow MVP 的 Launcher、JS scheduler、Inspect
 - request_user_input 等待不触发 Turn End；
 - subagent 内部运行不触发 Controller；
 - Dynamic Workflow 行为不变；
+- 普通 Dynamic Workflow 的 launched 返回、后台 engine、progress、notification ack/re-notify 和取消行为不变；
+- 普通会话前台 `execute` 仍为 60 秒，`run_in_background=true` 仍返回 task_id 并由 task_output 查询；
+- 托管会话及其工作 Runtime 的 `execute(run_in_background=true)` 强制前台等待，20 分钟后沿用现有前台超时行为；
 - V1 插件动作协议、能力字段、草稿和旧状态通知均不存在。
 
 ## 19. 当前实现差距
@@ -1038,6 +1107,14 @@ Stage Retry 和同 Thread Biz Retry 合并为共享单一 `bizRetryCount` 的两
 
 90% 上下文复用阈值只用于 Biz Retry 会话选择。Provider Retry 处理模型服务瞬时失败，继续沿用原 Thread、5/30/120 秒退避和独立三次预算；自动消息统一为“继续当前任务”。
 
+### ADR-012：托管 execute 不允许脱离 Agent Turn
+
+active Managed Session 及其工作 Runtime 将 `execute(run_in_background=true)` 强制为前台 Tool Call，并使用固定 20 分钟超时和现有前台完成/失败/取消语义。active 必须同时满足 ManagedRun `status=running` 且 `currentSession.threadId` 匹配；历史 `runId` 不构成有效托管状态。普通会话和终态托管 Thread 的后续人工 Turn 执行协议不变。该约束避免 shell 命令仍在修改插件状态或工作区时，Agent Turn 已结束并触发 Controller 推进。
+
+### ADR-013：Workflow 执行不变，Controller 过滤 launch Turn
+
+Workflow launched、后台 engine、结果持久化和 notification Turn 保持原协议。Workflow launch 所在物理 Agent Run 仍正常结算并产生 Turn End；Managed Controller 仅根据该物理 Run 累积上报的 `workflowLaunchedRunIds` 决定不消费该次结束。Workflow engine 事件不进入 Controller。notification Turn 成功后按普通 Agent Turn 处理；失败时先由 Workflow re-notify，耗尽后仅由仍 active 的 ManagedRun 接管最后一次 terminal。普通 Dynamic Workflow 不受影响。
+
 ## 21. V2 验收标准
 
 - 插件只实现标准 feature_status 即可开启托管；
@@ -1062,6 +1139,8 @@ Stage Retry 和同 Thread Biz Retry 合并为共享单一 `bizRetryCount` 的两
 - 每次 Controller 决策都能通过中文 tooltip 解释结构化判断事实和命中的判断规则；
 - 自动 Thread 继续与普通会话同等展示；
 - 使用插件 session_context_inject 的 Feature 可通过 `agentConfig.agentMode="workflow"` 将新建 Thread 初始化为 Workflow Agent 模式；显式 Thread metadata 仍优先；
+- active 托管 Thread 和其工作 Runtime 中 `execute(run_in_background=true)` 不创建后台 task，改为前台等待并在 20 分钟后按现有前台超时结束；ManagedRun 终态后该历史 Thread 的新人工 Turn 恢复普通执行行为；
+- Workflow launch Turn 正常结算但不触发 Managed Controller 判断；engine completed/error/cancelled 不进入 Controller；notification 成功时驱动 Controller，失败时优先使用三次 Workflow re-notify，耗尽后才把最后一次 terminal 交给仍 active 的 ManagedRun；
 - completed/failed/cancelled 后再次开始创建新 runId，历史保留；
 - V2 明确不承诺跨重启执行幂等、旧 Thread 恢复或通用会话计数；除当前阶段 Biz Retry 上限外，其他循环硬限制仍进入 V3；
 - 普通 Chat、非 Harness Thread、没有活跃 ManagedRun、Dynamic Workflow 均无行为变化。

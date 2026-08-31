@@ -316,7 +316,8 @@ import {
 } from "../harness-board/service"
 import {
   handleAutoModeAgentCancelled,
-  handleAutoModeAgentTurnEnd
+  handleAutoModeAgentTurnEnd,
+  isActiveManagedRunSession
 } from "../harness-board/auto-mode-controller"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
@@ -445,6 +446,7 @@ async function queueAutoModeAgentTurnEnd(input: {
   turnId?: string
   terminal: AutoModeTerminal
   contextUsage?: AgentTurnEndEvent["contextUsage"]
+  executionFacts?: AgentTurnEndEvent["executionFacts"]
   delivery: AgentRunDelivery
   isStillCurrent: () => boolean
 }): Promise<void> {
@@ -482,6 +484,7 @@ async function queueAutoModeAgentTurnEnd(input: {
       outcome: input.terminal.outcome,
       endReason: input.terminal.endReason,
       ...(input.contextUsage ? { contextUsage: input.contextUsage } : {}),
+      ...(input.executionFacts ? { executionFacts: input.executionFacts } : {}),
       delivery: input.delivery
     }).catch((error) => {
       console.error(`[AutoMode] Failed to handle terminal run for ${input.threadId}:`, error)
@@ -849,6 +852,7 @@ async function withActiveRunReplacementLock<T>(threadId: string, fn: () => Promi
 }
 
 interface HarnessAgentContext {
+  managedExecution?: boolean
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig
@@ -878,6 +882,7 @@ interface HarnessAgentContext {
 type HarnessFeatureBindingContext = {
   projectId: string
   slug: string
+  runId?: string
   nodeName?: string
   nodeStatus?: string
 }
@@ -5554,6 +5559,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         streamRequestId,
         userMessageId,
         agentMode: requestedAgentMode,
+        managedExecution: requestedManagedExecution,
         coordinatorInternalNotification
       }: AgentInvokeParams,
       delivery
@@ -6090,6 +6096,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             ...(currentStage.status ? { nodeStatus: currentStage.status } : {})
           }
       }
+      const managedExecution =
+        requestedManagedExecution === true || isActiveManagedRunSession(threadId)
 
       // Start trace collection for this invocation (modelId resolved later)
       const isInternalNotificationTrace =
@@ -6408,6 +6416,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // High-water mark of input tokens — hoisted for catch/finally access
       let highWaterInputTokens = 0
       let autoModeTerminal: AutoModeTerminal | undefined
+      // Managed terminal is emitted once per physical Agent run, so launch facts
+      // intentionally accumulate across failover and Goal-continuation LLM calls.
+      const workflowLaunchedRunIds = new Set<string>()
+      const onWorkflowLaunched = (runId: string): void => {
+        const normalized = runId.trim()
+        if (normalized) workflowLaunchedRunIds.add(normalized)
+      }
       const markAutoModeTerminal = (
         outcome: "success" | "error",
         code: AutoModeTerminalCode,
@@ -6448,12 +6463,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // run is only marked in-flight IN MEMORY here; the durable `delivered` flag
       // is persisted on SUCCESS (so a crash mid-turn re-reports — at-least-once,
       // mirroring coordinator). On SUCCESS we markNotified + clear in-flight; on
-      // FAILURE we just clear in-flight (delivered stays false → re-reportable).
+      // FAILURE we normally keep delivered=false for re-notify. The sole exception
+      // is an exhausted notification handed to an active ManagedRun terminal.
       // Carries workspacePath because that is block-scoped inside the try.
       // `startedAt` pins the run INSTANCE this notification was built from: a resume
       // reuses the runId, so the ack must not land on a newer instance (see
       // setWorkflowRunNotified's instance fence).
       let workflowNotificationToSettle:
+        | { workspacePath: string; runId: string; startedAt: string }
+        | undefined
+      let workflowNotificationTerminalEligibleForManaged = false
+      let exhaustedWorkflowNotificationHandoff:
         | { workspacePath: string; runId: string; startedAt: string }
         | undefined
 
@@ -6498,6 +6518,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           workspacePath,
           featureBinding: harnessFeatureBinding
         })
+        harnessAgentContext.managedExecution = managedExecution
         sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
         const rawOnAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
           window,
@@ -7243,7 +7264,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
+              onCoordinatorNotificationAction,
+              onWorkflowLaunched
             })
             throwIfInvokeAborted()
             // First attempt sends the message; subsequent attempts resume from checkpoint
@@ -8089,7 +8111,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onFileMutation: autoCommit.onFileMutation,
             onCoordinatorWorkerHookResult,
             onCoordinatorWorkerEvent,
-            onCoordinatorNotificationAction
+            onCoordinatorNotificationAction,
+            onWorkflowLaunched
           })
           throwIfInvokeAborted()
           usedModelId = nextCandidate
@@ -8231,7 +8254,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
+              onCoordinatorNotificationAction,
+              onWorkflowLaunched
             })
             throwIfInvokeAborted()
             activeStream = await agent.stream(null, streamConfig) // resume from checkpoint
@@ -8695,6 +8719,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             if (delivered || shouldKickPendingDrain) {
               workflowRunManager.kickNextPendingNotification(settle.workspacePath, threadId)
             }
+            workflowNotificationTerminalEligibleForManaged = true
           }
           if (invokeFinalOutcome === "success") {
             await finalizeAutoCommit({
@@ -9075,21 +9100,29 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             error.message.includes("aborted") ||
             error.message.includes("Controller is already closed"))
 
-        // A workflow notification turn that ends here (success is settled on the
-        // ack path) MUST release its in-flight mark — INCLUDING on abort — or the
-        // runId stays in inFlightNotifications forever and findPendingNotification
-        // keeps excluding it, so it could never be re-reported this process. The
-        // `delivered` flag was never persisted (at-least-once), so the run stays
-        // re-discoverable on disk regardless. Only a GENUINE failure auto-re-reports;
-        // a user abort / hook halt deliberately does NOT (the user/policy chose to
-        // stop, so re-reporting would fight that intent) — but clearing the mark
-        // still lets a later hydrate / restart surface it.
+        // A failed workflow notification keeps its existing at-least-once owner
+        // while re-notify still has budget. Only after the fourth failed delivery
+        // makes renotify exhausted may an ACTIVE ManagedRun take ownership of the
+        // final Agent terminal. Abort remains undelivered/re-discoverable and never
+        // auto-re-notifies. In every path the in-flight marker must be released.
         if (workflowNotificationToSettle) {
-          const { runId: settleRunId } = workflowNotificationToSettle
+          const { runId: settleRunId, workspacePath: settleWorkspacePath, startedAt } =
+            workflowNotificationToSettle
           workflowNotificationToSettle = undefined
           workflowRunManager.clearNotificationInFlight(settleRunId)
           if (!isAbortError) {
             workflowRunManager.renotify(threadId, settleRunId)
+            if (
+              workflowRunManager.isRenotifyExhausted(settleRunId) &&
+              isActiveManagedRunSession(threadId)
+            ) {
+              exhaustedWorkflowNotificationHandoff = {
+                workspacePath: settleWorkspacePath,
+                runId: settleRunId,
+                startedAt
+              }
+              workflowNotificationTerminalEligibleForManaged = true
+            }
           }
         }
 
@@ -9201,11 +9234,37 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         window.removeListener("closed", onWindowClosed)
         await settleDrainedCoordinatorNotifications("restore")
         const terminal = autoModeTerminal
+        const activeManagedSession = isActiveManagedRunSession(threadId)
+        if (exhaustedWorkflowNotificationHandoff) {
+          if (activeManagedSession) {
+            const handoff = exhaustedWorkflowNotificationHandoff
+            await workflowRunManager.markNotified(
+              handoff.workspacePath,
+              threadId,
+              handoff.runId,
+              handoff.startedAt
+            )
+            workflowRunManager.clearRenotify(handoff.runId)
+            await workflowRunManager.recoverFlushFailedRun(
+              handoff.workspacePath,
+              threadId,
+              handoff.runId,
+              handoff.startedAt
+            )
+          } else {
+            workflowNotificationTerminalEligibleForManaged = false
+          }
+          exhaustedWorkflowNotificationHandoff = undefined
+        }
+        const shouldReportWorkflowNotificationTerminal =
+          isWorkflowNotificationInvoke &&
+          workflowNotificationTerminalEligibleForManaged &&
+          isActiveManagedRunSession(threadId)
         if (
           terminal &&
           !abortController.signal.aborted &&
           !isTrustedCoordinatorNotificationInvoke &&
-          !isWorkflowNotificationInvoke
+          (!isWorkflowNotificationInvoke || shouldReportWorkflowNotificationTerminal)
         ) {
           let contextUsage: AgentTurnEndEvent["contextUsage"]
           try {
@@ -9235,6 +9294,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             turnId: ensureTurnId(turnState, threadId, "invoke"),
             terminal,
             ...(contextUsage ? { contextUsage } : {}),
+            ...(workflowLaunchedRunIds.size > 0
+              ? {
+                  executionFacts: {
+                    workflowLaunchedRunIds: Array.from(workflowLaunchedRunIds)
+                  }
+                }
+              : {}),
             delivery,
             isStillCurrent: () =>
               isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
@@ -9362,6 +9428,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = metadata.workspacePath as string | undefined
       const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+      harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
         window,
@@ -9846,6 +9913,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
       let resumeErrorModelId: string | undefined
       let resumeAutoModeTerminal: AutoModeTerminal | undefined
+      const resumeWorkflowLaunchedRunIds = new Set<string>()
+      const onResumeWorkflowLaunched = (runId: string): void => {
+        const normalized = runId.trim()
+        if (normalized) resumeWorkflowLaunchedRunIds.add(normalized)
+      }
       physicalStreamRunSetupGuard.handoff()
       pendingPhysicalStreamRunSetupGuard = undefined
       try {
@@ -9935,7 +10007,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
+              onCoordinatorNotificationAction,
+              onWorkflowLaunched: onResumeWorkflowLaunched
             })
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             resumeStream = await resumeAgent.stream(
@@ -10184,7 +10257,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
+              onCoordinatorNotificationAction,
+              onWorkflowLaunched: onResumeWorkflowLaunched
             })
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             activeResumeStream = await nextAgent.stream(
@@ -10412,6 +10486,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             threadId,
             turnId: turnState.turnId,
             terminal: resumeAutoModeTerminal,
+            ...(resumeWorkflowLaunchedRunIds.size > 0
+              ? {
+                  executionFacts: {
+                    workflowLaunchedRunIds: Array.from(resumeWorkflowLaunchedRunIds)
+                  }
+                }
+              : {}),
             delivery: createBrowserWindowAgentRunDelivery(window),
             isStillCurrent: () =>
               isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
@@ -10523,6 +10604,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const workspacePath = metadata.workspacePath as string | undefined
     const modelId = metadata.model as string | undefined
     const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+    harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
       window,
@@ -10956,6 +11038,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
     let interruptErrorModelId: string | undefined
     let interruptAutoModeTerminal: AutoModeTerminal | undefined
+    const interruptWorkflowLaunchedRunIds = new Set<string>()
+    const onInterruptWorkflowLaunched = (runId: string): void => {
+      const normalized = runId.trim()
+      if (normalized) interruptWorkflowLaunchedRunIds.add(normalized)
+    }
     physicalStreamRunSetupGuard.handoff()
     pendingPhysicalStreamRunSetupGuard = undefined
     try {
@@ -11030,7 +11117,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
+              onCoordinatorNotificationAction,
+              onWorkflowLaunched: onInterruptWorkflowLaunched
             })
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             intStream = await intAgent.stream(null, interruptStreamConfig)
@@ -11272,7 +11360,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onFileMutation: autoCommit.onFileMutation,
               onCoordinatorWorkerHookResult,
               onCoordinatorWorkerEvent,
-              onCoordinatorNotificationAction
+              onCoordinatorNotificationAction,
+              onWorkflowLaunched: onInterruptWorkflowLaunched
             })
             throwIfPhysicalStreamRunIsInactive(threadId, runToken, abortController.signal)
             activeIntStream = await nextAgent.stream(null, interruptStreamConfig)
@@ -11511,6 +11600,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           threadId,
           turnId: turnState.turnId,
           terminal: interruptAutoModeTerminal,
+          ...(interruptWorkflowLaunchedRunIds.size > 0
+            ? {
+                executionFacts: {
+                  workflowLaunchedRunIds: Array.from(interruptWorkflowLaunchedRunIds)
+                }
+              }
+            : {}),
           delivery: createBrowserWindowAgentRunDelivery(window),
           isStillCurrent: () =>
             isPhysicalStreamRunActive(threadId, runToken, abortController.signal)

@@ -42,6 +42,7 @@ export interface AutoModeAgentTurnEndInput {
   outcome: AgentTurnEndEvent["outcome"]
   endReason: AgentTurnEndEvent["endReason"]
   contextUsage?: AgentTurnEndEvent["contextUsage"]
+  executionFacts?: AgentTurnEndEvent["executionFacts"]
   delivery: AgentRunDelivery
 }
 
@@ -80,6 +81,27 @@ function readHarnessFeatureContext(threadId: string): HarnessFeatureContext | nu
       : null
   } catch {
     return null
+  }
+}
+
+export function isActiveManagedRunSession(threadId: string): boolean {
+  const feature = readHarnessFeatureContext(threadId)
+  if (!feature?.runId) return false
+  try {
+    const record = managedRunStore.getRun({
+      projectId: feature.projectId,
+      featureId: feature.featureId,
+      runId: feature.runId
+    })
+    return Boolean(
+      record.snapshot &&
+        !record.corrupt &&
+        record.snapshot.status === "running" &&
+        record.snapshot.currentSession?.threadId === threadId
+    )
+  } catch (error) {
+    console.warn("[ManagedRun] Failed to inspect active session:", { threadId, error })
+    return false
   }
 }
 
@@ -695,13 +717,6 @@ export async function cancelManagedRunForHumanGate(input: {
 export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInput): Promise<void> {
   const feature = readHarnessFeatureContext(input.threadId)
   if (!feature?.runId) return
-  if (input.outcome === "error") {
-    emitAppAttention({
-      kind: "task-error",
-      threadId: input.threadId,
-      key: `managed-mode:${feature.runId}:${input.threadId}`
-    })
-  }
   const runId = feature.runId
   await featureLocks.withKey(featureKey(feature.projectId, feature.featureId), async () => {
     const record = managedRunStore.getRun({
@@ -710,10 +725,23 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
       runId
     })
     if (!record.snapshot || record.corrupt) return
-    if (
-      record.snapshot.status === "cancelled" &&
-      record.snapshot.currentSession?.threadId === input.threadId
-    ) {
+    if (record.snapshot.currentSession?.threadId !== input.threadId) return
+    if ((input.executionFacts?.workflowLaunchedRunIds?.length ?? 0) > 0) {
+      console.info("[ManagedRun] Agent turn launched a detached workflow; deferring evaluation:", {
+        threadId: input.threadId,
+        runId,
+        workflowRunIds: input.executionFacts?.workflowLaunchedRunIds
+      })
+      return
+    }
+    if (input.outcome === "error") {
+      emitAppAttention({
+        kind: "task-error",
+        threadId: input.threadId,
+        key: `managed-mode:${feature.runId}:${input.threadId}`
+      })
+    }
+    if (record.snapshot.status === "cancelled") {
       const persisted = managedRunStore.updateSnapshot(record.snapshot, {
         type: "session_completed",
         scope: "stage",
@@ -728,7 +756,6 @@ export async function handleAutoModeAgentTurnEnd(input: AutoModeAgentTurnEndInpu
       return
     }
     if (record.snapshot.status !== "running") return
-    if (record.snapshot.currentSession?.threadId !== input.threadId) return
     managedRunStore.appendEvent(record.snapshot, {
       type: "session_completed",
       scope: "stage",

@@ -749,6 +749,12 @@ export interface AgentTurnEndEvent extends AutoModeEventBase {
     inputTokens: number
     maxTokens: number
   }
+  executionFacts?: AgentTurnExecutionFacts
+}
+
+export interface AgentTurnExecutionFacts {
+  /** Detached Dynamic Workflow runs successfully launched during this physical Turn. */
+  workflowLaunchedRunIds?: string[]
 }
 
 export interface ManagedRunSessionAction {
