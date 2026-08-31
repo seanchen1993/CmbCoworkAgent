@@ -31,7 +31,6 @@ import {
   parseWorktreeList,
   persistWorkflowWorktreeRecord,
   removeWorkflowWorktree,
-  resolveWorkflowWorktreeIsolationBoundary,
   type WorkflowWorktreeInfo
 } from "../src/main/services/git-worktree.ts"
 import {
@@ -58,6 +57,8 @@ import type {
   WorkflowSubagentRunner,
   WorkflowWorktreeRecord
 } from "../src/main/agent/workflow/types.ts"
+
+const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
 
 const WORKFLOW_WORKTREE_DIFF_SUMMARY_MAX_CHARS = 32 * 1024
 const WORKFLOW_WORKTREE_BRANCH_PREFIX = "cmbcowork/wf"
@@ -3267,66 +3268,74 @@ function testParseWorktreeList(): void {
 // ── entry point ──────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  await testCreateProducesAttachedBranchAtHead()
-  await testDetachedSourceFailsBeforeProvisioning()
-  await testCreateDoesNotMutateGitConfig()
-  await testSourceSnapshotRejectsConcurrentBranchSwitch()
-  await testSourceSnapshotHonorsWorkflowCancellation()
-  await testWorkspaceHookFilesAreMaterializedWithoutDirtyingWorktree()
-  await testTrackedWorkspaceHookSymlinkStaysPristine()
-  await testDirtySourceUsesCommittedHead()
-  await testSubdirectoryScopeAndLinkedSourceHead()
-  await testConcurrentCreatesAreSerializedAndUnique()
-  await testLongLabelOwnershipRecordsDoNotCollide()
-  await testCreateFromInsideAWorktreeUsesPrimaryRepo()
-  await testSymlinkedWorkspaceKeepsOneRepositoryIdentity()
-  await testCreateRejectsNonGitDirectory()
-  await testPristineDetection()
-  await testRemoveIsCompleteAndIdempotent()
-  await testManagedOperationsDoNotPruneUnrelatedWorktrees()
-  await testSafeRemovalRejectsAnAdvancedBranch()
-  await testGitRemovalFailureNeverFallsBackToRecursiveDelete()
-  await testLedgerKeepsOnlyChangedSuccesses()
-  await testSuccessfulAgentWithMissingCheckoutIsRecoverable()
-  await testRewrittenBaseIsNotAdvertisedAsReady()
-  await testLedgerReclaimsOutstandingWorktrees()
-  await testLedgerCleansUpWorktreeCreatedDuringCancel()
-  await testLedgerReclaimAwaitsRecoveryBeforeReturning()
-  await testLedgerRetriesSourcePreparationAfterDetachedHead()
-  await testLedgerFreezesFanoutBase()
-  await testDiffMergeAndDiscardOperations()
-  await testCancellationAfterSourceAdvanceStillFinishesMerge()
-  await testConcurrentActionsStayMonotonic()
-  await testAtomicIntegrationCrashWindowIsRecoverable()
-  await testMergedTerminalStateSurvivesCleanupPersistenceFailure()
-  await testIgnoredSourceCollisionNeverGetsOverwritten()
-  await testTrackedFileToDirectoryIntegrationIsSupported()
-  await testSourceOnlyFilteredSiblingDoesNotBlockScopedMerge()
-  await testGitLfsAttributeRemainsUsable()
-  await testGitLfsCheckoutMatchesSourceWhenAvailable()
-  await testSingleSidedMergeAttributeDoesNotBlock()
-  await testIntegrationTransactionOwnershipAndDescendants()
-  await testTrackedRuntimeChangesBlockMerge()
-  await testScopedDeliverableCannotMergeOutsideWorkspace()
-  await testReservedRuntimeAndGitlinkChangesFailClosed()
-  await testSourceGitOperationIsNeverAborted()
-  await testDamagedWorktreeDiscardIsRecoverableAndNoFollow()
-  await testDiscardCleanupNeverDeletesLateCommits()
-  await testDiffSummaryIsBoundedAndBranchIdentityIsEnforced()
-  await testMergeConflictDoesNotTouchSource()
-  await testRunPruneKeepsUnresolvedWorktreeEntry()
-  await testRunFileMutationsDoNotLoseWorktreeNotificationOrBackupState()
-  await testRunStoreRecoversManifestMissingFromSnapshot()
-  await testManifestOnlyWorktreePinsItsWorkspace()
-  await testEngineForwardsIsolationWithoutChangingResults()
-  await testEngineDoesNotJournalIsolatedAgents()
-  await testIsolationChangesCallIdentity()
-  await testUnsupportedIsolationKeepsLegacySharedExecution()
-  testParseWorktreeList()
-  testWorktreePromptMatchesRuntimeBoundary()
-  testGitEnvironmentOverridesAreRemoved()
+  const workflowDataRoot = mkdtempSync(join(tmpdir(), "cmb-workflow-worktree-data-"))
+  process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
+  try {
+    await testCreateProducesAttachedBranchAtHead()
+    await testDetachedSourceFailsBeforeProvisioning()
+    await testCreateDoesNotMutateGitConfig()
+    await testSourceSnapshotRejectsConcurrentBranchSwitch()
+    await testSourceSnapshotHonorsWorkflowCancellation()
+    await testWorkspaceHookFilesAreMaterializedWithoutDirtyingWorktree()
+    await testTrackedWorkspaceHookSymlinkStaysPristine()
+    await testDirtySourceUsesCommittedHead()
+    await testSubdirectoryScopeAndLinkedSourceHead()
+    await testConcurrentCreatesAreSerializedAndUnique()
+    await testLongLabelOwnershipRecordsDoNotCollide()
+    await testCreateFromInsideAWorktreeUsesPrimaryRepo()
+    await testSymlinkedWorkspaceKeepsOneRepositoryIdentity()
+    await testCreateRejectsNonGitDirectory()
+    await testPristineDetection()
+    await testRemoveIsCompleteAndIdempotent()
+    await testManagedOperationsDoNotPruneUnrelatedWorktrees()
+    await testSafeRemovalRejectsAnAdvancedBranch()
+    await testGitRemovalFailureNeverFallsBackToRecursiveDelete()
+    await testLedgerKeepsOnlyChangedSuccesses()
+    await testSuccessfulAgentWithMissingCheckoutIsRecoverable()
+    await testRewrittenBaseIsNotAdvertisedAsReady()
+    await testLedgerReclaimsOutstandingWorktrees()
+    await testLedgerCleansUpWorktreeCreatedDuringCancel()
+    await testLedgerReclaimAwaitsRecoveryBeforeReturning()
+    await testLedgerRetriesSourcePreparationAfterDetachedHead()
+    await testLedgerFreezesFanoutBase()
+    await testDiffMergeAndDiscardOperations()
+    await testCancellationAfterSourceAdvanceStillFinishesMerge()
+    await testConcurrentActionsStayMonotonic()
+    await testAtomicIntegrationCrashWindowIsRecoverable()
+    await testMergedTerminalStateSurvivesCleanupPersistenceFailure()
+    await testIgnoredSourceCollisionNeverGetsOverwritten()
+    await testTrackedFileToDirectoryIntegrationIsSupported()
+    await testSourceOnlyFilteredSiblingDoesNotBlockScopedMerge()
+    await testGitLfsAttributeRemainsUsable()
+    await testGitLfsCheckoutMatchesSourceWhenAvailable()
+    await testSingleSidedMergeAttributeDoesNotBlock()
+    await testIntegrationTransactionOwnershipAndDescendants()
+    await testTrackedRuntimeChangesBlockMerge()
+    await testScopedDeliverableCannotMergeOutsideWorkspace()
+    await testReservedRuntimeAndGitlinkChangesFailClosed()
+    await testSourceGitOperationIsNeverAborted()
+    await testDamagedWorktreeDiscardIsRecoverableAndNoFollow()
+    await testDiscardCleanupNeverDeletesLateCommits()
+    await testDiffSummaryIsBoundedAndBranchIdentityIsEnforced()
+    await testMergeConflictDoesNotTouchSource()
+    await testRunPruneKeepsUnresolvedWorktreeEntry()
+    await testRunFileMutationsDoNotLoseWorktreeNotificationOrBackupState()
+    await testRunStoreRecoversManifestMissingFromSnapshot()
+    await testManifestOnlyWorktreePinsItsWorkspace()
+    await testEngineForwardsIsolationWithoutChangingResults()
+    await testEngineDoesNotJournalIsolatedAgents()
+    await testIsolationChangesCallIdentity()
+    await testUnsupportedIsolationKeepsLegacySharedExecution()
+    testParseWorktreeList()
+    testWorktreePromptMatchesRuntimeBoundary()
+    testGitEnvironmentOverridesAreRemoved()
 
-  console.log("PASS workflow-worktree (62 tests)")
+    console.log("PASS workflow-worktree (62 tests)")
+  } finally {
+    if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+    else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
+    rmSync(workflowDataRoot, { recursive: true, force: true })
+  }
 }
 
 main().catch((error) => {

@@ -33,7 +33,8 @@ import {
   Copy,
   Check,
   ShieldCheck,
-  Eye
+  Eye,
+  PackageOpen
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
@@ -61,6 +62,10 @@ import { SubagentCard } from "@/components/panels/SubagentPanel"
 import { LspPanel } from "@/components/customize/LspPanel"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { getRightPanelSkillPathSegments } from "@/components/panels/skill-tree-path"
+import {
+  resolveHarnessPluginRunArtifactPath,
+  type HarnessPluginRunArtifactsContext
+} from "@/lib/harness-plugin-run-artifacts"
 import {
   getSystemConstraintsLoadCounts,
   SystemConstraintsPanel
@@ -99,6 +104,7 @@ const PREVIEW_MAX_HEIGHT = "100vh"
 type PanelHeights = {
   tasks: number
   files: number
+  pluginRunArtifacts: number
   systemConstraints: number
   agents: number
   skills: number
@@ -212,6 +218,7 @@ function ResizeHandle({ onDrag }: ResizeHandleProps): React.JSX.Element {
 interface RightPanelProps {
   threadId?: string | null
   showSystemConstraints?: boolean
+  pluginRunArtifacts?: HarnessPluginRunArtifactsContext | null
   onPreviewFullscreenChange?: (isFullscreen: boolean) => void
   onBrowserFullscreenChange?: (isFullscreen: boolean) => void
 }
@@ -228,6 +235,7 @@ function LazySectionFallback({ label }: { label: string }): React.JSX.Element {
 export function RightPanel({
   threadId,
   showSystemConstraints = false,
+  pluginRunArtifacts,
   onPreviewFullscreenChange,
   onBrowserFullscreenChange
 }: RightPanelProps): React.JSX.Element {
@@ -253,6 +261,10 @@ export function RightPanel({
       }))
     )
   const currentThreadId = threadId ?? storeCurrentThreadId
+  const activePluginRunArtifacts =
+    currentThreadId && pluginRunArtifacts?.threadIds.includes(currentThreadId)
+      ? pluginRunArtifacts
+      : null
   const canMutateCurrentThreadState = currentThreadId === storeCurrentThreadId
   // Derive the current thread's card state from the per-thread map
   const skillGenerationAgent = selectSkillGenerationAgent(
@@ -285,6 +297,7 @@ export function RightPanel({
   const prevStreamLoadingRef = useRef(false)
   const [tasksOpen, setTasksOpen] = useState(false)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [pluginRunArtifactsOpen, setPluginRunArtifactsOpen] = useState(false)
   const [systemConstraintsOpen, setSystemConstraintsOpen] = useState(false)
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
@@ -743,6 +756,7 @@ export function RightPanel({
   // Store content heights in pixels (null = auto/equal distribution)
   const [tasksHeight, setTasksHeight] = useState<number | null>(null)
   const [filesHeight, setFilesHeight] = useState<number | null>(null)
+  const [pluginRunArtifactsHeight, setPluginRunArtifactsHeight] = useState<number | null>(null)
   const [systemConstraintsHeight, setSystemConstraintsHeight] = useState<number | null>(null)
   const [agentsHeight, setAgentsHeight] = useState<number | null>(null)
   const [skillsHeight, setSkillsHeight] = useState<number | null>(null)
@@ -754,6 +768,7 @@ export function RightPanel({
   const dragStartHeights = useRef<{
     tasks: number
     files: number
+    pluginRunArtifacts: number
     systemConstraints: number
     agents: number
     skills: number
@@ -771,6 +786,7 @@ export function RightPanel({
     const openPanels = [
       tasksOpen,
       filesOpen,
+      Boolean(activePluginRunArtifacts && pluginRunArtifactsOpen),
       showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
@@ -778,7 +794,7 @@ export function RightPanel({
       hooksOpen,
       lspOpen
     ]
-    const sectionCount = showSystemConstraints ? 8 : 7
+    const sectionCount = (showSystemConstraints ? 8 : 7) + (activePluginRunArtifacts ? 1 : 0)
     let used = HEADER_HEIGHT * sectionCount
     // Fixed visual gaps between section blocks
     used += SECTION_GAP * (sectionCount - 1)
@@ -797,6 +813,8 @@ export function RightPanel({
     rightModule,
     tasksOpen,
     filesOpen,
+    activePluginRunArtifacts,
+    pluginRunArtifactsOpen,
     showSystemConstraints,
     systemConstraintsOpen,
     agentsOpen,
@@ -812,6 +830,7 @@ export function RightPanel({
     const openCount = [
       tasksOpen,
       filesOpen,
+      Boolean(activePluginRunArtifacts && pluginRunArtifactsOpen),
       showSystemConstraints && systemConstraintsOpen,
       agentsOpen,
       skillsOpen,
@@ -824,6 +843,7 @@ export function RightPanel({
       return {
         tasks: 0,
         files: 0,
+        pluginRunArtifacts: 0,
         systemConstraints: 0,
         agents: 0,
         skills: 0,
@@ -838,6 +858,10 @@ export function RightPanel({
     return {
       tasks: tasksOpen ? (tasksHeight ?? defaultHeight) : 0,
       files: filesOpen ? (filesHeight ?? defaultHeight) : 0,
+      pluginRunArtifacts:
+        activePluginRunArtifacts && pluginRunArtifactsOpen
+          ? (pluginRunArtifactsHeight ?? defaultHeight)
+          : 0,
       systemConstraints:
         showSystemConstraints && systemConstraintsOpen
           ? (systemConstraintsHeight ?? defaultHeight)
@@ -852,6 +876,8 @@ export function RightPanel({
     getAvailableContentHeight,
     tasksOpen,
     filesOpen,
+    activePluginRunArtifacts,
+    pluginRunArtifactsOpen,
     showSystemConstraints,
     systemConstraintsOpen,
     agentsOpen,
@@ -861,6 +887,7 @@ export function RightPanel({
     lspOpen,
     tasksHeight,
     filesHeight,
+    pluginRunArtifactsHeight,
     systemConstraintsHeight,
     agentsHeight,
     skillsHeight,
@@ -1200,6 +1227,7 @@ export function RightPanel({
   useEffect(() => {
     setTasksHeight(null)
     setFilesHeight(null)
+    setPluginRunArtifactsHeight(null)
     setSystemConstraintsHeight(null)
     setAgentsHeight(null)
     setSkillsHeight(null)
@@ -1209,6 +1237,7 @@ export function RightPanel({
   }, [
     tasksOpen,
     filesOpen,
+    pluginRunArtifactsOpen,
     systemConstraintsOpen,
     agentsOpen,
     skillsOpen,
@@ -1221,6 +1250,7 @@ export function RightPanel({
   const [heights, setHeights] = useState<PanelHeights>({
     tasks: 0,
     files: 0,
+    pluginRunArtifacts: 0,
     systemConstraints: 0,
     agents: 0,
     skills: 0,
@@ -1236,6 +1266,7 @@ export function RightPanel({
     rightModule === "work" &&
     !tasksOpen &&
     !filesOpen &&
+    !(activePluginRunArtifacts && pluginRunArtifactsOpen) &&
     !(showSystemConstraints && systemConstraintsOpen) &&
     !agentsOpen &&
     !skillsOpen &&
@@ -1422,6 +1453,29 @@ export function RightPanel({
               </div>
             )}
           </div>
+
+          {activePluginRunArtifacts && (
+            <div className="flex flex-col shrink-0 border border-border/75 rounded-2xl bg-background/95 mt-2">
+              <SectionHeader
+                title="插件运行产物"
+                icon={PackageOpen}
+                badge={activePluginRunArtifacts.files.length}
+                isOpen={pluginRunArtifactsOpen}
+                onToggle={() => setPluginRunArtifactsOpen((prev) => !prev)}
+              />
+              {pluginRunArtifactsOpen && (
+                <div
+                  className="overflow-auto right-panel-scroll"
+                  style={{ height: heights.pluginRunArtifacts }}
+                >
+                  <PluginRunArtifactsContent
+                    context={activePluginRunArtifacts}
+                    threadId={currentThreadId}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Resize handle after FILES */}
           {!showSystemConstraints && filesOpen && agentsOpen && (
@@ -1961,6 +2015,78 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
           <FileTree files={workspaceFiles} threadId={threadId} />
         </div>
       )}
+    </div>
+  )
+}
+
+function PluginRunArtifactsContent({
+  context,
+  threadId
+}: {
+  context: HarnessPluginRunArtifactsContext
+  threadId: string | null
+}): React.JSX.Element {
+  const openArtifact = useCallback(
+    async (artifact: HarnessPluginRunArtifactsContext["files"][number]): Promise<void> => {
+      if (!threadId) return
+      const filePath = resolveHarnessPluginRunArtifactPath(
+        context.projectRootPath,
+        artifact.path
+      )
+
+      if (artifact.artifactType === "directory") {
+        try {
+          await window.electron.ipcRenderer.invoke("show-item-in-folder", filePath)
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "无法打开产物位置")
+        }
+        return
+      }
+
+      emitOpenResourcePreview({ threadId, filePath })
+    },
+    [context.projectRootPath, threadId]
+  )
+
+  if (context.files.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center px-4 py-8 text-center text-sm text-muted-foreground">
+        <PackageOpen className="mb-2 size-8 opacity-50" />
+        <span>暂无已生成的插件运行产物</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="select-none py-1">
+      {context.files.map((artifact) => {
+        const fileName = artifact.path.split(/[\\/]/).pop() || artifact.path
+        const isDirectory = artifact.artifactType === "directory"
+        return (
+          <button
+            key={artifact.path}
+            type="button"
+            className="group flex w-full min-w-0 items-start gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-background-interactive focus-visible:bg-background-interactive focus-visible:outline-none"
+            title={artifact.path}
+            onClick={() => void openArtifact(artifact)}
+          >
+            <span className="mt-0.5 shrink-0">
+              <FileIcon name={fileName} isDir={isDirectory} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium text-foreground">{fileName}</span>
+              <span className="mt-0.5 block break-all font-mono text-[10px] leading-4 text-muted-foreground">
+                {artifact.path}
+              </span>
+            </span>
+            {isDirectory ? (
+              <FolderOpen className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            ) : (
+              <Eye className="mt-0.5 size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+            )}
+          </button>
+        )
+      })}
     </div>
   )
 }

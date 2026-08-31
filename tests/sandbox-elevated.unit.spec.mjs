@@ -1706,8 +1706,8 @@ test("workflow surfaces the real reason an invalid resumeFromRunId failed", () =
   )
   assert.match(
     workflowToolSource,
-    /resolveScriptSource\(workspacePath, input, resume\.run\?\.script, resume\.note\)/,
-    "the resume note is threaded into resolveScriptSource"
+    /resolveScriptSource\(\s*workspacePath,\s*threadId,\s*input,\s*resume\.run\?\.script,\s*resume\.note\s*\)/,
+    "the thread identity and resume note are threaded into resolveScriptSource"
   )
 })
 

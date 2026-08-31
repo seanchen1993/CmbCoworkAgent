@@ -10,6 +10,8 @@ import {
 } from "fs"
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "fs/promises"
 import { basename, dirname, join, resolve } from "path"
+import { getCmbCoworkAgentDataRoot } from "../../app-data-root"
+import { getProjectThreadDataDirectorySync } from "../context-history-path"
 import { serializeWorkflowAgentSnapshotMessages } from "./agent-snapshot"
 import type {
   PersistedWorkflowRun,
@@ -29,11 +31,13 @@ const MAX_RUNS_PER_THREAD = 30
 /**
  * Workflow run persistence.
  *
- * Each run is one JSON file under `<workspace>/.cmbdevclaw/workflows/<threadId>/`,
- * written atomically (tmp + rename) with a best-effort `.bak` of the previous
- * good save as corruption fallback. The journal inside the run state powers
- * `resumeFromRunId` content-based replay (each call matches its journal entry by
- * (child/prompt/schema/model) hash, so concurrent/reordered calls still replay).
+ * New threads store runs under CmbCowork's app-managed project/thread directory.
+ * A thread with real legacy run files under
+ * `<workspace>/.cmbdevclaw/workflows/<threadId>/` stays there for its lifetime,
+ * so an upgrade never splits one thread's history or migrates user files. Each
+ * run is written atomically (tmp + rename) with a best-effort `.bak` of the
+ * previous good save as corruption fallback. The journal powers
+ * `resumeFromRunId` content-based replay.
  */
 
 const SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/
@@ -57,7 +61,7 @@ function assertSafeSegment(value: string, label: string): string {
   return value
 }
 
-export function getWorkflowRunsDir(workspacePath: string, threadId: string): string {
+export function getLegacyWorkflowRunsDir(workspacePath: string, threadId: string): string {
   return join(
     resolve(workspacePath),
     ".cmbdevclaw",
@@ -66,9 +70,88 @@ export function getWorkflowRunsDir(workspacePath: string, threadId: string): str
   )
 }
 
+export function getManagedWorkflowRunsDir(workspacePath: string, threadId: string): string {
+  return join(
+    getProjectThreadDataDirectorySync(workspacePath, assertSafeSegment(threadId, "threadId")),
+    "workflows"
+  )
+}
+
+/** Only an actual persisted run pins a pre-upgrade thread to legacy storage.
+ * Empty directories and user-authored scripts must not do so. `.bak` counts:
+ * it is a valid corruption fallback even when the primary run file is missing. */
+function hasPersistedWorkflowRun(dir: string, threadId: string): boolean {
+  try {
+    if (!existsSync(dir)) return false
+    return readdirSync(dir).some((file) => {
+      const runId = file.endsWith(".json.bak")
+        ? file.slice(0, -".json.bak".length)
+        : file.endsWith(".json")
+          ? file.slice(0, -".json".length)
+          : ""
+      if (!isValidWorkflowRunId(runId)) return false
+      try {
+        const parsed = JSON.parse(
+          readFileSync(join(dir, file), "utf8")
+        ) as Partial<PersistedWorkflowRun>
+        return parsed.version === 1 && parsed.runId === runId && parsed.threadId === threadId
+      } catch {
+        return false
+      }
+    })
+  } catch {
+    return false
+  }
+}
+
+type WorkflowRunsDirSelection = { threadId: string; dir: string }
+const workflowRunsDirSelections = new Map<string, WorkflowRunsDirSelection>()
+
+function workflowRunsDirSelectionKey(workspacePath: string, threadId: string): string {
+  // Keep the hot lookup lexical: stores ask for their run path on every flush.
+  // The selected managed directory itself is still based on canonical realpath,
+  // but realpathSync is paid only on the first lookup for this workspace spelling.
+  return `${getCmbCoworkAgentDataRoot()}\0${resolve(workspacePath)}\0${threadId}`
+}
+
+function workflowRunsDirCandidates(
+  workspacePath: string,
+  threadId: string
+): {
+  managed: string
+  legacy: string
+} {
+  const managed = getManagedWorkflowRunsDir(workspacePath, threadId)
+  return {
+    managed,
+    legacy: getLegacyWorkflowRunsDir(workspacePath, threadId)
+  }
+}
+
 /**
- * Removes all persisted workflow artifacts for a thread (run JSON/.bak/.tmp and
- * .workflow.js scripts under `<workspace>/.cmbdevclaw/workflows/<threadId>/`).
+ * Resolve a thread-sticky storage directory. Managed storage wins if it already
+ * contains runs; otherwise a genuine legacy run pins this thread to the legacy
+ * directory. Threads with no history start in managed storage. The in-process
+ * cache prevents a running workflow from changing roots mid-flush.
+ */
+export function getWorkflowRunsDir(workspacePath: string, threadId: string): string {
+  const key = workflowRunsDirSelectionKey(workspacePath, threadId)
+  const selected = workflowRunsDirSelections.get(key)
+  if (selected) return selected.dir
+
+  const candidates = workflowRunsDirCandidates(workspacePath, threadId)
+  const dir = hasPersistedWorkflowRun(candidates.managed, threadId)
+    ? candidates.managed
+    : hasPersistedWorkflowRun(candidates.legacy, threadId)
+      ? candidates.legacy
+      : candidates.managed
+  workflowRunsDirSelections.set(key, { threadId, dir })
+  return dir
+}
+
+/**
+ * Removes all persisted workflow artifacts for a thread from both the managed
+ * and legacy locations during the compatibility window.
  * Called when the thread is deleted so workflow data doesn't outlive it as disk
  * litter. Best-effort. Marks the directory disposed FIRST so that even if an
  * active run is still settling (its abort wait timed out), its late flush is a
@@ -83,16 +166,22 @@ export function getWorkflowRunsDir(workspacePath: string, threadId: string): str
  * swept. Revisit if fixed-id threads ever gain workflow access.
  */
 export function deleteWorkflowRunsForThread(workspacePath: string, threadId: string): void {
-  const dir = getWorkflowRunsDir(workspacePath, threadId)
+  const candidates = workflowRunsDirCandidates(workspacePath, threadId)
+  const dirs = [...new Set([candidates.managed, candidates.legacy])]
   // Mark disposed FIRST: a background run still settling (e.g. cancelAndWait
-  // timed out) must not recreate this directory via a late flush/persist.
-  disposedRunDirs.add(dir)
+  // timed out) must not recreate either directory via a late flush/persist.
+  for (const dir of dirs) disposedRunDirs.add(dir)
   markWorkflowThreadDisposed(threadId)
   commitWorkflowThreadDisposal(threadId)
-  try {
-    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
-  } catch (error) {
-    console.warn("[Workflow] Failed to delete run artifacts for thread:", error)
+  for (const [key, selection] of workflowRunsDirSelections) {
+    if (selection.threadId === threadId) workflowRunsDirSelections.delete(key)
+  }
+  for (const dir of dirs) {
+    try {
+      if (existsSync(dir)) rmSync(dir, { recursive: true, force: true })
+    } catch (error) {
+      console.warn("[Workflow] Failed to delete run artifacts for thread:", error)
+    }
   }
 }
 
@@ -531,30 +620,39 @@ export function countUnresolvedWorkflowWorktrees(
   options: { failClosedOnUnreadable?: boolean } = {}
 ): number {
   const failClosed = options.failClosedOnUnreadable ?? true
-  const dir = getWorkflowRunsDir(workspacePath, threadId)
-  if (!existsSync(dir)) return 0
   let unresolved = 0
-  let files: string[]
-  try {
-    files = readdirSync(dir)
-  } catch {
-    return failClosed ? 1 : 0
-  }
-  for (const file of files) {
-    if (!file.endsWith(".json") || file.endsWith(".bak")) continue
-    const runId = file.slice(0, -".json".length)
-    if (!isValidWorkflowRunId(runId)) continue
-    const run = loadWorkflowRun(workspacePath, threadId, runId)
-    if (!run) {
+  const candidates = workflowRunsDirCandidates(workspacePath, threadId)
+  for (const dir of new Set([candidates.managed, candidates.legacy])) {
+    if (!existsSync(dir)) continue
+    let files: string[]
+    try {
+      files = readdirSync(dir)
+    } catch {
       if (failClosed) unresolved += 1
       continue
     }
-    unresolved += (run.worktrees ?? []).filter(
-      (record) =>
-        (record.status !== "merged" && record.status !== "discarded") ||
-        record.cleanupPending === true ||
-        existsSync(record.directory)
-    ).length
+    const runIds = new Set<string>()
+    for (const file of files) {
+      const runId = file.endsWith(".json.bak")
+        ? file.slice(0, -".json.bak".length)
+        : file.endsWith(".json")
+          ? file.slice(0, -".json".length)
+          : ""
+      if (isValidWorkflowRunId(runId)) runIds.add(runId)
+    }
+    for (const runId of runIds) {
+      const run = loadWorkflowRunFromPath(join(dir, `${runId}.json`), runId, threadId)
+      if (!run) {
+        if (failClosed) unresolved += 1
+        continue
+      }
+      unresolved += (run.worktrees ?? []).filter(
+        (record) =>
+          (record.status !== "merged" && record.status !== "discarded") ||
+          record.cleanupPending === true ||
+          existsSync(record.directory)
+      ).length
+    }
   }
   return unresolved
 }
@@ -808,7 +906,7 @@ export async function persistRecoveredRun(
 ): Promise<boolean> {
   // Deletion tombstone: this writer mkdirs, so an in-flight retry that grabbed
   // its snapshot BEFORE forgetThread() cleared the table could otherwise
-  // rebuild the removed `.cmbdevclaw/workflows/<threadId>` after the sweep.
+  // rebuild a removed managed or legacy run directory after the sweep.
   // The set tombstones alone aren't enough: reviveWorkflowThread (fixed-id
   // recreation) clears them, which must never re-arm an OLD incarnation's
   // snapshot — callers stamp the disposal epoch at capture time, and an epoch
@@ -1063,12 +1161,24 @@ export function loadWorkflowRun(
   runId: string
 ): PersistedWorkflowRun | null {
   if (!isValidWorkflowRunId(runId)) return null
-  const path = runFilePath(workspacePath, threadId, runId)
+  return loadWorkflowRunFromPath(runFilePath(workspacePath, threadId, runId), runId)
+}
+
+function loadWorkflowRunFromPath(
+  path: string,
+  runId: string,
+  threadId?: string
+): PersistedWorkflowRun | null {
   for (const candidate of [path, `${path}.bak`]) {
     try {
       if (!existsSync(candidate)) continue
       const parsed = JSON.parse(readFileSync(candidate, "utf-8")) as PersistedWorkflowRun
-      if (parsed && parsed.version === 1 && parsed.runId === runId) {
+      if (
+        parsed &&
+        parsed.version === 1 &&
+        parsed.runId === runId &&
+        (threadId === undefined || parsed.threadId === threadId)
+      ) {
         return parsed
       }
     } catch (error) {
@@ -1184,8 +1294,8 @@ const storeGenerations = new Map<string, number>()
 /**
  * Run directories whose thread has been deleted. Any persist targeting one of
  * these is a no-op, so a background run that settles AFTER its thread was
- * deleted cannot recreate the removed `.cmbdevclaw/workflows/<threadId>/`
- * directory as an orphan (the thread is gone from the DB, so nothing would ever
+ * deleted cannot recreate its removed managed or legacy run directory as an
+ * orphan (the thread is gone from the DB, so nothing would ever
  * reconcile it). Keyed by the resolved run directory. ThreadIds are unique and
  * never reused, so entries can stay for the process lifetime (tiny, bounded).
  */
@@ -1274,22 +1384,31 @@ export function rollbackWorkflowThreadDisposal(threadId: string, priorDisposed: 
 /** Lift the disposal tombstones for a thread id that is being legitimately
  * re-created (fixed-id service threads like heartbeat — see
  * reviveRetiredThread in runtime.ts for the contract). Clears both the
- * id-keyed entry and any dir-keyed entries (the run dir's basename IS the
- * threadId), so the new incarnation can persist workflow runs again.
+ * id-keyed entry and any legacy (`.../workflows/<threadId>`) or managed
+ * (`.../<threadId>/workflows`) dir-keyed entries, so the new incarnation can
+ * persist workflow runs again.
  * Deliberately does NOT reset the disposal epoch: stores created before the
  * deletion stay permanently silent — revive must never re-arm an old
  * incarnation's late flush (its doWrite mkdirs the swept directory back). */
 export function reviveWorkflowThread(threadId: string): void {
   disposedThreadIds.delete(threadId)
   for (const dir of Array.from(disposedRunDirs)) {
-    if (basename(dir) === threadId) disposedRunDirs.delete(dir)
+    if (
+      basename(dir) === threadId ||
+      (basename(dir) === "workflows" && basename(dirname(dir)) === threadId)
+    ) {
+      disposedRunDirs.delete(dir)
+    }
+  }
+  for (const [key, selection] of workflowRunsDirSelections) {
+    if (selection.threadId === threadId) workflowRunsDirSelections.delete(key)
   }
 }
 
 /** True once a thread's run directory has been disposed (thread deleted): a late,
  * fire-and-forget write (e.g. a subagent tool-stream sidecar still settling) must check
- * this and skip, so it can't recreate the removed `.cmbdevclaw/workflows/<threadId>/`
- * as an orphan after the thread is gone. */
+ * this and skip, so it can't recreate either removed run directory as an
+ * orphan after the thread is gone. */
 export function isWorkflowRunDirDisposed(workspacePath: string, threadId: string): boolean {
   return (
     disposedThreadIds.has(threadId) ||

@@ -39,6 +39,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { ThreadForkCheckpointDialog } from "./ThreadForkCheckpointDialog"
+import { ThreadGroupDeleteDialog } from "./ThreadGroupDeleteDialog"
 import { useAppStore } from "@/lib/store"
 import {
   useAllStreamLoadingStates,
@@ -47,6 +48,10 @@ import {
 } from "@/lib/thread-context"
 import { cn, truncate } from "@/lib/utils"
 import { useFeatureGate } from "@/lib/feature-gates"
+import {
+  deleteThreadGroupSequentially,
+  hasRunningThreadForDeletion
+} from "@/lib/thread-group-deletion"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
 import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
@@ -944,11 +949,10 @@ export function ThreadSidebar(): React.JSX.Element {
   const confirmDeleteProject = useCallback(async () => {
     if (!projectToDelete) return
 
-    for (const thread of projectToDelete.threads) {
-      await deleteThread(thread.thread_id)
-      cleanupThread(thread.thread_id)
-      markRead(thread.thread_id)
-    }
+    await deleteThreadGroupSequentially(
+      projectToDelete.threads.map((thread) => thread.thread_id),
+      { deleteThread, cleanupThread, markRead }
+    )
 
     setCollapsedProjectKeys((prev) => {
       if (!prev.has(projectToDelete.key)) return prev
@@ -1185,17 +1189,11 @@ export function ThreadSidebar(): React.JSX.Element {
                 const hasContextReminderThread = project.threads.some((thread) =>
                   Boolean(allThreadStates[thread.thread_id]?.contextReminder?.pending)
                 )
-                const hasRunningThread = project.threads.some((thread) => {
-                  const threadState = allThreadStates[thread.thread_id]
-                  return (
-                    (allStreamLoadingStates[thread.thread_id] ?? false) ||
-                    Boolean(
-                      threadState?.coordinatorWorkers.some((worker) => worker.status === "running")
-                    ) ||
-                    Boolean(threadState?.scheduledTaskLoading) ||
-                    threadState?.workflowRun?.status === "running"
-                  )
-                })
+                const hasRunningThread = hasRunningThreadForDeletion(
+                  project.threads.map((thread) => thread.thread_id),
+                  allThreadStates,
+                  allStreamLoadingStates
+                )
 
                 return (
                   <div key={project.key} className="space-y-1">
@@ -1505,26 +1503,19 @@ export function ThreadSidebar(): React.JSX.Element {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Dialog open={!!projectToDelete} onOpenChange={(open) => !open && setProjectToDelete(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>确认删除工作区会话</DialogTitle>
-            <DialogDescription>
-              {projectToDelete
-                ? `确定要删除「${projectToDelete.name}」工作区下的全部 ${projectToDelete.threads.length} 个会话吗？删除后不可恢复。`
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setProjectToDelete(null)}>
-              取消
-            </Button>
-            <Button variant="destructive" onClick={confirmDeleteProject}>
-              删除全部
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ThreadGroupDeleteDialog
+        open={!!projectToDelete}
+        title="确认删除工作区会话"
+        description={
+          projectToDelete
+            ? `确定要删除「${projectToDelete.name}」工作区下的全部 ${projectToDelete.threads.length} 个会话吗？删除后不可恢复。`
+            : ""
+        }
+        onOpenChange={(open) => {
+          if (!open) setProjectToDelete(null)
+        }}
+        onConfirm={() => void confirmDeleteProject()}
+      />
       <WorkspaceRenameDialog
         open={!!projectToRename}
         workspace={projectToRename}

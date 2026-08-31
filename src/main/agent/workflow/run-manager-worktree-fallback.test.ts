@@ -15,6 +15,8 @@ import { validateWorkflowScript } from "./script"
 import { workflowRunManager } from "./run-manager"
 import { generateWorkflowRunId, loadWorkflowRun, sha256Hex } from "./run-store"
 
+const PREVIOUS_WORKFLOW_DATA_ROOT = process.env.CMB_COWORK_AGENT_HOME
+
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
     encoding: "utf8",
@@ -35,21 +37,30 @@ function makeRepo(): string {
 
 describe("isolated worktree provisioning failure", () => {
   let repo: string
+  let workflowDataRoot: string
   let threadId: string
   let runId: string
 
   beforeEach(() => {
+    workflowDataRoot = mkdtempSync(join(tmpdir(), "cmb-workflow-fallback-data-"))
+    process.env.CMB_COWORK_AGENT_HOME = workflowDataRoot
     repo = makeRepo()
     threadId = `thread-no-shared-fallback-${Date.now()}`
     runId = generateWorkflowRunId()
   })
 
   afterEach(async () => {
-    if (workflowRunManager.isActive(threadId)) {
-      workflowRunManager.cancel(threadId, runId)
-      await workflowRunManager.waitForRunLifecycle(threadId, runId)
+    try {
+      if (workflowRunManager.isActive(threadId)) {
+        workflowRunManager.cancel(threadId, runId)
+        await workflowRunManager.waitForRunLifecycle(threadId, runId)
+      }
+    } finally {
+      if (PREVIOUS_WORKFLOW_DATA_ROOT === undefined) delete process.env.CMB_COWORK_AGENT_HOME
+      else process.env.CMB_COWORK_AGENT_HOME = PREVIOUS_WORKFLOW_DATA_ROOT
+      rmSync(repo, { recursive: true, force: true })
+      rmSync(workflowDataRoot, { recursive: true, force: true })
     }
-    rmSync(repo, { recursive: true, force: true })
   })
 
   test("never starts the subagent in the shared workspace", async () => {

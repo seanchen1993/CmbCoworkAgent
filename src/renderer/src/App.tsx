@@ -56,6 +56,7 @@ import {
   unnotifiedReviewCandidates
 } from "@/lib/evolution-notices"
 import { useMyUploadedSkills } from "@/lib/use-my-uploaded-skills"
+import type { HarnessPluginRunArtifactsContext } from "@/lib/harness-plugin-run-artifacts"
 interface UserInfoConfig {
   sapId: string
   ystId: string
@@ -248,6 +249,8 @@ function App(): React.JSX.Element {
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
   const [browserFullscreen, setBrowserFullscreen] = useState(false)
   const [harnessSessionThreadId, setHarnessSessionThreadId] = useState<string | null>(null)
+  const [harnessPluginRunArtifacts, setHarnessPluginRunArtifacts] =
+    useState<HarnessPluginRunArtifactsContext | null>(null)
   const [pendingGitDiffByThread, setPendingGitDiffByThread] = useState<Record<string, boolean>>({})
   const [isGitWorkspaceByThread, setIsGitWorkspaceByThread] = useState<Record<string, boolean>>({})
 
@@ -591,6 +594,13 @@ function App(): React.JSX.Element {
   const handleHarnessActiveSessionThreadChange = useCallback((threadId: string | null) => {
     setHarnessSessionThreadId((prev) => (prev === threadId ? prev : threadId))
   }, [])
+
+  const handleHarnessPluginRunArtifactsChange = useCallback(
+    (context: HarnessPluginRunArtifactsContext | null) => {
+      setHarnessPluginRunArtifacts(context)
+    },
+    []
+  )
 
   const activeRightPanelThreadId =
     mainView === "harness" ? harnessSessionThreadId : currentThreadId
@@ -1230,6 +1240,7 @@ function App(): React.JSX.Element {
                   onDismissGitChangeNotice={dismissGitChangeNotice}
                   onThreadGitStatusChange={handleThreadGitStatusChange}
                   onActiveSessionThreadChange={handleHarnessActiveSessionThreadChange}
+                  onPluginRunArtifactsChange={handleHarnessPluginRunArtifactsChange}
                 />
               </Suspense>
             </main>
@@ -1257,6 +1268,7 @@ function App(): React.JSX.Element {
                   <RightPanel
                     threadId={harnessSessionThreadId}
                     showSystemConstraints={mainView === "harness"}
+                    pluginRunArtifacts={harnessPluginRunArtifacts}
                     onPreviewFullscreenChange={setPreviewFullscreen}
                     onBrowserFullscreenChange={setBrowserFullscreen}
                   />
