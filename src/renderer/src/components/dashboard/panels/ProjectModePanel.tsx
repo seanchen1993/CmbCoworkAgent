@@ -1396,7 +1396,8 @@ function SortableTh({
   order,
   enabled,
   onSort,
-  title
+  title,
+  hint
 }: {
   label: string
   sortKey: DashboardProjectModeProjectSortKey
@@ -1405,11 +1406,15 @@ function SortableTh({
   enabled: boolean
   onSort: (key: DashboardProjectModeProjectSortKey) => void
   title?: string
+  hint?: ReactNode
 }): React.JSX.Element {
   if (!enabled) {
     return (
       <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title={title}>
-        {label}
+        <span className="inline-flex items-center justify-end gap-1">
+          <span>{label}</span>
+          {hint ? <InfoHint hint={hint} /> : null}
+        </span>
       </th>
     )
   }
@@ -1417,18 +1422,21 @@ function SortableTh({
   const Icon = active ? (order === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown
   return (
     <th className="whitespace-nowrap px-3 py-2 text-right font-medium">
-      <button
-        type="button"
-        onClick={() => onSort(sortKey)}
-        title={title ?? `按${label}排序`}
-        className={cn(
-          "ml-auto inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
-          active ? "text-foreground" : "text-muted-foreground"
-        )}
-      >
-        <span>{label}</span>
-        <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
-      </button>
+      <div className="ml-auto flex w-fit items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onSort(sortKey)}
+          title={title ?? `按${label}排序`}
+          className={cn(
+            "inline-flex items-center gap-1 whitespace-nowrap transition-colors hover:text-foreground",
+            active ? "text-foreground" : "text-muted-foreground"
+          )}
+        >
+          <span>{label}</span>
+          <Icon className={cn("size-3 shrink-0", active ? "opacity-100" : "opacity-40")} />
+        </button>
+        {hint ? <InfoHint hint={hint} /> : null}
+      </div>
     </th>
   )
 }
@@ -1787,6 +1795,7 @@ function ProjectListSection({
                 order={sortOrder}
                 enabled={metricSortAllowed}
                 onSort={cycleSort}
+                hint="所选时间范围内，仅统计主动触发的主 Agent 会话；不包含定时任务、心跳等后台触发，也不包含子 Agent 会话。"
               />
               <SortableTh
                 label="原始生成行数"
@@ -2015,9 +2024,7 @@ const DEV_MOCK_PLUGIN_MARKET_INFO: Record<string, PluginMarketInfo> = {
 }
 
 /**
- * 用 item.user_id（上传者 SAP id）到全量用户目录解析 {负责人, 部门}。
- * 负责人/部门并不在插件列表响应里——应用市场与 Harness 看板都是靠 user_id 二次查
- * queryAllUser 拿到的，这里复用同一口径（queryAllUser + buildUploaderIdCandidates）。
+ * 用 item.user_id（上传者 SAP id）按需解析 {负责人, 部门}，只查询当前列表涉及的候选 ID。
  */
 async function resolvePluginUploaderProfiles(
   items: MarketItem[]
@@ -2027,9 +2034,14 @@ async function resolvePluginUploaderProfiles(
     new Set(items.map((item) => item.user_id?.trim() || "").filter(Boolean))
   )
   if (rawUserIds.length === 0) return result
-  if (typeof window.api?.dashboard?.queryAllUser !== "function") return result
+  if (typeof window.api?.dashboard?.userProfiles !== "function") return result
   try {
-    const response = await window.api.dashboard.queryAllUser()
+    const requestedSapIds = Array.from(
+      new Set(rawUserIds.flatMap((rawUserId) => buildUploaderIdCandidates(rawUserId)))
+    )
+    const response = await window.api.dashboard.userProfiles(requestedSapIds, {
+      family: "project-mode-market"
+    })
     if (!response.success || !response.data) return result
     const allUsers = response.data.filter((user) => user.sapId?.trim())
     for (const rawUserId of rawUserIds) {

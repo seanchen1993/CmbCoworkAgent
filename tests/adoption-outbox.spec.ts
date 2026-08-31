@@ -7,44 +7,46 @@
 
 import { execFile } from "child_process"
 import { createHash } from "crypto"
-import { existsSync } from "fs"
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "fs/promises"
-import { homedir, tmpdir } from "os"
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "fs/promises"
+import { tmpdir } from "os"
 import { join, resolve } from "path"
 import initSqlJs from "sql.js"
 import { promisify } from "util"
-import {
-  captureStagedSnapshotsForCommit,
-  flushAdoptionCommitJobs,
-  flushAdoptionEventOutbox,
-  getCommitMeasurementStatus,
-  initializeAdoptionTracker,
-  measureForCommit,
-  recordGen,
-  setAdoptionContext,
-  shutdownAdoptionTracker
-} from "../src/main/services/adoption-tracker.ts"
-import {
-  cleanupAdoptionDeliveryRecords,
-  closeAdoptionIndex,
-  enqueueCommitJob,
-  enqueueEventOutbox,
-  findPendingGensForFile,
-  flushAdoptionIndex,
-  getAdoptLineDetails,
-  getCommitJob,
-  getGenRowByEventId,
-  getOutboxEvent,
-  markOutboxFailed
-} from "../src/main/services/adoption-index.ts"
-import {
-  buildEvent,
-  NoopEventReporter,
-  setEventReporter,
-  type CoworkEvent,
-  type EventReportResult,
-  type IEventReporter
+import type {
+  CoworkEvent,
+  EventReportResult,
+  IEventReporter
 } from "../src/main/services/event-reporter.ts"
+
+type AdoptionTrackerModule = typeof import("../src/main/services/adoption-tracker.ts")
+type AdoptionIndexModule = typeof import("../src/main/services/adoption-index.ts")
+type EventReporterModule = typeof import("../src/main/services/event-reporter.ts")
+
+let testDataRoot = ""
+let captureStagedSnapshotsForCommit!: AdoptionTrackerModule["captureStagedSnapshotsForCommit"]
+let flushAdoptionCommitJobs!: AdoptionTrackerModule["flushAdoptionCommitJobs"]
+let flushAdoptionEventOutbox!: AdoptionTrackerModule["flushAdoptionEventOutbox"]
+let getCommitMeasurementStatus!: AdoptionTrackerModule["getCommitMeasurementStatus"]
+let initializeAdoptionTracker!: AdoptionTrackerModule["initializeAdoptionTracker"]
+let measureForCommit!: AdoptionTrackerModule["measureForCommit"]
+let recordGen!: AdoptionTrackerModule["recordGen"]
+let setAdoptionContext!: AdoptionTrackerModule["setAdoptionContext"]
+let shutdownAdoptionTracker!: AdoptionTrackerModule["shutdownAdoptionTracker"]
+let waitForAdoptionRecordGenIdleForTest!: AdoptionTrackerModule["waitForAdoptionRecordGenIdleForTest"]
+let cleanupAdoptionDeliveryRecords!: AdoptionIndexModule["cleanupAdoptionDeliveryRecords"]
+let closeAdoptionIndex!: AdoptionIndexModule["closeAdoptionIndex"]
+let enqueueCommitJob!: AdoptionIndexModule["enqueueCommitJob"]
+let enqueueEventOutbox!: AdoptionIndexModule["enqueueEventOutbox"]
+let findPendingGensForFile!: AdoptionIndexModule["findPendingGensForFile"]
+let flushAdoptionIndex!: AdoptionIndexModule["flushAdoptionIndex"]
+let getAdoptLineDetails!: AdoptionIndexModule["getAdoptLineDetails"]
+let getCommitJob!: AdoptionIndexModule["getCommitJob"]
+let getGenRowByEventId!: AdoptionIndexModule["getGenRowByEventId"]
+let getOutboxEvent!: AdoptionIndexModule["getOutboxEvent"]
+let markOutboxFailed!: AdoptionIndexModule["markOutboxFailed"]
+let buildEvent!: EventReporterModule["buildEvent"]
+let NoopEventReporter!: EventReporterModule["NoopEventReporter"]
+let setEventReporter!: EventReporterModule["setEventReporter"]
 
 const execFileAsync = promisify(execFile)
 
@@ -112,37 +114,20 @@ async function withTempRepo<T>(name: string, fn: (repo: string) => Promise<T>): 
   }
 }
 
-async function moveIfExists(from: string, to: string): Promise<boolean> {
-  if (!existsSync(from)) return false
-  await rm(to, { recursive: true, force: true })
-  await rename(from, to)
-  return true
-}
-
-async function restorePath(path: string, backup: string, existed: boolean): Promise<void> {
-  await rm(path, { recursive: true, force: true })
-  if (existed) await rename(backup, path)
-}
-
 async function withIsolatedAdoptionStore<T>(fn: () => Promise<T>): Promise<T> {
   shutdownAdoptionTracker()
-  const root = join(homedir(), ".cmbcoworkagent")
-  await mkdir(root, { recursive: true })
-  const backupRoot = await mkdtemp(join(tmpdir(), "adoption-outbox-backup-"))
-  const adoptionDir = join(root, "adoption")
-  const adoptionIndex = join(root, "adoption-index.sqlite")
-  const adoptionDirBackup = join(backupRoot, "adoption")
-  const adoptionIndexBackup = join(backupRoot, "adoption-index.sqlite")
-  const hadAdoptionDir = await moveIfExists(adoptionDir, adoptionDirBackup)
-  const hadAdoptionIndex = await moveIfExists(adoptionIndex, adoptionIndexBackup)
+  const adoptionDir = join(testDataRoot, "adoption")
+  const adoptionIndex = join(testDataRoot, "adoption-index.sqlite")
+  await rm(adoptionDir, { recursive: true, force: true })
+  await rm(adoptionIndex, { force: true })
   try {
     return await fn()
   } finally {
+    await waitForAdoptionRecordGenIdleForTest()
     shutdownAdoptionTracker()
     setEventReporter(new NoopEventReporter())
-    await restorePath(adoptionDir, adoptionDirBackup, hadAdoptionDir)
-    await restorePath(adoptionIndex, adoptionIndexBackup, hadAdoptionIndex)
-    await rm(backupRoot, { recursive: true, force: true })
+    await rm(adoptionDir, { recursive: true, force: true })
+    await rm(adoptionIndex, { force: true })
   }
 }
 
@@ -175,7 +160,7 @@ async function waitForGenerationCall(reporter: AdoptionReporter, index = 0): Pro
 
 async function querySnapshotCount(sql: string, params: Array<string | number>): Promise<number> {
   const SQL = await initSqlJs()
-  const indexPath = join(homedir(), ".cmbcoworkagent", "adoption-index.sqlite")
+  const indexPath = join(testDataRoot, "adoption-index.sqlite")
   const snapshot = new SQL.Database(await readFile(indexPath))
   const stmt = snapshot.prepare(sql)
   stmt.bind(params)
@@ -334,7 +319,7 @@ async function testCodeGenRequiresAnIndexedBaseline(): Promise<void> {
         tool: "write_file",
         generatedContent
       })
-      await sleep(100)
+      await waitForAdoptionRecordGenIdleForTest()
 
       assert(reporter.generationCalls.length === 0, "unindexed code_gen must be suppressed")
       assert(
@@ -351,17 +336,31 @@ async function testCodeGenUsesDurableBatchedOutbox(): Promise<void> {
     const reporter = new AdoptionReporter()
     reporter.failGeneration = true
     let durablePairCounts = { baseline: 0, outbox: 0 }
+    let durablePairIds = { generation: "", outbox: "" }
+    let settleDurablePairCheck!: () => void
+    let rejectDurablePairCheck!: (error: unknown) => void
+    const durablePairCheck = new Promise<void>((resolvePromise, rejectPromise) => {
+      settleDurablePairCheck = resolvePromise
+      rejectDurablePairCheck = rejectPromise
+    })
     reporter.onGenerationReport = async (event) => {
-      const genEventId = String(event.properties?.eventId ?? "")
-      const baselineCount = await querySnapshotCount(
-        "SELECT COUNT(*) AS count FROM gen_events WHERE event_id = ?",
-        [genEventId]
-      )
-      const outboxCount = await querySnapshotCount(
-        "SELECT COUNT(*) AS count FROM event_outbox WHERE event_id = ?",
-        [event.eventId]
-      )
-      durablePairCounts = { baseline: baselineCount, outbox: outboxCount }
+      try {
+        const genEventId = String(event.properties?.eventId ?? "")
+        const baselineCount = await querySnapshotCount(
+          "SELECT COUNT(*) AS count FROM gen_events WHERE event_id = ?",
+          [genEventId]
+        )
+        const outboxCount = await querySnapshotCount(
+          "SELECT COUNT(*) AS count FROM event_outbox WHERE event_id = ?",
+          [event.eventId]
+        )
+        durablePairCounts = { baseline: baselineCount, outbox: outboxCount }
+        durablePairIds = { generation: genEventId, outbox: event.eventId }
+        settleDurablePairCheck()
+      } catch (error) {
+        rejectDurablePairCheck(error)
+        throw error
+      }
     }
     setEventReporter(reporter)
     await initializeAdoptionTracker()
@@ -385,11 +384,13 @@ async function testCodeGenUsesDurableBatchedOutbox(): Promise<void> {
       assert(reporter.generationCalls.length === 0, "code_gen drain should be batched")
 
       const firstEvent = await waitForGenerationCall(reporter)
+      await durablePairCheck
+      await flushAdoptionEventOutbox()
       const genEventId = String(firstEvent.properties?.eventId ?? "")
       assert(genEventId.startsWith("g_"), "code_gen should retain its measurement id")
       assert(
         durablePairCounts.baseline === 1 && durablePairCounts.outbox === 1,
-        `reporter must see a disk-durable baseline/outbox pair: ${JSON.stringify(durablePairCounts)}`
+        `reporter must see a disk-durable baseline/outbox pair: ${JSON.stringify({ ...durablePairCounts, ...durablePairIds })}`
       )
       assert(
         getGenRowByEventId(genEventId)?.measured === 0,
@@ -507,7 +508,6 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
         tool: "edit_file",
         generatedContent: newString,
         oldString,
-        newString,
         occurrences: 1
       })
 
@@ -515,6 +515,13 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
       assert(
         genEvent.properties?.lineCount === 1,
         "oversize code_gen should report one net-new line"
+      )
+      assert(
+        genEvent.properties?.deletedLineCount === 0 &&
+          genEvent.properties?.netNewRatio === 1 &&
+          genEvent.properties?.newRatio === undefined &&
+          genEvent.properties?.changeKind === "new",
+        "oversize append should preserve the new-only classification"
       )
       await flushAdoptionEventOutbox()
       const adoptEvent = reporter.adoptionCalls.find(
@@ -534,6 +541,12 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
         adoptEvent?.properties?.generatedLineCount === 1 &&
           adoptEvent.properties?.effectiveGeneratedLineCount === 1,
         "oversize terminal event should use the same net-new denominator"
+      )
+      assert(
+        adoptEvent?.properties?.netNewRatio === 1 &&
+          adoptEvent.properties?.newRatio === undefined &&
+          adoptEvent.properties?.changeKind === "new",
+        "oversize terminal event should carry the same change classification"
       )
       assert(
         findPendingGensForFile(filePath, 0).length === 0,
@@ -585,6 +598,10 @@ async function testStableOutboxRetryAcrossRestart(): Promise<void> {
       assert(
         firstEvent.properties?.genEventId === committed.genEventId,
         "outbox event should reference the measured generation"
+      )
+      assert(
+        firstEvent.properties?.netNewRatio === 1 && firstEvent.properties?.newRatio === undefined,
+        "measured adoption should use only the explicitly-double ratio field"
       )
 
       // Make the failed row immediately due, then restart before retrying. This
@@ -747,7 +764,48 @@ async function main(): Promise<void> {
   await testOutboxAttemptAndRetentionLimits()
 }
 
-main().catch((error) => {
+async function run(): Promise<void> {
+  testDataRoot = await mkdtemp(join(tmpdir(), "adoption-outbox-data-"))
+  process.env.CMB_COWORK_AGENT_HOME = testDataRoot
+  try {
+    const adoptionTracker = await import("../src/main/services/adoption-tracker.ts")
+    const adoptionIndex = await import("../src/main/services/adoption-index.ts")
+    const eventReporter = await import("../src/main/services/event-reporter.ts")
+    ;({
+      captureStagedSnapshotsForCommit,
+      flushAdoptionCommitJobs,
+      flushAdoptionEventOutbox,
+      getCommitMeasurementStatus,
+      initializeAdoptionTracker,
+      measureForCommit,
+      recordGen,
+      setAdoptionContext,
+      shutdownAdoptionTracker,
+      waitForAdoptionRecordGenIdleForTest
+    } = adoptionTracker)
+    ;({
+      cleanupAdoptionDeliveryRecords,
+      closeAdoptionIndex,
+      enqueueCommitJob,
+      enqueueEventOutbox,
+      findPendingGensForFile,
+      flushAdoptionIndex,
+      getAdoptLineDetails,
+      getCommitJob,
+      getGenRowByEventId,
+      getOutboxEvent,
+      markOutboxFailed
+    } = adoptionIndex)
+    ;({ buildEvent, NoopEventReporter, setEventReporter } = eventReporter)
+    await main()
+  } finally {
+    await waitForAdoptionRecordGenIdleForTest?.()
+    shutdownAdoptionTracker?.()
+    await rm(testDataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  }
+}
+
+run().catch((error) => {
   console.error("FAIL adoption outbox tests", error)
   process.exitCode = 1
 })

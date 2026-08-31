@@ -96,7 +96,9 @@ describe("stored local adoption details", () => {
       workflow_run_id: null,
       workflow_agent_index: null,
       workflow_phase: null,
-      workflow_agent_label: null
+      workflow_agent_label: null,
+      new_ratio: null,
+      change_kind: null
     }
     insertGenEvent(genRow)
     expect(

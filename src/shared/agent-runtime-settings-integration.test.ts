@@ -108,7 +108,7 @@ describe("agent runtime settings integration", () => {
     )
     expect(mergeFinalization).toContain("operationTimeoutMs: number")
     expect(mergeFinalization).toContain("signal?: AbortSignal")
-    expect(mergeFinalization).toContain("operationTimeoutMs,\n      signal")
+    expect(mergeFinalization).toMatch(/operationTimeoutMs,\r?\n\s+signal/)
 
     const merge = sourceBetween(
       worktreeService,
@@ -118,7 +118,7 @@ describe("agent runtime settings integration", () => {
     expect(merge).toContain("const operationTimeoutMs = getWorkflowWorktreeTimeoutMs()")
     expect(merge.match(/\boperationTimeoutMs\b/g)?.length ?? 0).toBeGreaterThan(10)
     expect(merge).not.toMatch(/git\(record\.sourceRoot, \["write-tree"\]\)/)
-    expect(merge).toContain("operationTimeoutMs,\n          input.signal")
+    expect(merge).toMatch(/operationTimeoutMs,\r?\n\s+input\.signal/)
 
     const runtime = readRepositoryFile("src/main/agent/runtime.ts")
     expect(runtime).toContain(

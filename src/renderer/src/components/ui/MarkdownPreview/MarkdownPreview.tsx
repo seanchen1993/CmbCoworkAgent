@@ -76,7 +76,7 @@ function safeDecodeUri(value: string): string {
 
 /**
  * 把 markdown 文件里的相对图片路径解析为可读取的路径。
- * - mdPath 为绝对路径时返回绝对路径（外部文件走 requestExternalFileRead）；
+ * - mdPath 为绝对路径时返回绝对路径（外部文件由 main 签发的 grant 约束）；
  * - mdPath 为工作区相对路径时返回工作区相对路径（走 readBinaryFile）。
  * 支持 `./`、`../`、子目录；越界（`..` 超出根）时收敛到根。
  */
@@ -121,17 +121,15 @@ function MarkdownImage({
   mdPath: string
   readBinaryFile?: (resolvedPath: string) => Promise<string | null>
 } & React.ImgHTMLAttributes<HTMLImageElement>): React.JSX.Element {
-  const [dataUrl, setDataUrl] = useState<string | undefined>(undefined)
+  const [loadedImage, setLoadedImage] = useState<{ src: string; url: string } | null>(null)
+  const directUrl = src && (hasProtocol(src) || src.startsWith("data:")) ? src : undefined
 
   useEffect(() => {
     let cancelled = false
     if (!src) return
 
     // 远程/内联图片直接渲染，无需本地读取。
-    if (hasProtocol(src) || src.startsWith("data:")) {
-      setDataUrl(src)
-      return
-    }
+    if (hasProtocol(src) || src.startsWith("data:")) return
     if (!readBinaryFile) return
 
     const resolved = resolveMarkdownImagePath(mdPath, src)
@@ -140,9 +138,13 @@ function MarkdownImage({
     readBinaryFile(resolved)
       .then((base64) => {
         if (cancelled || !base64) return
+        if (hasProtocol(base64) || base64.startsWith("data:")) {
+          setLoadedImage({ src, url: base64 })
+          return
+        }
         const ext = resolved.split(".").pop()?.toLowerCase() ?? ""
         const mime = IMAGE_MIME_BY_EXT[ext] ?? "image/png"
-        setDataUrl(`data:${mime};base64,${base64}`)
+        setLoadedImage({ src, url: `data:${mime};base64,${base64}` })
       })
       .catch(() => {})
 
@@ -151,7 +153,8 @@ function MarkdownImage({
     }
   }, [src, mdPath, readBinaryFile])
 
-  return <img src={dataUrl ?? src ?? ""} alt={alt ?? ""} {...props} />
+  const loadedUrl = loadedImage && loadedImage.src === src ? loadedImage.url : undefined
+  return <img src={directUrl ?? loadedUrl ?? src ?? ""} alt={alt ?? ""} {...props} />
 }
 
 export function MarkdownPreview({
