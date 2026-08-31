@@ -52,7 +52,13 @@ import type {
   LocalGeneratedLineStatus,
   LocalGenAdoptionLines
 } from "../../shared/adoption-trace-types"
-import { buildEvent, getEventReporter, type CoworkEvent } from "./event-reporter"
+import {
+  buildEvent,
+  getEventReporter,
+  type CoworkEvent,
+  type EventReportResult,
+  type IEventReporter
+} from "./event-reporter"
 import { getGitRootForPath } from "./git-repository-discovery"
 import {
   attributeChangeKind,
@@ -80,6 +86,7 @@ import {
   listPendingGenPaths,
   markCommitJobProcessing,
   markCommitJobRetry,
+  markOutboxDeferred,
   markOutboxDelivered,
   markOutboxFailed,
   markOutboxSending,
@@ -97,6 +104,7 @@ import {
   type CommitJobStatus,
   type CommitJobRow,
   type EventOutboxInput,
+  type EventOutboxRow,
   type GenIndexRow
 } from "./adoption-index"
 
@@ -143,6 +151,7 @@ const CODE_GEN_OUTBOX_DRAIN_DELAY_MS = 750
 const OUTBOX_MAX_ATTEMPTS = 10
 const OUTBOX_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000
 const OUTBOX_SENDING_STALE_MS = 2 * 60 * 1000
+const OUTBOX_REPORT_DEADLINE_MS = 12 * 1000
 const COMMIT_JOB_POLL_INTERVAL_MS = 30 * 1000
 const COMMIT_JOB_BATCH_SIZE = 5
 const DELIVERY_RECORD_RETENTION_MS = 14 * 24 * 60 * 60 * 1000
@@ -383,6 +392,8 @@ const inFlightRecordGenTasks = new Set<Promise<void>>()
 const inFlightFileMeasurements = new Set<string>()
 
 let outboxDrainPromise: Promise<void> | null = null
+let outboxLifecycleGeneration = 0
+let outboxLifecycleController = new AbortController()
 let commitJobDrainPromise: Promise<void> | null = null
 const inFlightCommitJobs = new Map<string, Promise<boolean>>()
 
@@ -853,7 +864,19 @@ function retryDelayMs(
   delays: readonly number[] = COMMIT_JOB_RETRY_DELAYS_MS
 ): number {
   const fallback = delays[Math.min(attemptsBeforeCurrentAttempt, delays.length - 1)]
-  return Math.max(fallback, retryAfterMs ?? 0)
+  const safeRetryAfterMs =
+    typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs)
+      ? Math.min(OUTBOX_RETRY_WINDOW_MS, Math.max(0, Math.ceil(retryAfterMs)))
+      : 0
+  return Math.max(fallback, safeRetryAfterMs)
+}
+
+function nextOutboxAttemptAt(row: EventOutboxRow, delayMs: number, now = Date.now()): number {
+  const retryDeadline = row.created_at + OUTBOX_RETRY_WINDOW_MS
+  const safeDelayMs = Number.isFinite(delayMs)
+    ? Math.min(OUTBOX_RETRY_WINDOW_MS, Math.max(0, Math.ceil(delayMs)))
+    : 0
+  return Math.min(retryDeadline, now + safeDelayMs)
 }
 
 // ─────────────────────────────────────────────────────────
@@ -2927,7 +2950,75 @@ function scheduleBatchedCodeGenOutboxDrain(): void {
   if (typeof codeGenOutboxDrainTimer.unref === "function") codeGenOutboxDrainTimer.unref()
 }
 
-async function drainAdoptionEventOutbox(): Promise<void> {
+const OUTBOX_REPORT_CANCELLED = { kind: "outbox-report-cancelled" } as const
+type OutboxReportCancelled = typeof OUTBOX_REPORT_CANCELLED
+const OUTBOX_REPORT_TIMED_OUT = { kind: "outbox-report-timed-out" } as const
+type OutboxReportTimedOut = typeof OUTBOX_REPORT_TIMED_OUT
+type OutboxReportOutcome = EventReportResult | OutboxReportCancelled | OutboxReportTimedOut
+
+function isOutboxReportCancelled(result: OutboxReportOutcome): result is OutboxReportCancelled {
+  return result === OUTBOX_REPORT_CANCELLED
+}
+
+function isOutboxReportTimedOut(result: OutboxReportOutcome): result is OutboxReportTimedOut {
+  return result === OUTBOX_REPORT_TIMED_OUT
+}
+
+function isOutboxLifecycleCurrent(generation: number, signal: AbortSignal): boolean {
+  return initialized && generation === outboxLifecycleGeneration && !signal.aborted
+}
+
+function unrefAdoptionTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (typeof timer === "object" && timer && "unref" in timer) timer.unref()
+}
+
+async function reportOutboxEventWithDeadline(
+  reporter: IEventReporter,
+  event: CoworkEvent,
+  signal: AbortSignal,
+  onAttempt: () => void
+): Promise<EventReportResult | OutboxReportCancelled | OutboxReportTimedOut> {
+  if (signal.aborted) return OUTBOX_REPORT_CANCELLED
+
+  // Start through a microtask so flushAdoptionEventOutbox can publish its
+  // single-flight placeholder before arbitrary custom reporter code runs.
+  const reportPromise = Promise.resolve().then(
+    async (): Promise<EventReportResult | OutboxReportCancelled> => {
+      if (signal.aborted) return OUTBOX_REPORT_CANCELLED
+      onAttempt()
+      return await reporter.report(event)
+    }
+  )
+  // Promise.race does not observe a rejection that happens after timeout or
+  // lifecycle cancellation. Keep a terminal handler attached for that case.
+  void reportPromise.catch(() => undefined)
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let removeAbortListener: (() => void) | undefined
+  const timeoutPromise = new Promise<OutboxReportTimedOut>((resolvePromise) => {
+    timeoutId = setTimeout(() => {
+      resolvePromise(OUTBOX_REPORT_TIMED_OUT)
+    }, OUTBOX_REPORT_DEADLINE_MS)
+    unrefAdoptionTimer(timeoutId)
+  })
+  const cancellationPromise = new Promise<OutboxReportCancelled>((resolvePromise) => {
+    const cancel = () => resolvePromise(OUTBOX_REPORT_CANCELLED)
+    signal.addEventListener("abort", cancel, { once: true })
+    removeAbortListener = () => signal.removeEventListener("abort", cancel)
+    // Abort may have happened between the initial check and listener registration.
+    if (signal.aborted) cancel()
+  })
+
+  try {
+    return await Promise.race([reportPromise, timeoutPromise, cancellationPromise])
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+    removeAbortListener?.()
+  }
+}
+
+async function drainAdoptionEventOutbox(generation: number, signal: AbortSignal): Promise<void> {
+  if (!isOutboxLifecycleCurrent(generation, signal)) return
   // A code_gen envelope and its measurement baseline share the in-memory
   // transaction. Never expose either to the reporter until the current sql.js
   // image is safely exported; failures stay queued for the next poll.
@@ -2935,14 +3026,17 @@ async function drainAdoptionEventOutbox(): Promise<void> {
     console.warn("[AdoptionTracker] outbox drain deferred — adoption index flush failed")
     return
   }
+  if (!isOutboxLifecycleCurrent(generation, signal)) return
   resetInterruptedOutboxEvents(Date.now() - OUTBOX_SENDING_STALE_MS)
   const rows = listDueOutboxEvents(Date.now(), OUTBOX_BATCH_SIZE)
   for (const row of rows) {
+    if (!isOutboxLifecycleCurrent(generation, signal)) return
     if (Date.now() - row.created_at >= OUTBOX_RETRY_WINDOW_MS) {
       markOutboxFailed(row.event_id, "retry window expired after 24 hours", Date.now(), true)
       continue
     }
     if (!markOutboxSending(row.event_id)) continue
+    let reporterInvoked = false
     try {
       const event = JSON.parse(row.payload_json) as CoworkEvent
       if (
@@ -2953,47 +3047,81 @@ async function drainAdoptionEventOutbox(): Promise<void> {
       ) {
         throw new Error("outbox payload identity does not match its immutable key")
       }
-      const result = await getEventReporter().report(event)
-      if (result.ok) {
+      const reporter = getEventReporter()
+      const result = await reportOutboxEventWithDeadline(reporter, event, signal, () => {
+        reporterInvoked = true
+      })
+      if (isOutboxReportCancelled(result)) return
+      if (!isOutboxLifecycleCurrent(generation, signal)) return
+      const reportTimedOut = isOutboxReportTimedOut(result)
+      const reportResult: EventReportResult = reportTimedOut
+        ? {
+            ok: false,
+            retryable: true,
+            error: `event reporter exceeded ${OUTBOX_REPORT_DEADLINE_MS}ms deadline`,
+            attempted: true
+          }
+        : result
+      if (reportResult.ok) {
         markOutboxDelivered(row.event_id)
       } else {
-        const delay = retryDelayMs(row.attempts, result.retryAfterMs, OUTBOX_RETRY_DELAYS_MS)
-        const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
-        const error = attemptLimitReached
-          ? `${result.error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})`
-          : result.error
-        markOutboxFailed(
-          row.event_id,
-          error,
-          Date.now() + delay,
-          !result.retryable || attemptLimitReached
-        )
+        const attempted = reportResult.attempted !== false
+        const delay = retryDelayMs(row.attempts, reportResult.retryAfterMs, OUTBOX_RETRY_DELAYS_MS)
+        const nextAttemptAt = nextOutboxAttemptAt(row, delay)
+        if (!reportResult.retryable) {
+          markOutboxFailed(row.event_id, reportResult.error, nextAttemptAt, true, {
+            consumeAttempt: attempted,
+            requireSending: true
+          })
+        } else if (!attempted) {
+          markOutboxDeferred(row.event_id, reportResult.error, nextAttemptAt)
+        } else {
+          const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+          const error = attemptLimitReached
+            ? `${reportResult.error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})`
+            : reportResult.error
+          markOutboxFailed(row.event_id, error, nextAttemptAt, attemptLimitReached, {
+            consumeAttempt: true,
+            requireSending: true
+          })
+        }
       }
+      // A hung custom reporter is usually shared by the whole batch. Avoid
+      // multiplying the 12-second safety deadline across up to 25 rows.
+      if (reportTimedOut) break
     } catch (e) {
+      if (!isOutboxLifecycleCurrent(generation, signal)) return
       const error = e instanceof Error ? e.message : String(e)
       // A malformed immutable payload cannot become valid through retry. An
       // unexpected reporter exception can, so JSON/identity failures are
       // dead-lettered immediately; transient failures stop at the attempt cap.
-      const malformed = error.includes("outbox payload identity") || e instanceof SyntaxError
-      const attemptLimitReached = row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+      const malformed =
+        !reporterInvoked && (error.includes("outbox payload identity") || e instanceof SyntaxError)
+      const attemptLimitReached = reporterInvoked && row.attempts + 1 >= OUTBOX_MAX_ATTEMPTS
+      const delay = retryDelayMs(row.attempts, undefined, OUTBOX_RETRY_DELAYS_MS)
       markOutboxFailed(
         row.event_id,
         attemptLimitReached ? `${error} (attempt limit reached: ${OUTBOX_MAX_ATTEMPTS})` : error,
-        Date.now() + retryDelayMs(row.attempts, undefined, OUTBOX_RETRY_DELAYS_MS),
-        malformed || attemptLimitReached
+        nextOutboxAttemptAt(row, delay),
+        malformed || attemptLimitReached,
+        { consumeAttempt: reporterInvoked, requireSending: true }
       )
     }
   }
-  flushAdoptionIndex()
+  if (isOutboxLifecycleCurrent(generation, signal)) flushAdoptionIndex()
 }
 
 /** Flush all currently due adoption events. Exported for deterministic tests. */
 export function flushAdoptionEventOutbox(): Promise<void> {
   if (!initialized) return Promise.resolve()
   if (outboxDrainPromise) return outboxDrainPromise
-  const task = drainAdoptionEventOutbox().catch((e) => {
-    console.warn("[AdoptionTracker] outbox drain failed:", e)
-  })
+  const generation = outboxLifecycleGeneration
+  const signal = outboxLifecycleController.signal
+  const task = Promise.resolve()
+    .then(() => drainAdoptionEventOutbox(generation, signal))
+    .catch((e) => {
+      console.warn("[AdoptionTracker] outbox drain failed:", e)
+    })
   outboxDrainPromise = task
   void task.then(() => {
     if (outboxDrainPromise === task) outboxDrainPromise = null
@@ -3059,18 +3187,28 @@ async function sweep(): Promise<void> {
 // Lifecycle
 // ─────────────────────────────────────────────────────────
 
-export async function initializeAdoptionTracker(): Promise<void> {
-  if (initialized) return
+export async function initializeAdoptionTracker(): Promise<boolean> {
+  if (initialized) return true
   try {
     getAdoptionDir() // ensure dir exists
-    await initializeAdoptionIndex()
+    if (!(await initializeAdoptionIndex())) {
+      console.warn("[AdoptionTracker] index unavailable — tracker disabled")
+      return false
+    }
     // Apply the new payload limits immediately to databases created by older
     // builds instead of waiting for the first periodic sweep.
     trimGeneratedSourceTextToByteCap(LOCAL_PENDING_SOURCE_MAX_BYTES)
     trimAdoptLineDetails(LOCAL_ADOPT_DETAILS_MAX_ROWS, LOCAL_ADOPT_DETAILS_MAX_BYTES)
     resetInterruptedCommitJobs()
     resetInterruptedOutboxEvents(Date.now())
-    flushAdoptionIndex()
+    if (!flushAdoptionIndex()) {
+      console.warn("[AdoptionTracker] initial durable index flush failed — tracker disabled")
+      closeAdoptionIndex()
+      return false
+    }
+    outboxLifecycleGeneration += 1
+    outboxLifecycleController.abort()
+    outboxLifecycleController = new AbortController()
     initialized = true
 
     sweepTimer = setInterval(() => {
@@ -3094,14 +3232,22 @@ export async function initializeAdoptionTracker(): Promise<void> {
     })
 
     console.log("[AdoptionTracker] initialized")
+    return true
   } catch (e) {
     console.warn("[AdoptionTracker] init failed — tracker disabled:", e)
-    initialized = false
+    shutdownAdoptionTracker()
+    return false
   }
 }
 
 export function shutdownAdoptionTracker(): void {
   initialized = false
+  outboxLifecycleGeneration += 1
+  outboxLifecycleController.abort()
+  // A custom reporter may never settle. The lifecycle abort above releases
+  // the old drain, while clearing this pointer lets a reinitialized tracker
+  // start independently instead of inheriting the obsolete single-flight.
+  outboxDrainPromise = null
   if (sweepTimer) {
     clearInterval(sweepTimer)
     sweepTimer = null
