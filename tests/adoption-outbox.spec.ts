@@ -464,7 +464,8 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
       )
       assert(
         genEvent.properties?.deletedLineCount === 0 &&
-          genEvent.properties?.newRatio === 1 &&
+          genEvent.properties?.netNewRatio === 1 &&
+          genEvent.properties?.newRatio === undefined &&
           genEvent.properties?.changeKind === "new",
         "oversize append should preserve the new-only classification"
       )
@@ -488,7 +489,9 @@ async function testOversizeEditReportsNetGeneratedLines(): Promise<void> {
         "oversize terminal event should use the same net-new denominator"
       )
       assert(
-        adoptEvent?.properties?.newRatio === 1 && adoptEvent.properties?.changeKind === "new",
+        adoptEvent?.properties?.netNewRatio === 1 &&
+          adoptEvent.properties?.newRatio === undefined &&
+          adoptEvent.properties?.changeKind === "new",
         "oversize terminal event should carry the same change classification"
       )
       assert(
@@ -541,6 +544,10 @@ async function testStableOutboxRetryAcrossRestart(): Promise<void> {
       assert(
         firstEvent.properties?.genEventId === committed.genEventId,
         "outbox event should reference the measured generation"
+      )
+      assert(
+        firstEvent.properties?.netNewRatio === 1 && firstEvent.properties?.newRatio === undefined,
+        "measured adoption should use only the explicitly-double ratio field"
       )
 
       // Make the failed row immediately due, then restart before retrying. This

@@ -153,17 +153,29 @@ export function buildChangeKindAggs(
   }
 }
 
-/** Histogram over `properties.newRatio`, used to re-tune the bucket threshold. */
+/**
+ * Histogram over the explicitly-double `properties.netNewRatio` field.
+ *
+ * The parent query contains both `code_gen` and `code_adopt` so adoption stats
+ * can share one request. Restrict this distribution to `code_gen`: the ratio is
+ * mirrored onto `code_adopt`, and counting both would double every measured
+ * generation while counting an unmeasured generation only once.
+ */
 export function buildNewRatioHistogramAgg(
   interval: number = NEW_RATIO_HISTOGRAM_INTERVAL
 ): Record<string, unknown> {
   return {
     new_ratio_histogram: {
-      histogram: {
-        field: "properties.newRatio",
-        interval,
-        min_doc_count: 0,
-        extended_bounds: { min: 0, max: 1 }
+      filter: { term: { eventName: "code_gen" } },
+      aggs: {
+        bins: {
+          histogram: {
+            field: "properties.netNewRatio",
+            interval,
+            min_doc_count: 0,
+            extended_bounds: { min: 0, max: 1 }
+          }
+        }
       }
     }
   }
@@ -240,9 +252,10 @@ function hasAnyLines(stats: DashboardCodeStats): boolean {
   return stats.generatedLines > 0 || stats.inclusiveEffectiveGeneratedLines > 0
 }
 
-/** Read the newRatio histogram bins, dropping the empty tail bars. */
+/** Read the nested code-generation ratio histogram bins. */
 export function normalizeNewRatioHistogram(raw: unknown): NewRatioHistogramBin[] {
-  const buckets = asRecord(asRecord(asRecord(raw).aggregations).new_ratio_histogram).buckets
+  const histogram = asRecord(asRecord(asRecord(raw).aggregations).new_ratio_histogram)
+  const buckets = asRecord(histogram.bins).buckets
   if (!Array.isArray(buckets)) return []
   return buckets.map((bucket) => {
     const record = asRecord(bucket)

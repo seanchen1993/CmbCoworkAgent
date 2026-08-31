@@ -1200,7 +1200,9 @@ function buildCodeGenerationProperties(args: {
     language: extname(absPath).slice(1).toLowerCase() || null,
     lineCount,
     deletedLineCount,
-    newRatio,
+    // Explicitly mapped as `double` in ES. Do not reuse the legacy `newRatio`
+    // field: its first 0/1 value can make dynamic mapping lock it to `long`.
+    netNewRatio: newRatio,
     changeKind,
     usedSkills,
     ...(skillSource.length > 0 ? { skillSource } : {}),
@@ -1525,7 +1527,7 @@ function emitSkippedLargeAtGen(args: {
     harnessNodeStatus: ctx.harnessNodeStatus ?? null,
     harnessAdapterName: ctx.harnessAdapterName ?? null,
     harnessAdapterVersion: ctx.harnessAdapterVersion ?? null,
-    newRatio: changeAttribution.newRatio,
+    netNewRatio: changeAttribution.newRatio,
     changeKind: changeAttribution.changeKind,
     ...observabilityProps
   })
@@ -1899,7 +1901,7 @@ async function buildMeasurementsForFile(
         // Carried over from gen time. The adopted/effective line counts live on
         // this event, so the bucket has to travel with them — otherwise slicing
         // adoption by 新增/存量 would need a join back to code_gen.
-        newRatio: normalizeNewRatio(pending.new_ratio),
+        netNewRatio: normalizeNewRatio(pending.new_ratio),
         changeKind: normalizeChangeKind(pending.change_kind),
         ...observabilityProps
       })

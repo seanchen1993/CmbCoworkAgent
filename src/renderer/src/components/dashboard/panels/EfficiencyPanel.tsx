@@ -171,7 +171,7 @@ function NewRatioHistogram({
         {bins.map((bin) => (
           <div
             key={bin.from}
-            className="group relative flex-1"
+            className="group relative flex h-full flex-1 items-end"
             title={`[${bin.from.toFixed(2)}, ${(bin.from + 0.05).toFixed(2)}) · ${formatCount(bin.docCount)} 次`}
           >
             <div
@@ -179,7 +179,9 @@ function NewRatioHistogram({
                 "w-full rounded-sm",
                 bin.from >= 0.7 ? "bg-emerald-500/60" : "bg-amber-500/60"
               )}
-              style={{ height: `${Math.max(2, (bin.docCount / max) * 64)}px` }}
+              style={{
+                height: `${bin.docCount === 0 ? 0 : Math.max(3, (bin.docCount / max) * 64)}px`
+              }}
             />
           </div>
         ))}
