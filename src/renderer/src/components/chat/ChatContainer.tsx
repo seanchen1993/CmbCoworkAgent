@@ -7220,8 +7220,8 @@ export function ChatContainer({
     >
       {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
       {modelRetry && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
-          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+        <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
+          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-status-warning border-t-transparent" />
           <div className="min-w-0 flex-1">
             <span>
               模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
@@ -7257,25 +7257,25 @@ export function ChatContainer({
         <WorkflowHistoryButton threadId={threadId} />
       ) : null}
       {hookInterruption && !isLoading && (
-        <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-300" />
+        <div className="flex items-start gap-3 rounded-md border border-status-warning/30 bg-status-warning/10 p-4">
+          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-status-warning-foreground" />
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-amber-800 dark:text-amber-200">
+            <div className="text-sm font-medium text-status-warning-foreground">
               {interruptionNotice?.title}
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
-              <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-status-warning-foreground/80">
+              <span className="rounded border border-status-warning/40 px-1.5 py-0.5 font-mono">
                 {hookInterruption.event}
               </span>
               <span title={HOOK_TIME_ZONE_LABEL}>
                 {formatHookClockTime(hookInterruption.timestamp) ?? "时间无效"}
               </span>
             </div>
-            <div className="mt-2 text-sm text-amber-900/90 break-words dark:text-amber-100/90">
+            <div className="mt-2 break-words text-sm text-status-warning-foreground">
               {hookInterruption.reason}
             </div>
             {hookInterruption.systemMessage && (
-              <div className="mt-2 text-xs text-amber-700/80 break-words dark:text-amber-200/80">
+              <div className="mt-2 break-words text-xs text-status-warning-foreground/80">
                 {hookInterruption.systemMessage}
               </div>
             )}
@@ -7285,7 +7285,7 @@ export function ChatContainer({
           </div>
           <button
             onClick={clearHookInterruption}
-            className="shrink-0 rounded p-1 transition-colors hover:bg-amber-500/20"
+            className="shrink-0 rounded p-1 transition-colors hover:bg-status-warning/20"
             aria-label="Dismiss hook notice"
           >
             <X className="size-4 text-muted-foreground" />

@@ -534,6 +534,7 @@ export function RightPanel({
   const runningCoordinatorWorkerRunKeysRef = useRef<Set<string>>(new Set())
   const handledWorkRequestIdsRef = useRef<Set<number>>(new Set())
   const containerRef = useRef<HTMLDivElement>(null)
+  const workspacePanelRef = useRef<HTMLDivElement>(null)
 
   const [previewPath, setPreviewPath] = useState<string | null>(null)
   const [previewWorkspacePathKind, setPreviewWorkspacePathKind] =
@@ -1385,8 +1386,8 @@ export function RightPanel({
   // Calculate available content height
   const getAvailableContentHeight = useCallback(() => {
     if (moduleMode !== "work") return 0
-    if (!containerRef.current) return 0
-    const totalHeight = containerRef.current.clientHeight
+    if (!workspacePanelRef.current) return 0
+    const totalHeight = workspacePanelRef.current.clientHeight
 
     const sectionCount = (showSystemConstraints ? 8 : 7) + (activePluginRunArtifacts ? 1 : 0)
     let used = HEADER_HEIGHT * sectionCount
@@ -2071,6 +2072,7 @@ export function RightPanel({
 
       {moduleMode === "work" && (
         <div
+          ref={workspacePanelRef}
           data-testid="workspace-info-panel"
           className={cn(
             "flex min-h-0 flex-col overflow-hidden rounded-[26px] border border-border/80 bg-background-elevated",

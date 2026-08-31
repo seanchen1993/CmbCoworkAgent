@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
@@ -8,6 +8,33 @@ import { MarkdownPreview } from "@/components/ui/MarkdownPreview/MarkdownPreview
 const RENDERER_ROOT = join(process.cwd(), "src/renderer/src")
 const HTML_PREVIEW_LIGHT_CANVAS_RULE =
   /\.html-preview-light-canvas\s*\{\s*background-color:\s*#ffffff;\s*\}/
+
+// These fixed backgrounds are intentionally decorative rather than application surfaces.
+// Keying allowances by file and token, with a maximum count, prevents the exception from
+// silently authorizing additional fixed-color UI in the same component.
+const FIXED_DECORATIVE_SURFACE_ALLOWANCES: Readonly<Record<string, number>> = {
+  "components/browser/BrowserScriptRecordingResultDialog.tsx:bg-slate-900": 1,
+  "components/chat/ChatScrollNavigator.tsx:bg-[#0F766E]/10": 1,
+  "components/chat/ChatScrollNavigator.tsx:bg-[#D97757]": 1,
+  "components/chat/ChatScrollNavigator.tsx:bg-[#eb31ba]": 1,
+  "components/chat/ChatScrollNavigator.tsx:dark:bg-[#2DD4BF]": 1,
+  "components/chat/ChatScrollNavigator.tsx:dark:bg-[#2DD4BF]/15": 1,
+  "components/chat/ChatScrollNavigator.tsx:dark:bg-[#E58A68]": 1,
+  "components/chat/OutputStyleSwitcher.tsx:bg-slate-500/10": 1,
+  "components/customize/EvolutionPanel.tsx:bg-zinc-400": 1,
+  "components/customize/EvolutionPanel.tsx:bg-zinc-500/15": 2,
+  "components/customize/EvolutionPanel.tsx:bg-zinc-500/30": 1,
+  "components/customize/GeneralPanel.tsx:bg-[#c4c4c4]": 1,
+  "components/customize/GeneralPanel.tsx:bg-[#cfcfcf]": 1,
+  "components/customize/GeneralPanel.tsx:bg-[#d2d2d2]": 2,
+  "components/customize/GeneralPanel.tsx:bg-[#dedede]": 1,
+  "components/customize/GeneralPanel.tsx:bg-[#e2e2e2]": 1,
+  "components/dashboard/panels/AdvancedFeaturesPanel.tsx:bg-slate-500": 1,
+  "components/dashboard/panels/AdvancedFeaturesPanel.tsx:bg-stone-800": 1,
+  "components/dashboard/panels/OverviewPanel.tsx:bg-zinc-500": 1,
+  "components/git/TaskCardPicker.tsx:bg-slate-400": 1,
+  "components/ui/toggle-thumb.tsx:bg-[#fff]": 1
+}
 
 function rendererSourceFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -123,6 +150,45 @@ describe("theme surface policy", () => {
     )
 
     expect(violations).toEqual([])
+  })
+
+  it("prevents new fixed-color application surfaces", () => {
+    const componentRoots = [join(RENDERER_ROOT, "components"), join(RENDERER_ROOT, "features")]
+    const fixedSourceSurface =
+      /(?:(?:[a-z-]+):)*bg-(?:slate|gray|zinc|stone|neutral)-(?:50|100|200|300|400|500|600|700|800|900|950)(?!\d)(?:\/(?:\[[^\]]+\]|\d+))?|(?:(?:[a-z-]+):)*bg-\[(?:#[0-9a-f]{3,8}|rgba?\([^\]]+\))\](?:\/(?:\[[^\]]+\]|\d+))?|background(?:Color)?\s*:\s*["'](?:#[0-9a-f]{3,8}|rgba?\([^"']+\))["']/gi
+    const usageCounts = new Map<string, number>()
+    const sourceViolations = componentRoots.flatMap((root) =>
+      rendererSourceFiles(root).flatMap((file) => {
+        const source = readFileSync(file, "utf8").replace(/\{\/\*[\s\S]*?\*\/\}/g, (comment) =>
+          comment.replace(/[^\n]/g, " ")
+        )
+        const relativeFile = relative(RENDERER_ROOT, file)
+
+        return source.split("\n").flatMap((line, index) =>
+          [...line.matchAll(fixedSourceSurface)].flatMap((match) => {
+            const token = match[0]
+            const key = `${relativeFile}:${token}`
+            const count = (usageCounts.get(key) ?? 0) + 1
+            usageCounts.set(key, count)
+            return count > (FIXED_DECORATIVE_SURFACE_ALLOWANCES[key] ?? 0)
+              ? [{ file, lineNumber: index + 1, token }]
+              : []
+          })
+        )
+      })
+    )
+
+    const fixedCssSurface = /background(?:-color)?\s*:\s*(#[0-9a-f]{3,8}|rgba?\([^;]+\))\s*;/gi
+    const cssViolations = rendererStyleFiles(RENDERER_ROOT).flatMap((file) => {
+      let css = readFileSync(file, "utf8").replace(HTML_PREVIEW_LIGHT_CANVAS_RULE, "")
+      if (file.endsWith("index.css")) css = css.replace(/:root\s*\{[\s\S]*?\n\}/, "")
+      return [...css.matchAll(fixedCssSurface)].map((match) => ({
+        file,
+        declaration: match[0]
+      }))
+    })
+
+    expect([...sourceViolations, ...cssViolations]).toEqual([])
   })
 
   it("reserves the fixed light canvas for isolated HTML previews", () => {
@@ -281,5 +347,23 @@ describe("theme surface policy", () => {
       reminderClasses.every((className) => className.includes("bg-status-warning-foreground"))
     ).toBe(true)
     expect(unreadClasses.every((className) => className.includes("bg-status-info"))).toBe(true)
+  })
+
+  it("keeps merged right-panel sizing and chat notices theme-aware", () => {
+    const rightPanel = readFileSync(join(RENDERER_ROOT, "components/panels/RightPanel.tsx"), "utf8")
+    const chatContainer = readFileSync(
+      join(RENDERER_ROOT, "components/chat/ChatContainer.tsx"),
+      "utf8"
+    )
+
+    expect(rightPanel).toContain("const workspacePanelRef = useRef<HTMLDivElement>(null)")
+    expect(rightPanel).toContain("workspacePanelRef.current.clientHeight")
+    expect(rightPanel).toMatch(/ref=\{workspacePanelRef\}[\s\S]{0,120}workspace-info-panel/)
+    expect(chatContainer).toContain(
+      "border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground"
+    )
+    expect(chatContainer).toContain("border-status-warning/30 bg-status-warning/10 p-4")
+    expect(chatContainer).not.toContain("border-amber-300/60 bg-amber-50/60")
+    expect(chatContainer).not.toContain("border-amber-400/60 bg-amber-50/50")
   })
 })
