@@ -745,6 +745,7 @@ interface DashboardProjectModeProject {
   systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  suspectedTechnicalDetailConversationCount?: number
   devStageConversationCount: number
   devAssociatedFeatureCount: number
   hasError: boolean
@@ -795,6 +796,7 @@ interface DashboardProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: DashboardProjectModeProjectSortKey | null
   sortOrder: DashboardProjectModeProjectSortOrder
+  showSuspectedTechnicalDetailMetric: boolean
   /**
    * True when more projects matched than the metric-sort enumeration cap, so the
    * ranking + total only cover the first N projects and the UI should warn that

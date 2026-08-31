@@ -1054,6 +1054,8 @@ const DASHBOARD_ALLOWED_IDS_ENV = "VITE_DASHBOARD_ALLOWED_YST_IDS"
 const DASHBOARD_UNRESTRICTED_IDS_ENV = "VITE_DASHBOARD_UNRESTRICTED_YST_IDS"
 const TRACE_EVOLVER_REVIEW_ADMIN_IDS_ENV = "VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS"
 const DASHBOARD_AWARDS_ADMIN_IDS_ENV = "VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS"
+const DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_IDS_ENV =
+  "VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS"
 // 评奖辅助看板当前仅开放给这四个 ystId；env 可覆盖，留空则回退到此默认名单，
 // 保证即使未配置环境变量也严格只对这四人可见。
 const DASHBOARD_AWARDS_ADMIN_DEFAULT_IDS = "383331,280631,231855,231858"
@@ -1094,6 +1096,12 @@ function getDashboardSkillEvalAllowedIds(): Set<string> {
     (import.meta.env[DASHBOARD_SKILL_EVAL_IDS_ENV] as string | undefined) || ""
   ).trim()
   return splitEnvIds(configured || DASHBOARD_SKILL_EVAL_DEFAULT_IDS)
+}
+
+function getDashboardSuspectedTechnicalDetailAllowedIds(): Set<string> {
+  return splitEnvIds(
+    import.meta.env[DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_IDS_ENV] as string | undefined
+  )
 }
 
 function getDashboardAccessContext(): DashboardAccessContext {
@@ -1146,6 +1154,15 @@ function requireDashboardProjectModeAccess(): DashboardAccessContext {
   const access = getDashboardAccessContext()
   if (!access.loggedIn) throw new Error("请先登录后再查看项目运营面板")
   return access
+}
+
+/** Project-list heuristic metric gate; production access comes only from encrypted .env. */
+function isDashboardSuspectedTechnicalDetailAllowed(
+  access: DashboardAccessContext = getDashboardAccessContext()
+): boolean {
+  if (import.meta.env.DEV) return true
+  if (!access.loggedIn || !access.ystId) return false
+  return getDashboardSuspectedTechnicalDetailAllowedIds().has(access.ystId)
 }
 
 // 评奖辅助看板（技能贡献奖 / 技能应用奖）的访问门禁：仅 DASHBOARD_AWARDS_ADMIN
@@ -8809,6 +8826,7 @@ function makeMockProjectMode(range: TimeRange, opts?: OrgFilterOptions): Dashboa
     const devStageConversationCount = Math.round(project.conversationCount * 0.4)
     return {
       ...project,
+      suspectedTechnicalDetailConversationCount: Math.round(project.conversationCount * 0.35),
       devStageConversationCount,
       devAssociatedFeatureCount:
         devStageConversationCount > 0
@@ -10815,6 +10833,8 @@ interface ProjectModeProjectView {
   systemConstraintEverLoadedSuccessfully?: boolean
   featureCount: number
   conversationCount: number
+  /** Forward-only count of main-Agent turns matching the technical-detail heuristic. */
+  suspectedTechnicalDetailConversationCount?: number
   /** Conversations whose current workflow node belongs to the Dev group. */
   devStageConversationCount: number
   /** Distinct bound Features that contributed a Dev-stage conversation in the range. */
@@ -10866,6 +10886,8 @@ interface ProjectModeProjectPageData {
   creatorOrgKeyword: string
   sortBy: ProjectModeProjectSortKey | null
   sortOrder: ProjectModeProjectSortOrder
+  /** Whether the current viewer may receive and see the heuristic metric. */
+  showSuspectedTechnicalDetailMetric: boolean
   /**
    * True when more projects matched than the metric-sort enumeration cap
    * (`PROJECT_MODE_PROJECT_ID_LIMIT`), so the ranking + total only reflect the
@@ -11459,6 +11481,8 @@ function sliceProjectModeProjects(
     creatorOrgKeyword,
     sortBy,
     sortOrder,
+    // DEV is intentionally open so the gated column can be previewed locally.
+    showSuspectedTechnicalDetailMetric: true,
     // Mock paginates the in-memory list directly, so it is never cap-truncated.
     truncated: false
   }
@@ -12576,12 +12600,15 @@ async function fetchProjectModePageUsage(
   access: DashboardAccessContext
 ): Promise<{
   perProject: Map<string, number>
+  perProjectSuspectedTechnicalDetail: Map<string, number>
   perProjectDevStage: Map<string, number>
   perProjectDevAssociatedFeatures: Map<string, number>
   perProjectSkills: Map<string, ProjectModeSkillCount[]>
   perProjectStageConversations: Map<string, Record<StageBucket, number>>
 }> {
+  const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   const perProject = new Map<string, number>()
+  const perProjectSuspectedTechnicalDetail = new Map<string, number>()
   const perProjectDevStage = new Map<string, number>()
   const perProjectDevAssociatedFeatures = new Map<string, number>()
   const perProjectSkills = new Map<string, ProjectModeSkillCount[]>()
@@ -12589,6 +12616,7 @@ async function fetchProjectModePageUsage(
   if (projectIds.length === 0) {
     return {
       perProject,
+      perProjectSuspectedTechnicalDetail,
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
       perProjectSkills,
@@ -12611,7 +12639,18 @@ async function fetchProjectModePageUsage(
       by_project: {
         terms: { field: "harnessProjectId", size: Math.max(1, projectIds.length) },
         aggs: {
-          main_agent_conversations: { filter: projectModeMainAgentConversationFilter() },
+          main_agent_conversations: {
+            filter: projectModeMainAgentConversationFilter(),
+            ...(includeSuspectedTechnicalDetail
+              ? {
+                  aggs: {
+                    suspected_technical_detail_supplements: {
+                      filter: { term: { suspectedTechnicalDetailSupplement: true } }
+                    }
+                  }
+                }
+              : {})
+          },
           skills: { terms: { field: "usedSkills", size: 100 } },
           skill_source: { terms: { field: "skillSource", size: 100 } },
           by_node: { terms: { field: "harnessNodeName", size: 100 } },
@@ -12636,6 +12675,7 @@ async function fetchProjectModePageUsage(
   if (!Array.isArray(buckets)) {
     return {
       perProject,
+      perProjectSuspectedTechnicalDetail,
       perProjectDevStage,
       perProjectDevAssociatedFeatures,
       perProjectSkills,
@@ -12647,7 +12687,14 @@ async function fetchProjectModePageUsage(
     const b = asRecord(bucket)
     const key = asString(b.key)
     if (!key) continue
-    perProject.set(key, asNumber(asRecord(b.main_agent_conversations).doc_count))
+    const mainAgentConversations = asRecord(b.main_agent_conversations)
+    perProject.set(key, asNumber(mainAgentConversations.doc_count))
+    if (includeSuspectedTechnicalDetail) {
+      perProjectSuspectedTechnicalDetail.set(
+        key,
+        asNumber(asRecord(mainAgentConversations.suspected_technical_detail_supplements).doc_count)
+      )
+    }
     perProjectDevStage.set(key, countDevStageConversations(asRecord(b.by_node).buckets))
     perProjectDevAssociatedFeatures.set(
       key,
@@ -12662,6 +12709,7 @@ async function fetchProjectModePageUsage(
 
   return {
     perProject,
+    perProjectSuspectedTechnicalDetail,
     perProjectDevStage,
     perProjectDevAssociatedFeatures,
     perProjectSkills,
@@ -13041,6 +13089,7 @@ async function enrichProjectModeProjectViews(
   access: DashboardAccessContext
 ): Promise<ProjectModeProjectView[]> {
   const projectIds = projects.map((project) => project.projectId)
+  const includeSuspectedTechnicalDetail = isDashboardSuspectedTechnicalDetailAllowed(access)
   // Key code stats on the page's project ids (not just those with conversations)
   // so a project ranked high by 原始生成行数 still shows its adoption columns.
   const [usage, code] = await Promise.all([
@@ -13050,6 +13099,12 @@ async function enrichProjectModeProjectViews(
   return projects.map((project) => ({
     ...project,
     conversationCount: usage.perProject.get(project.projectId) ?? 0,
+    ...(includeSuspectedTechnicalDetail
+      ? {
+          suspectedTechnicalDetailConversationCount:
+            usage.perProjectSuspectedTechnicalDetail.get(project.projectId) ?? 0
+        }
+      : {}),
     devStageConversationCount: usage.perProjectDevStage.get(project.projectId) ?? 0,
     devAssociatedFeatureCount: usage.perProjectDevAssociatedFeatures.get(project.projectId) ?? 0,
     topSkills: usage.perProjectSkills.get(project.projectId) ?? [],
@@ -13084,6 +13139,7 @@ async function fetchProjectModeProjectPage(
     ...sliced,
     sortBy,
     sortOrder,
+    showSuspectedTechnicalDetailMetric: isDashboardSuspectedTechnicalDetailAllowed(access),
     projects: await enrichProjectModeProjectViews(sliced.projects, range, options, access)
   }
 }

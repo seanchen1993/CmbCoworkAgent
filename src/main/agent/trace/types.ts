@@ -438,6 +438,11 @@ export interface AgentTrace {
   durationMs: number
   /** The user message that triggered this run */
   userMessage: string
+  /**
+   * Whether the full user input contains at least ten ASCII English letters.
+   * Missing on traces produced before this forward-only heuristic was introduced.
+   */
+  suspectedTechnicalDetailSupplement?: boolean
   /** Model identifier used for this run */
   modelId: string
   /** Human-readable model name (e.g. "minmax"), populated at recording time */

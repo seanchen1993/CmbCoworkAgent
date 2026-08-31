@@ -150,18 +150,57 @@ function testProjectListConversationCountUsesActiveMainAgentTraces(): void {
   )
   assertIncludes(
     usageSource,
-    "main_agent_conversations: { filter: projectModeMainAgentConversationFilter() }",
+    "filter: projectModeMainAgentConversationFilter(),",
     "per-project usage should aggregate active main-Agent conversations separately"
   )
   assertIncludes(
     usageSource,
-    "perProject.set(key, asNumber(asRecord(b.main_agent_conversations).doc_count))",
+    "perProject.set(key, asNumber(mainAgentConversations.doc_count))",
     "project-list values and metric sorting should use the main-Agent bucket"
   )
   assertNotIncludes(
     usageSource,
     "perProject.set(key, asNumber(b.doc_count))",
     "project-list conversation count must not use the all-trace project bucket"
+  )
+}
+
+function testSuspectedTechnicalDetailMetricIsGatedAndNested(): void {
+  const accessSource = section(
+    dashboardSource,
+    "const DASHBOARD_ALLOWED_IDS_ENV",
+    "function getDashboardAccessContext"
+  )
+  assertIncludes(
+    accessSource,
+    "VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS",
+    "technical-detail metric access should come from encrypted environment configuration"
+  )
+
+  const usageSource = section(
+    dashboardSource,
+    "async function fetchProjectModePageUsage",
+    "/**\n * Code-adoption stats for project mode."
+  )
+  assertIncludes(
+    usageSource,
+    "includeSuspectedTechnicalDetail",
+    "technical-detail aggregation should be conditional on viewer access"
+  )
+  assertIncludes(
+    usageSource,
+    "filter: { term: { suspectedTechnicalDetailSupplement: true } }",
+    "technical-detail count should use the forward-only trace boolean"
+  )
+  assertIncludes(
+    projectModePanelSource,
+    "用户输入全文中累计包含 10 个及以上英文字母的会话数量",
+    "technical-detail metric should explain its conversation-count heuristic in the UI"
+  )
+  assertNotIncludes(
+    projectModePanelSource,
+    "历史 Trace 不回填",
+    "technical-detail metric should not expose trace implementation details in the UI"
   )
 }
 
@@ -197,6 +236,8 @@ function run(): void {
   console.log("PASS dashboard project-list active main-Agent conversation count")
   testProjectListConversationCountExplainsItsScope()
   console.log("PASS dashboard project-list conversation-count scope hint")
+  testSuspectedTechnicalDetailMetricIsGatedAndNested()
+  console.log("PASS dashboard project-list suspected technical-detail metric")
 }
 
 run()
