@@ -2059,6 +2059,9 @@ interface CustomAPI {
       threadId: string,
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
+    listenToThreadActivity: (
+      callback: (activity: { threadId: string; type: string }) => void
+    ) => () => void
   }
   heartbeat: {
     getConfig: () => Promise<HeartbeatConfig>

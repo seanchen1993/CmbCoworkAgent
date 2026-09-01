@@ -2461,6 +2461,18 @@ const api = {
       return () => {
         ipcRenderer.removeListener(channel, handler)
       }
+    },
+    listenToThreadActivity: (
+      callback: (activity: { threadId: string; type: string }) => void
+    ): (() => void) => {
+      const channel = "scheduler:thread-activity"
+      const handler = (_: unknown, activity: { threadId: string; type: string }): void => {
+        callback(activity)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   memory: {

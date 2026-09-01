@@ -7957,6 +7957,25 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     }
   }, [reconcileScheduledRunStates])
 
+  // Lightweight turn lifecycle for lazy (unopened) threads: the sidebar renders
+  // its loading indicator from thread-state summary flags, but per-thread
+  // streams and history hydration only start once the thread is opened. This
+  // global listener flips only the flag, so IM-driven turns surface the spinner
+  // immediately without paying for the full stream or early hydration.
+  useEffect(() => {
+    const offActivity = window.api.scheduledTasks.listenToThreadActivity(({ threadId, type }) => {
+      if (initializedThreadsRef.current.has(threadId)) return
+      if (type === "started") {
+        updateThreadState(threadId, () => ({ scheduledTaskLoading: true }))
+        return
+      }
+      if (type === "done" || type === "error") {
+        if (threadStatesRef.current[threadId]?.scheduledTaskLoading !== true) return
+        updateThreadState(threadId, () => ({ scheduledTaskLoading: false }))
+      }
+    })
+    return offActivity
+  }, [updateThreadState])
   const contextValue = useMemo<ThreadContextValue>(
     () => ({
       getThreadState,
