@@ -1106,7 +1106,11 @@ interface AgentStreamValues {
   todos?: Array<{ id?: string; content?: string; status?: string }>
 }
 
-export type ChatSurface = "default" | "harness-project" | "harness-feature-session"
+export type ChatSurface =
+  | "default"
+  | "harness-project"
+  | "harness-feature-session"
+  | "requirement-session"
 
 interface ChatSurfaceConfig {
   showWelcomeHeadline: boolean
@@ -1126,6 +1130,11 @@ const CHAT_SURFACE_CONFIG: Record<ChatSurface, ChatSurfaceConfig> = {
     showHarnessDialogTips: true
   },
   "harness-feature-session": {
+    showWelcomeHeadline: false,
+    showWelcomeSkillTabs: false,
+    showHarnessDialogTips: false
+  },
+  "requirement-session": {
     showWelcomeHeadline: false,
     showWelcomeSkillTabs: false,
     showHarnessDialogTips: false
@@ -1981,6 +1990,7 @@ export function ChatContainer({
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
+  const isRequirementMode = surface === "requirement-session"
   const readOnly = Boolean(readOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
@@ -3784,7 +3794,11 @@ export function ChatContainer({
       return "任务运行中，可使用取消按钮停止当前任务"
     }
     if (hasPendingFilePayload) return "输入消息或直接发送文件..."
-    if (!goal) return "向 CMBDevClaw 提问，/ 输入命令；@ 引用文件；Shift + Enter 换行"
+    if (!goal) {
+      return isRequirementMode
+        ? "补充需求背景、目标或验收标准；Shift + Enter 换行"
+        : "向 CMBDevClaw 提问；Shift + Enter 换行"
+    }
     if (goal.status === "active") {
       return "输入新消息会暂停当前 Goal；查看详情用 /goal status"
     }
@@ -3799,6 +3813,7 @@ export function ChatContainer({
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
+    isRequirementMode,
     readOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
@@ -3928,7 +3943,11 @@ export function ChatContainer({
   const appendVisibleUserMessageWithTime = useCallback(
     async (
       content: string,
-      options: { persistTiming?: boolean; id?: string } = {}
+      options: {
+        persistTiming?: boolean
+        id?: string
+        contextLabel?: Message["contextLabel"]
+      } = {}
     ): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
@@ -3937,7 +3956,8 @@ export function ChatContainer({
         content,
         created_at: userStartAt,
         start_at: userStartAt,
-        end_at: userStartAt
+        end_at: userStartAt,
+        ...(options.contextLabel ? { contextLabel: options.contextLabel } : {})
       }
       appendMessage(userMessage)
       if (options.persistTiming === false) return userMessage
@@ -5003,7 +5023,8 @@ export function ChatContainer({
       // by id, so re-using queued.id makes a retry replace the same bubble instead).
       const visibleUserMessage = await appendVisibleUserMessageWithTime(displayContent, {
         persistTiming: true,
-        id: queued.id
+        id: queued.id,
+        contextLabel: queued.contextLabel
       })
       if (isFirstMessage) {
         const currentThread = threads.find((t) => t.thread_id === threadId)
@@ -7313,20 +7334,24 @@ export function ChatContainer({
                 </div>
               )}
               <form onSubmit={handleSubmit} className="max-w-3xl mx-auto relative">
-                <SlashCommandPopover
-                  mode={slash.mode}
-                  selectedIdx={slash.selectedIdx}
-                  onHoverIdx={slash.setSelectedIdx}
-                  onSelectCommand={applySlashCommand}
-                  onSelectSkill={applySkillSelection}
-                  skillsLoading={skillsLoading}
-                />
-                <AtFileMentionPopover
-                  mode={atFileMentions.mode}
-                  selectedIdx={atFileMentions.selectedIdx}
-                  onHoverIdx={atFileMentions.setSelectedIdx}
-                  onSelectFile={applyAtFileMention}
-                />
+                {!isRequirementMode && (
+                  <SlashCommandPopover
+                    mode={slash.mode}
+                    selectedIdx={slash.selectedIdx}
+                    onHoverIdx={slash.setSelectedIdx}
+                    onSelectCommand={applySlashCommand}
+                    onSelectSkill={applySkillSelection}
+                    skillsLoading={skillsLoading}
+                  />
+                )}
+                {!isRequirementMode && (
+                  <AtFileMentionPopover
+                    mode={atFileMentions.mode}
+                    selectedIdx={atFileMentions.selectedIdx}
+                    onHoverIdx={atFileMentions.setSelectedIdx}
+                    onSelectFile={applyAtFileMention}
+                  />
+                )}
                 <div className="flex flex-col gap-2">
                   {queuedMessages.length > 0 && (
                     <div className="px-1 py-1">
@@ -7623,48 +7648,50 @@ export function ChatContainer({
                           />
                           <div className="w-px h-4 bg-border mx-1" />
                           <ModelSwitcher threadId={threadId} />
-                          <div className="w-px h-4 bg-border mx-1" />
-                          <AgentModeSwitcher
-                            showWorkflow={!isProjectModeAgentContext}
-                            mode={
-                              (disableMultiModeOption && agentMode === "multi") ||
-                              (disableCoordinatorModeOption && agentMode === "coordinator") ||
-                              (disableWorkflowModeOption && agentMode === "workflow")
-                                ? "normal"
-                                : agentMode
-                            }
-                            locked={isLoading || !canChangeAgentMode}
-                            lockedReason={agentModeSwitchDisabledReason}
-                            disabledModes={
-                              disableMultiModeOption ||
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
-                                ? {
-                                    multi: disableMultiModeOption,
-                                    coordinator: disableCoordinatorModeOption,
-                                    workflow: disableWorkflowModeOption
-                                  }
-                                : undefined
-                            }
-                            disabledModeReasons={
-                              disableMultiModeOption ||
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
-                                ? {
-                                    multi: disableMultiModeOption
-                                      ? "项目配置已禁用 task 子代理。"
-                                      : undefined,
-                                    coordinator: disableCoordinatorModeOption
-                                      ? "项目模式暂不支持 Agent Team。"
-                                      : undefined,
-                                    workflow: disableWorkflowModeOption
-                                      ? "项目模式暂不支持 Workflow。"
-                                      : undefined
-                                  }
-                                : undefined
-                            }
-                            onChange={handleAgentModeChange}
-                          />
+                          <div className={isRequirementMode ? "hidden" : undefined}>
+                            <div className="w-px h-4 bg-border mx-1" />
+                            <AgentModeSwitcher
+                              showWorkflow={!isProjectModeAgentContext}
+                              mode={
+                                (disableMultiModeOption && agentMode === "multi") ||
+                                (disableCoordinatorModeOption && agentMode === "coordinator") ||
+                                (disableWorkflowModeOption && agentMode === "workflow")
+                                  ? "normal"
+                                  : agentMode
+                              }
+                              locked={isLoading || !canChangeAgentMode}
+                              lockedReason={agentModeSwitchDisabledReason}
+                              disabledModes={
+                                disableMultiModeOption ||
+                                disableCoordinatorModeOption ||
+                                disableWorkflowModeOption
+                                  ? {
+                                      multi: disableMultiModeOption,
+                                      coordinator: disableCoordinatorModeOption,
+                                      workflow: disableWorkflowModeOption
+                                    }
+                                  : undefined
+                              }
+                              disabledModeReasons={
+                                disableMultiModeOption ||
+                                disableCoordinatorModeOption ||
+                                disableWorkflowModeOption
+                                  ? {
+                                      multi: disableMultiModeOption
+                                        ? "项目配置已禁用 task 子代理。"
+                                        : undefined,
+                                      coordinator: disableCoordinatorModeOption
+                                        ? "项目模式暂不支持 Agent Team。"
+                                        : undefined,
+                                      workflow: disableWorkflowModeOption
+                                        ? "项目模式暂不支持 Workflow。"
+                                        : undefined
+                                    }
+                                  : undefined
+                              }
+                              onChange={handleAgentModeChange}
+                            />
+                          </div>
                           <div className="w-px h-4 bg-border mx-1" />
                           <WorkspacePicker
                             threadId={threadId}
@@ -7692,7 +7719,7 @@ export function ChatContainer({
                           </TooltipProvider>
                           {isLoading ? (
                             <>
-                              {canSubmitGoalCommandWhileLoading && (
+                              {!isRequirementMode && canSubmitGoalCommandWhileLoading && (
                                 <button
                                   type="submit"
                                   disabled={goalSendButtonDisabledWhileLoading}
@@ -7714,7 +7741,7 @@ export function ChatContainer({
                             </>
                           ) : (
                             <>
-                              {hasRunningCoordinatorWorker && (
+                              {!isRequirementMode && hasRunningCoordinatorWorker && (
                                 <TooltipProvider delayDuration={0}>
                                   <Tooltip>
                                     <TooltipTrigger asChild>
@@ -7800,7 +7827,12 @@ export function ChatContainer({
                     </div>
                   </div>
                   {/*chat container bottom panel */}
-                  <div className={"flex items-center justify-between"}>
+                  <div
+                    className={cn(
+                      "flex items-center justify-between",
+                      isRequirementMode && "hidden"
+                    )}
+                  >
                     <div className={"flex items-center gap-2"}>
                       {yoloMode && (
                         <button

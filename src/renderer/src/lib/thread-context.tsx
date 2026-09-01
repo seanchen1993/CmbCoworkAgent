@@ -748,6 +748,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedMessage | null {
   return {
     id: item.id,
     text: item.text,
+    contextLabel: item.contextLabel === "requirement-workbench" ? item.contextLabel : undefined,
     attachmentModelBlocks:
       typeof item.attachmentModelBlocks === "string" ? item.attachmentModelBlocks : undefined,
     attachmentDisplayPrefix:

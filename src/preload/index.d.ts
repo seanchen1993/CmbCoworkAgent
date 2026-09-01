@@ -2028,11 +2028,12 @@ interface CustomAPI {
       title: string
       workDir: string
       source: {
-        type: "file" | "link"
+        type: "file" | "text" | "link"
         fileName: string
         sourcePath?: string
         url?: string
         content?: string
+        initialDescription?: string
       }
     }) => Promise<{
       success: boolean

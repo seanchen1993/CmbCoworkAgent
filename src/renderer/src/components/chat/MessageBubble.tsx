@@ -21,7 +21,8 @@ import {
   Flag,
   PlayCircle,
   GitFork,
-  Loader2
+  Loader2,
+  Sparkles
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -611,6 +612,11 @@ function MessageBubbleImpl({
   const isUser = message.role === "user"
   const isTool = message.role === "tool"
   const isSystem = message.role === "system"
+  const isRequirementWorkbenchMessage =
+    isUser &&
+    (message.contextLabel === "requirement-workbench" ||
+      (typeof message.content === "string" &&
+        /^为「[^」]+」撰写一份产品需求文档。/.test(message.content.trim())))
   const isForkingThisMessage = forkingMessageId === message.id
   const canForkFromMessage = message.role === "assistant" && Boolean(onForkFromMessage)
   const forkFromMessageDisabled = isLoading || Boolean(forkingMessageId)
@@ -808,6 +814,14 @@ function MessageBubbleImpl({
         const { visibleText, skillName } = parseUserVisibleSkillContent(displayContent)
         return (
           <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
+            {isRequirementWorkbenchMessage && (
+              <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-medium text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
+                  <Sparkles className="size-3.5" />
+                </span>
+                需求工作台
+              </span>
+            )}
             {skillName && <SkillChip label={skillName} compact className="mr-2" />}
             {visibleText}
           </div>
@@ -831,6 +845,14 @@ function MessageBubbleImpl({
                 key={index}
                 className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
               >
+                {isRequirementWorkbenchMessage && (
+                  <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-medium text-emerald-600 dark:text-emerald-400">
+                    <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
+                      <Sparkles className="size-3.5" />
+                    </span>
+                    需求工作台
+                  </span>
+                )}
                 {skillName && <SkillChip label={skillName} compact className="mr-2" />}
                 {visibleText}
               </div>

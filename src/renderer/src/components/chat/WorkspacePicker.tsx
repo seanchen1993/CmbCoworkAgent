@@ -341,13 +341,13 @@ function WorkspacePickerImpl({
           variant="ghost"
           size="sm"
           className={cn(
-            "h-7 px-2 text-xs gap-1.5",
+            "h-7 px-2 text-xs gap-1.5 max-w-[100px]",
             workspacePath ? "text-foreground" : "text-amber-500"
           )}
           disabled={!threadId}
         >
           {isWorktree ? <GitBranch className="size-3.5" /> : <Folder className="size-3.5" />}
-          <span className="max-w-[160px] truncate">
+          <span className="max-w-[100px] truncate">
             {workspacePath
               ? isWorktree && worktreeBranch
                 ? worktreeBaseBranch

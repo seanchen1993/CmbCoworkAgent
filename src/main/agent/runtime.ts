@@ -43,6 +43,7 @@ import {
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
+import { discoverSkills } from "../skills/discovery"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
@@ -260,6 +261,7 @@ import {
   stripCustomModelPrefix,
   type AgentShellAccess
 } from "./agent-registry"
+import { REQUIREMENT_MODE_CONFIG } from "./library/requirement-mode"
 import {
   createWorkerValuesSnapshotContext,
   extractWorkerFinalText,
@@ -1779,6 +1781,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     subagentExtraSystemPromptForRestrictedRoles = false,
     mainFilesystemEnabled = true,
     mainTodosEnabled = true,
+    requirementMode = false,
     subagentDefaultTools,
     taskSystemPrompt = TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent = true,
@@ -2577,7 +2580,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       // validate-before-permissions order.
       createMalformedToolCallGuardMiddleware(),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
-      ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
+      ...(mainFilesystemEnabled
+        ? [createFsMiddleware(requirementMode ? filesystemSystemPrompt : "\n")]
+        : []),
       fileToolArgsMiddleware,
       ...postFsToolDocStripMiddleware,
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
@@ -4083,6 +4088,8 @@ export interface CreateAgentRuntimeOptions {
   soloTaskTraceManager?: SoloTaskTraceManager
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
+  /** Restricts a requirement conversation to the analyst subagent. */
+  requirementMode?: boolean
   /** Optional filesystem access limits for leaf runtimes: coordinator async
    * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
   filesystemAccess?: CoordinatorWorkerFilesystemAccess
@@ -4201,6 +4208,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     traceContext,
     soloTaskTraceManager,
     disableSubagents = false,
+    requirementMode = false,
     onHookResult,
     onFailureFuseNotice,
     onContextCompaction,
@@ -4328,7 +4336,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
   const registrySubagentSpecs =
     agentMode === "normal" && !disableSubagents
-      ? loadAgentProfiles(workspacePath, projectModeSoloSubagentConfig).map((profile) => ({
+      ? (requirementMode
+          ? REQUIREMENT_MODE_CONFIG.subagentProfiles
+          : loadAgentProfiles(workspacePath, projectModeSoloSubagentConfig)
+        ).map((profile) => ({
           name: profile.name,
           description: profile.description,
           systemPrompt: profile.systemPrompt,
@@ -4768,6 +4779,17 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
+  const restrictedSkillSources =
+    !requirementMode
+      ? allSkillsSources
+      : Array.from(
+          new Map(
+            (await Promise.all(allSkillsSources.map((source) => discoverSkills(source))))
+              .flat()
+              .filter((skill) => REQUIREMENT_MODE_CONFIG.skillNames.includes(skill.name))
+              .map((skill) => [resolve(skill.rootDir), skill.rootDir])
+          ).values()
+        )
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(
@@ -6050,7 +6072,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     })
   }
   const mainSkillSources =
-    !isCoordinatorMode && allSkillsSources.length > 0 ? allSkillsSources : undefined
+    !isCoordinatorMode && restrictedSkillSources.length > 0 ? restrictedSkillSources : undefined
   // memory is NOT gated by coordinator mode (unlike todos/fs/skills above, which are
   // "doing-work" capabilities a pure orchestrator shouldn't have). The coordinator
   // main agent is the ONLY agent that talks directly to the user, so user-collaboration
@@ -6080,6 +6102,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
+    requirementMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
     filesystemAccess: options.filesystemAccess,
     registrySubagentSpecs,
@@ -6091,7 +6114,9 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent:
-      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeSoloSubagentConfig),
+      !requirementMode &&
+      !isCoordinatorMode &&
+      isGeneralPurposeSubagentEnabled(projectModeSoloSubagentConfig),
     skills: mainSkillSources,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO

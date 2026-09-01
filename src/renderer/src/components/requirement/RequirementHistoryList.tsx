@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  Edit,
   FileText,
   FolderOpen,
   Link2,
@@ -54,6 +55,7 @@ function getSystemColor(systemId: string): (typeof SYSTEM_COLOR_OPTIONS)[number]
 
 function getStatusLabel(status: string): string {
   if (status.includes("沟通")) return "沟通中"
+  if (status.includes("发布")) return "已发布"
   if (status.includes("交付")) return "已交付"
   if (status.includes("生成")) return "已规范"
   return status
@@ -62,6 +64,7 @@ function getStatusLabel(status: string): string {
 function getStatusClass(status: string): string {
   if (status.includes("异常")) return "bg-status-critical/10 text-status-critical"
   if (status.includes("沟通")) return "bg-[#fff0e9] text-[#a65a3e]"
+  if (status.includes("发布")) return "bg-status-warning/10 text-status-warning"
   if (status.includes("交付")) return "bg-[#e9f2ec] text-[#44715a]"
   return "bg-[#a4e6a27a] text-[#1b7e30]"
 }
@@ -88,15 +91,17 @@ function RequirementSystem({
   )
 }
 
-function getSourceType(item: RequirementRecord): "file" | "link" {
-  return item.sourceType ?? (item.fileName ? "file" : "link")
+function getSourceType(item: RequirementRecord): "file" | "text" | "link" {
+  return item.sourceType ?? (item.fileName ? "file" : item.initialDescription ? "text" : "link")
 }
 
 function getLegacyLabel(item: RequirementRecord): string {
-  return getSourceType(item) === "file" ? "文件" : "Link"
+  if (getSourceType(item) === "text") return "描述"
+  return getSourceType(item) === "file" ? "文件" : "链接"
 }
 
 function getLegacyValue(item: RequirementRecord): string {
+  if (getSourceType(item) === "text") return item.initialDescription || "—"
   return item.sourceName || (getSourceType(item) === "file" ? item.fileName : item.link) || "—"
 }
 
@@ -312,10 +317,18 @@ export function RequirementHistoryList({
                     <span
                       className={cn(
                         "truncate text-[11.5px]",
-                        sourceType === "file" ? "text-[#8f6a2a]" : "text-[#3970a5]"
+                        sourceType === "file"
+                          ? "text-[#8f6a2a]"
+                          : sourceType === "link"
+                            ? "text-[#3970a5]"
+                            : "text-[#756a5f]"
                       )}
                     >
-                      {sourceType === "file" ? "上传文件" : "Link"}
+                      {sourceType === "file"
+                        ? "文件"
+                        : sourceType === "link"
+                          ? "链接"
+                          : "输入"}
                     </span>
                     <span className="flex min-w-0 items-center gap-1.5 font-mono text-[11.5px]">
                       <span className="shrink-0 rounded-[5px] bg-[#f1eae1] px-1.5 py-0.5 text-[10px] font-sans text-[#958a7f]">
@@ -323,13 +336,19 @@ export function RequirementHistoryList({
                       </span>
                       {sourceType === "file" ? (
                         <FileText className="size-3 shrink-0 text-[#8f6a2a]" />
-                      ) : (
+                      ) : sourceType === "link" ? (
                         <Link2 className="size-3 shrink-0 text-[#3970a5]" />
+                      ) : (
+                        <Edit className="size-3 shrink-0 text-[#756a5f]" />
                       )}
                       <span
                         className={cn(
                           "min-w-0 truncate underline decoration-dotted underline-offset-4",
-                          sourceType === "file" ? "text-[#8f6a2a]" : "text-[#3970a5]"
+                          sourceType === "file"
+                            ? "text-[#8f6a2a]"
+                            : sourceType === "link"
+                              ? "text-[#3970a5]"
+                              : "text-[#756a5f]"
                         )}
                         title={getLegacyValue(item)}
                       >

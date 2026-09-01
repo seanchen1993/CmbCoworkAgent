@@ -5,13 +5,14 @@ import { randomUUID } from "crypto"
 import mammoth from "mammoth"
 import { getOpenworkDir } from "../storage"
 
-type RequirementSourceType = "file" | "link"
+type RequirementSourceType = "file" | "text" | "link"
 type RequirementStatus = "draft" | "normalized" | "delivered"
 
 export type RequirementSource = {
   type: RequirementSourceType
   fileName: string
   url?: string | null
+  initialDescription?: string
 }
 
 export type RequirementIndexItem = {
@@ -89,6 +90,7 @@ type CreateRequirementPayload = {
     sourcePath?: string
     url?: string
     content?: string
+    initialDescription?: string
   }
 }
 
@@ -266,8 +268,19 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
     delete item.prdVersion
     delete item.prdPublished
     delete item.prdManifestSynced
+    const rawSourceType = (item.source as { type?: unknown } | undefined)?.type
+    const sourceType: RequirementSourceType =
+      rawSourceType === "file" || rawSourceType === "link" || rawSourceType === "text"
+        ? rawSourceType
+        : rawSourceType === "blank"
+          ? "text"
+          : "text"
     return {
       ...item,
+      source: {
+        ...item.source,
+        type: sourceType
+      },
       prdGenerated: item.prdGenerated === true,
       prdManifest: normalizePrdManifest(item.prdManifest)
     }
@@ -442,7 +455,11 @@ async function convertRequirementSourceToMarkdown(sourcePath: string): Promise<s
 }
 
 async function readRequirementSourcePreview(item: RequirementIndexItem): Promise<string> {
+  if (item.source.type === "text") {
+    return item.source.initialDescription?.trim() || "暂无原始需求文件。"
+  }
   const previewPath = getRequirementSourcePreviewPath(item)
+
   try {
     return (await fs.readFile(previewPath, "utf-8")).trim()
   } catch {
@@ -484,6 +501,7 @@ async function getRequirementCoreFileStatus(
   if (workspaceMissing) {
     return { missing: true, reason: "需求归档目录已被删除或不可用" }
   }
+  if (item.source.type === "text") return { missing: false, reason: null }
 
   try {
     const sourceStats = await fs.stat(getRequirementSourcePath(item))
@@ -526,7 +544,7 @@ async function createRequirement(
   const systemId = payload?.systemId?.trim()
   const title = payload?.title?.trim()
   const source = payload?.source
-  if (!systemId || !title || !source?.fileName || !source.type) {
+  if (!systemId || !title || !source?.type || (source.type !== "text" && !source.fileName)) {
     throw new Error("需求标题和需求来源不能为空")
   }
   const workDir = await resolveRequirementWorkDir(payload?.workDir)
@@ -541,8 +559,11 @@ async function createRequirement(
     requirementPath: getRequirementWorkspacePath(workDir, reqId, title),
     source: {
       type: source.type,
-      fileName: safeSegment(source.fileName, "source"),
-      ...(source.type === "link" ? { url: source.url?.trim() || null } : {})
+      fileName: source.type === "text" ? "" : safeSegment(source.fileName, "source"),
+      ...(source.type === "link" ? { url: source.url?.trim() || null } : {}),
+      ...(source.type === "text"
+        ? { initialDescription: source.initialDescription?.trim() || "" }
+        : {})
     },
     status: "draft",
     createdAt: now,
@@ -550,21 +571,23 @@ async function createRequirement(
     prdGenerated: false,
     prdManifest: createEmptyPrdManifest()
   }
-  const sourcePath = getRequirementSourcePath(item)
-  await fs.mkdir(path.dirname(sourcePath), { recursive: true })
-  if (typeof source.content === "string") {
-    validateTextContent(source.content, "需求内容")
-    await fs.writeFile(sourcePath, source.content, "utf-8")
-  } else if (source.sourcePath?.trim()) {
-    const sourceStat = await fs.stat(source.sourcePath)
-    if (!sourceStat.isFile()) throw new Error("选择的需求草稿不是文件")
-    await fs.copyFile(source.sourcePath, sourcePath)
-  } else {
-    throw new Error("缺少需要保存的需求内容")
-  }
+  if (source.type !== "text") {
+    const sourcePath = getRequirementSourcePath(item)
+    await fs.mkdir(path.dirname(sourcePath), { recursive: true })
+    if (typeof source.content === "string") {
+      validateTextContent(source.content, "需求内容")
+      await fs.writeFile(sourcePath, source.content, "utf-8")
+    } else if (source.sourcePath?.trim()) {
+      const sourceStat = await fs.stat(source.sourcePath)
+      if (!sourceStat.isFile()) throw new Error("选择的需求草稿不是文件")
+      await fs.copyFile(source.sourcePath, sourcePath)
+    } else {
+      throw new Error("缺少需要保存的需求内容")
+    }
 
-  const sourcePreview = await convertRequirementSourceToMarkdown(sourcePath)
-  await fs.writeFile(getRequirementSourcePreviewPath(item), `${sourcePreview}\n`, "utf-8")
+    const sourcePreview = await convertRequirementSourceToMarkdown(sourcePath)
+    await fs.writeFile(getRequirementSourcePreviewPath(item), `${sourcePreview}\n`, "utf-8")
+  }
   await fs.mkdir(getRequirementPrdDir(item), { recursive: true })
   await saveLastRequirementWorkDir(workDir)
   const list = await readRequirementIndex()

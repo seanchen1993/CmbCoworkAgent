@@ -387,4 +387,51 @@ describe("requirement source preview", () => {
     ) as { list: unknown[] }
     expect(deletedIndex.list).toEqual([])
   })
+
+  it("stores text requirements without creating a source file", async () => {
+    const workDir = join(tempHome, "blank-requirement-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")
+    const getSourcePreview = handlers.get("requirements:get-source-preview")
+    const deleteRequirement = handlers.get("requirements:delete")
+    expect(create).toBeTypeOf("function")
+    expect(getSourcePreview).toBeTypeOf("function")
+
+    const created = (await create!(null, {
+      systemId: "system-blank",
+      title: "空白需求",
+      workDir,
+      source: {
+        type: "text",
+        fileName: "",
+        initialDescription: "为柜员增加批量导入客户资料的能力"
+      }
+    })) as {
+      success: boolean
+      requirement?: { reqId: string; requirementPath: string; source: { type: string; initialDescription?: string } }
+      error?: string
+    }
+
+    expect(created.success, created.error).toBe(true)
+    expect(created.requirement?.source).toEqual({
+      type: "text",
+      fileName: "",
+      initialDescription: "为柜员增加批量导入客户资料的能力"
+    })
+    expect(existsSync(join(created.requirement!.requirementPath, "source"))).toBe(false)
+
+    const preview = (await getSourcePreview!(null, created.requirement!.reqId)) as {
+      success: boolean
+      content?: string
+      error?: string
+    }
+    expect(preview.success, preview.error).toBe(true)
+    expect(preview.content).toContain("批量导入客户资料")
+
+    const deleted = (await deleteRequirement!(null, created.requirement!.reqId)) as {
+      success: boolean
+      error?: string
+    }
+    expect(deleted.success, deleted.error).toBe(true)
+  })
 })

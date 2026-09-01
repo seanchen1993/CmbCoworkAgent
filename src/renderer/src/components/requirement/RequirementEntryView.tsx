@@ -96,6 +96,8 @@ export function RequirementEntryView(): React.JSX.Element {
         requirementId: requirement.id,
         requirementTitle: requirement.title,
         requirementSystem: requirement.system,
+        requirementSourceType: requirement.sourceType,
+        requirementSourceName: requirement.sourceName,
         ...(requirement.requirementPath ? { workspacePath: requirement.requirementPath } : {})
       },
       { preserveView: true }
@@ -162,6 +164,7 @@ export function RequirementEntryView(): React.JSX.Element {
           requirements={requirements}
           onSelectRequirement={openRequirement}
           onBack={() => setScreen("history")}
+          onNew={startNewRequirement}
           autoGeneratePrd={autoGeneratePrd}
         />
       )}

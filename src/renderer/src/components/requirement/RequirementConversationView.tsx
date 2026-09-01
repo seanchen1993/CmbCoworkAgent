@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   Bot,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   Eye,
   KeyRound,
   ListTodo,
   Loader2,
+  Plus,
+  Search,
   Send
 } from "lucide-react"
 import { toast } from "sonner"
@@ -28,6 +32,7 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAppStore } from "@/lib/store"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
+import { useAllStreamLoadingStates, useAllThreadStates } from "@/lib/thread-context"
 import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
 import { cn } from "@/lib/utils"
 import { RequirementBreadcrumbHeader } from "./RequirementBreadcrumbHeader"
@@ -38,14 +43,13 @@ import {
   type RequirementRecord
 } from "./requirement-data"
 
-const PRD_GENERATION_MESSAGE = "使用requirement-to-prd技能把source文件夹下的原需求文件生成规范化PRD"
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
 const PRD_COMPLETION_CHECK_MAX_ATTEMPTS = 4
 const PRD_COMPLETION_CHECK_RETRY_DELAY_MS = 500
+const requirementListScrollPositions = new Map<string, number>()
 
 type PreviewTab = "source" | "prd" | "requirement-space"
-
 function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
   if (isRequirementPublished(requirement) || requirement.prdGenerated) return "requirement-space"
   return "source"
@@ -132,20 +136,47 @@ ${preview || "> 暂无可预览的原始需求内容。"}
 `
 }
 
+function buildRequirementInitializationMessage(requirement: RequirementRecord): string {
+  const sourceInstruction =
+    requirement.sourceType === "text"
+      ? "请通过对话从零梳理需求，先了解目标和使用场景"
+      : "请先基于 source 文件夹中的原始需求资料完成需求分析"
+  const initialDescription = requirement.initialDescription.trim()
+  return `为「${requirement.title}」撰写一份产品需求文档。${sourceInstruction}，梳理目标用户、使用场景、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准；先与我确认待澄清事项，再生成正式 PRD。${initialDescription ? `\n\n用户的初始需求描述：\n${initialDescription}` : ""}`
+}
+
+function getRequirementStartTypeLabel(requirement: RequirementRecord): string {
+  const sourceType = requirement.sourceType ?? (requirement.fileName ? "file" : "text")
+  switch (sourceType) {
+    case "file":
+      return "上传文件"
+    case "text":
+      return "输入"
+    case "link":
+      return "链接"
+    default:
+      return "输入"
+  }
+}
+
 function RequirementConversationSession({
   requirement,
   requirements,
   onSelectRequirement,
   onBack,
+  onNew,
   autoGeneratePrd
 }: {
   requirement: RequirementRecord
   requirements: RequirementRecord[]
   onSelectRequirement: (requirement: RequirementRecord) => Promise<void>
   onBack: () => void
+  onNew: () => void
   autoGeneratePrd: boolean
 }): React.JSX.Element {
   const selectThread = useAppStore((state) => state.selectThread)
+  const streamLoadingStates = useAllStreamLoadingStates()
+  const allThreadStates = useAllThreadStates()
   const threadId = requirement.threadId ?? null
   const threadState = useThreadState(threadId)
   // ChatContainer treats this stream state as the source of truth for an active turn.
@@ -169,10 +200,34 @@ function RequirementConversationSession({
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
   const [tokenSaving, setTokenSaving] = useState(false)
+  const [requirementQuery, setRequirementQuery] = useState("")
+  const [collapsedSystemIds, setCollapsedSystemIds] = useState<Set<string>>(new Set())
+  const requirementListRef = useRef<HTMLDivElement>(null)
   const orderedRequirements = useMemo(
     () => sortRequirementsByUpdatedAt(requirements),
     [requirements]
   )
+  const groupedRequirements = useMemo(() => {
+    const normalizedQuery = requirementQuery.trim().toLocaleLowerCase()
+    const matchingRequirements = normalizedQuery
+      ? orderedRequirements.filter((item) =>
+          item.title.toLocaleLowerCase().includes(normalizedQuery)
+        )
+      : orderedRequirements
+    return Array.from(
+      matchingRequirements.reduce((groups, item) => {
+        const group = groups.get(item.systemId)
+        if (group) group.items.push(item)
+        else groups.set(item.systemId, { name: item.system, items: [item] })
+        return groups
+      }, new Map<string, { name: string; items: RequirementRecord[] }>())
+    )
+  }, [orderedRequirements, requirementQuery])
+
+  useLayoutEffect(() => {
+    const list = requirementListRef.current
+    if (list) list.scrollTop = requirementListScrollPositions.get("conversation") ?? 0
+  }, [])
   const prdFiles = useMemo(
     () =>
       (threadState?.workspaceFiles ?? []).filter(
@@ -416,12 +471,14 @@ function RequirementConversationSession({
     autoQueuedPrdGenerationRef.current = true
     threadState.addQueuedMessage({
       id: crypto.randomUUID(),
-      text: PRD_GENERATION_MESSAGE,
+      text: buildRequirementInitializationMessage(requirement),
+      contextLabel: "requirement-workbench",
       created_at: new Date(),
       updated_at: new Date()
     })
   }, [
     autoGeneratePrd,
+    requirement,
     requirement.prdGenerated,
     threadState,
     threadState?.historyLoading,
@@ -521,81 +578,179 @@ function RequirementConversationSession({
                 </span>
                 <span>需求列表</span>
               </div>
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-[#eee7df] text-[11px] font-semibold tabular-nums text-[#74695f]">
-                {requirements.length}
-              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  aria-label="查看需求列表"
+                  title="查看需求列表"
+                  onClick={onBack}
+                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  <ListTodo className="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="新增需求"
+                  title="新增需求"
+                  onClick={onNew}
+                  className="flex size-7 items-center justify-center rounded-md text-primary hover:bg-primary/10"
+                >
+                  <Plus className="size-4" />
+                </button>
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-[#eee7df] text-[11px] font-semibold tabular-nums text-[#74695f]">
+                  {requirements.length}
+                </span>
+              </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto p-2.5 bg-white">
+            <div className="border-b border-border/70 bg-white p-2.5">
+              <label className="relative block">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={requirementQuery}
+                  onChange={(event) => setRequirementQuery(event.target.value)}
+                  placeholder="搜索需求名称"
+                  aria-label="搜索需求名称"
+                  className="h-8 pl-8 text-[12px]"
+                />
+              </label>
+            </div>
+
+            <div
+              ref={requirementListRef}
+              onScroll={(event) => {
+                requirementListScrollPositions.set("conversation", event.currentTarget.scrollTop)
+              }}
+              className="min-h-0 flex-1 overflow-y-auto bg-white p-2.5"
+            >
               {requirements.length > 0 ? (
                 <div className="flex flex-col gap-1.5">
-                  {orderedRequirements.map((item) => {
-                    const isActive = item.id === requirement.id
+                  {groupedRequirements.map(([systemId, group]) => {
+                    const collapsed = collapsedSystemIds.has(systemId)
                     return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        disabled={switchingRequirementId !== null}
-                        aria-current={isActive ? "page" : undefined}
-                        onClick={() => {
-                          if (isActive || switchingRequirementId !== null) return
-                          setSwitchingRequirementId(item.id)
-                          void onSelectRequirement(item).finally(() => {
-                            setSwitchingRequirementId(null)
-                          })
-                        }}
-                        title={`${item.title} · ${item.system}`}
-                        className={cn(
-                          "group relative flex min-h-[80px]  w-full min-w-0 gap-3 rounded border p-2 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-wait disabled:opacity-70",
-                          isActive
-                            ? "bg-white text-foreground border-[#c4956af7]"
-                            : "bg-white text-muted-foreground "
-                        )}
-                      >
-                        <span className="flex min-w-0 flex-1 flex-col justify-between gap-1">
-                          <span className="flex min-w-0 items-center gap-2 ">
-                            <span className="min-w-0 flex-1 truncate text-sm font-semibold leading-5">
-                              {item.title}
-                            </span>
-                            <span
-                              className={cn(
-                                "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium leading-none",
-                                item.coreFilesMissing || item.workspaceMissing
-                                  ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
-                                  : item.prdGenerated
-                                    ? "border-status-nominal/20 bg-status-nominal/10 text-status-nominal"
-                                    : "border-status-info/20 bg-status-info/10 text-status-info",
-                                item.coreFilesMissing || item.workspaceMissing
-                                  ? "font-semibold"
-                                  : ""
-                              )}
-                              title={
-                                item.coreFilesMissingReason ||
-                                (item.workspaceMissing ? "需求归档目录已被删除或不可用" : undefined)
-                              }
-                            >
-                              {item.coreFilesMissing || item.workspaceMissing ? (
-                                <AlertTriangle className="size-2.5" aria-hidden="true" />
-                              ) : item.prdGenerated ? (
-                                <CheckCircle2 className="size-2.5" aria-hidden="true" />
-                              ) : (
-                                <Loader2 className="size-2.5 animate-spin" aria-hidden="true" />
-                              )}
-                              {item.coreFilesMissing || item.workspaceMissing
+                      <div key={systemId} className="space-y-1.5">
+                        <button
+                          type="button"
+                          aria-expanded={!collapsed}
+                          onClick={() =>
+                            setCollapsedSystemIds((current) => {
+                              const next = new Set(current)
+                              if (next.has(systemId)) next.delete(systemId)
+                              else next.add(systemId)
+                              return next
+                            })
+                          }
+                          className="flex h-7 w-full items-center gap-1.5 px-1 text-left text-[11px] font-semibold text-muted-foreground hover:text-foreground"
+                        >
+                          {collapsed ? (
+                            <ChevronRight className="size-3.5" />
+                          ) : (
+                            <ChevronDown className="size-3.5" />
+                          )}
+                          <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                          <span className="tabular-nums">{group.items.length}</span>
+                        </button>
+                        {!collapsed &&
+                          group.items.map((item) => {
+                            const isActive = item.id === requirement.id
+                            const isConversationLoading = Boolean(
+                              item.threadId &&
+                                (streamLoadingStates[item.threadId] ||
+                                  allThreadStates[item.threadId]?.scheduledTaskLoading)
+                            )
+                            const status =
+                              item.coreFilesMissing || item.workspaceMissing
                                 ? "异常"
-                                : item.prdGenerated
-                                  ? "已生成"
-                                  : "沟通中"}
-                            </span>
-                          </span>
-                          <span className="flex min-w-0 items-center justify-between gap-2 text-[11px] leading-4">
-                            <span className="min-w-0 truncate text-[#81766b]">{item.system}</span>
-                            <span className="shrink-0 tabular-nums text-[#a0958a]">
-                              {item.updatedAt}
-                            </span>
-                          </span>
-                        </span>
-                      </button>
+                                : isRequirementPublished(item)
+                                  ? "已发布"
+                                  : item.prdGenerated
+                                    ? "已生成"
+                                    : isConversationLoading
+                                      ? "沟通中"
+                                      : "未规范"
+                            return (
+                              <button
+                                key={item.id}
+                                type="button"
+                                disabled={switchingRequirementId !== null}
+                                aria-current={isActive ? "page" : undefined}
+                                onClick={() => {
+                                  if (isActive || switchingRequirementId !== null) return
+                                  const list = requirementListRef.current
+                                  if (list)
+                                    requirementListScrollPositions.set(
+                                      "conversation",
+                                      list.scrollTop
+                                    )
+                                  setSwitchingRequirementId(item.id)
+                                  void onSelectRequirement(item).finally(() => {
+                                    setSwitchingRequirementId(null)
+                                  })
+                                }}
+                                title={`${item.title} · ${item.system}`}
+                                className={cn(
+                                  "group relative flex min-h-[80px]  w-full min-w-0 gap-3 rounded border p-2 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-wait disabled:opacity-70",
+                                  isActive
+                                    ? "bg-white text-foreground border-[#c4956af7]"
+                                    : "bg-white text-muted-foreground "
+                                )}
+                              >
+                                <span className="flex min-w-0 flex-1 flex-col justify-between gap-1">
+                                  <span className="flex min-w-0 items-center gap-2 ">
+                                    <span className="min-w-0 flex-1 truncate text-sm font-semibold leading-5">
+                                      {item.title}
+                                    </span>
+                                    <span
+                                      className={cn(
+                                        "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium leading-none",
+                                        item.coreFilesMissing || item.workspaceMissing
+                                          ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
+                                          : isRequirementPublished(item)
+                                            ? "border-status-warning/30 bg-status-warning/10 text-status-warning"
+                                            : item.prdGenerated
+                                              ? "border-status-nominal/20 bg-status-nominal/10 text-status-nominal"
+                                              : isConversationLoading
+                                                ? "border-status-info/20 bg-status-info/10 text-status-info"
+                                                : "border-border/70 bg-muted/30 text-muted-foreground",
+                                        item.coreFilesMissing || item.workspaceMissing
+                                          ? "font-semibold"
+                                          : ""
+                                      )}
+                                      title={
+                                        item.coreFilesMissingReason ||
+                                        (item.workspaceMissing
+                                          ? "需求归档目录已被删除或不可用"
+                                          : undefined)
+                                      }
+                                    >
+                                      {item.coreFilesMissing || item.workspaceMissing ? (
+                                        <AlertTriangle className="size-2.5" aria-hidden="true" />
+                                      ) : isRequirementPublished(item) ? (
+                                        <CheckCircle2 className="size-2.5" aria-hidden="true" />
+                                      ) : item.prdGenerated ? (
+                                        <CheckCircle2 className="size-2.5" aria-hidden="true" />
+                                      ) : isConversationLoading ? (
+                                        <Loader2
+                                          className="size-2.5 animate-spin"
+                                          aria-hidden="true"
+                                        />
+                                      ) : null}
+                                      {status}
+                                    </span>
+                                  </span>
+                                  <span className="flex min-w-0 items-center justify-between gap-2 text-[11px] leading-4">
+                                    <span className="min-w-0 truncate text-[#81766b]">
+                                      {getRequirementStartTypeLabel(item)}
+                                    </span>
+                                    <span className="shrink-0 tabular-nums text-[#a0958a]">
+                                      {item.updatedAt}
+                                    </span>
+                                  </span>
+                                </span>
+                              </button>
+                            )
+                          })}
+                      </div>
                     )
                   })}
                 </div>
@@ -614,13 +769,16 @@ function RequirementConversationSession({
                   <Bot className="size-3.5" />
                 </span>
                 <span>需求澄清会话</span>
+                <span className="inline-flex shrink-0 items-center rounded-full border border-status-info/20 bg-status-info/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-status-info">
+                  需求工作台
+                </span>
               </div>
               <span className="truncate text-[11px] text-muted-foreground">
                 结合原始需求持续完善 PRD
               </span>
             </div>
             {threadId ? (
-              <ChatContainer key={threadId} threadId={threadId} surface="harness-feature-session" />
+              <ChatContainer key={threadId} threadId={threadId} surface="requirement-session" />
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
                 <span>该需求尚未关联沟通会话</span>
@@ -1091,12 +1249,14 @@ export function RequirementConversationView({
   requirements,
   onSelectRequirement,
   onBack,
+  onNew,
   autoGeneratePrd = false
 }: {
   requirement: RequirementRecord
   requirements: RequirementRecord[]
   onSelectRequirement: (requirement: RequirementRecord) => Promise<void>
   onBack: () => void
+  onNew: () => void
   autoGeneratePrd?: boolean
 }): React.JSX.Element {
   return (
@@ -1106,6 +1266,7 @@ export function RequirementConversationView({
       requirements={requirements}
       onSelectRequirement={onSelectRequirement}
       onBack={onBack}
+      onNew={onNew}
       autoGeneratePrd={autoGeneratePrd}
     />
   )
