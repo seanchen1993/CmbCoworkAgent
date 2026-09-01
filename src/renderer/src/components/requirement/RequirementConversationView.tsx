@@ -16,6 +16,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { ChatContainer } from "@/components/chat/ChatContainer"
+import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
 import { FileTree, ResourcePreview } from "@/components/panels/RightPanel"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { Button } from "@/components/ui/button"
@@ -49,7 +50,7 @@ const PRD_COMPLETION_CHECK_MAX_ATTEMPTS = 4
 const PRD_COMPLETION_CHECK_RETRY_DELAY_MS = 500
 const requirementListScrollPositions = new Map<string, number>()
 
-type PreviewTab = "source" | "prd" | "requirement-space"
+type PreviewTab = "expert-process" | "source" | "prd" | "requirement-space"
 function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
   if (isRequirementPublished(requirement) || requirement.prdGenerated) return "requirement-space"
   return "source"
@@ -175,10 +176,14 @@ function RequirementConversationSession({
   autoGeneratePrd: boolean
 }): React.JSX.Element {
   const selectThread = useAppStore((state) => state.selectThread)
+  const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
+  const subagentFocusView = useAppStore((state) => state.subagentFocusView)
   const streamLoadingStates = useAllStreamLoadingStates()
   const allThreadStates = useAllThreadStates()
   const threadId = requirement.threadId ?? null
   const threadState = useThreadState(threadId)
+  const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
+  const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
   const autoQueuedPrdGenerationRef = useRef(false)
@@ -203,6 +208,45 @@ function RequirementConversationSession({
   const [requirementQuery, setRequirementQuery] = useState("")
   const [collapsedSystemIds, setCollapsedSystemIds] = useState<Set<string>>(new Set())
   const requirementListRef = useRef<HTMLDivElement>(null)
+  const focusExpertProcess = useCallback((): boolean => {
+    if (!threadId || subagents.length === 0) return false
+    const isAnalyst = (item: (typeof subagents)[number]): boolean => {
+      const identity = `${item.subagentType ?? ""} ${item.name}`.toLowerCase()
+      return identity.includes("analyst")
+    }
+    const runningSubagents = subagents.filter((item) => item.status === "running")
+    const subagent =
+      runningSubagents.find(isAnalyst) ??
+      runningSubagents[0] ??
+      [...subagents].reverse().find(isAnalyst) ??
+      subagents[subagents.length - 1]
+
+    openSubagentFocusView({
+      threadId,
+      subagentId: subagent.id,
+      name: subagent.name,
+      description: subagent.description,
+      status: subagent.status
+    })
+    return true
+  }, [openSubagentFocusView, subagents, threadId])
+  useEffect(() => {
+    const previous = observedSubagentStatesRef.current
+    const runningSubagents = subagents.filter((item) => item.status === "running")
+    const started =
+      runningSubagents.find((item) => {
+        const identity = `${item.subagentType ?? ""} ${item.name}`.toLowerCase()
+        return identity.includes("analyst")
+      }) ?? runningSubagents[0]
+
+    if (started && previous.get(started.id) !== "running" && focusExpertProcess()) {
+      setPreviewTab("expert-process")
+    }
+
+    observedSubagentStatesRef.current = new Map(
+      subagents.map((subagent) => [subagent.id, subagent.status])
+    )
+  }, [focusExpertProcess, subagents])
   const orderedRequirements = useMemo(
     () => sortRequirementsByUpdatedAt(requirements),
     [requirements]
@@ -655,8 +699,8 @@ function RequirementConversationSession({
                             const isActive = item.id === requirement.id
                             const isConversationLoading = Boolean(
                               item.threadId &&
-                                (streamLoadingStates[item.threadId] ||
-                                  allThreadStates[item.threadId]?.scheduledTaskLoading)
+                              (streamLoadingStates[item.threadId] ||
+                                allThreadStates[item.threadId]?.scheduledTaskLoading)
                             )
                             const status =
                               item.coreFilesMissing || item.workspaceMissing
@@ -814,12 +858,17 @@ function RequirementConversationSession({
               value={previewTab}
               onValueChange={(value) => {
                 const nextTab: PreviewTab =
-                  value === "prd"
-                    ? "prd"
-                    : value === "requirement-space"
-                      ? "requirement-space"
-                      : "source"
+                  value === "expert-process"
+                    ? "expert-process"
+                    : value === "prd"
+                      ? "prd"
+                      : value === "requirement-space"
+                        ? "requirement-space"
+                        : "source"
                 setPreviewTab(nextTab)
+                if (nextTab === "expert-process") {
+                  focusExpertProcess()
+                }
                 if (nextTab === "prd") {
                   void refreshPrdFiles().catch((error) => {
                     console.warn(
@@ -833,6 +882,15 @@ function RequirementConversationSession({
             >
               <div className="shrink-0 border-b border-border/80 bg-[#fffdf9] px-3">
                 <TabsList className="h-9 rounded-none bg-transparent p-0">
+                  <TabsTrigger
+                    value="expert-process"
+                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
+                  >
+                    专家过程
+                    {subagents.some((item) => item.status === "running") ? (
+                      <Loader2 className="size-2.5 animate-spin text-status-info" />
+                    ) : null}
+                  </TabsTrigger>
                   <TabsTrigger
                     value="source"
                     className="h-9 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
@@ -890,6 +948,16 @@ function RequirementConversationSession({
                   </TabsTrigger>
                 </TabsList>
               </div>
+
+              <TabsContent value="expert-process" className="m-0 min-h-0 flex-1 overflow-hidden">
+                {subagentFocusView?.threadId === threadId ? (
+                  <SubagentStreamPanel showCloseButton={false} />
+                ) : (
+                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center text-sm text-muted-foreground">
+                    暂无专家执行记录
+                  </div>
+                )}
+              </TabsContent>
 
               <TabsContent value="source" className="m-0 min-h-0 flex-1 overflow-y-auto">
                 {sourcePreviewLoading ? (
