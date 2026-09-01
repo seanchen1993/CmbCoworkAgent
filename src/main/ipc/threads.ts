@@ -3122,9 +3122,11 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle(
-    "threads:getSubagentTranscripts",
-    async (event, threadId: string, options?: { requestScope?: "foreground-hydration" }) => {
+  ipcMain.handle("threads:getSubagentTranscripts", async (
+    event,
+    threadId: string,
+    options?: { requestScope?: "foreground-hydration" }
+  ) => {
       const webContentsId = event.sender.id
       const isForeground = options?.requestScope === "foreground-hydration"
       if (isForeground) {
@@ -3158,12 +3160,10 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  ipcMain.handle(
-    "threads:getSubagentTranscript",
-    async (
-      _event,
-      { threadId, subagentId, before }: { threadId: string; subagentId: string; before?: number }
-    ) => {
+  ipcMain.handle("threads:getSubagentTranscript", async (
+    _event,
+    { threadId, subagentId, before }: { threadId: string; subagentId: string; before?: number }
+  ) => {
       const page = await withThreadRunMutationLock(threadId, async () => {
         if (!getThreadCore(threadId) || !subagentId) {
           return sliceSubagentTranscriptManifestPage([], before)

@@ -5545,6 +5545,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       }: AgentInvokeParams,
       delivery
     ) => {
+      // Freeze a mode/workspace snapshot from the durable thread BEFORE anything
+      // can patch it: workflow-notification detection and forced-coordinator
+      // gating must see the state the request was prepared against, not a later
+      // mode/workspace commit (mirrors the UAT initial snapshot).
+      const initialInvokeThread = getThreadCore(threadId)
+      const initialInvokeMetadata = parseThreadMetadata(initialInvokeThread?.metadata)
+      const initialInvokeAgentMode = getAgentModeFromMetadata(initialInvokeMetadata)
+      const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(
+        message,
+        initialInvokeMetadata,
+        { allowForcedRequests: allowsForcedCoordinatorRequests(initialInvokeMetadata) }
+      )
       const baseChannel = `agent:stream:${threadId}`
       const window = delivery.window
 
@@ -6542,7 +6554,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const hasWorkflowNotificationPrefix =
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
-          if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
+          if (matchesWorkflowNotificationPrompt && initialInvokeAgentMode === "workflow") {
             const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
               threadId
@@ -6744,7 +6756,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             requestedAgentMode === "workflow"
               ? requestedAgentMode
               : undefined
-          const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata)
+          const coordinatorRequest = resolveCoordinatorModeRequest(effectiveMessage, metadata, {
+            allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
+          })
           effectiveMessage = coordinatorRequest.message
           if (
             !isCoordinatorNotificationTurn &&
@@ -6769,7 +6783,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const coordinatorForcedByRequest =
             coordinatorRequest.source === "message-prefix" ||
-            coordinatorRequest.source === "environment"
+            coordinatorRequest.source === "environment" ||
+            // The initial snapshot froze the request's forced-coordinator origin
+            // before any mode/workspace patch could dilute it; honour that origin.
+            initialInvokeCoordinatorRequest.source === "message-prefix" ||
+            initialInvokeCoordinatorRequest.source === "environment"
           const coordinatorFromMetadata =
             coordinatorRequest.enabled && coordinatorRequest.source === "metadata"
           const effectiveAgentMode: AgentMode = coordinatorForcedByRequest
@@ -6833,7 +6851,119 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
 
           if (shouldPersistAgentMode) {
-            metadata.agentMode = effectiveAgentMode
+            let finalWorkflowBlock: string | null = null
+            let finalNormalModeGuardState: NormalModeGuardState | null = null
+            let modeCommitConversationPresence: "empty" | "nonempty" | "unknown" = "empty"
+            let workspaceChangedBeforeModeCommit = false
+            let invokeContextChangedBeforeModeCommit = false
+            await workflowRunManager.withThreadTransitionLease(threadId, () =>
+              withThreadRunMutationLock(threadId, async () => {
+                const latestThread = getThreadCore(threadId)
+                const latestMetadata = parseThreadMetadata(latestThread?.metadata)
+                const latestWorkspacePath =
+                  typeof latestMetadata.workspacePath === "string"
+                    ? latestMetadata.workspacePath
+                    : undefined
+                // Leaving workflow → any non-workflow mode: block to avoid orphaning a run.
+                if (
+                  getAgentModeFromMetadata(latestMetadata) === "workflow" &&
+                  effectiveAgentMode !== "workflow"
+                ) {
+                  finalWorkflowBlock = await workflowLeaveBlockedMessage(
+                    threadId,
+                    latestWorkspacePath
+                  )
+                  if (finalWorkflowBlock) return
+                }
+                if (
+                  (requestedMode === "normal" || requestedMode === "workflow") &&
+                  latestMetadata.agentMode !== requestedMode
+                ) {
+                  finalNormalModeGuardState = await getNormalModeGuardState(
+                    threadId,
+                    latestWorkspacePath
+                  )
+                  throwIfInvokeAborted()
+                  if (isNormalModeBlocked(finalNormalModeGuardState)) return
+                }
+                const guardedCandidateMetadata = {
+                  ...latestMetadata,
+                  agentMode: effectiveAgentMode
+                }
+                if (
+                  getThreadExecutionMode(latestMetadata) !==
+                  getThreadExecutionMode(guardedCandidateMetadata)
+                ) {
+                  modeCommitConversationPresence =
+                    await readThreadConversationPresenceForMutation(threadId)
+                }
+                // Every async guard above runs under the same thread mutation lock
+                // as this commit. Re-read immediately before the synchronous patch
+                // to bind the result to the original incarnation and run context.
+                const commitThread = getThreadCore(threadId)
+                if (!commitThread) {
+                  invokeContextChangedBeforeModeCommit = true
+                  return
+                }
+                const commitMetadata = parseThreadMetadata(commitThread.metadata)
+                const commitWorkspacePath =
+                  typeof commitMetadata.workspacePath === "string"
+                    ? commitMetadata.workspacePath
+                    : undefined
+                if (commitWorkspacePath !== workspacePath) {
+                  workspaceChangedBeforeModeCommit = true
+                  return
+                }
+                throwIfInvokeAborted()
+                const commitCandidateMetadata = {
+                  ...commitMetadata,
+                  agentMode: effectiveAgentMode
+                }
+                assertNoTranscriptAgentModeTransition(
+                  commitMetadata,
+                  commitCandidateMetadata,
+                  modeCommitConversationPresence !== "empty"
+                )
+                commitMetadata.agentMode = effectiveAgentMode
+                // Commit at the lease boundary. The later metadata write also
+                // folds in coordinator selections, but cannot be the first
+                // durable mode update after an async guard or launch could slip
+                // into the gap.
+                metadata = persistAgentOwnedMetadataFields(threadId, commitMetadata, ["agentMode"])
+              })
+            )
+            if (invokeContextChangedBeforeModeCommit) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "会话模式或会话实例已在请求准备期间发生变化，请重新发送消息。"
+              })
+              void tracer.finish("error", "THREAD_CONTEXT_CHANGED_DURING_MODE_COMMIT")
+              return
+            }
+            if (workspaceChangedBeforeModeCommit) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "工作区已在请求准备期间发生变化，请重新发送消息。"
+              })
+              void tracer.finish("error", "WORKSPACE_CHANGED_DURING_MODE_COMMIT")
+              return
+            }
+            if (finalWorkflowBlock) {
+              safeSendToWindow(window, channel, { type: "error", error: finalWorkflowBlock })
+              void tracer.finish("error", "WORKFLOW_LEAVE_BLOCKED")
+              return
+            }
+            const blockedNormalModeGuardState =
+              finalNormalModeGuardState as NormalModeGuardState | null
+            if (blockedNormalModeGuardState && isNormalModeBlocked(blockedNormalModeGuardState)) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: buildNormalModeGuardMessage(blockedNormalModeGuardState)
+              })
+              sendCoordinatorWorkers(window, channel, blockedNormalModeGuardState.workers)
+              void tracer.finish("error", "COORDINATOR_NORMAL_MODE_BLOCKED")
+              return
+            }
           }
 
           console.log("[CoordinatorMode] mode resolved", {
@@ -10610,7 +10740,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       channel,
       harnessAgentContext
     )
-    const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata)
+    const interruptCoordinatorRequest = resolveCoordinatorModeRequest("", metadata, {
+      allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
+    })
     const interruptAgentMode: AgentMode =
       interruptCoordinatorRequest.source === "environment"
         ? "coordinator"

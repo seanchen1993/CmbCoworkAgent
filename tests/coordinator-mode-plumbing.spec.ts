@@ -225,6 +225,7 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "project mode does not add a separate task-tool policy over Solo/Multi selection"
   )
   const modeHelpers = await readProjectFile("src/renderer/src/lib/coordinator-mode-helpers.ts")
+  const sharedAgentModeMetadata = await readProjectFile("src/shared/agent-mode-metadata.ts")
   assertIncludes(
     modeHelpers,
     "resolveThreadExecutionModeFromMetadata(metadata)",
