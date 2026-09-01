@@ -581,6 +581,11 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   )
   assertIncludes(
     rightPanel,
+    "orderSubagentsForDisplay(subagentSnapshot ?? [])",
+    "right panel displays running task subagents before historical cards"
+  )
+  assertIncludes(
+    rightPanel,
     "worker.tool_call_count",
     "right panel shows coordinator worker tool count"
   )

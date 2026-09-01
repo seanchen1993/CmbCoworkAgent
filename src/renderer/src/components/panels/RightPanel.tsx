@@ -58,6 +58,7 @@ import {
 } from "@/lib/thread-context"
 import { getFileType } from "@/lib/file-types"
 import { getToolLabel } from "@/lib/tool-labels"
+import { orderSubagentsForDisplay } from "@/lib/subagent-state"
 import {
   hasLoadedWorkspaceFiles,
   continueWorkspaceFilesDeduped,
@@ -3634,7 +3635,11 @@ function AgentsContent({ threadId }: { threadId: string | null }): React.JSX.Ele
   )
   const canMutateCurrentThreadState = threadId === storeCurrentThreadId
   const retryInFlightRef = useRef(false)
-  const subagents = useThreadStateSelector(threadId, (state) => state.subagents) ?? []
+  const subagentSnapshot = useThreadStateSelector(threadId, (state) => state.subagents)
+  const subagents = useMemo(
+    () => orderSubagentsForDisplay(subagentSnapshot ?? []),
+    [subagentSnapshot]
+  )
   const coordinatorWorkers =
     useThreadStateSelector(threadId, (state) => state.coordinatorWorkers) ?? []
   const hasRunningCoordinatorWorker = coordinatorWorkers.some(
