@@ -17,6 +17,7 @@ import {
   type PhysicalStreamRunSetupGuard
 } from "../agent/physical-stream-run-setup"
 import {
+  OwnedClaimFence,
   SingleFlightBatchCoalescer,
   TimedOutPredecessorFence,
   runSettlementPhases
@@ -431,6 +432,17 @@ function canPreviewSystemPrompt(): boolean {
 
 // Track active runs for cancellation
 const activeRuns = new Map<string, AbortController>()
+const workflowNotificationClaimFence = new OwnedClaimFence<string, string>()
+
+function claimWorkflowNotification(runId: string, runToken: string): void {
+  workflowNotificationClaimFence.claim(runId, runToken)
+}
+
+function releaseWorkflowNotification(runId: string, runToken: string): boolean {
+  return workflowNotificationClaimFence.release(runId, runToken, () => {
+    workflowRunManager.clearNotificationInFlight(runId)
+  })
+}
 const streamChannelByRunController = new WeakMap<AbortController, string>()
 
 let agentTaskShutdownStarted = false
@@ -6418,7 +6430,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // reuses the runId, so the ack must not land on a newer instance (see
         // setWorkflowRunNotified's instance fence).
         let workflowNotificationToSettle:
-          | { workspacePath: string; runId: string; startedAt: string }
+          | { workspacePath: string; runId: string; startedAt: string; ownerRunToken: string }
           | undefined
 
         // When THIS turn delivers a background workflow's completion notification,
@@ -6522,7 +6534,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
           if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
-            const pendingWorkflowRun = workflowRunManager.findPendingNotification(
+            const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
               threadId
             )
@@ -6532,6 +6544,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               await tracer.finish("success", "WORKFLOW_NOTIFICATION_STALE")
               return
             }
+            claimWorkflowNotification(pendingWorkflowRun.runId, runToken)
             const workflowOutputFile = resolveWorkflowOutputFile(
               workspacePath,
               pendingWorkflowRun.threadId,
@@ -6557,11 +6570,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             // turn SUCCEEDS, so an app crash mid-turn leaves delivered=false on disk
             // and the run is rediscovered + re-reported on the next hydrate, rather
             // than being silently lost (the at-most-once crash hole).
-            workflowRunManager.markNotificationInFlight(pendingWorkflowRun.runId)
             workflowNotificationToSettle = {
               workspacePath,
               runId: pendingWorkflowRun.runId,
-              startedAt: pendingWorkflowRun.startedAt
+              startedAt: pendingWorkflowRun.startedAt,
+              ownerRunToken: runToken
             }
             // NOTE: do NOT auto-commit the run's edits against a launch-time
             // baseline. A background workflow shares the workspace with the user's
@@ -8549,7 +8562,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               //     is pre-terminal, so markNotified always returns false for it → this is
               //     its only licence.
               if (delivered || shouldKickPendingDrain) {
-                workflowRunManager.kickNextPendingNotification(settle.workspacePath, threadId)
+                await workflowRunManager.kickNextPendingNotificationAsync(
+                  settle.workspacePath,
+                  threadId
+                )
               }
             }
             if (invokeFinalOutcome === "success") {
@@ -8982,9 +8998,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // stop, so re-reporting would fight that intent) — but clearing the mark
           // still lets a later hydrate / restart surface it.
           if (workflowNotificationToSettle) {
-            const { runId: settleRunId } = workflowNotificationToSettle
+            const {
+              runId: settleRunId,
+              ownerRunToken
+            } = workflowNotificationToSettle
             workflowNotificationToSettle = undefined
-            workflowRunManager.clearNotificationInFlight(settleRunId)
+            releaseWorkflowNotification(settleRunId, ownerRunToken)
             if (!isAbortError) {
               workflowRunManager.renotify(threadId, settleRunId)
             }
@@ -9279,6 +9298,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
       })
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
+      const latestMetadata = metadata
+      const requestedResumeMode = requestedAgentMode
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
         ? "coordinator"
         : requestedAgentMode === "coordinator" ||
@@ -9296,7 +9317,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         // Leaving workflow → any non-workflow mode: block to avoid orphaning a run.
         // Covers requestedAgentMode === "coordinator", which the coordinator guard
         // below explicitly skips.
-        if (metadata.agentMode === "workflow" && requestedAgentMode !== "workflow") {
+        if (
+          getAgentModeFromMetadata(latestMetadata) === "workflow" &&
+          requestedResumeMode !== "workflow"
+        ) {
           const workflowBlock = workflowLeaveBlockedMessage(threadId, workspacePath)
           if (workflowBlock) {
             safeSendToWindow(window, channel, { type: "error", error: workflowBlock })
