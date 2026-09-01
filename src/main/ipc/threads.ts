@@ -222,6 +222,7 @@ import {
 } from "../../shared/subagent-transcript-storage"
 import { createThreadService } from "../services/thread-service"
 import { collectReferencedTranscriptHashesFromPages } from "./thread-transcript-gc-scan"
+import { getCapturedRawApiCall } from "../services/llm-api-request-capture"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 interface ExportAttachment {
@@ -4053,6 +4054,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       const zip = new AdmZip()
       zip.addFile("session.md", Buffer.from(formatMarkdown(payload), "utf-8"))
       zip.addFile("session.json", Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf-8"))
+      zip.addFile("raw_api_call.json", Buffer.from(getCapturedRawApiCall(threadId), "utf-8"))
       zip.writeZip(result.filePath)
 
       return { success: true, filePath: result.filePath }

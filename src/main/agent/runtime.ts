@@ -32,6 +32,7 @@ import {
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import { getProjectThreadDataDirectory } from "./context-history-path"
+import { withRawApiCallCapture } from "../services/llm-api-request-capture"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
@@ -4080,7 +4081,8 @@ export function getModelInstance(
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
-  purpose: ModelInstancePurpose = "agent"
+  purpose: ModelInstancePurpose = "agent",
+  captureThreadId?: string
 ): ChatOpenAI {
   const apiKey = customConfig.apiKey
   if (!apiKey) {
@@ -4107,6 +4109,14 @@ export function getModelInstance(
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
+  const retryingFetch =
+    retryHooks || maxRetryAttempts !== undefined
+      ? createRetryingFetch(retryHooks, maxRetryAttempts)
+      : defaultRetryingFetch
+  const modelFetch =
+    purpose === "agent" && captureThreadId
+      ? withRawApiCallCapture(retryingFetch, captureThreadId)
+      : retryingFetch
 
   const baseFields = {
     model: resolvedModel,
@@ -4133,10 +4143,7 @@ export function getModelInstance(
     },
     configuration: {
       baseURL: customConfig.baseUrl,
-      fetch:
-        retryHooks || maxRetryAttempts !== undefined
-          ? createRetryingFetch(retryHooks, maxRetryAttempts)
-          : defaultRetryingFetch
+      fetch: modelFetch
     }
   }
 
@@ -4527,7 +4534,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     throw new Error("Custom model not configured. Please configure a model in Settings.")
   }
 
-  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts)
+  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, "agent", threadId)
   const contextCompactionModel = getModelInstance(
     customConfig,
     retryHooks,
