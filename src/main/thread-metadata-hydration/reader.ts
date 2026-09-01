@@ -50,7 +50,12 @@ const THREAD_LIST_SMALL_OBJECT_KEYS = new Set([
   "harnessFeature",
   "harnessProjectSession",
   "routingState",
-  "gitContext"
+  "gitContext",
+  // IM delivery context drives the remote inbox / Feature session UI in the
+  // renderer (sidebar grouping, chat banner, read-only gates). Without it the
+  // projection silently strips the field and those call sites degrade to
+  // plain local threads.
+  "imDeliveryContext"
 ])
 const THREAD_LIST_PRIORITY_KEYS = [
   "workspacePath",
@@ -73,7 +78,14 @@ const THREAD_LIST_PRIORITY_KEYS = [
   "gitContext",
   "scheduledTaskId",
   "isHeartbeat",
-  "title"
+  "title",
+  // Remote IM session identity: the sidebar and chat banner classify threads by
+  // these before the conversation-level object below. Keep them ahead of
+  // budget-exhaustion so remote inbox / Feature threads never degrade silently.
+  "targetKind",
+  "remoteState",
+  "remoteThread",
+  "remoteReadOnly"
 ] as const
 const MAX_GOAL_EVENT_MESSAGE_BYTES = 128 * 1024
 const THREAD_LIST_PAGE_MAX_ROWS = 128
