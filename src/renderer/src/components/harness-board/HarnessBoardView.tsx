@@ -208,15 +208,6 @@ const harnessActionIconClassName =
   "relative flex size-4 items-center justify-center rounded-full bg-primary-foreground/15 ring-1 ring-primary-foreground/25 transition-transform duration-200 group-hover:scale-105"
 const DELETED_PROJECT_NAME = "项目已删除"
 
-function areHarnessValuesEqual(left: unknown, right: unknown): boolean {
-  if (left === right) return true
-  try {
-    return JSON.stringify(left) === JSON.stringify(right)
-  } catch {
-    return false
-  }
-}
-
 const deletedProjectCompatibility: HarnessBoardCompatibility = {
   status: "missing-plugin",
   compatible: false,
@@ -7063,8 +7054,7 @@ function FeatureDetailPage({
       >
         <DialogContent className={harnessDialogContentClassName}>
           <DialogHeader>
-            <DialogTitle>开启托管</DialogTitle>
-            <DialogDescription>确认本次托管自动创建会话时使用的会话工作区。</DialogDescription>
+            <DialogTitle>开启托管运行</DialogTitle>
           </DialogHeader>
           <div className="grid gap-2 py-2">
             <div className="flex items-center gap-1.5 text-sm font-medium">
@@ -9152,32 +9142,44 @@ export function HarnessBoardView({
 
   useEffect(() => {
     return window.api.harnessBoard.onHumanGateChanged((event) => {
-      void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
-      const currentFeature = selectedFeatureRef.current
-      if (
-        !currentFeature ||
-        currentFeature.deleted ||
-        currentFeature.projectId !== event.projectId ||
-        currentFeature.slug !== event.featureId
-      ) {
-        return
-      }
-      void window.api.harnessBoard
-        .getRunDetail(event.projectId, event.featureId)
-        .then((detail) => {
-          const current = selectedFeatureRef.current
-          if (
-            current &&
-            current.projectId === event.projectId &&
-            current.slug === event.featureId
-          ) {
-            setRunDetail((currentDetail) =>
-              areHarnessValuesEqual(currentDetail, detail) ? currentDetail : detail
-            )
-          }
+      const projectDetail = detailsByProjectIdRef.current[event.projectId]
+      if (projectDetail) {
+        let changed = false
+        const runs = projectDetail.runs.map((run) => {
+          if (run.slug !== event.featureId) return run
+          changed = true
+          const nextRun = { ...run }
+          if (event.humanGate) nextRun.humanGate = event.humanGate
+          else delete nextRun.humanGate
+          return nextRun
         })
+        if (changed) {
+          const nextProjectDetail = { ...projectDetail, runs }
+          const nextDetails = {
+            ...detailsByProjectIdRef.current,
+            [event.projectId]: nextProjectDetail
+          }
+          cacheHarnessProjectDetails({ [event.projectId]: nextProjectDetail })
+          detailsByProjectIdRef.current = nextDetails
+          setDetailsByProjectId(nextDetails)
+        }
+      }
+
+      setRunDetail((currentDetail) => {
+        if (
+          !currentDetail ||
+          currentDetail.project.projectId !== event.projectId ||
+          currentDetail.run.slug !== event.featureId
+        ) {
+          return currentDetail
+        }
+        const nextRun = { ...currentDetail.run }
+        if (event.humanGate) nextRun.humanGate = event.humanGate
+        else delete nextRun.humanGate
+        return { ...currentDetail, run: nextRun }
+      })
     })
-  }, [loadProjectDetail])
+  }, [])
 
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {

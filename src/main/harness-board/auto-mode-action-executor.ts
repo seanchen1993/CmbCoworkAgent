@@ -1,16 +1,13 @@
 import { v4 as uuid } from "uuid"
 import { getThread, upsertThreadMessages } from "../db"
-import {
-  startAgentRun,
-  type AgentRunDelivery
-} from "../agent/agent-run-service"
+import { startAgentRun, type AgentRunDelivery } from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
 import { listAllSkills, listPluginSkills } from "../ipc/skills"
 import { normalizeSkillId } from "../skills/ids"
 import { createThreadService } from "../services/thread-service"
 import { generateTitle } from "../services/title-generator"
 import { getDisabledSkills } from "../storage"
-import type { AgentInvokeParams, SkillMetadata } from "../types"
+import type { AgentInvokeParams, SkillMetadata, Thread } from "../types"
 import { getHarnessProjectAdapterSnapshot } from "./service"
 import { resolveAgentStreamRequestChannel } from "../../shared/agent-stream-channel"
 import { formatSkillUseBlock } from "../../shared/skill-use-block"
@@ -271,7 +268,7 @@ export async function sendManagedBizRetryReuseThread(
 
 export async function createAndStartManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
-): Promise<{ threadId: string }> {
+): Promise<{ threadId: string; thread: Thread }> {
   const prepared = await prepareHarnessMessage(input.projectId, input.nextAction)
   const thread = await createManagedHarnessSession(input)
   try {
@@ -286,7 +283,7 @@ export async function createAndStartManagedHarnessSession(
 
 export async function createManagedHarnessSession(
   input: CreateManagedHarnessSessionInput
-): Promise<{ threadId: string }> {
+): Promise<{ threadId: string; thread: Thread }> {
   const titleSource = input.nextAction.userMessage?.trim() ?? ""
   const thread = await createThreadService({
     workspacePath: input.workspacePath,
@@ -299,5 +296,5 @@ export async function createManagedHarnessSession(
       nodeId: input.nodeId
     }
   })
-  return { threadId: thread.thread_id }
+  return { threadId: thread.thread_id, thread }
 }

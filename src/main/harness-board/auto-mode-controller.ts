@@ -1,6 +1,6 @@
 import { BrowserWindow } from "electron"
 import { existsSync, statSync } from "fs"
-import { getAllThreads, getThread } from "../db"
+import { getAllThreadSummaries, getThread } from "../db"
 import type { AgentRunDelivery } from "../agent/agent-run-service"
 import { hasActiveTopLevelAgentRun } from "../agent/agent-run-service"
 import { emitAppAttention } from "../app-attention-events"
@@ -125,7 +125,7 @@ function publishManagedRunThreadCreated(event: ManagedRunThreadCreatedEvent): vo
 }
 
 function hasActiveFeatureThread(projectId: string, featureId: string): boolean {
-  for (const thread of getAllThreads()) {
+  for (const thread of getAllThreadSummaries()) {
     if (!thread.metadata) continue
     try {
       const feature = readHarnessFeatureMetadata(JSON.parse(thread.metadata) as unknown)
@@ -605,7 +605,8 @@ async function inspectAndLaunch(
       projectId: decidedRun.projectId,
       featureId: decidedRun.featureId,
       runId: decidedRun.runId,
-      threadId: created.threadId
+      threadId: created.threadId,
+      thread: created.thread
     })
     publishManagedRunChanged(lastRunSummary(persisted))
   } catch (error) {

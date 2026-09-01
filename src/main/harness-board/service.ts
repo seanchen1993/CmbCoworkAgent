@@ -2743,17 +2743,16 @@ function makeProjectDetailViewModel(
   }
 }
 
-async function attachHumanGatesToProjectDetail(
-  detail: HarnessProjectDetailViewModel
-): Promise<HarnessProjectDetailViewModel> {
-  const runs = await Promise.all(
-    detail.runs.map(async (run) => {
-      const humanGate = (
-        await findFeatureDeployUnitBinding(detail.project.projectId, run.slug)
-      )?.humanGate
-      return humanGate ? { ...run, humanGate } : run
-    })
-  )
+function attachHumanGatesToProjectDetail(
+  detail: HarnessProjectDetailViewModel,
+  bindingByFeature: ReadonlyMap<string, HarnessFeatureDeployUnitBindingRecord>
+): HarnessProjectDetailViewModel {
+  const runs = detail.runs.map((run) => {
+    const humanGate = bindingByFeature.get(
+      featureDeployUnitBindingKey(detail.project.projectId, run.slug)
+    )?.humanGate
+    return humanGate ? { ...run, humanGate } : run
+  })
   return { ...detail, runs }
 }
 
@@ -3865,6 +3864,7 @@ async function loadHarnessProjectDetails(
   const result: Record<string, HarnessProjectDetailViewModel> = {}
   const configContextByProjectId = new Map<string, HarnessProjectConfigContext>()
   const projectDirectoryExistsById = new Map<string, boolean>()
+  let featureBindingByKey: Map<string, HarnessFeatureDeployUnitBindingRecord> | null = null
   const groups = new Map<
     string,
     {
@@ -3955,6 +3955,14 @@ async function loadHarnessProjectDetails(
         )
         throwIfHarnessDetailCancelled(signal)
         const workflow = snapshot.workflow
+        if (!featureBindingByKey) {
+          featureBindingByKey = new Map(
+            (await readFeatureDeployUnitBindingStore()).bindings.map((binding) => [
+              featureDeployUnitBindingKey(binding.projectId, binding.featureId),
+              binding
+            ])
+          )
+        }
 
         for (const project of batch) {
           const projectDir = projectDirectoryName(project)
@@ -3969,7 +3977,7 @@ async function loadHarnessProjectDetails(
             continue
           }
 
-          result[project.projectId] = await attachHumanGatesToProjectDetail(
+          result[project.projectId] = attachHumanGatesToProjectDetail(
             makeProjectDetailViewModel(
               project,
               {
@@ -3980,7 +3988,8 @@ async function loadHarnessProjectDetails(
                 error: null
               },
               configContextByProjectId.get(project.projectId)
-            )
+            ),
+            featureBindingByKey
           )
         }
       } catch (error) {

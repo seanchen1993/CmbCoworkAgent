@@ -7656,19 +7656,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunThreadCreated((event) => {
-      void useAppStore
-        .getState()
-        .refreshThreads()
-        .then(() => {
-          if (initializedThreadsRef.current.has(event.threadId)) {
-            loadThreadHistory(event.threadId)
-          } else {
-            initializeThread(event.threadId)
-          }
-        })
-        .catch((error) => {
-          console.warn("[ThreadProvider] Failed to refresh managed-mode threads:", error)
-        })
+      useAppStore.getState().addThreadSummary(event.thread)
+      if (initializedThreadsRef.current.has(event.threadId)) {
+        loadThreadHistory(event.threadId)
+      } else {
+        initializeThread(event.threadId)
+      }
     })
   }, [initializeThread, loadThreadHistory])
 

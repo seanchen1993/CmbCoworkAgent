@@ -10083,6 +10083,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             })
           }
           turnStateShouldDispose = true
+          markAutoModeTerminal(
+            "error",
+            "failure_fuse",
+            actionStationarityHalt.decision.reason
+          )
           sendActionStationarityHalt(window, channel, actionStationarityHalt)
           return
         }
@@ -11626,6 +11631,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             boundaryGoalActiveWindowId
           )
           turnStateShouldDispose = true
+          resumeAutoModeTerminal = createAutoModeTerminal(
+            "error",
+            "failure_fuse",
+            actionStationarityHalt.decision.reason
+          )
           sendActionStationarityHalt(window, channel, actionStationarityHalt)
           return
         }
@@ -12791,6 +12801,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           boundaryGoalActiveWindowId
         )
         turnStateShouldDispose = true
+        interruptAutoModeTerminal = createAutoModeTerminal(
+          "error",
+          "failure_fuse",
+          actionStationarityHalt.decision.reason
+        )
         sendActionStationarityHalt(window, channel, actionStationarityHalt)
         return
       }

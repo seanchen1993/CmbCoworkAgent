@@ -826,6 +826,10 @@ export class ManagedRunStore {
       )
   }
 
+  listProjectRuns(projectId: string): ManagedRunRecord[] {
+    return this.listRunsInRoot(this.rootDirForProject(projectId), projectId)
+  }
+
   findRunningRun(projectId: string, featureId: string): ManagedRunRecord | null {
     for (const record of this.listFeatureRuns(projectId, featureId)) {
       if (

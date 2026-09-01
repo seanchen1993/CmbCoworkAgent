@@ -682,6 +682,15 @@ export interface ManagedRunThreadCreatedEvent {
   featureId: string
   runId: string
   threadId: string
+  thread: {
+    thread_id: string
+    created_at: Date
+    updated_at: Date
+    metadata?: Record<string, unknown>
+    status: "idle" | "busy" | "interrupted" | "error"
+    thread_values?: Record<string, unknown>
+    title?: string
+  }
 }
 
 export interface ManagedFeatureStatusSnapshot {

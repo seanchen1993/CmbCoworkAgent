@@ -5926,6 +5926,8 @@ export class LocalSandbox
   private static readonly _grantedAclRefCount = new Map<string, number>()
   /** Per-run tracking: which dirs each runId has granted (for correct decrement on cleanup). */
   private static readonly _runAclDirs = new Map<string, Set<string>>()
+  /** Original filesystem paths keyed by normalized ACL key, retained for OS revoke commands. */
+  private static readonly _runAclDirectoryPaths = new Map<string, Map<string, string>>()
   /** Serializes OS-level grant/revoke mutations per directory. */
   private static readonly _aclOsOperationTails = new Map<string, Promise<void>>()
   /** Directories that should never be revoked (e.g. TEMP — public dir, safe to leave open). */
@@ -5964,10 +5966,16 @@ export class LocalSandbox
       runDirs = new Set()
       LocalSandbox._runAclDirs.set(runId, runDirs)
     }
+    let runDirectoryPaths = LocalSandbox._runAclDirectoryPaths.get(runId)
+    if (!runDirectoryPaths) {
+      runDirectoryPaths = new Map()
+      LocalSandbox._runAclDirectoryPaths.set(runId, runDirectoryPaths)
+    }
     // Only increment ref count once per (run, dir) pair — the same run may
     // call grantSandboxWriteAcl multiple times for the same workingDir.
     if (!runDirs.has(key)) {
       runDirs.add(key)
+      runDirectoryPaths.set(key, dir)
       const prevCount = LocalSandbox._grantedAclRefCount.get(key) ?? 0
       LocalSandbox._grantedAclRefCount.set(key, prevCount + 1)
       // If another owner registered first, its OS grant may still be running.
@@ -6085,10 +6093,15 @@ export class LocalSandbox
     const runDirs = LocalSandbox._runAclDirs.get(runId)
     if (!runDirs || runDirs.size === 0) {
       LocalSandbox._runAclDirs.delete(runId)
+      LocalSandbox._runAclDirectoryPaths.delete(runId)
       return
     }
-    const dirsToRevoke = [...runDirs].filter((key) => !LocalSandbox._permanentAclDirs.has(key))
+    const runDirectoryPaths = LocalSandbox._runAclDirectoryPaths.get(runId)
+    const dirsToRevoke = [...runDirs]
+      .filter((key) => !LocalSandbox._permanentAclDirs.has(key))
+      .map((key) => runDirectoryPaths?.get(key) ?? key)
     LocalSandbox._runAclDirs.delete(runId)
+    LocalSandbox._runAclDirectoryPaths.delete(runId)
     if (dirsToRevoke.length === 0) return
     console.log(
       `[LocalSandbox] revokeGrantedAclsForRun(${runId}): releasing ${dirsToRevoke.length} dirs`

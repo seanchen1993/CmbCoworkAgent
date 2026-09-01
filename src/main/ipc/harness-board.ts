@@ -61,6 +61,7 @@ import {
   getHumanGateForThread,
   rejectHumanGate
 } from "../harness-board/human-gate-service"
+import { assertHarnessProjectCanBeDeleted } from "../harness-board/project-deletion-gate"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import {
@@ -552,6 +553,7 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:deleteProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
+      await assertHarnessProjectCanBeDeleted(projectId)
       const projectDirectory = getHarnessProjectRootPath(projectId)
       const deleted = await deleteHarnessProject(projectId)
       managedRunStore.removeProject(projectId, projectDirectory)

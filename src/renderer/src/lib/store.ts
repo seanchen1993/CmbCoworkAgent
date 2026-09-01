@@ -998,7 +998,7 @@ interface AppState {
 
   // Thread actions
   loadThreads: (options?: ThreadDirectoryLoadOptions) => Promise<void>
-  refreshThreads: () => Promise<void>
+  addThreadSummary: (thread: Thread) => void
   loadMoreThreads: () => Promise<void>
   touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
   createThread: (
@@ -1300,9 +1300,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
-  refreshThreads: async () => {
-    const threads = await window.api.threads.list()
-    set({ threads })
+  addThreadSummary: (thread) => {
+    markThreadDirectoryMutation(thread.thread_id)
+    set((state) => ({
+      threads: adoptThreadDirectorySnapshot([
+        thread,
+        ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
+      ])
+    }))
   },
 
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
