@@ -527,7 +527,7 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
   }
   const heartbeat = asRecord(aggs.heartbeat)
   const evolution = asRecord(aggs.evo_run)
-  const chatx = asRecord(aggs.chatx)
+  const im = asRecord(aggs.im)
   const hooks = asRecord(aggs.hooks)
   return {
     hbActionable: countByKey(heartbeat.by_outcome, "actionable"),
@@ -544,9 +544,9 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
     cloudPublished: asNumber(asRecord(aggs.evo_published).doc_count),
     proposalTriggered: asNumber(asRecord(aggs.proposal_triggered).doc_count),
     proposalAccepted: asNumber(asRecord(aggs.proposal_accepted).doc_count),
-    chatxReplied: countByKey(chatx.by_outcome, "replied"),
-    chatxCancelled: countByKey(chatx.by_outcome, "cancelled"),
-    chatxError: countByKey(chatx.by_outcome, "error"),
+    imCompleted: countByKey(im.by_outcome, "completed"),
+    imCancelled: countByKey(im.by_outcome, "cancelled"),
+    imError: countByKey(im.by_outcome, "error") + countByKey(im.by_outcome, "outcome_unknown"),
     hookTotal: asNumber(hooks.doc_count),
     hookBlocked: asNumber(asRecord(hooks.blocked).doc_count),
     claudeCodeLaunches: asNumber(asRecord(aggs.claude_code_launches).doc_count)

@@ -1382,11 +1382,11 @@ function escapeWildcard(value: string): string {
 }
 
 function safeExportFileName(value: string): string {
-  const cleaned = value
-    .trim()
-    // Windows forbids ASCII control characters in file names.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+  const withoutControlCharacters = Array.from(value.trim(), (character) =>
+    character.charCodeAt(0) <= 0x1f ? "-" : character
+  ).join("")
+  const cleaned = withoutControlCharacters
+    .replace(/[<>:"/\\|?*]/g, "-")
     .replace(/\s+/g, " ")
     .replace(/-+/g, "-")
     .slice(0, 80)
@@ -6105,7 +6105,7 @@ async function fetchFeedback(
 // Two-tier model (core usage + value result) for advanced capabilities.
 // Event-side metrics come from the `event` index by `eventName`
 // (heartbeat.run.completed / memory.write.applied / skill.evolution.* /
-// chatx.message.processed / hook.executed).
+// im.event.processed / hook.executed).
 // Tool-call-based metrics (memory_search/get, java_lsp, code_exec, deferred
 // tools) and post-evolution skill usage are REUSED from the `trace` index
 // (`toolNames`, `evolvedSkills`) instead of double-emitting events for things
@@ -6154,9 +6154,9 @@ interface AdvFeatureMetrics {
   proposalAccepted: number
   evolvedTraces: number
   evolvedUsages: number
-  chatxReplied: number
-  chatxCancelled: number
-  chatxError: number
+  imCompleted: number
+  imCancelled: number
+  imError: number
   hookTotal: number
   hookBlocked: number
   codeExec: number
@@ -6170,7 +6170,7 @@ function assembleAdvancedFeatureCards(
 ): AdvancedFeaturesResult {
   const hbTotal = m.hbActionable + m.hbSilent + m.hbError + m.hbCancelled
   const memTotal = m.memSearch + m.memGet + m.memWrite
-  const chatxTotal = m.chatxReplied + m.chatxCancelled + m.chatxError
+  const imTotal = m.imCompleted + m.imCancelled + m.imError
   const progTotal = m.codeExec + m.savedTool
 
   return {
@@ -6221,15 +6221,15 @@ function assembleAdvancedFeatureCards(
         items: []
       },
       {
-        key: "chatx",
-        label: "机器人 ChatX",
-        value: chatxTotal,
+        key: "im",
+        label: "内置统一机器人",
+        value: imTotal,
         valueLabel: "处理消息数",
-        hint: `成功回复 ${m.chatxReplied} 条`,
+        hint: `成功完成 ${m.imCompleted} 条`,
         items: [
-          { label: "已回复", count: m.chatxReplied, tone: "good" },
-          { label: "取消", count: m.chatxCancelled, tone: "warn" },
-          { label: "错误", count: m.chatxError, tone: "bad" }
+          { label: "已完成", count: m.imCompleted, tone: "good" },
+          { label: "取消", count: m.imCancelled, tone: "warn" },
+          { label: "错误/未知", count: m.imError, tone: "bad" }
         ]
       },
       {
@@ -6296,8 +6296,8 @@ async function fetchAdvancedFeatures(
       evo_published: { filter: { term: { eventName: "skill.evolution.cloud.published" } } },
       proposal_triggered: { filter: { term: { eventName: "skill.proposal.triggered" } } },
       proposal_accepted: { filter: { term: { eventName: "skill.proposal.accepted" } } },
-      chatx: {
-        filter: { term: { eventName: "chatx.message.processed" } },
+      im: {
+        filter: { term: { eventName: "im.event.processed" } },
         aggs: { by_outcome: { terms: { field: "properties.outcome", size: 10 } } }
       },
       hooks: {
@@ -6386,9 +6386,9 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     proposalAccepted: k(4),
     evolvedTraces: k(9),
     evolvedUsages: k(14),
-    chatxReplied: k(12),
-    chatxCancelled: k(2),
-    chatxError: k(1),
+    imCompleted: k(12),
+    imCancelled: k(2),
+    imError: k(1),
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),

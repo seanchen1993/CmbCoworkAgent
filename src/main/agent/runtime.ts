@@ -212,7 +212,13 @@ import { classifyCommandConcurrency, isReadOnlyShellCommand } from "./exec-polic
 import type { WindowsShellKind } from "./windows-safe-commands"
 import { readOnlyExecuteBlockMessage } from "./read-only-shell-message"
 import { SkillUsageDetector } from "./skill-evolution/usage-detector"
-import type { ApprovalRequest, ApprovalDecision, Message } from "../types"
+import type {
+  ApprovalRequest,
+  ApprovalDecision,
+  Message,
+  ScheduledTaskImDeliveryContext
+} from "../types"
+import { approvalDecisionBroker } from "./approval-decision-broker"
 import { emitAppAttention } from "../app-attention-events"
 import {
   isTraceReasoningTruncated,
@@ -1796,6 +1802,46 @@ export function createAgentToolGuardMiddleware(
   })
 }
 
+/**
+ * Exact main-runtime tool denylist used by transport capability policies.
+ *
+ * This stays separate from the registry/coordinator worker access model: a
+ * remote inbox is still the main agent and may keep `manage_scheduler`, while
+ * transport-incompatible tools such as `execute` are removed. Hiding and
+ * hard-rejecting use the same set so a recovered tool call cannot bypass the
+ * advertised policy.
+ */
+export function createRuntimeToolDenylistMiddleware(
+  disallowedTools: readonly string[]
+): ReturnType<typeof createMiddleware> {
+  const blocked = new Set(disallowedTools.map((name) => name.trim()).filter(Boolean))
+  return createMiddleware({
+    name: "runtimeToolDenylist",
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapModelCall: (request: any, handler: any) => {
+      const tools = Array.isArray(request.tools)
+        ? request.tools.filter((tool: { name?: string }) => !tool.name || !blocked.has(tool.name))
+        : request.tools
+      return handler({
+        ...request,
+        tools,
+        systemMessage: stripBlockedToolDocs(request.systemMessage, blocked)
+      })
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    wrapToolCall: (request: any, handler: any) => {
+      const name: string | undefined = request.toolCall?.name
+      if (!name || !blocked.has(name)) return handler(request)
+      return new ToolMessage({
+        content: `Tool "${name}" is unavailable for this message source. Continue using the available tools.`,
+        tool_call_id: request.toolCall?.id ?? "",
+        name,
+        status: "error"
+      })
+    }
+  })
+}
+
 function describeRegistrySubagentAccess(
   disallowedTools: readonly string[],
   shellAccess: AgentShellAccess
@@ -2069,6 +2115,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     includeGeneralPurposeSubagent = true,
     mainSubagentsEnabled = true,
     filesystemAccess,
+    mainBlockedToolNames = [],
     managedExecution = false,
     registrySubagentSpecs = [],
     // Windows shell kind the runtime's commands execute in (derived from the
@@ -2770,6 +2817,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       })
     ]
   }
+  const mainToolDenylistMiddleware =
+    mainBlockedToolNames.length > 0
+      ? [createRuntimeToolDenylistMiddleware(mainBlockedToolNames)]
+      : []
   const systemPromptPreviewCaptureMiddleware =
     threadId && typeof threadId === "string"
       ? [
@@ -2817,6 +2868,10 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
       ...postFsToolDocStripMiddleware,
+      // The filesystem middleware appends execute documentation dynamically;
+      // run the transport denylist after it so the docs and tool disappear
+      // together.
+      ...mainToolDenylistMiddleware,
       ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "main" })] : []),
       createSkillHookContextMiddleware(filesystemBackend),
       gradedToolConcurrencyMiddleware,
@@ -4267,10 +4322,20 @@ export interface CreateAgentRuntimeOptions {
   projectDir?: string
   /** Skip the manage_scheduler tool (used by scheduled task / heartbeat execution to prevent recursive scheduling) */
   noSchedulerTool?: boolean
+  /** Optional IM inbox delivery context supplied by the transport-owned caller. */
+  imDeliveryContext?: ScheduledTaskImDeliveryContext
   /** Skip the manage_skill tool (disable skill evolution for scheduled/heartbeat agents) */
   noSkillEvolutionTool?: boolean
   /** Enable the interactive user-input tool. Only foreground, user-invoked runs should set this. */
   enableRequestUserInput?: boolean
+  /** Keep request_user_input pending when a renderer is temporarily absent. */
+  allowDeferredUserInputRenderer?: boolean
+  /**
+   * Transport-owned barrier around approvals and structured input. Desktop
+   * callers leave this unset; IM uses it to durably enter waiting_desktop and
+   * revalidate its execution permit before a tool can resume.
+   */
+  interactionWaitHooks?: RuntimeInteractionWaitHooks
   /** Frozen request_user_input policy for a Harness project feature session. */
   requestUserInputConfig?: HarnessRequestUserInputConfig
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
@@ -4318,6 +4383,10 @@ export interface CreateAgentRuntimeOptions {
   /** Optional filesystem access limits for leaf runtimes: coordinator async
    * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
   filesystemAccess?: CoordinatorWorkerFilesystemAccess
+  /** Skip eager/lazy MCP tools and saved/deferred code-exec bridges. */
+  disableMcpTools?: boolean
+  /** Exact main-agent tool names hidden and hard-blocked by a transport policy. */
+  blockedToolNames?: string[]
   /** AbortSignal — when signalled, any running child process is killed immediately. */
   abortSignal?: AbortSignal
   /** Optional hooks invoked when the model fetch layer retries / resolves. */
@@ -4386,6 +4455,19 @@ export interface CreateAgentRuntimeOptions {
   autoApproveFileEdits?: boolean
 }
 
+export type RuntimeInteractionWaitKind = "approval" | "user_input"
+
+export interface RuntimeInteractionWaitEvent {
+  id: string
+  kind: RuntimeInteractionWaitKind
+  threadId: string
+}
+
+export interface RuntimeInteractionWaitHooks {
+  onWaitStart(event: RuntimeInteractionWaitEvent): void | Promise<void>
+  onWaitEnd(event: RuntimeInteractionWaitEvent): void | Promise<void>
+}
+
 // Create agent runtime with configured model and checkpointer
 export type AgentRuntime = ReturnType<typeof createAgent>
 
@@ -4431,6 +4513,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     traceContext,
     soloTaskTraceManager,
     disableSubagents = false,
+    disableMcpTools = false,
+    blockedToolNames = [],
     onHookResult,
     onFailureFuseNotice,
     onContextCompaction,
@@ -4447,6 +4531,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onFileMutation
   } = options
   const approvalThreadId = requestedApprovalThreadId ?? threadId
+  const runtimeBlockedToolNames = new Set(
+    blockedToolNames.map((name) => name.trim()).filter(Boolean)
+  )
   const isCoordinatorMode = agentMode === "coordinator"
   const isWorkflowMode = agentMode === "workflow"
   const outputStyle =
@@ -4745,12 +4832,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // because the user stepped away. They are resolved by an explicit user
   // decision, or by the run abort signal when the user stops/cancels the turn.
   const APPROVAL_TIMEOUT_MS: number | null = null
-  const requestApproval = (req: ApprovalRequest): Promise<ApprovalDecision> => {
+  const requestApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
     // IPC fires immediately; the renderer owns the queue (pendingApprovals[]).
     // Multiple concurrent tool calls each register their own resolver here —
     // the renderer shows them one at a time, but the events are not serialized
     // back-end side. This matches how Codex surfaces ExecApprovalRequest events.
-    return new Promise<ApprovalDecision>((resolve) => {
+    const waitEvent: RuntimeInteractionWaitEvent = {
+      id: req.id,
+      kind: "approval",
+      threadId: approvalThreadId
+    }
+    await options.interactionWaitHooks?.onWaitStart(waitEvent)
+    const decision = await new Promise<ApprovalDecision>((resolve) => {
       let settled = false
       let attentionRaised = false
       let timeoutId: ReturnType<typeof setTimeout> | undefined
@@ -4767,6 +4860,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         settled = true
         cleanup()
         pendingApprovals.delete(req.id)
+        approvalDecisionBroker.unregister(req.id)
         if (attentionRaised) {
           attentionRaised = false
           emitAppAttention({
@@ -4815,6 +4909,12 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         // hasPendingWorkflowApproval can tell which workflow run is blocked.
         runtimeThreadId: threadId,
         targetWebContentsIds: BrowserWindow.getAllWindows().map((w) => w.webContents.id)
+      })
+      approvalDecisionBroker.register({
+        request: req,
+        threadId: approvalThreadId,
+        runtimeThreadId: threadId,
+        resolve: (decision) => pendingApprovals.get(req.id)?.resolve(decision)
       })
       options.abortSignal?.addEventListener("abort", onAbort, { once: true })
       if (options.abortSignal?.aborted) {
@@ -4870,6 +4970,10 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         win.webContents.send(`approval:request:${approvalThreadId}`, req)
       }
     })
+    if (!options.abortSignal?.aborted) {
+      await options.interactionWaitHooks?.onWaitEnd(waitEvent)
+    }
+    return decision
   }
 
   const approvalStore = getOrCreateApprovalStore(approvalThreadId)
@@ -4901,9 +5005,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   //    builds/installs/tests, so the guidance would steer the agent into commands
   //    the gate rejects (contradicting its access prompt). Suppress it there too.
   // The main agent (no filesystemAccess), verify, and whole-workspace write keep it.
-  const executeToolAvailable = options.filesystemAccess
-    ? !blockedToolNamesForAccess(options.filesystemAccess).has("execute")
-    : true
+  const executeToolAvailable =
+    !runtimeBlockedToolNames.has("execute") &&
+    (options.filesystemAccess
+      ? !blockedToolNamesForAccess(options.filesystemAccess).has("execute")
+      : true)
   const isReadOnlyRuntime =
     options.filesystemAccess?.shellAccess === "read_only" ||
     options.filesystemAccess?.workload === "read_only"
@@ -5148,13 +5254,18 @@ The workspace root is: ${fileRoot}`
   let eagerMcpMetadata: McpCapabilityTool[] = []
   let lazyMcpMetadata: McpCapabilityTool[] = []
   const deferredSavedTools =
-    !isConstrainedCoordinatorWorker && codeExecEnabled && runtimePolicy.includeSavedCodeExecTools
+    !disableMcpTools &&
+    !isConstrainedCoordinatorWorker &&
+    codeExecEnabled &&
+    runtimePolicy.includeSavedCodeExecTools
       ? listSavedCodeExecTools()
       : []
   let mcpTools: ReturnType<typeof createEagerMcpTools> = []
   let toolSearchTools: unknown[] = []
 
-  if (isConstrainedCoordinatorWorker) {
+  if (disableMcpTools) {
+    console.log("[Runtime] MCP and deferred code-exec tools disabled by runtime policy")
+  } else if (isConstrainedCoordinatorWorker) {
     // Keep EAGER MCP (a structured single tool call, bounded by the MCP server's
     // own permissions — safe for a restricted worker, and matching CC subagents +
     // the Solo/workflow read-only baseline which both keep eager MCP). WITHHOLD the
@@ -5217,29 +5328,19 @@ The workspace root is: ${fileRoot}`
       createRequestUserInputTool({
         threadId: options.threadId,
         abortSignal: options.abortSignal,
+        allowDeferredRenderer: options.allowDeferredUserInputRenderer,
+        interactionWaitHooks: options.interactionWaitHooks,
         requestUserInputConfig: options.requestUserInputConfig
       })
     )
   }
   if (!options.noSchedulerTool && !runtimePolicy.isProjectMode) {
-    let chatxRobotChatId: string | null = null
-    if (options.threadId) {
-      try {
-        const threadRow = getThreadCore(options.threadId)
-        if (threadRow?.metadata) {
-          const meta = JSON.parse(threadRow.metadata)
-          chatxRobotChatId = (meta.chatxRobotChatId as string) || null
-        }
-      } catch {
-        /* ignore */
-      }
-    }
     extraTools.push(
       createSchedulerTool({
         workspacePath,
         modelId: options.modelId,
         threadId: options.threadId,
-        chatxRobotChatId
+        imDeliveryContext: options.imDeliveryContext ?? null
       })
     )
   }
@@ -5571,7 +5672,10 @@ The workspace root is: ${fileRoot}`
   const finalTools = filterCoordinatorWorkerFinalTools(
     [...mcpTools, ...memoryTools, ...extraTools, ...toolSearchTools],
     options.filesystemAccess
-  )
+  ).filter((tool) => {
+    const name = (tool as { name?: string }).name
+    return !name || !runtimeBlockedToolNames.has(name)
+  })
   const hasNamedTool = (name: string): boolean => {
     return finalTools.some((tool) => (tool as { name?: string }).name === name)
   }
@@ -6486,6 +6590,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     mainFilesystemEnabled: !isCoordinatorMode,
     mainSubagentsEnabled,
     filesystemAccess: options.filesystemAccess,
+    mainBlockedToolNames: [...runtimeBlockedToolNames],
     managedExecution,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox

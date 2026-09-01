@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { dirname, join, posix } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it } from "vitest"
@@ -107,7 +107,7 @@ describe("workspace file preview reader", () => {
     )
 
     expect(page.result.content).toBe("inside")
-    expect(page.resolvedPath).toBe(filePath)
+    expect(page.resolvedPath).toBe(await realpath(filePath))
   })
 
   it("rejects an absolute renderer candidate outside the authoritative workspace", async () => {
@@ -147,7 +147,9 @@ describe("workspace file preview reader", () => {
   })
 
   it("resolves the POSIX file-tree /src convention relative to the authoritative root", () => {
-    expect(resolveWorkspacePreviewCandidate("/src/file.ts", "/workspace", "relative", posix)).toEqual({
+    expect(
+      resolveWorkspacePreviewCandidate("/src/file.ts", "/workspace", "relative", posix)
+    ).toEqual({
       root: "/workspace",
       candidate: "/workspace/src/file.ts"
     })
@@ -190,6 +192,6 @@ describe("workspace file preview reader", () => {
     )
 
     expect(page.result.content).toBe("auto")
-    expect(page.resolvedPath).toBe(filePath)
+    expect(page.resolvedPath).toBe(await realpath(filePath))
   })
 })

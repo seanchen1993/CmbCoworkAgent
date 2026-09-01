@@ -224,12 +224,8 @@ async function testRendererSendsAgentMode(): Promise<void> {
     "projectSubagentsAvailable",
     "project mode does not add a separate task-tool policy over Solo/Multi selection"
   )
-  const modeHelpers = await readProjectFile(
-    "src/renderer/src/lib/coordinator-mode-helpers.ts"
-  )
-  const sharedAgentModeMetadata = await readProjectFile(
-    "src/shared/agent-mode-metadata.ts"
-  )
+  const modeHelpers = await readProjectFile("src/renderer/src/lib/coordinator-mode-helpers.ts")
+  const sharedAgentModeMetadata = await readProjectFile("src/shared/agent-mode-metadata.ts")
   assertIncludes(
     modeHelpers,
     "resolveThreadExecutionModeFromMetadata(metadata)",
@@ -891,26 +887,27 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   const streamSerialization = await readProjectFile("src/main/ipc/stream-data-serialization.ts")
   const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
+  const standardThreadTurn = await readProjectFile("src/main/agent/standard-thread-turn.ts")
   assertIncludes(
     agentIpc,
     'return agentMode === "normal" && metadata.subagentsEnabled === false',
     "main process disables task subagents only for explicitly persisted Solo threads"
   )
   assertNotIncludes(
-    agentIpc,
+    standardThreadTurn,
     "enableTaskTool",
-    "project sessions do not layer a task-tool switch over the selected execution mode"
+    "project sessions rely on the selected execution mode instead of a second task-tool switch"
   )
-  assertMatches(
-    agentIpc,
-    /console\.warn\("\[HarnessBoard\] Failed to build harness agent context:"[\s\S]{0,800}?\.\.\.\(harnessFeature[\s\S]{0,300}?featureId:\s*harnessFeature\.slug,[\s\S]{0,200}?harnessProjectId:\s*harnessFeature\.projectId,/,
+  assertIncludes(
+    standardThreadTurn,
+    "{ featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }",
     "Harness feature failures preserve project-mode identity for runtime policy"
   )
   assertOccurrenceCount(
     agentIpc,
     "disableSubagents: shouldDisableNormalModeSubagents(",
-    7,
-    "invoke, resume, interrupt, and failover runtime construction all preserve the Solo/Multi policy"
+    3,
+    "invoke, resume, and interrupt runtime factories preserve the Solo/Multi policy across failovers"
   )
   const replacementLock = await readProjectFile("src/main/ipc/async-keyed-lock.ts")
   assertIncludes(
@@ -927,8 +924,8 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertIncludes(agentIpc, "coordinatorWorkerManager", "agent IPC imports worker manager")
   assertIncludes(
     agentIpc,
-    "getAgentModeFromMetadata(metadata)",
-    "agent IPC can load persisted mode"
+    "parsedThreadMetadata.agentMode",
+    "agent IPC loads persisted mode through the shared Thread metadata parser"
   )
   assertIncludes(agentIpc, "requestedAgentMode", "agent IPC reads requested mode")
   assertIncludes(
@@ -1262,6 +1259,16 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     '"agent:coordinator-workers"',
     '"agent:coordinator-workers-unsubscribe"'
   )
+  assertIncludes(
+    coordinatorWorkersHandler,
+    "await readCoordinatorWorkspacePath(threadId)",
+    "coordinator history refreshes resolve workspace metadata off the main thread"
+  )
+  assertIncludes(
+    agentIpc,
+    "await readThreadWorkspacePathInWorker(threadId)",
+    "coordinator workspace hydration uses the bounded metadata worker"
+  )
   assertNotIncludes(
     coordinatorWorkersHandler,
     "existingWorkers.length > 0",
@@ -1297,9 +1304,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "activeCoordinatorNotificationSelectedSkills",
     "agent IPC keeps per-notification selected skill context for coordinator follow-up turns"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "const parsedCoordinatorSelectedSkill =\n            extractCoordinatorSelectedSkill(effectiveMessage) ?? undefined",
+    /const parsedCoordinatorSelectedSkill =\s+extractCoordinatorSelectedSkill\(effectiveMessage\) \?\? undefined/,
     "agent invoke extracts structured selected skill metadata before prompt adaptation"
   )
   assertIncludes(
@@ -1372,9 +1379,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "notificationSkills.some((selectedSkill) => !selectedSkill)",
     "agent invoke refuses to infer a shared selected skill from mixed notification batches that include skill-less workers"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "coordinatorNotificationSelectedSkills,\n              coordinatorWorkerTurnPlanning,\n              abortSignal: abortController.signal",
+    /coordinatorNotificationSelectedSkills,\s+coordinatorWorkerTurnPlanning,\s+abortSignal: abortController\.signal/,
     "agent invoke passes notification-selected skill context into the first coordinator runtime"
   )
   assertIncludes(
@@ -1382,9 +1389,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()",
     "agent invoke preserves coordinator worker planning counters across failover runtime rebuilds"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "coordinatorTurnPrompt,\n              coordinatorSelectedSkill,",
+    /coordinatorTurnPrompt,\s+coordinatorSelectedSkill,/,
     "agent invoke passes turn-scoped coordinator context into the first coordinator runtime"
   )
   assertIncludes(
@@ -1407,9 +1414,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "coordinatorTurnPrompt: resumeCoordinatorTurnPrompt",
     "agent resume passes the coordinator turn context into runtime recreation and failover"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "let resumeCoordinatorNotificationSelectedSkills =\n        getActiveOrPersistedCoordinatorNotificationSelectedSkills(threadId, metadata)",
+    /let resumeCoordinatorNotificationSelectedSkills =\s+getActiveOrPersistedCoordinatorNotificationSelectedSkills\(threadId, metadata\)/,
     "agent resume inherits current notification-selected skill context from the active coordinator run or persisted thread metadata"
   )
   assertIncludes(
@@ -1477,9 +1484,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "coordinatorTurnPrompt: interruptCoordinatorTurnPrompt",
     "agent interrupt passes the coordinator turn context into runtime recreation and failover"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "let interruptCoordinatorNotificationSelectedSkills =\n      getActiveOrPersistedCoordinatorNotificationSelectedSkills(threadId, metadata)",
+    /let interruptCoordinatorNotificationSelectedSkills =\s+getActiveOrPersistedCoordinatorNotificationSelectedSkills\(threadId, metadata\)/,
     "agent interrupt inherits current notification-selected skill context from the active coordinator run or persisted thread metadata"
   )
   assertIncludes(
@@ -1946,9 +1953,9 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "userHumanMessage",
     "agent IPC includes both normal user input and worker notifications when they arrive in the same coordinator turn"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "persistedCoordinatorTurnPromptForMetadata =\n            buildCoordinatorTurnContextPrompt(runningWorkerContext)",
+    /persistedCoordinatorTurnPromptForMetadata =\s+buildCoordinatorTurnContextPrompt\(runningWorkerContext\)/,
     "agent IPC persists only worker context metadata, not full worker notification XML"
   )
   assertNotIncludes(
@@ -2009,7 +2016,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   assertSourceOrder(
     agentIpc,
     "coordinatorTurnPrompt = buildCoordinatorTurnContextPrompt(",
-    "invokeRoutingResult = await resolveModel({",
+    "const preparedRouting = await resolveStandardTurnRouting({",
     "agent IPC builds coordinator context before model routing runs"
   )
   assertIncludes(
@@ -3033,61 +3040,6 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     /finally \{\s*if \(deletingThreads\.get\(threadId\) === deletion\) deletingThreads\.delete\(threadId\)/,
     "the deletion mutex entry is released on success AND failure (finally), so a failed delete can be retried"
   )
-  const chatxService = await readProjectFile("src/main/services/chatx.ts")
-  assertIncludes(
-    chatxService,
-    "handleInbound(next, true)",
-    "chatx queue drain must skip receipt-dedup — the entry's id was marked when it was queued, so re-checking silently dropped every queued message"
-  )
-  assertOccurrenceCount(
-    chatxService,
-    "abortController.signal.reason === CHATX_STOP_ABORT_REASON",
-    1,
-    "the stop reason may be consulted ONCE, in the abort CLASSIFICATION only — never for a handler-side dedup release (stopChatX's synchronous release is the single point; a second delete can strip a redelivered copy's fresh mark)"
-  )
-  assertSourceOrder(
-    chatxService,
-    "const replySent = lastAssistantText",
-    'processedOutcome = "replied"',
-    "the replied outcome is claimed only AFTER the HTTP send is verified — a swallowed send failure must not masquerade as 回复完成 while the remote got nothing"
-  )
-  assertOccurrenceCount(
-    chatxService,
-    "drainNextQueued(",
-    5,
-    "queue draining continues on EVERY requeued exit (definition + main finally + robot-gone + workspace-missing + setup-failure) — an early-exiting requeued message must not strand the backlog"
-  )
-  {
-    const stopChatXBody = chatxService.slice(
-      chatxService.indexOf("export function stopChatX"),
-      chatxService.indexOf("export function cancelChatXByThreadId")
-    )
-    assertIncludes(
-      stopChatXBody,
-      "processedMsgIds.delete(queued.msgId)",
-      "stopChatX releases the dedup marks of the queued messages it drops — dropped ≠ processed, broker redeliveries must still land after a restart"
-    )
-    assertMatches(
-      chatxService,
-      /inFlightMsgIds\.delete\(chatKey\)[\s\S]{0,900}?sendChatXReply/,
-      "the success branch removes the message from the stop-releasable set BEFORE the reply is sent — a stop landing after the reply must not re-open an already-answered msgId for redelivery (duplicate tools/replies)"
-    )
-    assertIncludes(
-      stopChatXBody,
-      "processedMsgIds.delete(activeMsgId)",
-      "stopChatX releases the ACTIVE message's dedup mark synchronously at abort — the handler's finally-release loses the race against a quick reconnect's broker redelivery"
-    )
-    assertIncludes(
-      stopChatXBody,
-      "controller.abort(CHATX_STOP_ABORT_REASON)",
-      "stopChatX carries its intent ON the abort signal — the global `stopped` flag is reset by restartChatX before the aborted handler's catch runs, so a flag check there swallows broker redeliveries"
-    )
-    assertNotIncludes(
-      stopChatXBody,
-      "runningChats.clear()",
-      "stopChatX must NOT clear owner-managed run state — the handler's finally does, after its close settles (else stop→restart reopens the dual-writer window on a reused chat thread)"
-    )
-  }
   const schedulerService = await readProjectFile("src/main/services/scheduler.ts")
   assertSourceOrder(
     schedulerService,
@@ -3095,27 +3047,17 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "runningTasks.delete(taskId)",
     "scheduler run state survives until the checkpointer close settles (owner-finally), while still deleting before the renderer broadcast"
   )
-  for (const [label, source] of [
-    ["chatx", chatxService],
-    ["scheduler", schedulerService]
-  ] as const) {
-    assertSourceOrder(
-      source,
-      "dbDeleteThread(threadId)",
-      "purgeThreadCheckpointArtifacts(threadId)",
-      `${label}'s discarded-thread cleanup deletes the transcript too (retire + purge), matching threads:delete semantics — a bare DB-row delete leaves an orphan checkpoint the finally's reusable close just flushed`
-    )
-    assertSourceOrder(
-      source,
-      "await retireThreadCheckpointers(threadId)",
-      "purgeThreadCheckpointArtifacts(threadId)",
-      `${label}'s discarded-thread cleanup must RETIRE before purging (writers poisoned before the disk sweep) — dbDelete + purge without retire would let the finally's reusable close resurrect the file`
-    )
-  }
-  assertMatches(
-    chatxService,
-    /await closeCheckpointer\(threadId\)[\s\S]{0,600}?threadIdToChatKey\.delete\(threadId\)\s*runningChats\.delete\(chatKey\)/,
-    "chatx keeps both its thread ownership mapping and runningChats gate until the checkpointer close settles — inbound re-entry and destructive deletion must not observe false-idle state while the old saver is still flushing"
+  assertSourceOrder(
+    schedulerService,
+    "dbDeleteThread(threadId)",
+    "purgeThreadCheckpointArtifacts(threadId)",
+    "scheduler discarded-thread cleanup deletes the transcript and checkpoint artifacts"
+  )
+  assertSourceOrder(
+    schedulerService,
+    "await retireThreadCheckpointers(threadId)",
+    "purgeThreadCheckpointArtifacts(threadId)",
+    "scheduler discarded-thread cleanup retires writers before purging"
   )
   {
     const stopSchedulerBody = schedulerService.slice(
@@ -3130,7 +3072,7 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     assertNotIncludes(
       stopSchedulerBody,
       "runningTasks.clear()",
-      "stopScheduler must NOT clear run state — executeTask's finally releases it after its own cleanup settles (owner-finally principle, same as stopChatX/stopHeartbeat)"
+      "stopScheduler must NOT clear run state — executeTask's finally releases it after its own cleanup settles"
     )
     assertNotIncludes(
       stopSchedulerBody,
@@ -3166,9 +3108,17 @@ async function testRuntimeKeepsNormalAndCoordinatorSeparate(): Promise<void> {
     "const existing = dbGetThreadCore(threadId)",
     "heartbeat revives UNCONDITIONALLY (before the row-exists branch) — a row-missing-only revive deadlocks when a deletion's late retire re-tombstones a mid-deletion recreation"
   )
-  assertMatches(
-    heartbeatService,
-    /await closeCheckpointer\(HEARTBEAT_THREAD_ID\)[^\n]*\n(?:\s*\}\n)?\s*running = false/,
+  const heartbeatRunFinally = heartbeatService.slice(heartbeatService.lastIndexOf("  } finally {"))
+  assertSourceOrder(
+    heartbeatRunFinally,
+    "await closeCheckpointer(HEARTBEAT_THREAD_ID)",
+    'releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)',
+    "heartbeat releases its local Thread lease only after checkpointer close"
+  )
+  assertSourceOrder(
+    heartbeatRunFinally,
+    'releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)',
+    "running = false",
     "heartbeat keeps `running` up until its checkpointer close settles — a run-now in the close window would pin, skip the pending-close wait, and dual-write the same file"
   )
   assertSourceOrder(
@@ -3449,16 +3399,15 @@ async function testHookAgentIdentityPlumbing(): Promise<void> {
     /const switchToNextFailoverCandidate = async[\s\S]{0,180}?if \(isHookHaltError\(error\)\) throw error/,
     "goal-continuation failover never reclassifies a Hook halt as a model failure"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "catch (midStreamErr) {\n            if (isHookHaltError(midStreamErr)) throw midStreamErr",
+    /catch \(midStreamErr\) \{\s+if \(isHookHaltError\(midStreamErr\)\) throw midStreamErr/,
     "initial stream bypasses disconnect retry for Hook halts"
   )
-  assertOccurrenceCount(
-    agentIpc,
-    "catch (midErr) {\n            if (isHookHaltError(midErr)) throw midErr",
-    2,
-    "resume and interrupt-continue bypass disconnect retry for Hook halts"
+  assert(
+    (agentIpc.match(/catch \(midErr\) \{\s+if \(isHookHaltError\(midErr\)\) throw midErr/g) ?? [])
+      .length === 2,
+    "resume and interrupt-continue must both bypass disconnect retry for Hook halts"
   )
   assertMatches(
     agentIpc,

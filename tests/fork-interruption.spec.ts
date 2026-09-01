@@ -17,8 +17,7 @@ async function readProjectFile(path: string): Promise<string> {
 
 async function testAbortPathsMarkStableForkBoundary(): Promise<void> {
   const source = await readProjectFile("src/main/ipc/agent.ts")
-  const interruptedMarkerCalls =
-    source.match(/source: "agent_run_interrupted"/g)?.length ?? 0
+  const interruptedMarkerCalls = source.match(/source: "agent_run_interrupted"/g)?.length ?? 0
 
   assert.equal(
     interruptedMarkerCalls,
@@ -207,7 +206,8 @@ async function testStoppedStreamSyncsDurableTranscript(): Promise<void> {
 
 async function testDurableSyncThreadLifecycleBoundaries(): Promise<void> {
   const source = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
-  const lifecycleChecks = source.match(/initializedThreadsRef\.current\.has\(threadId\)/g)?.length ?? 0
+  const lifecycleChecks =
+    source.match(/initializedThreadsRef\.current\.has\(threadId\)/g)?.length ?? 0
 
   assert(
     lifecycleChecks >= 4,

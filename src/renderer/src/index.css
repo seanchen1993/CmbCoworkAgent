@@ -897,59 +897,6 @@
   -webkit-app-region: drag;
 }
 
-@keyframes lobster-blink {
-  0%,
-  90%,
-  100% {
-    transform: scaleY(1);
-  }
-  95% {
-    transform: scaleY(0.1);
-  }
-}
-
-@keyframes antenna-left {
-  0%,
-  100% {
-    transform: rotate(0deg);
-  }
-  30% {
-    transform: rotate(-15deg);
-  }
-  60% {
-    transform: rotate(8deg);
-  }
-}
-
-@keyframes antenna-right {
-  0%,
-  100% {
-    transform: rotate(0deg);
-  }
-  40% {
-    transform: rotate(15deg);
-  }
-  70% {
-    transform: rotate(-8deg);
-  }
-}
-
-@keyframes lobster-sway-bounce {
-  0%,
-  100% {
-    transform: translateY(0) rotate(0deg);
-  }
-  25% {
-    transform: translateY(-2px) rotate(6deg);
-  }
-  50% {
-    transform: translateY(0) rotate(0deg);
-  }
-  75% {
-    transform: translateY(-2px) rotate(-6deg);
-  }
-}
-
 .app-badge-name {
   font-family: "Inter", ui-sans-serif, sans-serif;
   font-size: 17px;

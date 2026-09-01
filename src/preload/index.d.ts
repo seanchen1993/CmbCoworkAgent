@@ -20,6 +20,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -29,7 +33,6 @@ import type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
-  ChatXConfig,
   HookLoggingConfig,
   PluginHookMetadata,
   PluginDetail,
@@ -2076,6 +2079,9 @@ interface CustomAPI {
       threadId: string,
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
+    listenToThreadActivity: (
+      callback: (activity: { threadId: string; type: string }) => void
+    ) => () => void
   }
   heartbeat: {
     getConfig: () => Promise<HeartbeatConfig>
@@ -2091,6 +2097,25 @@ interface CustomAPI {
       threadId: string,
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
+  }
+  builtinRobot: {
+    getStatus: () => Promise<BuiltinRobotStatus>
+    getRemoteAccess: () => Promise<BuiltinRobotRemoteAccessOverview>
+    setThreadRemoteAccess: (
+      threadId: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    setFeatureRemoteAccess: (
+      projectId: string,
+      featureSlug: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    listGrantableFeatures: () => Promise<BuiltinRobotGrantableFeature[]>
+    saveSettings: (updates: Partial<BuiltinRobotSettings>) => Promise<BuiltinRobotStatus>
+    reconnect: () => Promise<BuiltinRobotStatus>
+    disconnect: () => Promise<BuiltinRobotStatus>
+    cleanupLegacy: () => Promise<BuiltinRobotStatus>
+    onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }
   plugins: {
     list: () => Promise<PluginMetadata[]>
@@ -2135,12 +2160,6 @@ interface CustomAPI {
       content: string
     ) => Promise<{ success: boolean; error?: string }>
   }
-  chatx: {
-    getConfig: () => Promise<ChatXConfig>
-    saveConfig: (updates: Partial<ChatXConfig>) => Promise<void>
-    restart: () => Promise<void>
-    cancelByThread: (threadId: string) => Promise<boolean>
-  }
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">
     setMode: (mode: "none" | "unelevated" | "readonly" | "elevated") => Promise<void>
@@ -2169,6 +2188,10 @@ interface CustomAPI {
       pushResult?: { success: boolean; error?: string }
     }) => void
     onApprovalRequest: (threadId: string, callback: (request: unknown) => void) => () => void
+    onApprovalResolved: (
+      threadId: string,
+      callback: (data: { requestId: string; decision: "approve" | "reject" }) => void
+    ) => () => void
     onApprovalTimeout: (
       threadId: string,
       callback: (data: { requestId: string }) => void
@@ -2181,6 +2204,7 @@ interface CustomAPI {
   }
   userInput: {
     sendResponse: (response: UserInputResponse) => void
+    getPending: (threadId: string) => Promise<UserInputRequest | null>
     onRequest: (threadId: string, callback: (request: UserInputRequest) => void) => () => void
     onCancel: (
       threadId: string,

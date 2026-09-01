@@ -11,6 +11,7 @@ interface ImportMetaEnv {
   readonly VITE_ZZJ_WEB_URL: string
   readonly VITE_JUMP_RECORD_SKILL_URL?: string
   readonly VITE_PROJECT_MODE_AGENT_TEAM_ENABLED?: string
+  readonly VITE_BUILTIN_ROBOT_DEBUG_YST_IDS?: string
 }
 
 interface ImportMeta {

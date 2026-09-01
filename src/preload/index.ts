@@ -26,6 +26,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -39,7 +43,6 @@ import type {
   PluginDetail,
   PluginMetadata,
   SkillHookMetadata,
-  ChatXConfig,
   HookCatalogPage,
   HookCatalogPageInput,
   SkillPluginCatalogPage,
@@ -99,10 +102,7 @@ import type {
   AttachmentGrantParseRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
-import type {
-  SkillPreviewGrantRequest,
-  SkillPreviewGrantResult
-} from "../shared/skill-preview"
+import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -686,8 +686,8 @@ const api = {
       const ambientChannel = command
         ? `agent:stream:${threadId}`
         : coordinatorInternalNotification
-        ? `agent:stream:${threadId}:coordinator-internal`
-        : `agent:stream:${threadId}`
+          ? `agent:stream:${threadId}:coordinator-internal`
+          : `agent:stream:${threadId}`
       const streamRequestId = randomUUID()
       const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       const cleanup = listenForAgentStreamRequest(
@@ -1627,7 +1627,12 @@ const api = {
           workspacePath
         })) as WorkspaceFileScanOpenResult
         if (!opened.success || !opened.scanId) {
-          return { success: false, files: [], error: opened.error, workspacePath: opened.workspacePath }
+          return {
+            success: false,
+            files: [],
+            error: opened.error,
+            workspacePath: opened.workspacePath
+          }
         }
         const files: WorkspaceFileScanPageResult["files"] = []
         try {
@@ -1637,7 +1642,12 @@ const api = {
               threadId
             })) as WorkspaceFileScanPageResult
             if (!page.success) {
-              return { success: false, files: [], error: page.error, workspacePath: page.workspacePath }
+              return {
+                success: false,
+                files: [],
+                error: page.error,
+                workspacePath: page.workspacePath
+              }
             }
             files.push(...page.files)
             if (page.truncated) {
@@ -2130,9 +2140,7 @@ const api = {
       }>
     },
     // Listen for file changes in the workspace
-    onFilesChanged: (
-      callback: (data: WorkspaceFilesChangedPayload) => void
-    ): (() => void) => {
+    onFilesChanged: (callback: (data: WorkspaceFilesChangedPayload) => void): (() => void) => {
       const handler = (_: unknown, data: unknown): void => {
         const payload = normalizeWorkspaceFilesChangedPayload(data)
         if (payload) callback(payload)
@@ -2245,9 +2253,7 @@ const api = {
     listPlugins: (): Promise<SkillMetadata[]> => {
       return ipcRenderer.invoke("skills:listPlugins")
     },
-    requestPreviewGrant: (
-      request: SkillPreviewGrantRequest
-    ): Promise<SkillPreviewGrantResult> => {
+    requestPreviewGrant: (request: SkillPreviewGrantRequest): Promise<SkillPreviewGrantResult> => {
       return ipcRenderer.invoke("skills:requestPreviewGrant", request)
     },
     cancelPreviewGrant: (): Promise<void> => {
@@ -2593,6 +2599,18 @@ const api = {
       return () => {
         ipcRenderer.removeListener(channel, handler)
       }
+    },
+    listenToThreadActivity: (
+      callback: (activity: { threadId: string; type: string }) => void
+    ): (() => void) => {
+      const channel = "scheduler:thread-activity"
+      const handler = (_: unknown, activity: { threadId: string; type: string }): void => {
+        callback(activity)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   memory: {
@@ -2819,6 +2837,51 @@ const api = {
       }
     }
   },
+  builtinRobot: {
+    getStatus: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
+    getRemoteAccess: (): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke(
+        "builtinRobot:getRemoteAccess"
+      ) as Promise<BuiltinRobotRemoteAccessOverview>,
+    setThreadRemoteAccess: (
+      threadId: string,
+      enabled: boolean
+    ): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke("builtinRobot:setThreadRemoteAccess", {
+        id: threadId,
+        enabled
+      }) as Promise<BuiltinRobotRemoteAccessOverview>,
+    setFeatureRemoteAccess: (
+      projectId: string,
+      featureSlug: string,
+      enabled: boolean
+    ): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke("builtinRobot:setFeatureRemoteAccess", {
+        projectId,
+        featureSlug,
+        enabled
+      }) as Promise<BuiltinRobotRemoteAccessOverview>,
+    listGrantableFeatures: (): Promise<BuiltinRobotGrantableFeature[]> =>
+      ipcRenderer.invoke("builtinRobot:listGrantableFeatures") as Promise<
+        BuiltinRobotGrantableFeature[]
+      >,
+    saveSettings: (updates: Partial<BuiltinRobotSettings>): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:saveSettings", updates) as Promise<BuiltinRobotStatus>,
+    reconnect: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:reconnect") as Promise<BuiltinRobotStatus>,
+    disconnect: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:disconnect") as Promise<BuiltinRobotStatus>,
+    cleanupLegacy: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:cleanupLegacy", {
+        confirmed: true
+      }) as Promise<BuiltinRobotStatus>,
+    onStatus: (callback: (status: BuiltinRobotStatus) => void): (() => void) => {
+      const handler = (_event: unknown, status: BuiltinRobotStatus): void => callback(status)
+      ipcRenderer.on("builtinRobot:status", handler)
+      return () => ipcRenderer.removeListener("builtinRobot:status", handler)
+    }
+  },
   skillEvolution: {
     // ── Phase 1: Intent banner ("Want to save as skill?") ──────────
     onIntentRequest: (
@@ -3018,15 +3081,6 @@ const api = {
         error?: string
       }>
   },
-  chatx: {
-    getConfig: (): Promise<ChatXConfig> =>
-      ipcRenderer.invoke("chatx:get-config") as Promise<ChatXConfig>,
-    saveConfig: (updates: Partial<ChatXConfig>): Promise<void> =>
-      ipcRenderer.invoke("chatx:save-config", updates) as Promise<void>,
-    restart: (): Promise<void> => ipcRenderer.invoke("chatx:restart") as Promise<void>,
-    cancelByThread: (threadId: string): Promise<boolean> =>
-      ipcRenderer.invoke("chatx:cancel-by-thread", threadId) as Promise<boolean>
-  },
   sandbox: {
     getMode: (): Promise<"none" | "unelevated" | "readonly" | "elevated"> =>
       ipcRenderer.invoke("sandbox:getMode") as Promise<
@@ -3094,6 +3148,23 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     },
+    // Listen for approval decisions completed outside the desktop renderer (for example via IM).
+    onApprovalResolved: (
+      threadId: string,
+      callback: (data: { requestId: string; decision: "approve" | "reject" }) => void
+    ): (() => void) => {
+      const channel = `approval:resolved:${threadId}`
+      const handler = (
+        _: unknown,
+        data: { requestId: string; decision: "approve" | "reject" }
+      ): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
     // Listen for approval timeout notifications from main → renderer
     onApprovalTimeout: (
       threadId: string,
@@ -3136,6 +3207,8 @@ const api = {
     sendResponse: (response: UserInputResponse): void => {
       ipcRenderer.send("userInput:response", response)
     },
+    getPending: (threadId: string): Promise<UserInputRequest | null> =>
+      ipcRenderer.invoke("userInput:getPending", threadId) as Promise<UserInputRequest | null>,
     onRequest: (threadId: string, callback: (request: UserInputRequest) => void): (() => void) => {
       const channel = `userInput:request:${threadId}`
       const handler = (_: unknown, request: UserInputRequest): void => {
@@ -3988,11 +4061,7 @@ const api = {
     userProfiles: (
       sapIds: string[],
       options?: {
-        family?:
-          | "dashboard-market"
-          | "project-mode-market"
-          | "harness-market"
-          | "customize-market"
+        family?: "dashboard-market" | "project-mode-market" | "harness-market" | "customize-market"
       }
     ): Promise<{
       success: boolean
@@ -4015,8 +4084,7 @@ const api = {
         upperOrgLv1?: string
       }>
       error?: string
-    }> =>
-      ipcRenderer.invoke("dashboard:queryAllUser"),
+    }> => ipcRenderer.invoke("dashboard:queryAllUser"),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -4152,7 +4220,10 @@ const api = {
   },
   harnessBoard: {
     catalogPage: (input: HarnessBoardCatalogPageInput): Promise<HarnessBoardCatalogPageResult> =>
-      ipcRenderer.invoke("harnessBoard:catalogPage", input) as Promise<HarnessBoardCatalogPageResult>,
+      ipcRenderer.invoke(
+        "harnessBoard:catalogPage",
+        input
+      ) as Promise<HarnessBoardCatalogPageResult>,
     cancelCatalogRequests: (
       scope?: "board" | "board-registry" | "board-sidebar" | "board-settings" | "chat-binding"
     ): Promise<void> =>

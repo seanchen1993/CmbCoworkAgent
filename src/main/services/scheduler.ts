@@ -11,7 +11,6 @@ import {
 import { getModelConfigByRef } from "../models/registry"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { TraceCollector } from "../agent/trace/collector"
-import { trySendChatXReply } from "./chatx"
 import {
   createAgentRuntime,
   closeCheckpointer,
@@ -24,6 +23,13 @@ import { StreamConverter } from "../agent/stream-converter"
 import { notifyAlways, stripThink } from "./notify"
 import { showPetCompletedTaskNotice } from "../pet"
 import { emitAppAttention } from "../app-attention-events"
+import {
+  assertLocalThreadRunLease,
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
+import type { ScheduledTask } from "../types"
+import { executeImInboxScheduledTask } from "./im/inbox-scheduler"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { getAgentGraphRecursionLimit } from "../../shared/agent-runtime-limits"
 
@@ -87,7 +93,7 @@ export function stopScheduler(): void {
   }
   // Abort only — run state (runningTasks / activeAbortControllers) is released
   // by each executeTask's finally AFTER its own cleanup and checkpointer close
-  // settle (same owner-finally principle as stopChatX/stopHeartbeat). Clearing
+  // settle (the same owner-finally principle as heartbeat). Clearing
   // here would make isTaskRunning()/cancelTask() lie during the unwind window,
   // and a stop→start could re-run a task whose previous run is still settling.
   console.log("[Scheduler] Stopped scheduler service")
@@ -154,12 +160,68 @@ function broadcastToChannel(channel: string, data: unknown): void {
   }
 }
 
+async function executeManagedInboxTask(task: ScheduledTask): Promise<void> {
+  runningTasks.add(task.id)
+  const abortController = new AbortController()
+  activeAbortControllers.set(task.id, abortController)
+  notifyRenderer("scheduledTasks:changed")
+  const startedAt = new Date()
+  try {
+    const result = await executeImInboxScheduledTask(task, abortController.signal, {
+      occurrence: task.nextRunAt ?? undefined
+    })
+    if (result.status === "deferred") {
+      console.log(`[Scheduler] Deferred managed inbox reminder ${task.id}: ${result.reasonCode}`)
+      return
+    }
+
+    updateScheduledTaskRunResult(task.id, "ok", null)
+    recordRun(task.id, task.name, startedAt, "ok", null)
+    if (task.frequency === "once") setScheduledTaskEnabled(task.id, false)
+    showTaskNotification(task.name, "ok", result.text)
+    showPetCompletedTaskNotice(task.imDeliveryContext!.inboxThreadId, task.name)
+    emitAppAttention({
+      kind: "task-complete",
+      threadId: task.imDeliveryContext!.inboxThreadId,
+      key: `scheduled-task:${task.id}:${result.deliveryId}`
+    })
+  } catch (error) {
+    const cancelled =
+      abortController.signal.aborted ||
+      (error instanceof Error && (error.name === "AbortError" || /aborted/i.test(error.message)))
+    const message = cancelled
+      ? "Cancelled by user"
+      : error instanceof Error
+        ? error.message
+        : String(error)
+    updateScheduledTaskRunResult(task.id, "error", message)
+    recordRun(task.id, task.name, startedAt, "error", message)
+    if (!cancelled) {
+      showTaskNotification(task.name, "error", message)
+      emitAppAttention({
+        kind: "task-error",
+        threadId: task.imDeliveryContext!.inboxThreadId,
+        key: `scheduled-task:${task.id}:${startedAt.toISOString()}`
+      })
+    }
+  } finally {
+    runningTasks.delete(task.id)
+    activeAbortControllers.delete(task.id)
+    notifyRenderer("scheduledTasks:changed")
+    notifyRenderer("threads:changed")
+  }
+}
+
 async function executeTask(taskId: string): Promise<void> {
   if (shuttingDown) throw new Error("The application is quitting; scheduled tasks cannot start.")
   const tasks = getScheduledTasks()
   const task = tasks.find((t) => t.id === taskId)
   if (!task) throw new Error(`任务不存在: ${taskId}`)
   if (!task.enabled) return
+  if (task.imDeliveryContext) {
+    await executeManagedInboxTask(task)
+    return
+  }
 
   runningTasks.add(taskId)
   const abortController = new AbortController()
@@ -191,9 +253,22 @@ async function executeTask(taskId: string): Promise<void> {
   const tracer = new TraceCollector(threadId, finalPrompt, task.modelId ?? "unknown", {
     triggerSource: schedulerSource
   })
-  const releaseCheckpointerPin = pinCheckpointer(threadId)
+  const schedulerRunId = uuid()
+  let leaseAcquired = false
+  let releaseCheckpointerPin: (() => void) | null = null
 
   try {
+    const leaseClaim = claimLocalThreadRunLease({
+      threadId,
+      owner: "scheduler",
+      runId: schedulerRunId
+    })
+    if (!leaseClaim.acquired) {
+      throw new Error(`Thread ${threadId} is already owned by ${leaseClaim.conflict.owner}`)
+    }
+    leaseAcquired = true
+    releaseCheckpointerPin = pinCheckpointer(threadId)
+
     const workspacePath = task.workDir
     if (!workspacePath) {
       await tracer.finish("error", "No workspace directory")
@@ -234,6 +309,7 @@ async function executeTask(taskId: string): Promise<void> {
       if (cfg?.model) tracer.setModelName(cfg.model)
     }
 
+    assertLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
     const agent = await createAgentRuntime({
       threadId,
       workspacePath,
@@ -260,8 +336,11 @@ async function executeTask(taskId: string): Promise<void> {
     for await (const chunk of stream) {
       if (abortController.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
-      const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } =
-        serializeForRun(mode, data)
+      const {
+        data: serialized,
+        valuesMessageIndexOffset,
+        valuesSnapshotKind
+      } = serializeForRun(mode, data)
       const events = converter.processChunk(mode, serialized, {
         valuesMessageIndexOffset,
         valuesSnapshotScope: "turn",
@@ -341,10 +420,6 @@ async function executeTask(taskId: string): Promise<void> {
         threadId,
         key: `scheduled-task:${taskId}:${startedAt.toISOString()}`
       })
-      // If task is linked to a ChatX robot, send reply via HTTP
-      if (task.chatxRobotChatId && lastAssistantText) {
-        trySendChatXReply(task.chatxRobotChatId, lastAssistantText)
-      }
       console.log(`[Scheduler] Task completed: ${task.name}`)
     } else {
       updateScheduledTaskRunResult(taskId, "error", "Cancelled by user")
@@ -431,15 +506,20 @@ async function executeTask(taskId: string): Promise<void> {
       }
     }
   } finally {
-    releaseCheckpointerPin()
+    releaseCheckpointerPin?.()
     // Close FIRST, then release run state, then broadcast — two contracts at
-    // once: (1) owner-finally principle (same as chatx/heartbeat): the task
+    // once: (1) owner-finally principle (same as heartbeat): the task
     // counts as running until its checkpointer close settles, so a runNow in
     // the close window is refused instead of overlapping a still-settling
     // run; (2) renderer contract: runningTasks is deleted BEFORE the done/
     // error broadcast, so loadThreadHistory → isRunning never races back to
     // scheduledTaskLoading = true.
-    await closeCheckpointer(threadId).catch(() => {})
+    if (releaseCheckpointerPin) {
+      await closeCheckpointer(threadId).catch(() => {})
+    }
+    if (leaseAcquired) {
+      releaseLocalThreadRunLease(threadId, "scheduler", schedulerRunId)
+    }
     runningTasks.delete(taskId)
     activeAbortControllers.delete(taskId)
 

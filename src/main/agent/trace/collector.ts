@@ -16,15 +16,7 @@
 
 import { join } from "path"
 import { homedir } from "os"
-import {
-  lstat,
-  opendir,
-  readFile,
-  rename,
-  rmdir,
-  unlink,
-  writeFile
-} from "fs/promises"
+import { lstat, opendir, readFile, rename, rmdir, unlink, writeFile } from "fs/promises"
 import { v4 as uuid } from "uuid"
 import type {
   AgentTrace,
@@ -464,19 +456,15 @@ const TRACE_MAX_MODEL_MESSAGES = 64
 const TRACE_MAX_NODES = 512
 const TRACE_MAX_SKILLS = 128
 
-function boundTraceToolCall(
-  call: TraceToolCall,
-  budget: TraceCollectionBudget
-): TraceToolCall {
+function boundTraceToolCall(call: TraceToolCall, budget: TraceCollectionBudget): TraceToolCall {
   const args = budget.takeValue(call.args, 32 * 1024)
   return {
     name: budget.takeText(String(call.name ?? "unknown"), 512),
-    args: args && typeof args === "object" && !Array.isArray(args)
-      ? (args as Record<string, unknown>)
-      : {},
-    ...(typeof call.result === "string"
-      ? { result: budget.takeText(call.result, 16 * 1024) }
-      : {}),
+    args:
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    ...(typeof call.result === "string" ? { result: budget.takeText(call.result, 16 * 1024) } : {}),
     ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs)
       ? { durationMs: Math.max(0, Math.min(call.durationMs, 24 * 60 * 60 * 1000)) }
       : {})
@@ -641,7 +629,7 @@ export class TraceCollector {
       buildObservabilityContext(this.traceId, this.threadId, options),
       32 * 1024
     ) as TraceObservabilityContext
-    this.includeSkillEval = options.includeSkillEval ?? (this.observability.traceKind === "root")
+    this.includeSkillEval = options.includeSkillEval ?? this.observability.traceKind === "root"
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
     this.pushNode({
@@ -801,9 +789,7 @@ export class TraceCollector {
 
   /** Set source markers keyed by the same skill identifier used in usedSkills. */
   setSkillSource(skillSource: string[]): void {
-    this.skillSource = normalizeSkillSourceRefs(
-      boundStringList(skillSource, this.collectionBudget)
-    )
+    this.skillSource = normalizeSkillSourceRefs(boundStringList(skillSource, this.collectionBudget))
     const root = this.getNode(this.rootNodeId)
     if (root) {
       const metadata = { ...(root.metadata ?? {}) }
@@ -856,7 +842,9 @@ export class TraceCollector {
     const metadataToolCalls = this.nodes.reduce((sum, node) => {
       const toolNames = node.metadata?.toolNames
       if (!Array.isArray(toolNames)) return sum
-      return sum + toolNames.filter((name) => typeof name === "string" && name.trim().length > 0).length
+      return (
+        sum + toolNames.filter((name) => typeof name === "string" && name.trim().length > 0).length
+      )
     }, 0)
     const metadataToolCallCounts = this.nodes.reduce((sum, node) => {
       const count = node.metadata?.toolCallCount
@@ -868,7 +856,8 @@ export class TraceCollector {
 
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
-    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512)) return
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512))
+      return
     const inputMessages = call.inputMessages
       .slice(0, TRACE_MAX_MODEL_MESSAGES)
       .map((message) => boundTraceChatMessage(message, this.collectionBudget))
@@ -1553,17 +1542,15 @@ export async function listTracedThreads(): Promise<string[]> {
   let scanned = 0
   for await (const entry of directory) {
     scanned += 1
-    if (scanned > TRACE_READ_MAX_DIRECTORY_ENTRIES || threads.length >= TRACE_READ_MAX_THREADS) break
+    if (scanned > TRACE_READ_MAX_DIRECTORY_ENTRIES || threads.length >= TRACE_READ_MAX_THREADS)
+      break
     if (entry.isDirectory() && isSafeTraceSegment(entry.name)) threads.push(entry.name)
     if (scanned % TRACE_IO_YIELD_INTERVAL === 0) await yieldTraceIo()
   }
   return threads
 }
 
-async function listThreadTraceFiles(
-  threadId: string,
-  budget: TraceReadBudget
-): Promise<string[]> {
+async function listThreadTraceFiles(threadId: string, budget: TraceReadBudget): Promise<string[]> {
   if (!isSafeTraceSegment(threadId)) return []
   const files: string[] = []
   let directory
@@ -1637,7 +1624,7 @@ async function readThreadTracesBounded(
   const traces: AgentTrace[] = []
   for (const filePath of files) {
     if (traces.length >= maxResults || budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES) break
-    traces.push(...await readTraceFileBounded(filePath, budget, maxResults - traces.length))
+    traces.push(...(await readTraceFileBounded(filePath, budget, maxResults - traces.length)))
     await yieldTraceIo()
   }
   return traces
@@ -1665,10 +1652,7 @@ async function findTraceLocation(
     for (const filePath of await listThreadTraceFiles(threadId, budget)) {
       const traces = await readTraceFileBounded(filePath, budget, 256)
       if (traces.some((trace) => trace.traceId === traceId)) return { threadId, filePath }
-      if (
-        budget.files >= TRACE_READ_MAX_FILES ||
-        budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES
-      ) {
+      if (budget.files >= TRACE_READ_MAX_FILES || budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES) {
         return null
       }
     }
@@ -1723,7 +1707,9 @@ export async function readRecentTraces(limit = 20): Promise<AgentTrace[]> {
   const all: AgentTrace[] = []
   for (const threadId of await listTracedThreads()) {
     if (budget.files >= TRACE_READ_MAX_FILES || budget.bytes >= TRACE_READ_MAX_TOTAL_BYTES) break
-    all.push(...await readThreadTracesBounded(threadId, budget, TRACE_READ_MAX_RESULTS - all.length))
+    all.push(
+      ...(await readThreadTracesBounded(threadId, budget, TRACE_READ_MAX_RESULTS - all.length))
+    )
     if (all.length >= TRACE_READ_MAX_RESULTS) break
   }
   return all.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, boundedLimit)

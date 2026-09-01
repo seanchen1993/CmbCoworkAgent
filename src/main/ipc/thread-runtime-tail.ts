@@ -1,9 +1,5 @@
 import type { BaseMessage } from "@langchain/core/messages"
-import {
-  getThreadMessages,
-  getThreadMessagesAfterAnyId,
-  getThreadMessagesByIds
-} from "../db"
+import { getThreadMessages, getThreadMessagesAfterAnyId, getThreadMessagesByIds } from "../db"
 import { withCheckpointer } from "../agent/runtime"
 import type { Message } from "../types"
 import {
@@ -12,8 +8,9 @@ import {
   deriveCheckpointTranscriptIndex,
   findMessagesAfterCheckpointVisibleIds
 } from "../../shared/checkpoint-transcript"
+import { isImRemoteControlTranscriptMessageId } from "../../shared/im-remote-transcript"
 import {
-  isRuntimeVisiblePersistedMessage,
+  isRuntimeVisiblePersistedMessage as isBaseRuntimeVisiblePersistedMessage,
   persistedMessageToRuntimeMessage
 } from "./persisted-runtime-message"
 
@@ -23,6 +20,13 @@ export interface DurableRuntimeTail {
   messages: BaseMessage[]
   persistedMessages: Message[]
   checkpointHasInterrupt: boolean
+}
+
+function isRuntimeVisiblePersistedMessage(message: Message): boolean {
+  return (
+    !isImRemoteControlTranscriptMessageId(message.id) &&
+    isBaseRuntimeVisiblePersistedMessage(message)
+  )
 }
 
 export function findDurableTailMessagesAfterCheckpoint(
@@ -91,9 +95,11 @@ export async function getDurableRuntimeTail(
   // metadata, not the ordinary start/resume path.
   const recentCheckpointIds = Array.from(
     new Set(
-      transcript.visibleMessages.slice(-32).flatMap((message) =>
-        [message.renderId, message.id].filter((id): id is string => Boolean(id))
-      )
+      transcript.visibleMessages
+        .slice(-32)
+        .flatMap((message) =>
+          [message.renderId, message.id].filter((id): id is string => Boolean(id))
+        )
     )
   )
   const durableCheckpointBoundaries = getThreadMessagesByIds(threadId, recentCheckpointIds)

@@ -50,9 +50,24 @@ const THREAD_LIST_SMALL_OBJECT_KEYS = new Set([
   "harnessFeature",
   "harnessProjectSession",
   "routingState",
-  "gitContext"
+  "gitContext",
+  // IM delivery context drives the remote inbox / Feature session UI in the
+  // renderer (sidebar grouping, chat banner, read-only gates). Without it the
+  // projection silently strips the field and those call sites degrade to
+  // plain local threads.
+  "imDeliveryContext"
 ])
 const THREAD_LIST_PRIORITY_KEYS = [
+  // Remote IM session identity: the sidebar and chat banner classify threads by
+  // these, so they must lead the priority queue — priority keys consume the
+  // per-row char budget in array order, and a large known key later would
+  // otherwise starve them and degrade remote inbox / Feature sessions to plain
+  // local threads.
+  "targetKind",
+  "remoteState",
+  "remoteThread",
+  "remoteReadOnly",
+  "imDeliveryContext",
   "workspacePath",
   "harnessFeature",
   "harnessProjectSession",

@@ -100,6 +100,7 @@ import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
+import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
 import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
@@ -177,6 +178,7 @@ import {
   type MentionedWorkspaceFile
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
@@ -275,6 +277,27 @@ import {
 const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
 )
+const REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY = "chat:remote-thread-tip-dismissals"
+
+function loadRemoteThreadTipDismissals(): Set<string> {
+  try {
+    const raw = sessionStorage.getItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((threadId): threadId is string => typeof threadId === "string"))
+  } catch {
+    return new Set()
+  }
+}
+
+function persistRemoteThreadTipDismissals(threadIds: Set<string>): void {
+  try {
+    sessionStorage.setItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY, JSON.stringify([...threadIds]))
+  } catch {
+    // Tip dismissal is a best-effort, renderer-session-only preference.
+  }
+}
 const CHAT_AT_BOTTOM_THRESHOLD_PX = 32
 const CHAT_SCROLL_UP_DETACH_DELTA_PX = 1
 const CHAT_USER_SCROLL_INTENT_WINDOW_MS = 350
@@ -1116,6 +1139,39 @@ interface MessageForkDialogTarget {
   checkpoint: ForkableCheckpoint
 }
 
+interface RemoteThreadDisplayInfo {
+  kind: "inbox" | "feature"
+  historical: boolean
+  featureLabel?: string
+}
+
+function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayInfo | null {
+  const metadata = thread?.metadata
+  if (!metadata || (metadata.targetKind !== "inbox" && metadata.targetKind !== "feature")) {
+    return null
+  }
+  const delivery = metadata.imDeliveryContext
+  if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return null
+  const context = delivery as Record<string, unknown>
+  if (context.provider !== DEFAULT_IM_CHANNEL_ID || typeof context.conversationKey !== "string") {
+    return null
+  }
+  if (metadata.targetKind === "inbox") {
+    return { kind: "inbox", historical: metadata.remoteState === "historical" }
+  }
+  const harnessFeature = metadata.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object" || Array.isArray(harnessFeature)) {
+    return null
+  }
+  const feature = harnessFeature as Record<string, unknown>
+  if (typeof feature.projectId !== "string" || typeof feature.slug !== "string") return null
+  return {
+    kind: "feature",
+    historical: metadata.remoteState === "historical",
+    featureLabel: feature.slug
+  }
+}
+
 function getForkWorkspacePath(thread: Thread | null): string | null {
   const workspacePath = thread?.metadata?.workspacePath
   return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : null
@@ -1643,13 +1699,24 @@ export function ChatContainer({
   onThreadGitStatusChange,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
+  const remoteThread = useAppStore(
+    (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
+  )
+  const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
+  const resolvedReadOnlyReason =
+    readOnlyReason ??
+    (remoteThreadInfo?.historical
+      ? "设备接管前的远程历史 Thread 仅可查看"
+      : remoteThreadInfo?.kind === "inbox"
+        ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息"
+        : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
   const [initialChatScrollView] = useState(() => chatScrollSessionStore.open(threadId))
   const initialChatScrollSession = initialChatScrollView.session
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
-  const readOnly = Boolean(readOnlyReason)
+  const readOnly = Boolean(resolvedReadOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -1657,6 +1724,9 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  const [dismissedRemoteTipThreadIds, setDismissedRemoteTipThreadIds] = useState(
+    loadRemoteThreadTipDismissals
+  )
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const chatScrollStateRef = useRef<ChatScrollState | null>(initialChatScrollSession?.state ?? null)
   if (chatScrollStateRef.current === null) {
@@ -2341,6 +2411,9 @@ export function ChatContainer({
   const handleOpenMemorySettings = useCallback((): void => {
     setShowCustomizeView(true, "memory")
   }, [setShowCustomizeView])
+  const handleOpenRobotSettings = useCallback((): void => {
+    setShowCustomizeView(true, "robot")
+  }, [setShowCustomizeView])
 
   const canChangeAgentMode = canChangeThreadAgentMode({
     historyLoading,
@@ -2379,6 +2452,22 @@ export function ChatContainer({
       }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
+        // Temporary guard: a Thread granted to the Zhaohu robot must not change
+        // its execution mode. Remote turns are hard-wired to the normal/Multi
+        // runtime, so Team/Workflow on a granted thread would render a mode the
+        // IM side never executes. Remove together with per-mode remote support.
+        const remoteAccess = await window.api.builtinRobot
+          .getRemoteAccess()
+          .catch(() => null)
+        if (requestId !== agentModeChangeRequestRef.current) return
+        if (
+          remoteAccess?.threadGrants.some(
+            (grant) => grant.threadId === threadId && grant.state === "active"
+          )
+        ) {
+          toast.error("当前会话已接入招乎，暂不能切换执行模式")
+          return
+        }
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
           toast.error("项目模式暂不支持 Agent Team。")
           return
@@ -4869,7 +4958,7 @@ export function ChatContainer({
   const effectiveComposerControlsDisabled =
     composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {
-    if (readOnlyReason) return readOnlyReason
+    if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
     if (isLoading) {
@@ -4897,7 +4986,7 @@ export function ChatContainer({
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
-    readOnlyReason,
+    resolvedReadOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
   ])
@@ -6523,13 +6612,9 @@ export function ChatContainer({
       }
       threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
-      // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
-      try {
-        const cancelled = await window.api.chatx.cancelByThread(threadId)
-        if (!cancelled) console.warn("[ChatContainer] ChatX thread not found for cancel:", threadId)
-      } catch (err) {
-        console.error("[ChatContainer] Failed to cancel ChatX thread:", err)
-      }
+      // Passive remote streams are owned by IM. Desktop must not cross-source
+      // cancel them; use /停止 from the originating conversation instead.
+      return
     } else {
       // Match Claude Code coordinator semantics: the main stop button stops the
       // foreground turn only. Durable background workers are stopped explicitly
@@ -7318,9 +7403,42 @@ export function ChatContainer({
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+  const remoteLifecycleState = remoteThread?.metadata?.remoteState
+  const remoteThreadStatus = pendingApproval
+    ? "等待桌面审批"
+    : pendingUserInput
+      ? "等待桌面补充输入"
+      : remoteLifecycleState === "historical"
+        ? "接管前历史"
+        : remoteLifecycleState === "waiting_desktop"
+          ? "等待桌面处理"
+          : remoteLifecycleState === "suspended"
+            ? "绑定已暂停"
+            : remoteLifecycleState === "outcome_unknown"
+              ? "执行结果未知"
+              : remoteLifecycleState === "rejected"
+                ? "远程能力不支持"
+                : remoteLifecycleState === "failed"
+                  ? "执行失败"
+                  : isLoading
+                    ? "任务执行中"
+                    : remoteThread?.status === "error"
+                      ? "执行失败"
+                      : remoteThread?.status === "interrupted"
+                        ? "已中止"
+                        : "空闲"
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "远程收件箱" : "远程会话"
+  const handleDismissRemoteThreadTip = useCallback(() => {
+    setDismissedRemoteTipThreadIds((current) => {
+      const next = new Set(current)
+      next.add(threadId)
+      persistRemoteThreadTipDismissals(next)
+      return next
+    })
+  }, [threadId])
   const chatMessageListFooter = (
     <div
       className="space-y-4 pt-4 pb-4"
@@ -7408,6 +7526,42 @@ export function ChatContainer({
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+      {remoteThreadInfo && !dismissedRemoteTipThreadIds.has(threadId) ? (
+        <div className="flex shrink-0 items-start gap-2 border-b border-blue-500/20 bg-blue-500/5 px-4 py-2 text-xs">
+          <Info className="mt-0.5 size-3.5 shrink-0 text-blue-500" />
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="rounded bg-blue-500/15 px-1.5 py-0.5 font-medium text-blue-700 dark:text-blue-300">
+                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"}
+              </span>
+              {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
+                <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
+              ) : null}
+              <span className="text-muted-foreground">{remoteThreadStatus}</span>
+            </div>
+            <p className="text-muted-foreground">
+              {remoteThreadInfo.kind === "inbox"
+                ? remoteThreadInfo.historical
+                  ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
+                  : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                : remoteThreadInfo.historical
+                  ? "此远程会话已停用，仅保留历史；请重新绑定。"
+                  : isLoading
+                    ? "当前任务占用远程运行租约，结束后可在桌面继续。"
+                    : "可在桌面继续处理。"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleDismissRemoteThreadTip}
+            className="ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-blue-500/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
+            aria-label={`关闭${remoteThreadTipLabel}提示`}
+            title="关闭提示"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         open={searchOpen}
@@ -8385,6 +8539,10 @@ export function ChatContainer({
                                 : undefined
                             }
                             onChange={handleAgentModeChange}
+                          />
+                          <ThreadRemoteAccessSwitcher
+                            threadId={threadId}
+                            onOpenSettings={handleOpenRobotSettings}
                           />
                           <div className="w-px h-4 bg-border mx-1" />
                           <WorkspacePicker

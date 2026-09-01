@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const ownerMocks = vi.hoisted(() => ({
   hasActiveBackgroundTasks: vi.fn<(threadId: string) => boolean>(),
-  isChatXThreadRunning: vi.fn<(threadId: string) => boolean>(),
+  getLocalThreadRunLease: vi.fn<(threadId: string) => object | undefined>(),
   isHeartbeatRunning: vi.fn<() => boolean>(),
   isTaskRunning: vi.fn<(taskId: string) => boolean>()
 }))
@@ -12,7 +12,9 @@ vi.mock("../agent/local-sandbox", () => ({
     hasActiveBackgroundTasks: ownerMocks.hasActiveBackgroundTasks
   }
 }))
-vi.mock("./chatx", () => ({ isChatXThreadRunning: ownerMocks.isChatXThreadRunning }))
+vi.mock("../agent/thread-run-lease", () => ({
+  getLocalThreadRunLease: ownerMocks.getLocalThreadRunLease
+}))
 vi.mock("./heartbeat", () => ({ isHeartbeatRunning: ownerMocks.isHeartbeatRunning }))
 vi.mock("./heartbeat-session", () => ({ HEARTBEAT_THREAD_ID: "heartbeat" }))
 vi.mock("./scheduler", () => ({ isTaskRunning: ownerMocks.isTaskRunning }))
@@ -23,15 +25,17 @@ describe("isExternallyManagedThreadRunBusy", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     ownerMocks.hasActiveBackgroundTasks.mockReturnValue(false)
-    ownerMocks.isChatXThreadRunning.mockReturnValue(false)
+    ownerMocks.getLocalThreadRunLease.mockReturnValue(undefined)
     ownerMocks.isHeartbeatRunning.mockReturnValue(false)
     ownerMocks.isTaskRunning.mockReturnValue(false)
   })
 
-  it("blocks the exact thread owned by a ChatX run", () => {
-    ownerMocks.isChatXThreadRunning.mockImplementation((threadId) => threadId === "chatx")
+  it("blocks the exact thread owned by a local run lease", () => {
+    ownerMocks.getLocalThreadRunLease.mockImplementation((threadId) =>
+      threadId === "remote" ? { threadId, owner: "im", runId: "run-1" } : undefined
+    )
 
-    expect(isExternallyManagedThreadRunBusy("chatx", {})).toBe(true)
+    expect(isExternallyManagedThreadRunBusy("remote", {})).toBe(true)
     expect(isExternallyManagedThreadRunBusy("other", {})).toBe(false)
   })
 

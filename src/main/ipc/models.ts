@@ -3829,6 +3829,7 @@ import {
   MAX_TOP_K,
   DEFAULT_THINKING_EFFORT
 } from "../storage"
+import { builtinRobotManager } from "../services/im/manager"
 import type { BuiltinModelOverride, CustomModelConfig, ThinkingEffort } from "../storage"
 import {
   getBuiltinModelPublicConfigs,
@@ -3957,6 +3958,7 @@ export function registerModelHandlers(ipcMain: IpcMain): void {
     "models:upsertUserInfo",
     async (_event, config: Omit<CustomModelConfig, "id"> & { id?: string }) => {
       const id = upsertUserInfoConfig(config)
+      void builtinRobotManager.refreshIdentity()
       return { id }
     }
   )
