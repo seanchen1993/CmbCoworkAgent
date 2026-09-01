@@ -5551,7 +5551,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       // mode/workspace commit (mirrors the UAT initial snapshot).
       const initialInvokeThread = getThreadCore(threadId)
       const initialInvokeMetadata = parseThreadMetadata(initialInvokeThread?.metadata)
-      const initialInvokeAgentMode = getAgentModeFromMetadata(initialInvokeMetadata)
       const initialInvokeCoordinatorRequest = resolveCoordinatorModeRequest(
         message,
         initialInvokeMetadata,
@@ -6554,7 +6553,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const hasWorkflowNotificationPrefix =
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_TURN_TRIGGER) ||
             trimmedStart.startsWith(WORKFLOW_NOTIFICATION_MARKER_PREFIX)
-          if (matchesWorkflowNotificationPrompt && initialInvokeAgentMode === "workflow") {
+          if (matchesWorkflowNotificationPrompt && parsedThreadMetadata.agentMode === "workflow") {
             const pendingWorkflowRun = await workflowRunManager.claimPendingNotificationAsync(
               workspacePath,
               threadId
