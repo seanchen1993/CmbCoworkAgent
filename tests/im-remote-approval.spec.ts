@@ -394,9 +394,11 @@ async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(
     context.register(outside)
     await waitFor(() => context.deliveryText(outside.id).length > 0, "outside path notice")
     const outsideText = context.deliveryText(outside.id)
-    assert(outsideText.includes("需要在桌面确认"))
-    assert(!outsideText.includes(outsidePath))
-    assert(!/[A-F0-9]{6}/u.test(outsideText))
+    // Out-of-workspace writes are IM-approvable: the message shows the resolved
+    // absolute path with an explicit marker and a single-use short code.
+    assert(outsideText.includes("A1B2C3"))
+    assert(outsideText.includes("工作区外"))
+    assert(outsideText.includes(outsidePath))
 
     const command = `printf 'BEGIN-REMOTE-EXECUTE-${"x".repeat(6_000)}-END-REMOTE-EXECUTE'`
     const execute = approvalRequest({
@@ -406,13 +408,13 @@ async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(
       command
     })
     const executeDecisions = context.register(execute)
-    await waitFor(() => context.deliveryText(execute.id).includes("A1B2C3"), "execute approval")
+    await waitFor(() => context.deliveryText(execute.id).includes("D4E5F6"), "execute approval")
     const executeText = context.deliveryText(execute.id)
     assert(executeText.includes("BEGIN-REMOTE-EXECUTE"))
     assert(executeText.includes("END-REMOTE-EXECUTE"))
     assert(!executeText.includes(IM_REPLY_TRUNCATION_NOTICE))
     const approvalResult = await context.service.resolveCode({
-      code: "A1B2C3",
+      code: "D4E5F6",
       decision: "approve",
       ...ROUTE
     })

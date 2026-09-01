@@ -119,6 +119,19 @@ function safeRelativePath(workspacePath: string, request: ApprovalRequest): stri
   return display && !display.startsWith("..") && !isAbsolute(display) ? display : null
 }
 
+/**
+ * Resolve the absolute side-effect path used when the target lies outside the
+ * authorized workspace. The approver must still see exactly which file is
+ * being written, so the IM message falls back to the resolved path (with a
+ * workspace-outside marker) instead of hiding it behind a desktop-only notice.
+ */
+function resolvedFilePath(workspacePath: string, request: ApprovalRequest): string | null {
+  const filePath = request.filePath?.trim()
+  if (!filePath) return null
+  const base = request.cwd?.trim() || workspacePath
+  return isAbsolute(filePath) ? resolve(filePath) : resolve(base, filePath)
+}
+
 function approvalOperation(request: ApprovalRequest): string {
   if (request.operation) return request.operation
   if (request.command?.trim()) return "execute"
@@ -133,22 +146,38 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
   )
   const oneShotDecisionAllowed = allowedDecisions.length > 0
   if (operation === "write_file" || operation === "edit_file") {
-    const displayPath = safeRelativePath(workspacePath, request)
     const label = operation === "write_file" ? "写入文件" : "编辑文件"
-    if (!displayPath || !oneShotDecisionAllowed) {
+    if (!oneShotDecisionAllowed) {
       return {
         approvable: false,
         operation,
         summary: `${label}（仅桌面确认）`,
-        detail: "目标不在已授权工作区内，或该请求不接受一次性批准。",
+        detail: "该请求不接受一次性批准，请回到桌面确认。",
         allowedDecisions: []
       }
     }
+    const relativePath = safeRelativePath(workspacePath, request)
+    const displayPath = relativePath ?? resolvedFilePath(workspacePath, request)
+    if (!displayPath) {
+      return {
+        approvable: false,
+        operation,
+        summary: `${label}（仅桌面确认）`,
+        detail: "该请求没有可展示的文件路径，请回到桌面确认。",
+        allowedDecisions: []
+      }
+    }
+    const outsideWorkspace = relativePath === null
     return {
       approvable: true,
       operation,
-      summary: `${label} ${displayPath}`,
-      detail: `${label}：${displayPath}`,
+      summary: `${label} ${displayPath}${outsideWorkspace ? "（工作区外）" : ""}`,
+      detail: [
+        `${label}：${displayPath}`,
+        outsideWorkspace ? "目标在已授权工作区外，请核对后再决定。" : ""
+      ]
+        .filter(Boolean)
+        .join("\n"),
       allowedDecisions
     }
   }
