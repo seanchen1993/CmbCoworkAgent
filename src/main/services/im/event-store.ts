@@ -362,9 +362,22 @@ export class ImEventStore {
   }
 
   getNextQueuedEventForThread(threadId: string): ImEventRecord | null {
-    return (
-      this.listQueuedEvents().find((event) => event.targetSnapshot?.threadId === threadId) ?? null
+    // Resolve the thread target inside SQLite (json_extract) instead of
+    // hydrating every queued row and scanning in JS: with unbounded parallel
+    // threads this ran a full queued-set read + find per processed message,
+    // i.e. O(N²) main-process work. The LIMIT 1 query keeps the same
+    // (created_at, conversation_key, conversation_seq, event_id) ordering.
+    const row = readOne<ImEventRow>(
+      this.dependencies.getDatabase(),
+      `SELECT * FROM im_events
+       WHERE state = 'queued'
+         AND json_valid(target_snapshot_json)
+         AND json_extract(target_snapshot_json, '$.threadId') = ?
+       ORDER BY created_at ASC, conversation_key ASC, conversation_seq ASC, event_id ASC
+       LIMIT 1`,
+      [threadId]
     )
+    return row ? hydrateEvent(row) : null
   }
 
   listQueuedConversationKeys(): string[] {

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { afterEach, describe, expect, it } from "vitest"
+import { DEFAULT_IM_CHANNEL_ID } from "../../shared/im-gateway-contract"
 import { readThreadSummaryPage } from "./reader"
 
 /**
@@ -71,7 +72,7 @@ const imThreadMetadata = {
   remoteState: "active",
   memoryEnabled: false,
   imDeliveryContext: {
-    provider: "zhaohu",
+    provider: DEFAULT_IM_CHANNEL_ID,
     principalId: "principal-1",
     conversationKey: "conv-1",
     targetId: "target-1"
@@ -96,7 +97,7 @@ describe("thread list metadata projection", () => {
       expect(metadata.remoteReadOnly).toBe(true)
       expect(metadata.remoteState).toBe("active")
       expect(metadata.imDeliveryContext).toEqual({
-        provider: "zhaohu",
+        provider: DEFAULT_IM_CHANNEL_ID,
         principalId: "principal-1",
         conversationKey: "conv-1",
         targetId: "target-1"
@@ -114,14 +115,13 @@ describe("thread list metadata projection", () => {
     try {
       createThreadsTable(database)
       const now = Date.now()
+      // Fill the per-row 16,384-char budget with large known-string keys so the
+      // non-priority projection has nothing left; IM identity keys must still
+      // survive because they are processed ahead of budget exhaustion.
       const largeMetadata = {
         ...imThreadMetadata,
-        llmModifiedFiles: Array.from({ length: 40 }, (_value, index) => ({
-          path: `/tmp/workspace/f${index}.ts`,
-          mode: "generate"
-        })),
-        // A fat transcript-ish string to force budget pressure.
-        padding: "x".repeat(64 * 1024)
+        projectName: "p".repeat(8_192),
+        workspacePath: "w".repeat(8_192)
       }
       database
         .prepare(
@@ -141,7 +141,13 @@ describe("thread list metadata projection", () => {
         .metadata as Record<string, unknown>
 
       expect(metadata.targetKind).toBe("inbox")
-      expect(metadata.imDeliveryContext).toBeDefined()
+      expect(metadata.remoteState).toBe("active")
+      expect(metadata.imDeliveryContext).toEqual({
+        provider: DEFAULT_IM_CHANNEL_ID,
+        principalId: "principal-1",
+        conversationKey: "conv-1",
+        targetId: "target-1"
+      })
     } finally {
       database.close()
     }

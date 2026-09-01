@@ -58,6 +58,16 @@ const THREAD_LIST_SMALL_OBJECT_KEYS = new Set([
   "imDeliveryContext"
 ])
 const THREAD_LIST_PRIORITY_KEYS = [
+  // Remote IM session identity: the sidebar and chat banner classify threads by
+  // these, so they must lead the priority queue — priority keys consume the
+  // per-row char budget in array order, and a large known key later would
+  // otherwise starve them and degrade remote inbox / Feature sessions to plain
+  // local threads.
+  "targetKind",
+  "remoteState",
+  "remoteThread",
+  "remoteReadOnly",
+  "imDeliveryContext",
   "workspacePath",
   "harnessFeature",
   "harnessProjectSession",
@@ -78,14 +88,7 @@ const THREAD_LIST_PRIORITY_KEYS = [
   "gitContext",
   "scheduledTaskId",
   "isHeartbeat",
-  "title",
-  // Remote IM session identity: the sidebar and chat banner classify threads by
-  // these before the conversation-level object below. Keep them ahead of
-  // budget-exhaustion so remote inbox / Feature threads never degrade silently.
-  "targetKind",
-  "remoteState",
-  "remoteThread",
-  "remoteReadOnly"
+  "title"
 ] as const
 const MAX_GOAL_EVENT_MESSAGE_BYTES = 128 * 1024
 const THREAD_LIST_PAGE_MAX_ROWS = 128

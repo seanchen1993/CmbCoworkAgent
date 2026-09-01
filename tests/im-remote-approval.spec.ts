@@ -28,6 +28,7 @@ function approvalRequest(input: {
   cwd: string
   filePath?: string
   command?: string
+  commandInArgs?: string
   allowed?: ApprovalRequest["allowed_approval_types"]
 }): ApprovalRequest {
   return {
@@ -35,7 +36,7 @@ function approvalRequest(input: {
     tool_call: {
       id: `tool-${input.id}`,
       name: input.toolName ?? input.operation ?? "unknown",
-      args: {},
+      args: input.commandInArgs !== undefined ? { command: input.commandInArgs } : {},
       metadata: null,
       status: "pending",
       thread_values: null,
@@ -429,6 +430,38 @@ async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(
   }
 }
 
+async function testCommandInsideToolArgsIsRecognized(): Promise<void> {
+  const context = await createContext()
+  try {
+    const argsOnly = approvalRequest({
+      id: "request-args-command",
+      toolName: "execute",
+      cwd: context.root,
+      commandInArgs: "echo args-only-command"
+    })
+    const decisions = context.register(argsOnly)
+    await waitFor(
+      () => context.deliveryText(argsOnly.id).includes("A1B2C3"),
+      "args-only command approval"
+    )
+    const text = context.deliveryText(argsOnly.id)
+    assert(text.includes("args-only-command"))
+    assert(!text.includes("unknown"))
+    assert(!text.includes("需要在桌面确认"))
+    const result = await context.service.resolveCode({
+      code: "A1B2C3",
+      decision: "approve",
+      ...ROUTE
+    })
+    assert(result.includes("一次性批准"))
+    assert.deepEqual(decisions, [{ type: "approve", tool_call_id: argsOnly.tool_call.id }])
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function testConcurrentCodesPointToExactlyOneRequest(): Promise<void> {
   const context = await createContext()
   try {
@@ -538,6 +571,7 @@ async function main(): Promise<void> {
   await testAuditFlushFailureNeverResumesRuntime()
   await testDesktopDecisionWinsAuditFlushRace()
   await testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly()
+  await testCommandInsideToolArgsIsRecognized()
   await testConcurrentCodesPointToExactlyOneRequest()
   await testBrokerPreservesDesktopDecisionSurfaceAndCommandIsExplicit()
   console.log("IM remote approval tests passed")

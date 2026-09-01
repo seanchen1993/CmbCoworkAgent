@@ -134,9 +134,24 @@ function resolvedFilePath(workspacePath: string, request: ApprovalRequest): stri
 
 function approvalOperation(request: ApprovalRequest): string {
   if (request.operation) return request.operation
-  if (request.command?.trim()) return "execute"
+  if (request.command?.trim() || toolCallCommand(request)) return "execute"
   const toolName = request.tool_call?.name?.trim()
   return toolName || "unknown"
+}
+
+/**
+ * Some approval paths carry the shell command only inside the tool call
+ * arguments (tool_call.args.command) while the top-level `command` field stays
+ * empty. Read both so the remote approver sees the actual command instead of a
+ * fallback "unknown" / desktop-only notice.
+ */
+function toolCallCommand(request: ApprovalRequest): string | null {
+  const command = request.command?.trim()
+  if (command) return command
+  const args = request.tool_call?.args
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null
+  const nested = args as Record<string, unknown>
+  return typeof nested.command === "string" && nested.command.trim() ? nested.command.trim() : null
 }
 
 function presentationFor(request: ApprovalRequest, workspacePath: string): ApprovalPresentation {
@@ -182,7 +197,7 @@ function presentationFor(request: ApprovalRequest, workspacePath: string): Appro
     }
   }
   if (operation === "execute") {
-    const command = request.command?.trim() ?? ""
+    const command = toolCallCommand(request) ?? ""
     if (!command || !oneShotDecisionAllowed) {
       return {
         approvable: false,
