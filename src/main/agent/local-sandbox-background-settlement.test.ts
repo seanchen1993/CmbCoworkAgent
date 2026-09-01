@@ -1,5 +1,8 @@
 import { EventEmitter } from "node:events"
 import type { ChildProcess } from "node:child_process"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
@@ -266,7 +269,7 @@ describe("LocalSandbox background-task settlement", () => {
       _runAclDirs: Map<string, Set<string>>
       _aclOsOperationTails: Map<string, Promise<void>>
     }
-    const dir = process.cwd()
+    const dir = mkdtempSync(join(tmpdir(), "acl-delayed-revoke-"))
     const firstRun = `acl-first-grant-${Date.now()}-${Math.random()}`
     const secondRun = `acl-second-grant-${Date.now()}-${Math.random()}`
     const spawned: Array<{ args: string[]; process: FakeChildProcess }> = []
@@ -307,6 +310,7 @@ describe("LocalSandbox background-task settlement", () => {
       aclClass._runAclDirs.delete(firstRun)
       aclClass._runAclDirs.delete(secondRun)
       spawnMock.mockReset()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
@@ -318,7 +322,7 @@ describe("LocalSandbox background-task settlement", () => {
       _runAclDirs: Map<string, Set<string>>
       _aclOsOperationTails: Map<string, Promise<void>>
     }
-    const dir = process.cwd()
+    const dir = mkdtempSync(join(tmpdir(), "acl-delayed-revoke-"))
     const predecessorRun = `acl-predecessor-${Date.now()}-${Math.random()}`
     const successorRun = `acl-successor-${Date.now()}-${Math.random()}`
     const spawned: Array<{ args: string[]; process: FakeChildProcess }> = []
@@ -337,6 +341,7 @@ describe("LocalSandbox background-task settlement", () => {
       await initialGrant
       aclKey = [...(aclClass._runAclDirs.get(predecessorRun) ?? [])][0]
       expect(aclKey).toBeTruthy()
+      expect(aclClass._grantedAclRefCount.get(aclKey!)).toBe(1)
 
       const delayedRevoke = aclClass.revokeGrantedAclsForRun(predecessorRun)
       await vi.waitFor(() => expect(spawned).toHaveLength(2))
@@ -365,6 +370,7 @@ describe("LocalSandbox background-task settlement", () => {
       aclClass._runAclDirs.delete(predecessorRun)
       aclClass._runAclDirs.delete(successorRun)
       spawnMock.mockReset()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

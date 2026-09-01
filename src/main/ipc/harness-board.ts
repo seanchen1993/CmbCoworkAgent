@@ -1,4 +1,10 @@
-import { shell, type IpcMain, type IpcMainInvokeEvent, type WebContents } from "electron"
+import {
+  BrowserWindow,
+  shell,
+  type IpcMain,
+  type IpcMainInvokeEvent,
+  type WebContents
+} from "electron"
 import { createHash } from "node:crypto"
 import path from "node:path"
 import {
@@ -13,6 +19,7 @@ import {
   getHarnessProjectDetails,
   getHarnessLocalAgentmdDeployUnitMappings,
   getHarnessProjectPublicAgentmdDeployUnits,
+  getHarnessProjectRootPath,
   getHarnessRunDetail,
   listHarnessDeployUnitMappings,
   getHarnessLeanTokenConfig,
@@ -46,6 +53,15 @@ import {
   stopHarnessWatchRefs,
   stopAllHarnessWatchRefs
 } from "../harness-board/watch-ref-watcher"
+import { managedRunStore } from "../harness-board/managed-run-store"
+import { createBrowserWindowAgentRunDelivery } from "../agent/agent-run-service"
+import { managedRunController } from "../harness-board/managed-run-controller"
+import {
+  approveHumanGate,
+  getHumanGateForThread,
+  rejectHumanGate
+} from "../harness-board/human-gate-service"
+import { assertHarnessProjectCanBeDeleted } from "../harness-board/project-deletion-gate"
 import { purgeProjectAnalytics } from "../services/project-analytics-purge"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import {
@@ -86,6 +102,8 @@ import type {
   HarnessRunArtifactRevealInput,
   HarnessRunArtifactRevealResult,
   HarnessFeatureDeployUnitBinding,
+  HarnessHumanGateDecisionInput,
+  HarnessHumanGateSnapshot,
   HarnessFeatureDeployUnitUpdateInput,
   HarnessProjectReviewInput,
   HarnessProjectReviewResult
@@ -150,6 +168,14 @@ function issueHarnessRunArtifactPreviewGrant(
     expiresAt: issuedAt + EXTERNAL_FILE_READ_GRANT_TTL_MS
   }
 }
+import type {
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunStartInput,
+  ManagedRunStopInput,
+  ManagedRunSummary
+} from "../../shared/harness-board-types"
 import type {
   HarnessFeatureCreateInput,
   HarnessFeatureCreateResult
@@ -239,6 +265,27 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   })
 
   ipcMain.handle(
+    "harnessBoard:getHumanGateForThread",
+    async (_event, threadId: string): Promise<HarnessHumanGateSnapshot | undefined> => {
+      return getHumanGateForThread(typeof threadId === "string" ? threadId : "")
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:approveHumanGate",
+    async (_event, input: HarnessHumanGateDecisionInput): Promise<boolean> => {
+      return approveHumanGate(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:rejectHumanGate",
+    async (_event, input: HarnessHumanGateDecisionInput): Promise<boolean> => {
+      return rejectHumanGate(input)
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:catalogPage",
     async (event, input: HarnessBoardCatalogPageInput): Promise<HarnessBoardCatalogPageResult> =>
       readHarnessCatalogPageInWorker(
@@ -253,21 +300,23 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       event,
       requestedScope?: "board" | "board-registry" | "board-settings" | "chat-binding"
     ): void => {
-    const prefix = `${event.sender.id}:`
-    const suffixes = requestedScope ? [requestedScope] : [
-      "catalog",
-      "registry",
-      "projects",
-      "catalog-page",
-      "board",
-      "board-registry",
-      "board-sidebar",
-      "board-settings",
-      "chat-binding"
-    ]
-    for (const suffix of suffixes) {
-      cancelHarnessCatalogScope(`${prefix}${suffix}`)
-    }
+      const prefix = `${event.sender.id}:`
+      const suffixes = requestedScope
+        ? [requestedScope]
+        : [
+            "catalog",
+            "registry",
+            "projects",
+            "catalog-page",
+            "board",
+            "board-registry",
+            "board-sidebar",
+            "board-settings",
+            "chat-binding"
+          ]
+      for (const suffix of suffixes) {
+        cancelHarnessCatalogScope(`${prefix}${suffix}`)
+      }
     }
   )
 
@@ -438,6 +487,25 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   )
 
   ipcMain.handle(
+    "harnessBoard:startManagedRun",
+    async (event, input: ManagedRunStartInput): Promise<ManagedRunSummary> => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (!window) throw new Error("没有可用的应用主窗口，无法开始托管")
+      return managedRunController.start({
+        ...input,
+        delivery: createBrowserWindowAgentRunDelivery(window)
+      })
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:stopManagedRun",
+    async (_event, input: ManagedRunStopInput): Promise<boolean> => {
+      return managedRunController.stop(input)
+    }
+  )
+
+  ipcMain.handle(
     "harnessBoard:getDynamicWorkflowConfig",
     async (_event, projectId: string): Promise<HarnessDynamicWorkflowConfig | null> => {
       return await getHarnessDynamicWorkflowConfig(projectId)
@@ -485,7 +553,10 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "harnessBoard:deleteProject",
     async (_event, projectId: string): Promise<HarnessProjectMetadata> => {
+      await assertHarnessProjectCanBeDeleted(projectId)
+      const projectDirectory = getHarnessProjectRootPath(projectId)
       const deleted = await deleteHarnessProject(projectId)
+      managedRunStore.removeProject(projectId, projectDirectory)
       // 项目本地删除后，后台清理其在 ES 中的 trace/event 文档，使其不再出现在运营面板统计中。
       // 尽力而为（fire-and-forget）：内网部分机器无法直连 ES/后端，清理失败不应阻断或回滚删除。
       void purgeProjectAnalytics(projectId)
@@ -696,6 +767,16 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       if ("error" in resolved) return { success: false, error: resolved.error }
       shell.showItemInFolder(resolved.filePath)
       return { success: true }
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:getManagedRunEvents",
+    async (
+      _event,
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ): Promise<ManagedRunEventsPage> => {
+      return managedRunStore.listEvents(input, input.cursor, input.limit)
     }
   )
 

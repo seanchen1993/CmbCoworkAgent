@@ -310,10 +310,10 @@ function ThreadListItemImpl({
       <ContextMenuTrigger asChild>
         <div
           className={cn(
-            "group flex items-center gap-2 rounded-sm px-3 py-2 cursor-pointer transition-colors overflow-hidden",
+            "group relative flex cursor-pointer items-center gap-2 overflow-hidden rounded-md px-3 py-2 transition-colors",
             isSelected
               ? "bg-sidebar-accent text-sidebar-accent-foreground"
-              : "hover:bg-sidebar-accent/50"
+              : "hover:bg-sidebar-hover"
           )}
           onClick={() => {
             if (!isEditing) {
@@ -383,9 +383,10 @@ function ThreadListItemImpl({
             )}
           </div>
           {hasContextReminder && !isRunning ? (
-            <span className="size-2 rounded-full bg-status-warning shrink-0" />
+            <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
           ) : (
-            isUnread && !isRunning && <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+            isUnread &&
+            !isRunning && <span className="size-2 rounded-full bg-status-info shrink-0" />
           )}
           <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
             <span className="absolute right-0 text-[10px] text-muted-foreground transition-opacity group-hover:opacity-0">
@@ -1425,7 +1426,7 @@ export function ThreadSidebar(): React.JSX.Element {
                                 "group flex w-full items-center gap-1.5 rounded-sm px-2 py-1.5 text-left transition-colors",
                                 hasSelectedThread
                                   ? "bg-sidebar-accent/70 text-sidebar-accent-foreground"
-                                  : "hover:bg-sidebar-accent/40"
+                                  : "hover:bg-sidebar-hover"
                               )}
                               onMouseEnter={() => setHoveredProjectKey(project.key)}
                               onMouseLeave={() => setHoveredProjectKey(null)}
@@ -1459,10 +1460,10 @@ export function ThreadSidebar(): React.JSX.Element {
                                 </span>
                               </button>
                               {hasContextReminderThread ? (
-                                <span className="size-2 rounded-full bg-status-warning shrink-0" />
+                                <span className="size-2 rounded-full bg-status-warning-foreground shrink-0" />
                               ) : (
                                 unreadCount > 0 && (
-                                  <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                                  <span className="size-2 rounded-full bg-status-info shrink-0" />
                                 )
                               )}
                               <span className="relative flex h-6 w-4 shrink-0 items-center justify-end overflow-hidden transition-[width] duration-150 group-hover:w-28 group-focus-within:w-28">
@@ -1639,7 +1640,7 @@ export function ThreadSidebar(): React.JSX.Element {
                         {visibleThreads.hiddenCount > 0 && (
                           <button
                             type="button"
-                            className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent/40 hover:text-foreground"
+                            className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-sidebar-hover hover:text-foreground"
                             onClick={() =>
                               setVisibleThreadCounts((counts) => ({
                                 ...counts,
@@ -1715,7 +1716,7 @@ export function ThreadSidebar(): React.JSX.Element {
           >
             Claw
           </span>
-          <span className="text-[9px] text-black ml-1 tabular-nums">
+          <span className="ml-1 text-[9px] text-foreground tabular-nums">
             {version || __APP_VERSION__}
           </span>
           <UpdateActionButton variant="tag" className="ml-1" />

@@ -35,6 +35,7 @@ import {
   MessageSquarePlus,
   Minimize2,
   MoreHorizontal,
+  PauseCircle,
   Pencil,
   Plus,
   RefreshCcw,
@@ -83,6 +84,7 @@ import { ThreadForkCheckpointDialog } from "@/components/sidebar/ThreadForkCheck
 import { ThreadGroupDeleteDialog } from "@/components/sidebar/ThreadGroupDeleteDialog"
 import { KnowledgePreviewPanel } from "@/components/harness-board/KnowledgePreviewPanel"
 import { KnowledgeDialog } from "@/components/harness-board/KnowledgeDialog"
+import { ManagedRunTimeline } from "@/components/harness-board/ManagedRunPanel"
 import {
   createBoundedLatestTaskQueue,
   type BoundedTaskContext
@@ -166,7 +168,11 @@ import type {
   BuiltinRobotStatus,
   BuiltinRobotRemoteAccessOverview
 } from "@/types"
-import { HARNESS_SOURCE } from "../../../../shared/harness-board-types"
+import {
+  HARNESS_SOURCE,
+  MANAGED_RUN_STATUS_LABELS,
+  type ManagedRunViewStatus
+} from "../../../../shared/harness-board-types"
 import {
   HARNESS_PROJECT_DETAIL_BATCH_SIZE,
   MAX_HARNESS_PROJECT_DETAIL_CACHE_ENTRIES,
@@ -1149,23 +1155,52 @@ function statusTone(status?: HarnessStatus): string {
   }
 }
 
+function managedRunStatusToHarnessStatus(status: ManagedRunViewStatus): HarnessStatus {
+  const uiKind =
+    status === "running"
+      ? "active"
+      : status === "completed"
+        ? "done"
+        : status === "cancelled"
+          ? "warning"
+          : "error"
+  return { label: MANAGED_RUN_STATUS_LABELS[status], uiKind }
+}
+
 function StatusPill({
   status,
-  tooltip
+  tooltip,
+  onClick
 }: {
   status: HarnessStatus
   tooltip?: string | null
+  onClick?: () => void
 }): React.JSX.Element {
   const pill = (
-    <span
-      className={cn(
-        "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium",
-        statusTone(status)
-      )}
-      title={status.label}
-    >
-      <span className="truncate">{status.label}</span>
-    </span>
+    onClick ? (
+      <button
+        type="button"
+        className={cn(
+          "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          statusTone(status),
+          "cursor-pointer hover:bg-status-info/20"
+        )}
+        title={status.label}
+        onClick={onClick}
+      >
+        <span className="truncate">{status.label}</span>
+      </button>
+    ) : (
+      <span
+        className={cn(
+          "inline-flex h-6 max-w-full items-center rounded border px-2 text-[11px] font-medium",
+          statusTone(status)
+        )}
+        title={status.label}
+      >
+        <span className="truncate">{status.label}</span>
+      </span>
+    )
   )
 
   if (!tooltip) return pill
@@ -1230,7 +1265,7 @@ function ProjectPluginUpdateButton({
         type="button"
         variant="outline"
         size="sm"
-        className="market-update-bounce h-7 gap-1 rounded-lg border-[#78d7cb] bg-[#e5fbf7] px-3 text-xs text-[#0f766e] hover:bg-[#d4f7f0] disabled:cursor-not-allowed disabled:opacity-70"
+        className="market-update-bounce h-7 gap-1 rounded-lg border-status-nominal/30 bg-status-nominal/10 px-3 text-xs text-status-nominal hover:bg-status-nominal/15 disabled:cursor-not-allowed disabled:opacity-70"
         disabled={updatingPlugin}
         onClick={(event) => {
           event.stopPropagation()
@@ -1765,7 +1800,7 @@ function HarnessProjectPhaseFlow({
     <section className="w-full shrink-0 rounded-2xl border border-border/80 bg-background-elevated/80 p-3 shadow-sx">
       <div className="mb-2 flex">
         <span className="text-sm">项目流程</span>
-        <span className="ml-2 shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+        <span className="ml-2 shrink-0 rounded border border-status-info/25 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
           来自精益之星
         </span>
       </div>
@@ -1808,7 +1843,7 @@ function HarnessProjectPhaseFlow({
                     className={cn(
                       "flex size-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-all duration-200",
                       isDone && "bg-status-nominal text-white",
-                      step.tone === "upcoming" && "bg-gray-200 text-muted-foreground"
+                      step.tone === "upcoming" && "bg-background-interactive text-muted-foreground"
                     )}
                   >
                     {isDone ? <Check className="size-3.5" /> : step.order}
@@ -4309,7 +4344,12 @@ function FeatureCard({
           <div className="truncate text-sm font-semibold">{run.title}</div>
           <div className="mt-1 truncate text-[11px] text-muted-foreground">{run.slug}</div>
         </div>
-        <StatusPill status={run.overallStatus} />
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <StatusPill status={run.overallStatus} />
+          {run.humanGate && (
+            <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
+          )}
+        </div>
       </div>
       <ProgressBar progressIndex={progressIndex} totalNodes={totalNodes} />
       <div className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
@@ -4334,11 +4374,11 @@ function ProjectBadgeRow({
   return (
     <div className="flex min-w-0 items-center">
       {children}
-      <span className="text-xs mx-1 text-gray-500 max-w-[100px] truncate">
+      <span className="mx-1 max-w-[100px] truncate text-xs text-muted-foreground">
         / {project.projectCode}
       </span>
       {project.projectFromLean && (
-        <span className="shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+        <span className="shrink-0 rounded border border-status-info/25 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
           精益之星
         </span>
       )}
@@ -4420,6 +4460,7 @@ function ProjectCard({
       run.overallStatus.uiKind === "blocked" ||
       run.overallStatus.uiKind === "error"
   ).length
+  const pendingHumanGateCount = runs.filter((run) => Boolean(run.humanGate)).length
   const projectStatus = pluginCompatibilityMessage
     ? pluginCompatibilityStatus
     : detail?.projectState
@@ -4502,7 +4543,7 @@ function ProjectCard({
               <StatusPill status={detail.projectState} tooltip={detailError} />
             </div>
           ) : (
-            <div className="grid grid-cols-4 gap-1.5">
+            <div className="grid grid-cols-5 gap-1.5">
               <div className="min-w-0 text-[11px] text-muted-foreground">
                 特性
                 <strong className="mt-0.5 block text-sm text-foreground">
@@ -4525,6 +4566,12 @@ function ProjectCard({
                 风险
                 <strong className="mt-0.5 block text-sm text-status-warning">
                   {loading || !detail ? "-" : riskCount}
+                </strong>
+              </div>
+              <div className="min-w-0 text-[11px] text-muted-foreground">
+                待确认
+                <strong className="mt-0.5 block text-sm text-status-warning">
+                  {loading || !detail ? "-" : pendingHumanGateCount}
                 </strong>
               </div>
             </div>
@@ -4794,7 +4841,7 @@ function ArchivedProjectsTable({
                     <div className="flex min-w-0 items-center gap-1.5">
                       <span className="truncate font-medium">{project.name}</span>
                       {project.projectFromLean && (
-                        <span className="shrink-0 rounded border border-border bg-blue-200/50 px-1.5 py-0.5 text-[10px] text-blue-600">
+                        <span className="shrink-0 rounded border border-status-info/25 bg-status-info/10 px-1.5 py-0.5 text-[10px] text-status-info">
                           精益之星
                         </span>
                       )}
@@ -5094,7 +5141,7 @@ function FeatureDeployUnitsPanel({
   deployUnits: HarnessDeployUnitMapping[]
 }): React.JSX.Element {
   return (
-    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-white")}>
+    <section className={cn(harnessSurfaceClassName, "overflow-hidden bg-background-elevated")}>
       <div className="flex min-w-0 items-center gap-2 border-b border-border/70 px-4 py-3 text-sm font-semibold">
         <FolderOpen className="size-4 shrink-0 text-muted-foreground" />
         <span className="truncate">当前特性绑定的发布单元</span>
@@ -6384,12 +6431,14 @@ function FeatureDetailPage({
         featureCurrentNodeStatus
       )
     : 0
-  const featureProgressPercent = progressPercentFromValues(
-    featureProgressIndex,
-    featureProgressTotal
-  )
-  const featureOverallStatus = detail?.run.overallStatus ??
-    selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
+  const featureProgressPercent = progressPercentFromValues(featureProgressIndex, featureProgressTotal)
+  const featureOverallStatus =
+    detail?.run.overallStatus ?? selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
+  const managedRun = detail?.run.managedRun
+  const managedRunSessionThreadId = managedRun?.currentSession?.threadId
+  const managedRunStatus = managedRun
+    ? managedRunStatusToHarnessStatus(managedRun.status)
+    : null
   const nodeGroups = useMemo(() => groupStageNodes(detail?.run.nodes ?? []), [detail])
   const selectedGroup =
     nodeGroups.length > 0
@@ -6417,12 +6466,28 @@ function FeatureDetailPage({
   const threads = useAppStore((s) => s.threads)
   const allThreadStates = useThreadStateSummaries()
   const allStreamLoadingStates = useAllStreamLoadingStates()
-  const threadsById = useMemo(
-    () => new Map(threads.map((thread) => [thread.thread_id, thread])),
-    [threads]
+  const threadsById = useMemo(() => new Map(threads.map((thread) => [thread.thread_id, thread])), [threads])
+  const managedSessionTitles = useMemo(
+    () =>
+      new Map(
+        (detail?.sessions ?? []).flatMap((session) => {
+          const title = threadsById.get(session.threadId)?.title
+          return title ? [[session.threadId, title] as const] : []
+        })
+      ),
+    [detail?.sessions, threadsById]
   )
   const [sessionBusy, setSessionBusy] = useState<"create" | null>(null)
   const [skippingNodeId, setSkippingNodeId] = useState<string | null>(null)
+  const [updatingManagedRun, setUpdatingManagedRun] = useState(false)
+  const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<
+    "approve" | "reject" | null
+  >(null)
+  const [managedRunDialogOpen, setManagedRunDialogOpen] = useState(false)
+  const [managedRunWorkspacePath, setManagedRunWorkspacePath] = useState("")
+  const [openingManagedRunDialog, setOpeningManagedRunDialog] = useState(false)
+  const [pickingManagedRunWorkspace, setPickingManagedRunWorkspace] = useState(false)
+  const managedRunActionInFlightRef = useRef(false)
   const [selectedSessionState, setSelectedSessionState] = useState<{
     detailKey: string
     threadId: string | null
@@ -6552,29 +6617,147 @@ function FeatureDetailPage({
     threadsById
   ])
 
-  const handleContextReminderSessionCreated = useCallback(
-    (threadId: string): void => {
-      if (!threadId) return
-      setSelectedSessionState({ detailKey, threadId })
-      onActiveSessionChange?.(threadId)
-      setActiveDetailTab("session")
-      onSessionViewChange?.(true)
+  const handlePickManagedRunWorkspace = useCallback(async (): Promise<void> => {
+    if (pickingManagedRunWorkspace) return
+    setPickingManagedRunWorkspace(true)
+    try {
+      const workspacePath = normalizeWorkspacePath(await window.api.workspace.select())
+      if (workspacePath) setManagedRunWorkspacePath(workspacePath)
+    } finally {
+      setPickingManagedRunWorkspace(false)
+    }
+  }, [pickingManagedRunWorkspace])
+
+  const handleOpenManagedRunDialog = useCallback(async (): Promise<void> => {
+    if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled) return
+    setOpeningManagedRunDialog(true)
+    try {
+      const latestSessionWorkspacePath = await getLatestSessionWorkspacePath(
+        detail.sessions,
+        threadsById,
+        allThreadStates
+      )
+      const configuredWorkspacePath = normalizeWorkspacePath(detail.project.sessionWorkspacePath)
+      const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
+      setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
+      setManagedRunDialogOpen(true)
+    } finally {
+      setOpeningManagedRunDialog(false)
+    }
+  }, [
+    allThreadStates,
+    detail,
+    openingManagedRunDialog,
+    projectInteractionDisabled,
+    threadsById,
+    updatingManagedRun
+  ])
+
+  const handleManagedRunChange = useCallback(
+    async (shouldStart: boolean, workspacePath?: string): Promise<boolean> => {
+      if (
+        !detail ||
+        updatingManagedRun ||
+        projectInteractionDisabled ||
+        managedRunActionInFlightRef.current
+      ) {
+        return false
+      }
+
+      managedRunActionInFlightRef.current = true
+      setUpdatingManagedRun(true)
+      try {
+        let startStatus: "running" | "completed" | "failed" | "cancelled" | "corrupt" | null = null
+        let startFailureReason: string | undefined
+        if (shouldStart) {
+          const confirmedWorkspacePath = normalizeWorkspacePath(workspacePath)
+          if (!confirmedWorkspacePath) throw new Error("请选择本次托管使用的会话工作区")
+          const startedRun = await window.api.harnessBoard.startManagedRun({
+            projectId: detail.project.projectId,
+            featureId: detail.run.slug,
+            workspacePath: confirmedWorkspacePath
+          })
+          startStatus = startedRun.status
+          startFailureReason = startedRun.failureReason
+        } else {
+          const runId = detail.run.managedRun?.runId
+          if (!runId) throw new Error("当前没有可停止的托管 Run")
+          const stopped = await window.api.harnessBoard.stopManagedRun({
+            projectId: detail.project.projectId,
+            featureId: detail.run.slug,
+            runId
+          })
+          if (!stopped) throw new Error("托管 Run 已发生变化，请刷新后重试")
+        }
+        await onRefresh()
+        if (!shouldStart) {
+          toast.success("已停止托管")
+        } else if (startStatus === "running") {
+          toast.success("已开始托管")
+        } else if (startStatus === "completed") {
+          toast.success("特性已完成，无需继续托管")
+        } else {
+          toast.error(startFailureReason || "托管未能启动，请查看托管运行记录")
+        }
+        return true
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+        return false
+      } finally {
+        managedRunActionInFlightRef.current = false
+        setUpdatingManagedRun(false)
+      }
     },
-    [detailKey, onActiveSessionChange, onSessionViewChange]
+    [detail, onRefresh, projectInteractionDisabled, updatingManagedRun]
   )
 
-  const canSkipNode = useCallback(
-    (node: HarnessRunNode | null): boolean =>
-      Boolean(
-        detail &&
-        node &&
-        detail.run.skipNodeAvailable &&
-        !projectInteractionDisabled &&
-        node.id === detail.run.currentNodeId &&
-        node.status.uiKind !== "done"
-      ),
-    [detail, projectInteractionDisabled]
+  const handleConfirmManagedRun = useCallback(async (): Promise<void> => {
+    const started = await handleManagedRunChange(true, managedRunWorkspacePath)
+    if (started) setManagedRunDialogOpen(false)
+  }, [handleManagedRunChange, managedRunWorkspacePath])
+
+  const handleContextReminderSessionCreated = useCallback((threadId: string): void => {
+    if (!threadId) return
+    setSelectedSessionState({ detailKey, threadId })
+    onActiveSessionChange?.(threadId)
+    setActiveDetailTab("session")
+    onSessionViewChange?.(true)
+  }, [detailKey, onActiveSessionChange, onSessionViewChange])
+
+  const handleHumanGateDecision = useCallback(
+    async (decision: "approve" | "reject"): Promise<void> => {
+      const humanGate = detail?.run.humanGate
+      if (!humanGate || humanGateDecisionBusy) return
+      setHumanGateDecisionBusy(decision)
+      try {
+        const input = {
+          projectId: humanGate.projectId,
+          featureId: humanGate.featureId,
+          gateId: humanGate.gateId
+        }
+        const changed =
+          decision === "approve"
+            ? await window.api.harnessBoard.approveHumanGate(input)
+            : await window.api.harnessBoard.rejectHumanGate(input)
+        if (!changed) throw new Error("Human Gate 已发生变化，请刷新后重试")
+        await onRefresh()
+      } catch (error) {
+        toast.error(cleanIpcError(error))
+      } finally {
+        setHumanGateDecisionBusy(null)
+      }
+    },
+    [detail, humanGateDecisionBusy, onRefresh]
   )
+
+  const canSkipNode = useCallback((node: HarnessRunNode | null): boolean => Boolean(
+    detail &&
+    node &&
+    detail.run.skipNodeAvailable &&
+    !projectInteractionDisabled &&
+    node.id === detail.run.currentNodeId &&
+    node.status.uiKind !== "done"
+  ), [detail, projectInteractionDisabled])
 
   const handleSkipNode = useCallback(
     async (node: HarnessRunNode): Promise<void> => {
@@ -6817,6 +7000,42 @@ function FeatureDetailPage({
           </div>
           {effectiveActiveDetailTab === "feature" && (
             <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant={detail?.run.managedRun?.status === "running" ? "outline" : "default"}
+                      size="sm"
+                      className={cn(harnessDetailSecondaryButtonClassName, "w-[132px]")}
+                      onClick={() => {
+                        if (detail?.run.managedRun?.status === "running") {
+                          void handleManagedRunChange(false)
+                          return
+                        }
+                        void handleOpenManagedRunDialog()
+                      }}
+                      disabled={
+                        loading ||
+                        !detail ||
+                        projectInteractionDisabled ||
+                        openingManagedRunDialog ||
+                        updatingManagedRun
+                      }
+                    >
+                      {(openingManagedRunDialog || updatingManagedRun) && (
+                        <Loader2 className="size-4 animate-spin" />
+                      )}
+                      {detail?.run.managedRun?.status === "running" ? "停止托管" : "开始托管"}
+                    </Button>
+                  </TooltipTrigger>
+                  {detail?.run.managedRun?.status !== "running" && (
+                    <TooltipContent side="bottom" className="z-[70] max-w-72">
+                      将自动在会话结束时创建新会话、推进到下一阶段
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              </TooltipProvider>
               <Button
                 type="button"
                 variant="ghost"
@@ -6915,9 +7134,45 @@ function FeatureDetailPage({
       ) : (
         <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden p-2">
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <section
-              className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}
-            >
+            {detail.run.humanGate && (
+              <section className="mb-4 flex flex-col gap-3 rounded-xl border border-status-warning/35 bg-status-warning/10 p-4 shadow-sm sm:flex-row sm:items-center">
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <PauseCircle className="mt-0.5 size-5 shrink-0 text-status-warning" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold">需要人工确认</div>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                      {detail.run.humanGate.message}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex shrink-0 justify-end gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="destructive"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void handleHumanGateDecision("reject")}
+                  >
+                    {humanGateDecisionBusy === "reject" && (
+                      <Loader2 className="size-4 animate-spin" />
+                    )}
+                    拒绝并终止
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void handleHumanGateDecision("approve")}
+                  >
+                    {humanGateDecisionBusy === "approve" && (
+                      <Loader2 className="size-4 animate-spin" />
+                    )}
+                    批准推进
+                  </Button>
+                </div>
+              </section>
+            )}
+            <section className={cn(harnessSurfaceClassName, "isolate relative mb-4 overflow-hidden p-4")}>
               <video
                 aria-hidden="true"
                 autoPlay
@@ -6944,6 +7199,16 @@ function FeatureDetailPage({
                       {detail.run.title}
                     </h2>
                     <StatusPill status={featureOverallStatus} />
+                    {managedRunStatus && (
+                      <StatusPill
+                        status={managedRunStatus}
+                        onClick={
+                          managedRun?.status === "running" && managedRunSessionThreadId
+                            ? () => handleHookSessionSelect(managedRunSessionThreadId)
+                            : undefined
+                        }
+                      />
+                    )}
                     {unbound && (
                       <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[11px] text-status-warning">
                         未绑定会话
@@ -6997,6 +7262,17 @@ function FeatureDetailPage({
                     暂无阶段数据。
                   </section>
                 )}
+                <ManagedRunTimeline
+                  key={detail.run.managedRun?.runId ?? "no-managed-run"}
+                  run={detail.run.managedRun}
+                  projectId={detail.project.projectId}
+                  featureId={detail.run.managedRun?.featureId ?? detail.run.slug}
+                  stages={detail.run.nodes.map((node) => ({ id: node.id, label: node.label }))}
+                  selectedNodeId={selectedNode?.id}
+                  sessionTitles={managedSessionTitles}
+                  onSelectNode={setSelectedNodeId}
+                  onSelectThread={handleHookSessionSelect}
+                />
               </div>
 
               <aside className="min-w-0 space-y-3">
@@ -7078,6 +7354,78 @@ function FeatureDetailPage({
           </div>
         </div>
       )}
+      <Dialog
+        open={managedRunDialogOpen}
+        onOpenChange={(open) => {
+          if (!updatingManagedRun) setManagedRunDialogOpen(open)
+        }}
+      >
+        <DialogContent className={harnessDialogContentClassName}>
+          <DialogHeader>
+            <DialogTitle>开启托管运行</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-2 py-2">
+            <div className="flex items-center gap-1.5 text-sm font-medium">
+              <span>会话工作区</span>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      aria-label="托管模式会话工作区提示"
+                      className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      <Info className="size-3.5" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top" className="z-[70] max-w-72">
+                    该路径将作为本次托管模式自动创建会话时使用的会话工作区
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            <div className="flex min-w-0 gap-2">
+              <Input
+                value={managedRunWorkspacePath}
+                readOnly
+                placeholder="请选择文件夹"
+                className="min-w-0 flex-1"
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                className="shrink-0 gap-2"
+                onClick={() => void handlePickManagedRunWorkspace()}
+                disabled={pickingManagedRunWorkspace || updatingManagedRun}
+              >
+                {pickingManagedRunWorkspace ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <FolderOpen className="size-4" />
+                )}
+                选择文件夹
+              </Button>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setManagedRunDialogOpen(false)}
+              disabled={updatingManagedRun}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleConfirmManagedRun()}
+              disabled={!managedRunWorkspacePath.trim() || updatingManagedRun}
+            >
+              {updatingManagedRun && <Loader2 className="size-4 animate-spin" />}
+              确认并开启托管
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -7473,9 +7821,7 @@ function ProjectFeatureSidebar({
                           </span>
                         )
                       )}
-                      {hasUnreadSession && (
-                        <span className="size-2 rounded-full bg-blue-500 shrink-0" />
-                      )}
+                      {hasUnreadSession && <span className="size-2 rounded-full bg-status-info shrink-0" />}
                     </div>
                   </div>
                   <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
@@ -7603,9 +7949,7 @@ function ProjectFeatureSidebar({
                             >
                               {featureGroup.title}
                             </span>
-                            {hasUnreadFeatureSession && (
-                              <span className="size-2 rounded-full bg-blue-500 shrink-0" />
-                            )}
+                            {hasUnreadFeatureSession && <span className="size-2 rounded-full bg-status-info shrink-0" />}
                             <span className="relative ml-auto flex h-6 w-14 shrink-0 items-center justify-end overflow-hidden">
                               <span className="absolute right-1 text-[10px] tabular-nums text-muted-foreground transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
                                 {featureGroup.sessions.length}
@@ -9075,6 +9419,80 @@ export function HarnessBoardView({
       }
     })
   }, [loadProjectDetail])
+
+  useEffect(() => {
+    return window.api.harnessBoard.onManagedRunChanged((event) => {
+      const currentFeature = selectedFeatureRef.current
+      if (
+        !currentFeature ||
+        currentFeature.deleted ||
+        currentFeature.projectId !== event.projectId ||
+        currentFeature.slug !== event.featureId
+      ) {
+        return
+      }
+      setRunDetail((currentDetail) => {
+        if (
+          !currentDetail ||
+          currentDetail.project.projectId !== event.projectId ||
+          currentDetail.run.slug !== event.featureId
+        ) {
+          return currentDetail
+        }
+        return {
+          ...currentDetail,
+          run: {
+            ...currentDetail.run,
+            managedRun: event.run
+          }
+        }
+      })
+      if (event.run.status !== "running") {
+        void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
+      }
+    })
+  }, [loadProjectDetail])
+
+  useEffect(() => {
+    return window.api.harnessBoard.onHumanGateChanged((event) => {
+      const projectDetail = detailsByProjectIdRef.current[event.projectId]
+      if (projectDetail) {
+        let changed = false
+        const runs = projectDetail.runs.map((run) => {
+          if (run.slug !== event.featureId) return run
+          changed = true
+          const nextRun = { ...run }
+          if (event.humanGate) nextRun.humanGate = event.humanGate
+          else delete nextRun.humanGate
+          return nextRun
+        })
+        if (changed) {
+          const nextProjectDetail = { ...projectDetail, runs }
+          const nextDetails = {
+            ...detailsByProjectIdRef.current,
+            [event.projectId]: nextProjectDetail
+          }
+          cacheHarnessProjectDetails({ [event.projectId]: nextProjectDetail })
+          detailsByProjectIdRef.current = nextDetails
+          setDetailsByProjectId(nextDetails)
+        }
+      }
+
+      setRunDetail((currentDetail) => {
+        if (
+          !currentDetail ||
+          currentDetail.project.projectId !== event.projectId ||
+          currentDetail.run.slug !== event.featureId
+        ) {
+          return currentDetail
+        }
+        const nextRun = { ...currentDetail.run }
+        if (event.humanGate) nextRun.humanGate = event.humanGate
+        else delete nextRun.humanGate
+        return { ...currentDetail, run: nextRun }
+      })
+    })
+  }, [])
 
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {

@@ -11,8 +11,11 @@ import {
   ChevronDown
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
+import { getThemeDefinition } from "@/lib/theme-registry"
+import { getThemePreference, subscribeThemePreference } from "@/lib/theme-preference"
 import { cn } from "@/lib/utils"
-import { Terminal } from "@xterm/xterm"
+import { Terminal, type ITheme } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { WebglAddon } from "@xterm/addon-webgl"
 import "@xterm/xterm/css/xterm.css"
@@ -44,32 +47,92 @@ const PTY_STARTUP_TIMEOUT_MS = 15_000 // Claude Code CLI 冷启动约 8-10s，�
 // 判断是否为打包环境
 const isPackaged = !window.location.hostname.includes("localhost")
 
+interface ParsedThemeColor {
+  red: number
+  green: number
+  blue: number
+  alpha: number
+}
+
+function parseThemeColor(color: string): ParsedThemeColor | null {
+  const hex = color.match(/^#([\da-f]{6})([\da-f]{2})?$/i)
+  if (hex) {
+    return {
+      red: Number.parseInt(hex[1].slice(0, 2), 16),
+      green: Number.parseInt(hex[1].slice(2, 4), 16),
+      blue: Number.parseInt(hex[1].slice(4, 6), 16),
+      alpha: hex[2] ? Number.parseInt(hex[2], 16) / 255 : 1
+    }
+  }
+
+  const rgb = color.match(
+    /^rgb\(\s*(\d{1,3})\s+(\d{1,3})\s+(\d{1,3})(?:\s*\/\s*(\d*\.?\d+))?\s*\)$/i
+  )
+  if (!rgb) return null
+  return {
+    red: Number(rgb[1]),
+    green: Number(rgb[2]),
+    blue: Number(rgb[3]),
+    alpha: rgb[4] === undefined ? 1 : Number(rgb[4])
+  }
+}
+
+function flattenXtermColor(color: string, background: string): string {
+  const foregroundColor = parseThemeColor(color)
+  const backgroundColor = parseThemeColor(background)
+  if (!foregroundColor || !backgroundColor) return color
+
+  const alpha = Math.min(1, Math.max(0, foregroundColor.alpha))
+  const channel = (foreground: number, backdrop: number): string =>
+    Math.round(foreground * alpha + backdrop * (1 - alpha))
+      .toString(16)
+      .padStart(2, "0")
+
+  return `#${channel(foregroundColor.red, backgroundColor.red)}${channel(
+    foregroundColor.green,
+    backgroundColor.green
+  )}${channel(foregroundColor.blue, backgroundColor.blue)}`
+}
+
+function createXtermTheme(): ITheme {
+  const definition = getThemeDefinition(getThemePreference())
+  const { palette } = definition
+  const ansiBlack = flattenXtermColor(
+    definition.colorScheme === "dark" ? palette.tertiaryForeground : palette.foreground,
+    palette.background
+  )
+  const ansiWhite = flattenXtermColor(palette.mutedForeground, palette.background)
+
+  return {
+    background: palette.background,
+    foreground: palette.foreground,
+    cursor: palette.foreground,
+    cursorAccent: palette.background,
+    selectionBackground: palette.accent,
+    black: ansiBlack,
+    red: palette.statusCritical,
+    green: palette.statusNominal,
+    yellow: palette.statusWarning,
+    blue: palette.statusInfo,
+    magenta: palette.syntaxKeyword,
+    cyan: palette.primary,
+    white: ansiWhite,
+    brightBlack: ansiWhite,
+    brightRed: palette.statusCritical,
+    brightGreen: palette.statusNominal,
+    brightYellow: palette.statusWarning,
+    brightBlue: palette.statusInfo,
+    brightMagenta: palette.syntaxKeyword,
+    brightCyan: palette.primary,
+    brightWhite: palette.foreground
+  }
+}
+
 function createXterm(): { xterm: Terminal; fitAddon: FitAddon } {
   const xterm = new Terminal({
     fontSize: 13,
     fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, monospace",
-    theme: {
-      background: "#faf9f6",
-      foreground: "#1a1a1a",
-      cursor: "#1a1a1a",
-      selectionBackground: "#d4d0c8",
-      black: "#1a1a1a",
-      red: "#c4261d",
-      green: "#2e7d32",
-      yellow: "#f57f17",
-      blue: "#1565c0",
-      magenta: "#7b1fa2",
-      cyan: "#00838f",
-      white: "#b8b4ac",
-      brightBlack: "#545454",
-      brightRed: "#e05a50",
-      brightGreen: "#4caf50",
-      brightYellow: "#ff9800",
-      brightBlue: "#42a5f5",
-      brightMagenta: "#ab47bc",
-      brightCyan: "#26c6da",
-      brightWhite: "#8a8780"
-    },
+    theme: createXtermTheme(),
     cursorBlink: true,
     scrollback: 5000,
     allowProposedApi: true,
@@ -109,6 +172,17 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
   const syncMemoryRef = useRef(syncMemory)
   syncSkillsRef.current = syncSkills
   syncMemoryRef.current = syncMemory
+
+  useEffect(
+    () =>
+      subscribeThemePreference(() => {
+        const theme = createXtermTheme()
+        for (const session of sessionsRef.current.values()) {
+          session.xterm.options.theme = theme
+        }
+      }),
+    []
+  )
 
   // 加载模型列表（仅打包环境）
   const refreshModels = useCallback((resetSelection = false) => {
@@ -768,10 +842,10 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
           </div>
           <div className="flex flex-col items-center gap-3 w-full max-w-md">
             {/* 液态玻璃配置面板 */}
-            <div className="w-full rounded-2xl border border-[rgba(0,0,0,0.06)] bg-[rgba(255,255,255,0.5)] backdrop-blur-xl shadow-[0_2px_12px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.8)] overflow-hidden">
+            <div className="w-full overflow-hidden rounded-2xl border border-border/60 bg-background-elevated/50 shadow-[0_2px_12px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.8)] backdrop-blur-xl dark:shadow-[0_2px_12px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.08)]">
               {/* 模型选择行 */}
               {isPackaged && models.length > 0 && (
-                <div className="flex items-center justify-between px-4 py-2.5 border-b border-[rgba(0,0,0,0.04)]">
+                <div className="flex items-center justify-between border-b border-border/50 px-4 py-2.5">
                   <span className="text-xs text-muted-foreground/60">模型</span>
                   <div className="relative inline-flex items-center">
                     <select
@@ -799,7 +873,7 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                   key={label}
                   className={cn(
                     "flex items-center justify-between px-4 py-2.5",
-                    i < arr.length - 1 && "border-b border-[rgba(0,0,0,0.04)]"
+                    i < arr.length - 1 && "border-b border-border/50"
                   )}
                 >
                   <span className="text-xs text-muted-foreground/60">{label}</span>
@@ -808,13 +882,15 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                     onClick={() => onChange(!checked)}
                     className={cn(
                       "relative w-[38px] h-[22px] rounded-full transition-all duration-300 ease-out cursor-pointer",
-                      checked ? "bg-[#34C759]" : "bg-[#e9e9ea]"
+                      checked ? "bg-status-nominal" : "bg-background-interactive"
                     )}
                   >
-                    <span className={cn(
-                      "absolute top-[2px] size-[18px] rounded-full bg-white shadow-[0_2px_4px_rgba(0,0,0,0.15),0_1px_1px_rgba(0,0,0,0.06)] transition-all duration-300 ease-out",
-                      checked ? "left-[18px]" : "left-[2px]"
-                    )} />
+                    <ToggleThumb
+                      className={cn(
+                        "absolute top-[2px] size-[18px] shadow-[0_2px_4px_rgba(0,0,0,0.15),0_1px_1px_rgba(0,0,0,0.06)] duration-300 ease-out",
+                        checked ? "left-[18px]" : "left-[2px]"
+                      )}
+                    />
                   </button>
                 </div>
               ))}
@@ -922,9 +998,9 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
       )}
 
       {/* 终端容器 */}
-      <div ref={hostRef} className="flex-1 min-h-0 overflow-hidden" style={{ position: "relative", backgroundColor: "#faf9f6" }}>
+      <div ref={hostRef} className="flex-1 min-h-0 overflow-hidden bg-background" style={{ position: "relative" }}>
         {activeSession && !activeSession.hasContent && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center z-10 gap-4" style={{ backgroundColor: "#faf9f6" }}>
+          <div className="absolute inset-0 flex flex-col items-center justify-center z-10 gap-4 bg-background">
             {/* Claude Code 像素吉祥物 - 逐帧行走动画 */}
             <div className="claude-mascot-container">
               <svg width="66" height="60" viewBox="0 0 11 10" xmlns="http://www.w3.org/2000/svg" style={{ shapeRendering: "crispEdges" }}>

@@ -375,7 +375,7 @@ export function UpdateDialog({
   const isIntermediate = !!updateInfo && updateInfo.version !== updateInfo.targetVersion
   const isSelfTestSource = sourceInfo?.channel === "selftest"
   const sourceNotice = isSelfTestSource ? (
-    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+    <div className="rounded-md border border-status-warning/25 bg-status-warning/10 px-3 py-2 text-xs text-status-warning">
       <div className="font-medium">自测更新通道</div>
       <div className="mt-1 break-all">manifest：{sourceInfo.manifestFile}</div>
       {sourceInfo.baseUrl && <div className="mt-0.5 break-all">baseUrl：{sourceInfo.baseUrl}</div>}

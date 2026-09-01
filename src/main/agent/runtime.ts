@@ -50,6 +50,10 @@ import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
 import type { HookResult } from "../hooks/types"
+import {
+  listPendingHumanGateRuntimeThreadIds,
+  requestHumanGate
+} from "../harness-board/human-gate-service"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
@@ -338,6 +342,8 @@ import {
 import { SOLO_TASK_OWNER_METADATA_KEY, type SoloTaskTraceManager } from "./trace/solo-task"
 import type { TraceContext, TraceOutcome } from "./trace/types"
 
+export const MANAGED_EXECUTE_TIMEOUT_MS = 20 * 60 * 1000
+
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   return error.name === "AbortError" || (error as { code?: unknown }).code === "ABORT_ERR"
@@ -417,7 +423,9 @@ export function hasPendingWorkflowApproval(parentThreadId: string, runId?: strin
   for (const approval of pendingApprovals.values()) {
     if (isWorkflowSubagentThreadOf(approval.runtimeThreadId, parentThreadId, runId)) return true
   }
-  return false
+  return listPendingHumanGateRuntimeThreadIds().some((runtimeThreadId) =>
+    isWorkflowSubagentThreadOf(runtimeThreadId, parentThreadId, runId)
+  )
 }
 
 /**
@@ -435,7 +443,9 @@ export function hasPendingApprovalForRuntimeThread(runtimeThreadId: string): boo
       return true
     }
   }
-  return false
+  return listPendingHumanGateRuntimeThreadIds().some((pendingThreadId) =>
+    approvalMatchesRuntimeThread(pendingThreadId, runtimeThreadId)
+  )
 }
 
 coordinatorWorkerManager.setWorkerApprovalProbe(hasPendingApprovalForRuntimeThread)
@@ -2105,6 +2115,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     mainSubagentsEnabled = true,
     filesystemAccess,
     mainBlockedToolNames = [],
+    managedExecution = false,
     registrySubagentSpecs = [],
     // Windows shell kind the runtime's commands execute in (derived from the
     // sandbox). Threaded into the read-only execute gate so Windows PowerShell
@@ -2337,6 +2348,9 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             return readOnlyExecuteBlockMessage(windowsShellKind)
           }
           if (input.run_in_background) {
+            if (managedExecution) {
+              return formatExecuteResponse(await sandbox.execute(input.command, input.cwd))
+            }
             return sandbox.executeBackground(input.command, input.cwd)
           }
           if (input.cwd?.trim()) {
@@ -2368,9 +2382,11 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
               .boolean()
               .optional()
               .describe(
-                "Set to true to run the command in the background. Returns a task ID immediately. " +
-                  "Use this for long-running commands like builds, dependency downloads, or test suites. " +
-                  "Retrieve the result later with the task_output tool."
+                managedExecution
+                  ? "Managed sessions always execute in the foreground. This flag is accepted for compatibility but still waits up to 20 minutes and returns the final command result instead of a task ID."
+                  : "Set to true to run the command in the background. Returns a task ID immediately. " +
+                      "Use this for long-running commands like builds, dependency downloads, or test suites. " +
+                      "Retrieve the result later with the task_output tool."
               )
           })
         }
@@ -3045,12 +3061,14 @@ export function getSystemPrompt(
   windowsSandbox?: "none" | "unelevated" | "readonly" | "elevated",
   options: {
     includeBackgroundExec?: boolean
+    managedForegroundExec?: boolean
     includeSubagents?: boolean
     includeMemory?: boolean
     includeCurrentTime?: boolean
   } = {}
 ): string {
   const includeBackgroundExec = options.includeBackgroundExec ?? true
+  const managedForegroundExec = options.managedForegroundExec === true
   const isWindows = process.platform === "win32"
   const platform = isWindows ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux"
   const { name: shell, isBashLike, isPowerShell } = getShellInfo(windowsSandbox)
@@ -3102,7 +3120,17 @@ ${shellGuidance}
   // execute is present, but isReadOnlyShellCommand rejects builds/installs/tests.
   const backgroundExecSection = !includeBackgroundExec
     ? ""
-    : `
+    : managedForegroundExec
+      ? `
+### 长时间命令执行
+
+**重要提示：** 当前是托管会话，execute 始终以前台方式运行，最长等待 20 分钟。即使传入 \`run_in_background: true\`，命令也不会返回 task_id，而是等待成功、失败、取消或超时后直接返回结果。
+
+- 项目编译、依赖安装、测试套件、代码生成和 Docker 构建均可直接调用 execute。
+- 不要为托管会话轮询 task_output；当前 Tool Call 会一直等待命令结算。
+- 命令运行超过 20 分钟时，按现有前台超时行为终止并返回超时结果。
+`
+      : `
 ### 长时间命令执行
 
 **重要提示：** execute 工具默认超时 60 秒。对于可能超过 60 秒的命令，**必须**使用 \`run_in_background: true\` 参数：
@@ -4242,6 +4270,11 @@ export interface CreateAgentRuntimeOptions {
   modelId?: string
   /** Workspace path - REQUIRED for agent to operate on files */
   workspacePath: string
+  /** ManagedRun execution boundary. Forces detached shell execution into a
+   * foreground Tool Call with the managed timeout and is inherited by leaf runtimes. */
+  managedExecution?: boolean
+  /** Turn-local observer invoked only after a Dynamic Workflow launch succeeds. */
+  onWorkflowLaunched?: (runId: string) => void
   /** Immutable checkout/git boundary for a dynamic-workflow worktree agent.
    * Its workspaceRoot moves only the agent's file view; workspacePath remains
    * the host identity for hooks, thread data, memory and the agent registry. */
@@ -4481,6 +4514,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     onCoordinatorWorkerHookResult,
     onCoordinatorWorkerEvent,
     onCoordinatorNotificationAction,
+    onWorkflowLaunched,
     hookTurnId,
     actionStationarityTurnId = hookTurnId,
     onHookSkippedFactory,
@@ -4529,6 +4563,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return {}
     }
   })()
+  const managedExecution = options.managedExecution === true
   const memoryEnabledForThread =
     inheritedMemoryEnabled ?? isThreadMemoryEnabled(runtimeThreadMetadata)
   const runtimePolicy = createRuntimePromptToolPolicy({
@@ -4713,7 +4748,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     // Native Git in an isolated worktree runs through the normal shell path.
     // Reuse the existing worktree operation timeout so large adds, filters and
     // repository hooks do not regress to the ordinary agent's 60-second limit.
-    timeout: options.worktreeIsolation ? getWorkflowWorktreeTimeoutMs() : 60_000,
+    timeout: managedExecution
+      ? MANAGED_EXECUTE_TIMEOUT_MS
+      : options.worktreeIsolation
+        ? getWorkflowWorktreeTimeoutMs()
+        : 60_000,
     maxOutputBytes,
     windowsSandbox,
     codexExePath: codexExists ? codexExePath : undefined,
@@ -4721,6 +4760,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     hookScope,
     onHookResult,
     onFailureFuseNotice,
+    requestHumanGate,
+    humanGateThreadId: approvalThreadId,
     hookTurnId,
     pluginOutputDir,
     systemId,
@@ -4970,6 +5011,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   // worktree (the sandbox would refuse, so it would just fail confusingly).
   let systemPrompt = getSystemPrompt(fileRoot, windowsSandbox, {
     includeBackgroundExec: executeToolAvailable && !isReadOnlyRuntime,
+    managedForegroundExec: managedExecution,
     includeSubagents: mainSubagentsEnabled,
     includeMemory: runtimePolicy.includeMemory,
     includeCurrentTime: runtimePolicy.includeCurrentTime
@@ -5366,6 +5408,7 @@ The workspace root is: ${fileRoot}`
         threadId,
         workspacePath,
         modelId,
+        onLaunched: onWorkflowLaunched,
         // Run-before approval gate (aligns with Claude Code's "Review dynamic
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
@@ -5479,7 +5522,8 @@ The workspace root is: ${fileRoot}`
               // acceptEdits: the user approved the whole workflow at launch, so
               // its background subagents must not re-prompt per file edit
               // (shell execution stays gated).
-              autoApproveFileEdits: true
+              autoApproveFileEdits: true,
+              managedExecution
             })
             if (worktreeIsolation) worktreeSubagentThreads.add(subagentOptions.threadId)
             return subagentRuntime as unknown as WorkflowSubagentRuntime
@@ -6000,6 +6044,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
+            managedExecution,
             modelId: candidateId,
             extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6074,6 +6119,7 @@ Use the same worker thread context for follow-up instructions. ${scratchpadGuida
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
+            managedExecution,
             modelId: nextCandidate,
             extraSystemPrompt: `${workerRolePrompt}\n\n${workerMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6129,6 +6175,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
             actionStationarityTurnId: workerActionStationarityTurnId,
             approvalThreadId: workerInput.parentThreadId,
             workspacePath,
+            managedExecution,
             modelId: usedWorkerModelId ?? modelId,
             extraSystemPrompt: `${workerRolePrompt}\n\n${handoffMetadataPrompt}`,
             noSchedulerTool: true,
@@ -6537,6 +6584,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     mainSubagentsEnabled,
     filesystemAccess: options.filesystemAccess,
     mainBlockedToolNames: [...runtimeBlockedToolNames],
+    managedExecution,
     registrySubagentSpecs,
     // The runtime's commands execute via the sandbox; on Windows with a sandbox
     // that's PowerShell. Pass that to the read-only execute gate so PS read-only

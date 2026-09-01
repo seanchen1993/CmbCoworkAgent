@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import {
@@ -971,9 +972,9 @@ export function CustomModelDialog({
                       config.enableThinking ? "bg-primary" : "bg-muted-foreground/30"
                     )}
                   >
-                    <span
+                    <ToggleThumb
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        "inline-block size-4",
                         config.enableThinking ? "translate-x-4" : "translate-x-0"
                       )}
                     />
@@ -1009,9 +1010,9 @@ export function CustomModelDialog({
                           : "cursor-pointer bg-muted-foreground/30"
                     )}
                   >
-                    <span
+                    <ToggleThumb
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        "inline-block size-4",
                         config.enableThinking && config.enableThinkingEffort
                           ? "translate-x-4"
                           : "translate-x-0"
@@ -1069,9 +1070,9 @@ export function CustomModelDialog({
                           : "cursor-pointer bg-muted-foreground/30"
                     )}
                   >
-                    <span
+                    <ToggleThumb
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        "inline-block size-4",
                         config.interleavedThinking ? "translate-x-4" : "translate-x-0"
                       )}
                     />
@@ -1131,9 +1132,9 @@ export function CustomModelDialog({
                           : "cursor-pointer bg-muted-foreground/30"
                     )}
                   >
-                    <span
+                    <ToggleThumb
                       className={cn(
-                        "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                        "inline-block size-4",
                         isDefaultModel ? "translate-x-4" : "translate-x-0"
                       )}
                     />
@@ -1188,7 +1189,7 @@ export function CustomModelDialog({
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="ml-auto shrink-0 h-6 px-2 text-xs border-blue-500/50 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700"
+                    className="ml-auto h-6 shrink-0 border-primary/50 px-2 text-xs text-primary hover:bg-primary/10 hover:text-primary/80"
                     onClick={handleTest}
                     disabled={!canTest || testing || saving || deleting}
                   >

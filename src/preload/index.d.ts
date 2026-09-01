@@ -115,8 +115,20 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  ManagedAutoSendStreamStartEvent,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
+  HarnessHumanGateSnapshot,
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunChangeEvent,
+  ManagedRunStartInput,
+  ManagedRunStopInput,
+  ManagedRunSummary,
+  ManagedRunThreadCreatedEvent,
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
 } from "../shared/harness-board-types"
@@ -978,6 +990,13 @@ interface CustomAPI {
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
+    ) => () => void
+    onManagedAutoSendStreamStart: (
+      callback: (event: ManagedAutoSendStreamStartEvent) => void
+    ) => () => void
+    observeManagedAutoSendStream: (
+      runId: string,
+      callback: (event: StreamEvent) => void
     ) => () => void
     goalControl: (
       threadId: string,
@@ -2832,6 +2851,9 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
+    getHumanGateForThread: (threadId: string) => Promise<HarnessHumanGateSnapshot | undefined>
+    approveHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
+    rejectHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
     getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
@@ -2863,6 +2885,8 @@ interface CustomAPI {
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
+    startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
+    stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
@@ -2887,8 +2911,16 @@ interface CustomAPI {
     ) => Promise<HarnessRunArtifactRevealResult>
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
+    getManagedRunEvents: (
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ) => Promise<ManagedRunEventsPage>
     cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
+    onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void) => () => void
+    onManagedRunThreadCreated: (
+      callback: (event: ManagedRunThreadCreatedEvent) => void
+    ) => () => void
+    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void) => () => void
   }
   app: {
     restart: () => Promise<void>

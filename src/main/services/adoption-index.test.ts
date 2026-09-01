@@ -10,8 +10,9 @@
  * touches the real ~/.cmbcoworkagent/adoption-index.sqlite.
  */
 
-import { rmSync } from "fs"
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs"
+import { join } from "path"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 const h = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -30,12 +31,20 @@ import {
   enqueueEventOutbox,
   finalizeGenMeasurement,
   findPendingGensForFile,
+  flushAdoptionIndex,
   getAdoptLineDetails,
   getGenRowByEventId,
   getOutboxEvent,
   initializeAdoptionIndex,
   insertGenEvent,
   insertGenEventWithOutbox,
+  markOutboxDeferred,
+  markOutboxDelivered,
+  markOutboxFailed,
+  markOutboxSending,
+  resetInterruptedOutboxEvents,
+  setAdoptionIndexSnapshotFsyncForTest,
+  setAdoptionIndexSnapshotReplaceForTest,
   trimGeneratedSourceTextToByteCap,
   type GenIndexRow
 } from "./adoption-index"
@@ -204,6 +213,49 @@ describe("adoption-index harness_node_name column", () => {
     expect(getOutboxEvent(eventId)?.payload_json).toBe(originalPayload)
   })
 
+  it("counts only completed reporter attempts across claim, deferral, and restart", async () => {
+    const eventId = "outbox-attempt-state-machine"
+    expect(
+      enqueueEventOutbox({
+        eventId,
+        eventName: "code_adopt",
+        payloadJson: JSON.stringify({ eventId, eventName: "code_adopt" }),
+        createdAt: Date.now()
+      })
+    ).toBe(true)
+
+    expect(markOutboxSending(eventId)).toBe(true)
+    expect(getOutboxEvent(eventId)).toMatchObject({ status: "sending", attempts: 0 })
+    expect(flushAdoptionIndex()).toBe(true)
+    closeAdoptionIndex()
+    await initializeAdoptionIndex()
+
+    expect(getOutboxEvent(eventId)).toMatchObject({ status: "sending", attempts: 0 })
+    resetInterruptedOutboxEvents(Date.now())
+    expect(getOutboxEvent(eventId)).toMatchObject({ status: "retry", attempts: 0 })
+
+    expect(markOutboxSending(eventId)).toBe(true)
+    expect(markOutboxDeferred(eventId, "admission deferred", Date.now() + 60_000)).toBe(true)
+    expect(getOutboxEvent(eventId)).toMatchObject({ status: "retry", attempts: 0 })
+
+    expect(markOutboxSending(eventId)).toBe(true)
+    expect(
+      markOutboxFailed(eventId, "network failure", Date.now() + 60_000, false, {
+        consumeAttempt: true,
+        requireSending: true
+      })
+    ).toBe(true)
+    expect(getOutboxEvent(eventId)).toMatchObject({ status: "retry", attempts: 1 })
+
+    expect(markOutboxSending(eventId)).toBe(true)
+    expect(markOutboxDelivered(eventId)).toBe(true)
+    expect(getOutboxEvent(eventId)).toMatchObject({ status: "delivered", attempts: 2 })
+    expect(flushAdoptionIndex()).toBe(true)
+    closeAdoptionIndex()
+    await initializeAdoptionIndex()
+    expect(getOutboxEvent(eventId)).toMatchObject({ status: "delivered", attempts: 2 })
+  })
+
   it("returns harness_node_name from findPendingGensForFile", () => {
     insertGenEvent(
       makeRow({
@@ -330,5 +382,280 @@ describe("adoption-index harness_node_name column", () => {
     expect(getAdoptLineDetails("cap-2", "g_cap_2")).toBeNull()
     expect(getAdoptLineDetails("newer-1", "g_newer-1")).not.toBeNull()
     expect(getAdoptLineDetails("newer-2", "g_newer-2")).not.toBeNull()
+  })
+})
+
+describe.sequential("adoption-index atomic snapshot persistence", () => {
+  const primaryPath = join(h.tempDir, "adoption-index.sqlite")
+  const primaryTempPath = `${primaryPath}.tmp`
+
+  beforeEach(() => {
+    setAdoptionIndexSnapshotFsyncForTest(null)
+    setAdoptionIndexSnapshotReplaceForTest(null)
+    closeAdoptionIndex()
+    rmSync(h.tempDir, { recursive: true, force: true })
+    mkdirSync(h.tempDir, { recursive: true })
+  })
+
+  afterEach(() => {
+    setAdoptionIndexSnapshotFsyncForTest(null)
+    setAdoptionIndexSnapshotReplaceForTest(null)
+    closeAdoptionIndex()
+  })
+
+  afterAll(() => {
+    rmSync(h.tempDir, { recursive: true, force: true })
+  })
+
+  it("atomically creates a durable primary without leftover temp files", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(insertGenEvent(makeRow({ event_id: "g_snapshot_first" }))).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    expect(existsSync(primaryPath)).toBe(true)
+    expect(readFileSync(primaryPath).subarray(0, 16).toString("utf8")).toBe("SQLite format 3\0")
+    expect(existsSync(primaryTempPath)).toBe(false)
+  })
+
+  it("defers fsync for debounced saves until an explicit flush", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+
+    vi.useFakeTimers()
+    let fsyncCalls = 0
+    setAdoptionIndexSnapshotFsyncForTest(() => {
+      fsyncCalls += 1
+    })
+    try {
+      expect(insertGenEvent(makeRow({ event_id: "g_debounced_no_fsync" }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(existsSync(primaryPath)).toBe(true)
+      expect(fsyncCalls).toBe(0)
+
+      expect(flushAdoptionIndex()).toBe(true)
+      expect(fsyncCalls).toBeGreaterThan(0)
+
+      // Exercise the real Node fsync path as well as the probe above. On
+      // Windows, fsyncSync rejects a read-only descriptor with EPERM; the
+      // production flush must reopen a debounced snapshot read/write.
+      setAdoptionIndexSnapshotFsyncForTest(null)
+      expect(insertGenEvent(makeRow({ event_id: "g_windows_real_fsync" }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(flushAdoptionIndex()).toBe(true)
+    } finally {
+      setAdoptionIndexSnapshotFsyncForTest(null)
+      vi.useRealTimers()
+    }
+  })
+
+  it("re-exports the in-memory database if the primary is externally replaced", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(insertGenEvent(makeRow({ event_id: "g_identity_replace" }))).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    writeFileSync(primaryPath, "externally-replaced-primary", "utf8")
+    expect(flushAdoptionIndex()).toBe(true)
+    expect(readFileSync(primaryPath).subarray(0, 16).toString("utf8")).toBe("SQLite format 3\0")
+
+    closeAdoptionIndex()
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_identity_replace")).not.toBeNull()
+  })
+
+  it("re-exports the in-memory database if the primary is externally deleted", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(insertGenEvent(makeRow({ event_id: "g_identity_delete" }))).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    rmSync(primaryPath, { force: true })
+    expect(flushAdoptionIndex()).toBe(true)
+    expect(existsSync(primaryPath)).toBe(true)
+    closeAdoptionIndex()
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_identity_delete")).not.toBeNull()
+  })
+
+  it("retries failed debounced saves with bounded backoff and throttled logging", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    let replaceAttempts = 0
+    setAdoptionIndexSnapshotReplaceForTest((source, destination) => {
+      replaceAttempts += 1
+      if (replaceAttempts <= 2) throw new Error("simulated debounce replace failure")
+      renameSync(source, destination)
+    })
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      expect(insertGenEvent(makeRow({ event_id: "g_debounce_retry" }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(replaceAttempts).toBe(1)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(replaceAttempts).toBe(2)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(replaceAttempts).toBe(3)
+      expect(warn).toHaveBeenCalledTimes(1)
+    } finally {
+      warn.mockRestore()
+      setAdoptionIndexSnapshotReplaceForTest(null)
+      vi.useRealTimers()
+    }
+
+    expect(flushAdoptionIndex()).toBe(true)
+    closeAdoptionIndex()
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_debounce_retry")).not.toBeNull()
+  })
+
+  it("restores the retry timer when an explicit flush interrupts backoff and also fails", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    let replaceAttempts = 0
+    setAdoptionIndexSnapshotReplaceForTest((source, destination) => {
+      replaceAttempts += 1
+      if (replaceAttempts <= 2) throw new Error("simulated retry and flush failure")
+      renameSync(source, destination)
+    })
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      expect(insertGenEvent(makeRow({ event_id: "g_flush_restores_retry" }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(500)
+      expect(replaceAttempts).toBe(1)
+
+      // This clears the already-scheduled 1s retry, then fails synchronously.
+      // The dirty snapshot must still be retried automatically with backoff.
+      expect(flushAdoptionIndex()).toBe(false)
+      expect(replaceAttempts).toBe(2)
+      expect(warn).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(replaceAttempts).toBe(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(replaceAttempts).toBe(3)
+    } finally {
+      warn.mockRestore()
+      setAdoptionIndexSnapshotReplaceForTest(null)
+      vi.useRealTimers()
+    }
+
+    expect(flushAdoptionIndex()).toBe(true)
+    closeAdoptionIndex()
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_flush_restores_retry")).not.toBeNull()
+  })
+
+  it("retries a durable repair after debounce succeeded but fsync and replacement failed", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    let fsyncAttempts = 0
+    let replaceAttempts = 0
+    try {
+      expect(insertGenEvent(makeRow({ event_id: "g_durability_repair" }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(500)
+
+      setAdoptionIndexSnapshotFsyncForTest(() => {
+        fsyncAttempts += 1
+        if (fsyncAttempts === 1) {
+          const error = new Error("simulated Windows file lock") as NodeJS.ErrnoException
+          error.code = "EPERM"
+          throw error
+        }
+      })
+      setAdoptionIndexSnapshotReplaceForTest((source, destination) => {
+        replaceAttempts += 1
+        if (replaceAttempts === 1) throw new Error("simulated durable replace failure")
+        renameSync(source, destination)
+      })
+
+      expect(flushAdoptionIndex()).toBe(false)
+      expect(replaceAttempts).toBe(1)
+      setAdoptionIndexSnapshotFsyncForTest(null)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(replaceAttempts).toBe(2)
+    } finally {
+      warn.mockRestore()
+      setAdoptionIndexSnapshotFsyncForTest(null)
+      setAdoptionIndexSnapshotReplaceForTest(null)
+      vi.useRealTimers()
+    }
+
+    expect(flushAdoptionIndex()).toBe(true)
+    closeAdoptionIndex()
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_durability_repair")).not.toBeNull()
+  })
+
+  it("retries durable repair when an externally missing primary cannot be replaced", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(insertGenEvent(makeRow({ event_id: "g_missing_repair" }))).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    rmSync(primaryPath, { force: true })
+
+    let replaceAttempts = 0
+    setAdoptionIndexSnapshotReplaceForTest((source, destination) => {
+      replaceAttempts += 1
+      if (replaceAttempts === 1) throw new Error("simulated missing-primary replace failure")
+      renameSync(source, destination)
+    })
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      expect(flushAdoptionIndex()).toBe(false)
+      expect(existsSync(primaryPath)).toBe(false)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(replaceAttempts).toBe(2)
+      expect(existsSync(primaryPath)).toBe(true)
+    } finally {
+      warn.mockRestore()
+      setAdoptionIndexSnapshotReplaceForTest(null)
+      vi.useRealTimers()
+    }
+
+    closeAdoptionIndex()
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_missing_repair")).not.toBeNull()
+  })
+
+  it("fails closed when the existing primary is corrupt", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    closeAdoptionIndex()
+    writeFileSync(primaryPath, "corrupted-primary", "utf8")
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      expect(await initializeAdoptionIndex()).toBe(false)
+    } finally {
+      warn.mockRestore()
+    }
+    expect(insertGenEvent(makeRow({ event_id: "g_must_not_overwrite" }))).toBe(false)
+    expect(readFileSync(primaryPath, "utf8")).toBe("corrupted-primary")
+  })
+
+  it("keeps the old primary and dirty state retryable when atomic replace fails", async () => {
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(insertGenEvent(makeRow({ event_id: "g_replace_old" }))).toBe(true)
+    expect(flushAdoptionIndex()).toBe(true)
+    const oldPrimary = readFileSync(primaryPath)
+
+    expect(insertGenEvent(makeRow({ event_id: "g_replace_retry" }))).toBe(true)
+    setAdoptionIndexSnapshotReplaceForTest((source, destination) => {
+      if (destination === primaryPath) throw new Error("simulated primary replace failure")
+      renameSync(source, destination)
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    try {
+      expect(flushAdoptionIndex()).toBe(false)
+    } finally {
+      warn.mockRestore()
+    }
+
+    expect(readFileSync(primaryPath)).toEqual(oldPrimary)
+    expect(existsSync(primaryTempPath)).toBe(false)
+    setAdoptionIndexSnapshotReplaceForTest(null)
+    expect(flushAdoptionIndex()).toBe(true)
+
+    closeAdoptionIndex()
+    expect(await initializeAdoptionIndex()).toBe(true)
+    expect(getGenRowByEventId("g_replace_old")).not.toBeNull()
+    expect(getGenRowByEventId("g_replace_retry")).not.toBeNull()
   })
 })

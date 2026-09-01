@@ -74,7 +74,8 @@ import { toast } from "sonner"
 import { formatAutoCommitText } from "../../../shared/auto-commit-format"
 import {
   normalizeHarnessAgentmdLoadStatus,
-  type HarnessAgentmdLoadStatusItem
+  type HarnessAgentmdLoadStatusItem,
+  type ManagedAutoSendStreamStartEvent
 } from "../../../shared/harness-board-types"
 import {
   findMessagesAfterCheckpointVisibleIds,
@@ -1561,6 +1562,7 @@ interface CustomEventData {
 
 interface ThreadStreamHolderProps {
   threadId: string
+  managedAutoSendRun?: ManagedAutoSendStreamStartEvent
   messages: readonly Message[]
   checkpointFallbackIndexBaselines?: StreamFallbackIndexBaselines
   subagentTranscriptBaseline: Record<string, Message[]>
@@ -1577,6 +1579,7 @@ const MAX_RETAINED_IDLE_STREAM_HOLDERS = 6
 // to thread A from re-running useStream for every previously opened thread.
 const ThreadStreamHolder = memo(function ThreadStreamHolder({
   threadId,
+  managedAutoSendRun,
   messages,
   checkpointFallbackIndexBaselines,
   subagentTranscriptBaseline,
@@ -1598,12 +1601,13 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
       getMessageFallbackIndexBaselines(messages)
     )
   }, [checkpointFallbackIndexBaselines, getMessageFallbackIndexBaselines, messages])
-
   // The holder is mounted only after transcript hydration succeeds. Seed the
   // transport synchronously, before useStream can subscribe or convert any
   // live values snapshot, so reused raw task IDs cannot claim a legacy bucket.
   const [transport] = useState(() => {
-    const seededTransport = new ElectronIPCTransport()
+    const seededTransport = new ElectronIPCTransport(
+      managedAutoSendRun ? { managedAutoSendRunId: managedAutoSendRun.runId } : undefined
+    )
     seededTransport.seedSubagentTranscriptBaseline(threadId, subagentTranscriptBaseline)
     seededTransport.setFallbackIndexBaselines(fallbackIndexBaselines)
     return seededTransport
@@ -1635,6 +1639,30 @@ const ThreadStreamHolder = memo(function ThreadStreamHolder({
       onErrorRef.current(threadId, error instanceof Error ? error : new Error(String(error)))
     }
   })
+  const submittedManagedRunIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!managedAutoSendRun || submittedManagedRunIdRef.current === managedAutoSendRun.runId) {
+      return
+    }
+    submittedManagedRunIdRef.current = managedAutoSendRun.runId
+    void stream
+      .submit(null, {
+        config: {
+          configurable: {
+            thread_id: threadId,
+            ...(managedAutoSendRun.agentMode ? { agent_mode: managedAutoSendRun.agentMode } : {})
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        onErrorRef.current(
+          threadId,
+          error instanceof Error ? error : new Error(String(error))
+        )
+      })
+  }, [managedAutoSendRun, stream, threadId])
+
   const latestStreamRef = useRef(stream)
   useEffect(() => {
     latestStreamRef.current = stream
@@ -1681,6 +1709,9 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   const [pendingResolutionRevision, setPendingResolutionRevision] = useState(0)
   const [dehydrationEligibilityRevision, setDehydrationEligibilityRevision] = useState(0)
   const [activeThreadIds, setActiveThreadIds] = useState<Set<string>>(new Set())
+  const [managedAutoSendRuns, setManagedAutoSendRuns] = useState<
+    Record<string, ManagedAutoSendStreamStartEvent>
+  >({})
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({})
   const initializedThreadsRef = useRef<Set<string>>(new Set())
   const previousCurrentThreadIdRef = useRef<string | null>(null)
@@ -7517,6 +7548,27 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
+    return window.api.agent.onManagedAutoSendStreamStart((event) => {
+      setManagedAutoSendRuns((prev) => ({
+        ...prev,
+        [event.threadId]: event
+      }))
+      initializeThread(event.threadId)
+    })
+  }, [initializeThread])
+
+  useEffect(() => {
+    return window.api.harnessBoard.onManagedRunThreadCreated((event) => {
+      useAppStore.getState().addThreadSummary(event.thread)
+      if (initializedThreadsRef.current.has(event.threadId)) {
+        loadThreadHistory(event.threadId)
+      } else {
+        initializeThread(event.threadId)
+      }
+    })
+  }, [initializeThread, loadThreadHistory])
+
+  useEffect(() => {
     foregroundHydrationGeneration.transition(currentThreadId)
     const previousThreadId = previousCurrentThreadIdRef.current
     if (previousThreadId && previousThreadId !== currentThreadId) {
@@ -7698,6 +7750,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
         const next = new Set(prev)
         next.delete(threadId)
         return next
+      })
+      setManagedAutoSendRuns((prev) => {
+        if (!prev[threadId]) return prev
+        const { [threadId]: _removed, ...rest } = prev
+        void _removed
+        return rest
       })
       deleteThreadState(threadId)
     },
@@ -8023,10 +8081,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       {Array.from(activeThreadIds).map((threadId) => {
         const state = threadStatesRef.current[threadId]
         if (!state?.subagentTranscriptBaselineReady) return null
+        const managedAutoSendRun = managedAutoSendRuns[threadId]
         return (
           <ThreadStreamHolder
-            key={threadId}
+            key={`${threadId}:${managedAutoSendRun?.runId ?? "standard"}`}
             threadId={threadId}
+            managedAutoSendRun={managedAutoSendRun}
             messages={state.messages}
             checkpointFallbackIndexBaselines={checkpointFallbackIndexBaselinesRef.current[threadId]}
             subagentTranscriptBaseline={state.subagentTranscripts}

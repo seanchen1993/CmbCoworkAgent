@@ -2,7 +2,6 @@ import { IpcMain, BrowserWindow, dialog, type IpcMainInvokeEvent } from "electro
 import { constants as fsConstants } from "fs"
 import { copyFile, lstat, mkdir } from "fs/promises"
 import path from "path"
-import Store from "electron-store"
 import AdmZip from "adm-zip"
 import { v4 as uuid } from "uuid"
 import {
@@ -61,7 +60,6 @@ import {
   deleteThreadWorkflowCheckpoints,
   getThreadCheckpointPath,
   getDbPath,
-  getOpenworkDir,
   purgeThreadCheckpointArtifacts
 } from "../storage"
 import { SqlJsSaver } from "../checkpointer/sqljs-saver"
@@ -85,7 +83,7 @@ import {
   deleteProjectThreadDataDirectory,
   getProjectThreadDataDirectory
 } from "../agent/context-history-path"
-import { defaultThreadTitle, generateTitle } from "../services/title-generator"
+import { generateTitle } from "../services/title-generator"
 import { imRemoteAccessService } from "../services/im/remote-access-service"
 import {
   finalizeWorkflowWorktreeRecord,
@@ -94,7 +92,6 @@ import {
 } from "../services/git-worktree"
 import { fireSessionEnd } from "../hooks/session-lifecycle"
 import { makeHookResultCallback } from "../hooks/result-callback"
-import { getDefaultModel } from "./models"
 import { stopWatching } from "../services/workspace-watcher"
 import { isExternallyManagedThreadRunBusy } from "../services/thread-external-run-busy"
 import { threadMetadataMatchesGroupSelector } from "../services/thread-group-selector"
@@ -162,8 +159,10 @@ import {
   patchLatestThreadMetadata,
   validateRendererThreadMetadataPatch
 } from "../services/thread-metadata"
-import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
-import { resolveRecentWorkspacePath } from "./recent-workspace"
+import {
+  captureThreadIncarnation,
+  matchesThreadIncarnation
+} from "../services/thread-incarnation"
 import {
   copyCheckpoint,
   type Checkpoint,
@@ -202,10 +201,6 @@ import {
   readSubagentTranscriptStartupInWorker
 } from "../subagent-transcript-startup/client"
 import {
-  buildHarnessFeatureAgentContext,
-  DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG
-} from "../harness-board/service"
-import {
   acquireSubagentTranscriptBlobReadPin,
   advanceSubagentTranscriptReferenceEpoch,
   compactSubagentTranscriptManifests,
@@ -225,6 +220,7 @@ import {
   getSubagentTranscriptBlobReferenceHashKey,
   isSubagentTranscriptBlobRef
 } from "../../shared/subagent-transcript-storage"
+import { createThreadService } from "../services/thread-service"
 import { collectReferencedTranscriptHashesFromPages } from "./thread-transcript-gc-scan"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
@@ -292,13 +288,6 @@ interface ThreadCheckpoint {
     }
   }
 }
-
-// 复用主进程 settings 存储，用于读取“最近一次选择的工作区”。
-// 这里不存敏感信息，只读写路径类配置。
-const settingsStore = new Store({
-  name: "settings",
-  cwd: getOpenworkDir()
-})
 
 const CHECKPOINT_THREAD_ID_PATTERN = /^[A-Za-z0-9_-]+$/
 
@@ -2992,103 +2981,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
 
   // Create a new thread
   ipcMain.handle("threads:create", async (_event, metadata?: Record<string, unknown>) => {
-    const threadId = uuid()
-    // 先拷贝一份，避免直接修改调用方传入的 metadata 对象。
-    const nextMetadata: Record<string, unknown> = { ...(metadata ?? {}) }
-    const harnessFeatureMetadata =
-      nextMetadata.harnessFeature &&
-      typeof nextMetadata.harnessFeature === "object" &&
-      !Array.isArray(nextMetadata.harnessFeature)
-        ? (nextMetadata.harnessFeature as Record<string, unknown>)
-        : undefined
-    if (harnessFeatureMetadata) {
-      nextMetadata.harnessFeature = {
-        ...harnessFeatureMetadata,
-        requestUserInputConfig: { ...DEFAULT_HARNESS_REQUEST_USER_INPUT_CONFIG }
-      }
-    }
-
-    // 仅当调用方没有显式传 workspacePath 时，才自动继承最近工作区。
-    // 这样可以兼容两种场景：
-    // 1) 用户手动点“新任务” -> 自动带上最近目录；
-    // 2) 业务方显式指定 workspacePath -> 保持调用方优先。
-    const hasWorkspacePath = Object.prototype.hasOwnProperty.call(nextMetadata, "workspacePath")
-    if (!hasWorkspacePath) {
-      // UNC/network paths can make existsSync block Electron main for seconds.
-      // Probe asynchronously with a short bound, then verify the setting did not
-      // change while I/O was in flight before inheriting it.
-      const lastWorkspacePath = await resolveRecentWorkspacePath(() =>
-        settingsStore.get("workspacePath", null)
-      )
-      if (lastWorkspacePath) {
-        nextMetadata.workspacePath = lastWorkspacePath
-      }
-    }
-
-    let harnessContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>> = null
-    try {
-      const workspacePath =
-        typeof nextMetadata.workspacePath === "string" ? nextMetadata.workspacePath : undefined
-      harnessContext = await buildHarnessFeatureAgentContext(nextMetadata, {
-        workspacePath,
-        requestUserInputConfigSource: "plugin"
-      })
-      if (harnessFeatureMetadata && harnessContext?.agentConfig?.toolConfig?.requestUserInput) {
-        nextMetadata.harnessFeature = {
-          ...harnessFeatureMetadata,
-          requestUserInputConfig: harnessContext.agentConfig.toolConfig.requestUserInput
-        }
-      }
-    } catch (error) {
-      console.warn("[Threads] Failed to resolve Harness request_user_input policy:", error)
-    }
-
-    if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode")) {
-      try {
-        const initialAgentMode = harnessContext?.agentConfig?.agentMode
-        if (initialAgentMode === "solo") {
-          nextMetadata.agentMode = "normal"
-          nextMetadata.subagentsEnabled = false
-        }
-        if (initialAgentMode === "multi") {
-          nextMetadata.agentMode = "normal"
-          nextMetadata.subagentsEnabled = true
-        }
-        if (initialAgentMode === "agent_team") nextMetadata.agentMode = "coordinator"
-      } catch (error) {
-        console.warn("[Threads] Failed to apply Harness initial agent mode:", error)
-      }
-    }
-    if (
-      getAgentModeFromMetadata(nextMetadata) === "normal" &&
-      typeof nextMetadata.subagentsEnabled !== "boolean"
-    ) {
-      nextMetadata.subagentsEnabled = true
-    }
-
-    const hasModel = Object.prototype.hasOwnProperty.call(nextMetadata, "model")
-    if (!hasModel) {
-      const defaultModelId = getDefaultModel()
-      if (defaultModelId) {
-        nextMetadata.model = defaultModelId
-      }
-    }
-
-    // title 仍保持原有规则：优先使用调用方传入，否则使用日期默认值。
-    const title = (nextMetadata.title as string) || defaultThreadTitle()
-    nextMetadata.title = title
-
-    const thread = dbCreateThread(threadId, nextMetadata)
-
-    return {
-      thread_id: thread.thread_id,
-      created_at: new Date(thread.created_at),
-      updated_at: new Date(thread.updated_at),
-      metadata: thread.metadata ? JSON.parse(thread.metadata) : undefined,
-      status: thread.status as Thread["status"],
-      thread_values: thread.thread_values ? JSON.parse(thread.thread_values) : undefined,
-      title
-    } as Thread
+    return createThreadService(metadata)
   })
 
   ipcMain.handle("threads:fork", async (_event, params: ThreadForkParams) => {

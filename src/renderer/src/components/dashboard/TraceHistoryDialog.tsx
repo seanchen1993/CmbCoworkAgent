@@ -407,7 +407,7 @@ function outcomeClass(outcome: string): string {
   if (outcome === "error") return "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
   if (outcome === "unknown")
     return "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30"
-  return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/20"
+  return "border-border bg-muted text-muted-foreground"
 }
 
 function shortTraceId(value?: string): string {

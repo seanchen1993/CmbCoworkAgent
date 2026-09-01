@@ -2190,6 +2190,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
 
   const threadsIpc = await readProjectFile("src/main/ipc/threads.ts")
+  const threadService = await readProjectFile("src/main/services/thread-service.ts")
   const coordinatorWorkerManagerSource = await readProjectFile(
     "src/main/agent/coordinator-worker-manager.ts"
   )
@@ -2205,13 +2206,28 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
   )
   assertIncludes(
     harnessBoardService,
-    'HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"',
-    "Harness agent configuration can select the normal-mode Multi variant"
+    'HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team" | "workflow"',
+    "Harness agent configuration can select workflow mode"
   )
   assertIncludes(
-    threadsIpc,
+    harnessBoardService,
+    'value.agentMode === "workflow"',
+    "session_context_inject normalization accepts workflow mode"
+  )
+  assertIncludes(
+    threadService,
     'if (initialAgentMode === "multi")',
     "Harness Multi initializes the normal runtime with subagents enabled"
+  )
+  assertIncludes(
+    threadService,
+    'if (initialAgentMode === "workflow") nextMetadata.agentMode = "workflow"',
+    "Harness workflow initializes the Thread in workflow mode"
+  )
+  assertIncludes(
+    threadService,
+    'if (!Object.prototype.hasOwnProperty.call(nextMetadata, "agentMode"))',
+    "explicit Thread agentMode metadata takes precedence over the plugin default"
   )
   assertIncludes(
     threadsIpc,
@@ -2219,7 +2235,7 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     "thread fork preserves the Solo/Multi capability variant"
   )
   assertMatches(
-    threadsIpc,
+    threadService,
     /getAgentModeFromMetadata\(nextMetadata\) === "normal"[\s\S]*?nextMetadata\.subagentsEnabled = true/,
     "new normal threads explicitly default to Multi"
   )

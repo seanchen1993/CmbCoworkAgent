@@ -2442,46 +2442,38 @@ function SkillSection(props: {
   const sectionStyle = useMemo(() => {
     if (title.includes("内置")) {
       return {
-        header:
-          "border-sky-200/70 bg-sky-50/80 text-sky-900 hover:bg-sky-50 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-100",
-        dot: "bg-sky-500",
-        count:
-          "border-sky-200/80 bg-white/85 text-sky-700 dark:border-sky-800 dark:bg-sky-950/50 dark:text-sky-200"
+        header: "border-status-info/25 bg-status-info/10 text-status-info hover:bg-status-info/15",
+        dot: "bg-status-info",
+        count: "border-status-info/25 bg-background-elevated/85 text-status-info"
       }
     }
     if (title.includes("我上传")) {
       return {
         header:
-          "border-amber-200/70 bg-amber-50/80 text-amber-900 hover:bg-amber-50 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100",
-        dot: "bg-amber-500",
-        count:
-          "border-amber-200/80 bg-white/85 text-amber-700 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200"
+          "border-status-warning/25 bg-status-warning/10 text-status-warning hover:bg-status-warning/15",
+        dot: "bg-status-warning",
+        count: "border-status-warning/25 bg-background-elevated/85 text-status-warning"
       }
     }
     if (title.includes("应用市场")) {
       return {
         header:
-          "border-emerald-200/70 bg-emerald-50/80 text-emerald-900 hover:bg-emerald-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100",
-        dot: "bg-emerald-500",
-        count:
-          "border-emerald-200/80 bg-white/85 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200"
+          "border-status-nominal/25 bg-status-nominal/10 text-status-nominal hover:bg-status-nominal/15",
+        dot: "bg-status-nominal",
+        count: "border-status-nominal/25 bg-background-elevated/85 text-status-nominal"
       }
     }
     if (title.includes("组织级")) {
       return {
-        header:
-          "border-violet-200/70 bg-violet-50/80 text-violet-900 hover:bg-violet-50 dark:border-violet-900/50 dark:bg-violet-950/30 dark:text-violet-100",
-        dot: "bg-violet-500",
-        count:
-          "border-violet-200/80 bg-white/85 text-violet-700 dark:border-violet-800 dark:bg-violet-950/50 dark:text-violet-200"
+        header: "border-primary/25 bg-primary/10 text-primary hover:bg-primary/15",
+        dot: "bg-primary",
+        count: "border-primary/25 bg-background-elevated/85 text-primary"
       }
     }
     return {
-      header:
-        "border-border/70 bg-muted/50 text-foreground hover:bg-muted dark:border-border/60 dark:bg-muted/30 dark:text-foreground",
+      header: "border-border/70 bg-muted/50 text-foreground hover:bg-muted",
       dot: "bg-muted-foreground",
-      count:
-        "border-border/70 bg-background text-muted-foreground dark:border-border/60 dark:bg-background/70"
+      count: "border-border/70 bg-background text-muted-foreground"
     }
   }, [title])
   const toggleSkillTreeNode = useCallback((nodeKey: string) => {
@@ -2930,7 +2922,7 @@ function SkillItem(props: {
           {childCount > 0 && (
             <Badge
               variant="outline"
-              className="h-4 gap-1 px-1.5 text-[10px] border-slate-200 text-slate-600 bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:bg-slate-900/40"
+              className="h-4 gap-1 border-border bg-background-interactive px-1.5 text-[10px] text-muted-foreground"
             >
               <Folder className="size-2.5 shrink-0" />
               {childCount}
@@ -2939,7 +2931,7 @@ function SkillItem(props: {
           {isFeatured && (
             <Badge
               variant="outline"
-              className="h-4 gap-1 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              className="h-4 gap-1 border-status-warning/25 bg-status-warning/10 px-1.5 text-[10px] text-status-warning"
             >
               <Sparkles className="size-2.5 shrink-0" />
               精品
@@ -2948,7 +2940,7 @@ function SkillItem(props: {
           {hasMarketEntry && !hideMarketTag && (
             <Badge
               variant="outline"
-              className="h-4 gap-1 px-1.5 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+              className="h-4 gap-1 border-status-nominal/25 bg-status-nominal/10 px-1.5 text-[10px] text-status-nominal"
             >
               <Store className="size-2.5 shrink-0" />
               市场
@@ -2957,7 +2949,7 @@ function SkillItem(props: {
           {isEdited && (
             <Badge
               variant="outline"
-              className="h-4 px-1.5 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+              className="h-4 border-status-warning/25 bg-status-warning/10 px-1.5 text-[10px] text-status-warning"
             >
               已编辑
             </Badge>
@@ -3228,7 +3220,7 @@ export function SkillDetail(props: {
                     className={cn(publishButtonClassName, "group shrink-0")}
                     onClick={onPublish}
                   >
-                    <span className="flex size-4 items-center justify-center rounded-full bg-white/20 ring-1 ring-white/30 transition-transform duration-200 group-hover:scale-105">
+                    <span className="flex size-4 items-center justify-center rounded-full bg-primary-foreground/20 ring-1 ring-primary-foreground/30 transition-transform duration-200 group-hover:scale-105">
                       <CloudUpload className="size-2.5" />
                     </span>
                     {publishLabel}
@@ -3242,7 +3234,7 @@ export function SkillDetail(props: {
                 {isFeatured && (
                   <Badge
                     variant="outline"
-                    className="h-5 gap-1 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+                    className="h-5 gap-1 border-status-warning/25 bg-status-warning/10 px-2 text-[10px] text-status-warning"
                   >
                     <Sparkles className="size-3 shrink-0" />
                     精品
@@ -3251,7 +3243,7 @@ export function SkillDetail(props: {
                 {hasMarketEntry && (
                   <Badge
                     variant="outline"
-                    className="h-5 gap-1 px-2 text-[10px] border-emerald-200 text-emerald-700 bg-emerald-50"
+                    className="h-5 gap-1 border-status-nominal/25 bg-status-nominal/10 px-2 text-[10px] text-status-nominal"
                   >
                     <Store className="size-3 shrink-0" />
                     市场
@@ -3260,7 +3252,7 @@ export function SkillDetail(props: {
                 {isEdited && (
                   <Badge
                     variant="outline"
-                    className="h-5 px-2 text-[10px] border-amber-200 text-amber-800 bg-amber-50"
+                    className="h-5 border-status-warning/25 bg-status-warning/10 px-2 text-[10px] text-status-warning"
                   >
                     已编辑
                   </Badge>
@@ -3273,8 +3265,8 @@ export function SkillDetail(props: {
                         className={cn(
                           "h-5 gap-1 px-2 text-[10px] cursor-help",
                           skillVersionMissingInFrontmatter
-                            ? "border-amber-200 text-amber-800 bg-amber-50"
-                            : "border-sky-200 text-sky-700 bg-sky-50"
+                            ? "border-status-warning/25 bg-status-warning/10 text-status-warning"
+                            : "border-status-info/25 bg-status-info/10 text-status-info"
                         )}
                       >
                         <GitBranch className="size-3 shrink-0" />
@@ -3402,13 +3394,13 @@ export function SkillDetail(props: {
                 </div>
               </div>
               {skillVersionMissingInFrontmatter && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-relaxed text-amber-900">
-                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                <div className="flex items-start gap-2 rounded-lg border border-status-warning/25 bg-status-warning/10 px-3 py-2.5 text-xs leading-relaxed text-status-warning">
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-status-warning-foreground" />
                   <p>
                     当前没有在{" "}
-                    <code className="rounded bg-amber-100 px-1">SKILL.md frontmatter</code> 里找到{" "}
-                    <code className="rounded bg-amber-100 px-1">version</code>，系统当前按{" "}
-                    <code className="rounded bg-amber-100 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
+                    <code className="rounded bg-status-warning/15 px-1">SKILL.md frontmatter</code> 里找到{" "}
+                    <code className="rounded bg-status-warning/15 px-1">version</code>，系统当前按{" "}
+                    <code className="rounded bg-status-warning/15 px-1">{DEFAULT_SKILL_VERSION}</code>{" "}
                     处理。建议补上 version，方便发布、追踪和版本识别。
                   </p>
                 </div>
@@ -3420,7 +3412,7 @@ export function SkillDetail(props: {
 
       {hideContentPreview ? (
         <div className="flex-1 min-h-0 p-4">
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div className="rounded-lg border border-status-warning/25 bg-status-warning/10 px-4 py-3 text-sm text-status-warning">
             精品技能不支持查看，可以直接使用。
           </div>
         </div>
@@ -3459,11 +3451,11 @@ export function SkillDetail(props: {
                   <iframe
                     title={selectedFilePath ?? "pdf preview"}
                     src={binaryDataUrl}
-                    className="h-full w-full rounded-md border border-border bg-white"
+                    className="h-full w-full rounded-md border border-border bg-background-elevated"
                   />
                 </div>
               ) : previewKind === "html" ? (
-                <div className="h-[80vh] min-h-[500px] rounded-md border border-border overflow-hidden bg-white">
+                <div className="html-preview-light-canvas h-[80vh] min-h-[500px] overflow-hidden rounded-md border border-border">
                   <iframe
                     title={selectedFilePath ?? "html preview"}
                     srcDoc={content ?? ""}

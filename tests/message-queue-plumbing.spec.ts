@@ -942,6 +942,47 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
   )
 }
 
+function testManagedAutoModeTerminalRunsInsideSettlementFence(): void {
+  const settlementHelperStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  const settlementHelperBody = agentIpc.slice(settlementHelperStart, settlementHelperStart + 9000)
+  assertSourceOrder(
+    settlementHelperBody,
+    "...criticalBeforeReleasePhases",
+    'name: "release-active-controller"',
+    "managed terminal phases run before physical ownership is released"
+  )
+  assertOccurrences(
+    agentIpc,
+    'name: "queue-managed-auto-mode-terminal"',
+    3,
+    "invoke, resume, and interrupt each queue exactly one managed terminal phase"
+  )
+  let managedPhaseIndex = agentIpc.indexOf('name: "queue-managed-auto-mode-terminal"')
+  for (const kind of ["invoke", "resume", "interrupt"]) {
+    assert(managedPhaseIndex >= 0, `${kind} managed terminal phase exists`)
+    const managedPhaseBody = agentIpc.slice(managedPhaseIndex, managedPhaseIndex + 5_000)
+    assertIncludes(
+      managedPhaseBody,
+      "isStillCurrent: () =>",
+      `${kind} managed terminal delivery carries an ownership predicate`
+    )
+    assertIncludes(
+      managedPhaseBody,
+      "isPhysicalStreamRunActive(threadId, runToken, abortController.signal)",
+      `${kind} managed terminal delivery is fenced to its physical run`
+    )
+    managedPhaseIndex = agentIpc.indexOf(
+      'name: "queue-managed-auto-mode-terminal"',
+      managedPhaseIndex + 1
+    )
+  }
+  assertIncludes(
+    agentIpc,
+    'name: "settle-managed-workflow-handoff"',
+    "invoke settles an exhausted workflow handoff before managed terminal delivery"
+  )
+}
+
 function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   assertIncludes(
     agentIpc,
@@ -2778,6 +2819,7 @@ function main(): void {
     testGuideUsesCurrentRunPromptPipeline,
     testClearOnEveryRunExit,
     testPhysicalRunSettlementCannotStrandQueuedReplacements,
+    testManagedAutoModeTerminalRunsInsideSettlementFence,
     testStreamTranscriptBuffersArePhysicalRunScoped,
     testPreparingGuidesParticipateInReconciliation,
     testPreloadExposesApi,

@@ -12,19 +12,27 @@ import {
 } from "fs/promises"
 import { appendFileSync } from "fs"
 import { app } from "electron"
-import { join } from "path"
+import { dirname, join } from "path"
+import { types as nodeUtilTypes } from "node:util"
+import { withHookLogMaintenance } from "./hooks/persistence"
 import { getLogsDir, getMainLogPath, getRendererLogPath, resolveHookLogDir } from "./storage"
-import { redactLogValues, redactSensitiveText } from "./log-redaction"
+import {
+  redactAndTruncateSensitiveText,
+  redactLogValues,
+  redactPossiblyTruncatedSensitiveText
+} from "./log-redaction"
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024
 const PRIVATE_DIRECTORY_MODE = 0o700
 const PRIVATE_FILE_MODE = 0o600
 const REDACTION_MIGRATION_MARKER = ".redaction-v1"
+const REDACTION_MIGRATION_VERSION = "version=1\n"
 const LOG_MIGRATION_MAX_FILES = 4_096
 const LOG_MIGRATION_MAX_FILE_BYTES = 8 * 1024 * 1024
 const LOG_MIGRATION_MAX_TOTAL_BYTES = 64 * 1024 * 1024
 const LOG_MIGRATION_YIELD_INTERVAL = 128
 const LOG_MIGRATION_MAX_LINE_CHARS = 64 * 1024
+const PRIVATE_KEY_MARKER_PATTERN = /-----(BEGIN|END) [A-Z0-9 ]*PRIVATE KEY-----/g
 
 export interface LogRedactionInitializationResult {
   alreadyComplete: boolean
@@ -39,17 +47,14 @@ function yieldToEventLoop(): Promise<void> {
 
 async function redactHistoricalLog(raw: string): Promise<string> {
   const output: string[] = []
+  const pemState = { insidePrivateKey: false, endMarker: "-----END PRIVATE KEY-----" }
   let cursor = 0
   let processedChars = 0
   while (cursor < raw.length) {
     const newline = raw.indexOf("\n", cursor)
     const end = newline < 0 ? raw.length : newline + 1
     const line = raw.slice(cursor, end)
-    output.push(
-      line.length > LOG_MIGRATION_MAX_LINE_CHARS
-        ? `[historical log line omitted: ${line.length} chars]\n`
-        : redactSensitiveText(line)
-    )
+    output.push(redactHistoricalLine(line, pemState))
     processedChars += line.length
     cursor = end
     if (processedChars >= 512 * 1024) {
@@ -57,7 +62,57 @@ async function redactHistoricalLog(raw: string): Promise<string> {
       await yieldToEventLoop()
     }
   }
+  if (pemState.insidePrivateKey) output.push(`${pemState.endMarker}\n`)
   return output.join("")
+}
+
+function redactHistoricalPlainText(text: string): string {
+  const hasNewline = text.endsWith("\n")
+  const content = hasNewline ? text.slice(0, -1) : text
+  return `${redactPossiblyTruncatedSensitiveText(content)}${hasNewline ? "\n" : ""}`
+}
+
+function redactHistoricalLine(
+  line: string,
+  state: { insidePrivateKey: boolean; endMarker: string }
+): string {
+  const overLimit = line.length > LOG_MIGRATION_MAX_LINE_CHARS
+  let containsPrivateKeyMaterial = state.insidePrivateKey
+  let plainCursor = 0
+  let redacted = ""
+
+  for (const match of line.matchAll(PRIVATE_KEY_MARKER_PATTERN)) {
+    const marker = match[0]
+    const markerKind = match[1]
+    const markerIndex = match.index
+    if (!state.insidePrivateKey && markerKind === "BEGIN") {
+      containsPrivateKeyMaterial = true
+      if (!overLimit) {
+        redacted += redactHistoricalPlainText(line.slice(plainCursor, markerIndex))
+      }
+      redacted += `${marker}\n[REDACTED]\n`
+      state.insidePrivateKey = true
+      state.endMarker = marker.replace("BEGIN", "END")
+      plainCursor = markerIndex + marker.length
+    } else if (state.insidePrivateKey && markerKind === "END") {
+      containsPrivateKeyMaterial = true
+      redacted += state.endMarker
+      state.insidePrivateKey = false
+      plainCursor = markerIndex + marker.length
+    }
+  }
+
+  if (overLimit) {
+    return containsPrivateKeyMaterial
+      ? `${redacted}${state.insidePrivateKey || redacted.endsWith("\n") ? "" : "\n"}`
+      : `[historical log line omitted: ${line.length} chars]\n`
+  }
+  if (state.insidePrivateKey) {
+    // BEGIN already emitted the canonical newline-delimited replacement.
+    // Private-key body lines produce no output, making retries idempotent.
+    return redacted
+  }
+  return `${redacted}${redactHistoricalPlainText(line.slice(plainCursor))}`
 }
 
 async function getHistoricalLogPaths(): Promise<{ paths: string[]; discoveryFailures: number }> {
@@ -119,19 +174,20 @@ async function tightenLogPermissions(paths: readonly string[]): Promise<void> {
  * console values. New writes are always redacted at enqueue time.
  */
 export async function initializeLogRedaction(): Promise<LogRedactionInitializationResult> {
-  const { paths, discoveryFailures } = await getHistoricalLogPaths()
   const markerPath = join(getLogsDir(), REDACTION_MIGRATION_MARKER)
   let migrationComplete = false
   try {
     migrationComplete =
-      (await lstat(markerPath)).isFile() && (await readFile(markerPath, "utf8")) === "version=1\n"
+      (await lstat(markerPath)).isFile() &&
+      (await readFile(markerPath, "utf8")) === REDACTION_MIGRATION_VERSION
   } catch {
     // No valid completion marker yet.
   }
   if (migrationComplete) {
-    await tightenLogPermissions([...paths, markerPath])
     return { alreadyComplete: true, scannedFiles: 0, redactedFiles: 0, failedFiles: 0 }
   }
+
+  const { paths, discoveryFailures } = await getHistoricalLogPaths()
 
   let scannedFiles = 0
   let redactedFiles = 0
@@ -153,7 +209,7 @@ export async function initializeLogRedaction(): Promise<LogRedactionInitializati
         continue
       }
       totalBytes += fileStat.size
-      await withLogFileMaintenance(filePath, async () => {
+      const operation = async (): Promise<void> => {
         const raw = await readFile(filePath, "utf8")
         const redacted = await redactHistoricalLog(raw)
         scannedFiles += 1
@@ -169,7 +225,12 @@ export async function initializeLogRedaction(): Promise<LogRedactionInitializati
           }
         }
         if (process.platform !== "win32") await chmod(filePath, PRIVATE_FILE_MODE)
-      })
+      }
+      if (dirname(filePath) === resolveHookLogDir()) {
+        await withHookLogMaintenance(operation)
+      } else {
+        await withLogFileMaintenance(filePath, operation)
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue
       failedFiles += 1
@@ -180,7 +241,7 @@ export async function initializeLogRedaction(): Promise<LogRedactionInitializati
   await tightenLogPermissions(paths)
   if (failedFiles === 0) {
     try {
-      await writeFile(markerPath, "version=1\n", {
+      await writeFile(markerPath, REDACTION_MIGRATION_VERSION, {
         encoding: "utf8",
         mode: PRIVATE_FILE_MODE
       })
@@ -319,7 +380,10 @@ async function seedSizeOnce(filePath: string, state: LogFileState): Promise<void
   return state.sizeSeedPromise
 }
 
-async function withLogFileMaintenance(filePath: string, operation: () => Promise<void>): Promise<void> {
+async function withLogFileMaintenance(
+  filePath: string,
+  operation: () => Promise<void>
+): Promise<void> {
   const state = getFileState(filePath)
   while (state.maintenancePromise || state.flushPromise) {
     await (state.maintenancePromise ?? state.flushPromise)
@@ -352,7 +416,7 @@ async function flushFile(filePath: string, state: LogFileState): Promise<void> {
   if (state.buffer.length === 0) return
 
   state.flushPromise = (async () => {
-    if (state.maintenancePromise) await state.maintenancePromise
+    while (state.maintenancePromise) await state.maintenancePromise
     while (state.buffer.length > 0) {
       await seedSizeOnce(filePath, state)
       const chunk = state.buffer.join("")
@@ -445,10 +509,10 @@ function enqueueLine(
 ): void {
   const state = getFileState(filePath)
   const timestamp = new Date().toISOString()
-  const boundedMessage = message.slice(0, LOG_LINE_MAX_CHARS)
-  const line = `[${timestamp}] [${level}] ${
-    alreadyRedacted ? boundedMessage : redactSensitiveText(boundedMessage)
-  }\n`
+  const boundedMessage = alreadyRedacted
+    ? message.slice(0, LOG_LINE_MAX_CHARS)
+    : redactAndTruncateSensitiveText(message, LOG_LINE_MAX_CHARS, "…[line truncated]")
+  const line = `[${timestamp}] [${level}] ${boundedMessage}\n`
   state.buffer.push(line)
   state.bufferBytes += Buffer.byteLength(line)
   // Bound memory if a flush can't keep up (e.g. disk stall): drop oldest lines.
@@ -470,6 +534,25 @@ const LOG_VALUE_MAX_STRING_CHARS = 2 * 1024
 const LOG_ARGUMENT_MAX_CHARS = 8 * 1024
 const LOG_LINE_MAX_CHARS = 16 * 1024
 const LOG_ARGUMENT_MAX_COUNT = 32
+const LOG_PROJECTION_MAX_NODES = 1_024
+const LOG_PROJECTION_MAX_PROPERTY_SCANS = 4_096
+const LOG_PROJECTION_MAX_STRING_CHARS = 256 * 1024
+
+interface LogProjectionContext {
+  remainingNodes: number
+  remainingPropertyScans: number
+  remainingStringChars: number
+  readonly seen: WeakSet<object>
+}
+
+function createLogProjectionContext(): LogProjectionContext {
+  return {
+    remainingNodes: LOG_PROJECTION_MAX_NODES,
+    remainingPropertyScans: LOG_PROJECTION_MAX_PROPERTY_SCANS,
+    remainingStringChars: LOG_PROJECTION_MAX_STRING_CHARS,
+    seen: new WeakSet<object>()
+  }
+}
 
 function boundedString(value: string, limit = LOG_VALUE_MAX_STRING_CHARS): string {
   // Bound the raw input before any replacement. Replacing first would scan and
@@ -483,6 +566,20 @@ function boundedString(value: string, limit = LOG_VALUE_MAX_STRING_CHARS): strin
       ? value.length - rawPrefix.length
       : Math.max(0, singleLine.length - limit)
   return `${singleLine.slice(0, limit)}…[truncated ${truncatedChars} chars]`
+}
+
+function projectString(
+  value: string,
+  context: LogProjectionContext,
+  maxChars = LOG_VALUE_MAX_STRING_CHARS
+): string {
+  if (context.remainingStringChars <= 0) return "[text-budget]"
+  const limit = Math.min(maxChars, context.remainingStringChars)
+  context.remainingStringChars = Math.max(
+    0,
+    context.remainingStringChars - Math.min(value.length, limit)
+  )
+  return boundedString(value, limit)
 }
 
 export function getLogQueueDiagnosticsForTest(): {
@@ -505,13 +602,11 @@ export function getLogQueueDiagnosticsForTest(): {
   }
 }
 
-function projectLogValue(
-  value: unknown,
-  depth: number,
-  seen: WeakSet<object>
-): unknown {
-  if (typeof value === "string") return boundedString(value)
-  if (typeof value === "bigint") return `${value.toString()}n`
+function projectLogValue(value: unknown, depth: number, context: LogProjectionContext): unknown {
+  if (context.remainingNodes <= 0) return "[node-limit]"
+  context.remainingNodes -= 1
+  if (typeof value === "string") return projectString(value, context)
+  if (typeof value === "bigint") return projectString(`${value.toString()}n`, context)
   if (
     value === null ||
     value === undefined ||
@@ -520,29 +615,40 @@ function projectLogValue(
   ) {
     return value
   }
-  if (typeof value === "function") return `[Function ${boundedString(value.name || "anonymous")}]`
-  if (typeof value === "symbol") return boundedString(value.toString())
-  if (typeof value !== "object") return boundedString(String(value))
-  if (seen.has(value)) return "[Circular]"
-  if (depth >= LOG_VALUE_MAX_DEPTH) return `[${value.constructor?.name || "Object"} depth-limit]`
-  seen.add(value)
+  if ((typeof value === "object" && value !== null) || typeof value === "function") {
+    try {
+      if (nodeUtilTypes.isProxy(value)) return "[Unserializable Object]"
+    } catch {
+      return "[Unserializable Object]"
+    }
+  }
+  if (typeof value === "function") {
+    return `[Function ${projectString(value.name || "anonymous", context, 256)}]`
+  }
+  if (typeof value === "symbol") return projectString(value.toString(), context)
+  if (typeof value !== "object") return projectString(String(value), context)
+  if (context.seen.has(value)) return "[Circular]"
+  if (depth >= LOG_VALUE_MAX_DEPTH) return "[Object depth-limit]"
+  context.seen.add(value)
 
   if (value instanceof Error) {
     return {
-      name: boundedString(value.name),
-      message: boundedString(value.message),
-      stack: boundedString(value.stack || "")
+      name: projectString(value.name, context, 256),
+      message: projectString(value.message, context),
+      stack: projectString(value.stack || "", context)
     }
   }
   if (value instanceof Date) return value.toISOString()
-  if (value instanceof RegExp || value instanceof URL) return boundedString(value.toString())
+  if (value instanceof RegExp || value instanceof URL) {
+    return projectString(value.toString(), context)
+  }
   if (value instanceof ArrayBuffer) return `[ArrayBuffer ${value.byteLength} bytes]`
   if (ArrayBuffer.isView(value)) return `[${value.constructor.name} ${value.byteLength} bytes]`
   if (Array.isArray(value)) {
     const count = Math.min(value.length, LOG_VALUE_MAX_ENTRIES)
     const output = new Array<unknown>(count)
     for (let index = 0; index < count; index += 1) {
-      output[index] = projectLogValue(value[index], depth + 1, seen)
+      output[index] = projectLogValue(value[index], depth + 1, context)
     }
     if (value.length > count) output.push(`[+${value.length - count} entries]`)
     return output
@@ -553,8 +659,8 @@ function projectLogValue(
     for (const [key, nested] of value) {
       if (index >= LOG_VALUE_MAX_ENTRIES) break
       output.push([
-        projectLogValue(key, depth + 1, seen),
-        projectLogValue(nested, depth + 1, seen)
+        projectLogValue(key, depth + 1, context),
+        projectLogValue(nested, depth + 1, context)
       ])
       index += 1
     }
@@ -566,7 +672,7 @@ function projectLogValue(
     let index = 0
     for (const nested of value) {
       if (index >= LOG_VALUE_MAX_ENTRIES) break
-      output.push(projectLogValue(nested, depth + 1, seen))
+      output.push(projectLogValue(nested, depth + 1, context))
       index += 1
     }
     if (value.size > index) output.push(`[+${value.size - index} entries]`)
@@ -577,15 +683,20 @@ function projectLogValue(
   let included = 0
   try {
     for (const key in value) {
+      if (context.remainingPropertyScans <= 0) {
+        output["…"] = "[property-scan-limit]"
+        break
+      }
+      context.remainingPropertyScans -= 1
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue
       if (included >= LOG_VALUE_MAX_ENTRIES) {
         output["…"] = `[entry-limit ${LOG_VALUE_MAX_ENTRIES}]`
         break
       }
       const descriptor = Object.getOwnPropertyDescriptor(value, key)
-      output[boundedString(key, 256)] =
+      output[projectString(key, context, 256)] =
         descriptor && "value" in descriptor
-          ? projectLogValue(descriptor.value, depth + 1, seen)
+          ? projectLogValue(descriptor.value, depth + 1, context)
           : "[Getter]"
       included += 1
     }
@@ -595,16 +706,16 @@ function projectLogValue(
   return output
 }
 
-function projectLogValueSafely(value: unknown): unknown {
+function projectLogValueSafely(value: unknown, context: LogProjectionContext): unknown {
   try {
-    return projectLogValue(value, 0, new WeakSet<object>())
+    return projectLogValue(value, 0, context)
   } catch {
     return "[Unserializable Object]"
   }
 }
 
-function safeStringify(value: unknown): string {
-  const projected = projectLogValueSafely(value)
+function safeStringify(value: unknown, context: LogProjectionContext): string {
+  const projected = projectLogValueSafely(value, context)
   let serialized: string
   try {
     if (typeof projected === "string") {
@@ -626,11 +737,12 @@ function safeStringify(value: unknown): string {
 function joinArgs(args: unknown[]): string {
   let output = ""
   const count = Math.min(args.length, LOG_ARGUMENT_MAX_COUNT)
+  const projectionContext = createLogProjectionContext()
   for (let index = 0; index < count; index += 1) {
     const separator = output ? " " : ""
     const remaining = LOG_LINE_MAX_CHARS - output.length - separator.length
     if (remaining <= 0) break
-    output += `${separator}${safeStringify(args[index]).slice(0, remaining)}`
+    output += `${separator}${safeStringify(args[index], projectionContext).slice(0, remaining)}`
   }
   if (args.length > count && output.length < LOG_LINE_MAX_CHARS) {
     output += ` [+${args.length - count} args]`
@@ -643,15 +755,17 @@ function joinArgs(args: unknown[]): string {
  * safe to reuse for stdout/stderr and renderer forwarding.
  */
 export function writeMainLog(level: string, args: unknown[]): unknown[] {
-  const boundedArgs = args
-    .slice(0, LOG_ARGUMENT_MAX_COUNT)
-    .map((value) => projectLogValueSafely(value))
-  if (args.length > boundedArgs.length) boundedArgs.push(`[+${args.length - boundedArgs.length} args]`)
-  const redactedArgs = redactLogValues(boundedArgs)
+  const redactedInputArgs = redactLogValues(args.slice(0, LOG_ARGUMENT_MAX_COUNT))
+  const projectionContext = createLogProjectionContext()
+  const boundedArgs = redactedInputArgs.map((value) =>
+    projectLogValueSafely(value, projectionContext)
+  )
+  if (args.length > boundedArgs.length)
+    boundedArgs.push(`[+${args.length - boundedArgs.length} args]`)
   if (isLevelEnabled(level)) {
-    enqueueLine(getMainLogPath(), level, joinArgs(redactedArgs), true)
+    enqueueLine(getMainLogPath(), level, joinArgs(boundedArgs), true)
   }
-  return redactedArgs
+  return boundedArgs
 }
 
 export function writeRendererLog(
@@ -660,9 +774,18 @@ export function writeRendererLog(
   meta?: { sourceId?: string; line?: number }
 ): void {
   if (!isLevelEnabled(level)) return
+  const safeMessage = redactAndTruncateSensitiveText(
+    message,
+    LOG_LINE_MAX_CHARS,
+    (omittedChars) => `…[truncated ${omittedChars} chars]`
+  )
   const suffix =
     meta?.sourceId || typeof meta?.line === "number"
-      ? ` (${redactSensitiveText((meta?.sourceId || "unknown").slice(0, 512))}:${meta?.line ?? 0})`
+      ? ` (${redactAndTruncateSensitiveText(
+          meta?.sourceId || "unknown",
+          512,
+          (omittedChars) => `…[truncated ${omittedChars} chars]`
+        )}:${meta?.line ?? 0})`
       : ""
-  enqueueLine(getRendererLogPath(), level, `${message.slice(0, LOG_LINE_MAX_CHARS)}${suffix}`)
+  enqueueLine(getRendererLogPath(), level, `${safeMessage}${suffix}`, true)
 }

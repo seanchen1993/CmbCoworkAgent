@@ -426,14 +426,14 @@ function GitBranchSwitcherImpl({
           ) : (
             <>
               {localBranches.length > 0 && (
-                <div className="px-3 pb-1 pt-1.5 text-[12px] text-black">本地分支</div>
+                <div className="px-3 pb-1 pt-1.5 text-[12px] text-foreground">本地分支</div>
               )}
               {localBranches.map(renderBranchButton)}
               {localBranches.length > 0 && remoteBranches.length > 0 && (
                 <div className="my-1 border-t border-border" />
               )}
               {remoteBranches.length > 0 && (
-                <div className="px-3 pb-1 pt-1.5 text-[12px] text-black">远程分支</div>
+                <div className="px-3 pb-1 pt-1.5 text-[12px] text-foreground">远程分支</div>
               )}
               {remoteBranches.map(renderBranchButton)}
             </>

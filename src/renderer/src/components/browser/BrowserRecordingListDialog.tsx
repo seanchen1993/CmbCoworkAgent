@@ -632,7 +632,7 @@ export function BrowserRecordingListDialog({
                       {selectedEntry?.fileName ?? "playwright.spec.ts"}
                     </span>
                     {detailDirty ? (
-                      <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-200">
+                      <span className="rounded-full border border-status-warning/30 bg-status-warning/10 px-2 py-0.5 text-[10px] text-status-warning-foreground">
                         未保存
                       </span>
                     ) : null}
@@ -643,14 +643,14 @@ export function BrowserRecordingListDialog({
                     <Loader2 className="size-3.5 animate-spin" strokeWidth={1.8} />
                   ) : (
                     <div className="flex shrink-0 items-center gap-2">
-                      <span className="font-mono tabular-nums text-[11px] text-slate-400">
+                      <span className="font-mono tabular-nums text-[11px] text-muted-foreground">
                         {detailScriptLineCount > 0 ? `${detailScriptLineCount} lines` : "waiting"}
                       </span>
                       <Button
                         type="button"
                         size="icon"
                         variant="ghost"
-                        className="size-6 rounded-md text-slate-300 hover:bg-white/5 hover:text-white"
+                        className="size-6 rounded-md text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
                         disabled={!detailViewActive || !detailScriptValue.trim()}
                         onClick={() => void handleCopyDetailScript()}
                       >

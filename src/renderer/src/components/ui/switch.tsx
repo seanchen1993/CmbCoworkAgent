@@ -1,6 +1,7 @@
 import * as React from "react"
 import * as SwitchPrimitive from "@radix-ui/react-switch"
 import { cn } from "@/lib/utils"
+import { ToggleThumb } from "./toggle-thumb"
 
 const Switch = React.forwardRef<
   React.ElementRef<typeof SwitchPrimitive.Root>,
@@ -9,16 +10,14 @@ const Switch = React.forwardRef<
   <SwitchPrimitive.Root
     ref={ref}
     className={cn(
-      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#3898ec] focus-visible:ring-offset-2 focus-visible:ring-offset-[#faf9f5] disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-[#c4956a] data-[state=unchecked]:bg-[#d8d4cb]",
+      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent bg-background-interactive transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary",
       className
     )}
     {...props}
   >
-    <SwitchPrimitive.Thumb
-      className={cn(
-        "pointer-events-none block size-4 rounded-full bg-white shadow-sm ring-0 transition-transform data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0"
-      )}
-    />
+    <SwitchPrimitive.Thumb asChild>
+      <ToggleThumb className="block size-4 ring-0 data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0" />
+    </SwitchPrimitive.Thumb>
   </SwitchPrimitive.Root>
 ))
 

@@ -135,7 +135,7 @@ export function HtmlPreview({
             ref={iframeRef}
             title={path || "html-preview"}
             srcDoc={srcDocContent}
-            className={`border-0 ${fillHeight ? "h-full" : ""}`}
+            className={`html-preview-light-canvas border-0 ${fillHeight ? "h-full" : ""}`}
             style={
               fillHeight
                 ? { height: "100%", minWidth: "1000px", width: "max(100%, 1000px)" }

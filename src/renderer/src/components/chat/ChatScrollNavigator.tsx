@@ -678,11 +678,7 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
     <button
       type="button"
       data-chat-scroll-marker="released-history"
-      aria-label={
-        canLoadReleasedHistory
-          ? "中间提问尚未加载，继续读取"
-          : "中间提问尚未加载"
-      }
+      aria-label={canLoadReleasedHistory ? "中间提问尚未加载，继续读取" : "中间提问尚未加载"}
       title={
         canLoadReleasedHistory
           ? "中间提问尚未加载，点击继续读取"
@@ -888,7 +884,7 @@ const ChatScrollMarkerRail = memo(function ChatScrollMarkerRail({
           sideOffset={30}
           onMouseEnter={clearCloseTimer}
           onMouseLeave={armClose}
-          className="max-h-[70vh] mb-10 max-w-80 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border-border/70 bg-white px-3 py-2 leading-relaxed shadow-lg shadow-black/5 backdrop-blur-sm"
+          className="mb-10 max-h-[70vh] max-w-80 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border-border/70 bg-popover px-3 py-2 leading-relaxed shadow-lg shadow-black/5 backdrop-blur-sm"
         >
           {hoveredIndex !== null && renderPopoverContent(questions[hoveredIndex], hoveredIndex)}
         </PopoverContent>

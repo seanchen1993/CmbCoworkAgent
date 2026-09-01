@@ -346,7 +346,7 @@ function SummaryComparison({
   return (
     <div>
       {adapterName ? (
-        <div className="mb-3 rounded-md bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+        <div className="mb-3 rounded-md bg-status-warning/10 px-3 py-2 text-xs leading-relaxed text-status-warning-foreground">
           DevClaw 侧已按插件收窄；非 DevClaw 侧不受插件筛选影响，两侧样本范围不对称。
         </div>
       ) : null}
@@ -811,7 +811,7 @@ export function ProjectMetricsSection({
       </div>
 
       {truncated ? (
-        <div className="mt-3 rounded-md bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+        <div className="mt-3 rounded-md bg-status-warning/10 px-3 py-2 text-xs leading-relaxed text-status-warning-foreground">
           项目关联或派生指标排序样本超过 10,000
           条，当前结果基于截断数据，可能存在统计不完整或开发方式误分类。
         </div>

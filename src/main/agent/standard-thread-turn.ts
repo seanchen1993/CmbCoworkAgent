@@ -72,6 +72,7 @@ export function parseStandardThreadMetadata(
 }
 
 export interface HarnessAgentContext {
+  managedExecution?: boolean
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig

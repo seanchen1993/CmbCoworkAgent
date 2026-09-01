@@ -124,13 +124,13 @@ const EVENT_BADGE: Record<
   },
   PreCompact: {
     label: "压缩前",
-    className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
+    className: "bg-muted text-muted-foreground",
     english: "PreCompact",
     tip: "上下文压缩前触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
   PostCompact: {
     label: "压缩后",
-    className: "bg-slate-500/15 text-slate-600 dark:text-slate-400",
+    className: "bg-muted text-muted-foreground",
     english: "PostCompact",
     tip: "上下文压缩后触发 ⚠️ [暂未实现] 本运行时尚未支持；存储层在所有读取路径（flat / workspace / plugin / skill / Claude Code settings 导入）都会过滤丢弃该事件，UI 创建对话框也不开放"
   },
@@ -488,7 +488,7 @@ function getHookTypeLabel(hook: Pick<HookConfig, "type">): string {
 function getHookTypeBadgeClass(hook: Pick<HookConfig, "type">): string {
   if (hook.type === "prompt") return "bg-violet-500/15 text-violet-600 dark:text-violet-400"
   if (hook.type === "http") return "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400"
-  return "bg-zinc-500/15 text-zinc-600 dark:text-zinc-400"
+  return "bg-muted text-muted-foreground"
 }
 
 function getHookTimeoutDisplay(hook: DisplayHook): string {
@@ -779,7 +779,7 @@ export function HooksPanel(): React.JSX.Element {
         {catalogTruncated && (
           <div
             role="status"
-            className="border-b border-amber-300/40 bg-amber-50/80 px-3 py-2 text-[11px] text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300"
+            className="border-b border-status-warning/35 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning-foreground"
           >
             Hook 目录达到安全上限，当前仅展示已安全加载的 {hooks.length} 条。
           </div>
@@ -904,9 +904,7 @@ export function HooksPanel(): React.JSX.Element {
                 variant="ghost"
                 size="sm"
                 className="w-full text-xs"
-                onClick={() =>
-                  setVisibleHookCount((count) => count + CUSTOMIZE_HOOK_RENDER_BATCH)
-                }
+                onClick={() => setVisibleHookCount((count) => count + CUSTOMIZE_HOOK_RENDER_BATCH)}
               >
                 加载更多（剩余 {filteredHooks.length - visibleHooks.length}）
               </Button>
@@ -1889,9 +1887,7 @@ function HooksGuide(): React.JSX.Element {
             <p className="mb-2 text-sm text-muted-foreground">
               <code className="font-mono text-foreground/85">forcedOutcome</code>
               {" 取值："}
-              <code className="mx-1 font-mono text-foreground/85">
-                &quot;always-revise&quot;
-              </code>
+              <code className="mx-1 font-mono text-foreground/85">&quot;always-revise&quot;</code>
               （强制走修订流程）/
               <code className="mx-1 font-mono text-foreground/85">&quot;always-halt&quot;</code>
               （强制终止本轮）；省略该字段时跟随 hook stdout 决定。
@@ -2215,8 +2211,7 @@ function HooksGuide(): React.JSX.Element {
                 处理（<code className="font-mono text-foreground/85">&quot;allow&quot;</code>
                 放行，
                 <code className="font-mono text-foreground/85">&quot;block&quot;</code>
-                阻断）。响应体上限
-                1MB。
+                阻断）。响应体上限 1MB。
               </p>
               <p>
                 <code className="mx-1 font-mono text-foreground/85">headers</code>

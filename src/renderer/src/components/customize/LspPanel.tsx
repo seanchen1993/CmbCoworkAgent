@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useRef } from "react"
 import { AlertTriangle, Code2, Download, Loader2, Play, RotateCcw, Square, Upload } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { cn } from "@/lib/utils"
 import type { LspConfig, LspStatus } from "@/types"
 import { marketApi } from "../../api/market"
@@ -492,9 +493,9 @@ export function LspPanel({
                 )}
                 onClick={() => handleToggleEnabled(!config.enabled)}
               >
-                <span
+                <ToggleThumb
                   className={cn(
-                    "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                    "inline-block size-4",
                     config.enabled ? "translate-x-4" : "translate-x-0"
                   )}
                 />

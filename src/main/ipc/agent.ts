@@ -315,6 +315,10 @@ import {
 } from "../agent/goals/types"
 import { scheduleAutoInstallGitHooksForPath } from "../services/git-hook-service"
 import { markHarnessProjectSystemConstraintsLoaded } from "../harness-board/service"
+import {
+  handleAutoModeAgentCancelled,
+  isActiveManagedRunSession
+} from "../harness-board/auto-mode-controller"
 import { reportProjectSnapshotNow } from "../services/harness-status-reporter"
 import { isMemoryAllowedForProjectMode } from "../project-mode-memory"
 import type { AgentAutoCommitResult } from "../types"
@@ -357,6 +361,12 @@ import {
   type LocalThreadRunLeaseClaim
 } from "../agent/thread-run-lease"
 import { emitAppAttention } from "../app-attention-events"
+import {
+  createBrowserWindowAgentRunDelivery,
+  registerActiveAgentRunInspector,
+  registerAgentRunImplementation,
+  startAgentRun
+} from "../agent/agent-run-service"
 
 function withHarnessStageInvalidation(
   callback: HookResultCallback,
@@ -436,6 +446,7 @@ function hasPendingApprovalForThread(threadId: string): boolean {
   }
   return false
 }
+
 
 async function markLatestForkBoundary(input: {
   threadId: string
@@ -1460,12 +1471,15 @@ function disposeTurnState(threadId: string): void {
   discardAgentAutoCommitTracking(threadId)
 }
 
+const reportedAutoModeTerminalTurnByThread = new Map<string, string>()
+
 export function disposeAgentThreadState(threadId: string): void {
   disposeTurnState(threadId)
 }
 
 export function disposeDeletedAgentThreadRuntime(threadId: string): void {
   disposeAgentThreadState(threadId)
+  reportedAutoModeTerminalTurnByThread.delete(threadId)
   invalidateCurrentRunMessagePreparer(threadId)
   clearCurrentRunMessageQueue(threadId)
   discardPendingStreamTranscriptMessagesForThread(threadId)
@@ -1477,6 +1491,7 @@ export function disposeAllAgentThreadStates(): void {
     clearAdoptionContext(threadId)
   }
   turnStates.clear()
+  reportedAutoModeTerminalTurnByThread.clear()
   clearActionStationarityState()
 }
 
@@ -5399,11 +5414,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
   )
 
-  // Handle agent invocation with streaming
-  ipcMain.on(
-    "agent:invoke",
+  registerActiveAgentRunInspector(hasActiveAgentRun)
+
+  registerAgentRunImplementation(
     async (
-      event,
       {
         threadId,
         message,
@@ -5412,21 +5426,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         userMessageId,
         agentMode: requestedAgentMode,
         coordinatorInternalNotification
-      }: AgentInvokeParams
+      }: AgentInvokeParams,
+      delivery
     ) => {
       const baseChannel = `agent:stream:${threadId}`
-      const window = BrowserWindow.fromWebContents(event.sender)
+      const window = delivery.window
 
       console.log("[Agent] Received invoke request:", {
         threadId,
         message: message.substring(0, 50),
         modelId
       })
-
-      if (!window) {
-        console.error("[Agent] No window found")
-        return
-      }
 
       const hasCoordinatorNotificationPrefixAtInvoke = message
         .trimStart()
@@ -9030,6 +9040,25 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  // Handle agent invocation with streaming
+  ipcMain.on("agent:invoke", (event, request: AgentInvokeParams) => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    if (!window) {
+      console.error("[Agent] No window found")
+      return
+    }
+
+    void startAgentRun(request, createBrowserWindowAgentRunDelivery(window))
+      .then((handle) => {
+        void handle.completion.catch((error) => {
+          console.error(`[Agent] Run completion failed for thread ${handle.threadId}:`, error)
+        })
+      })
+      .catch((error) => {
+        console.error(`[Agent] Failed to start run for thread ${request.threadId}:`, error)
+      })
+  })
+
   // Handle agent resume (after interrupt approval/rejection via useStream)
   ipcMain.on(
     "agent:resume",
@@ -9068,6 +9097,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
       const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+      harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
         window,
@@ -10174,6 +10204,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     const workspacePath = parsedThreadMetadata.workspacePath
     const modelId = parsedThreadMetadata.modelId
     const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+    harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
       window,
@@ -11189,13 +11220,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       pendingPhysicalStreamRunSetupGuard?.abandon()
       pendingPhysicalStreamRunSetupGuard = undefined
     }
-  })
+    }
+  )
 
   // Handle cancellation
   ipcMain.handle(
     "agent:cancel",
     async (event, { threadId, cancelWorkers = false }: AgentCancelParams) => {
-      return withThreadRunMutationLock(threadId, async () => {
+      const cancelled = await withThreadRunMutationLock(threadId, async () => {
         const lease = getLocalThreadRunLease(threadId)
         if (lease && lease.owner !== "desktop") {
           const window = BrowserWindow.fromWebContents(event.sender)
@@ -11271,6 +11303,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         return Boolean(controller && !cancelWorkers)
       })
+      if (cancelled) handleAutoModeAgentCancelled(threadId)
+      return cancelled
     }
   )
 }

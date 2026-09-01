@@ -16,6 +16,7 @@
 
   /* Foundation colors */
   --color-background: var(--background);
+  --color-background-secondary: var(--background-secondary);
   --color-background-elevated: var(--background-elevated);
   --color-background-interactive: var(--background-interactive);
   --color-foreground: var(--foreground);
@@ -27,13 +28,17 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-button: var(--button);
+  --color-button-foreground: var(--button-foreground);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-tertiary-foreground: var(--tertiary-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
 
   /* Border colors */
   --color-border: var(--border);
@@ -46,6 +51,17 @@
   --color-status-warning: var(--status-warning);
   --color-status-nominal: var(--status-nominal);
   --color-status-info: var(--status-info);
+  --color-status-critical-foreground: var(--status-critical-foreground);
+  --color-status-warning-foreground: var(--status-warning-foreground);
+  --color-status-nominal-foreground: var(--status-nominal-foreground);
+  --color-status-info-foreground: var(--status-info-foreground);
+  --color-syntax-keyword: var(--syntax-keyword);
+  --color-syntax-string: var(--syntax-string);
+  --color-syntax-number: var(--syntax-number);
+  --color-syntax-comment: var(--syntax-comment);
+  --color-syntax-meta: var(--syntax-meta);
+  --color-syntax-addition: var(--syntax-addition);
+  --color-syntax-deletion: var(--syntax-deletion);
 
   /* Chart colors - using status palette */
   --color-chart-1: var(--status-critical);
@@ -59,6 +75,7 @@
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
   --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-hover: var(--sidebar-hover);
   --color-sidebar-accent: var(--sidebar-accent);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
@@ -66,52 +83,70 @@
 }
 
 :root {
-  /* Foundation */
+  /* CMBDevClaw white fallback. Runtime themes override this contract before React renders. */
   --radius: 8px;
-  --background: #FAF9F6;
-  --background-elevated: #FFFFFF;
-  --background-interactive: #F0EEE9;
+  --background: #faf9f6;
+  --background-secondary: #f5f3ef;
+  --background-elevated: #ffffff;
+  --background-interactive: #f0eee9;
   --foreground: #292524;
 
   /* Borders */
-  --border: #EEECE7;
-  --border-emphasis: #DDD9D2;
-  --input: #EEECE7;
-  --ring: #C4956A;
+  --border: #eeece7;
+  --border-emphasis: #ddd9d2;
+  --input: #eeece7;
+  --ring: #c4956a;
 
   /* Text hierarchy */
-  --muted: #F5F3EF;
-  --muted-foreground: #8C857C;
-  --tertiary-foreground: #A8A29E;
+  --muted: #f5f3ef;
+  --muted-foreground: #8c857c;
+  --tertiary-foreground: #a8a29e;
 
   /* Semantic mapping for shadcn compatibility */
-  --card: #FAF9F6;
+  --card: #faf9f6;
   --card-foreground: #292524;
-  --popover: #FFFFFF;
+  --popover: #ffffff;
   --popover-foreground: #292524;
-  --primary: #C4956A;
-  --primary-foreground: #FFFFFF;
-  --secondary: #F0EEE9;
-  --secondary-foreground: #44403C;
-  --accent: #D4956A;
-  --accent-foreground: #FFFFFF;
-  --destructive: #DC2626;
+  --primary: #c4956a;
+  --primary-foreground: #ffffff;
+  --button: #c4956a;
+  --button-foreground: #ffffff;
+  --secondary: #f0eee9;
+  --secondary-foreground: #44403c;
+  --accent: #d4956a;
+  --accent-foreground: #ffffff;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
 
   /* Status colors */
-  --status-critical: #DC2626;
-  --status-warning: #D97706;
-  --status-nominal: #16A34A;
-  --status-info: #2563EB;
+  --status-critical: #dc2626;
+  --status-warning: #d97706;
+  --status-nominal: #16a34a;
+  --status-info: #2563eb;
+  --status-critical-foreground: #e02e2a;
+  --status-warning-foreground: #e25507;
+  --status-nominal-foreground: #00a240;
+  --status-info-foreground: #2563eb;
+
+  /* Syntax roles are overridden with every runtime theme. */
+  --syntax-keyword: rgb(51 156 255);
+  --syntax-string: rgb(0 162 64);
+  --syntax-number: rgb(226 85 7);
+  --syntax-comment: rgb(26 28 31 / 49.4%);
+  --syntax-meta: rgb(51 156 255);
+  --syntax-addition: rgb(0 162 64);
+  --syntax-deletion: rgb(224 46 42);
 
   /* Sidebar */
-  --sidebar: #FAF9F6;
+  --sidebar: #faf9f6;
   --sidebar-foreground: #292524;
-  --sidebar-primary: #C4956A;
-  --sidebar-primary-foreground: #FFFFFF;
-  --sidebar-accent: #F0EEE9;
+  --sidebar-primary: #c4956a;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-hover: rgb(41 37 36 / 0.05);
+  --sidebar-accent: #f0eee9;
   --sidebar-accent-foreground: #292524;
-  --sidebar-border: #EEECE7;
-  --sidebar-ring: #C4956A;
+  --sidebar-border: #eeece7;
+  --sidebar-ring: #c4956a;
 }
 
 @layer base {
@@ -120,7 +155,14 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-family:
+      "Inter",
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      "Helvetica Neue",
+      Arial,
+      sans-serif;
   }
 }
 
@@ -135,7 +177,9 @@
     border: 0;
     color: var(--foreground);
     background: var(--background-interactive);
-    box-shadow: 0 8px 24px rgb(41 37 36 / 8%), 0 1px 2px rgb(41 37 36 / 6%);
+    box-shadow:
+      0 8px 24px rgb(41 37 36 / 8%),
+      0 1px 2px rgb(41 37 36 / 6%);
   }
 
   .liquid-glass-notice__icon {
@@ -181,13 +225,15 @@
 
   .dark .liquid-glass-notice {
     color: var(--foreground);
-    background: rgb(39 39 42 / 42%);
-    box-shadow: 0 8px 24px rgb(0 0 0 / 18%), 0 1px 2px rgb(0 0 0 / 18%);
+    background: color-mix(in srgb, var(--background-elevated) 72%, transparent);
+    box-shadow:
+      0 8px 24px rgb(0 0 0 / 18%),
+      0 1px 2px rgb(0 0 0 / 18%);
   }
 
   .dark .liquid-glass-notice__icon {
     color: rgb(var(--liquid-tint));
-    background: rgb(255 255 255 / 8%);
+    background: color-mix(in srgb, var(--foreground) 8%, transparent);
   }
 }
 
@@ -206,16 +252,39 @@
 
 /* Status color utilities */
 .text-critical {
-  color: var(--status-critical);
+  color: var(--status-critical-foreground);
 }
 .text-warning {
-  color: var(--status-warning);
+  color: var(--status-warning-foreground);
 }
 .text-nominal {
-  color: var(--status-nominal);
+  color: var(--status-nominal-foreground);
 }
 .text-info {
-  color: var(--status-info);
+  color: var(--status-info-foreground);
+}
+
+/* Codex keeps semantic status text separate from decorative theme surfaces. */
+.text-status-critical {
+  color: var(--status-critical-foreground);
+}
+.text-status-warning {
+  color: var(--status-warning-foreground);
+}
+.text-status-nominal {
+  color: var(--status-nominal-foreground);
+}
+.text-status-info {
+  color: var(--status-info-foreground);
+}
+.text-status-critical\/80 {
+  color: color-mix(in srgb, var(--status-critical-foreground) 80%, transparent);
+}
+.text-status-info\/80 {
+  color: color-mix(in srgb, var(--status-info-foreground) 80%, transparent);
+}
+.text-status-nominal\/80 {
+  color: color-mix(in srgb, var(--status-nominal-foreground) 80%, transparent);
 }
 
 .bg-critical {
@@ -321,7 +390,7 @@
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #A8A29E;
+  background: color-mix(in srgb, var(--foreground) 35%, transparent);
 }
 
 /* Hide scrollbar but allow scrolling */
@@ -337,9 +406,89 @@
 .bg-grid-subtle {
   background-color: var(--background);
   background-image:
-    linear-gradient(to right, color-mix(in srgb, var(--border) 55%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in srgb, var(--border) 55%, transparent) 1px, transparent 1px);
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--border) 55%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--border) 55%, transparent) 1px,
+      transparent 1px
+    );
   background-size: 30px 30px;
+}
+
+/* Dark mode uses a quiet, uninterrupted canvas instead of the light-theme grid. */
+.dark .bg-grid-subtle {
+  background-image: none;
+}
+
+/* A literal white surface is legacy light-theme intent, never a dark canvas. */
+.dark .bg-white,
+.dark [class*="data-[state=active]:bg-white"][data-state="active"] {
+  background-color: var(--background-elevated);
+}
+
+.dark .text-black {
+  color: var(--foreground);
+}
+
+/* Raw HTML files render in an isolated document and keep the browser's light canvas. */
+.html-preview-light-canvas {
+  background-color: #ffffff;
+}
+
+/*
+ * Some of the older market and evolution views predate semantic color tokens.
+ * Keep their light-theme character, while translating their hard-coded ink and
+ * paper colors into the dark palette instead of leaving isolated black-on-dark
+ * text or bright-white cards behind.
+ */
+.dark
+  :is(.market-theme, .skill-evolution-theme)
+  :is(.bg-white, .bg-\[\#faf9f5\], .bg-\[\#fffdf8\]) {
+  background-color: var(--background-elevated);
+}
+
+.dark :is(.market-theme, .skill-evolution-theme) :is(.bg-\[\#f5f4ed\], .bg-\[\#f6f2ea\]) {
+  background-color: var(--background-interactive);
+}
+
+.dark
+  :is(.market-theme, .skill-evolution-theme)
+  :is(.border-\[\#e8e6dc\], .border-\[\#ebe8dd\], .border-\[\#f0eee6\], .border-\[\#d8d3c2\]) {
+  border-color: var(--border);
+}
+
+/* Common legacy ink colors. The selectors are deliberately global because
+ * these utilities represent text hierarchy, not semantic status colors. */
+.dark
+  :is(
+    .text-\[\#141413\],
+    .text-\[\#181713\],
+    .text-\[\#1a1a1a\],
+    .text-\[\#172033\],
+    .text-\[\#35433f\],
+    .text-\[\#2f3f4a\],
+    .text-\[\#23483c\]
+  ) {
+  color: var(--foreground);
+}
+
+.dark
+  :is(
+    .text-\[\#5e5d59\],
+    .text-\[\#87867f\],
+    .text-\[\#7b7970\],
+    .text-\[\#b0aea5\],
+    .text-\[\#a09f98\],
+    .text-\[\#9b8f80\],
+    .text-\[\#9a9688\],
+    .text-\[\#5f6b66\],
+    .text-\[\#51453a\]
+  ) {
+  color: var(--muted-foreground);
 }
 
 /* Streaming markdown styles */
@@ -350,7 +499,7 @@
   font-weight: 400;
   letter-spacing: 0.005em;
 }
-.streaming-markdown .language-bash{
+.streaming-markdown .language-bash {
   white-space: break-spaces;
 }
 
@@ -412,10 +561,10 @@
   display: inline;
   word-break: break-all;
   padding: 0.08em 0.35em;
-  border: 1px solid #c9c6c6;
+  border: 1px solid var(--border-emphasis);
   border-radius: 4px;
-  background: rgba(232, 232, 232, 0.68);
-  color: #333333;
+  background: var(--background-interactive);
+  color: var(--foreground);
   font-family: "SF Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
   font-size: 0.86em;
   white-space: normal !important;
@@ -426,7 +575,7 @@
   margin: 0.95em 0;
   border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, white 82%, var(--background));
+  background: var(--background-elevated);
   box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 
@@ -478,20 +627,12 @@
   margin: 0;
   padding: 0.85rem 1rem;
   overflow-x: auto;
-  background: color-mix(in srgb, white 88%, var(--background));
+  background: var(--background-interactive);
   color: color-mix(in srgb, var(--foreground) 92%, transparent);
   font-family: "SF Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
   font-size: 0.82rem;
   line-height: 1.65;
   tab-size: 2;
-}
-
-.dark .streaming-markdown-code-block {
-  background: color-mix(in srgb, var(--background) 88%, white);
-}
-
-.dark .streaming-markdown-code-pre {
-  background: color-mix(in srgb, var(--background) 92%, white);
 }
 
 .streaming-markdown-code-pre code {
@@ -503,112 +644,80 @@
   white-space: pre;
 }
 
+/* Shared Highlight.js baseline for chat and file previews. */
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs {
+  color: color-mix(in srgb, var(--foreground) 92%, transparent);
+  background: transparent;
+}
+
 /* File preview (.md 文件预览) hljs 代码块背景 */
 .markdown-preview code.hljs {
-  background: rgb(241 245 249 / 0.6);
+  display: block;
+  overflow-x: auto;
+  padding: 0.75rem;
+  background: var(--background-interactive);
   border-radius: 10px;
 }
 
-.dark .markdown-preview code.hljs {
-  background: #334155;
-  border-radius: 10px;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-keyword,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-selector-tag,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-built_in,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-name,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-tag,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-selector-pseudo {
+  color: var(--syntax-keyword);
 }
 
-.streaming-markdown-code-pre .hljs-keyword,
-.streaming-markdown-code-pre .hljs-selector-tag,
-.streaming-markdown-code-pre .hljs-built_in,
-.streaming-markdown-code-pre .hljs-name,
-.streaming-markdown-code-pre .hljs-tag {
-  color: #8957e5;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-string,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-title,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-section,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-attribute,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-literal,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-template-tag,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-template-variable,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-type {
+  color: var(--syntax-string);
 }
 
-.streaming-markdown-code-pre .hljs-string,
-.streaming-markdown-code-pre .hljs-title,
-.streaming-markdown-code-pre .hljs-section,
-.streaming-markdown-code-pre .hljs-attribute,
-.streaming-markdown-code-pre .hljs-literal,
-.streaming-markdown-code-pre .hljs-template-tag,
-.streaming-markdown-code-pre .hljs-template-variable,
-.streaming-markdown-code-pre .hljs-type {
-  color: #116329;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-number,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-symbol,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-bullet,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-variable,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-regexp,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-link,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-attr,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-operator,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-selector-attr,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-selector-class,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-selector-id {
+  color: var(--syntax-number);
 }
 
-.streaming-markdown-code-pre .hljs-number,
-.streaming-markdown-code-pre .hljs-symbol,
-.streaming-markdown-code-pre .hljs-bullet,
-.streaming-markdown-code-pre .hljs-variable,
-.streaming-markdown-code-pre .hljs-regexp,
-.streaming-markdown-code-pre .hljs-link {
-  color: #953800;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-comment,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-quote,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-deletion,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-code,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-formula {
+  color: var(--syntax-comment);
 }
 
-.streaming-markdown-code-pre .hljs-comment,
-.streaming-markdown-code-pre .hljs-quote,
-.streaming-markdown-code-pre .hljs-deletion {
-  color: #6e7781;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-meta,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-doctag,
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-strong {
+  color: var(--syntax-meta);
 }
 
-.streaming-markdown-code-pre .hljs-meta,
-.streaming-markdown-code-pre .hljs-doctag,
-.streaming-markdown-code-pre .hljs-strong {
-  color: #0550ae;
-}
-
-.streaming-markdown-code-pre .hljs-emphasis {
-  color: #8250df;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-emphasis {
+  color: var(--syntax-keyword);
   font-style: italic;
 }
 
-.streaming-markdown-code-pre .hljs-addition {
-  color: #1a7f37;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-addition {
+  color: var(--syntax-addition);
 }
 
-.dark .streaming-markdown-code-pre .hljs-keyword,
-.dark .streaming-markdown-code-pre .hljs-selector-tag,
-.dark .streaming-markdown-code-pre .hljs-built_in,
-.dark .streaming-markdown-code-pre .hljs-name,
-.dark .streaming-markdown-code-pre .hljs-tag {
-  color: #d2a8ff;
-}
-
-.dark .streaming-markdown-code-pre .hljs-string,
-.dark .streaming-markdown-code-pre .hljs-title,
-.dark .streaming-markdown-code-pre .hljs-section,
-.dark .streaming-markdown-code-pre .hljs-attribute,
-.dark .streaming-markdown-code-pre .hljs-literal,
-.dark .streaming-markdown-code-pre .hljs-template-tag,
-.dark .streaming-markdown-code-pre .hljs-template-variable,
-.dark .streaming-markdown-code-pre .hljs-type {
-  color: #a5d6ff;
-}
-
-.dark .streaming-markdown-code-pre .hljs-number,
-.dark .streaming-markdown-code-pre .hljs-symbol,
-.dark .streaming-markdown-code-pre .hljs-bullet,
-.dark .streaming-markdown-code-pre .hljs-variable,
-.dark .streaming-markdown-code-pre .hljs-regexp,
-.dark .streaming-markdown-code-pre .hljs-link {
-  color: #ffa657;
-}
-
-.dark .streaming-markdown-code-pre .hljs-comment,
-.dark .streaming-markdown-code-pre .hljs-quote,
-.dark .streaming-markdown-code-pre .hljs-deletion {
-  color: #8b949e;
-}
-
-.dark .streaming-markdown-code-pre .hljs-meta,
-.dark .streaming-markdown-code-pre .hljs-doctag,
-.dark .streaming-markdown-code-pre .hljs-strong {
-  color: #79c0ff;
-}
-
-.dark .streaming-markdown-code-pre .hljs-emphasis {
-  color: #d2a8ff;
-}
-
-.dark .streaming-markdown-code-pre .hljs-addition {
-  color: #7ee787;
+:is(.streaming-markdown-code-pre, .markdown-preview) .hljs-deletion {
+  color: var(--syntax-deletion);
 }
 
 .streaming-markdown blockquote {
@@ -638,7 +747,7 @@
   border-radius: 8px;
   background: var(--background-elevated);
   box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--background-elevated) 86%, white),
+    inset 0 1px 0 color-mix(in srgb, var(--foreground) 12%, var(--background-elevated)),
     0 1px 2px color-mix(in srgb, var(--foreground) 6%, transparent);
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--muted-foreground) 34%, transparent) transparent;
@@ -752,7 +861,7 @@
   height: auto;
 }
 
-.streaming-markdown pre{
+.streaming-markdown pre {
   width: 100%;
   overflow: auto;
 }
@@ -789,7 +898,7 @@
 }
 
 .app-badge-name {
-  font-family: 'Inter', ui-sans-serif, sans-serif;
+  font-family: "Inter", ui-sans-serif, sans-serif;
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.01em;
@@ -807,6 +916,17 @@
 
 /* Shiki syntax highlighting styles */
 .shiki-wrapper {
+  --shiki-background: transparent;
+  --shiki-foreground: var(--foreground);
+  --shiki-token-comment: var(--syntax-comment);
+  --shiki-token-constant: var(--syntax-number);
+  --shiki-token-string: var(--syntax-string);
+  --shiki-token-keyword: var(--syntax-keyword);
+  --shiki-token-parameter: var(--foreground);
+  --shiki-token-function: var(--syntax-meta);
+  --shiki-token-string-expression: var(--syntax-string);
+  --shiki-token-punctuation: var(--foreground);
+  --shiki-token-link: var(--syntax-meta);
   font-size: 0.875rem;
   line-height: 1.6;
 }
@@ -836,8 +956,12 @@
 
 /* macOS-style rainbow spinner (beach ball) */
 @keyframes rainbow-spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .rainbow-spinner {
@@ -857,7 +981,7 @@
   );
   animation: rainbow-spin 0.8s linear infinite;
   flex-shrink: 0;
-  box-shadow: 0 0 0 0.5px rgba(0,0,0,0.08);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.08);
 }
 
 @keyframes thinking-shimmer {
@@ -949,22 +1073,37 @@
 }
 
 @keyframes siri-spin {
-  to { --siri-angle: 360deg; }
+  to {
+    --siri-angle: 360deg;
+  }
 }
 
 @keyframes siri-fade-in {
-  from { opacity: 0; }
-  to { opacity: 0.25; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.25;
+  }
 }
 
 @keyframes siri-breathe {
-  0%, 100% { opacity: 0.25; }
-  50% { opacity: 0.45; }
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.45;
+  }
 }
 
 @keyframes siri-fade-out {
-  from { opacity: 0.35; }
-  to { opacity: 0; }
+  from {
+    opacity: 0.35;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 .siri-bg-glow {
@@ -978,7 +1117,9 @@
 }
 
 .siri-bg-glow:not(.siri-bg-glow-out) {
-  animation: siri-fade-in 0.6s ease-out forwards, siri-breathe 3s ease-in-out 0.6s infinite;
+  animation:
+    siri-fade-in 0.6s ease-out forwards,
+    siri-breathe 3s ease-in-out 0.6s infinite;
 }
 
 .siri-bg-glow::before {
@@ -987,15 +1128,15 @@
   inset: -80%;
   background: conic-gradient(
     from var(--siri-angle) at 50% 50%,
-    #BC82F3,
+    #bc82f3,
     #5f2bf6,
     #0855ff,
     #06b6d4,
     #f59e0b,
     #f652bb,
-    #FF6778,
-    #C686FF,
-    #BC82F3
+    #ff6778,
+    #c686ff,
+    #bc82f3
   );
   filter: blur(40px);
   animation: siri-spin 4s linear infinite;
@@ -1051,11 +1192,11 @@
 }
 
 .market-update-badge {
-  color: #0f766e;
-  background: linear-gradient(135deg, #d9fbf4 0%, #bdf5e8 100%);
-  border: 1px solid #78d7cb;
+  color: var(--status-nominal-foreground);
+  background: color-mix(in srgb, var(--status-nominal) 14%, var(--background-elevated));
+  border: 1px solid color-mix(in srgb, var(--status-nominal) 42%, var(--border));
   border-radius: 4px 10px 4px 10px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 
 .market-update-bounce {
@@ -1081,6 +1222,6 @@
   }
 }
 
-button{
+button {
   cursor: pointer;
 }

@@ -89,6 +89,11 @@ export interface CreateWorkflowToolOptions {
   threadId: string
   workspacePath: string
   modelId?: string
+  /** Physical-run observer. Called after the run manager accepts and schedules
+   * a launch, intentionally before initial persistence settles: even a later
+   * fail-closed spawn produces an error notification that ManagedRun must await.
+   * Observer failures are isolated so they cannot change the launched contract. */
+  onLaunched?: (runId: string) => void
   /** When true (YOLO), the run-before approval gate is skipped. */
   yoloMode?: boolean
   /** Caches an "Approve for this session" decision so re-runs don't re-prompt. */
@@ -283,6 +288,11 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         subagentDeps,
         runExclusiveFileWrite: options.runExclusiveFileWrite
       })
+      try {
+        options.onLaunched?.(launch.runId)
+      } catch (error) {
+        console.warn("[Workflow] onLaunched observer failed:", error)
+      }
 
       // Make the run and editable script durable BEFORE telling the model it
       // launched. A run-state write fault retains the warning behavior below;

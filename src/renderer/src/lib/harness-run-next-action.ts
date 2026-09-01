@@ -1,5 +1,5 @@
 import type { HarnessRunDetailViewModel, HarnessWorkflowNextAction } from "@/types"
-import { normalizeHarnessNextAction } from "@/lib/harness-next-action"
+import { resolveHarnessNextAction } from "../../../shared/harness-run-next-action"
 
 export function getHarnessRunNextAction(
   detail: HarnessRunDetailViewModel | null | undefined
@@ -10,10 +10,5 @@ export function getHarnessRunNextAction(
   const nodeStatus = detail.run.nodes.find((node) => node.id === currentNodeId)?.nodeStatus
   if (!currentNodeId || !nodeStatus) return undefined
 
-  const workflowNode = detail.workflow.nodes.find((node) => node.id === currentNodeId)
-  const state =
-    workflowNode?.states?.find((item) => item.nodeStatus === nodeStatus) ??
-    detail.workflow.states?.find((item) => item.nodeStatus === nodeStatus)
-
-  return normalizeHarnessNextAction(state?.nextAction)
+  return resolveHarnessNextAction(detail.workflow, currentNodeId, nodeStatus)
 }

@@ -1,6 +1,5 @@
-import { createHighlighterCore, type HighlighterCore } from "shiki/core"
+import { createCssVariablesTheme, createHighlighterCore, type HighlighterCore } from "shiki/core"
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript"
-import githubLight from "shiki/themes/github-light.mjs"
 import langTypescript from "shiki/langs/typescript.mjs"
 import langTsx from "shiki/langs/tsx.mjs"
 import langJavascript from "shiki/langs/javascript.mjs"
@@ -29,11 +28,15 @@ interface CancelRequest {
 let highlighterPromise: Promise<HighlighterCore> | null = null
 const cancelled = new Set<number>()
 const MAX_HIGHLIGHT_HTML_CHARS = 512 * 1024
+const appSyntaxTheme = createCssVariablesTheme({
+  name: "cmbdevclaw",
+  variablePrefix: "--shiki-"
+})
 
 function getHighlighter(): Promise<HighlighterCore> {
   if (!highlighterPromise) {
     highlighterPromise = createHighlighterCore({
-      themes: [githubLight],
+      themes: [appSyntaxTheme],
       langs: [
         langTypescript,
         langTsx,
@@ -67,7 +70,7 @@ self.onmessage = (event: MessageEvent<HighlightRequest | CancelRequest>): void =
       if (cancelled.delete(request.requestId)) return
       const html = highlighter.codeToHtml(request.content, {
         lang: request.language,
-        theme: "github-light"
+        theme: "cmbdevclaw"
       })
       if (cancelled.delete(request.requestId)) return
       if (html.length > MAX_HIGHLIGHT_HTML_CHARS) {

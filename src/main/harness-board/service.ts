@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "child_process"
+import { createHash } from "crypto"
 import { access, mkdir } from "node:fs/promises"
 import { basename, isAbsolute, join, relative, resolve } from "path"
 import { serialize } from "node:v8"
@@ -7,9 +8,11 @@ import * as iconv from "iconv-lite"
 import { v4 as uuid } from "uuid"
 import { getOpenworkDir, getPlugins, getUserInfo } from "../storage"
 import { deriveUpperOrgLevelsFromPath } from "../org-levels"
+import { managedRunStore } from "./managed-run-store"
 import type { PluginMetadata } from "../types"
 import type { HarnessConfigReadSnapshot } from "./service-read-snapshot"
 import { normalizeHarnessAgentmdLoadStatus } from "../../shared/harness-board-types"
+import { resolveHarnessNextAction } from "../../shared/harness-run-next-action"
 import {
   cancelHarnessAdapterDetailScope,
   HarnessAdapterDetailWorkerResultError,
@@ -62,6 +65,7 @@ import type {
   HarnessFeatureDeployUnitUpdateInput,
   HarnessFeatureDeployUnitBinding,
   HarnessAgentmdLoadStatusItem,
+  HarnessFeatureStatus,
   HarnessNodeStatus,
   HarnessProjectCreateInput,
   HarnessProjectConstraintSyncResult,
@@ -79,12 +83,47 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessFeatureSummary,
+  HarnessHumanGateSnapshot,
+  ManagedFeatureStatusSnapshot,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
   HarnessWorkflowArtifactDefinition,
   HarnessWorkflowNextAction
 } from "../../shared/harness-board-types"
+
+function stableStringifyManagedState(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value)
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("ManagedRun hash input contains a non-finite number")
+    return JSON.stringify(value)
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringifyManagedState(item)).join(",")}]`
+  }
+  if (isObject(value)) {
+    const entries = Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    return `{${entries
+      .map(
+        ([key, item]) =>
+          `${JSON.stringify(key)}:${stableStringifyManagedState(item)}`
+      )
+      .join(",")}}`
+  }
+  throw new Error("ManagedRun hash input contains an unsupported value")
+}
+
+function hashManagedState(domain: "feature-state" | "next-action", value: unknown): string {
+  const digest = createHash("sha256")
+    .update(`managed-run:${domain}:v1\0`, "utf8")
+    .update(stableStringifyManagedState(value), "utf8")
+    .digest("hex")
+  return `v1:sha256:${digest}`
+}
 
 interface HarnessProjectStoreFile {
   version: 1
@@ -203,6 +242,7 @@ interface HarnessCommandParseOptions {
   workflowTemplate?: string
   workflowNodes?: string
   nodeId?: string
+  eventJson?: string
   preserveMissingPlaceholders?: boolean
 }
 
@@ -282,6 +322,18 @@ const HARNESS_NODE_STATUSES = new Set<HarnessNodeStatus>([
   "unknown"
 ])
 
+const HARNESS_FEATURE_STATUSES = new Set<HarnessFeatureStatus>([
+  "not_started",
+  "in_progress",
+  "done",
+  "blocked",
+  "warning",
+  "error",
+  "skipped",
+  "archived",
+  "unknown"
+])
+
 const HARNESS_SESSION_CONTEXT_INJECTION_SOURCES = new Set<HarnessSessionContextInjectionSource>([
   "cmbdevclaw",
   "plugin"
@@ -343,7 +395,7 @@ function emptyFeatureDeployUnitBindingStore(): HarnessFeatureDeployUnitBindingSt
   }
 }
 
-function formatGmt8Timestamp(date = new Date()): string {
+export function formatGmt8Timestamp(date = new Date()): string {
   const gmt8Date = new Date(date.getTime() + 8 * 60 * 60 * 1000)
   const pad = (value: number): string => String(value).padStart(2, "0")
   return [
@@ -899,10 +951,11 @@ function replaceHarnessConfigPlaceholders(
     mode,
     workflowTemplate: options.workflowTemplate ?? "",
     workflowNodes: options.workflowNodes ?? "",
-    nodeId: options.nodeId ?? ""
+    nodeId: options.nodeId ?? "",
+    eventJson: options.eventJson ?? ""
   }
   return value.replace(
-    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId)\}/g,
+    /\$\{(pluginWorkspace|project|projectDir|projectCode|leanToken|feature|selectedDeployUnits|sessionWorkspacePath|pluginPath|mode|workflowTemplate|workflowNodes|nodeId|eventJson)\}/g,
     (placeholder: string, key: string) => {
       const replacement = replacements[key]
       if (replacement) return replacement
@@ -1525,6 +1578,23 @@ function normalizeNodeStatus(value: unknown): HarnessNodeStatus {
     : UNKNOWN_NODE_STATUS
 }
 
+function normalizeFeatureStatus(value: unknown): HarnessFeatureStatus | null {
+  const featureStatus = normalizeText(value)
+  return HARNESS_FEATURE_STATUSES.has(featureStatus as HarnessFeatureStatus)
+    ? (featureStatus as HarnessFeatureStatus)
+    : null
+}
+
+function deriveFeatureStatusFromCurrentNode(
+  currentNodeStatus: HarnessNodeStatus,
+  currentNodeIndex: number,
+  workflowNodeCount: number
+): HarnessFeatureStatus {
+  if (currentNodeStatus !== "done") return currentNodeStatus
+  if (currentNodeIndex >= 0 && currentNodeIndex < workflowNodeCount - 1) return "in_progress"
+  return "done"
+}
+
 function normalizeArtifactType(value: unknown): HarnessArtifactType {
   const artifactType = normalizeText(value)
   return HARNESS_ARTIFACT_TYPES.has(artifactType as HarnessArtifactType)
@@ -1803,6 +1873,7 @@ function normalizeFeatureDeployUnitBinding(
   assertFeatureBindingKeyBudgets(projectId, featureId)
   const selectedDeployUnitMappings = normalizeDeployUnitMappings(value.selectedDeployUnitMappings)
   if (!projectId || !featureId) return null
+  const humanGate = normalizeHumanGate(value.humanGate, projectId, featureId)
   return {
     projectId,
     featureId,
@@ -1810,8 +1881,47 @@ function normalizeFeatureDeployUnitBinding(
     sessionContextInjectionSource: normalizeSessionContextInjectionSource(
       value.sessionContextInjectionSource
     ),
+    ...(humanGate ? { humanGate } : {}),
     createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
     updatedAt: normalizeText(value.updatedAt).trim() || undefined
+  }
+}
+
+function normalizeHumanGate(
+  value: unknown,
+  projectId: string,
+  featureId: string
+): HarnessHumanGateSnapshot | undefined {
+  if (value === undefined) return undefined
+  if (!isObject(value)) return undefined
+  const gateId = normalizeText(value.gateId).trim()
+  const sourceThreadId = normalizeText(value.sourceThreadId).trim()
+  const sourceManagedRunId = normalizeText(value.sourceManagedRunId).trim()
+  const hookId = normalizeText(value.hookId).trim()
+  const message = normalizeText(value.message).trim()
+  const createdAt = normalizeText(value.createdAt).trim()
+  if (
+    value.status !== "pending" ||
+    !gateId ||
+    !sourceThreadId ||
+    !hookId ||
+    !message ||
+    message.length > 2_000 ||
+    !isGmt8Timestamp(createdAt)
+  ) {
+    console.error("[HumanGate] Ignoring invalid persisted Gate", { projectId, featureId })
+    return undefined
+  }
+  return {
+    gateId,
+    status: "pending",
+    projectId,
+    featureId,
+    sourceThreadId,
+    ...(sourceManagedRunId ? { sourceManagedRunId } : {}),
+    hookId,
+    message,
+    createdAt
   }
 }
 
@@ -1876,13 +1986,31 @@ function assertFeatureBindingKeyBudgets(projectId: string, featureId: string): v
   }
 }
 
+const managedRunProjectDirectoryById = new Map<string, string>()
+
+function refreshManagedRunProjectDirectoryCache(store: HarnessProjectStoreFile): void {
+  managedRunProjectDirectoryById.clear()
+  for (const project of store.projects) {
+    try {
+      managedRunProjectDirectoryById.set(project.projectId, projectDirectoryPath(project))
+    } catch (error) {
+      console.warn("[ManagedRun] Ignoring project with invalid ManagedRun directory:", {
+        projectId: project.projectId,
+        error
+      })
+    }
+  }
+}
+
 async function readProjectStore(): Promise<HarnessProjectStoreFile> {
   const parsed = await readHarnessJsonFileBounded(
     HARNESS_BOARD_FILE,
     HARNESS_PROJECT_STORE_MAX_BYTES,
     "Harness project store"
   )
-  return parsed === null ? emptyProjectStore() : normalizeProjectStore(parsed)
+  const store = parsed === null ? emptyProjectStore() : normalizeProjectStore(parsed)
+  refreshManagedRunProjectDirectoryCache(store)
+  return store
 }
 
 async function mutateProjectStore<T>(
@@ -1901,6 +2029,7 @@ async function mutateProjectStore<T>(
       HARNESS_PROJECT_STORE_MAX_BYTES,
       "Harness project store"
     )
+    refreshManagedRunProjectDirectoryCache(store)
     return result
   })
 }
@@ -1994,6 +2123,7 @@ async function saveFeatureDeployUnitBinding(
       featureId,
       selectedDeployUnitMappings,
       sessionContextInjectionSource,
+      ...(existing?.humanGate ? { humanGate: existing.humanGate } : {}),
       createdAt:
         existing?.createdAt && isGmt8Timestamp(existing.createdAt) ? existing.createdAt : now,
       updatedAt: now
@@ -2042,6 +2172,70 @@ async function updateFeatureDeployUnitBinding(
     )
     return binding
   })
+}
+
+export async function getHarnessFeatureBinding(
+  projectId: string,
+  featureId: string
+): Promise<HarnessFeatureDeployUnitBinding | null> {
+  return findFeatureDeployUnitBinding(projectId, featureId)
+}
+
+export async function listHarnessHumanGates(): Promise<HarnessHumanGateSnapshot[]> {
+  return (await readFeatureDeployUnitBindingStore()).bindings.flatMap((binding) =>
+    binding.humanGate ? [binding.humanGate] : []
+  )
+}
+
+export async function setHarnessHumanGate(
+  projectId: string,
+  featureId: string,
+  humanGate: HarnessHumanGateSnapshot | undefined
+): Promise<HarnessFeatureDeployUnitBinding> {
+  assertFeatureBindingKeyBudgets(projectId, featureId)
+  return withHarnessStoreMutation(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, async () => {
+    const store = await readFeatureDeployUnitBindingStore()
+    const key = featureDeployUnitBindingKey(projectId, featureId)
+    const existingIndex = store.bindings.findIndex(
+      (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
+    )
+    if (existingIndex < 0) throw new Error("未找到该特性的项目模式绑定记录")
+    const existing = store.bindings[existingIndex]
+    const next: HarnessFeatureDeployUnitBindingRecord = {
+      ...existing,
+      ...(humanGate ? { humanGate } : {}),
+      updatedAt: formatGmt8Timestamp()
+    }
+    if (!humanGate) delete next.humanGate
+    store.bindings[existingIndex] = next
+    await writeHarnessJsonFileAtomic(
+      HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE,
+      store,
+      HARNESS_FEATURE_BINDING_MAX_BYTES,
+      "Harness feature binding store"
+    )
+    return next
+  })
+}
+
+export async function initializeHarnessManagedRunProjectDirectories(): Promise<void> {
+  await readProjectStore()
+}
+
+export function getHarnessProjectRootPath(projectId: string): string {
+  const projectDirectory = managedRunProjectDirectoryById.get(projectId)
+  if (!projectDirectory) throw new Error("Project not found")
+  return projectDirectory
+}
+
+export function listHarnessManagedRunProjectDirectories(): Array<{
+  projectId: string
+  projectDirectory: string
+}> {
+  return Array.from(managedRunProjectDirectoryById, ([projectId, projectDirectory]) => ({
+    projectId,
+    projectDirectory
+  }))
 }
 
 export async function listHarnessDeployUnitMappings(): Promise<HarnessDeployUnitMapping[]> {
@@ -2523,7 +2717,6 @@ function makeProjectDetailViewModel(
   context?: HarnessProjectConfigContext
 ): HarnessProjectDetailViewModel {
   const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project, context)
-
   return {
     project: {
       projectId: project.projectId,
@@ -2548,6 +2741,19 @@ function makeProjectDetailViewModel(
     loading: false,
     error: data.error
   }
+}
+
+function attachHumanGatesToProjectDetail(
+  detail: HarnessProjectDetailViewModel,
+  bindingByFeature: ReadonlyMap<string, HarnessFeatureDeployUnitBindingRecord>
+): HarnessProjectDetailViewModel {
+  const runs = detail.runs.map((run) => {
+    const humanGate = bindingByFeature.get(
+      featureDeployUnitBindingKey(detail.project.projectId, run.slug)
+    )?.humanGate
+    return humanGate ? { ...run, humanGate } : run
+  })
+  return { ...detail, runs }
 }
 
 async function initializeHarnessProject(project: HarnessProjectMetadata): Promise<void> {
@@ -2579,11 +2785,21 @@ async function initializeHarnessProject(project: HarnessProjectMetadata): Promis
 
 export function readHarnessFeatureMetadata(
   metadata: unknown
-): { projectId: string; slug: string } | null {
+): { projectId: string; slug: string; runId?: string; nodeId?: string } | null {
   if (!isObject(metadata) || !isObject(metadata.harnessFeature)) return null
-  const projectId = normalizeText(metadata.harnessFeature.projectId).trim()
-  const slug = normalizeText(metadata.harnessFeature.slug).trim()
-  return projectId && slug ? { projectId, slug } : null
+  const harnessFeature = metadata.harnessFeature
+  const projectId = normalizeText(harnessFeature.projectId).trim()
+  const slug = normalizeText(harnessFeature.slug).trim()
+  const runId = normalizeText(harnessFeature.runId).trim()
+  const nodeId = normalizeText(harnessFeature.nodeId).trim()
+  return projectId && slug
+    ? {
+        projectId,
+        slug,
+        ...(runId ? { runId } : {}),
+        ...(nodeId ? { nodeId } : {})
+      }
+    : null
 }
 
 export interface HarnessFeatureAgentContext {
@@ -2622,7 +2838,7 @@ function isHarnessSessionContextOk(value: unknown): boolean {
   return value === true
 }
 
-export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team"
+export type HarnessRuntimeAgentMode = "solo" | "multi" | "agent_team" | "workflow"
 
 export interface HarnessAgentConfig {
   agentMode?: HarnessRuntimeAgentMode
@@ -2683,7 +2899,8 @@ function normalizeHarnessAgentConfig(value: unknown): HarnessAgentConfig | undef
   const agentMode =
     value.agentMode === "solo" ||
     value.agentMode === "multi" ||
-    value.agentMode === "agent_team"
+    value.agentMode === "agent_team" ||
+    value.agentMode === "workflow"
       ? value.agentMode
       : undefined
   const normalizeStringList = (input: unknown): string[] => {
@@ -2956,6 +3173,49 @@ export async function resolveHarnessFeatureCurrentStage(
     return resolveCurrentStageFromSnapshot(snapshot)
   } catch {
     return null
+  }
+}
+
+export async function inspectHarnessManagedFeatureStatus(
+  projectId: string,
+  featureId: string
+): Promise<ManagedFeatureStatusSnapshot> {
+  const project = await requireProject(normalizeText(projectId).trim())
+  const normalizedFeatureId = normalizeText(featureId).trim()
+  if (!normalizedFeatureId) throw new Error("Feature is required")
+
+  const snapshot = await runInspectAdapter(project, "run", normalizedFeatureId)
+  const workflow = normalizeWorkflow(snapshot.workflow)
+  const run = isObject(snapshot.run) ? snapshot.run : {}
+  const currentNodeId = normalizeText(run.currentNodeId).trim() || "unknown"
+  const currentNodeIndex = workflow.nodes.findIndex((node) => node.id === currentNodeId)
+  const currentNodeStatus = normalizeNodeStatus(
+    Array.isArray(run.nodes)
+      ? run.nodes.find(
+          (node): node is Record<string, unknown> =>
+            isObject(node) && normalizeText(node.id).trim() === currentNodeId
+        )?.nodeStatus ?? run.currentNodeStatus
+      : run.currentNodeStatus
+  )
+  const explicitFeatureStatus = normalizeFeatureStatus(run.featureStatus)
+  const featureStatus =
+    explicitFeatureStatus ??
+    deriveFeatureStatusFromCurrentNode(currentNodeStatus, currentNodeIndex, workflow.nodes.length)
+  const nextAction = resolveHarnessNextAction(workflow, currentNodeId, currentNodeStatus)
+  const nextActionHash = hashManagedState("next-action", nextAction ?? null)
+  return {
+    featureStatus,
+    currentNodeId,
+    currentNodeStatus,
+    isFinalNode: currentNodeIndex >= 0 && currentNodeIndex === workflow.nodes.length - 1,
+    ...(nextAction ? { nextAction } : {}),
+    featureStateHash: hashManagedState("feature-state", {
+      featureStatus,
+      currentNodeId,
+      currentNodeStatus,
+      nextActionHash
+    }),
+    nextActionHash
   }
 }
 
@@ -3604,6 +3864,7 @@ async function loadHarnessProjectDetails(
   const result: Record<string, HarnessProjectDetailViewModel> = {}
   const configContextByProjectId = new Map<string, HarnessProjectConfigContext>()
   const projectDirectoryExistsById = new Map<string, boolean>()
+  let featureBindingByKey: Map<string, HarnessFeatureDeployUnitBindingRecord> | null = null
   const groups = new Map<
     string,
     {
@@ -3694,6 +3955,14 @@ async function loadHarnessProjectDetails(
         )
         throwIfHarnessDetailCancelled(signal)
         const workflow = snapshot.workflow
+        if (!featureBindingByKey) {
+          featureBindingByKey = new Map(
+            (await readFeatureDeployUnitBindingStore()).bindings.map((binding) => [
+              featureDeployUnitBindingKey(binding.projectId, binding.featureId),
+              binding
+            ])
+          )
+        }
 
         for (const project of batch) {
           const projectDir = projectDirectoryName(project)
@@ -3708,13 +3977,20 @@ async function loadHarnessProjectDetails(
             continue
           }
 
-          result[project.projectId] = makeProjectDetailViewModel(project, {
-            workflow,
-            runs: projectData.runs,
-            watchRefs: projectData.watchRefs,
-            projectState: projectAdapterLoadedStatus(project),
-            error: null
-          }, configContextByProjectId.get(project.projectId))
+          result[project.projectId] = attachHumanGatesToProjectDetail(
+            makeProjectDetailViewModel(
+              project,
+              {
+                workflow,
+                runs: projectData.runs,
+                watchRefs: projectData.watchRefs,
+                projectState: projectAdapterLoadedStatus(project),
+                error: null
+              },
+              configContextByProjectId.get(project.projectId)
+            ),
+            featureBindingByKey
+          )
         }
       } catch (error) {
         if (signal.aborted) throw harnessDetailCancelledError()
@@ -3801,6 +4077,8 @@ async function loadHarnessRunDetail(
   }
   const skipNodeAvailable = hasConfiguredHarnessInvocationInContext(context, "skipNode")
   const selectedDeployUnits = workerContext.selectedDeployUnits ?? []
+  const featureBinding = await findFeatureDeployUnitBinding(project.projectId, slug)
+  const managedRun = managedRunStore.getLatestRun(projectId, slug)
   const detail: HarnessRunDetailViewModel = {
     project: {
       projectId: project.projectId,
@@ -3823,7 +4101,9 @@ async function loadHarnessRunDetail(
         label: project["harness-adapter"].name
       },
       skipNodeAvailable,
-      selectedDeployUnits
+      selectedDeployUnits,
+      ...(managedRun ? { managedRun } : {}),
+      ...(featureBinding?.humanGate ? { humanGate: featureBinding.humanGate } : {})
     },
     sessions: []
   }

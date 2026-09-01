@@ -35,11 +35,11 @@ export function BrowserScriptEditor({
   return (
     <div
       className={cn(
-        "flex min-h-[360px] flex-col overflow-hidden rounded-xl border border-slate-900/80 bg-[#0b0f14] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]",
+        "flex min-h-[360px] flex-col overflow-hidden rounded-xl border border-border bg-background-elevated",
         className
       )}
     >
-      <div className="flex items-center justify-between gap-3 border-b border-white/10 bg-[#11161d] px-4 py-2 text-[11px] text-slate-400">
+      <div className="flex items-center justify-between gap-3 border-b border-border bg-background-interactive px-4 py-2 text-[11px] text-muted-foreground">
         <div className="flex min-w-0 items-center gap-2">
           <FileCode2 className="size-3.5 shrink-0" strokeWidth={1.8} />
           <div className="min-w-0">{title}</div>
@@ -53,13 +53,13 @@ export function BrowserScriptEditor({
 
       <div
         className={cn(
-          "flex h-full min-h-0 flex-1 flex-col gap-3 px-4 py-4 font-mono text-[12px] leading-6 text-slate-100",
+          "flex h-full min-h-0 flex-1 flex-col gap-3 px-4 py-4 font-mono text-[12px] leading-6 text-foreground",
           contentClassName
         )}
       >
-        <div className="rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-2 font-sans text-[11px] leading-5 text-amber-100">
-          <p className="font-medium text-amber-50">变量格式提示</p>
-          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-amber-100">
+        <div className="rounded-lg border border-status-warning/20 bg-status-warning/10 px-3 py-2 font-sans text-[11px] leading-5 text-status-warning-foreground">
+          <p className="font-medium">变量格式提示</p>
+          <pre className="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-5">
             {VARIABLE_USAGE_HINT}
           </pre>
         </div>
@@ -71,7 +71,7 @@ export function BrowserScriptEditor({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
           className={cn(
-            "min-h-0 flex-1 overflow-x-auto overflow-y-scroll resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-slate-100 outline-none placeholder:text-slate-500 [scrollbar-gutter:stable]",
+            "min-h-0 flex-1 overflow-x-auto overflow-y-scroll resize-none border-0 bg-transparent p-0 font-mono text-[12px] leading-6 text-foreground outline-none placeholder:text-muted-foreground [scrollbar-gutter:stable]",
             textareaClassName
           )}
           placeholder={placeholder}

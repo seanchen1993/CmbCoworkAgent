@@ -170,6 +170,9 @@ import type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateSnapshot,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 } from "../../shared/harness-board-types"
@@ -267,6 +270,9 @@ export type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateSnapshot,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 }

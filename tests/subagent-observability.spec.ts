@@ -314,7 +314,8 @@ async function testThreadStateStoresAggregateToolCount(): Promise<void> {
     compactTranscriptHandlerStart + 1
   )
   assert(
-    compactTranscriptHandlerStart >= 0 && focusedTranscriptHandlerStart > compactTranscriptHandlerStart,
+    compactTranscriptHandlerStart >= 0 &&
+      focusedTranscriptHandlerStart > compactTranscriptHandlerStart,
     "thread IPC should expose separate compact and focused transcript handlers"
   )
   const compactTranscriptHandler = threadIpc.slice(
@@ -527,7 +528,32 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     "runningCoordinatorWorkerIdsRef",
     "right panel no longer keys coordinator auto-open only by worker id"
   )
-  assertIncludes(rightPanel, "setAgentsOpen(true)", "right panel auto-opens agents section")
+  assertIncludes(
+    rightPanel,
+    'setExclusiveOpenPanel("agents")',
+    "right panel opens agents through the exclusive workspace panel control"
+  )
+  assertIncludes(
+    rightPanel,
+    "if (hasNewRunning)",
+    "right panel switches to agents when a new agent run starts"
+  )
+  assertNotIncludes(
+    rightPanel,
+    "hasOpenWorkspacePanelRef",
+    "an open workspace section must not suppress a newly started agent run"
+  )
+  assertIncludes(
+    rightPanel,
+    "consumeRightPanelWorkRequest(rightPanelWorkRequest.id)",
+    "right panel consumes one-shot navigation requests after applying them"
+  )
+  assertSourceOrder(
+    rightPanel,
+    "setExclusiveOpenPanel(rightPanelWorkRequest.target)",
+    "consumeRightPanelWorkRequest(rightPanelWorkRequest.id)",
+    "right panel applies a navigation request before consuming it"
+  )
   assertIncludes(
     rightPanel,
     "worker.turns ?? 0",
@@ -552,6 +578,11 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
     rightPanel,
     "CoordinatorWorkerCard",
     "right panel renders coordinator worker cards"
+  )
+  assertIncludes(
+    rightPanel,
+    "orderSubagentsForDisplay(subagentSnapshot ?? [])",
+    "right panel displays running task subagents before historical cards"
   )
   assertIncludes(
     rightPanel,
@@ -781,6 +812,41 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   )
 }
 
+async function testSubagentFocusBackReturnsToAgentsPanel(): Promise<void> {
+  const panel = await readProjectFile("src/renderer/src/components/chat/SubagentStreamPanel.tsx")
+  const workerPanel = await readProjectFile(
+    "src/renderer/src/components/chat/WorkerStreamPanel.tsx"
+  )
+
+  assertIncludes(
+    panel,
+    "requestOpenRightPanelAgents(subagentFocusView.threadId)",
+    "subagent focus back requests the parent thread agents panel"
+  )
+  assertIncludes(
+    panel,
+    "closeSubagentFocusView()",
+    "subagent focus back closes the focused transcript"
+  )
+  assertSourceOrder(
+    panel,
+    "requestOpenRightPanelAgents(subagentFocusView.threadId)",
+    "closeSubagentFocusView()",
+    "subagent focus back requests agents before closing the transcript"
+  )
+  assertIncludes(
+    workerPanel,
+    "requestOpenRightPanelAgents(workerFocusView.threadId)",
+    "team worker focus back requests the parent thread agents panel"
+  )
+  assertSourceOrder(
+    workerPanel,
+    "requestOpenRightPanelAgents(workerFocusView.threadId)",
+    "closeWorkerFocusView()",
+    "team worker focus back requests agents before closing the tool stream"
+  )
+}
+
 async function testSidebarKeepsThreadLoadingWhileWorkerRuns(): Promise<void> {
   const sidebar = await readProjectFile("src/renderer/src/components/sidebar/ThreadSidebar.tsx")
   const deletionHelper = await readProjectFile(
@@ -875,7 +941,7 @@ async function testWorkerToolFlowPreservesToolErrorStatus(): Promise<void> {
   )
   assertIncludes(
     workerCheckpointHistory,
-    'message.is_error === true ||',
+    "message.is_error === true ||",
     "worker checkpoint helper preserves explicit tool error flags"
   )
   assertIncludes(
@@ -902,6 +968,8 @@ async function run(): Promise<void> {
   console.log("PASS subagent thread state aggregate tool count")
   await testRightPanelDisplaysAndAutoOpens()
   console.log("PASS subagent right panel observability")
+  await testSubagentFocusBackReturnsToAgentsPanel()
+  console.log("PASS subagent focus back returns to agents panel")
   await testSidebarKeepsThreadLoadingWhileWorkerRuns()
   console.log("PASS sidebar coordinator worker loading state")
   await testWorkerToolFlowPreservesToolErrorStatus()

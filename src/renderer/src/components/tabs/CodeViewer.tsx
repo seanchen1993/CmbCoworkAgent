@@ -67,9 +67,7 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
   const shouldVirtualize = lines.length > VIRTUAL_SCROLL_LINE_THRESHOLD
   const lineCount = lines.length
   const highlightKey =
-    language !== null &&
-    !shouldVirtualize &&
-    content.length <= MAX_HIGHLIGHT_CONTENT_CHARS
+    language !== null && !shouldVirtualize && content.length <= MAX_HIGHLIGHT_CONTENT_CHARS
       ? `${language}\u0000${content}`
       : null
   const highlightedHtml = highlighted?.key === highlightKey ? highlighted.html : null
@@ -118,7 +116,10 @@ export function CodeViewer({ filePath, content }: CodeViewerProps) {
         <ScrollArea className="flex-1 min-h-0">
           <div className="shiki-wrapper">
             {highlightedHtml ? (
-              <div className="shiki-content" dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+              <div
+                className="shiki-content"
+                dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+              />
             ) : (
               // Fallback plain text rendering
               <pre className="p-4 text-sm font-mono leading-relaxed whitespace-pre-wrap break-all">
