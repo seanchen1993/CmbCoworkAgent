@@ -236,7 +236,7 @@ export class ToolOrchestrator {
     private approvalStore: ApprovalStore,
     private rawExecute: RawExecuteFn,
     private requestApproval: RequestApprovalFn,
-    private yoloMode: boolean = false,
+    private readYoloMode: () => boolean = () => false,
     /**
      * Auto-approve file edits (write_file/edit_file) WITHOUT prompting, while
      * still gating shell execution. Used by dynamic-workflow subagents: the user
@@ -270,8 +270,9 @@ export class ToolOrchestrator {
     outsideShellSyntax: CommandShellSyntax = shellSyntax
   ): Promise<ExecuteResponse> {
     {
+      const yoloMode = this.readYoloMode()
       console.log(
-        `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${this.yoloMode}`
+        `[Orchestrator] execute: "${command}" cwd=${cwd} sandbox=${sandboxMode} yolo=${yoloMode}`
       )
 
       // 1. Assess command safety — always check, even in YOLO mode
@@ -404,7 +405,7 @@ export class ToolOrchestrator {
 
       // 3. YOLO mode: skip the initial command approval for safe + needs_approval
       // commands, but still require explicit approval before escaping the sandbox.
-      if (this.yoloMode) {
+      if (yoloMode) {
         const result = await this.rawExecute(command, sandboxMode, cwd)
         return this.maybeRetryOutsideSandbox(command, cwd, sandboxMode, result, outsideShellSyntax)
       }
@@ -808,7 +809,7 @@ export class ToolOrchestrator {
     cwd: string
   ): Promise<boolean> {
     {
-      if (this.yoloMode || this.autoApproveFileEdits) return true
+      if (this.readYoloMode() || this.autoApproveFileEdits) return true
 
       const key = this.approvalStore.makeKey(`${operation}:${filePath}`, cwd, "file")
       // Directory-based pattern for permanent approval: file:write:/dir/* or file:edit:/dir/*

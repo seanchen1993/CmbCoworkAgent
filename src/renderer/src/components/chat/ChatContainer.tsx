@@ -11,7 +11,7 @@ import ReactMarkdown, { type Components } from "react-markdown"
 import remarkBreaks from "remark-breaks"
 import type { VirtuosoHandle } from "react-virtuoso"
 import {
-  Send,
+  ArrowUp,
   Square,
   AlertCircle,
   X,
@@ -32,7 +32,6 @@ import {
   FilePenLine,
   Plus,
   Loader2,
-  CornerDownLeft,
   Flag,
   CheckCircle2,
   PauseCircle,
@@ -48,7 +47,8 @@ import {
   GripVertical,
   Pencil,
   ListEnd,
-  Check
+  Check,
+  SlidersHorizontal
 } from "lucide-react"
 import type { FileAttachment, QueuedMessage } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -64,6 +64,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { useAppStore } from "@/lib/store"
 import {
   consumePendingHarnessNextAction,
@@ -140,6 +141,7 @@ import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreat
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
 import { AgentGitCommitDialog, type AgentCommitOutcome } from "./AgentGitCommitDialog"
 import { ContextReminderController, isContextReminderPending } from "./ContextReminderController"
+import { YoloEnableConfirmDialog } from "@/components/YoloEnableConfirmDialog"
 import { uploadChatData } from "@/api"
 import { insertLog } from "../../../js/mmjUtils"
 import { toast } from "sonner"
@@ -284,7 +286,7 @@ const CHAT_HISTORY_ANCHOR_STABLE_FRAMES = 12
 const CHAT_SESSION_ANCHOR_STABLE_FRAMES = 2
 const CHAT_LOCAL_SEARCH_HISTORY_LIMIT = 500
 const CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT = 4 * 1024 * 1024
-
+type YoloModeLoadState = "loading" | "loaded" | "failed"
 function awaitWorkspaceMentionLoad<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
     const error = new Error("Workspace mention load was cancelled")
@@ -1520,27 +1522,10 @@ function SystemPromptPreviewButton({
 }: {
   threadId?: string | null
 }): React.JSX.Element | null {
-  const [allowed, setAllowed] = useState(false)
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [prompt, setPrompt] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
-  const closeTimerRef = useRef<number | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    window.api.agent
-      .canPreviewSystemPrompt()
-      .then((nextAllowed) => {
-        if (!cancelled) setAllowed(nextAllowed)
-      })
-      .catch(() => {
-        if (!cancelled) setAllowed(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   const loadPreview = useCallback(async () => {
     if (!threadId || loading) return
@@ -1557,46 +1542,27 @@ function SystemPromptPreviewButton({
     }
   }, [loading, threadId])
 
-  const clearCloseTimer = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
-    }
-  }, [])
-
-  const scheduleClose = useCallback(() => {
-    clearCloseTimer()
-    closeTimerRef.current = window.setTimeout(() => {
-      setOpen(false)
-      closeTimerRef.current = null
-    }, 120)
-  }, [clearCloseTimer])
-
-  useEffect(() => {
-    return () => clearCloseTimer()
-  }, [clearCloseTimer])
-
   useEffect(() => {
     setOpen(false)
     setPrompt(null)
     setUpdatedAt(null)
   }, [threadId])
 
-  if (!allowed || !threadId) return null
+  if (!threadId) return null
 
   const updatedAtLabel = updatedAt ? new Date(updatedAt).toLocaleString() : "暂无"
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen)
+        if (nextOpen) void loadPreview()
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
-          onMouseEnter={() => {
-            clearCloseTimer()
-            setOpen(true)
-            void loadPreview()
-          }}
-          onMouseLeave={scheduleClose}
           className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
           title="系统提示词预览"
           aria-label="系统提示词预览"
@@ -1609,17 +1575,12 @@ function SystemPromptPreviewButton({
         align="start"
         side="top"
         sideOffset={8}
-        onMouseEnter={() => {
-          clearCloseTimer()
-          setOpen(true)
-        }}
-        onMouseLeave={scheduleClose}
-        className="w-[720px] max-w-[calc(100vw-2rem)] p-0"
+        className="w-[420px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border-border bg-popover p-0 shadow-xl"
       >
-        <div className="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+        <div className="border-b border-border/60 px-3 py-2 text-[11px] text-muted-foreground">
           {loading ? "加载中..." : `更新时间：${updatedAtLabel}`}
         </div>
-        <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5">
+        <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-5 text-popover-foreground">
           {prompt || "暂无系统提示词；请先运行一次当前会话。"}
         </pre>
       </PopoverContent>
@@ -1746,7 +1707,20 @@ export function ChatContainer({
     }))
   )
   const [yoloMode, setYoloMode] = useState(false)
-  const [yoloModeLoaded, setYoloModeLoaded] = useState(false)
+  const [yoloModeLoadState, setYoloModeLoadState] = useState<YoloModeLoadState>("loading")
+  const yoloModeLoadRequestRef = useRef(0)
+  const [yoloModePending, setYoloModePending] = useState(false)
+  const [yoloEnableConfirmOpen, setYoloEnableConfirmOpen] = useState(false)
+  const [composerSettingsOpen, setComposerSettingsOpen] = useState(false)
+  const [composerEnvironmentRailCollapsed, setComposerEnvironmentRailCollapsed] = useState(false)
+  const yoloModeLoaded = yoloModeLoadState === "loaded"
+  const yoloModeLoadFailed = yoloModeLoadState === "failed"
+  const composerRightClearanceClass = composerEnvironmentRailCollapsed
+    ? yoloMode || yoloModeLoadFailed
+      ? "pr-20"
+      : "pr-12"
+    : null
+  const [systemPromptPreviewAllowed, setSystemPromptPreviewAllowed] = useState(false)
   const [glowVisible, setGlowVisible] = useState(false)
   const appleIntelligenceGlowEnabled = useSyncExternalStore(
     subscribeAppleIntelligenceGlow,
@@ -2136,6 +2110,8 @@ export function ChatContainer({
     draftBuiltinBrowser: selectedBuiltinBrowser,
     setDraftBuiltinBrowser: setSelectedBuiltinBrowser
   } = useCurrentThread(threadId)
+  const autoApproveGitPush =
+    pendingApproval?.operation === "git_push" && yoloModeLoaded && yoloMode
   const workspacePathRef = useRef(workspacePath)
   workspacePathRef.current = workspacePath
 
@@ -2146,6 +2122,9 @@ export function ChatContainer({
   const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
   const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
   const showSystemConstraintsButton = surface === "harness-project"
+  const showSystemPromptPreviewButton = Boolean(threadId) && systemPromptPreviewAllowed
+  const showComposerPromptSection =
+    showSystemPromptPreviewButton || showSystemConstraintsButton
   const systemConstraintsTitle = systemConstraintsLoadFailed
     ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
     : systemConstraintCounts.total > 0
@@ -2157,11 +2136,27 @@ export function ChatContainer({
       ? "系统约束已加载"
       : "系统约束"
   const handleOpenSystemConstraints = useCallback((): void => {
+    setComposerSettingsOpen(false)
     requestOpenRightPanelSystemConstraints(threadId)
   }, [requestOpenRightPanelSystemConstraints, threadId])
   const harnessDialogTipsProjectId = harnessFeatureBinding?.projectId ?? null
   const harnessDialogTipsSlug = harnessFeatureBinding?.slug ?? null
   const [harnessDialogTips, setHarnessDialogTips] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    window.api.agent
+      .canPreviewSystemPrompt()
+      .then((allowed) => {
+        if (!cancelled) setSystemPromptPreviewAllowed(allowed)
+      })
+      .catch(() => {
+        if (!cancelled) setSystemPromptPreviewAllowed(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (!pendingHarnessDialogTips) return
@@ -2651,21 +2646,74 @@ export function ChatContainer({
     setModelContextLimit(match?.maxTokens)
   }, [currentModel, models])
 
+  const fetchYoloMode = useCallback((): void => {
+    const requestId = ++yoloModeLoadRequestRef.current
+    setYoloModeLoadState("loading")
+    window.api.sandbox
+      .getYoloMode()
+      .then((nextYoloMode) => {
+        if (requestId !== yoloModeLoadRequestRef.current) return
+        setYoloMode(nextYoloMode)
+        setYoloModeLoadState("loaded")
+      })
+      .catch((e) => {
+        if (requestId !== yoloModeLoadRequestRef.current) return
+        setYoloModeLoadState("failed")
+        console.warn("[YoloMode] Failed to fetch:", e)
+      })
+  }, [])
+
   useEffect(() => {
-    const fetchYoloMode = (): void => {
-      window.api.sandbox
-        .getYoloMode()
-        .then((nextYoloMode) => {
-          setYoloMode(nextYoloMode)
-          setYoloModeLoaded(true)
-        })
-        .catch((e) => {
-          setYoloModeLoaded(true)
-          console.warn("[YoloMode] Failed to fetch:", e)
-        })
-    }
     fetchYoloMode()
-    return window.api.sandbox.onChanged(fetchYoloMode)
+    const unsubscribe = window.api.sandbox.onChanged(fetchYoloMode)
+    return () => {
+      yoloModeLoadRequestRef.current += 1
+      unsubscribe()
+    }
+  }, [fetchYoloMode])
+
+  const handleSetYoloMode = useCallback(
+    async (nextYoloMode: boolean): Promise<boolean> => {
+      if (!yoloModeLoaded || yoloModePending) return false
+
+      setYoloModePending(true)
+      try {
+        await window.api.sandbox.setYoloMode(nextYoloMode)
+        yoloModeLoadRequestRef.current += 1
+        setYoloMode(nextYoloMode)
+        setYoloModeLoadState("loaded")
+        toast.success(nextYoloMode ? "YOLO 模式已开启" : "YOLO 模式已关闭，审批已恢复")
+        return true
+      } catch (error) {
+        console.error("[YoloMode] Failed to update:", error)
+        toast.error("YOLO 模式切换失败，请稍后重试")
+        fetchYoloMode()
+        return false
+      } finally {
+        setYoloModePending(false)
+      }
+    },
+    [fetchYoloMode, yoloModeLoaded, yoloModePending]
+  )
+
+  const handleToggleYoloMode = useCallback((): void => {
+    if (!yoloModeLoaded || yoloModePending) return
+    if (yoloMode) {
+      void handleSetYoloMode(false)
+      return
+    }
+    setComposerSettingsOpen(false)
+    setYoloEnableConfirmOpen(true)
+  }, [handleSetYoloMode, yoloMode, yoloModeLoaded, yoloModePending])
+
+  const handleConfirmEnableYoloMode = useCallback(async (): Promise<void> => {
+    const updated = await handleSetYoloMode(true)
+    if (updated) setYoloEnableConfirmOpen(false)
+  }, [handleSetYoloMode])
+
+  const handleComposerEnvironmentRailCollapsedChange = useCallback((collapsed: boolean): void => {
+    if (collapsed) setComposerSettingsOpen(false)
+    setComposerEnvironmentRailCollapsed(collapsed)
   }, [])
 
   const uploadLoChatDataForThread = useCallback(
@@ -2974,12 +3022,12 @@ export function ChatContainer({
   )
 
   useEffect(() => {
-    if (!yoloModeLoaded || !yoloMode || !pendingApproval) return
+    if (!autoApproveGitPush || !pendingApproval) return
     const approvalRecord = pendingApproval as unknown as Record<string, unknown>
     if (approvalRecord._orchestratorRequestId && approvalRecord.operation === "git_push") {
       void handleApprovalDecision("approve")
     }
-  }, [handleApprovalDecision, pendingApproval, yoloMode, yoloModeLoaded])
+  }, [autoApproveGitPush, handleApprovalDecision, pendingApproval])
 
   // The pending git_commit approval (agent ran `git commit` → task-card dialog), if any.
   const agentCommitApproval = useMemo(() => {
@@ -4816,24 +4864,6 @@ export function ChatContainer({
     }
   }, [slashPopoverKind, loadSkills])
 
-  const insertTextAtCursor = useCallback(
-    (text: string, replaceRange?: { start: number; end: number }) => {
-      const textarea = inputRef.current
-      const selectionStart = replaceRange?.start ?? textarea?.selectionStart ?? input.length
-      const selectionEnd = replaceRange?.end ?? textarea?.selectionEnd ?? input.length
-      const nextInput = `${input.slice(0, selectionStart)}${text}${input.slice(selectionEnd)}`
-      const nextCursor = selectionStart + text.length
-
-      setInput(nextInput)
-      requestAnimationFrame(() => {
-        const target = inputRef.current
-        if (!target) return
-        target.setSelectionRange(nextCursor, nextCursor)
-      })
-    },
-    [input, setInput]
-  )
-
   // Depend on the stable callback refs, not the whole `slash` object —
   // the hook returns a fresh literal every render, which would re-create
   // applySkillSelection each keystroke and cascade into popover rerenders.
@@ -6379,11 +6409,6 @@ export function ChatContainer({
     }
   }
 
-  const handleInsertNewline = useCallback((): void => {
-    if (effectiveInputDisabled) return
-    insertTextAtCursor("\n")
-  }, [effectiveInputDisabled, insertTextAtCursor])
-
   // Auto-resize textarea based on content
   const adjustTextareaHeight = useCallback((): void => {
     const textarea = inputRef.current
@@ -7320,6 +7345,13 @@ export function ChatContainer({
         onReject={handleSkillReject}
       />
 
+      <YoloEnableConfirmDialog
+        open={yoloEnableConfirmOpen}
+        pending={yoloModePending}
+        onOpenChange={setYoloEnableConfirmOpen}
+        onConfirm={() => void handleConfirmEnableYoloMode()}
+      />
+
       <Dialog
         open={!!messageForkTarget}
         onOpenChange={(open) => {
@@ -7529,7 +7561,7 @@ export function ChatContainer({
                     toolCallStates={toolCallDisplayStates}
                     pendingApprovalToolCallKeys={pendingApprovalToolCallKeys}
                     pendingApproval={pendingApproval}
-                    autoApproveGitPush={!yoloModeLoaded || yoloMode}
+                    autoApproveGitPush={autoApproveGitPush}
                     onApprovalDecision={handleApprovalDecision}
                     onEditUserMessage={handleEditUserMessage}
                     onSetGoalFromMessage={handleSetGoalFromMessage}
@@ -7563,7 +7595,7 @@ export function ChatContainer({
               ) &&
               (pendingApproval as unknown as Record<string, unknown>).operation !== "git_commit" &&
               !(
-                (!yoloModeLoaded || yoloMode) &&
+                autoApproveGitPush &&
                 (pendingApproval as unknown as Record<string, unknown>).operation === "git_push"
               ) && (
                 <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
@@ -7859,7 +7891,7 @@ export function ChatContainer({
             <div
               className={cn(
                 "px-4 pb-4",
-                goalUi.goal ? "pt-1" : "pt-4",
+                goalUi.goal ? "pt-1" : "pt-0",
                 reserveLeftSpace && "md:pl-[20px]"
               )}
             >
@@ -8065,11 +8097,261 @@ export function ChatContainer({
                       </div>
                     </div>
                   )}
-                  <div className="flex items-end gap-2">
+                  {/* Composer environment rail, visually tucked behind the primary input card. */}
+                  <div
+                    aria-hidden={composerEnvironmentRailCollapsed}
+                    className={cn(
+                      "relative z-0 mx-3 -mb-4 flex min-w-0 items-center gap-1 rounded-t-[28px] bg-background-interactive/70 pb-[13px] pl-3 pr-2 pt-[5px]",
+                      composerEnvironmentRailCollapsed && "hidden"
+                    )}
+                  >
+                    {/* Scrollable environment context. */}
+                    <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                      <WorkspacePicker
+                        threadId={threadId}
+                        environmentRailCollapsed={composerEnvironmentRailCollapsed}
+                        onGitStatusChange={onThreadGitStatusChange}
+                      />
+                      <GitBranchSwitcher
+                        workspacePath={workspacePath}
+                        environmentRailCollapsed={composerEnvironmentRailCollapsed}
+                      />
+                      {tokenUsage && !composerEnvironmentRailCollapsed && (
+                        <ContextUsageIndicator
+                          tokenUsage={tokenUsage}
+                          modelId={currentModel}
+                          contextLimit={modelContextLimit}
+                          className="h-7 bg-transparent hover:bg-muted/60"
+                        />
+                      )}
+                    </div>
+                    {/* Fixed safety and environment actions. */}
+                    <div className="ml-auto flex shrink-0 items-center gap-1">
+                      {yoloModeLoadFailed ? (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                role="status"
+                                aria-label="YOLO 状态读取失败"
+                                className="inline-flex h-[18px] shrink-0 items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning"
+                              >
+                                <CircleAlert className="size-2.5" />
+                                YOLO?
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              无法确认全局 YOLO 状态，请重新读取
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : yoloMode ? (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span
+                                role="status"
+                                aria-label="YOLO 模式已开启"
+                                className="inline-flex h-[18px] shrink-0 items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning"
+                              >
+                                <Zap className="size-2.5" />
+                                YOLO
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              全局 YOLO 已开启；关闭后将立即恢复审批
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : null}
+                      <Popover open={composerSettingsOpen} onOpenChange={setComposerSettingsOpen}>
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  aria-label="更多会话设置"
+                                  className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                                >
+                                  <SlidersHorizontal className="size-3.5" />
+                                </button>
+                              </PopoverTrigger>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              更多会话设置
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <PopoverContent
+                          align="end"
+                          side="top"
+                          sideOffset={8}
+                          className="w-[328px] max-w-[calc(100vw-24px)] overflow-hidden rounded-2xl border-border/60 bg-popover/95 p-1.5 shadow-2xl backdrop-blur-xl"
+                        >
+                          <div className="flex items-center gap-2 px-2 py-1.5">
+                            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-background-interactive text-muted-foreground">
+                              <SlidersHorizontal className="size-3.5" />
+                            </span>
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-foreground">会话设置</div>
+                              <div className="mt-0.5 text-[10px] leading-4 text-muted-foreground">
+                                运行选项与会话辅助功能
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2 p-0.5">
+                            <section aria-labelledby="composer-run-settings-title">
+                              <div
+                                id="composer-run-settings-title"
+                                className="px-2 pb-1 text-[10px] font-medium text-muted-foreground/80"
+                              >
+                                运行控制
+                              </div>
+                              <div className="rounded-xl bg-background-interactive/60 p-2">
+                                <div className="flex items-center gap-2.5">
+                                  <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-status-warning/15 text-status-warning">
+                                    {yoloModePending || yoloModeLoadState === "loading" ? (
+                                      <Loader2 className="size-3.5 animate-spin" />
+                                    ) : yoloModeLoadFailed ? (
+                                      <CircleAlert className="size-3.5" />
+                                    ) : (
+                                      <Zap className="size-3.5" />
+                                    )}
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block text-xs font-semibold text-foreground">
+                                      {yoloModeLoadFailed ? "YOLO 状态读取失败" : "YOLO 模式"}
+                                    </span>
+                                    <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">
+                                      {yoloModeLoadFailed
+                                        ? "无法确认全局自动审批状态；部分操作仍可能按已保存设置自动批准。"
+                                        : yoloModeLoadState === "loading"
+                                          ? "正在读取全局自动审批状态…"
+                                          : "全局自动审批设置；切换后立即影响后续操作。"}
+                                    </span>
+                                  </span>
+                                  {yoloModeLoadFailed ? (
+                                    <button
+                                      type="button"
+                                      onClick={fetchYoloMode}
+                                      className="h-7 shrink-0 rounded-md px-2 text-[10px] font-medium text-status-warning transition-colors hover:bg-status-warning/10"
+                                    >
+                                      重新读取
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      role="switch"
+                                      aria-checked={yoloMode}
+                                      aria-label={yoloMode ? "关闭 YOLO 模式" : "开启 YOLO 模式"}
+                                      disabled={!yoloModeLoaded || yoloModePending}
+                                      onClick={() => {
+                                        void handleToggleYoloMode()
+                                      }}
+                                      className={cn(
+                                        "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border p-0.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50",
+                                        yoloMode
+                                          ? "border-status-warning/60 bg-status-warning"
+                                          : "border-border-emphasis bg-muted"
+                                      )}
+                                    >
+                                      <ToggleThumb
+                                        className={cn(
+                                          "size-3.5",
+                                          yoloMode ? "translate-x-4" : "translate-x-0"
+                                        )}
+                                      />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </section>
+
+                            <section aria-labelledby="composer-session-settings-title">
+                              <div
+                                id="composer-session-settings-title"
+                                className="px-2 pb-1 text-[10px] font-medium text-muted-foreground/80"
+                              >
+                                会话行为
+                              </div>
+                              <div className="grid gap-0.5 rounded-xl bg-background-interactive/45 p-1 [&_[data-slot=popover-trigger]]:h-9 [&_[data-slot=popover-trigger]]:w-full [&_[data-slot=popover-trigger]]:justify-start [&_[data-slot=popover-trigger]]:rounded-lg">
+                                <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
+                                {(agentMode === "normal" || agentMode === "multi") && (
+                                  <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
+                                )}
+                              </div>
+                            </section>
+
+                            {showComposerPromptSection && (
+                              <section aria-labelledby="composer-preview-settings-title">
+                                <div
+                                  id="composer-preview-settings-title"
+                                  className="px-2 pb-1 text-[10px] font-medium text-muted-foreground/80"
+                                >
+                                  提示词与约束
+                                </div>
+                                <div className="grid gap-0.5 rounded-xl bg-background-interactive/45 p-1 [&_[data-slot=popover-trigger]]:h-9 [&_[data-slot=popover-trigger]]:w-full [&_[data-slot=popover-trigger]]:justify-start [&_[data-slot=popover-trigger]]:rounded-lg">
+                                  {showSystemPromptPreviewButton && (
+                                    <SystemPromptPreviewButton threadId={threadId} />
+                                  )}
+                                  {showSystemConstraintsButton && (
+                                    <SystemConstraintsPreviewPopover
+                                      preview={systemConstraintsPromptPreview}
+                                      align="start"
+                                      side="left"
+                                      sideOffset={8}
+                                    >
+                                      <button
+                                        type="button"
+                                        className={cn(
+                                          "flex h-9 w-full items-center gap-1.5 rounded-md px-2 text-xs transition-colors hover:opacity-80",
+                                          systemConstraintsLoadFailed
+                                            ? "bg-status-warning/15 text-status-warning"
+                                            : "bg-status-nominal/15 text-status-nominal"
+                                        )}
+                                        title={systemConstraintsTitle}
+                                        aria-label={systemConstraintsTitle}
+                                        onClick={handleOpenSystemConstraints}
+                                      >
+                                        <ShieldCheck className="size-3.5" />
+                                        <span>{systemConstraintsLabel}</span>
+                                      </button>
+                                    </SystemConstraintsPreviewPopover>
+                                  )}
+                                </div>
+                              </section>
+                            )}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                      <TooltipProvider delayDuration={180}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              aria-label="隐藏环境栏"
+                              aria-expanded="true"
+                              onClick={() => handleComposerEnvironmentRailCollapsedChange(true)}
+                              className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/50 transition-colors hover:bg-muted/40 hover:text-muted-foreground"
+                            >
+                              <ChevronDown className="size-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" sideOffset={6}>
+                            隐藏环境栏
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                  </div>
+                  {/* Composer environment rail end. */}
+                  <div className="relative z-10 flex items-end gap-2">
                     <div
                       ref={dropZoneRef}
                       className={cn(
-                        "relative flex-1 min-w-0 flex flex-col rounded-3xl border border-border  transition-colors duration-300",
+                        "relative flex-1 min-w-0 flex flex-col overflow-hidden rounded-[28px] border border-border/80 shadow-sm transition-colors duration-300",
                         pendingUserInput
                           ? "border-primary/25 bg-background"
                           : appleIntelligenceGlowEnabled && glowVisible
@@ -8081,9 +8363,54 @@ export function ChatContainer({
                       onDragOver={handleDragOver}
                       onDragLeave={handleDragLeave}
                     >
+                      {composerEnvironmentRailCollapsed && (
+                        <TooltipProvider delayDuration={180}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                aria-label={
+                                  yoloModeLoadFailed
+                                    ? "YOLO 状态读取失败，显示环境栏"
+                                    : yoloMode
+                                      ? "YOLO 模式已开启，显示环境栏"
+                                      : "显示环境栏"
+                                }
+                                aria-expanded={false}
+                                onClick={() => handleComposerEnvironmentRailCollapsedChange(false)}
+                                className="absolute right-3 top-2.5 z-20 inline-flex h-7 min-w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                              >
+                                {yoloModeLoadFailed ? (
+                                  <span className="inline-flex h-[18px] items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning hover:bg-status-warning/20">
+                                    <CircleAlert className="size-2.5" />
+                                    YOLO?
+                                    <ChevronUp className="size-2.5" />
+                                  </span>
+                                ) : yoloMode ? (
+                                  <span className="inline-flex h-[18px] items-center gap-0.5 rounded-full bg-status-warning/15 px-1 text-[10px] font-normal leading-none text-status-warning hover:bg-status-warning/20">
+                                    <Zap className="size-2.5" />
+                                    YOLO
+                                    <ChevronUp className="size-2.5" />
+                                  </span>
+                                ) : (
+                                  <ChevronUp className="size-3.5" />
+                                )}
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" sideOffset={6}>
+                              显示环境栏
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
                       {/* Selected chips sit above the textarea inside the composer shell. */}
                       {selectedSkill && (
-                        <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                        <div
+                          className={cn(
+                            "flex items-center gap-1.5 px-3 pt-2.5",
+                            composerRightClearanceClass
+                          )}
+                        >
                           <SkillChip
                             label={selectedSkill.name}
                             onRemove={() => setSelectedSkill(null)}
@@ -8091,7 +8418,12 @@ export function ChatContainer({
                         </div>
                       )}
                       {selectedBuiltinBrowser && (
-                        <div className="flex items-center gap-1.5 px-3 pt-2.5">
+                        <div
+                          className={cn(
+                            "flex items-center gap-1.5 px-3 pt-2.5",
+                            composerRightClearanceClass
+                          )}
+                        >
                           <BuiltinBrowserChip onRemove={() => setSelectedBuiltinBrowser(false)} />
                         </div>
                       )}
@@ -8118,7 +8450,12 @@ export function ChatContainer({
                       )}
                       {/* File chips inside input box */}
                       {(mentionedFiles.length > 0 || attachments.length > 0) && (
-                        <div className="flex flex-col gap-1 px-3 pt-2.5">
+                        <div
+                          className={cn(
+                            "flex flex-col gap-1 px-3 pt-2.5",
+                            composerRightClearanceClass
+                          )}
+                        >
                           <ul className="flex flex-wrap gap-1.5">
                             {mentionedFiles.map((file, idx) => (
                               <li key={file.absolutePath}>
@@ -8186,17 +8523,18 @@ export function ChatContainer({
                         placeholder={inputPlaceholder}
                         disabled={effectiveInputDisabled}
                         className={cn(
-                          "relative z-[1] w-full resize-none bg-transparent overflow-y-auto",
+                          "composer-textarea relative z-[1] mr-2 w-[calc(100%-0.5rem)] resize-none overflow-y-auto bg-transparent",
                           "p-4 text-sm placeholder:text-muted-foreground",
                           "focus:outline-none disabled:opacity-70",
-                          hasPendingFilePayload && "pt-1.5"
+                          hasPendingFilePayload && "pt-1.5",
+                          composerRightClearanceClass
                         )}
-                        rows={3}
+                        rows={2}
                         style={{ minHeight: "44px", maxHeight: "200px" }}
                       />
-                      {/* Bottom bar: + button left, send button right */}
+                      {/* Bottom bar: primary execution controls left, send button right */}
                       <div className="flex items-center justify-between px-3 pb-2 w-full">
-                        <div className="flex items-center gap-1 flex-1 overflow-auto">
+                        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
                           <IconPopoverButton
                             icon={<Plus className="size-4" />}
                             popoverContent={ATTACH_FILE_POPOVER_CONTENT}
@@ -8211,9 +8549,8 @@ export function ChatContainer({
                             className="size-7 rounded-md p-0 text-muted-foreground hover:bg-muted/50 disabled:opacity-40 disabled:cursor-not-allowed"
                             onClick={handleAttachClick}
                           />
-                          <div className="w-px h-4 bg-border mx-1" />
+                          <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
                           <ModelSwitcher threadId={threadId} />
-                          <div className="w-px h-4 bg-border mx-1" />
                           <AgentModeSwitcher
                             showWorkflow
                             mode={
@@ -8246,31 +8583,8 @@ export function ChatContainer({
                             }
                             onChange={handleAgentModeChange}
                           />
-                          <div className="w-px h-4 bg-border mx-1" />
-                          <WorkspacePicker
-                            threadId={threadId}
-                            onGitStatusChange={onThreadGitStatusChange}
-                          />
                         </div>
-                        <div className="flex items-center gap-2">
-                          <TooltipProvider delayDuration={180}>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  disabled={effectiveInputDisabled}
-                                  onClick={handleInsertNewline}
-                                  aria-label="换行"
-                                  className="cursor-pointer flex items-center justify-center size-7 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  <CornerDownLeft className="size-3.5" />
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent side="top" sideOffset={6}>
-                                Shift + Enter 换行
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                        <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
                             <>
                               {canSubmitGoalCommandWhileLoading && (
@@ -8278,9 +8592,9 @@ export function ChatContainer({
                                   type="submit"
                                   disabled={goalSendButtonDisabledWhileLoading}
                                   aria-label="发送 goal 命令"
-                                  className="flex items-center justify-center size-7 rounded-md bg-button text-button-foreground hover:bg-button/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                                 >
-                                  <Send className="size-3.5" />
+                                  <ArrowUp className="size-5" strokeWidth={1.75} />
                                 </button>
                               )}
                               <button
@@ -8288,7 +8602,7 @@ export function ChatContainer({
                                 onClick={handleCancel}
                                 aria-label="停止生成"
                                 title="停止生成"
-                                className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground transition-colors hover:bg-destructive/90"
                               >
                                 <Square className="size-3 fill-current" />
                               </button>
@@ -8325,19 +8639,14 @@ export function ChatContainer({
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
-                                className="flex items-center justify-center size-7 rounded-md bg-button text-button-foreground hover:bg-button/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-button text-button-foreground transition-colors hover:bg-button/90 disabled:cursor-not-allowed disabled:opacity-40"
                               >
-                                <Send className="size-3.5" />
+                                <ArrowUp className="size-5" strokeWidth={1.75} />
                               </button>
                             </>
                           )}
                         </div>
                       </div>
-                      <UserInputRequestDialog
-                        request={pendingUserInput}
-                        onSubmit={handleUserInputSubmit}
-                        onLayoutChange={handleUserInputDialogLayoutChange}
-                      />
                       <AgentGitCommitDialog
                         key={agentCommitApproval?.id ?? "agent-commit-idle"}
                         open={Boolean(agentCommitApproval)}
@@ -8355,62 +8664,12 @@ export function ChatContainer({
                         onCancel={handleAgentCommitCancel}
                       />
                     </div>
-                  </div>
-                  {/*chat container bottom panel */}
-                  <div className={"flex items-center justify-between"}>
-                    <div className={"flex items-center gap-2"}>
-                      {yoloMode && (
-                        <button
-                          type="button"
-                          title="点击打开设置"
-                          onClick={() => setShowCustomizeView(true, "sandbox")}
-                          className="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 hover:bg-amber-500/25 transition-colors cursor-pointer"
-                        >
-                          <Zap className="size-3" />
-                          YOLO
-                        </button>
-                      )}
-                      <MemorySessionSwitcher onOpenSettings={handleOpenMemorySettings} />
-                      {(agentMode === "normal" || agentMode === "multi") && (
-                        <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
-                      )}
-                      <SystemPromptPreviewButton threadId={threadId} />
-                      <SandboxModeSwitcher onOpenSettings={handleOpenSandboxSettings} />
-                      {tokenUsage && (
-                        <ContextUsageIndicator
-                          tokenUsage={tokenUsage}
-                          modelId={currentModel}
-                          contextLimit={modelContextLimit}
-                        />
-                      )}
-                      {showSystemConstraintsButton && (
-                        <SystemConstraintsPreviewPopover
-                          preview={systemConstraintsPromptPreview}
-                          align="start"
-                          side="top"
-                          sideOffset={8}
-                        >
-                          <button
-                            type="button"
-                            className={cn(
-                              "flex items-center gap-1.5 rounded-sm px-2 py-0.5 text-xs transition-colors hover:opacity-80",
-                              systemConstraintsLoadFailed
-                                ? "bg-amber-500/20 text-amber-600 dark:text-amber-300"
-                                : "bg-emerald-500/20 text-emerald-600 dark:text-emerald-300"
-                            )}
-                            title={systemConstraintsTitle}
-                            aria-label={systemConstraintsTitle}
-                            onClick={handleOpenSystemConstraints}
-                          >
-                            <ShieldCheck className="size-3.5" />
-                            <span>{systemConstraintsLabel}</span>
-                          </button>
-                        </SystemConstraintsPreviewPopover>
-                      )}
-                    </div>
-                    <div className="flex min-w-0 items-center gap-2">
-                      <GitBranchSwitcher workspacePath={workspacePath} />
-                    </div>
+                    {/* Keep the upward-opening request panel outside the composer's clipped shell. */}
+                    <UserInputRequestDialog
+                      request={pendingUserInput}
+                      onSubmit={handleUserInputSubmit}
+                      onLayoutChange={handleUserInputDialogLayoutChange}
+                    />
                   </div>
                 </div>
               </form>

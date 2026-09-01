@@ -48,7 +48,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -73,7 +73,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
@@ -97,7 +97,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
 
     const result = await orchestrator.execute("git push --force", "C:/ai/CmbCoworkAgent", "none")
@@ -119,7 +119,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
     const cwd = process.cwd()
     const missingGitCwd = path.join(cwd, ".missing-git-push-cwd-for-test")
@@ -141,7 +141,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true,
+      () => true,
       false,
       false
     )
@@ -170,7 +170,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false
+      () => false
     )
 
     const result = await orchestrator.execute(
@@ -199,7 +199,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true,
+      () => true,
       false,
       false
     )
@@ -240,6 +240,39 @@ describe("ToolOrchestrator YOLO git behavior", () => {
     expect(requestApproval).toHaveBeenCalledTimes(1)
   })
 
+  it("reads the latest global YOLO state for each operation", async () => {
+    let yoloMode = false
+    const rawExecute = vi.fn<RawExecuteFn>().mockResolvedValue({
+      output: "push ok",
+      exitCode: 0,
+      truncated: false
+    })
+    const requestApproval = vi.fn<RequestApprovalFn>().mockResolvedValue({
+      type: "reject",
+      tool_call_id: "force-push"
+    })
+    const orchestrator = new ToolOrchestrator(
+      new ApprovalStore(),
+      rawExecute,
+      requestApproval,
+      () => yoloMode
+    )
+
+    const rejected = await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(rejected.exitCode).toBe(1)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(rawExecute).not.toHaveBeenCalled()
+
+    yoloMode = true
+    const approved = await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(approved.exitCode).toBe(0)
+    expect(rawExecute).toHaveBeenCalledTimes(1)
+
+    yoloMode = false
+    await orchestrator.execute("git push --force", process.cwd(), "none")
+    expect(requestApproval).toHaveBeenCalledTimes(2)
+  })
+
   it("rejects a bare commit instead of restaging unstaged hunks from indexed files", async () => {
     const rawExecute = vi.fn<RawExecuteFn>()
     const requestApproval = vi.fn<RequestApprovalFn>()
@@ -247,7 +280,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
       process.cwd()
@@ -274,7 +307,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
       workspace
@@ -313,7 +346,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         new ApprovalStore(),
         rawExecute,
         requestApproval,
-        false,
+        () => false,
         false,
         true,
         workspace
@@ -352,7 +385,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         new ApprovalStore(),
         rawExecute,
         requestApproval,
-        false,
+        () => false,
         false,
         true,
         workspace
@@ -387,7 +420,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      false,
+      () => false,
       false,
       true,
       workspace
@@ -419,7 +452,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
         new ApprovalStore(),
         rawExecute,
         requestApproval,
-        false,
+        () => false,
         false,
         true,
         workspace
@@ -447,7 +480,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -469,7 +502,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -492,7 +525,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
 
     const result = await orchestrator.execute(
@@ -518,7 +551,7 @@ describe("ToolOrchestrator YOLO git behavior", () => {
       new ApprovalStore(),
       rawExecute,
       requestApproval,
-      true
+      () => true
     )
     const command = String.raw`echo \" ; git commit -m x -- package.json ; echo \"`
 

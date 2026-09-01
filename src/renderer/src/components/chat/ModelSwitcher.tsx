@@ -140,14 +140,14 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+            className="h-8 gap-1.5 px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
           >
             {routingMode === "auto" ? (
               <>
                 <Zap className="size-3.5 text-amber-500" />
-                <span className="font-mono text-amber-600 dark:text-amber-400">智能路由</span>
+                <span className="text-amber-600 dark:text-amber-400">智能路由</span>
                 {routedModelName && routedTierLabel && (
-                  <span className="font-mono text-muted-foreground">
+                  <span className="text-muted-foreground">
                     → {routedModelName}（{routedTierLabel}）
                   </span>
                 )}
@@ -155,7 +155,7 @@ function ModelSwitcherImpl({ threadId }: ModelSwitcherProps): React.JSX.Element 
             ) : selectedModel ? (
               <>
                 <CustomIcon className="size-3.5" />
-                <span className="font-mono">{selectedModel.name}</span>
+                <span>{selectedModel.name}</span>
               </>
             ) : (
               <span>选择模型</span>

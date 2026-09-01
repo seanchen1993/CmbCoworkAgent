@@ -51,6 +51,14 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
       : effectiveEnabled
         ? "记忆开"
         : "记忆关"
+  const triggerValue =
+    pending || loadingGlobal
+      ? "加载中"
+      : pausedByGlobal
+        ? "暂停"
+        : effectiveEnabled
+          ? "开启"
+          : "关闭"
   const triggerTone = pausedByGlobal
     ? "text-amber-600 hover:bg-amber-500/10 dark:text-amber-300"
     : effectiveEnabled
@@ -143,7 +151,8 @@ function MemorySessionSwitcherImpl({ onOpenSettings }: MemorySessionSwitcherProp
               <Brain className="size-3.5" />
             )}
           </span>
-          <span className="font-medium">{triggerLabel}</span>
+          <span className="font-medium text-foreground">记忆</span>
+          <span className="ml-auto text-[11px] font-medium">{triggerValue}</span>
           <ChevronDown className="size-3 opacity-70" />
         </Button>
       </PopoverTrigger>

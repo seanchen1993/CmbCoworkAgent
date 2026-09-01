@@ -135,7 +135,12 @@ function SandboxModeSwitcherImpl({
     return null
   }
 
-  return <SandboxModeSwitcherContent onOpenSettings={onOpenSettings} />
+  return (
+    <>
+      <div aria-hidden="true" className="mx-1 h-4 w-px shrink-0 bg-border" />
+      <SandboxModeSwitcherContent onOpenSettings={onOpenSettings} />
+    </>
+  )
 }
 
 function SandboxModeSwitcherContent({ onOpenSettings }: SandboxModeSwitcherProps): JSX.Element {

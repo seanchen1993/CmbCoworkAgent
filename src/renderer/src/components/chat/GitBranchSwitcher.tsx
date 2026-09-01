@@ -8,6 +8,7 @@ import { toast } from "sonner"
 interface GitBranchSwitcherProps {
   /** 工作区路径，用于执行 git 命令的 cwd */
   workspacePath?: string | null
+  environmentRailCollapsed: boolean
 }
 
 type GitBranchRepositoryInfo = {
@@ -36,7 +37,8 @@ function isRemoteBranch(branch: string): boolean {
 export const GitBranchSwitcher = memo(GitBranchSwitcherImpl)
 
 function GitBranchSwitcherImpl({
-  workspacePath
+  workspacePath,
+  environmentRailCollapsed
 }: GitBranchSwitcherProps): React.JSX.Element | null {
   const [open, setOpen] = useState(false)
   const [gitRepoChecked, setGitRepoChecked] = useState(false)
@@ -168,6 +170,10 @@ function GitBranchSwitcherImpl({
     detectBranch()
   }, [workspacePath, detectBranch])
 
+  useEffect(() => {
+    if (environmentRailCollapsed) setOpen(false)
+  }, [environmentRailCollapsed])
+
   // Popover 打开时加载分支列表
   useEffect(() => {
     if (open && isGitRepo) {
@@ -287,7 +293,7 @@ function GitBranchSwitcherImpl({
               type="button"
               disabled
               className={cn(
-                "inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-md",
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium",
                 unavailable
                   ? "text-destructive border border-destructive/40 bg-destructive/10 cursor-help opacity-100 max-w-[200px]"
                   : "text-muted-foreground cursor-not-allowed opacity-70 max-w-[200px]"
@@ -316,7 +322,7 @@ function GitBranchSwitcherImpl({
                 disabled={branchSwitchDisabled}
                 onClick={branchSwitchDisabled ? undefined : undefined}
                 className={cn(
-                  "inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-md",
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium",
                   branchSwitchDisabled
                     ? "text-muted-foreground cursor-not-allowed opacity-70"
                     : "text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors",

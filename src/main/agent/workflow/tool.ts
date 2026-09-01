@@ -89,8 +89,8 @@ export interface CreateWorkflowToolOptions {
   threadId: string
   workspacePath: string
   modelId?: string
-  /** When true (YOLO), the run-before approval gate is skipped. */
-  yoloMode?: boolean
+  /** Reads the current global YOLO state when the run-before gate is reached. */
+  readYoloMode?: () => boolean
   /** Caches an "Approve for this session" decision so re-runs don't re-prompt. */
   approvalStore?: ApprovalStore
   /** Surfaces the approval card on the parent thread's UI. */
@@ -333,7 +333,7 @@ async function ensureWorkflowApproved(
   tokenBudget: number | null,
   executionProfiles: readonly AgentProfile[]
 ): Promise<boolean> {
-  if (options.yoloMode) return true
+  if (options.readYoloMode?.()) return true
   const { approvalStore, requestApproval } = options
   if (!approvalStore || !requestApproval) {
     // Fail CLOSED, not open: a workflow can fan out and execute many file/shell

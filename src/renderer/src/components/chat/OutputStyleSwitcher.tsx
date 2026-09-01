@@ -155,7 +155,8 @@ function OutputStyleSwitcherImpl({
               <ActiveIcon className="size-3.5" />
             )}
           </span>
-          <span className="font-medium">{activeOption.label}</span>
+          <span className="font-medium text-foreground">输出风格</span>
+          <span className="ml-auto text-[11px] font-medium">{activeOption.label}</span>
           <ChevronDown className="size-3 opacity-70" />
         </Button>
       </PopoverTrigger>

@@ -773,7 +773,7 @@ test("orchestrator wraps every sandbox failure in Codex's single retry-without-s
   )
   assert.match(
     orchestratorSection,
-    /this\.yoloMode[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
+    /const yoloMode = this\.readYoloMode\(\)[\s\S]*if \(yoloMode\) \{[\s\S]*rawExecute\(command, sandboxMode, cwd\)[\s\S]*maybeRetryOutsideSandbox\(\s*command,\s*cwd,\s*sandboxMode,\s*result,\s*outsideShellSyntax\s*\)/,
     "YOLO mode should skip only the initial command approval; sandbox escape must still require the retry approval prompt"
   )
   assert.match(
@@ -963,8 +963,8 @@ test("runtime mounts the orchestrator even in YOLO mode so sandbox escape can st
   )
   assert.match(
     runtimeApprovalSection,
-    /new ToolOrchestrator\(\s*approvalStore,\s*rawExecute,\s*requestApproval,\s*yoloMode[\s\S]*?\)[\s\S]*backend\.setOrchestrator\(orchestrator\)/,
-    "runtime should always mount ToolOrchestrator and pass yoloMode into it"
+    /new ToolOrchestrator\(\s*approvalStore,\s*rawExecute,\s*requestApproval,\s*getYoloMode[\s\S]*?\)[\s\S]*backend\.setOrchestrator\(orchestrator\)/,
+    "runtime should always mount ToolOrchestrator and pass the current YOLO reader into it"
   )
 })
 
@@ -977,7 +977,7 @@ test("autoApproveFileEdits waives ONLY file-edit approval, never shell execute",
   // 1) File edits auto-approve when the flag is set.
   assert.match(
     toolOrchestratorSource,
-    /if \(this\.yoloMode \|\| this\.autoApproveFileEdits\) return true/,
+    /if \(this\.readYoloMode\(\) \|\| this\.autoApproveFileEdits\) return true/,
     "approveFileOp must skip approval when autoApproveFileEdits is set"
   )
 
@@ -994,7 +994,7 @@ test("autoApproveFileEdits waives ONLY file-edit approval, never shell execute",
   )
   assert.match(
     executeSection,
-    /if \(this\.yoloMode\) \{/,
+    /if \(yoloMode\) \{/,
     "execute() skips approval only in YOLO mode (not via autoApproveFileEdits)"
   )
 

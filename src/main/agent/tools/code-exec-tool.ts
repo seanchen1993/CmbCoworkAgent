@@ -34,7 +34,7 @@ interface CodeExecToolContext {
   workspacePath: string
   threadId?: string
   modelId?: string
-  yoloMode: boolean
+  readYoloMode: () => boolean
   capabilityService: McpCapabilityService
   approvalStore?: ApprovalStore
   requestApproval?: (req: ApprovalRequest) => Promise<ApprovalDecision>
@@ -66,7 +66,7 @@ async function requestCodeExecApproval(
   context: CodeExecToolContext,
   input: CodeExecToolInput
 ): Promise<boolean> {
-  if (context.yoloMode) return true
+  if (context.readYoloMode()) return true
   if (!context.approvalStore || !context.requestApproval) return true
 
   const fingerprint = createHash("sha256")

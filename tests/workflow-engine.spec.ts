@@ -719,7 +719,7 @@ return "after"`
   const workflowTool = createWorkflowTool({
     threadId,
     workspacePath: workspace,
-    yoloMode: true,
+    readYoloMode: () => true,
     subagentDeps: {
       createRuntime: async () => ({
         stream: async () =>

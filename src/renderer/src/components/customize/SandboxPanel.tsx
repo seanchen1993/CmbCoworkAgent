@@ -6,9 +6,12 @@ import {
   ShieldPlus,
   Zap,
   Info,
-  Loader2
+  Loader2,
+  CircleAlert
 } from "lucide-react"
+import { toast } from "sonner"
 import { ToggleThumb } from "@/components/ui/toggle-thumb"
+import { YoloEnableConfirmDialog } from "@/components/YoloEnableConfirmDialog"
 import { cn } from "@/lib/utils"
 
 type SandboxMode = "none" | "unelevated" | "readonly" | "elevated"
@@ -57,11 +60,13 @@ type ElevatedSetupStatus = "idle" | "checking" | "running" | "done" | "error"
 export function SandboxPanel(): React.JSX.Element {
   const [mode, setMode] = useState<SandboxMode>("none")
   const [yolo, setYolo] = useState(false)
+  const [yoloLoadFailed, setYoloLoadFailed] = useState(false)
   const [failureFuseWarning, setFailureFuseWarning] = useState(false)
   const [failureFuseModelFeedback, setFailureFuseModelFeedback] = useState(false)
   const [failureFuseDebug, setFailureFuseDebug] = useState(false)
   const [loading, setLoading] = useState(true)
   const [yoloPending, setYoloPending] = useState(false)
+  const [yoloEnableConfirmOpen, setYoloEnableConfirmOpen] = useState(false)
   const [failureFuseWarningPending, setFailureFuseWarningPending] = useState(false)
   const [failureFuseModelFeedbackPending, setFailureFuseModelFeedbackPending] = useState(false)
   const [failureFuseDebugPending, setFailureFuseDebugPending] = useState(false)
@@ -69,6 +74,7 @@ export function SandboxPanel(): React.JSX.Element {
   const [elevatedSetupStatus, setElevatedSetupStatus] = useState<ElevatedSetupStatus>("idle")
   const [elevatedSetupError, setElevatedSetupError] = useState<string | null>(null)
   const mountedRef = useRef(true)
+  const settingsLoadRequestRef = useRef(0)
   // Developer backdoor
   const [devMode, setDevMode] = useState(false)
   const [devPassword, setDevPassword] = useState("")
@@ -78,36 +84,49 @@ export function SandboxPanel(): React.JSX.Element {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      settingsLoadRequestRef.current += 1
     }
   }, [])
 
   const loadSettings = useCallback(async () => {
-    try {
-      const [
-        currentMode,
-        currentYolo,
-        currentFailureFuseWarning,
-        currentFailureFuseModelFeedback,
-        currentFailureFuseDebug
-      ] = await Promise.all([
+    const requestId = ++settingsLoadRequestRef.current
+    const [modeResult, yoloResult, warningResult, feedbackResult, debugResult] =
+      await Promise.allSettled([
         window.api.sandbox.getMode(),
         window.api.sandbox.getYoloMode(),
         window.api.sandbox.getFailureFuseWarning(),
         window.api.sandbox.getFailureFuseModelFeedback(),
         window.api.sandbox.getFailureFuseDebug()
       ])
-      if (mountedRef.current) {
-        setMode(currentMode)
-        setYolo(currentYolo)
-        setFailureFuseWarning(currentFailureFuseWarning)
-        setFailureFuseModelFeedback(currentFailureFuseModelFeedback)
-        setFailureFuseDebug(currentFailureFuseDebug)
-        setLoading(false)
-      }
-    } catch (e) {
-      console.error("[SandboxPanel] Failed to load settings:", e)
-      if (mountedRef.current) setLoading(false)
+
+    if (!mountedRef.current || requestId !== settingsLoadRequestRef.current) return
+
+    if (modeResult.status === "fulfilled") setMode(modeResult.value)
+    else console.error("[SandboxPanel] Failed to load sandbox mode:", modeResult.reason)
+
+    if (yoloResult.status === "fulfilled") setYolo(yoloResult.value)
+    else console.error("[SandboxPanel] Failed to load YOLO mode:", yoloResult.reason)
+    setYoloLoadFailed(yoloResult.status === "rejected")
+
+    if (warningResult.status === "fulfilled") {
+      setFailureFuseWarning(warningResult.value)
+    } else {
+      console.error("[SandboxPanel] Failed to load failure warning:", warningResult.reason)
     }
+
+    if (feedbackResult.status === "fulfilled") {
+      setFailureFuseModelFeedback(feedbackResult.value)
+    } else {
+      console.error("[SandboxPanel] Failed to load failure model feedback:", feedbackResult.reason)
+    }
+
+    if (debugResult.status === "fulfilled") {
+      setFailureFuseDebug(debugResult.value)
+    } else {
+      console.error("[SandboxPanel] Failed to load failure debug mode:", debugResult.reason)
+    }
+
+    setLoading(false)
   }, [])
 
   useEffect(() => {
@@ -210,18 +229,47 @@ export function SandboxPanel(): React.JSX.Element {
     }
   }, [modePending, loadSettings])
 
-  const handleToggleYolo = useCallback(async () => {
+  const handleSetYolo = useCallback(
+    async (nextYolo: boolean): Promise<boolean> => {
+      if (yoloPending || yoloLoadFailed) return false
+      setYoloPending(true)
+      try {
+        await window.api.sandbox.setYoloMode(nextYolo)
+        if (mountedRef.current) {
+          setYolo(nextYolo)
+          setYoloLoadFailed(false)
+          void loadSettings()
+        }
+        return true
+      } catch (e) {
+        console.error("[SandboxPanel] Failed to set yolo mode:", e)
+        toast.error("YOLO 模式切换失败，请稍后重试")
+        void loadSettings()
+        return false
+      } finally {
+        if (mountedRef.current) setYoloPending(false)
+      }
+    },
+    [yoloPending, yoloLoadFailed, loadSettings]
+  )
+
+  const handleToggleYolo = useCallback((): void => {
     if (yoloPending) return
-    setYoloPending(true)
-    try {
-      await window.api.sandbox.setYoloMode(!yolo)
-    } catch (e) {
-      console.error("[SandboxPanel] Failed to set yolo mode:", e)
-      loadSettings()
-    } finally {
-      if (mountedRef.current) setYoloPending(false)
+    if (yoloLoadFailed) {
+      void loadSettings()
+      return
     }
-  }, [yolo, yoloPending, loadSettings])
+    if (yolo) {
+      void handleSetYolo(false)
+      return
+    }
+    setYoloEnableConfirmOpen(true)
+  }, [handleSetYolo, loadSettings, yolo, yoloLoadFailed, yoloPending])
+
+  const handleConfirmEnableYolo = useCallback(async (): Promise<void> => {
+    const updated = await handleSetYolo(true)
+    if (updated) setYoloEnableConfirmOpen(false)
+  }, [handleSetYolo])
 
   const handleToggleFailureFuseWarning = useCallback(async () => {
     if (failureFuseWarningPending) return
@@ -275,6 +323,12 @@ export function SandboxPanel(): React.JSX.Element {
 
   return (
     <div className="flex flex-1 overflow-hidden isolate">
+      <YoloEnableConfirmDialog
+        open={yoloEnableConfirmOpen}
+        pending={yoloPending}
+        onOpenChange={setYoloEnableConfirmOpen}
+        onConfirm={() => void handleConfirmEnableYolo()}
+      />
       <div className="w-full flex flex-col p-6 gap-8 overflow-y-auto">
         {/* Yolo 模式 */}
         <div className="flex flex-col gap-4">
@@ -283,11 +337,11 @@ export function SandboxPanel(): React.JSX.Element {
             <h2 className="text-lg font-bold">YOLO 模式</h2>
           </div>
 
-          <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 p-3 text-sm text-amber-600 dark:text-amber-400">
+          <div className="flex items-start gap-2 rounded-md border border-status-warning/25 bg-status-warning/10 p-3 text-sm text-status-warning-foreground">
             <Info className="size-4 mt-0.5 shrink-0" />
             <p>
-              开启后，Agent
-              执行命令时不再弹出审批确认，所有操作自动放行。适合熟悉任务内容、希望全自动运行的场景。切换后将在下一次对话中生效。
+              这是即时生效的全局设置。开启后，符合安全策略的后续操作（包括部分 Git
+              push）可能被自动批准；关闭后会立即恢复审批。被禁止的危险命令及需要专门确认的操作仍会被拦截或要求审批。
             </p>
           </div>
 
@@ -298,34 +352,49 @@ export function SandboxPanel(): React.JSX.Element {
               "flex items-center justify-between max-w-lg rounded-lg border-2 p-4 text-left transition-colors",
               yoloPending && "opacity-60 cursor-not-allowed",
               yolo
-                ? "border-amber-500 bg-amber-500/5"
-                : "border-border hover:border-amber-500/40 hover:bg-muted/40"
+                ? "border-status-warning bg-status-warning/5"
+                : "border-border hover:border-status-warning/40 hover:bg-muted/40"
             )}
           >
             <div className="flex items-center gap-3">
-              <Zap
-                className={cn("size-4 shrink-0", yolo ? "text-amber-500" : "text-muted-foreground")}
-              />
+              {yoloLoadFailed ? (
+                <CircleAlert className="size-4 shrink-0 text-status-warning" />
+              ) : (
+                <Zap
+                  className={cn(
+                    "size-4 shrink-0",
+                    yolo ? "text-status-warning" : "text-muted-foreground"
+                  )}
+                />
+              )}
               <div className="flex flex-col gap-1">
-                <span className="text-sm font-medium">YOLO 模式</span>
+                <span className="text-sm font-medium">
+                  {yoloLoadFailed ? "YOLO 状态未知" : "YOLO 模式"}
+                </span>
                 <p className="text-xs text-muted-foreground">
-                  跳过所有命令执行审批，Agent 全自动运行
+                  {yoloLoadFailed
+                    ? "无法确认全局自动审批是否开启，点击重新读取"
+                    : "自动批准符合条件的操作，仍受安全策略约束"}
                 </p>
               </div>
             </div>
-            <div
-              className={cn(
-                "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
-                yolo ? "bg-amber-500" : "bg-muted-foreground/30"
-              )}
-            >
-              <ToggleThumb
+            {yoloLoadFailed ? (
+              <span className="shrink-0 text-xs font-medium text-status-warning">状态未知</span>
+            ) : (
+              <div
                 className={cn(
-                  "mt-0.5 inline-block size-4 shadow",
-                  yolo ? "translate-x-4" : "translate-x-0.5"
+                  "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
+                  yolo ? "bg-status-warning" : "bg-muted-foreground/30"
                 )}
-              />
-            </div>
+              >
+                <ToggleThumb
+                  className={cn(
+                    "mt-0.5 inline-block size-4 shadow",
+                    yolo ? "translate-x-4" : "translate-x-0.5"
+                  )}
+                />
+              </div>
+            )}
           </button>
         </div>
 

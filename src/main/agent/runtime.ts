@@ -4689,7 +4689,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
 
   // ── Wire up the approval orchestrator ──
-  const yoloMode = getYoloMode()
   // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
   // approval, but escaping the sandbox after a sandbox denial still needs explicit
   // one-shot user approval, matching Codex's retry-without-sandbox flow.
@@ -4806,7 +4805,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
         // Lets a Notification hook know whether the user is in YOLO mode (where
         // approvals only fire for sandbox-escape) vs the default approve flow.
-        permissionMode: yoloMode ? "yolo" : "approve",
+        permissionMode: getYoloMode() ? "yolo" : "approve",
         // PR-16 follow-up — CC matcher target for Notification is
         // `notification_type`. The approval queue is the only Notification
         // fire path today, so the value is always "permission_prompt".
@@ -4838,7 +4837,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     approvalStore,
     rawExecute,
     requestApproval,
-    yoloMode,
+    getYoloMode,
     options.autoApproveFileEdits === true,
     !options.worktreeIsolation,
     workspacePath
@@ -5269,7 +5268,7 @@ The workspace root is: ${fileRoot}`
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
         // confirms once (Approve / Approve-session / Reject) before launch.
-        yoloMode,
+        readYoloMode: getYoloMode,
         approvalStore,
         requestApproval,
         // Run-level exclusive file-write lock keyed on this (parent) threadId — the
@@ -5446,7 +5445,7 @@ The workspace root is: ${fileRoot}`
         workspacePath,
         threadId: options.threadId,
         modelId: options.modelId,
-        yoloMode,
+        readYoloMode: getYoloMode,
         capabilityService,
         approvalStore,
         requestApproval
