@@ -65,10 +65,9 @@ function formatCount(value: number | null): string {
 
 function formatCompact(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—"
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B`
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
-  return formatCount(value)
+  return String(Math.round(value))
 }
 
 function formatDays(value: number | null): string {
@@ -192,8 +191,8 @@ function SummaryTokenPerLineValue({
             : "text-amber-800 dark:text-amber-300"
         )}
       >
-        <div>输入 Token/行 {formatMetric(input)}</div>
-        <div>输出 Token/行 {formatMetric(output)}</div>
+        <div>输入 Token/行 {formatCompact(input)}</div>
+        <div>输出 Token/行 {formatCompact(output)}</div>
       </div>
       {sample === undefined ? null : (
         <div className="text-[10px] text-muted-foreground">有效样本 {sample}</div>
@@ -246,12 +245,14 @@ function SummaryComparison({
   data,
   loading,
   error,
-  adapterName
+  adapterName,
+  tokenConsumptionFiltered
 }: {
   data: ProjectMetricSummaryData | null
   loading: boolean
   error: string | null
   adapterName: string
+  tokenConsumptionFiltered: boolean
 }): React.JSX.Element {
   const devclaw = summaryGroup(data, "devclaw")
   const nonDevclaw = summaryGroup(data, "non_devclaw")
@@ -275,8 +276,8 @@ function SummaryComparison({
       sample: "defectDensity"
     },
     {
-      label: "平均缺陷率",
-      hint: "缺陷率 =  CMBDevClaw 开发项目的缺陷数之和 × 1000 ÷ 累计已 Push 采纳行数之和。",
+      label: "平均千行代码缺陷率",
+      hint: "千行代码缺陷率 = CMBDevClaw 开发项目的缺陷数之和 × 1000 ÷ 累计已 Push 采纳行数之和。",
       read: (group) => group.defectRatePerKloc,
       sample: "defectRate"
     },
@@ -313,7 +314,7 @@ function SummaryComparison({
       hint: "CMBDevClaw 项目的累计已 Push 采纳行数之和 ÷ CMBDevClaw 项目数。没有采纳行的项目按 0 计入。",
       read: (group) => group.avgPushedAdoptedLines,
       sample: "codeLines",
-      formatter: formatCount
+      formatter: formatCompact
     },
     {
       label: "平均单行代码消耗 Token",
@@ -345,9 +346,13 @@ function SummaryComparison({
 
   return (
     <div>
-      {adapterName ? (
+      {adapterName || tokenConsumptionFiltered ? (
         <div className="mb-3 rounded-md bg-status-warning/10 px-3 py-2 text-xs leading-relaxed text-status-warning-foreground">
-          DevClaw 侧已按插件收窄；非 DevClaw 侧不受插件筛选影响，两侧样本范围不对称。
+          CMBDevClaw 侧已按
+          {[adapterName ? "插件" : "", tokenConsumptionFiltered ? "Token 消耗" : ""]
+            .filter(Boolean)
+            .join("和")}
+          收窄；非 CMBDevClaw 侧不受筛选影响，两侧样本范围不对称。
         </div>
       ) : null}
       {error ? (
@@ -425,14 +430,11 @@ function PhaseFilter({
         </Button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-56 p-2">
-        <button
-          type="button"
-          className="mb-1 w-full rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
-          onClick={() => onChange([])}
-        >
-          全部阶段
-        </button>
         <div className="max-h-64 space-y-0.5 overflow-y-auto">
+          <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted">
+            <input type="checkbox" checked={value.length === 0} onChange={() => onChange([])} />
+            全部阶段
+          </label>
           {PHASE_OPTIONS.map((phase) => {
             const checked = value.includes(phase)
             return (
@@ -532,16 +534,26 @@ function ProjectDateMetric({
 }
 
 function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Element {
+  const projectName = item.prjName || "—"
+  const projectCode = item.prjCode || "—"
+  const pluginNames = item.developmentMode === "devclaw" ? item.plugins.join("、") || "--" : "--"
   return (
     <tr className="border-t border-border align-top">
-      <td className="px-3 py-2">
-        <div className="max-w-60 font-medium text-foreground" title={item.prjName}>
-          {item.prjName || "—"}
+      <td className="min-w-0 overflow-hidden px-3 py-2">
+        <div className="truncate whitespace-nowrap font-medium text-foreground" title={projectName}>
+          {projectName}
         </div>
-        <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">{item.prjCode}</div>
+        <div
+          className="mt-0.5 truncate whitespace-nowrap font-mono text-[10px] text-muted-foreground"
+          title={projectCode}
+        >
+          {projectCode}
+        </div>
       </td>
-      <td className="max-w-44 px-3 py-2 text-muted-foreground">
-        {item.developmentMode === "devclaw" ? item.plugins.join("、") || "--" : "--"}
+      <td className="min-w-0 overflow-hidden px-3 py-2 text-muted-foreground">
+        <div className="truncate whitespace-nowrap" title={pluginNames}>
+          {pluginNames}
+        </div>
       </td>
       <td className="px-3 py-2">
         <div>{item.roomName || "—"}</div>
@@ -579,11 +591,13 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
           输出 Token {formatCompact(item.totalOutputTokens)}
         </div>
       </td>
-      <td className="px-3 py-2 text-right tabular-nums">{formatCount(item.pushedAdoptedLines)}</td>
+      <td className="px-3 py-2 text-right tabular-nums">
+        {formatCompact(item.pushedAdoptedLines)}
+      </td>
       <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
-        <div>输入 Token/行 {formatMetric(item.inputTokensPerAdoptedLine)}</div>
+        <div>输入 Token/行 {formatCompact(item.inputTokensPerAdoptedLine)}</div>
         <div className="mt-0.5 text-[10px] text-muted-foreground">
-          输出 Token/行 {formatMetric(item.outputTokensPerAdoptedLine)}
+          输出 Token/行 {formatCompact(item.outputTokensPerAdoptedLine)}
         </div>
       </td>
     </tr>
@@ -604,6 +618,10 @@ export function ProjectMetricsSection({
   const [functionPointMax, setFunctionPointMax] = useState("")
   const [debouncedFunctionPointMin, setDebouncedFunctionPointMin] = useState("")
   const [debouncedFunctionPointMax, setDebouncedFunctionPointMax] = useState("")
+  const [tokenConsumptionMin, setTokenConsumptionMin] = useState("")
+  const [tokenConsumptionMax, setTokenConsumptionMax] = useState("")
+  const [debouncedTokenConsumptionMin, setDebouncedTokenConsumptionMin] = useState("")
+  const [debouncedTokenConsumptionMax, setDebouncedTokenConsumptionMax] = useState("")
   const [adapterName, setAdapterName] = useState("")
   const [developmentMode, setDevelopmentMode] = useState<"all" | "devclaw" | "non_devclaw">("all")
   const [keyword, setKeyword] = useState("")
@@ -635,9 +653,11 @@ export function ProjectMetricsSection({
     const timer = setTimeout(() => {
       setDebouncedFunctionPointMin(functionPointMin)
       setDebouncedFunctionPointMax(functionPointMax)
+      setDebouncedTokenConsumptionMin(tokenConsumptionMin)
+      setDebouncedTokenConsumptionMax(tokenConsumptionMax)
     }, 300)
     return () => clearTimeout(timer)
-  }, [functionPointMax, functionPointMin])
+  }, [functionPointMax, functionPointMin, tokenConsumptionMax, tokenConsumptionMin])
 
   const filters = useMemo<ProjectMetricFilters>(
     () => ({
@@ -646,12 +666,16 @@ export function ProjectMetricsSection({
       phaseStatuses,
       functionPointMin: nullableNumber(debouncedFunctionPointMin),
       functionPointMax: nullableNumber(debouncedFunctionPointMax),
+      tokenConsumptionMin: nullableNumber(debouncedTokenConsumptionMin),
+      tokenConsumptionMax: nullableNumber(debouncedTokenConsumptionMax),
       adapterName: adapterName || null
     }),
     [
       adapterName,
       debouncedFunctionPointMax,
       debouncedFunctionPointMin,
+      debouncedTokenConsumptionMax,
+      debouncedTokenConsumptionMin,
       phaseStatuses,
       range,
       upperOrgLv1
@@ -788,6 +812,31 @@ export function ProjectMetricsSection({
           placeholder="功能点上限"
           className={cn(FILTER_CONTROL_CLASS, "w-28")}
         />
+        <Input
+          type="number"
+          min="0"
+          value={tokenConsumptionMin}
+          disabled={developmentMode === "non_devclaw"}
+          onChange={(event) => {
+            setTokenConsumptionMin(event.target.value)
+            setPage(1)
+          }}
+          placeholder="Token 消耗下限"
+          className={cn(FILTER_CONTROL_CLASS, "w-32")}
+        />
+        <span className="text-xs text-muted-foreground">至</span>
+        <Input
+          type="number"
+          min="0"
+          value={tokenConsumptionMax}
+          disabled={developmentMode === "non_devclaw"}
+          onChange={(event) => {
+            setTokenConsumptionMax(event.target.value)
+            setPage(1)
+          }}
+          placeholder="Token 消耗上限"
+          className={cn(FILTER_CONTROL_CLASS, "w-32")}
+        />
         <Select
           value={adapterName || ALL_VALUE}
           disabled={developmentMode === "non_devclaw"}
@@ -823,6 +872,10 @@ export function ProjectMetricsSection({
           loading={summaryLoading}
           error={summaryError}
           adapterName={adapterName}
+          tokenConsumptionFiltered={
+            nullableNumber(debouncedTokenConsumptionMin) !== null ||
+            nullableNumber(debouncedTokenConsumptionMax) !== null
+          }
         />
       </div>
 
@@ -834,7 +887,13 @@ export function ProjectMetricsSection({
               value={developmentMode}
               onValueChange={(value: "all" | "devclaw" | "non_devclaw") => {
                 setDevelopmentMode(value)
-                if (value === "non_devclaw") setAdapterName("")
+                if (value === "non_devclaw") {
+                  setAdapterName("")
+                  setTokenConsumptionMin("")
+                  setTokenConsumptionMax("")
+                  setDebouncedTokenConsumptionMin("")
+                  setDebouncedTokenConsumptionMax("")
+                }
                 setPage(1)
               }}
             >
@@ -882,7 +941,21 @@ export function ProjectMetricsSection({
         ) : null}
 
         <div className="mt-3 overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[1580px] text-xs">
+          <table className="w-full min-w-[1580px] table-fixed text-xs">
+            <colgroup>
+              <col className="w-[250px]" />
+              <col className="w-[190px]" />
+              <col className="w-[190px]" />
+              <col className="w-[90px]" />
+              <col className="w-[90px]" />
+              <col className="w-[105px]" />
+              <col className="w-[125px]" />
+              <col className="w-[120px]" />
+              <col className="w-[125px]" />
+              <col className="w-[155px]" />
+              <col className="w-[105px]" />
+              <col className="w-[205px]" />
+            </colgroup>
             <thead className="bg-muted/40 text-left text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">项目编号 / 名称</th>
@@ -903,7 +976,7 @@ export function ProjectMetricsSection({
                   onSort={cycleSort}
                 />
                 <th className="px-3 py-2 text-right font-medium">缺陷密度</th>
-                <th className="px-3 py-2 text-right font-medium">缺陷率</th>
+                <th className="px-3 py-2 text-right font-medium">千行代码缺陷率</th>
                 <th className="px-3 py-2 text-right font-medium">发起 ST 耗时</th>
                 <SortableProjectMetricTh
                   label="特性上线时间"
