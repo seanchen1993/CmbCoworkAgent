@@ -123,6 +123,7 @@ import type {
   ManagedRunIdentity,
   ManagedRunChangeEvent,
   ManagedRunStartInput,
+  ManagedRunStartValidationInput,
   ManagedRunStopInput,
   ManagedRunSummary,
   ManagedRunThreadCreatedEvent,
@@ -2861,6 +2862,7 @@ interface CustomAPI {
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
+    validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>

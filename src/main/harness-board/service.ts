@@ -85,6 +85,7 @@ import type {
   HarnessFeatureSummary,
   HarnessHumanGateSnapshot,
   ManagedFeatureStatusSnapshot,
+  ManagedRunViewStatus,
   HarnessStatus,
   HarnessWatchRef,
   HarnessWorkflow,
@@ -2717,6 +2718,13 @@ function makeProjectDetailViewModel(
   context?: HarnessProjectConfigContext
 ): HarnessProjectDetailViewModel {
   const systemConstraintUpdate = resolveSystemConstraintUpdateConfig(project, context)
+  const runs = data.runs.map((run) => {
+    const managedRunStatus: ManagedRunViewStatus | undefined = managedRunStore.getLatestRun(
+      project.projectId,
+      run.slug
+    )?.status
+    return managedRunStatus ? { ...run, managedRunStatus } : run
+  })
   return {
     project: {
       projectId: project.projectId,
@@ -2735,7 +2743,7 @@ function makeProjectDetailViewModel(
     },
     projectState: data.projectState,
     workflow: data.workflow,
-    runs: data.runs,
+    runs,
     ...(systemConstraintUpdate ? { systemConstraintUpdate } : {}),
     watchRefs: data.watchRefs,
     loading: false,

@@ -50,7 +50,7 @@ import {
   ListEnd,
   Check
 } from "lucide-react"
-import type { FileAttachment, QueuedMessage } from "@/types"
+import type { FileAttachment, HarnessRunDetailViewModel, QueuedMessage } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import {
@@ -1196,6 +1196,7 @@ function RotatingHeadline() {
 interface HarnessFeatureBinding {
   projectId: string
   slug: string
+  runId?: string
 }
 
 function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFeatureBinding | null {
@@ -1207,7 +1208,10 @@ function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFea
   const metadata = harnessFeature as Record<string, unknown>
   const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
   const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
-  return projectId && slug ? { projectId, slug } : null
+  const runId = typeof metadata.runId === "string" ? metadata.runId.trim() : ""
+  return projectId && slug
+    ? { projectId, slug, ...(runId ? { runId } : {}) }
+    : null
 }
 
 type HarnessPreferredPlugin = { id?: string; name?: string } | null
@@ -1874,10 +1878,54 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const [isManagedRunSessionActive, setIsManagedRunSessionActive] = useState(false)
   const [humanGate, setHumanGate] = useState<HarnessHumanGateSnapshot | null>(null)
   const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
     null
   )
+
+  useEffect(() => {
+    const runId = harnessFeatureBinding?.runId
+    if (!runId) {
+      setIsManagedRunSessionActive(false)
+      return
+    }
+
+    let cancelled = false
+    const applyManagedRunStatus = (managedRun: HarnessRunDetailViewModel["run"]["managedRun"]): void => {
+      if (cancelled) return
+      setIsManagedRunSessionActive(
+        managedRun?.status === "running" &&
+          managedRun.runId === runId &&
+          managedRun.currentSession?.threadId === threadId
+      )
+    }
+
+    const unsubscribe = window.api.harnessBoard.onManagedRunChanged((event) => {
+      if (
+        event.projectId !== harnessFeatureBinding.projectId ||
+        event.featureId !== harnessFeatureBinding.slug ||
+        event.run.runId !== runId
+      ) {
+        return
+      }
+      applyManagedRunStatus(event.run)
+    })
+    void window.api.harnessBoard
+      .getRunDetail(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((detail) => applyManagedRunStatus(detail.run.managedRun))
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn("[ChatContainer] Failed to load managed run status:", error)
+          setIsManagedRunSessionActive(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [harnessFeatureBinding, threadId])
 
   useEffect(() => {
     let cancelled = false
@@ -6495,6 +6543,9 @@ export function ChatContainer({
       setQueueAutoDrainSuppressed(true)
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+        if (isManagedRunSessionActive) {
+          toast.success("已退出托管模式")
+        }
       } finally {
         if (goalUi.goal) {
           void refreshGoalUi({ includeEvents: true })
@@ -6502,6 +6553,18 @@ export function ChatContainer({
       }
     }
   }
+
+  const stopGenerationButton = (
+    <button
+      type="button"
+      onClick={handleCancel}
+      aria-label="停止生成"
+      title="停止生成"
+      className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+    >
+      <Square className="size-3 fill-current" />
+    </button>
+  )
 
   const handleCancelBackgroundWorkers = async (): Promise<void> => {
     try {
@@ -8360,15 +8423,18 @@ export function ChatContainer({
                                   <Send className="size-3.5" />
                                 </button>
                               )}
-                              <button
-                                type="button"
-                                onClick={handleCancel}
-                                aria-label="停止生成"
-                                title="停止生成"
-                                className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
-                              >
-                                <Square className="size-3 fill-current" />
-                              </button>
+                              {isManagedRunSessionActive ? (
+                                <TooltipProvider delayDuration={180}>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>{stopGenerationButton}</TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      手动终止会话将退出托管模式
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              ) : (
+                                stopGenerationButton
+                              )}
                             </>
                           ) : (
                             <>

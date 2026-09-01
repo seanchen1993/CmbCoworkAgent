@@ -4256,6 +4256,10 @@ function FeatureCard({
   const totalNodes = workflowNodes.length
   const currentNodeLabel = currentNodeLabelFromNodes(workflowNodes, run.currentNodeId)
   const nodeStatusLabel = currentNodeStatusLabel(run)
+  const managedRunStatus =
+    run.managedRunStatus === "running"
+      ? { label: MANAGED_RUN_STATUS_LABELS.running, uiKind: "active" as const }
+      : null
 
   return (
     <button
@@ -4268,7 +4272,8 @@ function FeatureCard({
           <div className="truncate text-sm font-semibold">{run.title}</div>
           <div className="mt-1 truncate text-[11px] text-muted-foreground">{run.slug}</div>
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-1">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+          {managedRunStatus && <StatusPill status={managedRunStatus} />}
           <StatusPill status={run.overallStatus} />
           {run.humanGate && (
             <StatusPill status={{ label: "待人工确认", uiKind: "warning" }} />
@@ -6165,6 +6170,7 @@ function FeatureDetailPage({
   const featureOverallStatus =
     detail?.run.overallStatus ?? selectedNode?.status ?? { label: "读取中", uiKind: "unknown" as const }
   const managedRun = detail?.run.managedRun
+  const managedRunIsRunning = managedRun?.status === "running"
   const managedRunSessionThreadId = managedRun?.currentSession?.threadId
   const managedRunStatus = managedRun
     ? managedRunStatusToHarnessStatus(managedRun.status)
@@ -6355,6 +6361,10 @@ function FeatureDetailPage({
     if (!detail || updatingManagedRun || openingManagedRunDialog || projectInteractionDisabled) return
     setOpeningManagedRunDialog(true)
     try {
+      await window.api.harnessBoard.validateManagedRunStart({
+        projectId: detail.project.projectId,
+        featureId: detail.run.slug
+      })
       const latestSessionWorkspacePath = await getLatestSessionWorkspacePath(
         detail.sessions,
         threadsById,
@@ -6364,6 +6374,8 @@ function FeatureDetailPage({
       const defaultWorkspacePath = latestSessionWorkspacePath ?? configuredWorkspacePath
       setManagedRunWorkspacePath(defaultWorkspacePath ?? "")
       setManagedRunDialogOpen(true)
+    } catch (error) {
+      toast.error(cleanIpcError(error))
     } finally {
       setOpeningManagedRunDialog(false)
     }
@@ -6718,40 +6730,55 @@ function FeatureDetailPage({
           {effectiveActiveDetailTab === "feature" && (
             <div className={cn(harnessPageHeaderActionsClassName, "pt-0")}>
               <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant={detail?.run.managedRun?.status === "running" ? "outline" : "default"}
-                      size="sm"
-                      className={cn(harnessDetailSecondaryButtonClassName, "w-[132px]")}
-                      onClick={() => {
-                        if (detail?.run.managedRun?.status === "running") {
-                          void handleManagedRunChange(false)
-                          return
-                        }
-                        void handleOpenManagedRunDialog()
-                      }}
-                      disabled={
-                        loading ||
-                        !detail ||
-                        projectInteractionDisabled ||
-                        openingManagedRunDialog ||
-                        updatingManagedRun
+                <div className="flex shrink-0 items-center gap-px">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className={cn(
+                      harnessDetailSecondaryButtonClassName,
+                      "w-[160px]",
+                      managedRunIsRunning
+                        ? "text-status-critical hover:text-status-critical"
+                        : "text-status-info hover:text-status-info"
+                    )}
+                    onClick={() => {
+                      if (managedRunIsRunning) {
+                        void handleManagedRunChange(false)
+                        return
                       }
-                    >
-                      {(openingManagedRunDialog || updatingManagedRun) && (
-                        <Loader2 className="size-4 animate-spin" />
-                      )}
-                      {detail?.run.managedRun?.status === "running" ? "停止托管" : "开始托管"}
-                    </Button>
-                  </TooltipTrigger>
-                  {detail?.run.managedRun?.status !== "running" && (
-                    <TooltipContent side="bottom" className="z-[70] max-w-72">
-                      将自动在会话结束时创建新会话、推进到下一阶段
-                    </TooltipContent>
+                      void handleOpenManagedRunDialog()
+                    }}
+                    disabled={
+                      loading ||
+                      !detail ||
+                      projectInteractionDisabled ||
+                      openingManagedRunDialog ||
+                      updatingManagedRun
+                    }
+                  >
+                    {(openingManagedRunDialog || updatingManagedRun) && (
+                      <Loader2 className="size-4 animate-spin" />
+                    )}
+                    {managedRunIsRunning ? "停止托管运行" : "托管运行当前特性"}
+                  </Button>
+                  {!managedRunIsRunning && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label="托管运行提示"
+                          className="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Info className="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="z-[70] max-w-72">
+                        将自动在会话结束时创建新会话、推进到下一阶段
+                      </TooltipContent>
+                    </Tooltip>
                   )}
-                </Tooltip>
+                </div>
               </TooltipProvider>
               <Button
                 type="button"
@@ -8983,6 +9010,33 @@ export function HarnessBoardView({
     }
   }, [loadProjectDetail])
 
+  const patchCachedProjectRuns = useCallback(
+    (
+      projectId: string,
+      patchRun: (run: HarnessFeatureSummary) => HarnessFeatureSummary
+    ): void => {
+      const projectDetail = detailsByProjectIdRef.current[projectId]
+      if (!projectDetail) return
+      let changed = false
+      const runs = projectDetail.runs.map((run) => {
+        const nextRun = patchRun(run)
+        if (nextRun === run) return run
+        changed = true
+        return nextRun
+      })
+      if (!changed) return
+      const nextProjectDetail = { ...projectDetail, runs }
+      const nextDetails = {
+        ...detailsByProjectIdRef.current,
+        [projectId]: nextProjectDetail
+      }
+      cacheHarnessProjectDetails({ [projectId]: nextProjectDetail })
+      detailsByProjectIdRef.current = nextDetails
+      setDetailsByProjectId(nextDetails)
+    },
+    []
+  )
+
   useEffect(() => {
     if (!selectedProjectId || selectedFeature) return
     const timer = window.setInterval(() => {
@@ -9109,6 +9163,15 @@ export function HarnessBoardView({
 
   useEffect(() => {
     return window.api.harnessBoard.onManagedRunChanged((event) => {
+      if (event.run.status === "running") {
+        patchCachedProjectRuns(event.projectId, (run) => {
+          if (run.slug !== event.featureId || run.managedRunStatus === event.run.status) return run
+          return { ...run, managedRunStatus: event.run.status }
+        })
+      } else {
+        void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
+      }
+
       const currentFeature = selectedFeatureRef.current
       if (
         !currentFeature ||
@@ -9134,36 +9197,18 @@ export function HarnessBoardView({
           }
         }
       })
-      if (event.run.status !== "running") {
-        void loadProjectDetail(event.projectId, { showLoading: false, reportError: false })
-      }
     })
-  }, [loadProjectDetail])
+  }, [loadProjectDetail, patchCachedProjectRuns])
 
   useEffect(() => {
     return window.api.harnessBoard.onHumanGateChanged((event) => {
-      const projectDetail = detailsByProjectIdRef.current[event.projectId]
-      if (projectDetail) {
-        let changed = false
-        const runs = projectDetail.runs.map((run) => {
-          if (run.slug !== event.featureId) return run
-          changed = true
-          const nextRun = { ...run }
-          if (event.humanGate) nextRun.humanGate = event.humanGate
-          else delete nextRun.humanGate
-          return nextRun
-        })
-        if (changed) {
-          const nextProjectDetail = { ...projectDetail, runs }
-          const nextDetails = {
-            ...detailsByProjectIdRef.current,
-            [event.projectId]: nextProjectDetail
-          }
-          cacheHarnessProjectDetails({ [event.projectId]: nextProjectDetail })
-          detailsByProjectIdRef.current = nextDetails
-          setDetailsByProjectId(nextDetails)
-        }
-      }
+      patchCachedProjectRuns(event.projectId, (run) => {
+        if (run.slug !== event.featureId) return run
+        const nextRun = { ...run }
+        if (event.humanGate) nextRun.humanGate = event.humanGate
+        else delete nextRun.humanGate
+        return nextRun
+      })
 
       setRunDetail((currentDetail) => {
         if (
@@ -9179,7 +9224,7 @@ export function HarnessBoardView({
         return { ...currentDetail, run: nextRun }
       })
     })
-  }, [])
+  }, [patchCachedProjectRuns])
 
   const refreshSelectedRunDetail = useCallback(
     async (options: { rethrow?: boolean } = {}): Promise<void> => {

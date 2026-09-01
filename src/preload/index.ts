@@ -157,6 +157,7 @@ import type {
   ManagedRunIdentity,
   ManagedRunChangeEvent,
   ManagedRunStartInput,
+  ManagedRunStartValidationInput,
   ManagedRunStopInput,
   ManagedRunSummary,
   ManagedRunThreadCreatedEvent
@@ -4261,6 +4262,8 @@ const api = {
         "harnessBoard:updateFeatureDeployUnits",
         input
       ) as Promise<HarnessFeatureDeployUnitBinding>,
+    validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
     startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>
       ipcRenderer.invoke("harnessBoard:startManagedRun", input) as Promise<ManagedRunSummary>,
     stopManagedRun: (input: ManagedRunStopInput): Promise<boolean> =>

@@ -1,14 +1,23 @@
 import {
   handleAutoModeAgentTurnEnd,
+  validateManagedRunStart,
   startManagedRun,
   stopManagedRun,
   type AutoModeAgentTurnEndInput,
   type ManagedRunStartRequest
 } from "./auto-mode-controller"
-import type { ManagedRunStopInput, ManagedRunSummary } from "../../shared/harness-board-types"
+import type {
+  ManagedRunStartValidationInput,
+  ManagedRunStopInput,
+  ManagedRunSummary
+} from "../../shared/harness-board-types"
 
 /** Durable V2 Controller facade. The V1-named module remains the runtime adapter for Agent IPC. */
 export class ManagedRunController {
+  validateStart(input: ManagedRunStartValidationInput): void {
+    validateManagedRunStart(input)
+  }
+
   start(input: ManagedRunStartRequest): Promise<ManagedRunSummary> {
     return startManagedRun(input)
   }
