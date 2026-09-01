@@ -49,26 +49,44 @@ function bucket(
 describe("buildChangeKindAggs", () => {
   it("nests the shared per-bucket aggs under a changeKind terms bucket", () => {
     const perBucket = { code_gen: { filter: {} } }
-    const aggs = buildChangeKindAggs(perBucket) as Record<string, any>
-    expect(aggs.by_change_kind.terms.field).toBe("properties.changeKind")
-    expect(aggs.by_change_kind.aggs).toBe(perBucket)
+    expect(buildChangeKindAggs(perBucket)).toEqual({
+      by_change_kind: {
+        terms: {
+          field: "properties.changeKind",
+          size: 3,
+          missing: UNCLASSIFIED_CHANGE_KIND
+        },
+        aggs: perBucket
+      }
+    })
   })
 
   it("folds pre-migration events into an explicit bucket instead of dropping them", () => {
-    const aggs = buildChangeKindAggs({}) as Record<string, any>
-    expect(aggs.by_change_kind.terms.missing).toBe(UNCLASSIFIED_CHANGE_KIND)
-    // size must leave room for new + legacy + unclassified
-    expect(aggs.by_change_kind.terms.size).toBeGreaterThanOrEqual(3)
+    expect(buildChangeKindAggs({})).toMatchObject({
+      by_change_kind: {
+        terms: { missing: UNCLASSIFIED_CHANGE_KIND, size: 3 }
+      }
+    })
   })
 })
 
 describe("buildNewRatioHistogramAgg", () => {
-  it("covers the whole [0, 1] range so empty bins are still reported", () => {
-    const agg = buildNewRatioHistogramAgg() as Record<string, any>
-    expect(agg.new_ratio_histogram.histogram.field).toBe("properties.newRatio")
-    expect(agg.new_ratio_histogram.histogram.interval).toBe(NEW_RATIO_HISTOGRAM_INTERVAL)
-    expect(agg.new_ratio_histogram.histogram.extended_bounds).toEqual({ min: 0, max: 1 })
-    expect(agg.new_ratio_histogram.histogram.min_doc_count).toBe(0)
+  it("counts each code generation once using the explicitly-double field", () => {
+    expect(buildNewRatioHistogramAgg()).toEqual({
+      new_ratio_histogram: {
+        filter: { term: { eventName: "code_gen" } },
+        aggs: {
+          bins: {
+            histogram: {
+              field: "properties.netNewRatio",
+              interval: NEW_RATIO_HISTOGRAM_INTERVAL,
+              min_doc_count: 0,
+              extended_bounds: { min: 0, max: 1 }
+            }
+          }
+        }
+      }
+    })
   })
 })
 
@@ -144,10 +162,12 @@ describe("normalizeNewRatioHistogram", () => {
     const bins = normalizeNewRatioHistogram({
       aggregations: {
         new_ratio_histogram: {
-          buckets: [
-            { key: 0, doc_count: 3 },
-            { key: 0.7, doc_count: 42 }
-          ]
+          bins: {
+            buckets: [
+              { key: 0, doc_count: 3 },
+              { key: 0.7, doc_count: 42 }
+            ]
+          }
         }
       }
     })

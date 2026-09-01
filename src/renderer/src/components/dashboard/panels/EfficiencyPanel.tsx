@@ -1,12 +1,12 @@
 /**
  * 研发效能面板
  *
- * 三个指标各一张卡：系统可扩展性、AI 编码有效性、算力产出效能。
+ * 展示 AI 编码有效性与算力产出效能。
  * 范围在后端固定为「项目模式 + 已绑定精益项目」，前端不提供口径开关——
  * 关掉开关会让同一个标题下的数字换一个含义。
  */
 import React, { useMemo } from "react"
-import { AlertCircle, Info, Loader2, TrendingUp } from "lucide-react"
+import { AlertCircle, Info, Loader2 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type {
@@ -102,15 +102,6 @@ function MetricCard({
   )
 }
 
-function EmptyValue({ reason }: { reason: string }): React.JSX.Element {
-  return (
-    <div className="rounded-md border border-dashed border-border bg-muted/20 px-4 py-6">
-      <div className="text-2xl font-semibold tabular-nums text-muted-foreground">—</div>
-      <div className="mt-2 text-xs leading-relaxed text-muted-foreground">{reason}</div>
-    </div>
-  )
-}
-
 // ─────────────────────────────────────────────────────────
 // 指标 2：AI 编码有效性
 // ─────────────────────────────────────────────────────────
@@ -164,15 +155,23 @@ function NewRatioHistogram({
       <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
         <span>新增行占比分布</span>
         <Hint>
-          每次生成的新增行占比分布。0.7 是当前的分桶阈值。如果阈值正好落在分布密集处，
-          说明两桶划分对阈值很敏感，微调阈值会大幅改变结果——此时应该按分布的稀疏处重新定阈值。
+          <div className="space-y-1">
+            <div>
+              计算公式：新增行占比 = max（生成行数 − 删除或被替换的旧行数，0）÷ 生成行数。
+              等量改写为 0，纯新增为 1。
+            </div>
+            <div>
+              0.7 是当前的分桶阈值。如果阈值正好落在分布密集处，说明两桶划分对阈值很敏感，
+              微调阈值会大幅改变结果——此时应该按分布的稀疏处重新定阈值。
+            </div>
+          </div>
         </Hint>
       </div>
       <div className="mt-2 flex h-16 items-end gap-px">
         {bins.map((bin) => (
           <div
             key={bin.from}
-            className="group relative flex-1"
+            className="group relative flex h-full flex-1 items-end"
             title={`[${bin.from.toFixed(2)}, ${(bin.from + 0.05).toFixed(2)}) · ${formatCount(bin.docCount)} 次`}
           >
             <div
@@ -180,7 +179,9 @@ function NewRatioHistogram({
                 "w-full rounded-sm",
                 bin.from >= 0.7 ? "bg-emerald-500/60" : "bg-amber-500/60"
               )}
-              style={{ height: `${Math.max(2, (bin.docCount / max) * 64)}px` }}
+              style={{
+                height: `${bin.docCount === 0 ? 0 : Math.max(3, (bin.docCount / max) * 64)}px`
+              }}
             />
           </div>
         ))}
@@ -206,8 +207,8 @@ function AdoptionCard({
         <div className="space-y-1.5">
           <div>入库采纳率 = 已 Push 采纳行 ÷ 全部有效生成行（含未提交）。</div>
           <div>
-            新增 / 存量按每次生成的新增行占比划分，阈值 0.7：净删除越多越偏存量。分桶信息在
-            生成时算好并随采纳事件一起上报，不是事后按 diff 反推的。
+            新增 / 存量按每次生成的新旧行级差分划分，阈值 0.7：旧内容独有行（删除或被替换）
+            越多越偏存量。分桶信息在生成时算好并随采纳事件一起上报，不是事后按 diff 反推的。
           </div>
           <div>
             分母含 14 天归因窗口外未拿到采纳判定的生成行，这部分只进分母不进分子，
@@ -448,20 +449,6 @@ export function EfficiencyPanel({
               </>
             ) : null}
           </div>
-
-          <MetricCard
-            title="系统可扩展性"
-            hint="交付周期变化量 ÷ 系统规模变化量。目标是斜率 ≈ 0，即系统规模增长不拖慢单位交付。"
-          >
-            <EmptyValue reason={data.scalability.pendingReason} />
-            <div className="mt-3 flex items-start gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-              <TrendingUp className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                待接入两项数据：内网项目管理平台的需求特性（提出时间 / 交付时间，先走手工导入），
-                以及仓库规模的客户端采集。两项齐备后此处出两点差分斜率，并在样本足够时附回归斜率与置信区间。
-              </span>
-            </div>
-          </MetricCard>
 
           <AdoptionCard adoption={data.adoption} />
           <ComputeCard compute={data.compute} />
