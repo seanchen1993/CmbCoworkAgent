@@ -893,7 +893,7 @@ export interface SubagentFocusView {
 
 export interface RightPanelWorkRequest {
   id: number
-  target: "systemConstraints"
+  target: "systemConstraints" | "agents"
   threadId: string
 }
 
@@ -935,6 +935,7 @@ interface AppState {
   // Sidebar state
   sidebarCollapsed: boolean
   rightPanelCollapsed: boolean
+  rightPanelWorkRequestSequence: number
   rightPanelWorkRequest: RightPanelWorkRequest | null
 
   // Split view for inspecting a single coordinator worker stream.
@@ -1038,6 +1039,8 @@ interface AppState {
   toggleRightPanel: () => void
   setRightPanelCollapsed: (collapsed: boolean) => void
   requestOpenRightPanelSystemConstraints: (threadId: string) => void
+  requestOpenRightPanelAgents: (threadId: string) => void
+  consumeRightPanelWorkRequest: (requestId: number) => void
 
   // Kanban actions
   setShowKanbanView: (show: boolean) => void
@@ -1135,6 +1138,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   browserCdpConfig: DEFAULT_BROWSER_CDP_CONFIG,
   sidebarCollapsed: false,
   rightPanelCollapsed: false,
+  rightPanelWorkRequestSequence: 0,
   rightPanelWorkRequest: null,
   workerFocusView: null,
   workerFocusMessagesThreadId: null,
@@ -1604,14 +1608,39 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   requestOpenRightPanelSystemConstraints: (threadId: string) => {
-    set((state) => ({
-      rightPanelCollapsed: false,
-      rightPanelWorkRequest: {
-        id: (state.rightPanelWorkRequest?.id ?? 0) + 1,
-        target: "systemConstraints",
-        threadId
+    set((state) => {
+      const requestId = state.rightPanelWorkRequestSequence + 1
+      return {
+        rightPanelCollapsed: false,
+        rightPanelWorkRequestSequence: requestId,
+        rightPanelWorkRequest: {
+          id: requestId,
+          target: "systemConstraints",
+          threadId
+        }
       }
-    }))
+    })
+  },
+
+  requestOpenRightPanelAgents: (threadId: string) => {
+    set((state) => {
+      const requestId = state.rightPanelWorkRequestSequence + 1
+      return {
+        rightPanelCollapsed: false,
+        rightPanelWorkRequestSequence: requestId,
+        rightPanelWorkRequest: {
+          id: requestId,
+          target: "agents",
+          threadId
+        }
+      }
+    })
+  },
+
+  consumeRightPanelWorkRequest: (requestId: number) => {
+    set((state) =>
+      state.rightPanelWorkRequest?.id === requestId ? { rightPanelWorkRequest: null } : {}
+    )
   },
 
   openWorkerFocusView: (view) => {

@@ -1101,7 +1101,7 @@ export function UniversalUploadDialog({
               description="先选择要上传的文件。更新时也可以只修改表单信息。"
             >
               {resourceType === "plugin" && PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL ? (
-                <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-900">
+                <div className="rounded-md border border-status-info/25 bg-status-info/10 px-3 py-2 text-sm text-status-info">
                   <span>首次上传插件？可以先下载插件模板文件，按模板结构修改后再上传。</span>
                   <a
                     href={PLUGIN_TEMPLATE_ZIP_DOWNLOAD_URL}
@@ -1367,14 +1367,14 @@ export function UniversalUploadDialog({
                           {!versionFromSkillFile ? " 当前显示的是默认版本。" : ""}
                         </p>
                         {versionFromSkillFile && !versionFoundInSkillFrontmatter ? (
-                          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                          <div className="flex items-start gap-2 rounded-xl border border-status-warning/25 bg-status-warning/10 px-3 py-2 text-status-warning">
+                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-status-warning-foreground" />
                             <p className="leading-5">
                               当前没有从{" "}
-                              <code className="rounded bg-amber-100 px-1">md / SKILL.md</code>{" "}
-                              里找到 <code className="rounded bg-amber-100 px-1">version</code>
+                              <code className="rounded bg-status-warning/15 px-1">md / SKILL.md</code>{" "}
+                              里找到 <code className="rounded bg-status-warning/15 px-1">version</code>
                               ，所以展示的是默认版本{" "}
-                              <code className="rounded bg-amber-100 px-1">
+                              <code className="rounded bg-status-warning/15 px-1">
                                 {DEFAULT_MARKET_VERSION}
                               </code>
                               。
@@ -1403,14 +1403,14 @@ export function UniversalUploadDialog({
                           </p>
                         )}
                         {!versionFromPluginFile && file ? (
-                          <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-amber-700" />
+                          <div className="flex items-start gap-2 rounded-xl border border-status-warning/25 bg-status-warning/10 px-3 py-2 text-status-warning">
+                            <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-status-warning-foreground" />
                             <p className="leading-5">
                               当前没有从{" "}
-                              <code className="rounded bg-amber-100 px-1">plugin.json</code>{" "}
-                              里找到 <code className="rounded bg-amber-100 px-1">version</code>
+                              <code className="rounded bg-status-warning/15 px-1">plugin.json</code>{" "}
+                              里找到 <code className="rounded bg-status-warning/15 px-1">version</code>
                               ，当前先按{" "}
-                              <code className="rounded bg-amber-100 px-1">
+                              <code className="rounded bg-status-warning/15 px-1">
                                 {DEFAULT_PLUGIN_VERSION}
                               </code>{" "}
                               回填，你也可以手动修改。

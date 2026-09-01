@@ -771,7 +771,7 @@ function OperationalTelemetry({
                   </div>
                 ) : null}
                 {constraint.filesTruncated ? (
-                  <div className="border-t border-border/60 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
+                  <div className="border-t border-status-warning/30 bg-status-warning/10 px-3 py-2 text-[11px] text-status-warning-foreground">
                     存在文件列表被截断的汇总，文件数为下限值。
                   </div>
                 ) : null}

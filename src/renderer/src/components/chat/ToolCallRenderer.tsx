@@ -908,7 +908,7 @@ export function ToolCallRenderer({
                   )}
                   {approvalTypes.includes("approve") && (
                     <button
-                      className="px-3 py-1.5 text-xs bg-status-nominal text-background rounded-sm hover:bg-status-nominal/90 transition-colors"
+                      className="px-3 py-1.5 text-xs bg-status-nominal/15 text-status-nominal rounded-sm hover:bg-status-nominal/20 transition-colors"
                       onClick={(e) => {
                         e.stopPropagation()
                         onApprovalDecision?.("approve")

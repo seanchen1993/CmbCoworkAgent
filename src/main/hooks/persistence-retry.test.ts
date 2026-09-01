@@ -141,4 +141,56 @@ describe("Hook log retry isolation", () => {
     expect(writeState.pathAttemptsByDate.get("2026-08-28")).toBe(2)
     expect(writeState.attemptsByPath.get("2026-08-28")).toBe(1)
   })
+
+  it("queues appends until hook-log maintenance releases the file", async () => {
+    let releaseMaintenance!: () => void
+    const maintenance = persistence.withHookLogMaintenance(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseMaintenance = resolve
+        })
+    )
+    await Promise.resolve()
+
+    persistence.persistHookExecutionRecord({
+      id: "during-maintenance",
+      timestamp: "2026-08-29T12:00:00.000Z"
+    })
+    const flush = persistence.flushHookLogs()
+    await Promise.resolve()
+    expect(writeState.appendFile).not.toHaveBeenCalled()
+
+    releaseMaintenance()
+    await maintenance
+    await flush
+    expect(writeState.appendFile).toHaveBeenCalledTimes(1)
+    expect(String(writeState.appendFile.mock.calls[0]?.[1])).toContain('"id":"during-maintenance"')
+  })
+
+  it("keeps a waiting flush behind consecutive maintenance gates", async () => {
+    let releaseFirst!: () => void
+    let releaseSecond!: () => void
+    const first = persistence.withHookLogMaintenance(
+      () => new Promise<void>((resolve) => { releaseFirst = resolve })
+    )
+    await Promise.resolve()
+    const second = persistence.withHookLogMaintenance(
+      () => new Promise<void>((resolve) => { releaseSecond = resolve })
+    )
+
+    persistence.persistHookExecutionRecord({
+      id: "between-maintenance-gates",
+      timestamp: "2026-08-30T12:00:00.000Z"
+    })
+    const flush = persistence.flushHookLogs()
+    releaseFirst()
+    await first
+    await Promise.resolve()
+    expect(writeState.appendFile).not.toHaveBeenCalled()
+
+    releaseSecond()
+    await second
+    await flush
+    expect(writeState.appendFile).toHaveBeenCalledTimes(1)
+  })
 })

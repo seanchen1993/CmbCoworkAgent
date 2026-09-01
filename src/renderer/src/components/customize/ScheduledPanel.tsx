@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useRef } from "react"
 import { Clock, Info, Play, Square, Loader2, Pencil, Plus, Trash2, Sun } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { cn } from "@/lib/utils"
 import type { ScheduledTask } from "@/types"
 import { CreateScheduledTaskDialog } from "./CreateScheduledTaskDialog"
@@ -203,8 +204,8 @@ export function ScheduledPanel(): React.JSX.Element {
                   "relative w-7 h-4 rounded-full transition-colors",
                   keepAwake ? "bg-amber-500" : "bg-muted-foreground/25"
                 )}>
-                  <div className={cn(
-                    "absolute top-0.5 size-3 rounded-full bg-white shadow-sm transition-transform",
+                  <ToggleThumb className={cn(
+                    "absolute left-0 top-0.5 size-3",
                     keepAwake ? "translate-x-3.5" : "translate-x-0.5"
                   )} />
                 </div>

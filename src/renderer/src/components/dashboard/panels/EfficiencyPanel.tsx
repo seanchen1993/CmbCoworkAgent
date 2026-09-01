@@ -128,7 +128,11 @@ function AdoptionBucket({
       <div
         className={cn(
           "mt-1 text-2xl font-semibold tabular-nums",
-          met === null ? "text-foreground" : met ? "text-emerald-600" : "text-amber-600"
+          met === null
+            ? "text-foreground"
+            : met
+              ? "text-status-nominal-foreground"
+              : "text-status-warning-foreground"
         )}
       >
         {hasData ? formatPercent(rate) : "—"}
@@ -386,7 +390,7 @@ function ComputeCard({
       </dl>
 
       {compute.tokenTotalsConsistent ? null : (
-        <div className="mt-3 flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+        <div className="mt-3 flex items-start gap-2 rounded-md bg-status-warning/10 px-3 py-2 text-xs leading-relaxed text-status-warning-foreground">
           <AlertCircle className="mt-0.5 size-3.5 shrink-0" />
           <span>
             Token 自检未通过：总数 {formatCompact(totalTokens)} 与输入 + 输出{" "}
@@ -449,7 +453,9 @@ export function EfficiencyPanel({
             {data.meta.truncated ? (
               <>
                 <span>·</span>
-                <span className="text-amber-600">项目数超过上限，以下为截断后的子集</span>
+                <span className="text-status-warning-foreground">
+                  项目数超过上限，以下为截断后的子集
+                </span>
               </>
             ) : null}
           </div>

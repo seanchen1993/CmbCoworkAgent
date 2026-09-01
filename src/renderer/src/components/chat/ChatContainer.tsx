@@ -85,9 +85,7 @@ import {
 } from "@/lib/thread-context"
 import { filterCoordinatorNoiseMessages } from "@/lib/message-display-helpers"
 import { canChangeThreadAgentMode } from "@/lib/agent-mode-switch-availability"
-import {
-  getWorkerToolUiKey
-} from "@/lib/worker-tool-result-key"
+import { getWorkerToolUiKey } from "@/lib/worker-tool-result-key"
 import {
   messageHasVisibleRow,
   normalizeVisibleReasoningText
@@ -129,9 +127,7 @@ import {
   shouldVirtualizeChatMessageList,
   type ChatApprovalDecision
 } from "./ChatMessageVirtualList"
-import {
-  ChatScrollNavigator
-} from "./ChatScrollNavigator"
+import { ChatScrollNavigator } from "./ChatScrollNavigator"
 import { ChatScrollToBottomButton } from "./ChatScrollToBottomButton"
 import {
   ChatSearchOverlay,
@@ -139,10 +135,7 @@ import {
   type DurableChatSearchMatch,
   type DurableChatSearchPage
 } from "./ChatSearchOverlay"
-import {
-  chatScrollSessionStore,
-  type ChatScrollSessionAnchor
-} from "./chat-scroll-session-store"
+import { chatScrollSessionStore, type ChatScrollSessionAnchor } from "./chat-scroll-session-store"
 import { WelcomeSkills } from "./WelcomeSkills"
 import { SkillCreateConfirmDialog, type SkillConfirmRequest } from "./SkillCreateConfirmDialog"
 import { UserInputRequestDialog, type UserInputRequestDialogLayout } from "./UserInputRequestDialog"
@@ -195,10 +188,7 @@ import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summar
 import { projectVisibleChatSearchContent } from "../../../../shared/chat-search-visible-content"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
 import { resolveChatSearchContiguousTailStart } from "@/lib/chat-search-gap-boundary"
-import {
-  createMessageIdIndexLookup,
-  type MessageIdIndexLookup
-} from "@/lib/lazy-message-id-index"
+import { createMessageIdIndexLookup, type MessageIdIndexLookup } from "@/lib/lazy-message-id-index"
 import { BuiltinBrowserChip } from "@/features/builtin-browser/BuiltinBrowserChip"
 import { SkillChip } from "@/features/slash-commands/skill-chip"
 import { selectSkillForSlashName } from "@/features/slash-commands/skill-merge"
@@ -213,9 +203,7 @@ import {
   subscribeSkillCatalogInvalidation,
   type ChatSkillCatalogProjection
 } from "@/lib/app-catalog-cache"
-import {
-  readHarnessBoardCatalogCache
-} from "@/components/harness-board/harness-board-cache"
+import { readHarnessBoardCatalogCache } from "@/components/harness-board/harness-board-cache"
 import {
   getQueuedModelContent,
   getQueuedDisplayContent,
@@ -227,10 +215,7 @@ import {
 import { getSkillMetadataId, isSkillDisabled } from "@/lib/skill-ids"
 import { formatGoalEventMessage, isVisibleCheckpointTranscriptMessage } from "@/lib/goal-transcript"
 import { buildGoalPanelViewModel, goalVerdictTone } from "@/lib/goal-panel-view"
-import {
-  buildLatestChatReportBatch,
-  type ChatReportBatch
-} from "@/lib/chat-report-batch"
+import { buildLatestChatReportBatch, type ChatReportBatch } from "@/lib/chat-report-batch"
 import {
   markChatReportUploadFailed,
   markChatReportUploadSucceeded,
@@ -270,10 +255,7 @@ import {
   CHAT_SEARCH_DOCUMENT_TEXT_LIMIT
 } from "@/lib/bounded-chat-search-text"
 import { buildStreamingMarkdownPreview } from "@/lib/streaming-markdown-schedule"
-import {
-  continueWorkspaceFilesDeduped,
-  loadWorkspaceFilesDeduped
-} from "@/lib/workspace-file-load"
+import { continueWorkspaceFilesDeduped, loadWorkspaceFilesDeduped } from "@/lib/workspace-file-load"
 import {
   createChatScrollState,
   isChatScrollDetached,
@@ -348,15 +330,17 @@ interface PendingChatSessionAnchor extends ChatScrollSessionAnchor {
   stableFrames: number
 }
 
-function interruptionNoticeCopy(event: string, action: string): {
+function interruptionNoticeCopy(
+  event: string,
+  action: string
+): {
   title: string
   explanation: string
 } {
   if (event.startsWith("Failure fuse")) {
     return {
       title: "工具失败熔断已停止本轮",
-      explanation:
-        "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
+      explanation: "这是工具失败熔断结果，不是应用崩溃。你可以调整策略后发送新消息继续对话。"
     }
   }
   if (event.startsWith("Tool-call loop")) {
@@ -390,20 +374,20 @@ function goalStatusView(status: "active" | "paused" | "complete"): {
     return {
       label: "已完成",
       icon: <CheckCircle2 className="size-4 text-emerald-600" />,
-      className: "text-[#23483c]"
+      className: "text-status-nominal"
     }
   }
   if (status === "paused") {
     return {
       label: "已暂停",
       icon: <PauseCircle className="size-4 text-amber-600" />,
-      className: "text-[#51453a]"
+      className: "text-status-warning"
     }
   }
   return {
     label: "进行中",
     icon: <Flag className="size-4 text-sky-600" />,
-    className: "text-[#2f3f4a]"
+    className: "text-status-info"
   }
 }
 
@@ -452,7 +436,7 @@ function GoalStatusPanel({
       <div className="relative mx-auto mb-2 max-w-3xl">
         <div
           className={cn(
-            "flex items-center gap-3 rounded-2xl border border-black/[0.07] bg-white/82 px-3 py-2 shadow-[0_14px_42px_rgba(24,24,27,0.09),0_1px_0_rgba(255,255,255,0.88)_inset] backdrop-blur-2xl",
+            "flex items-center gap-3 rounded-2xl border border-border bg-background-elevated/90 px-3 py-2 shadow-[0_14px_42px_rgba(0,0,0,0.12)] backdrop-blur-2xl dark:shadow-[0_16px_42px_rgba(0,0,0,0.28)]",
             status.className
           )}
         >
@@ -461,13 +445,13 @@ function GoalStatusPanel({
             className="flex min-w-0 flex-1 items-center gap-3 text-left"
             onClick={() => onOpenChange(!open)}
           >
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white shadow-[0_6px_18px_rgba(24,24,27,0.10)] ring-1 ring-black/[0.06]">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-background-interactive shadow-[0_6px_18px_rgba(0,0,0,0.10)] ring-1 ring-border">
               {status.icon}
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex flex-wrap items-center gap-2">
                 <span className="shrink-0 text-sm font-semibold">Goal {status.label}</span>
-                <span className="shrink-0 rounded-full border border-black/[0.05] bg-[#f7f7f5]/85 px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="shrink-0 rounded-full border border-border bg-background-interactive/85 px-2 py-0.5 text-[11px] text-muted-foreground">
                   {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
                 </span>
               </span>
@@ -480,7 +464,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={onEditGoal}
                   aria-label="编辑 Goal"
                 >
@@ -494,7 +478,7 @@ function GoalStatusPanel({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={() => onCommand("/goal pause")}
                     aria-label="暂停 Goal"
                   >
@@ -509,7 +493,7 @@ function GoalStatusPanel({
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                    className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={() => onCommand("/goal resume")}
                     aria-label="继续 Goal"
                   >
@@ -523,7 +507,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={() => onOpenChange(!open)}
                   aria-label="查看 Goal 详情"
                 >
@@ -536,7 +520,7 @@ function GoalStatusPanel({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  className="flex size-8 items-center justify-center rounded-full bg-[#f7f7f5]/90 text-foreground/70 ring-1 ring-black/[0.04] transition-colors hover:bg-white hover:text-foreground"
+                  className="flex size-8 items-center justify-center rounded-full bg-background-interactive/90 text-foreground/70 ring-1 ring-border transition-colors hover:bg-secondary hover:text-foreground"
                   onClick={() => onCommand("/goal clear")}
                   aria-label="清除 Goal"
                 >
@@ -549,16 +533,16 @@ function GoalStatusPanel({
         </div>
 
         {open && (
-          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-black/[0.08] bg-[#fbfaf8] shadow-[0_24px_80px_rgba(24,24,27,0.18)]">
-            <div className="border-b border-black/[0.06] bg-white px-5 py-4">
+          <div className="fixed bottom-24 right-5 top-16 z-40 flex w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-3xl border border-border bg-background shadow-[0_24px_80px_rgba(0,0,0,0.22)] dark:shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+            <div className="border-b border-border bg-background-elevated px-5 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="flex size-10 items-center justify-center rounded-full bg-[#f7f7f5] shadow-sm ring-1 ring-black/[0.06]">
+                    <span className="flex size-10 items-center justify-center rounded-full bg-background-interactive shadow-sm ring-1 ring-border">
                       {status.icon}
                     </span>
                     <div className="text-lg font-semibold text-foreground">Goal {status.label}</div>
-                    <div className="rounded-full border border-black/[0.06] bg-[#f6f5f2] px-2 py-0.5 text-xs text-muted-foreground">
+                    <div className="rounded-full border border-border bg-background-interactive px-2 py-0.5 text-xs text-muted-foreground">
                       {duration} · {goal.turnsUsed}/{goal.maxTurns} 轮
                     </div>
                     <div
@@ -576,14 +560,14 @@ function GoalStatusPanel({
                 </div>
                 <button
                   type="button"
-                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#f6f5f2] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-full bg-background-interactive text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   onClick={() => onOpenChange(false)}
                   aria-label="关闭 Goal 详情"
                 >
                   <X className="size-4" />
                 </button>
               </div>
-              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#eeece8]">
+              <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-background-interactive">
                 <div
                   className={cn(
                     "h-full rounded-full",
@@ -601,7 +585,7 @@ function GoalStatusPanel({
             <div className="flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-5 py-4 text-sm break-words [overflow-wrap:anywhere]">
               <section
                 className={cn(
-                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[0_1px_0_rgba(255,255,255,0.8)_inset]",
+                  "min-w-0 overflow-hidden rounded-2xl border p-4 shadow-[inset_0_1px_0_var(--border)]",
                   goalVerdictTone(goal.lastVerdict)
                 )}
               >
@@ -612,13 +596,13 @@ function GoalStatusPanel({
                 <div className="whitespace-pre-wrap break-words text-base leading-7 text-foreground/90 [overflow-wrap:anywhere]">
                   {evaluatorReason}
                 </div>
-                <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <div className="mt-3 rounded-xl bg-background-interactive/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
                   这里展示的是 evaluator 根据最近一轮 assistant 回复、工具结果和持久化 ledger
                   做出的判断。它解释为什么 Goal 会继续、暂停或完成。
                 </div>
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Flag className="size-4" />
                   目标与完成标准
@@ -633,7 +617,7 @@ function GoalStatusPanel({
                     </div>
                   </div>
                   {goal.completionCondition !== goal.objective && (
-                    <div className="border-t border-black/[0.06] pt-3">
+                    <div className="border-t border-border pt-3">
                       <div className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                         完成条件
                       </div>
@@ -643,7 +627,7 @@ function GoalStatusPanel({
                     </div>
                   )}
                   {contextText && (
-                    <div className="border-t border-black/[0.06] pt-3">
+                    <div className="border-t border-border pt-3">
                       <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                         <Notebook className="size-3.5" />
                         启动上下文
@@ -656,7 +640,7 @@ function GoalStatusPanel({
                 </div>
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Layers className="size-4" />
                   进展与证据
@@ -667,7 +651,7 @@ function GoalStatusPanel({
                 </div>
 
                 {!hasLedgerDetails ? (
-                  <div className="rounded-xl border border-dashed border-black/[0.10] bg-[#fbfaf8] px-3 py-4 text-center text-xs text-muted-foreground">
+                  <div className="rounded-xl border border-dashed border-border bg-background-interactive/70 px-3 py-4 text-center text-xs text-muted-foreground">
                     暂无 ledger 条目。下一轮评估后会在这里记录进展、证据或阻塞。
                   </div>
                 ) : (
@@ -681,7 +665,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allProgressItems.map((item, index) => (
                             <li key={`progress-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-[11px] font-semibold text-emerald-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-nominal/10 text-[11px] font-semibold text-status-nominal">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -694,7 +678,7 @@ function GoalStatusPanel({
                     )}
 
                     {allEvidenceItems.length > 0 && (
-                      <div className="border-t border-black/[0.06] pt-4">
+                      <div className="border-t border-border pt-4">
                         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
                           <Database className="size-3.5 text-sky-600" />
                           证据
@@ -702,7 +686,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allEvidenceItems.map((item, index) => (
                             <li key={`evidence-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-sky-50 text-[11px] font-semibold text-sky-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-info/10 text-[11px] font-semibold text-status-info">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -715,7 +699,7 @@ function GoalStatusPanel({
                     )}
 
                     {allBlockerItems.length > 0 && (
-                      <div className="border-t border-black/[0.06] pt-4">
+                      <div className="border-t border-border pt-4">
                         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-foreground/80">
                           <CircleAlert className="size-3.5 text-amber-600" />
                           未解决问题
@@ -723,7 +707,7 @@ function GoalStatusPanel({
                         <ol className="space-y-2">
                           {allBlockerItems.map((item, index) => (
                             <li key={`blocker-${index}`} className="flex min-w-0 gap-2 leading-5">
-                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-amber-50 text-[11px] font-semibold text-amber-700">
+                              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-status-warning/10 text-[11px] font-semibold text-status-warning">
                                 {index + 1}
                               </span>
                               <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
@@ -738,26 +722,29 @@ function GoalStatusPanel({
                 )}
               </section>
 
-              <section className="min-w-0 overflow-hidden rounded-2xl border border-black/[0.06] bg-white p-4">
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border bg-background-elevated p-4">
                 <div className="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                   <Clock className="size-4" />
                   最近事件
                 </div>
-                <div className="mb-3 rounded-xl bg-[#fbfaf8] px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <div className="mb-3 rounded-xl bg-background-interactive/70 px-3 py-2 text-xs leading-5 text-muted-foreground">
                   最近一条：{recentEventSummary}
                 </div>
                 <details>
-                  <summary className="cursor-pointer list-none rounded-lg border border-black/[0.06] px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
+                  <summary className="cursor-pointer list-none rounded-lg border border-border px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40">
                     展开事件历史（{latestEvents.length}）
                   </summary>
                   {latestEvents.length === 0 ? (
-                    <div className="mt-3 rounded-lg bg-[#fbfaf8] px-3 py-2 text-xs text-muted-foreground">
+                    <div className="mt-3 rounded-lg bg-background-interactive/70 px-3 py-2 text-xs text-muted-foreground">
                       暂无事件
                     </div>
                   ) : (
                     <div className="mt-3 space-y-3">
                       {latestEvents.map((event) => (
-                        <div key={event.event_id} className="border-l-2 border-black/[0.10] pl-3">
+                        <div
+                          key={event.event_id}
+                          className="border-l-2 border-border-emphasis pl-3"
+                        >
                           <div className="mb-1 text-[11px] text-muted-foreground">
                             {goalEventTimeLabel(event.created_at)}
                           </div>
@@ -772,7 +759,7 @@ function GoalStatusPanel({
               </section>
             </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-black/[0.06] bg-white px-5 py-3">
+            <div className="flex items-center justify-between gap-2 border-t border-border bg-background-elevated px-5 py-3">
               <button
                 type="button"
                 className="rounded-xl px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted"
@@ -783,7 +770,7 @@ function GoalStatusPanel({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  className="rounded-xl border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
                   onClick={onEditGoal}
                 >
                   编辑
@@ -808,7 +795,7 @@ function GoalStatusPanel({
                 )}
                 <button
                   type="button"
-                  className="rounded-xl border border-black/[0.08] px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
+                  className="rounded-xl border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted"
                   onClick={() => onCommand("/goal clear")}
                 >
                   清除
@@ -1073,10 +1060,7 @@ const threadDisplayBaselineCache = new WeakMap<
   ThreadDisplayBaselineCacheEntry
 >()
 
-function getThreadDisplayBaseline(
-  messages: readonly Message[],
-  contentVersion: number
-): Message[] {
+function getThreadDisplayBaseline(messages: readonly Message[], contentVersion: number): Message[] {
   const cached = threadDisplayBaselineCache.get(messages)
   if (cached?.contentVersion === contentVersion) return cached.baseline
   const sourceTail = messages.at(-1)
@@ -1232,9 +1216,7 @@ function getCachedHarnessPreferredPlugin(projectId: string): HarnessPreferredPlu
   const project = readHarnessBoardCatalogCache()?.projects.find(
     (candidate) => candidate.projectId === projectId
   )
-  return project
-    ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name }
-    : null
+  return project ? { id: project.harnessAdapter.id, name: project.harnessAdapter.name } : null
 }
 
 interface InitialChatSkillCatalogState {
@@ -1672,9 +1654,7 @@ export function ChatContainer({
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
-  const chatScrollStateRef = useRef<ChatScrollState | null>(
-    initialChatScrollSession?.state ?? null
-  )
+  const chatScrollStateRef = useRef<ChatScrollState | null>(initialChatScrollSession?.state ?? null)
   if (chatScrollStateRef.current === null) {
     chatScrollStateRef.current = createChatScrollState(threadId)
   }
@@ -2074,9 +2054,7 @@ export function ChatContainer({
       ? getCachedHarnessPreferredPlugin(binding.projectId)
       : null
     if (cachedSkills) {
-      const preferredPlugin = binding
-        ? getCachedHarnessPreferredPlugin(binding.projectId)
-        : null
+      const preferredPlugin = binding ? getCachedHarnessPreferredPlugin(binding.projectId) : null
       const cachedProjection = projectChatSkillCatalog(cachedSkills, {
         harnessScoped,
         preferredPlugin
@@ -2090,10 +2068,7 @@ export function ChatContainer({
       isSkillCatalogFresh(cachedSkills, pluginVersion) &&
       (!binding || cachedHarnessPreferredPlugin)
     ) {
-      applySnapshot(
-        cachedSkills,
-        cachedHarnessPreferredPlugin
-      )
+      applySnapshot(cachedSkills, cachedHarnessPreferredPlugin)
       return
     }
 
@@ -2104,15 +2079,17 @@ export function ChatContainer({
         ? Promise.resolve(null)
         : cachedHarnessPreferredPlugin && cachedHarnessCatalog
           ? Promise.resolve(cachedHarnessCatalog)
-          : window.api.harnessBoard.catalogPage({
-              requestScope: "chat-binding",
-              projectId: binding.projectId,
-              projectLimit: 1,
-              includeRegistry: false
-            }).catch((error) => {
-              console.warn("[ChatContainer] Failed to resolve harness skill binding:", error)
-              return null
-            })
+          : window.api.harnessBoard
+              .catalogPage({
+                requestScope: "chat-binding",
+                projectId: binding.projectId,
+                projectLimit: 1,
+                includeRegistry: false
+              })
+              .catch((error) => {
+                console.warn("[ChatContainer] Failed to resolve harness skill binding:", error)
+                return null
+              })
       const [snapshot, harnessCatalog] = await Promise.all([
         skillCatalogPromise,
         harnessCatalogPromise
@@ -2214,18 +2191,16 @@ export function ChatContainer({
   const systemConstraintsLoadFailed = hasNoLoadedSystemConstraints(harnessAgentmdLoadStatus)
   const systemConstraintsPromptPreview = harnessAgentmdLoadStatus?.promptPreview?.trim()
   const showSystemConstraintsButton = surface === "harness-project"
-  const systemConstraintsTitle =
-    systemConstraintsLoadFailed
-      ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
-      : systemConstraintCounts.total > 0
+  const systemConstraintsTitle = systemConstraintsLoadFailed
+    ? `系统约束未加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
+    : systemConstraintCounts.total > 0
       ? `系统约束已加载 ${systemConstraintCounts.loaded}/${systemConstraintCounts.total}，点击查看详情`
       : "系统约束，点击查看详情"
-  const systemConstraintsLabel =
-    systemConstraintsLoadFailed
-      ? "系统约束未全部加载"
-      : systemConstraintCounts.loaded > 0
-        ? "系统约束已加载"
-        : "系统约束"
+  const systemConstraintsLabel = systemConstraintsLoadFailed
+    ? "系统约束未全部加载"
+    : systemConstraintCounts.loaded > 0
+      ? "系统约束已加载"
+      : "系统约束"
   const handleOpenSystemConstraints = useCallback((): void => {
     requestOpenRightPanelSystemConstraints(threadId)
   }, [requestOpenRightPanelSystemConstraints, threadId])
@@ -2556,11 +2531,9 @@ export function ChatContainer({
 
           // #6: check extension before calling backend
           const lastDot = displayIdentity.lastIndexOf(".")
-          const ext =
-            lastDot >= 0 ? displayIdentity.substring(lastDot).toLowerCase() : ""
+          const ext = lastDot >= 0 ? displayIdentity.substring(lastDot).toLowerCase() : ""
           if (!ext || !SUPPORTED_EXTS.has(ext)) {
-            const fileName =
-              displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
+            const fileName = displayIdentity.replace(/^.*[/\\]/, "") || displayIdentity
             if (ext === ".doc") {
               setError(`不支持的文件类型"${fileName}"；${DOC_SAVE_AS_DOCX_HINT}`)
             } else {
@@ -2748,10 +2721,7 @@ export function ChatContainer({
         chatReportPendingBatchesRef.current[targetThreadId] = { batch, attempt }
         return
       }
-      const reservedIds = reserveChatReportMessageIds(
-        targetThreadId,
-        batch.messageIds
-      )
+      const reservedIds = reserveChatReportMessageIds(targetThreadId, batch.messageIds)
       if (reservedIds.length === 0) return
 
       const controller = new AbortController()
@@ -2783,11 +2753,7 @@ export function ChatContainer({
                 !chatReportAbortControllersRef.current[retryThreadId] &&
                 !chatReportPendingBatchesRef.current[retryThreadId]
               ) {
-                void uploadLoChatDataForThread(
-                  retryThreadId,
-                  retryItem.batch,
-                  retryItem.attempt
-                )
+                void uploadLoChatDataForThread(retryThreadId, retryItem.batch, retryItem.attempt)
               }
             }, retryDelayMs)
           }
@@ -3235,8 +3201,8 @@ export function ChatContainer({
     (message: Message): boolean =>
       Boolean(
         hookLogConfig.enabled &&
-          message.role === "user" &&
-          hookLogBucketByTurnId.get(message.id)?.entries.length
+        message.role === "user" &&
+        hookLogBucketByTurnId.get(message.id)?.entries.length
       ),
     [hookLogBucketByTurnId, hookLogConfig.enabled]
   )
@@ -3249,8 +3215,7 @@ export function ChatContainer({
     hasHookLogChip: hasHookLogChipForMessage
   })
   const dynamicVisibilityByIndex = dynamicVisibilityProjection.byIndex
-  const orderedDynamicVisibleMessageIndexes =
-    dynamicVisibilityProjection.orderedVisibleIndexes
+  const orderedDynamicVisibleMessageIndexes = dynamicVisibilityProjection.orderedVisibleIndexes
   const liveLastUserMessageIndex = liveDisplayProjection.lastUserMessageId
     ? displayMessageProjection.indexById.get(liveDisplayProjection.lastUserMessageId)
     : undefined
@@ -3282,14 +3247,12 @@ export function ChatContainer({
   })
   const historyGapBeforeVisibleMessageId = useMemo(() => {
     if (!historyWindowGap) return null
-    const boundaryIndex = displayMessageProjection.indexById.get(
-      historyWindowGap.beforeMessageId
-    )
+    const boundaryIndex = displayMessageProjection.indexById.get(historyWindowGap.beforeMessageId)
     if (boundaryIndex === undefined) return null
     const visibleBoundaryIndex = visibleMessageIndexes.find((index) => index >= boundaryIndex)
     return visibleBoundaryIndex === undefined
       ? null
-      : displayMessages[visibleBoundaryIndex]?.id ?? null
+      : (displayMessages[visibleBoundaryIndex]?.id ?? null)
   }, [
     displayMessageProjection.indexById,
     displayMessages,
@@ -3301,7 +3264,7 @@ export function ChatContainer({
   const lastContentMessageId =
     lastVisibleMessageIndex === undefined
       ? null
-      : displayMessages[lastVisibleMessageIndex]?.id ?? null
+      : (displayMessages[lastVisibleMessageIndex]?.id ?? null)
 
   // Ordinary assistant tokens update only the changed display slot. Keep the
   // tool projection stable and replace a slot only when that changed row is
@@ -3318,10 +3281,7 @@ export function ChatContainer({
   )
 
   const { assistantDurationMsById, userSendTimeLabelById } =
-    threadProjectionRuntime.projectTimingMeta(
-      displayMessages,
-      displayMessagesStructureVersion
-    )
+    threadProjectionRuntime.projectTimingMeta(displayMessages, displayMessagesStructureVersion)
 
   const { toolCallDisplayStates, pendingApprovalToolCallKeys } =
     threadProjectionRuntime.projectToolCallDisplayState({
@@ -3449,11 +3409,12 @@ export function ChatContainer({
         message.id === streamingSearchMessageIdRef.current &&
         (typeof displayContent === "string" || Array.isArray(displayContent))
       ) {
-        const textBlocks = typeof displayContent === "string"
-          ? [displayContent]
-          : displayContent.flatMap((block) =>
-              block.type === "text" && block.text ? [block.text] : []
-            )
+        const textBlocks =
+          typeof displayContent === "string"
+            ? [displayContent]
+            : displayContent.flatMap((block) =>
+                block.type === "text" && block.text ? [block.text] : []
+              )
         visibleContent = textBlocks
           .flatMap((block) => {
             const preview = buildStreamingMarkdownPreview(block)
@@ -3510,11 +3471,7 @@ export function ChatContainer({
       cached.indexById === displayMessageProjection.indexById &&
       cached.buildDocument === buildSearchDocument &&
       cached.gapBeforeMessageId === (historyWindowGap?.beforeMessageId ?? null)
-    if (
-      cached &&
-      stableIdentityMatches &&
-      cached.contentVersion !== messagesContentVersion
-    ) {
+    if (cached && stableIdentityMatches && cached.contentVersion !== messagesContentVersion) {
       let requiresRebuild = false
       let textUnits = cached.textUnits
       const nextDocuments = [...cached.documents]
@@ -3522,8 +3479,7 @@ export function ChatContainer({
         const cachedDocumentIndex = cached.documentIndexById.get(changedMessage.id)
         const baselineIndex = cached.baselineIndexLookup.findFirstIndex(changedMessage.id)
         const belongsToCachedWindow =
-          baselineIndex >= cached.startIndex &&
-          baselineIndex < threadDisplayBaseline.length
+          baselineIndex >= cached.startIndex && baselineIndex < threadDisplayBaseline.length
         if (cachedDocumentIndex === undefined) {
           if (
             belongsToCachedWindow &&
@@ -3552,10 +3508,7 @@ export function ChatContainer({
         stableSearchDocumentsRef.current = null
         cached = null
       } else {
-        while (
-          nextDocuments.length > 1 &&
-          textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT
-        ) {
+        while (nextDocuments.length > 1 && textUnits > CHAT_LOCAL_SEARCH_CORPUS_TEXT_LIMIT) {
           textUnits -= nextDocuments.shift()?.text.length ?? 0
         }
         cached.documents = nextDocuments
@@ -3664,9 +3617,7 @@ export function ChatContainer({
         displayIndexById: displayMessageProjection.indexById,
         buildDocument: buildSearchDocument,
         documents,
-        documentIndexById: new Map(
-          documents.map((document, index) => [document.messageId, index])
-        )
+        documentIndexById: new Map(documents.map((document, index) => [document.messageId, index]))
       }
       dynamicSearchDocumentsRef.current = dynamicCache
       return dynamicCache
@@ -3750,28 +3701,31 @@ export function ChatContainer({
     setScrollParent(getViewport())
   }, [getViewport, threadId])
 
-  const applyChatScrollEvent = useCallback((event: ChatScrollEvent): ChatScrollTransition => {
-    const current = chatScrollStateRef.current ?? createChatScrollState(threadId)
-    const transition = transitionChatScroll(current, event)
-    chatScrollStateRef.current = transition.state
-    setChatScrollUiState((previous) => {
-      if (
-        previous.generation === transition.state.generation &&
-        previous.mode === transition.state.mode &&
-        previous.hasUnread === transition.state.hasUnread &&
-        previous.unreadCount === transition.state.unreadCount
-      ) {
-        return previous
-      }
-      return {
-        generation: transition.state.generation,
-        mode: transition.state.mode,
-        hasUnread: transition.state.hasUnread,
-        unreadCount: transition.state.unreadCount
-      }
-    })
-    return transition
-  }, [threadId])
+  const applyChatScrollEvent = useCallback(
+    (event: ChatScrollEvent): ChatScrollTransition => {
+      const current = chatScrollStateRef.current ?? createChatScrollState(threadId)
+      const transition = transitionChatScroll(current, event)
+      chatScrollStateRef.current = transition.state
+      setChatScrollUiState((previous) => {
+        if (
+          previous.generation === transition.state.generation &&
+          previous.mode === transition.state.mode &&
+          previous.hasUnread === transition.state.hasUnread &&
+          previous.unreadCount === transition.state.unreadCount
+        ) {
+          return previous
+        }
+        return {
+          generation: transition.state.generation,
+          mode: transition.state.mode,
+          hasUnread: transition.state.hasUnread,
+          unreadCount: transition.state.unreadCount
+        }
+      })
+      return transition
+    },
+    [threadId]
+  )
 
   useLayoutEffect(() => {
     if (bottomScrollFrameRef.current !== null) {
@@ -3870,8 +3824,7 @@ export function ChatContainer({
           viewport.scrollTo({ top: bottom, behavior: "auto" })
         }
 
-        const distanceToBottom =
-          viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
         if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
           bottomSettleAttemptRef.current = 0
           applyChatScrollEvent({
@@ -3893,9 +3846,7 @@ export function ChatContainer({
         const settleLimit = longSettle
           ? CHAT_BOTTOM_SETTLE_MAX_FRAMES
           : CHAT_FOLLOW_SETTLE_MAX_FRAMES
-        if (
-          bottomSettleAttemptRef.current < settleLimit
-        ) {
+        if (bottomSettleAttemptRef.current < settleLimit) {
           bottomSettleAttemptRef.current += 1
           pendingBottomScrollEffectRef.current = mergeChatScrollEffects(
             pendingBottomScrollEffectRef.current,
@@ -4014,11 +3965,7 @@ export function ChatContainer({
         let anchor: ChatScrollSessionAnchor | null = null
         // A durable reveal that is still loading owns the remount destination. Saving the old
         // viewport anchor here would race it and pull the reopened chat back to stale content.
-        if (
-          viewport &&
-          isChatScrollDetached(state) &&
-          !pendingDurableSearchRevealIdRef.current
-        ) {
+        if (viewport && isChatScrollDetached(state) && !pendingDurableSearchRevealIdRef.current) {
           const viewportTop = viewport.getBoundingClientRect().top
           let closestDistance = Number.POSITIVE_INFINITY
           for (const candidate of viewport.querySelectorAll<HTMLElement>(
@@ -4047,10 +3994,7 @@ export function ChatContainer({
     }
   }, [getViewport, threadId])
   const searchDurableMessages = useCallback(
-    (
-      query: string,
-      options: DurableChatSearchOptions
-    ): Promise<DurableChatSearchPage> => {
+    (query: string, options: DurableChatSearchOptions): Promise<DurableChatSearchPage> => {
       return window.api.threads.searchMessages(threadId, query, options)
     },
     [threadId]
@@ -4095,8 +4039,7 @@ export function ChatContainer({
     const confirmOrDetachFromScroll = (): void => {
       const previousTop = lastObservedScrollTopRef.current
       const nextTop = scrollParent.scrollTop
-      const distanceToBottom =
-        scrollParent.scrollHeight - nextTop - scrollParent.clientHeight
+      const distanceToBottom = scrollParent.scrollHeight - nextTop - scrollParent.clientHeight
       lastObservedScrollTopRef.current = nextTop
 
       if (
@@ -4151,10 +4094,12 @@ export function ChatContainer({
     const scrollRoot = scrollRef.current
     const detachFromScrollbarPointer = (event: PointerEvent): void => {
       if (
-        event.composedPath().some(
-          (target) =>
-            target instanceof HTMLElement && target.hasAttribute("data-scroll-area-scrollbar")
-        )
+        event
+          .composedPath()
+          .some(
+            (target) =>
+              target instanceof HTMLElement && target.hasAttribute("data-scroll-area-scrollbar")
+          )
       ) {
         scrollbarUserIntentActiveRef.current = true
         cancelPendingHistoryAnchorFromUserGesture()
@@ -4185,7 +4130,10 @@ export function ChatContainer({
     }
     const detachFromKeyboardScroll = (event: KeyboardEvent): void => {
       if (!chatRootRef.current || chatRootRef.current.offsetParent === null) return
-      if (!chatRootRef.current.contains(document.activeElement) && document.activeElement !== document.body) {
+      if (
+        !chatRootRef.current.contains(document.activeElement) &&
+        document.activeElement !== document.body
+      ) {
         return
       }
       const target = event.target
@@ -4264,12 +4212,7 @@ export function ChatContainer({
       }
       virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" })
     },
-    [
-      dispatchChatScrollEvent,
-      getViewport,
-      invalidateDurableMessageReveal,
-      visibleMessageIndexById
-    ]
+    [dispatchChatScrollEvent, getViewport, invalidateDurableMessageReveal, visibleMessageIndexById]
   )
   const revealMessage = useCallback(
     (messageId: string): void => {
@@ -4295,7 +4238,12 @@ export function ChatContainer({
       generation: chatScrollUiState.generation,
       messageCount: visibleMessageIndexes.length
     })
-  }, [chatScrollUiState.generation, dispatchChatScrollEvent, historyLoading, visibleMessageIndexes.length])
+  }, [
+    chatScrollUiState.generation,
+    dispatchChatScrollEvent,
+    historyLoading,
+    visibleMessageIndexes.length
+  ])
 
   const handleContentHeightChanged = useCallback((): void => {
     const state = chatScrollStateRef.current
@@ -4313,19 +4261,22 @@ export function ChatContainer({
     })
   }, [chatScrollUiState.generation, dispatchChatScrollEvent, visibleMessageIndexes.length])
 
-  const handleVirtualAtBottomStateChange = useCallback((atBottom: boolean): void => {
-    const state = chatScrollStateRef.current
-    // Virtuoso may report `true` when a row collapses or a late measurement shortens content.
-    // That is layout, not proof that a detached reader intentionally returned to the bottom.
-    // Manual downward scrolling is confirmed by the viewport scroll listener; the button changes
-    // mode to following before its programmatic settle, so both intentional paths still work.
-    if (atBottom && state && !isChatScrollDetached(state)) {
-      dispatchChatScrollEvent({
-        type: "BOTTOM_CONFIRMED",
-        generation: chatScrollUiState.generation
-      })
-    }
-  }, [chatScrollUiState.generation, dispatchChatScrollEvent])
+  const handleVirtualAtBottomStateChange = useCallback(
+    (atBottom: boolean): void => {
+      const state = chatScrollStateRef.current
+      // Virtuoso may report `true` when a row collapses or a late measurement shortens content.
+      // That is layout, not proof that a detached reader intentionally returned to the bottom.
+      // Manual downward scrolling is confirmed by the viewport scroll listener; the button changes
+      // mode to following before its programmatic settle, so both intentional paths still work.
+      if (atBottom && state && !isChatScrollDetached(state)) {
+        dispatchChatScrollEvent({
+          type: "BOTTOM_CONFIRMED",
+          generation: chatScrollUiState.generation
+        })
+      }
+    },
+    [chatScrollUiState.generation, dispatchChatScrollEvent]
+  )
 
   useLayoutEffect(() => {
     const messageId = pendingDurableSearchRevealIdRef.current
@@ -4367,9 +4318,9 @@ export function ChatContainer({
       const viewport = getViewport()
       const target =
         contentMessageRefs.current.get(anchor.messageId) ??
-        Array.from(
-          viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []
-        ).find((candidate) => candidate.dataset.chatMessageId === anchor.messageId)
+        Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
+          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+        )
       if (viewport && target) {
         const viewportTop = viewport.getBoundingClientRect().top
         const currentOffset = target.getBoundingClientRect().top - viewportTop
@@ -4381,7 +4332,11 @@ export function ChatContainer({
           return
         }
       } else if (anchor.attempt === 0) {
-        virtuosoRef.current?.scrollToIndex({ index: visibleIndex, align: "start", behavior: "auto" })
+        virtuosoRef.current?.scrollToIndex({
+          index: visibleIndex,
+          align: "start",
+          behavior: "auto"
+        })
       }
 
       anchor.attempt += 1
@@ -4429,7 +4384,8 @@ export function ChatContainer({
     const viewportTop = viewport?.getBoundingClientRect().top ?? 0
     let anchor: HTMLElement | null = null
     let anchorDistance = Number.POSITIVE_INFINITY
-    for (const candidate of viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []) {
+    for (const candidate of viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ??
+      []) {
       const distance = Math.abs(candidate.getBoundingClientRect().top - viewportTop)
       if (distance < anchorDistance) {
         anchor = candidate
@@ -4515,10 +4471,7 @@ export function ChatContainer({
     setPendingDurableRevealMessageId,
     waitForTranscriptCommit
   ])
-  const historyRemainingCount = Math.max(
-    0,
-    historyMessageTotal - historyLoadedMessageCount
-  )
+  const historyRemainingCount = Math.max(0, historyMessageTotal - historyLoadedMessageCount)
 
   useLayoutEffect(() => {
     const anchor = pendingDurableHistoryAnchorRef.current
@@ -4540,9 +4493,9 @@ export function ChatContainer({
       const viewport = getViewport()
       const target =
         contentMessageRefs.current.get(anchor.messageId) ??
-        Array.from(
-          viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []
-        ).find((candidate) => candidate.dataset.chatMessageId === anchor.messageId)
+        Array.from(viewport?.querySelectorAll<HTMLElement>("[data-chat-message-id]") ?? []).find(
+          (candidate) => candidate.dataset.chatMessageId === anchor.messageId
+        )
       if (viewport && target) {
         const delta = target.getBoundingClientRect().top - anchor.viewportTop
         if (Math.abs(delta) > 1) viewport.scrollTop += delta
@@ -4554,7 +4507,11 @@ export function ChatContainer({
       }
       const visibleIndex = visibleMessageIndexById.get(anchor.messageId)
       if (!target && anchor.attempt === 0 && visibleIndex !== undefined) {
-        virtuosoRef.current?.scrollToIndex({ index: visibleIndex, align: "start", behavior: "auto" })
+        virtuosoRef.current?.scrollToIndex({
+          index: visibleIndex,
+          align: "start",
+          behavior: "auto"
+        })
       }
       anchor.attempt += 1
       if (anchor.attempt <= CHAT_HISTORY_ANCHOR_MAX_FRAMES) {
@@ -4610,15 +4567,17 @@ export function ChatContainer({
       })
       return
     }
-    if (shouldMarkChatTailContentGrowth({
-      change: tailChange,
-      currentTail: lastVisibleMessage,
-      contentVersionChanged: nextSnapshot.contentVersion !== previous.contentVersion,
-      structureVersionChanged: nextSnapshot.structureVersion !== previous.structureVersion,
-      changedTail: displayMessageProjection.changedMessages.some(
-        (message) => message.id === nextSnapshot.lastMessageId
-      )
-    })) {
+    if (
+      shouldMarkChatTailContentGrowth({
+        change: tailChange,
+        currentTail: lastVisibleMessage,
+        contentVersionChanged: nextSnapshot.contentVersion !== previous.contentVersion,
+        structureVersionChanged: nextSnapshot.structureVersion !== previous.structureVersion,
+        changedTail: displayMessageProjection.changedMessages.some(
+          (message) => message.id === nextSnapshot.lastMessageId
+        )
+      })
+    ) {
       const state = chatScrollStateRef.current
       if (state && isChatScrollDetached(state)) {
         dispatchChatScrollEvent({ type: "CONTENT_GROWN", generation: state.generation })
@@ -4954,12 +4913,7 @@ export function ChatContainer({
         textarea.setSelectionRange(cursor, cursor)
       })
     },
-    [
-      setInput,
-      setSelectedBuiltinBrowser,
-      setSelectedSkill,
-      slashResetSelection
-    ]
+    [setInput, setSelectedBuiltinBrowser, setSelectedSkill, slashResetSelection]
   )
 
   const applyAtFileMention = useCallback(
@@ -5021,10 +4975,7 @@ export function ChatContainer({
   )
 
   const appendVisibleUserMessageWithTime = useCallback(
-    async (
-      content: string,
-      options: { id?: string } = {}
-    ): Promise<Message> => {
+    async (content: string, options: { id?: string } = {}): Promise<Message> => {
       const userStartAt = new Date()
       const userMessage: Message = {
         id: options.id ?? crypto.randomUUID(),
@@ -5217,9 +5168,9 @@ export function ChatContainer({
     ]
   )
 
-  const handleSubmit = async (e: React.FormEvent, defaultText=''): Promise<void> => {
+  const handleSubmit = async (e: React.FormEvent, defaultText = ""): Promise<void> => {
     e.preventDefault()
-    const trimmedInput = defaultText ||  input.trim()
+    const trimmedInput = defaultText || input.trim()
     const isGoalSlashInput = /^\/goal(?:\s|$)/i.test(trimmedInput)
     const shouldOpenGoalDetailsForStatus = /^\/goal(?:\s+status)?\s*$/i.test(trimmedInput)
     // Defense-in-depth: every current trigger already short-circuits while the
@@ -5245,10 +5196,7 @@ export function ChatContainer({
     })
     const willEnqueueWhileBusy =
       !isGoalSlashInput &&
-      (isLoading ||
-        Boolean(pendingApproval) ||
-        approvalQueue.length > 0 ||
-        shouldQueueBehindSubmit)
+      (isLoading || Boolean(pendingApproval) || approvalQueue.length > 0 || shouldQueueBehindSubmit)
     if (
       (!trimmedInput && !hasPendingFilePayload && !selectedSkill && !selectedBuiltinBrowser) ||
       historyLoading ||
@@ -5459,9 +5407,7 @@ export function ChatContainer({
             // A workspace can still change before the first user turn is
             // committed. Fence both sides of the async read so content from a
             // newly selected workspace is never attached under the old chip path.
-            if (
-              normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey
-            ) {
+            if (normalizeWorkspacePathKey(workspacePathRef.current) !== atFileWorkspaceKey) {
               return { success: false }
             }
             const result = await readBoundedWorkspaceMentionFile({
@@ -7265,7 +7211,7 @@ export function ChatContainer({
             <p className="text-xs">可重试或选择受限沙箱模式继续使用。</p>
             <div className="flex gap-2 mt-1">
               <button
-                className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+                className="px-3 py-1.5 text-xs bg-button text-button-foreground rounded-md hover:bg-button/90 transition-colors"
                 onClick={() => {
                   setNuxError(null)
                   setNuxLoading(true)
@@ -7315,16 +7261,12 @@ export function ChatContainer({
   const chatMessageListFooter = (
     <div
       className="space-y-4 pt-4 pb-4"
-      style={
-        userInputScrollPadding
-          ? { paddingBottom: `${userInputScrollPadding}px` }
-          : undefined
-      }
+      style={userInputScrollPadding ? { paddingBottom: `${userInputScrollPadding}px` } : undefined}
     >
       {contextCompaction && <ContextCompactionCard compaction={contextCompaction} />}
       {modelRetry && (
-        <div className="flex items-start gap-2 rounded-md border border-amber-300/60 bg-amber-50/60 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
-          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-amber-500 border-t-transparent" />
+        <div className="flex items-start gap-2 rounded-md border border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-status-warning-foreground">
+          <span className="mt-0.5 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-status-warning border-t-transparent" />
           <div className="min-w-0 flex-1">
             <span>
               模型暂时不可用（{modelRetry.reason}），正在重试 {modelRetry.attempt}/
@@ -7360,25 +7302,25 @@ export function ChatContainer({
         <WorkflowHistoryButton threadId={threadId} />
       ) : null}
       {hookInterruption && !isLoading && (
-        <div className="flex items-start gap-3 rounded-md border border-amber-400/60 bg-amber-50/50 p-4 dark:border-amber-500/40 dark:bg-amber-500/10">
-          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-amber-600 dark:text-amber-300" />
+        <div className="flex items-start gap-3 rounded-md border border-status-warning/30 bg-status-warning/10 p-4">
+          <ShieldCheck className="mt-0.5 size-5 shrink-0 text-status-warning-foreground" />
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-amber-800 dark:text-amber-200">
+            <div className="text-sm font-medium text-status-warning-foreground">
               {interruptionNotice?.title}
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-700/80 dark:text-amber-200/80">
-              <span className="rounded border border-amber-400/50 px-1.5 py-0.5 font-mono">
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-status-warning-foreground/80">
+              <span className="rounded border border-status-warning/40 px-1.5 py-0.5 font-mono">
                 {hookInterruption.event}
               </span>
               <span title={HOOK_TIME_ZONE_LABEL}>
                 {formatHookClockTime(hookInterruption.timestamp) ?? "时间无效"}
               </span>
             </div>
-            <div className="mt-2 text-sm text-amber-900/90 break-words dark:text-amber-100/90">
+            <div className="mt-2 break-words text-sm text-status-warning-foreground">
               {hookInterruption.reason}
             </div>
             {hookInterruption.systemMessage && (
-              <div className="mt-2 text-xs text-amber-700/80 break-words dark:text-amber-200/80">
+              <div className="mt-2 break-words text-xs text-status-warning-foreground/80">
                 {hookInterruption.systemMessage}
               </div>
             )}
@@ -7388,7 +7330,7 @@ export function ChatContainer({
           </div>
           <button
             onClick={clearHookInterruption}
-            className="shrink-0 rounded p-1 transition-colors hover:bg-amber-500/20"
+            className="shrink-0 rounded p-1 transition-colors hover:bg-status-warning/20"
             aria-label="Dismiss hook notice"
           >
             <X className="size-4 text-muted-foreground" />
@@ -7571,9 +7513,7 @@ export function ChatContainer({
         {({ reserveLeftSpace, setMessageRef, virtualRangeRef }) => (
           <>
             <ScrollArea className="flex-1 min-h-0" ref={scrollRef}>
-              <div
-                className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}
-              >
+              <div className={cn("px-4 pt-4", reserveLeftSpace && "md:pl-[20px]")}>
                 <div className="max-w-3xl mx-auto space-y-4">
                   {historyLoading && displayMessages.length === 0 && (
                     <div
@@ -7621,9 +7561,7 @@ export function ChatContainer({
                     historyPageLoading={historyPageLoading}
                     historyRemainingCount={historyRemainingCount}
                     historyGapBeforeMessageId={historyGapBeforeVisibleMessageId}
-                    canLoadReleasedHistory={Boolean(
-                      historyWindowGap?.reloadTargetMessageId
-                    )}
+                    canLoadReleasedHistory={Boolean(historyWindowGap?.reloadTargetMessageId)}
                     onLoadReleasedHistoryWindow={loadReleasedHistoryWindow}
                     onRestoreLatestHistoryWindow={scrollToConversationBottom}
                     hookLoggingEnabled={hookLogConfig.enabled}
@@ -7918,7 +7856,7 @@ export function ChatContainer({
                             <>
                               {approvalTypes.includes("approve") && (
                                 <button
-                                  className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+                                  className="rounded-md bg-button px-4 py-2 text-sm font-semibold text-button-foreground shadow-sm transition-colors hover:bg-button/90"
                                   onClick={() => handleApprovalDecision("approve")}
                                 >
                                   {isFileApproval
@@ -8013,7 +7951,7 @@ export function ChatContainer({
                       type="button"
                       onClick={onOpenGitPanel}
                       disabled={!onOpenGitPanel}
-                      className="rounded-md bg-status-warning px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-status-warning/90 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="rounded-md bg-status-warning/15 px-2.5 py-1 text-xs font-medium text-status-warning transition-colors hover:bg-status-warning/20 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       打开
                     </button>
@@ -8088,9 +8026,9 @@ export function ChatContainer({
                               }}
                               onDragEnd={() => setDraggingQueueId(null)}
                               className={cn(
-                                "rounded-xl bg-amber-900/5 px-2.5 py-2 transition-colors",
+                                "rounded-xl bg-status-warning/5 px-2.5 py-2 transition-colors",
                                 draggingQueueId === queued.id && "opacity-50",
-                                !isEditing && "hover:bg-amber-900/10"
+                                !isEditing && "hover:bg-status-warning/10"
                               )}
                             >
                               {isEditing ? (
@@ -8123,7 +8061,7 @@ export function ChatContainer({
                                     <button
                                       type="button"
                                       onClick={saveEditingQueuedMessage}
-                                      className="flex h-7 items-center gap-1 rounded-md bg-primary px-2 text-xs text-primary-foreground hover:bg-primary/90"
+                                      className="flex h-7 items-center gap-1 rounded-md bg-button px-2 text-xs text-button-foreground hover:bg-button/90"
                                     >
                                       <Check className="size-3.5" />
                                       保存
@@ -8212,8 +8150,8 @@ export function ChatContainer({
                         pendingUserInput
                           ? "border-primary/25 bg-background"
                           : appleIntelligenceGlowEnabled && glowVisible
-                            ? "bg-white/80"
-                            : "bg-white",
+                            ? "bg-background-elevated/80"
+                            : "bg-background-elevated",
                         dragOver && "border-primary"
                       )}
                       onDrop={handleDrop}
@@ -8364,8 +8302,7 @@ export function ChatContainer({
                             locked={isLoading || !canChangeAgentMode}
                             lockedReason={agentModeSwitchDisabledReason}
                             disabledModes={
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
+                              disableCoordinatorModeOption || disableWorkflowModeOption
                                 ? {
                                     coordinator: disableCoordinatorModeOption,
                                     workflow: disableWorkflowModeOption
@@ -8373,8 +8310,7 @@ export function ChatContainer({
                                 : undefined
                             }
                             disabledModeReasons={
-                              disableCoordinatorModeOption ||
-                              disableWorkflowModeOption
+                              disableCoordinatorModeOption || disableWorkflowModeOption
                                 ? {
                                     coordinator: disableCoordinatorModeOption
                                       ? "项目模式暂不支持 Agent Team。"
@@ -8419,7 +8355,7 @@ export function ChatContainer({
                                   type="submit"
                                   disabled={goalSendButtonDisabledWhileLoading}
                                   aria-label="发送 goal 命令"
-                                  className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                  className="flex items-center justify-center size-7 rounded-md bg-button text-button-foreground hover:bg-button/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                                 >
                                   <Send className="size-3.5" />
                                 </button>
@@ -8455,34 +8391,6 @@ export function ChatContainer({
                                   </Tooltip>
                                 </TooltipProvider>
                               )}
-                              <TooltipProvider delayDuration={180}>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        if (effectiveInputDisabled) return
-                                        // 创建伪造的表单提交事件
-                                        const fakeEvent = {
-                                          preventDefault: () => {}
-                                        } as React.FormEvent
-                                        // 发送继续消息
-                                        handleSubmit(fakeEvent, "继续")
-                                      }}
-                                      disabled={effectiveInputDisabled}
-                                      className="flex items-center justify-center gap-1 px-2.5 h-7 rounded-md border border-primary/20 bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                      aria-label="继续对话"
-                                    >
-                                      <Send className="size-3.5" />
-                                      <span className="text-xs font-medium">继续</span>
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top" sideOffset={6}>
-                                    点击自动发送“继续”2字
-                                  </TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
-
                               <button
                                 type="submit"
                                 disabled={
@@ -8494,7 +8402,7 @@ export function ChatContainer({
                                   (slash.mode.kind === "slash" &&
                                     !isBareGoalSlashCommandInput(input))
                                 }
-                                className="flex items-center justify-center size-7 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                className="flex items-center justify-center size-7 rounded-md bg-button text-button-foreground hover:bg-button/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                               >
                                 <Send className="size-3.5" />
                               </button>

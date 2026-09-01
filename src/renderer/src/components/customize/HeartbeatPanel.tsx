@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useRef } from "react"
 import { FolderOpen, Play, Loader2, HeartPulse, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { cn } from "@/lib/utils"
 import type { HeartbeatConfig } from "@/types"
 
@@ -186,9 +187,9 @@ export function HeartbeatPanel(): React.JSX.Element {
               )}
               onClick={() => handleToggleEnabled(!config.enabled)}
             >
-              <span
+              <ToggleThumb
                 className={cn(
-                  "pointer-events-none inline-block size-4 rounded-full bg-white shadow-sm transition-transform",
+                  "inline-block size-4",
                   config.enabled ? "translate-x-4" : "translate-x-0"
                 )}
               />

@@ -490,7 +490,7 @@ function WelcomeSkillButton(props: {
         "group w-full rounded-xl border px-3 py-2 text-left transition-all",
         disabled
           ? "cursor-not-allowed border-border/70 bg-background/60 opacity-65"
-          : "border-slate-300/90 bg-slate-50/70 shadow-[0_1px_0_rgba(15,23,42,0.05)] hover:border-slate-400/95 hover:bg-slate-100/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] dark:border-slate-600/85 dark:bg-slate-900/35 dark:hover:border-slate-500/95 dark:hover:bg-slate-800/55"
+          : "border-border bg-background-elevated shadow-[0_1px_0_rgba(0,0,0,0.05)] hover:border-border-emphasis hover:bg-background-interactive hover:shadow-[0_2px_8px_rgba(0,0,0,0.12)]"
       )}
     >
       <div className="flex min-w-0 items-center gap-2">
@@ -499,7 +499,7 @@ function WelcomeSkillButton(props: {
             "rounded-md border p-1.5 transition-colors",
             disabled
               ? "border-border/70 bg-background/70 text-muted-foreground"
-              : "border-slate-300/90 bg-white/80 text-slate-500 group-hover:text-slate-700 dark:border-slate-600/80 dark:bg-slate-900/45 dark:text-slate-300 dark:group-hover:text-slate-100"
+              : "border-border bg-background-interactive text-muted-foreground group-hover:text-foreground"
           )}
         >
           {card.icon}
@@ -1009,10 +1009,10 @@ export function WelcomeSkills({
                 ) : (
                   <button
                     type="button"
-                    className="group w-full rounded-xl border border-slate-300/90 bg-slate-50/70 px-3 py-2 text-left shadow-[0_1px_0_rgba(15,23,42,0.05)] transition-all hover:border-slate-400/95 hover:bg-slate-100/95 hover:shadow-[0_2px_8px_rgba(15,23,42,0.12)] dark:border-slate-600/85 dark:bg-slate-900/35 dark:hover:border-slate-500/95 dark:hover:bg-slate-800/55"
+                    className="group w-full rounded-xl border border-border bg-background-elevated px-3 py-2 text-left shadow-[0_1px_0_rgba(0,0,0,0.05)] transition-all hover:border-border-emphasis hover:bg-background-interactive hover:shadow-[0_2px_8px_rgba(0,0,0,0.12)]"
                   >
                     <div className="flex min-w-0 items-center gap-2">
-                      <div className="rounded-md border border-slate-300/90 bg-white/80 p-1.5 text-slate-500 transition-colors group-hover:text-slate-700 dark:border-slate-600/80 dark:bg-slate-900/45 dark:text-slate-300 dark:group-hover:text-slate-100">
+                      <div className="rounded-md border border-border bg-background-interactive p-1.5 text-muted-foreground transition-colors group-hover:text-foreground">
                         <CircleAlert className="size-4" />
                       </div>
                       <div className="min-w-0 flex-1">

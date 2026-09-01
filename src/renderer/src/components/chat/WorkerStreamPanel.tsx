@@ -940,6 +940,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
     (state) => state.workerFocusMessagesContentVersion
   )
   const closeWorkerFocusView = useAppStore((state) => state.closeWorkerFocusView)
+  const requestOpenRightPanelAgents = useAppStore((state) => state.requestOpenRightPanelAgents)
   const threadContext = useThreadContext()
   const [historyMessages, setHistoryMessages] = useState<Message[]>([])
   const [truncatedHistoryCount, setTruncatedHistoryCount] = useState(0)
@@ -1300,14 +1301,17 @@ export function WorkerStreamPanel(): React.JSX.Element {
             variant="ghost"
             size="sm"
             type="button"
-            onClick={() => closeWorkerFocusView()}
+            onClick={() => {
+              requestOpenRightPanelAgents(workerFocusView.threadId)
+              closeWorkerFocusView()
+            }}
             className="h-7 w-9 p-0"
             title="返回"
             aria-label="返回"
           >
             <ArrowLeft className="size-6" strokeWidth={1} />
           </Button>
-          <Workflow className="size-3.5 shrink-0 text-stone-500" />
+          <Workflow className="size-3.5 shrink-0 text-muted-foreground" />
           <div className="min-w-0 truncate text-sm font-semibold text-foreground">
             Worker 工具流
             <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -1320,7 +1324,7 @@ export function WorkerStreamPanel(): React.JSX.Element {
             "shrink-0 rounded-full border px-2 py-0.5 text-[11px] leading-none",
             isRunning
               ? "border-blue-300/60 bg-blue-500/10 text-blue-700 dark:text-blue-300"
-              : "border-stone-300/80 bg-stone-100/70 text-stone-700 dark:border-stone-700 dark:bg-stone-900/45 dark:text-stone-300"
+              : "border-border bg-background-interactive/70 text-muted-foreground"
           )}
         >
           {isRunning ? "实时运行中" : "历史快照"}

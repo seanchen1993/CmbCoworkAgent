@@ -26,9 +26,15 @@ export function goalVerdictLabel(verdict: string | null): string {
 }
 
 export function goalVerdictTone(verdict: string | null): string {
-  if (verdict === "complete") return "border-emerald-200 bg-emerald-50/70 text-emerald-950"
-  if (verdict === "blocked") return "border-amber-200 bg-amber-50/75 text-amber-950"
-  if (verdict === "continue") return "border-blue-200 bg-blue-50/70 text-blue-950"
+  if (verdict === "complete") {
+    return "border-emerald-200 bg-emerald-50/70 text-emerald-950 dark:border-emerald-500/30 dark:bg-emerald-950/40 dark:text-emerald-100"
+  }
+  if (verdict === "blocked") {
+    return "border-amber-200 bg-amber-50/75 text-amber-950 dark:border-amber-500/30 dark:bg-amber-950/40 dark:text-amber-100"
+  }
+  if (verdict === "continue") {
+    return "border-blue-200 bg-blue-50/70 text-blue-950 dark:border-blue-500/30 dark:bg-blue-950/40 dark:text-blue-100"
+  }
   return "border-border bg-muted/25 text-foreground"
 }
 

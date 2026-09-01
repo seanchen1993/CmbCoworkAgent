@@ -143,23 +143,23 @@ export function BrowserCdpConfigCard({
     <>
       <div
         className={cn(
-          "overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]",
+          "overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.16)]",
           className
         )}
       >
-        <div className="border-b border-stone-100 px-4 py-2">
-          <p className="text-xs font-semibold text-stone-800">{title}</p>
-          <p className="mt-0.5 text-[11px] text-stone-500">{description}</p>
+        <div className="border-b border-border px-4 py-2">
+          <p className="text-xs font-semibold text-foreground">{title}</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">{description}</p>
         </div>
 
         <div className="space-y-2 p-2">
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background-interactive px-3 py-2.5">
             <div className="min-w-0">
-              <p className="text-xs font-medium text-stone-800">
+              <p className="text-xs font-medium text-foreground">
                 开启 Agent操控内置浏览器
                 {/*（{cdpConfig?.enabled ? "已启用" : "未启用"}）*/}
               </p>
-              <p className="mt-1 text-[11px] leading-4 text-stone-500">
+              <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                 开启后，才能让Agent连接并操控当前内置浏览器。
               </p>
             </div>
@@ -170,13 +170,13 @@ export function BrowserCdpConfigCard({
             />
           </div>
 
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-stone-200/80 bg-stone-50/80 px-3 py-2.5">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background-interactive px-3 py-2.5">
             <div className="min-w-0">
-              <p className="text-xs font-medium text-stone-800">
+              <p className="text-xs font-medium text-foreground">
                 开启 导入已有Chrome登陆数据
                 {/*（{cdpConfig?.profileImportEnabled ? "已启用" : "未启用"}）*/}
               </p>
-              <p className="mt-1 text-[11px] leading-4 text-stone-500">
+              <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                 开启后，支持加载导入已有Chrome浏览器数据所需能力。
               </p>
             </div>
@@ -188,7 +188,7 @@ export function BrowserCdpConfigCard({
           </div>
 
           <div className="flex items-center justify-between gap-3" ref={saveButtonRef}>
-            <p className="text-[11px] leading-4 text-stone-500">保存后需重启应用生效。</p>
+            <p className="text-[11px] leading-4 text-muted-foreground">保存后需重启应用生效。</p>
             <Button
               type="button"
               size="sm"
@@ -268,7 +268,7 @@ export function BrowserCdpConfigCard({
                   {APP_DOWNLOAD_URL ? (
                     <a
                       href={APP_DOWNLOAD_URL}
-                      className="text-purple-500 underline underline-offset-2 hover:text-purple-700 ml-2"
+                      className="ml-2 text-primary underline underline-offset-2 hover:text-primary/80"
                       onClick={(event) => {
                         event.preventDefault()
                         void window.electron.openExternal(APP_DOWNLOAD_URL)

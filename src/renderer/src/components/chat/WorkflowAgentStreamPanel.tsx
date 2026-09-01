@@ -72,7 +72,7 @@ function statusBadge(status: string | undefined): { label: string; className: st
       return {
         label: "历史快照",
         className:
-          "border-stone-300/80 bg-stone-100/70 text-stone-700 dark:border-stone-700 dark:bg-stone-900/45 dark:text-stone-300"
+          "border-border bg-background-interactive/70 text-muted-foreground"
       }
   }
 }

@@ -23,7 +23,7 @@ export function SkillChip({
     <span
       className={cn(
         "inline-flex items-center gap-1 rounded-md align-middle",
-        "bg-violet-100 text-violet-700",
+        "bg-accent text-accent-foreground",
         "dark:bg-violet-500/20 dark:text-violet-300",
         compact ? "px-1.5 py-0.5 text-xs" : "px-2 py-1 text-sm",
         "font-medium",

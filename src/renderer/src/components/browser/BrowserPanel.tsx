@@ -129,54 +129,54 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
 
 function BrowserWelcomePanel(): React.JSX.Element {
   return (
-    <div className="absolute inset-0 z-20 overflow-y-auto bg-[radial-gradient(circle_at_12%_0%,rgba(234,179,8,0.11),transparent_34%),radial-gradient(circle_at_100%_100%,rgba(14,116,144,0.08),transparent_42%),#fcfcfb]">
+    <div className="absolute inset-0 z-20 overflow-y-auto bg-background">
       <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-4 py-2">
         <div className="mb-2">
-          <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-stone-200/80 bg-white text-stone-700 shadow-[0_8px_24px_rgba(41,37,36,0.08)]">
+          <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-border bg-background-elevated text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
             <Globe2 className="size-8 animate-[spin_12s_linear_infinite]" strokeWidth={1.7} />
           </div>
-          <p className="text-[10px] font-semibold tracking-[0.18em] text-stone-500">
+          <p className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
             IN-APP BROWSER
           </p>
-          <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-stone-900">
+          <h2 className="mt-1.5 text-lg font-semibold tracking-tight text-foreground">
             让 AI 在网页中，完成最后一公里
           </h2>
-          <p className="mt-2  text-xs leading-5 text-stone-600">
+          <p className="mt-2 text-xs leading-5 text-muted-foreground">
             在上方地址栏输入 Web URL、本地服务地址或工作区 HTML 路径，按 Enter 即刻开始。
           </p>
         </div>
 
-        <div className="overflow-hidden rounded-xl border border-stone-200/90 bg-white/90 shadow-[0_14px_38px_rgba(41,37,36,0.06)]">
-          <div className="border-b border-stone-100 px-4 py-3">
-            <p className="text-xs font-semibold text-stone-800">一个浏览器，贯通开发与验证</p>
-            <p className="mt-0.5 text-[11px] text-stone-500">
+        <div className="overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.16)]">
+          <div className="border-b border-border px-4 py-3">
+            <p className="text-xs font-semibold text-foreground">一个浏览器，贯通开发与验证</p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
               预览页面、复用登录态、驱动自动化，让每次网页任务更快闭环。
             </p>
           </div>
 
-          <div className="divide-y divide-stone-100">
+          <div className="divide-y divide-border">
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">
                 <Terminal className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">代码一改，效果即见</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
-                  运行 <code className="font-mono text-[10px] text-stone-700">npm run dev</code>
+                <p className="text-xs font-medium text-foreground">代码一改，效果即见</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                  运行 <code className="font-mono text-[10px] text-foreground">npm run dev</code>
                   后直接打开{" "}
-                  <code className="font-mono text-[10px] text-stone-700">localhost:8080</code>
+                  <code className="font-mono text-[10px] text-foreground">localhost:8080</code>
                   。AI 生成代码的同时，页面变化实时呈现，无需反复切换浏览器。
                 </p>
               </div>
             </div>
 
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300">
                 <Settings2 className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">把网页操作交给 AI</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                <p className="text-xs font-medium text-foreground">把网页操作交给 AI</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                   开启内置浏览器控制后，AI
                   可在任务中浏览页面、填写表单、点击操作并验证结果。并且支持Iframe。
                 </p>
@@ -184,17 +184,17 @@ function BrowserWelcomePanel(): React.JSX.Element {
             </div>
 
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300">
                 <KeyRound className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">登录一次，连续工作</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                <p className="text-xs font-medium text-foreground">登录一次，连续工作</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                   导入已有 Chrome 登录数据，减少重复扫码与登录。首次使用需安装浏览器插件，
                   {APP_DOWNLOAD_URL ? (
                     <a
                       href={APP_DOWNLOAD_URL}
-                      className="text-purple-500 underline underline-offset-2 hover:text-purple-700"
+                      className="text-primary underline underline-offset-2 hover:text-primary/80"
                       onClick={(event) => {
                         event.preventDefault()
                         void window.electron.openExternal(APP_DOWNLOAD_URL)
@@ -211,12 +211,12 @@ function BrowserWelcomePanel(): React.JSX.Element {
             </div>
 
             <div className="flex gap-3 px-4 py-3">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">
                 <Bot className="size-3.5" strokeWidth={1.8} />
               </span>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-stone-800">每次验证，都值得复用</p>
-                <p className="mt-1 text-[11px] leading-4 text-stone-500">
+                <p className="text-xs font-medium text-foreground">每次验证，都值得复用</p>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                   录制人工操作，把高频验证沉淀为可复用的测试案例，让下次验证从已有流程开始。
                 </p>
               </div>
@@ -230,7 +230,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
           description="在此开启 AI 浏览器操控和 Chrome 登录数据导入；保存后重启应用即可生效。"
         />
 
-        <div className="mt-4 text-[11px] text-stone-500">
+        <div className="mt-4 text-[11px] text-muted-foreground">
           从一个链接开始，让每次网页任务更快完成。
         </div>
       </div>
@@ -824,18 +824,18 @@ export function BrowserPanel({
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1 bg-white">
+      <div className="relative min-h-0 flex-1 bg-background">
         {/* Keep the welcome panel mounted so any dialogs launched from it are not
             immediately unmounted by the BrowserView modal-hide guard. */}
         {showBrowserWelcome && <BrowserWelcomePanel />}
         {isHiddenByModalDialog && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[radial-gradient(circle_at_top,#f5f5f4,transparent_58%),linear-gradient(135deg,#fafaf9,#f5f5f4)] p-6">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background p-6">
             <div className="max-w-xs text-center">
-              <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 shadow-sm">
+              <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full border border-border bg-background-elevated text-muted-foreground shadow-sm">
                 <EyeOff className="size-4" strokeWidth={1.8} />
               </div>
-              <p className="text-sm font-medium text-stone-800">浏览器已暂时隐藏</p>
-              <p className="mt-1.5 text-xs leading-5 text-stone-500">
+              <p className="text-sm font-medium text-foreground">浏览器已暂时隐藏</p>
+              <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
                 为确保当前弹窗完整显示，内置浏览器会在关闭弹窗后自动恢复。
               </p>
             </div>
@@ -924,7 +924,7 @@ export function BrowserPanel({
       </div>
 
       {consoleOpen && (
-        <div className="shrink-0 border-t border-border bg-white">
+        <div className="shrink-0 border-t border-border bg-background-elevated">
           <div className="flex h-9 items-center justify-between gap-2 px-3 text-[11px] text-muted-foreground">
             <div className="flex min-w-0 items-center gap-2">
               <Terminal className="size-3.5 shrink-0" strokeWidth={1.8} />
@@ -969,10 +969,10 @@ export function BrowserPanel({
           </div>
           <div
             ref={consoleScrollerRef}
-            className="h-44 overflow-auto border-t border-border/70 bg-white px-3 py-2 font-mono text-[11px] leading-5 text-slate-900"
+            className="h-44 overflow-auto border-t border-border/70 bg-background px-3 py-2 font-mono text-[11px] leading-5 text-foreground"
           >
             {consoleCount === 0 ? (
-              <div className="flex h-full items-center justify-center text-slate-500">
+              <div className="flex h-full items-center justify-center text-muted-foreground">
                 暂无 console 输出
               </div>
             ) : (
@@ -1007,7 +1007,7 @@ function getConsoleLevelClass(level: BrowserConsoleEntry["level"]): string {
     case "debug":
       return "text-violet-600"
     default:
-      return "text-slate-600"
+      return "text-muted-foreground"
   }
 }
 
@@ -1017,10 +1017,10 @@ function ConsoleRow({ entry }: { entry: BrowserConsoleEntry }): React.JSX.Elemen
 
   return (
     <div className="grid grid-cols-[64px_48px_minmax(0,1fr)] gap-3 py-1">
-      <span className="text-slate-500">{formatConsoleTime(entry.timestamp)}</span>
+      <span className="text-muted-foreground">{formatConsoleTime(entry.timestamp)}</span>
       <span className={getConsoleLevelClass(entry.level)}>{entry.level.toUpperCase()}</span>
-      <div className="min-w-0 whitespace-pre-wrap break-words text-slate-900">
-        {sourceLabel && <span className="mr-2 text-slate-500">{sourceLabel}</span>}
+      <div className="min-w-0 whitespace-pre-wrap break-words text-foreground">
+        {sourceLabel && <span className="mr-2 text-muted-foreground">{sourceLabel}</span>}
         {entry.message}
       </div>
     </div>

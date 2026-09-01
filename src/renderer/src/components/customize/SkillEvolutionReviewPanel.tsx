@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { ToggleThumb } from "@/components/ui/toggle-thumb"
 import { cn } from "@/lib/utils"
 import { evolutionApi, type EvolutionCandidate } from "@/api/evolution"
 import { DiffDisplay } from "@/components/chat/DiffDisplay"
@@ -334,24 +335,24 @@ export function SkillEvolutionReviewPanel({
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden bg-[#faf9f5]">
-      <div className="w-[360px] border-r border-[#ebe8dd] flex flex-col">
-        <div className="p-5 border-b border-[#ebe8dd]">
+    <div className="skill-evolution-theme flex flex-1 overflow-hidden bg-background">
+      <div className="flex w-[360px] flex-col border-r border-border">
+        <div className="border-b border-border p-5">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <h2
-                className="text-lg font-semibold text-[#181713] cursor-default select-none"
+                className="cursor-default select-none text-lg font-semibold text-foreground"
                 onClick={handleDebugReveal}
               >
                 {isCreatorMode ? "我的技能优化候选" : "技能进化审批"}
               </h2>
-              <p className="mt-1 text-sm text-[#7b7970]">
+              <p className="mt-1 text-sm text-muted-foreground">
                 {isCreatorMode
                   ? "审阅并发布你上传技能的优化候选。"
                   : "审阅 Trace Evolver 生成的候选补丁。"}
               </p>
               {showDebugToggle && (
-                <div className="mt-3 flex min-w-0 items-start gap-2 text-xs leading-5 text-[#7b7970]">
+                <div className="mt-3 flex min-w-0 items-start gap-2 text-xs leading-5 text-muted-foreground">
                   <button
                     type="button"
                     role="switch"
@@ -360,17 +361,17 @@ export function SkillEvolutionReviewPanel({
                     className={cn(
                       "relative mt-px h-5 w-9 shrink-0 rounded-full border transition-colors",
                       useLocalDebugEndpoint
-                        ? "border-[#3b68a8] bg-[#3b68a8]"
-                        : "border-[#d8d3c2] bg-[#eeeae0]"
+                        ? "border-primary bg-primary"
+                        : "border-border-emphasis bg-background-interactive"
                     )}
                     title="开启后所有 Trace Evolver 请求走本地 8017"
                   >
-                    <span
-                      className={cn(
-                        "absolute left-0.5 top-0.5 size-4 rounded-full bg-white shadow transition-transform",
-                        useLocalDebugEndpoint ? "translate-x-4" : "translate-x-0"
-                      )}
-                    />
+                      <ToggleThumb
+                        className={cn(
+                          "absolute left-0.5 top-0.5 size-4 shadow",
+                          useLocalDebugEndpoint ? "translate-x-4" : "translate-x-0"
+                        )}
+                      />
                   </button>
                   <span className="min-w-0 text-left">连接本地Trace Evolver服务(开发者调试使用)</span>
                 </div>
@@ -388,7 +389,7 @@ export function SkillEvolutionReviewPanel({
         <ScrollArea className="flex-1">
           <div className="p-3 space-y-2">
             {visibleItems.length === 0 && (
-              <div className="rounded-xl border border-dashed border-[#d8d3c2] p-5 text-sm text-[#7b7970]">
+              <div className="rounded-xl border border-dashed border-border-emphasis p-5 text-sm text-muted-foreground">
                 {isCreatorMode
                   ? "暂无你技能的优化候选。把技能上传到应用市场后，云端自进化跑出的优化版本会出现在这里。"
                   : "暂无待审批候选。Trace Evolver 跑完后会出现在这里。"}
@@ -400,22 +401,22 @@ export function SkillEvolutionReviewPanel({
                 className={cn(
                   "w-full rounded-xl border p-3 text-left transition-colors",
                   selected?.candidate_id === item.candidate_id
-                    ? "border-[#3b68a8] bg-white"
-                    : "border-[#ebe8dd] bg-[#fffdf8] hover:bg-white"
+                    ? "border-primary bg-background-elevated"
+                    : "border-border bg-background-elevated hover:bg-background-interactive"
                 )}
                 onClick={() => setSelectedId(item.candidate_id)}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-medium text-[#181713] truncate">{item.skill_name}</span>
-                  <span className="rounded-full bg-[#eef5ff] px-2 py-0.5 text-[11px] text-[#3b68a8]">
+                  <span className="truncate font-medium text-foreground">{item.skill_name}</span>
+                  <span className="rounded-full bg-accent px-2 py-0.5 text-[11px] text-accent-foreground">
                     {statusLabel(item.evolution_status)}
                   </span>
                 </div>
-                <div className="mt-2 text-xs text-[#7b7970]">
+                <div className="mt-2 text-xs text-muted-foreground">
                   {item.source_version || "unknown"} → {item.target_version || "unknown"} · score{" "}
                   {scoreLabel(item.evaluation_score)}
                 </div>
-                <div className="mt-1 text-xs text-[#9a9688] truncate">{item.candidate_id}</div>
+                <div className="mt-1 truncate text-xs text-tertiary-foreground">{item.candidate_id}</div>
               </button>
             ))}
           </div>
@@ -424,21 +425,21 @@ export function SkillEvolutionReviewPanel({
 
       <div className="flex min-w-0 flex-1 flex-col">
         {!selected ? (
-          <div className="flex flex-1 items-center justify-center text-sm text-[#7b7970]">
+          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
             请选择一个候选。
           </div>
         ) : (
           <>
-            <div className="border-b border-[#ebe8dd] bg-white px-6 py-4">
+            <div className="border-b border-border bg-background-elevated px-6 py-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="flex items-center gap-2">
-                    <ShieldCheck className="size-5 text-[#3b68a8]" />
-                    <h3 className="text-base font-semibold text-[#181713]">
+                    <ShieldCheck className="size-5 text-primary" />
+                    <h3 className="text-base font-semibold text-foreground">
                       {selected.skill_name}
                     </h3>
                   </div>
-                  <p className="mt-1 text-sm text-[#7b7970]">
+                  <p className="mt-1 text-sm text-muted-foreground">
                     变更文件 {selected.files_changed.length} 个，来源 trace{" "}
                     {selected.source_trace_ids.length} 条。
                   </p>
@@ -515,11 +516,11 @@ export function SkillEvolutionReviewPanel({
                   <Info label="状态" value={statusLabel(selected.evolution_status)} />
                   <Info label="候选 ID" value={selected.candidate_id} />
                 </div>
-                <div className="min-h-[540px] overflow-hidden rounded-xl border border-[#ebe8dd] bg-white">
+                <div className="min-h-[540px] overflow-hidden rounded-xl border border-border bg-background-elevated">
                   {diff ? (
                     <DiffDisplay diff={diff} />
                   ) : (
-                    <div className="flex min-h-[220px] items-center justify-center text-sm text-[#7b7970]">
+                    <div className="flex min-h-[220px] items-center justify-center text-sm text-muted-foreground">
                       暂无 diff
                     </div>
                   )}
@@ -547,9 +548,9 @@ export function SkillEvolutionReviewPanel({
 
 function Info({ label, value }: { label: string; value: string }): React.JSX.Element {
   return (
-    <div className="rounded-xl border border-[#ebe8dd] bg-white p-3">
-      <div className="text-xs text-[#9a9688]">{label}</div>
-      <div className="mt-1 break-all text-sm text-[#181713]">{value}</div>
+    <div className="rounded-xl border border-border bg-background-elevated p-3">
+      <div className="text-xs text-tertiary-foreground">{label}</div>
+      <div className="mt-1 break-all text-sm text-foreground">{value}</div>
     </div>
   )
 }

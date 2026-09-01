@@ -297,37 +297,40 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
     }
   }, [])
 
-  const loadData = useCallback(async (cursor: string | null = null) => {
-    const generation = ++fileGenerationRef.current
-    setFileLoading(true)
-    if (!cursor) setFileNextCursor(null)
-    try {
-      const page = await window.api.memory.listFiles({
-        ...scopeRequest,
-        requestScope: FILES_REQUEST_SCOPE,
-        ...(cursor ? { cursor } : {}),
-        limit: MEMORY_RENDER_WINDOW_SIZE
-      })
-      if (!mountedRef.current || generation !== fileGenerationRef.current) return
-      const fileList = boundMemoryRenderWindow(page.items)
-      const memStats = page.stats
-      setFiles(fileList)
-      setFileCurrentCursor(cursor)
-      setFileNextCursor(page.nextCursor ?? null)
-      setCatalogTruncated(page.truncated)
-      setStats(memStats)
-      setEnabled(memStats.enabled)
-      setDreamEnabled(memStats.dreamEnabled)
-      setSelectedFile((prev) => {
-        if (!prev) return null
-        return fileList.find((f) => f.name === prev.name) ?? prev
-      })
-    } catch (error) {
-      if (!isCatalogCancellation(error)) console.error(error)
-    } finally {
-      if (mountedRef.current && generation === fileGenerationRef.current) setFileLoading(false)
-    }
-  }, [scopeRequest])
+  const loadData = useCallback(
+    async (cursor: string | null = null) => {
+      const generation = ++fileGenerationRef.current
+      setFileLoading(true)
+      if (!cursor) setFileNextCursor(null)
+      try {
+        const page = await window.api.memory.listFiles({
+          ...scopeRequest,
+          requestScope: FILES_REQUEST_SCOPE,
+          ...(cursor ? { cursor } : {}),
+          limit: MEMORY_RENDER_WINDOW_SIZE
+        })
+        if (!mountedRef.current || generation !== fileGenerationRef.current) return
+        const fileList = boundMemoryRenderWindow(page.items)
+        const memStats = page.stats
+        setFiles(fileList)
+        setFileCurrentCursor(cursor)
+        setFileNextCursor(page.nextCursor ?? null)
+        setCatalogTruncated(page.truncated)
+        setStats(memStats)
+        setEnabled(memStats.enabled)
+        setDreamEnabled(memStats.dreamEnabled)
+        setSelectedFile((prev) => {
+          if (!prev) return null
+          return fileList.find((f) => f.name === prev.name) ?? prev
+        })
+      } catch (error) {
+        if (!isCatalogCancellation(error)) console.error(error)
+      } finally {
+        if (mountedRef.current && generation === fileGenerationRef.current) setFileLoading(false)
+      }
+    },
+    [scopeRequest]
+  )
 
   useEffect(() => {
     setFileBackStack([])
@@ -790,7 +793,7 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
               </>
             )}
             {catalogTruncated && (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-[10px] text-amber-600 dark:text-amber-400">
+              <div className="rounded-md border border-status-warning/30 bg-status-warning/10 p-2 text-[10px] text-status-warning-foreground">
                 记忆目录超过安全扫描预算，当前只显示已安全读取的部分内容。
               </div>
             )}
@@ -838,7 +841,7 @@ export function MemoryPanel({ workspacePath }: MemoryPanelProps): React.JSX.Elem
           </div>
           <ScrollArea className="flex-1">
             {fileContent?.truncated && (
-              <div className="m-4 mb-0 rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-600 dark:text-amber-400">
+              <div className="m-4 mb-0 rounded-md border border-status-warning/30 bg-status-warning/10 p-2 text-xs text-status-warning-foreground">
                 {fileContent.truncatedReason === "file-size"
                   ? "该文件超过 2 MB 安全读取上限，未加载正文。"
                   : `正文较大，仅显示前 ${formatSize(fileContent.bytesRead)}。`}

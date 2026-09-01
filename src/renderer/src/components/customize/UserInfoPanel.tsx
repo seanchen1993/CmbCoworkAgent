@@ -111,14 +111,14 @@ const UserInfoPanel: React.FC = () => {
                     // 登录状态
                     <div className="space-y-4">
                         <div className="flex items-center mt-2">
-                            <div className="w-12 h-12 rounded-full bg-blue-100 flex items-center justify-center">
+                            <div className="flex size-12 items-center justify-center rounded-full bg-status-info/10">
                                 <span className="text-blue-600 font-semibold text-lg">
                                     {getInitials(user.userName)}
                                 </span>
                             </div>
                             <div className="flex-1 min-w-0 ml-2">
                                 <h3 className="text-lg font-semibold truncate">{user.userName}</h3>
-                                <p className="text-sm text-gray-600 truncate">{user.orgName}</p >
+                                <p className="text-sm text-muted-foreground truncate">{user.orgName}</p >
                             </div>
                         </div>
 
@@ -130,15 +130,15 @@ const UserInfoPanel: React.FC = () => {
                     // 未登录状态
                     <div className="text-center space-y-4">
                         <div className="flex justify-center">
-                            <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center">
-                                <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <div className="flex size-16 items-center justify-center rounded-full bg-background-interactive">
+                                <svg className="w-8 h-8 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                                 </svg>
                             </div>
                         </div>
                         <div>
-                            <h3 className="text-lg font-medium text-gray-900">未登录</h3>
-                            <p className="text-sm text-gray-500">请登录以查看个人信息</p >
+                            <h3 className="text-lg font-medium text-foreground">未登录</h3>
+                            <p className="text-sm text-muted-foreground">请登录以查看个人信息</p >
                         </div>
                         <Button onClick={handleLogin} className="w-full">
                             立即登录
