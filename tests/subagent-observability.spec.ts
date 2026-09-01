@@ -535,8 +535,24 @@ async function testRightPanelDisplaysAndAutoOpens(): Promise<void> {
   )
   assertIncludes(
     rightPanel,
-    "hasNewRunning && !hasOpenWorkspacePanelRef.current",
-    "right panel does not replace a panel the user is already viewing"
+    "if (hasNewRunning)",
+    "right panel switches to agents when a new agent run starts"
+  )
+  assertNotIncludes(
+    rightPanel,
+    "hasOpenWorkspacePanelRef",
+    "an open workspace section must not suppress a newly started agent run"
+  )
+  assertIncludes(
+    rightPanel,
+    "consumeRightPanelWorkRequest(rightPanelWorkRequest.id)",
+    "right panel consumes one-shot navigation requests after applying them"
+  )
+  assertSourceOrder(
+    rightPanel,
+    "setExclusiveOpenPanel(rightPanelWorkRequest.target)",
+    "consumeRightPanelWorkRequest(rightPanelWorkRequest.id)",
+    "right panel applies a navigation request before consuming it"
   )
   assertIncludes(
     rightPanel,

@@ -242,8 +242,8 @@ function SectionHeader({
       )}
       style={{ height: HEADER_HEIGHT }}
     >
-      <Icon className="size-5 shrink-0 text-foreground/75" strokeWidth={1.7} />
-      <span className="flex-1 text-left text-[15px] font-semibold leading-none tracking-[-0.01em]">
+      <Icon className="size-5 shrink-0 text-foreground/75" strokeWidth={1.5} />
+      <span className="flex-1 text-left text-[15px] font-normal leading-none tracking-[-0.01em]">
         {title}
       </span>
       {detail != null && <div className="shrink-0">{detail}</div>}
@@ -270,7 +270,7 @@ function SectionHeader({
           "size-[18px] shrink-0 text-muted-foreground/65 transition-transform duration-200",
           isOpen && "rotate-90"
         )}
-        strokeWidth={1.8}
+        strokeWidth={1.5}
       />
     </button>
   )
@@ -484,6 +484,7 @@ export function RightPanel({
     currentThreadId: storeCurrentThreadId,
     pluginVersion,
     rightPanelWorkRequest,
+    consumeRightPanelWorkRequest,
     skillGenerationByThread,
     setSkillGenerationPhase
   } = useAppStore(
@@ -491,6 +492,7 @@ export function RightPanel({
       currentThreadId: s.currentThreadId,
       pluginVersion: s.pluginVersion,
       rightPanelWorkRequest: s.rightPanelWorkRequest,
+      consumeRightPanelWorkRequest: s.consumeRightPanelWorkRequest,
       // Subscribe to the whole map so we re-render when any thread's card changes
       skillGenerationByThread: s.skillGenerationByThread,
       setSkillGenerationPhase: s.setSkillGenerationPhase
@@ -618,7 +620,6 @@ export function RightPanel({
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [hooksOpen, setHooksOpen] = useState(false)
   const [lspOpen, setLspOpen] = useState(false)
-  const hasOpenWorkspacePanelRef = useRef(false)
   const [lspConfig, setLspConfig] = useState<LspConfig | null>(null)
   const [lspStatus, setLspStatus] = useState<LspStatus | null>(null)
   const [skills, setSkills] = useState<SkillMetadata[]>(
@@ -644,29 +645,6 @@ export function RightPanel({
     [setExclusiveOpenPanel]
   )
 
-  useEffect(() => {
-    hasOpenWorkspacePanelRef.current =
-      tasksOpen ||
-      filesOpen ||
-      Boolean(activePluginRunArtifacts && pluginRunArtifactsOpen) ||
-      systemConstraintsOpen ||
-      agentsOpen ||
-      skillsOpen ||
-      pluginsOpen ||
-      hooksOpen ||
-      lspOpen
-  }, [
-    activePluginRunArtifacts,
-    agentsOpen,
-    filesOpen,
-    hooksOpen,
-    lspOpen,
-    pluginRunArtifactsOpen,
-    pluginsOpen,
-    skillsOpen,
-    systemConstraintsOpen,
-    tasksOpen
-  ])
   const [marketSkillMap, setMarketSkillMap] = useState<Record<string, RightPanelSkillMarketInfo>>(
     () => readMarketSkillCatalogCache()?.skillMap ?? {}
   )
@@ -914,7 +892,7 @@ export function RightPanel({
 
   // Auto-open agents panel when skill generation starts
   useEffect(() => {
-    if (skillGenerationAgent.phase === "generating" && !hasOpenWorkspacePanelRef.current) {
+    if (skillGenerationAgent.phase === "generating") {
       setExclusiveOpenPanel("agents")
     }
   }, [setExclusiveOpenPanel, skillGenerationAgent.phase])
@@ -930,7 +908,14 @@ export function RightPanel({
     if (handledWorkRequestIdsRef.current.has(rightPanelWorkRequest.id)) return
     handledWorkRequestIdsRef.current.add(rightPanelWorkRequest.id)
     setExclusiveOpenPanel(rightPanelWorkRequest.target)
-  }, [currentThreadId, rightPanelWorkRequest, setExclusiveOpenPanel, showSystemConstraints])
+    consumeRightPanelWorkRequest(rightPanelWorkRequest.id)
+  }, [
+    consumeRightPanelWorkRequest,
+    currentThreadId,
+    rightPanelWorkRequest,
+    setExclusiveOpenPanel,
+    showSystemConstraints
+  ])
 
   // Auto-open once when an ordinary task subagent starts.
   useEffect(() => {
@@ -941,7 +926,7 @@ export function RightPanel({
       (id) => !runningSubagentIdsRef.current.has(id)
     )
 
-    if (hasNewRunning && !hasOpenWorkspacePanelRef.current) {
+    if (hasNewRunning) {
       setExclusiveOpenPanel("agents")
     }
 
@@ -962,7 +947,7 @@ export function RightPanel({
       (key) => !runningCoordinatorWorkerRunKeysRef.current.has(key)
     )
 
-    if (hasNewRunning && !hasOpenWorkspacePanelRef.current) {
+    if (hasNewRunning) {
       setExclusiveOpenPanel("agents")
     }
 
