@@ -6000,7 +6000,7 @@ export class LocalSandbox
   /** Best-effort removal of the Everyone ACE added by grantSandboxWriteAcl.
    *  Only calls icacls when the ref count drops to 0 (no other runs use this
    *  directory); timeout or failure is logged without blocking run cleanup. */
-  private static revokeSandboxWriteAcl(key: string): Promise<void> {
+  private static revokeSandboxWriteAcl(key: string, directoryPath: string): Promise<void> {
     // Callers pass the canonical key stored in _runAclDirs. Normalizing that
     // value again is not idempotent on non-Windows test hosts because its
     // backslashes are treated as literal path characters by path.resolve().
@@ -6021,13 +6021,13 @@ export class LocalSandbox
       key,
       () =>
         new Promise<void>((resolve) => {
-          const proc = spawn("icacls", [key, "/remove:g", LocalSandbox.EVERYONE_SID], {
+          const proc = spawn("icacls", [directoryPath, "/remove:g", LocalSandbox.EVERYONE_SID], {
             stdio: "ignore",
             windowsHide: true
           })
           const timeoutId = setTimeout(() => {
             console.warn(
-              `[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${key}, killing`
+              `[LocalSandbox] icacls revoke timed out after ${LocalSandbox.ICACLS_TIMEOUT_MS}ms on ${directoryPath}, killing`
             )
             try {
               proc.kill()
@@ -6038,12 +6038,13 @@ export class LocalSandbox
           }, LocalSandbox.ICACLS_TIMEOUT_MS)
           proc.on("exit", (code) => {
             clearTimeout(timeoutId)
-            if (code !== 0) console.warn(`[LocalSandbox] icacls revoke exited ${code} on ${key}`)
+            if (code !== 0)
+              console.warn(`[LocalSandbox] icacls revoke exited ${code} on ${directoryPath}`)
             resolve()
           })
           proc.on("error", (err) => {
             clearTimeout(timeoutId)
-            console.warn(`[LocalSandbox] icacls revoke error on ${key}:`, err.message)
+            console.warn(`[LocalSandbox] icacls revoke error on ${directoryPath}:`, err.message)
             resolve()
           })
         })
@@ -6065,7 +6066,7 @@ export class LocalSandbox
     const runDirectoryPaths = LocalSandbox._runAclDirectoryPaths.get(runId)
     const dirsToRevoke = [...runDirs]
       .filter((key) => !LocalSandbox._permanentAclDirs.has(key))
-      .map((key) => runDirectoryPaths?.get(key) ?? key)
+      .map((key) => ({ key, directoryPath: runDirectoryPaths?.get(key) ?? key }))
     LocalSandbox._runAclDirs.delete(runId)
     LocalSandbox._runAclDirectoryPaths.delete(runId)
     if (dirsToRevoke.length === 0) return
@@ -6073,7 +6074,7 @@ export class LocalSandbox
       `[LocalSandbox] revokeGrantedAclsForRun(${runId}): releasing ${dirsToRevoke.length} dirs`
     )
     await mapLimit(dirsToRevoke, LocalSandbox.ACL_OPERATION_CONCURRENCY, (dir) =>
-      LocalSandbox.revokeSandboxWriteAcl(dir)
+      LocalSandbox.revokeSandboxWriteAcl(dir.key, dir.directoryPath)
     )
   }
 
@@ -6658,20 +6659,23 @@ export class LocalSandbox
     result: HookResult | null
   ): Promise<{ release: () => void } | undefined> {
     if (result?.decision !== "human_gate") return undefined
-    const fallbackReason =
-      "decision=human_gate 仅支持当前项目绑定插件的 PreToolUse(execute) Hook"
+    const fallbackReason = "decision=human_gate 仅支持当前项目绑定插件的 PreToolUse(execute) Hook"
     if (
       !this._requestHumanGate ||
       !this.harnessProjectId ||
       !this.featureId ||
       !result.decisionSource?.hookId
     ) {
-      throwIfHookHalt("PreToolUse", {
-        ...result,
-        blocked: true,
-        continue: false,
-        stopReason: fallbackReason
-      }, fallbackReason)
+      throwIfHookHalt(
+        "PreToolUse",
+        {
+          ...result,
+          blocked: true,
+          continue: false,
+          stopReason: fallbackReason
+        },
+        fallbackReason
+      )
       return undefined
     }
     return this._requestHumanGate({

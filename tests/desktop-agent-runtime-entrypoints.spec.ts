@@ -36,7 +36,9 @@ const sources = {
   imRunner: read("src/main/services/im/remote-runner.ts"),
   scheduler: read("src/main/services/scheduler.ts"),
   heartbeat: read("src/main/services/heartbeat.ts"),
-  runtime: read("src/main/agent/runtime.ts")
+  runtime: read("src/main/agent/runtime.ts"),
+  managedAction: read("src/main/harness-board/auto-mode-action-executor.ts"),
+  managedController: read("src/main/harness-board/auto-mode-controller.ts")
 }
 
 const expectedDirectCalls: Record<keyof typeof sources, number> = {
@@ -45,7 +47,9 @@ const expectedDirectCalls: Record<keyof typeof sources, number> = {
   imRunner: 0,
   scheduler: 1,
   heartbeat: 1,
-  runtime: 4
+  runtime: 4,
+  managedAction: 0,
+  managedController: 0
 }
 
 for (const [owner, source] of Object.entries(sources) as [keyof typeof sources, string][]) {
@@ -92,6 +96,27 @@ assert(
 assert(
   count(interrupt, "interruptRuntimeFactory.create(") === 2,
   "desktop interrupt must retain two controlled factory failover sites"
+)
+
+assert(
+  sources.managedAction.includes("managedExecution: true") &&
+    invoke.includes("managedExecution,") &&
+    invoke.includes("managedExecution === true || isActiveManagedRunSession(threadId)"),
+  "managed launches must preserve one-run execution semantics through the shared invoke path"
+)
+assert(
+  invoke.includes("onWorkflowLaunched") &&
+    resume.includes("onWorkflowLaunched: onResumeWorkflowLaunched") &&
+    interrupt.includes("onWorkflowLaunched: onInterruptWorkflowLaunched"),
+  "all desktop physical run entry points must report detached workflow launch facts"
+)
+assert(
+  count(invoke, "queueAutoModeAgentTurnEnd({") === 1 &&
+    count(resume, "queueAutoModeAgentTurnEnd({") === 1 &&
+    count(interrupt, "queueAutoModeAgentTurnEnd({") === 1 &&
+    sources.desktop.includes("handleAutoModeAgentTurnEnd({") &&
+    sources.managedController.includes("input.executionFacts?.workflowLaunchedRunIds"),
+  "managed runs must report terminal events and defer evaluation after detached workflow launches"
 )
 
 assert(
