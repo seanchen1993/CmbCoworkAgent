@@ -2404,6 +2404,22 @@ export function ChatContainer({
       }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
+        // Temporary guard: a Thread granted to the Zhaohu robot must not change
+        // its execution mode. Remote turns are hard-wired to the normal/Multi
+        // runtime, so Team/Workflow on a granted thread would render a mode the
+        // IM side never executes. Remove together with per-mode remote support.
+        const remoteAccess = await window.api.builtinRobot
+          .getRemoteAccess()
+          .catch(() => null)
+        if (requestId !== agentModeChangeRequestRef.current) return
+        if (
+          remoteAccess?.threadGrants.some(
+            (grant) => grant.threadId === threadId && grant.state === "active"
+          )
+        ) {
+          toast.error("当前会话已接入招乎，暂不能切换执行模式")
+          return
+        }
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
           toast.error("项目模式暂不支持 Agent Team。")
           return
