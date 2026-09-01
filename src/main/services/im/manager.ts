@@ -459,7 +459,8 @@ export class BuiltinRobotManager {
     try {
       await service.recoverAndStart()
       client.start()
-    } catch {
+    } catch (error) {
+      console.error("[IM] Builtin robot local state recovery failed:", error)
       await service.stop().catch(() => undefined)
       client.stop()
       this.client = null

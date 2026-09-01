@@ -125,6 +125,22 @@ describe("NativeSqliteAdapter", () => {
     reopened.database.close()
   })
 
+  it("reports rows modified for sql.js-compatible getRowsModified()", () => {
+    const databasePath = temporaryDatabasePath("rows-modified.sqlite")
+    const database = openNativeSqliteDatabase(databasePath, "NativeSqliteTest").database
+    database.run("CREATE TABLE im_selection_contexts (token TEXT PRIMARY KEY)")
+    expect(database.getRowsModified()).toBe(0)
+    database.run("DELETE FROM im_selection_contexts")
+    expect(database.getRowsModified()).toBe(0)
+    database.run("INSERT INTO im_selection_contexts (token) VALUES (?), (?), (?)", ["a", "b", "c"])
+    expect(database.getRowsModified()).toBe(3)
+    database.run("UPDATE im_selection_contexts SET token = token")
+    expect(database.getRowsModified()).toBe(3)
+    database.run("DELETE FROM im_selection_contexts WHERE token = ?", ["a"])
+    expect(database.getRowsModified()).toBe(1)
+    database.close()
+  })
+
   it("preserves sql.js prepared-statement bind and iteration semantics", () => {
     const databasePath = temporaryDatabasePath("statements.sqlite")
     const database = openNativeSqliteDatabase(databasePath, "NativeSqliteTest").database
