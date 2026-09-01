@@ -408,7 +408,7 @@ function testAdvancedDesktopModesStayInsideTheExistingHandler(): void {
     'effectiveAgentMode === "coordinator"',
     'metadataAgentMode === "workflow"',
     "coordinatorWorkerManager.restoreWorkersForThread({",
-    "workflowRunManager.findPendingNotification(",
+    "workflowRunManager.claimPendingNotificationAsync(",
     "runCompletionHooksWithRevision({"
   ]) {
     assertIncludes(invoke, expected, `advanced desktop behavior ${expected}`)

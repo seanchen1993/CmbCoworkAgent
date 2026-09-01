@@ -66,9 +66,17 @@ import {
   updateThread,
   upsertThreadMessages
 } from "../db"
-import { parseThreadMetadata, patchLatestThreadMetadata } from "../services/thread-metadata"
+import {
+  assertNoTranscriptAgentModeTransition,
+  getThreadExecutionMode,
+  parseThreadMetadata,
+  patchLatestThreadMetadata
+} from "../services/thread-metadata"
+import { readThreadConversationPresenceForMutation } from "../services/thread-conversation-presence"
 import { subscribeWindowClosed } from "../services/window-close-subscriptions"
 import { containsCoordinatorInternalMarker } from "../services/initial-coordinator-prefix-commit"
+import { matchesAgentPublicationContext } from "../services/agent-publication-context"
+import { captureThreadIncarnation, matchesThreadIncarnation } from "../services/thread-incarnation"
 import { summarizeAndSave } from "../memory/summarizer"
 import { consolidateMemories, shouldRunDream, incrementDreamSessions } from "../memory/consolidate"
 import { scanMemoryFiles, type MemoryType } from "../memory/manifest"
@@ -204,6 +212,7 @@ import {
   extractCoordinatorSelectedSkill,
   getAgentModeFromMetadata,
   isCoordinatorModeForcedByEnvironment,
+  resolveCurrentAgentModeRequest,
   resolveCoordinatorModeRequest,
   type AgentMode,
   type CoordinatorSelectedSkill
@@ -3077,7 +3086,7 @@ async function finalizeAutoCommit({
   // are in the start snapshot by the time any un-skipped turn runs). Skip while a
   // deliverable workflow notification is still pending. No isWorkflowNotification-
   // Turn guard is needed to avoid self-skip: on the delivery turn the run being
-  // delivered is markNotified()+clearNotificationInFlight() BEFORE this finalize
+  // delivered is markNotified()+releaseWorkflowNotification() BEFORE this finalize
   // runs (see the settlement block above), so hasDeliverablePendingNotification no
   // longer counts it and that turn still auto-commits its own near-empty edits.
   // Gating on the run STATE (not the turn type) also correctly catches a NEW fast
@@ -6545,55 +6554,60 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               return
             }
             claimWorkflowNotification(pendingWorkflowRun.runId, runToken)
-            const workflowOutputFile = resolveWorkflowOutputFile(
-              workspacePath,
-              pendingWorkflowRun.threadId,
-              pendingWorkflowRun
-            )
-            effectiveMessage = buildWorkflowNotificationMessage(
-              pendingWorkflowRun,
-              workflowOutputFile
-            )
-            modelInputMessage = effectiveMessage
-            // Preserve the delivered workflow result as goal-evaluator evidence so
-            // the (deferred, never-evaluated) launch turn's use of a workflow is
-            // visible when THIS delivery turn is judged. See the decl comment.
-            pendingBackgroundResultEvidence =
-              buildGoalToolEvidenceEntry({
-                toolName: "workflow",
-                output: effectiveMessage,
-                inputSummary:
-                  "Background dynamic workflow run completed; its result was delivered into this conversation turn."
-              }) ?? undefined
-            // At-least-once (mirrors coordinator): mark in-flight IN MEMORY only —
-            // do NOT persist `delivered` yet. The durable flag is set only when this
-            // turn SUCCEEDS, so an app crash mid-turn leaves delivered=false on disk
-            // and the run is rediscovered + re-reported on the next hydrate, rather
-            // than being silently lost (the at-most-once crash hole).
-            workflowNotificationToSettle = {
-              workspacePath,
-              runId: pendingWorkflowRun.runId,
-              startedAt: pendingWorkflowRun.startedAt,
-              ownerRunToken: runToken
+            try {
+              const workflowOutputFile = resolveWorkflowOutputFile(
+                workspacePath,
+                pendingWorkflowRun.threadId,
+                pendingWorkflowRun
+              )
+              effectiveMessage = buildWorkflowNotificationMessage(
+                pendingWorkflowRun,
+                workflowOutputFile
+              )
+              modelInputMessage = effectiveMessage
+              // Preserve the delivered workflow result as goal-evaluator evidence so
+              // the (deferred, never-evaluated) launch turn's use of a workflow is
+              // visible when THIS delivery turn is judged. See the decl comment.
+              pendingBackgroundResultEvidence =
+                buildGoalToolEvidenceEntry({
+                  toolName: "workflow",
+                  output: effectiveMessage,
+                  inputSummary:
+                    "Background dynamic workflow run completed; its result was delivered into this conversation turn."
+                }) ?? undefined
+              // At-least-once (mirrors coordinator): mark in-flight IN MEMORY only —
+              // do NOT persist `delivered` yet. The durable flag is set only when this
+              // turn SUCCEEDS, so an app crash mid-turn leaves delivered=false on disk
+              // and the run is rediscovered + re-reported on the next hydrate, rather
+              // than being silently lost (the at-most-once crash hole).
+              workflowNotificationToSettle = {
+                workspacePath,
+                runId: pendingWorkflowRun.runId,
+                startedAt: pendingWorkflowRun.startedAt,
+                ownerRunToken: runToken
+              }
+              // NOTE: do NOT auto-commit the run's edits against a launch-time
+              // baseline. A background workflow shares the workspace with the user's
+              // concurrent FOREGROUND edits, and auto-commit selects candidates by
+              // dirty-diff (not by mutation tracking — see agent-auto-commit), so a
+              // launch→completion diff would sweep any file the USER changed during
+              // the run into the workflow's commit. Without per-run worktree
+              // isolation there is no reliable way to tell the run's edits from the
+              // user's, so the run's edits are left in the working tree for the user
+              // to review and commit. They appear as ordinary dirty/untracked files
+              // in `git status` and the git panel, but are NOT flagged as
+              // LLM-modified — workflow subagents run on their own child threads and
+              // never record into this (parent) thread's llmModifiedFiles metadata.
+              // This turn auto-commits only its own (near-empty) edits via the normal
+              // fresh snapshot below.
+              // Internal turn → suppress user-facing side effects (see flag decl).
+              isInternalNotificationTurn = true
+              // Workflow-only: also skip user Stop hooks for this report turn.
+              isWorkflowNotificationTurn = true
+            } catch (error) {
+              releaseWorkflowNotification(pendingWorkflowRun.runId, runToken)
+              throw error
             }
-            // NOTE: do NOT auto-commit the run's edits against a launch-time
-            // baseline. A background workflow shares the workspace with the user's
-            // concurrent FOREGROUND edits, and auto-commit selects candidates by
-            // dirty-diff (not by mutation tracking — see agent-auto-commit), so a
-            // launch→completion diff would sweep any file the USER changed during
-            // the run into the workflow's commit. Without per-run worktree
-            // isolation there is no reliable way to tell the run's edits from the
-            // user's, so the run's edits are left in the working tree for the user
-            // to review and commit. They appear as ordinary dirty/untracked files
-            // in `git status` and the git panel, but are NOT flagged as
-            // LLM-modified — workflow subagents run on their own child threads and
-            // never record into this (parent) thread's llmModifiedFiles metadata.
-            // This turn auto-commits only its own (near-empty) edits via the normal
-            // fresh snapshot below.
-            // Internal turn → suppress user-facing side effects (see flag decl).
-            isInternalNotificationTurn = true
-            // Workflow-only: also skip user Stop hooks for this report turn.
-            isWorkflowNotificationTurn = true
           } else if (hasWorkflowNotificationPrefix) {
             effectiveMessage = neutralizeWorkflowPlumbingUserText(effectiveMessage)
             modelInputMessage = effectiveMessage
@@ -8177,7 +8191,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 // delivered=false (the catch documents the same halt philosophy
                 // for the thrown shape): the next hydrate/restart re-surfaces it.
                 if (workflowNotificationToSettle) {
-                  workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+                  releaseWorkflowNotification(
+                    workflowNotificationToSettle.runId,
+                    workflowNotificationToSettle.ownerRunToken
+                  )
                   workflowNotificationToSettle = undefined
                 }
                 break
@@ -8528,7 +8545,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               )
               throwIfInvokeAborted()
               workflowRunManager.clearRenotify(settle.runId)
-              workflowRunManager.clearNotificationInFlight(settle.runId)
+              releaseWorkflowNotification(settle.runId, settle.ownerRunToken)
               // The run has been reported; if its final persist had failed, write the
               // true terminal state back to disk now (disk may have recovered) so
               // history/hydrate/resume stop reading the stale copy (#4 boundary).
@@ -8998,10 +9015,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // stop, so re-reporting would fight that intent) — but clearing the mark
           // still lets a later hydrate / restart surface it.
           if (workflowNotificationToSettle) {
-            const {
-              runId: settleRunId,
-              ownerRunToken
-            } = workflowNotificationToSettle
+            const { runId: settleRunId, ownerRunToken } = workflowNotificationToSettle
             workflowNotificationToSettle = undefined
             releaseWorkflowNotification(settleRunId, ownerRunToken)
             if (!isAbortError) {
@@ -9111,7 +9125,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           // auto-renotify — these exits are user/policy stops, mirroring the
           // catch's documented halt semantics; the run stays re-discoverable.
           if (workflowNotificationToSettle) {
-            workflowRunManager.clearNotificationInFlight(workflowNotificationToSettle.runId)
+            releaseWorkflowNotification(
+              workflowNotificationToSettle.runId,
+              workflowNotificationToSettle.ownerRunToken
+            )
             workflowNotificationToSettle = undefined
           }
           removeWindowClosedSubscription()
@@ -9278,12 +9295,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
 
       // Get workspace path from thread metadata
-      const thread = getThread(threadId)
+      const thread = getThreadCore(threadId)
+      const resumeThreadIncarnation = thread ? captureThreadIncarnation(thread) : null
       const parsedThreadMetadata = parseStandardThreadMetadata(thread?.metadata, {
         onParseError: () =>
           console.warn("[Agent] Failed to parse thread metadata, using empty object")
       })
-      const metadata = parsedThreadMetadata.metadata
+      let metadata = parsedThreadMetadata.metadata
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
       const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
@@ -9298,58 +9316,169 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         allowForcedRequests: allowsForcedCoordinatorRequests(metadata)
       })
       const resumeForcedByEnvironment = resumeCoordinatorRequest.source === "environment"
-      const latestMetadata = metadata
-      const requestedResumeMode = requestedAgentMode
+      const initialResumeAgentMode = getAgentModeFromMetadata(metadata)
+      // Resume carries the renderer's last-known mode as a routing hint. Mode
+      // changes themselves go through the guarded metadata mutation path, so a
+      // stale hint must never write an older snapshot back over current state.
+      const requestedResumeMode = resolveCurrentAgentModeRequest(
+        requestedAgentMode,
+        initialResumeAgentMode
+      )
       const resumeAgentMode: AgentMode = resumeForcedByEnvironment
         ? "coordinator"
-        : requestedAgentMode === "coordinator" ||
-            requestedAgentMode === "normal" ||
-            requestedAgentMode === "workflow"
-          ? requestedAgentMode
-          : parsedThreadMetadata.agentMode
+        : (requestedResumeMode ?? initialResumeAgentMode)
+      const expectedResumePublicationContext = {
+        workspacePath,
+        mode: resumeAgentMode,
+        modeForcedByEnvironment: resumeForcedByEnvironment,
+        normalSubagentsEnabled: metadata.subagentsEnabled !== false,
+        threadIncarnation: resumeThreadIncarnation!
+      }
 
-      if (
-        !resumeForcedByEnvironment &&
-        (requestedAgentMode === "coordinator" ||
-          requestedAgentMode === "normal" ||
-          requestedAgentMode === "workflow")
-      ) {
-        // Leaving workflow → any non-workflow mode: block to avoid orphaning a run.
-        // Covers requestedAgentMode === "coordinator", which the coordinator guard
-        // below explicitly skips.
-        if (
-          getAgentModeFromMetadata(latestMetadata) === "workflow" &&
-          requestedResumeMode !== "workflow"
-        ) {
-          const workflowBlock = workflowLeaveBlockedMessage(threadId, workspacePath)
-          if (workflowBlock) {
-            safeSendToWindow(window, channel, { type: "error", error: workflowBlock })
-            return
-          }
-        }
-        if (requestedAgentMode !== "coordinator" && metadata.agentMode !== requestedAgentMode) {
-          if (!workspacePath) {
-            safeSendToWindow(window, channel, {
-              type: "error",
-              error: "WORKSPACE_REQUIRED",
-              message:
-                "该线程缺少工作区路径，无法安全切换到 Solo 或 Multi。请先重新选择工作区后再切换。"
-            })
-            return
-          }
-          const normalModeGuardState = await getNormalModeGuardState(threadId, workspacePath)
-          if (isNormalModeBlocked(normalModeGuardState)) {
-            safeSendToWindow(window, channel, {
-              type: "error",
-              error: buildNormalModeGuardMessage(normalModeGuardState)
-            })
-            sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-            return
-          }
-        }
-        updateThread(threadId, {
-          metadata: JSON.stringify({ ...metadata, agentMode: requestedAgentMode })
-        })
+      if (!resumeForcedByEnvironment && requestedResumeMode !== undefined) {
+        const modePersisted = await workflowRunManager.withThreadTransitionLease(threadId, () =>
+          withThreadRunMutationLock(threadId, async () => {
+            const latestThread = getThreadCore(threadId)
+            if (
+              !latestThread ||
+              !resumeThreadIncarnation ||
+              !matchesThreadIncarnation(latestThread, resumeThreadIncarnation)
+            ) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "会话已在恢复请求准备期间被替换，请重新操作。"
+              })
+              return false
+            }
+            const latestMetadata = parseThreadMetadata(latestThread.metadata)
+            const latestWorkspacePath =
+              typeof latestMetadata.workspacePath === "string"
+                ? latestMetadata.workspacePath
+                : undefined
+            if (latestWorkspacePath !== workspacePath) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "工作区已在恢复请求准备期间发生变化，请重新操作。"
+              })
+              return false
+            }
+            if (
+              !matchesAgentPublicationContext(
+                latestThread,
+                latestMetadata,
+                expectedResumePublicationContext
+              )
+            ) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "会话模式已在恢复请求准备期间发生变化，请重新操作。"
+              })
+              return false
+            }
+            // Leaving workflow → any non-workflow mode: block to avoid orphaning a run.
+            if (
+              getAgentModeFromMetadata(latestMetadata) === "workflow" &&
+              requestedResumeMode !== "workflow"
+            ) {
+              const workflowBlock = await workflowLeaveBlockedMessage(threadId, latestWorkspacePath)
+              if (workflowBlock) {
+                safeSendToWindow(window, channel, { type: "error", error: workflowBlock })
+                return false
+              }
+            }
+            if (
+              requestedResumeMode !== "coordinator" &&
+              latestMetadata.agentMode !== requestedResumeMode
+            ) {
+              if (!latestWorkspacePath) {
+                safeSendToWindow(window, channel, {
+                  type: "error",
+                  error: "WORKSPACE_REQUIRED",
+                  message:
+                    "该线程缺少工作区路径，无法安全切换到 Solo 或 Multi。请先重新选择工作区后再切换。"
+                })
+                return false
+              }
+              const normalModeGuardState = await getNormalModeGuardState(
+                threadId,
+                latestWorkspacePath
+              )
+              if (isNormalModeBlocked(normalModeGuardState)) {
+                safeSendToWindow(window, channel, {
+                  type: "error",
+                  error: buildNormalModeGuardMessage(normalModeGuardState)
+                })
+                sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
+                return false
+              }
+            }
+            const guardedCandidateMetadata = {
+              ...latestMetadata,
+              agentMode: requestedResumeMode
+            }
+            let modeCommitConversationPresence: "empty" | "nonempty" | "unknown" = "empty"
+            if (
+              getThreadExecutionMode(latestMetadata) !==
+              getThreadExecutionMode(guardedCandidateMetadata)
+            ) {
+              modeCommitConversationPresence =
+                await readThreadConversationPresenceForMutation(threadId)
+            }
+
+            // The guards above yield. Rebind the write to the original row and
+            // publication context before committing only the agent-owned field.
+            const commitThread = getThreadCore(threadId)
+            if (
+              !commitThread ||
+              !resumeThreadIncarnation ||
+              !matchesThreadIncarnation(commitThread, resumeThreadIncarnation)
+            ) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "会话已在恢复请求准备期间被替换，请重新操作。"
+              })
+              return false
+            }
+            const commitMetadata = parseThreadMetadata(commitThread.metadata)
+            const commitWorkspacePath =
+              typeof commitMetadata.workspacePath === "string"
+                ? commitMetadata.workspacePath
+                : undefined
+            if (commitWorkspacePath !== workspacePath) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "工作区已在恢复请求准备期间发生变化，请重新操作。"
+              })
+              return false
+            }
+            if (
+              !matchesAgentPublicationContext(
+                commitThread,
+                commitMetadata,
+                expectedResumePublicationContext
+              )
+            ) {
+              safeSendToWindow(window, channel, {
+                type: "error",
+                error: "会话模式已在恢复请求准备期间发生变化，请重新操作。"
+              })
+              return false
+            }
+            const commitCandidateMetadata = {
+              ...commitMetadata,
+              agentMode: requestedResumeMode
+            }
+            assertNoTranscriptAgentModeTransition(
+              commitMetadata,
+              commitCandidateMetadata,
+              modeCommitConversationPresence !== "empty"
+            )
+            commitMetadata.agentMode = requestedResumeMode
+            metadata = persistAgentOwnedMetadataFields(threadId, commitMetadata, ["agentMode"])
+            return true
+          })
+        )
+        if (!modePersisted) return
       }
 
       if (!workspacePath) {
@@ -9368,6 +9497,17 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           withActiveRunReplacementLock(threadId, async () => {
             if (rejectAgentStartDuringShutdown(window, channel)) {
               return { startRejectedDuringShutdown: true as const }
+            }
+            const latestThread = getThreadCore(threadId)
+            const latestMetadata = parseThreadMetadata(latestThread?.metadata)
+            if (
+              !matchesAgentPublicationContext(
+                latestThread,
+                latestMetadata,
+                expectedResumePublicationContext
+              )
+            ) {
+              return { threadContextChanged: true as const }
             }
             // Transfer ownership before aborting. Even if settlement times out, the
             // old graph's token can no longer drain or clear continuation messages.
@@ -9428,6 +9568,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         }
         if ("startRejectedDuringShutdown" in resumeReplacement) return
         if ("prePublicationFailure" in resumeReplacement) return
+        if ("threadContextChanged" in resumeReplacement) {
+          safeSendToWindow(window, channel, {
+            type: "error",
+            error: "会话模式或工作区已在恢复准备期间发生变化，请重新操作。"
+          })
+          safeSendToWindow(window, channel, { type: "done" })
+          return
+        }
         const {
           abortController,
           turnState,
@@ -9794,7 +9942,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         physicalStreamRunSetupGuard.handoff()
         pendingPhysicalStreamRunSetupGuard = undefined
         try {
-          const requestedModelIdResume = modelId || parsedThreadMetadata.modelId
+          const requestedModelIdResume = modelId || (metadata.model as string | undefined)
           const preparedResumeRouting = await resolveStandardTurnRouting({
             taskSource: "chat",
             threadId,
