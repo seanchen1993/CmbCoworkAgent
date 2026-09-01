@@ -121,8 +121,8 @@ describe("agent runtime settings integration", () => {
     expect(merge).toMatch(/operationTimeoutMs,\r?\n\s+input\.signal/)
 
     const runtime = readRepositoryFile("src/main/agent/runtime.ts")
-    expect(runtime).toContain(
-      "timeout: options.worktreeIsolation ? getWorkflowWorktreeTimeoutMs() : 60_000"
+    expect(runtime).toMatch(
+      /timeout:\s*managedExecution\s*\?\s*MANAGED_EXECUTE_TIMEOUT_MS\s*:\s*options\.worktreeIsolation\s*\?\s*getWorkflowWorktreeTimeoutMs\(\)\s*:\s*60_000/
     )
   })
 

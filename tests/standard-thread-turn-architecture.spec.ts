@@ -84,8 +84,8 @@ assertNotIncludes(
   "desktop Runtime entrypoints use the shared Thread metadata parser"
 )
 assert(
-  count(desktop, "parseStandardThreadMetadata(") === 10,
-  "all ten desktop Thread metadata reads use the shared parser, including the remote inbox guard"
+  count(desktop, "parseStandardThreadMetadata(") === 9,
+  "all nine desktop Thread metadata reads use the shared parser, including the remote inbox guard"
 )
 for (const metadataField of [
   'typeof metadata.workspacePath === "string"',

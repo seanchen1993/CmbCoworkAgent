@@ -882,6 +882,11 @@ async function testRendererSendsAgentMode(): Promise<void> {
 
 async function testMainResolvesAndPersistsMode(): Promise<void> {
   const agentIpc = await readProjectFile("src/main/ipc/agent.ts")
+  const prefixCommitHelper = await readProjectFile(
+    "src/main/services/initial-coordinator-prefix-commit.ts"
+  )
+  const streamSerialization = await readProjectFile("src/main/ipc/stream-data-serialization.ts")
+  const threadContext = await readProjectFile("src/renderer/src/lib/thread-context.tsx")
   const standardThreadTurn = await readProjectFile("src/main/agent/standard-thread-turn.ts")
   assertIncludes(
     agentIpc,
@@ -1253,6 +1258,16 @@ async function testMainResolvesAndPersistsMode(): Promise<void> {
     agentIpc,
     '"agent:coordinator-workers"',
     '"agent:coordinator-workers-unsubscribe"'
+  )
+  assertIncludes(
+    coordinatorWorkersHandler,
+    "await readCoordinatorWorkspacePath(threadId)",
+    "coordinator history refreshes resolve workspace metadata off the main thread"
+  )
+  assertIncludes(
+    agentIpc,
+    "await readThreadWorkspacePathInWorker(threadId)",
+    "coordinator workspace hydration uses the bounded metadata worker"
   )
   assertNotIncludes(
     coordinatorWorkersHandler,

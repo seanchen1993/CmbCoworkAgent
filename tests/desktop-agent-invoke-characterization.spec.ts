@@ -318,27 +318,41 @@ function testResumeAndInterruptContinueTheSameLogicalTurn(): void {
 }
 
 function testIdentityFencedCleanupAndCancellation(): void {
+  const settlementHelperStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  assert(settlementHelperStart >= 0, "shared physical-run settlement helper exists")
+  const settlementHelper = agentIpc.slice(settlementHelperStart, settlementHelperStart + 8_000)
+  const settlementPhases = settlementHelper.slice(
+    settlementHelper.indexOf("await runSettlementPhases({")
+  )
+  assertSourceOrder(
+    settlementPhases,
+    [
+      "if (activeRuns.get(threadId) === controller) activeRuns.delete(threadId)",
+      "if (activeRunSettled.get(threadId) === settledPromise)",
+      "activeRunSettled.delete(threadId)",
+      "resolveSettlement"
+    ],
+    "shared identity-fenced cleanup"
+  )
+  assertIncludes(
+    settlementHelper,
+    "clearCurrentRunMessageQueue(threadId, runToken)",
+    "shared settlement clears only its own queue owner token"
+  )
+
   for (const [label, handler, settledPromise, resolver] of [
-    ["invoke", invoke, "activeRunSettledPromise", "resolveActiveRunSettled()"],
-    ["resume", resume, "resumeRunSettledPromise", "resolveResumeRunSettled()"],
-    ["interrupt", interrupt, "interruptRunSettledPromise", "resolveInterruptRunSettled()"]
+    ["invoke", invoke, "activeRunSettledPromise", "resolveActiveRunSettled"],
+    ["resume", resume, "resumeRunSettledPromise", "resolveResumeRunSettled"],
+    ["interrupt", interrupt, "interruptRunSettledPromise", "resolveInterruptRunSettled"]
   ] as const) {
     assertSourceOrder(
       handler,
       [
-        "const currentController = activeRuns.get(threadId)",
-        "if (currentController === abortController)",
-        "activeRuns.delete(threadId)",
-        `if (activeRunSettled.get(threadId) === ${settledPromise})`,
-        "activeRunSettled.delete(threadId)",
-        resolver
+        "await settlePhysicalAgentRun({",
+        `settledPromise: ${settledPromise}`,
+        `resolveSettlement: ${resolver}`
       ],
-      `${label} identity-fenced cleanup`
-    )
-    assertIncludes(
-      handler,
-      "clearCurrentRunMessageQueue(threadId, runToken)",
-      `${label} clears only its own queue owner token`
+      `${label} delegates identity-fenced cleanup`
     )
   }
   assertSourceOrder(

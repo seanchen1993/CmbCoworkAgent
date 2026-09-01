@@ -622,9 +622,10 @@ function testClearOnEveryRunExit(): void {
     "turnStates",
     "thread-state deletion must not prevent the physical owner from reclaiming ACLs"
   )
-  assertIncludes(
-    agentIpc,
-    "revokeSandboxAclsForRun(runToken)\n        discardAgentAutoCommitTracking(threadId)",
+  assert(
+    /revokeSandboxAclsForRun\(runToken\)\s+discardAgentAutoCommitTracking\(threadId\)/.test(
+      agentIpc
+    ),
     "a failed new-invoke setup reclaims inherited ACL and auto-commit tracking"
   )
   assertOccurrences(
