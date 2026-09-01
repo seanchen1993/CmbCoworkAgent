@@ -716,11 +716,25 @@ function normalizePage(value: number | undefined, pageSize: number): number {
 }
 
 function factSort(options: ProjectMetricListOptions): Record<string, unknown>[] {
-  const field =
-    options.sortBy === "bugNum" || options.sortBy === "notAdjustFuns"
-      ? options.sortBy
-      : "firstOnlineDate"
   const order = options.sortOrder === "asc" ? "asc" : "desc"
+  if (!options.sortBy || options.sortBy === "deliveryDays") {
+    return [
+      {
+        _script: {
+          type: "number",
+          order,
+          script: {
+            lang: "painless",
+            source:
+              "if (doc['approvedDate'].size() == 0 || doc['firstOnlineDate'].size() == 0) return params.missing; def approved = doc['approvedDate'].value; def online = doc['firstOnlineDate'].value; if (online.isBefore(approved)) return params.missing; return ChronoUnit.MILLIS.between(approved, online);",
+            params: { missing: order === "asc" ? 9e18 : -1 }
+          }
+        }
+      },
+      { prjCode: { order: "asc" } }
+    ]
+  }
+  const field = options.sortBy === "bugNum" ? "bugNum" : "notAdjustFuns"
   return [{ [field]: { order, missing: "_last" } }, { prjCode: { order: "asc" } }]
 }
 
@@ -1138,18 +1152,11 @@ export function makeMockProjectMetricProjects(
         item.roomName.toLocaleLowerCase("zh-CN").includes(departmentKeyword) ||
         item.groupName.toLocaleLowerCase("zh-CN").includes(departmentKeyword)
     )
-  const sortBy = options.sortBy ?? "firstOnlineDate"
+  const sortBy = options.sortBy ?? "deliveryDays"
   const direction = options.sortOrder === "asc" ? 1 : -1
   const sorted = [...filtered].sort((left, right) => {
-    const read = (item: ProjectMetricProjectItem): number | null => {
-      if (sortBy === "firstOnlineDate") {
-        const timestamp = item.firstOnlineDate ? Date.parse(item.firstOnlineDate) : Number.NaN
-        return Number.isFinite(timestamp) ? timestamp : null
-      }
-      return item[sortBy]
-    }
-    const leftValue = read(left)
-    const rightValue = read(right)
+    const leftValue = left[sortBy]
+    const rightValue = right[sortBy]
     if (leftValue === null && rightValue !== null) return 1
     if (leftValue !== null && rightValue === null) return -1
     if (leftValue !== null && rightValue !== null && leftValue !== rightValue) {

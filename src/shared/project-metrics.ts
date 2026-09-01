@@ -18,7 +18,7 @@ export interface ProjectMetricListOptions {
   page?: number
   pageSize?: 20 | 50 | 100
   sortBy?:
-    | "firstOnlineDate"
+    | "deliveryDays"
     | "bugNum"
     | "notAdjustFuns"
     | "pushedAdoptedLines"

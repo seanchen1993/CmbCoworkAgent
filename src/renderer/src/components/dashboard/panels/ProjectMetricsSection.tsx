@@ -289,7 +289,7 @@ function SummaryComparison({
       formatter: formatDays
     },
     {
-      label: "平均特性上线时间",
+      label: "平均特性上线耗时",
       hint: "首次实施日期 - 特性审批通过时间",
       read: (group) => group.avgDeliveryDays,
       sample: "delivery",
@@ -578,7 +578,7 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
       <td className="px-3 py-2 text-right tabular-nums">
         <ProjectDateMetric
           value={item.deliveryDays}
-          label="特性上线时间"
+          label="特性上线耗时"
           dates={[
             { label: "特性审批通过时间", value: item.approvedDate },
             { label: "首次实施日期", value: item.firstOnlineDate }
@@ -630,7 +630,7 @@ export function ProjectMetricsSection({
   const [debouncedDepartmentKeyword, setDebouncedDepartmentKeyword] = useState("")
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState<20 | 50 | 100>(20)
-  const [sortBy, setSortBy] = useState<ProjectMetricSortKey>("firstOnlineDate")
+  const [sortBy, setSortBy] = useState<ProjectMetricSortKey>("deliveryDays")
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc")
   const [summary, setSummary] = useState<ProjectMetricSummaryData | null>(null)
   const [projects, setProjects] = useState<ProjectMetricProjectsData | null>(null)
@@ -760,7 +760,7 @@ export function ProjectMetricsSection({
       setSortOrder("asc")
       return
     }
-    setSortBy("firstOnlineDate")
+    setSortBy("deliveryDays")
     setSortOrder("desc")
   }
 
@@ -979,12 +979,12 @@ export function ProjectMetricsSection({
                 <th className="px-3 py-2 text-right font-medium">千行代码缺陷率</th>
                 <th className="px-3 py-2 text-right font-medium">发起 ST 耗时</th>
                 <SortableProjectMetricTh
-                  label="特性上线时间"
-                  sortKey="firstOnlineDate"
+                  label="特性上线耗时"
+                  sortKey="deliveryDays"
                   activeKey={sortBy}
                   order={sortOrder}
                   onSort={cycleSort}
-                  title="按首次上线时间排序"
+                  title="按特性上线耗时排序"
                 />
                 <th className="px-3 py-2 text-right font-medium">Token</th>
                 <SortableProjectMetricTh
