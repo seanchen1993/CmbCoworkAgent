@@ -120,6 +120,67 @@ describe("bounded trace telemetry", () => {
     expect(Buffer.byteLength(readFileSync(persistedPath, "utf8"), "utf8")).toBeLessThan(1024 * 1024)
   }, 15_000)
 
+  it("holds a trace under the persist limit even when every field is maxed out", async () => {
+    const root = makeRoot("trace-collector-ceiling-")
+    process.env.CMB_COWORK_TRACES_DIR = root
+    process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
+    mockCollectorDependencies()
+    const { TraceCollector, flushTraceWriteQueue } = await import("./collector")
+
+    // Everything at its cap at once: a full user message, a full error message,
+    // 128 long skill names on both lists, long tool names, and per-turn content
+    // that never repeats so nothing can be deduplicated away.
+    const tracer = new TraceCollector("thread-ceiling", "U".repeat(64 * 1024), "model", {
+      includeSkillEval: false
+    })
+    tracer.setUsedSkills(Array.from({ length: 128 }, (_, i) => `skill-${i}-${"s".repeat(200)}`))
+    tracer.setEvolvedSkills(Array.from({ length: 128 }, (_, i) => `evo-${i}-${"e".repeat(200)}`))
+    // The budget is spent within ~13 turns; the rest only adds GC pressure.
+    for (let i = 0; i < 60; i += 1) {
+      const messageId = `m-${i}`
+      const blob = `${i}-` + "a".repeat(16 * 1024)
+      tracer.beginStep()
+      tracer.recordToolCall({ name: "exec", args: { i, blob } })
+      tracer.endStep(blob)
+      const nodeId = tracer.beginLlmNode({
+        messageId,
+        input: Array.from({ length: 12 }, (_, k) => ({
+          role: "tool" as const,
+          content: `${i}-${k}-` + "c".repeat(16 * 1024)
+        }))
+      })
+      tracer.recordModelCall({
+        messageId,
+        startedAt: new Date().toISOString(),
+        inputMessages: Array.from({ length: 12 }, (_, k) => ({
+          role: "tool" as const,
+          content: `${i}-${k}-` + "c".repeat(16 * 1024)
+        })),
+        outputMessage: { role: "assistant", content: blob, reasoning: blob },
+        toolCalls: [{ name: "exec", args: { i, blob } }]
+      })
+      tracer.endLlmNode({ nodeId, output: blob, metadata: { reasoning: blob } })
+      tracer.addToolNode({
+        name: "n".repeat(300),
+        input: { i, blob },
+        llmMessageId: messageId,
+        toolCallId: `tc-${i}`
+      })
+      tracer.addToolResultNode({ toolCallId: `tc-${i}`, output: blob })
+    }
+
+    const trace = await tracer.finish("error", "E".repeat(16 * 1024))
+    await flushTraceWriteQueue()
+
+    // Over TRACE_PERSISTED_MAX_BYTES the write queue drops the trace outright,
+    // and only an in-memory counter records that it happened. A node input that
+    // skipped the byte budget once pushed this to ~1.1MB, so pin the headroom.
+    const bytes = Buffer.byteLength(JSON.stringify(trace), "utf8")
+    expect(bytes).toBeLessThan(768 * 1024)
+    const persistedPath = join(root, "thread-ceiling", `${trace.traceId}.jsonl`)
+    expect(existsSync(persistedPath)).toBe(true)
+  }, 30_000)
+
   it("keeps identity and tree structure intact after the collection budget is spent", async () => {
     const root = makeRoot("trace-collector-identity-")
     process.env.CMB_COWORK_TRACES_DIR = root

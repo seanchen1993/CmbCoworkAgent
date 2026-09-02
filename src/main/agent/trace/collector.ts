@@ -1534,13 +1534,18 @@ export class TraceCollector {
       ...(node.name ? { name: clampText(node.name, 512) } : {}),
       startedAt: clampText(node.startedAt, 64),
       ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
-      // Intern after bounding, never before: ids are content addresses, so a id
-      // taken from the pre-truncation value would match nothing. Chat-message
-      // arrays are skipped — they have their own per-message dedupe.
+      // Everything passes through the byte budget — a node input has no
+      // exemption, and letting chat-message arrays skip it put the whole llm
+      // input window outside the 480KB pool.
+      //
+      // Interning comes after bounding, never before: ids are content
+      // addresses, so one taken from the pre-truncation value would match
+      // nothing. Chat-message arrays are bounded but not interned, because
+      // their messages already carry per-message refs.
       ...(node.input !== undefined
         ? {
             input: isChatMessageArray(node.input)
-              ? node.input
+              ? this.collectionBudget.takeValue(node.input, 32 * 1024)
               : this.internNodeValue(this.collectionBudget.takeValue(node.input, 32 * 1024))
           }
         : {}),
