@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react"
-import { ChevronDown, Loader2, MessageSquareText } from "lucide-react"
+import { ChevronDown, ChevronRight, Loader2, MessageSquareText } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -92,6 +92,15 @@ function ThreadRemoteAccessSwitcherImpl({
   const routeAvailable = overview?.routeAvailable === true
   const toggleDisabled = pending || loading || (!enabled && !routeAvailable)
   const triggerLabel = enabled ? "已接入招乎" : "接入招乎"
+  const triggerValue = pending
+    ? "处理中"
+    : loading
+      ? "读取中"
+      : loadError
+        ? "状态异常"
+        : enabled
+          ? "已接入"
+          : "未接入"
 
   const setRemoteAccess = async (nextEnabled: boolean): Promise<void> => {
     if (pending || toggleDisabled) return
@@ -120,85 +129,79 @@ function ThreadRemoteAccessSwitcherImpl({
           size="sm"
           title={`当前会话：${triggerLabel}`}
           aria-label={`当前会话：${triggerLabel}`}
-          className={cn(
-            "h-8 gap-1.5 rounded-md px-1.5 text-xs transition-colors",
-            enabled
-              ? "text-primary hover:bg-primary/10 hover:text-primary"
-              : "text-muted-foreground hover:bg-muted/60"
-          )}
+          className="h-8 gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/60"
         >
-          <span className="grid size-5 place-items-center">
+          <span className={cn("grid size-5 place-items-center", enabled && "text-primary")}>
             {loading || pending ? (
               <Loader2 className="size-3.5 animate-spin" />
             ) : (
               <MessageSquareText className="size-3.5" />
             )}
           </span>
-          <span className="font-medium">{triggerLabel}</span>
+          <span className="font-medium text-foreground">招乎接入</span>
+          <span
+            className={cn(
+              "ml-auto text-[11px] font-medium",
+              loadError ? "text-status-warning" : enabled ? "text-primary" : "text-muted-foreground"
+            )}
+          >
+            {triggerValue}
+          </span>
           <ChevronDown className="size-3 opacity-70" />
         </Button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-[340px] max-w-[calc(100vw-32px)] overflow-hidden border-border bg-background p-0 shadow-xl"
+        className="w-[300px] max-w-[calc(100vw-32px)] overflow-hidden rounded-xl border-border/70 bg-popover p-1.5 shadow-xl"
         align="start"
-        side="top"
+        side="left"
         sideOffset={8}
       >
-        <div className="border-b border-border bg-muted/40 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <span className="grid size-8 place-items-center rounded-lg bg-primary/10 text-primary">
-              <MessageSquareText className="size-4" />
-            </span>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold text-foreground">当前会话接入招乎</div>
-              <div className="text-xs leading-5 text-muted-foreground">
-                开放这一条已经存在的桌面会话。
-              </div>
+        <div className="flex items-center gap-3 rounded-lg bg-background-interactive/45 px-3 py-2.5">
+          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+            <MessageSquareText className="size-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-medium text-foreground">接入当前会话</div>
+            <div className="mt-0.5 text-[10px] leading-4 text-muted-foreground">
+              开启后，可从招乎查看并继续此会话
             </div>
           </div>
+          <Switch
+            aria-label="允许招乎访问当前会话"
+            checked={enabled}
+            disabled={toggleDisabled}
+            onCheckedChange={(checked) => void setRemoteAccess(checked)}
+            className="disabled:opacity-100"
+          />
         </div>
 
-        <div className="space-y-3 p-4">
-          <div className="flex items-center justify-between gap-4">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-foreground">接入当前会话</div>
-              <div className="mt-1 text-[11px] leading-5 text-muted-foreground">
-                开启后，这一条会话会出现在招乎的 /会话 列表中。
-              </div>
-            </div>
-            <Switch
-              aria-label="允许招乎访问当前会话"
-              checked={enabled}
-              disabled={toggleDisabled}
-              onCheckedChange={(checked) => void setRemoteAccess(checked)}
-            />
-          </div>
-
+        <div className="space-y-1.5 pt-1.5">
           {!enabled && !routeAvailable && (
-            <div className="rounded-md border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+            <div className="rounded-lg border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
               {loadError ?? overview?.routeReason ?? "正在读取招乎连接状态…"}
             </div>
           )}
 
           {grant && grant.state === "suspended" && grant.suspendReason && (
-            <div className="rounded-md border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+            <div className="rounded-lg border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
               当前授权已暂停：{grant.suspendReason}
             </div>
           )}
         </div>
 
-        <div className="border-t border-border px-3 py-2">
+        {onOpenSettings && (
           <button
             type="button"
             onClick={() => {
-              onOpenSettings?.()
+              onOpenSettings()
               setOpen(false)
             }}
-            className="text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            className="mt-1 flex h-8 w-full items-center rounded-lg px-3 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
           >
-            打开机器人管理
+            招乎机器人管理
+            <ChevronRight className="ml-auto size-3 opacity-70" />
           </button>
-        </div>
+        )}
       </PopoverContent>
     </Popover>
   )

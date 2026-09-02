@@ -881,8 +881,10 @@ export function ClaudeCodePanel({ visible }: { visible?: boolean }): React.JSX.E
                     type="button"
                     onClick={() => onChange(!checked)}
                     className={cn(
-                      "relative w-[38px] h-[22px] rounded-full transition-all duration-300 ease-out cursor-pointer",
-                      checked ? "bg-status-nominal" : "bg-background-interactive"
+                      "relative h-[22px] w-[38px] cursor-pointer rounded-full border transition-all duration-300 ease-out",
+                      checked
+                        ? "border-status-nominal bg-status-nominal"
+                        : "border-border-emphasis bg-muted-foreground/20"
                     )}
                   >
                     <ToggleThumb

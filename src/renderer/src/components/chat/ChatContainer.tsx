@@ -6670,7 +6670,7 @@ export function ChatContainer({
       onClick={handleCancel}
       aria-label="停止生成"
       title="停止生成"
-      className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+      className="flex size-8 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground transition-colors hover:bg-destructive/90"
     >
       <Square className="size-3 fill-current" />
     </button>
@@ -8575,6 +8575,10 @@ export function ChatContainer({
                                 {(agentMode === "normal" || agentMode === "multi") && (
                                   <OutputStyleSwitcher threadId={threadId} disabled={isLoading} />
                                 )}
+                                <ThreadRemoteAccessSwitcher
+                                  threadId={threadId}
+                                  onOpenSettings={handleOpenRobotSettings}
+                                />
                               </div>
                             </section>
 
@@ -8876,10 +8880,6 @@ export function ChatContainer({
                                 : undefined
                             }
                             onChange={handleAgentModeChange}
-                          />
-                          <ThreadRemoteAccessSwitcher
-                            threadId={threadId}
-                            onOpenSettings={handleOpenRobotSettings}
                           />
                         </div>
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">

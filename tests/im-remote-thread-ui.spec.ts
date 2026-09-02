@@ -135,25 +135,25 @@ function testRemoteThreadsHaveStableSourceAndModeLabels(): void {
   assert(!robotPanel.includes("设备版本"))
   assert(chat.includes("ThreadRemoteAccessSwitcher"))
   assert(chat.includes('setShowCustomizeView(true, "robot")'))
-  const composerBottomBarIndex = chat.indexOf(
-    "{/* Bottom bar: primary execution controls left, send button right */}"
-  )
-  const agentModeSwitcherIndex = chat.indexOf("<AgentModeSwitcher")
+  const sessionSettingsIndex = chat.indexOf('id="composer-session-settings-title"')
   const remoteAccessSwitcherIndex = chat.indexOf("<ThreadRemoteAccessSwitcher")
+  const promptSettingsIndex = chat.indexOf("{showComposerPromptSection &&", sessionSettingsIndex)
   assert(
-    composerBottomBarIndex < agentModeSwitcherIndex &&
-      agentModeSwitcherIndex < remoteAccessSwitcherIndex,
-    "the Zhaohu access entry must sit in the composer toolbar after execution mode"
+    sessionSettingsIndex < remoteAccessSwitcherIndex &&
+      remoteAccessSwitcherIndex < promptSettingsIndex,
+    "the Zhaohu access entry must sit in the session settings menu"
   )
   assert.equal(
     chat.match(/<ThreadRemoteAccessSwitcher/gu)?.length,
     1,
     "the Zhaohu access entry must not also remain in the lower status bar"
   )
-  assert(remoteAccessSwitcher.includes("当前会话接入招乎"))
+  assert(remoteAccessSwitcher.includes("招乎接入"))
+  assert(remoteAccessSwitcher.includes('? "已接入"'))
+  assert(remoteAccessSwitcher.includes(': "未接入"'))
   assert(remoteAccessSwitcher.includes("window.api.builtinRobot.getRemoteAccess()"))
   assert(remoteAccessSwitcher.includes("window.api.builtinRobot.setThreadRemoteAccess"))
-  assert(remoteAccessSwitcher.includes("这一条会话会出现在招乎的 /会话 列表中"))
+  assert(remoteAccessSwitcher.includes("开启后，可从招乎查看并继续此会话"))
   assert(!remoteAccessEligibility.includes("isHarnessProjectModeThread"))
   assert(remoteAccessEligibility.includes('metadata.targetKind === "feature"'))
   assert(remoteAccessEligibility.includes('metadata.targetKind !== "inbox"'))
