@@ -129,7 +129,7 @@ function browserStatesEqual(a: BrowserState, b: BrowserState): boolean {
 
 function BrowserWelcomePanel(): React.JSX.Element {
   return (
-    <div className="absolute inset-0 z-20 overflow-y-auto bg-background">
+    <div className="absolute inset-0 z-20 overflow-y-auto bg-background-elevated">
       <div className="mx-auto flex min-h-full max-w-xl flex-col justify-center px-4 py-2">
         <div className="mb-2">
           <div className="mb-3 flex size-12 items-center justify-center rounded-xl border border-border bg-background-elevated text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.12)]">
@@ -146,7 +146,7 @@ function BrowserWelcomePanel(): React.JSX.Element {
           </p>
         </div>
 
-        <div className="overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.16)]">
+        <div className="overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.08)]">
           <div className="border-b border-border px-4 py-3">
             <p className="text-xs font-semibold text-foreground">一个浏览器，贯通开发与验证</p>
             <p className="mt-0.5 text-[11px] text-muted-foreground">

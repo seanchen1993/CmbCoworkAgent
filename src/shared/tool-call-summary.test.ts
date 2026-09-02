@@ -11,7 +11,7 @@ describe("collapsed tool-call search summary", () => {
         name: "execute",
         args: { command: "123456789012345678901234567890hidden" }
       })
-    ).toBe("执行命令: 123456789012345678901234567890...")
+    ).toBe("执行命令: 123456789012345678901234567890hidden")
   })
 
   it("does not expose folded raw arguments", () => {

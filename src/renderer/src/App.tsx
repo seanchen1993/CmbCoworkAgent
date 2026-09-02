@@ -47,8 +47,11 @@ const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
+import {
+  openResourcePanelOverlay,
+  ResourcePanelOverlay
+} from "@/components/panels/ResourcePanelOverlay"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
-import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"
 import { ElectronIPCTransport } from "@/lib/electron-transport"
@@ -679,16 +682,16 @@ function App(): React.JSX.Element {
   }, [])
 
   const selectPreviewModule = useCallback(() => {
-    setRightModule("preview")
-  }, [setRightModule])
+    openResourcePanelOverlay("preview")
+  }, [])
 
   const selectWorkModule = useCallback(() => {
     setRightModule("work")
   }, [setRightModule])
 
   const selectBrowserModule = useCallback(() => {
-    setRightModule("browser")
-  }, [setRightModule])
+    openResourcePanelOverlay("browser")
+  }, [])
 
   useEffect(() => {
     if (!rightPanelWorkRequest) return
@@ -739,20 +742,15 @@ function App(): React.JSX.Element {
   const showRightPanelModuleControls =
     mainView === "thread" || (mainView === "harness" && Boolean(harnessSessionThreadId))
 
-  useBrowserViewLifecycle({
-    currentThreadId,
-    harnessSessionThreadId,
-    mainView,
-    rightPanelCollapsed,
-    isAgentFocusActive
-  })
-
   const selectGitModule = useCallback(() => {
     if (activeRightPanelThreadId) {
       setThreadPendingGitDiff(activeRightPanelThreadId, false)
     }
-    setRightModule("git")
-  }, [activeRightPanelThreadId, setRightModule, setThreadPendingGitDiff])
+    openResourcePanelOverlay("git")
+  }, [
+    activeRightPanelThreadId,
+    setThreadPendingGitDiff
+  ])
 
   const dismissGitChangeNotice = useCallback(() => {
     if (!activeRightPanelThreadId) return
@@ -1521,6 +1519,11 @@ function App(): React.JSX.Element {
               </div>
             </div>
           )}
+          <ResourcePanelOverlay
+            isAgentFocusActive={isAgentFocusActive}
+            renderedMainView={renderedMainView}
+            renderedPanelThreadId={renderedRightPanelThreadId}
+          />
         </div>
       </div>
       <PetStateBridge />

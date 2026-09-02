@@ -1002,7 +1002,7 @@ function MessageBubbleImpl({
                   className="rounded-sm border overflow-hidden border-border bg-background-elevated"
                 >
                   {/* 可折叠的工具标题 */}
-                  <div className="flex w-full items-center hover:bg-background-interactive transition-colors">
+                  <div className="flex w-full items-center hover:bg-muted/50 transition-colors">
                     <button
                       type="button"
                       onClick={() => toggleToolExpansion(toolId, isHtmlTool)}
@@ -1018,7 +1018,7 @@ function MessageBubbleImpl({
 
                       <span
                         data-chat-search-text
-                        className="text-xs font-medium min-w-0 max-w-[420px] truncate text-left"
+                        className="text-xs font-medium min-w-0 truncate text-left"
                       >
                         {summary}
                       </span>

@@ -79,7 +79,11 @@ import {
   type WorkspaceFileTreeNode
 } from "@/lib/workspace-file-tree-projection"
 import { Badge } from "@/components/ui/badge"
-import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
+import {
+  emitOpenResourcePreview,
+  type OpenResourcePreviewDetail
+} from "@/lib/resource-preview-events"
+import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
 import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
@@ -345,6 +349,9 @@ interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git" | "browser"
   showSystemConstraints?: boolean
+  resourcePreviewRequest?: OpenResourcePreviewDetail | null
+  onResourcePreviewRequestHandled?: () => void
+  listenForResourcePreview?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
   onRequestBrowserMode?: () => void
@@ -476,6 +483,9 @@ export function RightPanel({
   threadId,
   moduleMode,
   showSystemConstraints = false,
+  resourcePreviewRequest = null,
+  onResourcePreviewRequestHandled,
+  listenForResourcePreview = true,
   onRequestPreviewMode,
   onRequestWorkMode,
   onRequestBrowserMode,
@@ -501,6 +511,13 @@ export function RightPanel({
     }))
   )
   const currentThreadId = threadId ?? storeCurrentThreadId
+  const { request: localPreviewRequest, clear: clearLocalPreviewRequest } =
+    useResourcePreviewRequest(currentThreadId, listenForResourcePreview)
+  const activeResourcePreviewRequest = resourcePreviewRequest ?? localPreviewRequest
+  const handleResourcePreviewRequestHandled = useCallback(() => {
+    clearLocalPreviewRequest()
+    onResourcePreviewRequestHandled?.()
+  }, [clearLocalPreviewRequest, onResourcePreviewRequestHandled])
   const pluginRunArtifacts = useSyncExternalStore(
     subscribeHarnessPluginRunArtifacts,
     getHarnessPluginRunArtifactsSnapshot,
@@ -1293,47 +1310,48 @@ export function RightPanel({
   }, [currentThreadId, previewPathForCurrentThread])
 
   useEffect(() => {
-    const cleanup = onOpenResourcePreview(
-      ({
-        threadId,
-        filePath,
-        workspacePathKind,
-        externalPreviewGrant,
-        externalPreviewGrantExpiresAt,
-        externalPreviewProjectId,
-        externalPreviewSlug
-      }) => {
-        if (!currentThreadId || threadId !== currentThreadId) return
-        previewThreadIdRef.current = threadId
-        setPreviewPath(filePath)
-        setPreviewWorkspacePathKind(workspacePathKind)
-        previewExternalGrantRefreshPromiseRef.current = null
-        replacePreviewExternalAuthorization(
-          externalPreviewGrant
-            ? {
-                threadId,
-                filePath,
-                grant: externalPreviewGrant,
-                expiresAt: externalPreviewGrantExpiresAt,
-                projectId: externalPreviewProjectId,
-                slug: externalPreviewSlug
-              }
-            : null
-        )
-        setPreviewReloadToken((v) => v + 1)
-        if (isHtmlPreviewPath(filePath) && !externalPreviewGrant) {
-          onRequestBrowserMode?.()
-        } else {
-          onRequestPreviewMode?.()
-        }
-      }
+    const request = activeResourcePreviewRequest
+    if (!request || !currentThreadId || request.threadId !== currentThreadId) return
+
+    const {
+      threadId,
+      filePath,
+      workspacePathKind,
+      externalPreviewGrant,
+      externalPreviewGrantExpiresAt,
+      externalPreviewProjectId,
+      externalPreviewSlug
+    } = request
+    previewThreadIdRef.current = threadId
+    setPreviewPath(filePath)
+    setPreviewWorkspacePathKind(workspacePathKind)
+    previewExternalGrantRefreshPromiseRef.current = null
+    replacePreviewExternalAuthorization(
+      externalPreviewGrant
+        ? {
+            threadId,
+            filePath,
+            grant: externalPreviewGrant,
+            expiresAt: externalPreviewGrantExpiresAt,
+            projectId: externalPreviewProjectId,
+            slug: externalPreviewSlug
+          }
+        : null
     )
-    return cleanup
+    setPreviewReloadToken((v) => v + 1)
+    if (isHtmlPreviewPath(filePath) && !externalPreviewGrant) {
+      onRequestBrowserMode?.()
+    } else {
+      onRequestPreviewMode?.()
+    }
+    handleResourcePreviewRequestHandled()
   }, [
     currentThreadId,
     onRequestBrowserMode,
     onRequestPreviewMode,
-    replacePreviewExternalAuthorization
+    handleResourcePreviewRequestHandled,
+    replacePreviewExternalAuthorization,
+    activeResourcePreviewRequest
   ])
 
   useEffect(() => {
