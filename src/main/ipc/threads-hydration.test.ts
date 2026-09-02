@@ -155,6 +155,20 @@ describe("threads:get hydration contract", () => {
     expect(handler).toContain("throw error")
   })
 
+  it("uses the shifted deferred row when a complete tool group is prepended", () => {
+    const channel = source.indexOf('"threads:getSubagentTranscript"')
+    const start = source.lastIndexOf("ipcMain.handle(", channel)
+    const end = source.indexOf('"threads:exportSubagentTranscriptBlob"', start)
+    const handler = source.slice(start, end)
+
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(handler).toContain(
+      "selectedPage.messages[selectedPage.deferredHydrationIndex ?? 0]"
+    )
+    expect(handler).toContain("page.messages[deferredHydrationIndex]")
+    expect(handler).toContain("messageIndex: page.start + deferredHydrationIndex")
+  })
+
   it("uses an empty goal sidecar only for a successful read or bounded worker fallback", () => {
     const channel = source.indexOf('"threads:goalEvents"')
     const start = source.lastIndexOf("ipcMain.handle(", channel)

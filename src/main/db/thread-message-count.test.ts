@@ -33,6 +33,38 @@ afterAll(async () => {
 })
 
 describe("thread message count", () => {
+  it("keeps Goal ordinal anchors in the bounded main-process fallback", () => {
+    const threadId = "goal-fallback-anchor"
+    threadDb.createThread(threadId)
+    const createdAt = new Date(1)
+    threadDb.upsertThreadMessages(threadId, [
+      {
+        id: "goal-fallback-message",
+        role: "user",
+        content: "/goal fallback",
+        goal_id: "goal-fallback",
+        active_window_id: "window-fallback",
+        created_at: createdAt
+      }
+    ])
+    threadDb.addThreadGoalEvent(
+      threadId,
+      `${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal fallback`,
+      "goal-fallback",
+      createdAt.getTime(),
+      "window-fallback"
+    )
+
+    expect(
+      threadDb.getThreadGoalEventsHydrationFallback(threadId, { restore: true })
+    ).toEqual([
+      expect.objectContaining({
+        transcript_ordinal: 0,
+        transcript_message_id: "goal-fallback-message"
+      })
+    ])
+  })
+
   it("reads only the bucket and never parses a huge message or its fragments", () => {
     const threadId = "huge-first-message"
     threadDb.createThread(threadId)

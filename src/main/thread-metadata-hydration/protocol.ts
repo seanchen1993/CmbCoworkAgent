@@ -16,6 +16,8 @@ export interface ThreadGoalHydrationEvent {
   active_window_id: string | null
   message: string
   created_at: number
+  transcript_ordinal?: number | null
+  transcript_message_id?: string | null
 }
 
 export interface ThreadGitMetadataProjection {

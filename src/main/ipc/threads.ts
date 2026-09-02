@@ -3175,7 +3175,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           return selectedPage
         }
 
-        const deferredMessage = selectedPage.messages[0]
+        const deferredMessage =
+          selectedPage.messages[selectedPage.deferredHydrationIndex ?? 0]
         const hasSidecar =
           deferredMessage &&
           typeof deferredMessage === "object" &&
@@ -3210,14 +3211,17 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // focused request. Concurrent GC may make a blob unavailable; hydration
       // deliberately degrades to the compact projection in that case.
       const hydrated = await hydrateSubagentTranscriptManifestPage(page)
-      const deferredMessage = page.deferredHydration ? page.messages[0] : undefined
+      const deferredHydrationIndex = page.deferredHydrationIndex ?? 0
+      const deferredMessage = page.deferredHydration
+        ? page.messages[deferredHydrationIndex]
+        : undefined
       const deferredExport =
         deferredMessage &&
         typeof deferredMessage === "object" &&
         !Array.isArray(deferredMessage) &&
         typeof (deferredMessage as Record<string, unknown>).id === "string"
           ? {
-              messageIndex: page.start,
+              messageIndex: page.start + deferredHydrationIndex,
               expectedMessageId: (deferredMessage as Record<string, unknown>).id as string,
               fields: (["content", "reasoning", "tool_calls"] as const).filter((field) =>
                 isSubagentTranscriptBlobRef(

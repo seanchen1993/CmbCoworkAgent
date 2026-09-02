@@ -76,6 +76,7 @@ const THREAD_MESSAGE_ALIAS_LIMIT = 1_000
 const THREAD_MESSAGE_FRAGMENT_TEXT_LIMIT = 4_096
 const THREAD_SUBAGENT_TEXT_FRAGMENT_LIMIT = 4_096
 const THREAD_SUBAGENT_PAGE_JOURNAL_CHAR_BUDGET = 8 * 1024 * 1024
+const THREAD_SUBAGENT_TOOL_GROUP_LOOKBACK = 101
 export const DEFAULT_THREAD_MESSAGES_PAGE_LIMIT = 500
 const MAX_THREAD_MESSAGES_PAGE_LIMIT = 1_000
 export const THREAD_MESSAGES_PAGE_BYTE_BUDGET = 4 * 1024 * 1024
@@ -843,6 +844,16 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   db.run(
     `CREATE INDEX IF NOT EXISTS idx_thread_goal_events_thread_order ON thread_goal_events(thread_id, created_at, event_id)`
   )
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_thread_messages_active_window_order
+     ON thread_messages(thread_id, active_window_id, ordinal, message_id)
+     WHERE active_window_id IS NOT NULL AND active_window_id != ''`
+  )
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_thread_messages_goal_order
+     ON thread_messages(thread_id, goal_id, ordinal, message_id)
+     WHERE goal_id IS NOT NULL AND goal_id != ''`
+  )
 
   ensureImServiceSchema(db)
 
@@ -1114,6 +1125,7 @@ function threadMessageRowToMessage(row: ThreadMessageRow, appendedText = ""): Me
 
   return {
     id: row.message_id,
+    ordinal: row.ordinal,
     ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
     ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
       ? { provider_occurrence: row.provider_occurrence }
@@ -3199,8 +3211,79 @@ export function getThreadSubagentManifestPage(
     stmt.free()
   }
   const hasMore = descendingRows.length > boundedLimit
+  let pageHasMore = hasMore
   if (hasMore) descendingRows.length = boundedLimit
   const rows = descendingRows.reverse()
+  const oldestManifest = rows[0] ? parseSubagentManifestRow(rows[0]) : undefined
+  if (hasMore && isJsonRecord(oldestManifest) && oldestManifest.role === "tool") {
+    const predecessorStmt = database.prepare(
+      `SELECT thread_id, subagent_id, message_id, manifest_json, ordinal, updated_at
+       FROM thread_subagent_messages
+       WHERE thread_id = ? AND subagent_id = ? AND ordinal < ?
+       ORDER BY ordinal DESC, message_id DESC
+       LIMIT ?`
+    )
+    predecessorStmt.bind([
+      threadId,
+      subagentId,
+      rows[0].ordinal,
+      THREAD_SUBAGENT_TOOL_GROUP_LOOKBACK
+    ])
+    const predecessors: ThreadSubagentMessageRow[] = []
+    const toolResultIds = new Set<string>()
+    let foundOwningAssistant = false
+    const oldestToolCallId =
+      typeof oldestManifest.tool_call_id === "string" ? oldestManifest.tool_call_id : ""
+    if (oldestToolCallId) toolResultIds.add(oldestToolCallId)
+    try {
+      while (predecessorStmt.step()) {
+        const predecessor = predecessorStmt.getAsObject() as unknown as ThreadSubagentMessageRow
+        const manifest = parseSubagentManifestRow(predecessor)
+        if (!isJsonRecord(manifest)) break
+        if (manifest.role === "tool") {
+          if (typeof manifest.tool_call_id === "string") {
+            toolResultIds.add(manifest.tool_call_id)
+          }
+          predecessors.push(predecessor)
+          continue
+        }
+        const toolCalls = Array.isArray(manifest.tool_calls) ? manifest.tool_calls : []
+        const ownsBoundary =
+          manifest.role === "assistant" &&
+          (isSubagentTranscriptBlobRef(manifest.tool_calls_ref, "tool_calls") ||
+            toolCalls.some(
+              (toolCall) =>
+                isJsonRecord(toolCall) &&
+                typeof toolCall.id === "string" &&
+                toolResultIds.has(toolCall.id)
+            ))
+        if (ownsBoundary) {
+          predecessors.push(predecessor)
+          foundOwningAssistant = true
+        }
+        break
+      }
+    } finally {
+      predecessorStmt.free()
+    }
+    if (foundOwningAssistant) rows.unshift(...predecessors.reverse())
+    const firstRow = foundOwningAssistant ? rows[0] : undefined
+    if (firstRow) {
+      const earlierStmt = database.prepare(
+        `SELECT 1 AS present
+         FROM thread_subagent_messages
+         WHERE thread_id = ? AND subagent_id = ?
+           AND (ordinal < ? OR (ordinal = ? AND message_id < ?))
+         LIMIT 1`
+      )
+      earlierStmt.bind([threadId, subagentId, firstRow.ordinal, firstRow.ordinal, firstRow.message_id])
+      try {
+        pageHasMore = earlierStmt.step()
+      } finally {
+        earlierStmt.free()
+      }
+    }
+  }
   const ordinals = rows.map((row) => row.ordinal)
   const start = ordinals[0] ?? 0
   const end = ordinals.length > 0 ? ordinals[ordinals.length - 1] + 1 : start
@@ -3210,8 +3293,8 @@ export function getThreadSubagentManifestPage(
     start,
     end,
     total: Math.max(0, Number(bucket.message_count) || 0),
-    hasMore,
-    ...(hasMore && { nextBefore: start })
+    hasMore: pageHasMore,
+    ...(pageHasMore && { nextBefore: start })
   }
 }
 
@@ -5589,6 +5672,8 @@ export interface ThreadGoalEventRow {
   active_window_id: string | null
   message: string
   created_at: number
+  transcript_ordinal?: number | null
+  transcript_message_id?: string | null
 }
 
 export function addThreadGoalEvent(
@@ -5735,6 +5820,20 @@ export function getThreadGoalEventsHydrationFallback(
          LIMIT ?
        ) ORDER BY created_at ASC, event_id ASC`
   const stmt = database.prepare(statementSql)
+  const activeWindowAnchorStmt = database.prepare(
+    `SELECT ordinal, message_id
+     FROM thread_messages
+     WHERE thread_id = ? AND active_window_id = ?
+     ORDER BY CASE WHEN role = 'user' THEN 0 ELSE 1 END, ordinal ASC, message_id ASC
+     LIMIT 1`
+  )
+  const goalAnchorStmt = database.prepare(
+    `SELECT ordinal, message_id
+     FROM thread_messages
+     WHERE thread_id = ? AND goal_id = ?
+     ORDER BY CASE WHEN role = 'user' THEN 0 ELSE 1 END, ordinal ASC, message_id ASC
+     LIMIT 1`
+  )
   const restoreBindings = [
     GOAL_USER_MESSAGE_EVENT_PREFIX,
     GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -5766,18 +5865,40 @@ export function getThreadGoalEventsHydrationFallback(
       const message = wasTruncated ? `${row.message}\n…[历史 Goal 事件已截断]` : row.message
       const eventBytes = Buffer.byteLength(message) + 160
       if (events.length > 0 && responseBytes + eventBytes > byteBudget) continue
+      let anchor: { ordinal?: unknown; message_id?: unknown } | undefined
+      const activeWindowId = typeof row.active_window_id === "string" ? row.active_window_id : null
+      const goalId = typeof row.goal_id === "string" ? row.goal_id : null
+      for (const [anchorStmt, identity] of [
+        [activeWindowAnchorStmt, activeWindowId],
+        [goalAnchorStmt, goalId]
+      ] as const) {
+        if (!identity) continue
+        anchorStmt.reset()
+        anchorStmt.bind([threadId, identity])
+        if (anchorStmt.step()) {
+          anchor = anchorStmt.getAsObject() as { ordinal?: unknown; message_id?: unknown }
+          break
+        }
+      }
       events.push({
         event_id: Number(row.event_id),
         thread_id: row.thread_id,
-        goal_id: typeof row.goal_id === "string" ? row.goal_id : null,
-        active_window_id: typeof row.active_window_id === "string" ? row.active_window_id : null,
+        goal_id: goalId,
+        active_window_id: activeWindowId,
         message,
-        created_at: Number(row.created_at)
+        created_at: Number(row.created_at),
+        transcript_ordinal: Number.isSafeInteger(Number(anchor?.ordinal))
+          ? Number(anchor?.ordinal)
+          : null,
+        transcript_message_id:
+          typeof anchor?.message_id === "string" ? anchor.message_id : null
       })
       responseBytes += eventBytes
     }
   } finally {
     stmt.free()
+    activeWindowAnchorStmt.free()
+    goalAnchorStmt.free()
   }
   return events
 }
