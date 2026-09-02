@@ -89,6 +89,7 @@
   --background-secondary: #f5f3ef;
   --background-elevated: #ffffff;
   --background-interactive: #f0eee9;
+  --streaming-markdown-code-background: #ffffff;
   --foreground: #292524;
 
   /* Borders */
@@ -595,7 +596,6 @@
   border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
   border-radius: 8px;
   background: var(--background-elevated);
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 
 .streaming-markdown-code-header {
@@ -646,12 +646,16 @@
   margin: 0;
   padding: 0.85rem 1rem;
   overflow-x: auto;
-  background: var(--background-interactive);
+  background: var(--streaming-markdown-code-background);
   color: color-mix(in srgb, var(--foreground) 92%, transparent);
   font-family: "SF Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
   font-size: 0.82rem;
   line-height: 1.65;
   tab-size: 2;
+}
+
+.dark .streaming-markdown-code-pre {
+  background: var(--background-interactive);
 }
 
 .streaming-markdown-code-pre code {
@@ -765,9 +769,7 @@
   border: 1px solid color-mix(in srgb, var(--border-emphasis) 72%, transparent);
   border-radius: 8px;
   background: var(--background-elevated);
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--foreground) 12%, var(--background-elevated)),
-    0 1px 2px color-mix(in srgb, var(--foreground) 6%, transparent);
+
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--muted-foreground) 34%, transparent) transparent;
   -webkit-overflow-scrolling: touch;

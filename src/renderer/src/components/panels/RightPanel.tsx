@@ -83,8 +83,9 @@ import {
   beginOpenResourcePreviewIntent,
   emitOpenResourcePreview,
   isCurrentOpenResourcePreviewIntent,
-  onOpenResourcePreview
+  type OpenResourcePreviewDetail
 } from "@/lib/resource-preview-events"
+import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
 import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
@@ -353,6 +354,9 @@ interface RightPanelProps {
   threadId?: string | null
   moduleMode: "work" | "preview" | "git" | "browser"
   showSystemConstraints?: boolean
+  resourcePreviewRequest?: OpenResourcePreviewDetail | null
+  onResourcePreviewRequestHandled?: () => void
+  listenForResourcePreview?: boolean
   onRequestPreviewMode?: () => void
   onRequestWorkMode?: () => void
   onRequestBrowserMode?: () => void
@@ -523,6 +527,9 @@ export function RightPanel({
   threadId,
   moduleMode,
   showSystemConstraints = false,
+  resourcePreviewRequest = null,
+  onResourcePreviewRequestHandled,
+  listenForResourcePreview = true,
   onRequestPreviewMode,
   onRequestWorkMode,
   onRequestBrowserMode,
@@ -548,6 +555,13 @@ export function RightPanel({
     }))
   )
   const currentThreadId = threadId ?? storeCurrentThreadId
+  const { request: localPreviewRequest, clear: clearLocalPreviewRequest } =
+    useResourcePreviewRequest(currentThreadId, listenForResourcePreview)
+  const activeResourcePreviewRequest = resourcePreviewRequest ?? localPreviewRequest
+  const handleResourcePreviewRequestHandled = useCallback(() => {
+    clearLocalPreviewRequest()
+    onResourcePreviewRequestHandled?.()
+  }, [clearLocalPreviewRequest, onResourcePreviewRequestHandled])
   const pluginRunArtifacts = useSyncExternalStore(
     subscribeHarnessPluginRunArtifacts,
     getHarnessPluginRunArtifactsSnapshot,
@@ -1392,8 +1406,10 @@ export function RightPanel({
   }, [currentThreadId, replacePreviewExternalAuthorization])
 
   useEffect(() => {
-    if (currentThreadId) beginOpenResourcePreviewIntent(currentThreadId)
-  }, [currentThreadId, moduleMode])
+    if (currentThreadId && !activeResourcePreviewRequest) {
+      beginOpenResourcePreviewIntent(currentThreadId)
+    }
+  }, [activeResourcePreviewRequest, currentThreadId, moduleMode])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -1406,68 +1422,70 @@ export function RightPanel({
   }, [currentThreadId, previewPathForCurrentThread])
 
   useEffect(() => {
-    const cleanup = onOpenResourcePreview(
-      ({
+    const request = activeResourcePreviewRequest
+    if (!request || !currentThreadId || request.threadId !== currentThreadId) return
+
+    const {
+      threadId,
+      filePath,
+      workspacePathKind,
+      externalPreviewGrant,
+      externalPreviewGrantExpiresAt,
+      externalPreviewProjectId,
+      externalPreviewSlug,
+      toolCallId,
+      intentId
+    } = request
+    if (
+      !isCurrentOpenResourcePreviewIntent(
         threadId,
-        filePath,
-        workspacePathKind,
-        externalPreviewGrant,
-        externalPreviewGrantExpiresAt,
-        externalPreviewProjectId,
-        externalPreviewSlug,
-        toolCallId,
-        intentId
-      }) => {
-        if (!currentThreadId || threadId !== currentThreadId) return
-        if (
-          !isCurrentOpenResourcePreviewIntent(
-            threadId,
-            intentId,
-            latestPreviewIntentIdRef.current
-          )
-        ) {
-          return
-        }
-        latestPreviewIntentIdRef.current = intentId
-        const shouldUseExternalAuthorization = Boolean(
-          externalPreviewGrant &&
-            !resolveResourcePreviewPaths(
-              filePath,
-              workspacePath ?? null,
-              window.electron.process.platform,
-              workspacePathKind
-            ).inWorkspace
-        )
-        previewThreadIdRef.current = threadId
-        setPreviewPath(filePath)
-        setPreviewWorkspacePathKind(workspacePathKind)
-        previewExternalGrantRefreshPromiseRef.current = null
-        replacePreviewExternalAuthorization(
-          externalPreviewGrant && shouldUseExternalAuthorization
-            ? {
-                threadId,
-                filePath,
-                grant: externalPreviewGrant,
-                expiresAt: externalPreviewGrantExpiresAt,
-                projectId: externalPreviewProjectId,
-                slug: externalPreviewSlug,
-                toolCallId
-              }
-            : null
-        )
-        setPreviewReloadToken((v) => v + 1)
-        if (isHtmlPreviewPath(filePath) && !shouldUseExternalAuthorization) {
-          onRequestBrowserMode?.()
-        } else {
-          onRequestPreviewMode?.()
-        }
-      }
+        intentId,
+        latestPreviewIntentIdRef.current
+      )
+    ) {
+      handleResourcePreviewRequestHandled()
+      return
+    }
+    latestPreviewIntentIdRef.current = intentId
+    const shouldUseExternalAuthorization = Boolean(
+      externalPreviewGrant &&
+        !resolveResourcePreviewPaths(
+          filePath,
+          workspacePath ?? null,
+          window.electron.process.platform,
+          workspacePathKind
+        ).inWorkspace
     )
-    return cleanup
+    previewThreadIdRef.current = threadId
+    setPreviewPath(filePath)
+    setPreviewWorkspacePathKind(workspacePathKind)
+    previewExternalGrantRefreshPromiseRef.current = null
+    replacePreviewExternalAuthorization(
+      externalPreviewGrant && shouldUseExternalAuthorization
+        ? {
+            threadId,
+            filePath,
+            grant: externalPreviewGrant,
+            expiresAt: externalPreviewGrantExpiresAt,
+            projectId: externalPreviewProjectId,
+            slug: externalPreviewSlug,
+            toolCallId
+          }
+        : null
+    )
+    setPreviewReloadToken((v) => v + 1)
+    if (isHtmlPreviewPath(filePath) && !shouldUseExternalAuthorization) {
+      onRequestBrowserMode?.()
+    } else {
+      onRequestPreviewMode?.()
+    }
+    handleResourcePreviewRequestHandled()
   }, [
     currentThreadId,
     onRequestBrowserMode,
     onRequestPreviewMode,
+    activeResourcePreviewRequest,
+    handleResourcePreviewRequestHandled,
     replacePreviewExternalAuthorization,
     workspacePath
   ])
