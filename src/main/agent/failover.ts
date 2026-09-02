@@ -14,6 +14,7 @@ export type ApiErrorCode =
   | "server_error"
   | "network_error"
   | "local_storage_error"
+  | "harness_context_unavailable"
   | "unknown"
 
 // ─── Gateway status-code dictionary ──────────────────────────────────────────
@@ -438,6 +439,51 @@ export function extractErrorDetail(
   error: unknown,
   fetchDetail?: { status?: number; requestId?: string; rawBody?: string }
 ): ApiErrorDetail {
+  const deployUnitContextLimitError = findErrorWithCode(
+    error,
+    "HARNESS_DEPLOY_UNIT_CONTEXT_LIMIT_EXCEEDED"
+  )
+  if (deployUnitContextLimitError) {
+    const deployUnitContextLimitMessage = cleanProviderMessage(deployUnitContextLimitError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 仓库上下文超限",
+      hint: "请减少发布单元；框架模式最多 64 个，插件注入模式最多 512 个。",
+      reason:
+        deployUnitContextLimitMessage ??
+        "Harness 发布单元上下文超过安全上限，已阻止不完整执行。",
+      providerMessage: deployUnitContextLimitMessage
+    }
+  }
+  const sessionContextLimitError = findErrorWithCode(
+    error,
+    "HARNESS_SESSION_CONTEXT_LIMIT_EXCEEDED"
+  )
+  if (sessionContextLimitError) {
+    const sessionContextLimitMessage = cleanProviderMessage(sessionContextLimitError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文超限",
+      hint: "请缩短插件返回的 session_context_inject 内容，再重新运行任务。",
+      reason:
+        sessionContextLimitMessage ??
+        "Harness session_context_inject 超过安全上限，已阻止不完整执行。",
+      providerMessage: sessionContextLimitMessage
+    }
+  }
+  const harnessContextError = findErrorWithCode(error, "HARNESS_AGENT_CONTEXT_UNAVAILABLE")
+  if (harnessContextError) {
+    const harnessContextCause = asErrorLike(harnessContextError)?.cause
+    const harnessContextMessage =
+      cleanProviderMessage(harnessContextCause) ?? cleanProviderMessage(harnessContextError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文不可用",
+      hint: "请重试；如仍失败，请检查 Harness 配置、项目目录和后台 Worker 日志。",
+      reason: harnessContextMessage ?? "Harness 上下文加载失败，请重试后再运行任务。",
+      providerMessage: harnessContextMessage
+    }
+  }
   const localStorageError = findErrorWithCode(
     error,
     "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"

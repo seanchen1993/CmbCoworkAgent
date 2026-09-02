@@ -4778,6 +4778,20 @@ function emitErrorDetail(
   return detail
 }
 
+function sendHarnessAgentContextLoadError(
+  window: BrowserWindow,
+  channel: string,
+  error: unknown,
+  modelId?: string
+): void {
+  console.error("[Agent] Harness context load failed:", error)
+  emitErrorDetail(window, channel, error, { modelId })
+  safeSendToWindow(window, channel, {
+    type: "error",
+    error: error instanceof Error ? error.message : "Harness 上下文加载失败，请重试。"
+  })
+}
+
 /**
  * Max fetch attempts per model based on the current global routing mode.
  *
@@ -9951,7 +9965,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let metadata = parsedThreadMetadata.metadata
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
-      const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+      let harnessAgentContext: HarnessAgentContext
+      try {
+        harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+      } catch (error) {
+        sendHarnessAgentContextLoadError(window, channel, error, modelId)
+        return
+      }
       harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
@@ -11271,7 +11291,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath
     const modelId = parsedThreadMetadata.modelId
-    const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+    let harnessAgentContext: HarnessAgentContext
+    try {
+      harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+    } catch (error) {
+      sendHarnessAgentContextLoadError(window, channel, error, modelId)
+      return
+    }
     harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(

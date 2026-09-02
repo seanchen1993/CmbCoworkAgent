@@ -51,6 +51,12 @@ import {
   HARNESS_PROJECT_STORE_MAX_PROJECTS,
   HARNESS_PROJECT_TEXT_MAX_CHARS
 } from "./store-limits"
+import {
+  HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
+  HarnessSessionContextLimitError,
+  requireCompleteHarnessDeployUnitContext,
+  requireCompleteHarnessSessionContext
+} from "./context-integrity"
 import type {
   HarnessAdapterRegistryItem,
   HarnessAdapterSnapshot,
@@ -256,11 +262,9 @@ const HARNESS_ADAPTER_TIMEOUT_MS = 15_000
 const HARNESS_PULL_KNOWLEDGE_TIMEOUT_MS = 45_000
 const HARNESS_ADAPTER_MAX_BUFFER = HARNESS_ADAPTER_DETAIL_MAX_INPUT_BYTES
 const HARNESS_INVOCATION_MAX_CONCURRENCY = 2
-const HARNESS_SESSION_CONTEXT_MAX_CHARS = 60_000
 const CHARDET_CONFIDENCE_THRESHOLD = 0.8
 const CHARDET_SAMPLE_BYTES = 8_192
 const HARNESS_LOG_OUTPUT_PREVIEW_BYTES = 16 * 1024
-const HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES = 512
 const HARNESS_DEPLOY_UNIT_MAPPING_MAX_BYTES = 2 * 1024 * 1024
 const HARNESS_FEATURE_BINDING_MAX_ENTRIES = 4_096
 const HARNESS_FEATURE_BINDING_MAX_BYTES = 2 * 1024 * 1024
@@ -1821,6 +1825,12 @@ function normalizeDeployUnitMappings(
   options: { assignMissingOrDuplicateMappingId?: boolean } = {}
 ): HarnessDeployUnitMapping[] {
   if (!Array.isArray(value)) return []
+  if (value.length > HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES) {
+    throw new Error(
+      `发布单元映射超过 ${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} 条上限，` +
+        `已拒绝不完整读取`
+    )
+  }
   const seen = new Set<string>()
   const seenIds = new Set<string>()
   const mappings: HarnessDeployUnitMapping[] = []
@@ -1872,6 +1882,15 @@ function normalizeFeatureDeployUnitBinding(
   const projectId = normalizeText(value.projectId).trim()
   const featureId = normalizeText(value.featureId).trim()
   assertFeatureBindingKeyBudgets(projectId, featureId)
+  const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
+    value.sessionContextInjectionSource
+  )
+  requireCompleteHarnessDeployUnitContext(
+    Array.isArray(value.selectedDeployUnitMappings)
+      ? value.selectedDeployUnitMappings.length
+      : 0,
+    sessionContextInjectionSource
+  )
   const selectedDeployUnitMappings = normalizeDeployUnitMappings(value.selectedDeployUnitMappings)
   if (!projectId || !featureId) return null
   const humanGate = normalizeHumanGate(value.humanGate, projectId, featureId)
@@ -1879,9 +1898,7 @@ function normalizeFeatureDeployUnitBinding(
     projectId,
     featureId,
     selectedDeployUnitMappings,
-    sessionContextInjectionSource: normalizeSessionContextInjectionSource(
-      value.sessionContextInjectionSource
-    ),
+    sessionContextInjectionSource,
     ...(humanGate ? { humanGate } : {}),
     createdAt: normalizeText(value.createdAt).trim() || formatGmt8Timestamp(),
     updatedAt: normalizeText(value.updatedAt).trim() || undefined
@@ -2111,6 +2128,10 @@ async function saveFeatureDeployUnitBinding(
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
 ): Promise<HarnessFeatureDeployUnitBindingRecord> {
   assertFeatureBindingKeyBudgets(projectId, featureId)
+  requireCompleteHarnessDeployUnitContext(
+    selectedDeployUnitMappings.length,
+    sessionContextInjectionSource
+  )
   return withHarnessStoreMutation(HARNESS_FEATURE_DEPLOY_UNIT_BINDING_FILE, async () => {
     const store = await readFeatureDeployUnitBindingStore()
     const key = featureDeployUnitBindingKey(projectId, featureId)
@@ -2159,6 +2180,10 @@ async function updateFeatureDeployUnitBinding(
       (binding) => featureDeployUnitBindingKey(binding.projectId, binding.featureId) === key
     )
     if (existingIndex < 0) throw new Error("未找到该特性的发布单元绑定记录")
+    requireCompleteHarnessDeployUnitContext(
+      selectedDeployUnitMappings.length,
+      store.bindings[existingIndex].sessionContextInjectionSource
+    )
     const binding: HarnessFeatureDeployUnitBindingRecord = {
       ...store.bindings[existingIndex],
       selectedDeployUnitMappings,
@@ -3004,21 +3029,12 @@ async function readHarnessFeatureSessionContextAgentPrompt(
       return { warning: formatSessionContextInjectWarning(message) }
     }
     const agentmdLoadStatus = normalizeHarnessAgentmdLoadStatus(result.agentmdLoadStatus)
-    const sessionContext = normalizeText(result.sessionContext).trim()
+    const sessionContext = requireCompleteHarnessSessionContext(
+      normalizeText(result.sessionContext).trim()
+    )
     const agentConfig = normalizeHarnessAgentConfig(result.agentConfig)
     if (!sessionContext) {
       return {
-        agentmdLoadStatus,
-        ...(agentConfig ? { agentConfig } : {})
-      }
-    }
-    if (sessionContext.length > HARNESS_SESSION_CONTEXT_MAX_CHARS) {
-      console.warn("[HarnessBoard] session_context_inject sessionContext truncated:", {
-        chars: sessionContext.length,
-        maxChars: HARNESS_SESSION_CONTEXT_MAX_CHARS
-      })
-      return {
-        prompt: sessionContext.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS),
         agentmdLoadStatus,
         ...(agentConfig ? { agentConfig } : {})
       }
@@ -3029,6 +3045,7 @@ async function readHarnessFeatureSessionContextAgentPrompt(
       ...(agentConfig ? { agentConfig } : {})
     }
   } catch (error) {
+    if (error instanceof HarnessSessionContextLimitError) throw error
     const detail = error instanceof Error ? error.message : String(error)
     console.error("[HarnessBoard] session_context_inject failed, fallback to CMBDevClaw AGENTS.md:", {
       projectId: project.projectId,
@@ -3427,6 +3444,10 @@ export async function createHarnessFeature(
   const selectedDeployUnits = await resolveFeatureSelectedDeployUnits(input.selectedDeployUnits)
   const sessionContextInjectionSource = normalizeSessionContextInjectionSource(
     input.sessionContextInjectionSource
+  )
+  requireCompleteHarnessDeployUnitContext(
+    selectedDeployUnits.length,
+    sessionContextInjectionSource
   )
 
   try {

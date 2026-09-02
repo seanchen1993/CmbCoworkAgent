@@ -32,6 +32,10 @@ import {
   HARNESS_PROJECT_STORE_MAX_PROJECTS,
   HARNESS_PROJECT_TEXT_MAX_CHARS
 } from "./store-limits"
+import {
+  HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
+  requireCompleteHarnessDeployUnitContext
+} from "./context-integrity"
 
 const BOARD_CONFIG_REL_PATH = join("board_core", "board_config.json")
 const APP_BOARD_API_VERSION = 1
@@ -48,8 +52,6 @@ const MAX_LEAN_TOKEN_CHARS = 8 * 1024
 const MAX_FEATURE_BINDING_STORE_BYTES = 2 * 1024 * 1024
 const MAX_DEPLOY_UNIT_MAPPING_STORE_BYTES = 2 * 1024 * 1024
 const MAX_FEATURE_BINDINGS = 4_096
-const MAX_DEPLOY_UNIT_MAPPINGS = 512
-const MAX_SELECTED_DEPLOY_UNIT_MAPPINGS = 64
 const PROJECT_CONTEXT_COMMAND_KEYS = [
   "project_status",
   "feature_status",
@@ -273,12 +275,7 @@ function projectBoardConfigForDetails(
   return {
     ...(apiVersion !== undefined ? { apiVersion } : {}),
     inspectCommands: { [process.platform]: projectedPlatform },
-    supported_deploy_units: Array.isArray(config.supported_deploy_units)
-      ? config.supported_deploy_units
-          .map((value) => text(value, 2_048).trim())
-          .filter(Boolean)
-          .slice(0, 64)
-      : [],
+    supported_deploy_units: projectSupportedDeployUnits(config.supported_deploy_units),
     ...(knowledgeConfig
       ? {
           knowledge_config: {
@@ -288,6 +285,17 @@ function projectBoardConfigForDetails(
         }
       : {})
   }
+}
+
+function projectSupportedDeployUnits(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  if (value.length > HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES) {
+    throw new Error(
+      `Harness board config supported_deploy_units exceeded ` +
+        `${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} entries`
+    )
+  }
+  return value.map((item) => text(item, 2_048).trim()).filter(Boolean)
 }
 
 interface BoardConfigSnapshot {
@@ -653,15 +661,17 @@ function readFeatureBindingRows(path: string): unknown[] {
   if (featureBindingCache?.signature === signature) return featureBindingCache.value
   let rows: unknown[] = []
   if (signature !== "missing") {
-    try {
-      assertFileWithin(path, MAX_FEATURE_BINDING_STORE_BYTES, "Harness feature binding store")
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
-      rows = isRecord(parsed) && Array.isArray(parsed.bindings)
-        ? parsed.bindings.slice(0, MAX_FEATURE_BINDINGS)
-        : []
-    } catch {
-      rows = []
+    assertFileWithin(path, MAX_FEATURE_BINDING_STORE_BYTES, "Harness feature binding store")
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    if (!isRecord(parsed) || !Array.isArray(parsed.bindings)) {
+      throw new Error("Harness feature binding store has an invalid bindings field")
     }
+    if (parsed.bindings.length > MAX_FEATURE_BINDINGS) {
+      throw new Error(
+        `Harness feature binding store exceeded ${MAX_FEATURE_BINDINGS} bindings`
+      )
+    }
+    rows = parsed.bindings
   }
   featureBindingCache = { signature, value: rows }
   return rows
@@ -684,14 +694,18 @@ function normalizeDeployUnitMapping(value: unknown): HarnessDeployUnitMapping | 
 
 function normalizeDeployUnitMappingRows(
   value: unknown,
-  maxMappings = MAX_DEPLOY_UNIT_MAPPINGS
+  maxMappings = HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES
 ): HarnessDeployUnitMapping[] {
   if (!Array.isArray(value)) return []
   const seenIds = new Set<string>()
   const seenMappings = new Set<string>()
   const result: HarnessDeployUnitMapping[] = []
   for (const row of value) {
-    if (result.length >= Math.min(maxMappings, MAX_DEPLOY_UNIT_MAPPINGS)) break
+    if (
+      result.length >= Math.min(maxMappings, HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES)
+    ) {
+      break
+    }
     const mapping = normalizeDeployUnitMapping(row)
     if (
       !mapping ||
@@ -712,17 +726,22 @@ function readDeployUnitMappings(path: string): HarnessDeployUnitMapping[] {
   if (deployUnitMappingCache?.signature === signature) return deployUnitMappingCache.value
   let mappings: HarnessDeployUnitMapping[] = []
   if (signature !== "missing") {
-    try {
-      assertFileWithin(
-        path,
-        MAX_DEPLOY_UNIT_MAPPING_STORE_BYTES,
-        "Harness deploy unit mapping store"
-      )
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
-      mappings = isRecord(parsed) ? normalizeDeployUnitMappingRows(parsed.mappings) : []
-    } catch {
-      mappings = []
+    assertFileWithin(
+      path,
+      MAX_DEPLOY_UNIT_MAPPING_STORE_BYTES,
+      "Harness deploy unit mapping store"
+    )
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+    if (!isRecord(parsed) || !Array.isArray(parsed.mappings)) {
+      throw new Error("Harness deploy unit mapping store has an invalid mappings field")
     }
+    if (parsed.mappings.length > HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES) {
+      throw new Error(
+        `Harness deploy unit mapping store exceeded ` +
+          `${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} mappings`
+      )
+    }
+    mappings = normalizeDeployUnitMappingRows(parsed.mappings)
   }
   deployUnitMappingCache = { signature, value: mappings }
   return mappings
@@ -755,12 +774,21 @@ function selectedFeatureProjection(
     ) {
       continue
     }
-    snapshots = normalizeDeployUnitMappingRows(
-      row.selectedDeployUnitMappings,
-      MAX_SELECTED_DEPLOY_UNIT_MAPPINGS
-    )
     sessionContextInjectionSource =
       row.sessionContextInjectionSource === "plugin" ? "plugin" : "cmbdevclaw"
+    const selectedDeployUnitEntries = Array.isArray(row.selectedDeployUnitMappings)
+      ? row.selectedDeployUnitMappings.length
+      : 0
+    requireCompleteHarnessDeployUnitContext(
+      selectedDeployUnitEntries,
+      sessionContextInjectionSource
+    )
+    snapshots = normalizeDeployUnitMappingRows(
+      row.selectedDeployUnitMappings,
+      sessionContextInjectionSource === "plugin"
+        ? HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES
+        : selectedDeployUnitEntries
+    )
     break
   }
   if (snapshots.length === 0) {

@@ -2,7 +2,8 @@ import { resolve } from "node:path"
 import type {
   HarnessAgentmdLoadStatusItem,
   HarnessDeployUnitMapping,
-  HarnessProjectModeSubagentConfig
+  HarnessProjectModeSubagentConfig,
+  HarnessRequestUserInputConfig
 } from "../../shared/harness-board-types"
 import {
   buildHarnessFeatureAgentContext,
@@ -76,6 +77,7 @@ export interface HarnessAgentContext {
   pluginPromptInject?: string
   enableAgentsPrompt?: boolean
   subagentConfig?: HarnessProjectModeSubagentConfig
+  requestUserInputConfig?: HarnessRequestUserInputConfig
   isHarnessProjectSession?: boolean
   harnessAgentsPrompt?: string
   additionalAgentsWorkspacePaths?: string[]
@@ -96,6 +98,28 @@ export interface HarnessAgentContext {
   harnessNodeStatus?: string
   projectCode?: string
   projectDir?: string
+}
+
+export const HARNESS_AGENT_CONTEXT_UNAVAILABLE = "HARNESS_AGENT_CONTEXT_UNAVAILABLE"
+
+export class HarnessAgentContextUnavailableError extends Error {
+  readonly code = HARNESS_AGENT_CONTEXT_UNAVAILABLE
+  readonly featureId?: string
+  readonly harnessProjectId?: string
+
+  constructor(
+    message: string,
+    options: {
+      cause?: unknown
+      featureId?: string
+      harnessProjectId?: string
+    } = {}
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause })
+    this.name = HARNESS_AGENT_CONTEXT_UNAVAILABLE
+    this.featureId = options.featureId
+    this.harnessProjectId = options.harnessProjectId
+  }
 }
 
 export interface HarnessFeatureBindingContext {
@@ -177,60 +201,71 @@ export async function getHarnessAgentContext(
   const isHarnessProjectSession = Boolean(harnessProjectSession)
   const harnessFeature = readHarnessFeatureMetadata(metadata)
   const disableAgentsPrompt = metadata.disableAgentsPrompt === true
+  let featureContext: Awaited<ReturnType<typeof buildHarnessFeatureAgentContext>>
   try {
-    const featureContext = await buildHarnessFeatureAgentContext(metadata, {
+    featureContext = await buildHarnessFeatureAgentContext(metadata, {
       workspacePath: options.workspacePath
     })
-    if (!featureContext) {
-      return {
-        ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-        ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
-      }
-    }
-    const currentStage =
-      options.featureBinding !== undefined
-        ? {
-            harnessNodeName: options.featureBinding.nodeName,
-            harnessNodeStatus: options.featureBinding.nodeStatus
-          }
-        : await resolveHarnessCurrentStageForContext(
-            featureContext.harnessProjectId,
-            featureContext.featureId
-          )
-
-    return {
-      pluginPromptInject: featureContext.systemPromptInject,
-      enableAgentsPrompt: featureContext.enableAgentsPrompt,
-      subagentConfig: featureContext.agentConfig?.subagentConfig,
-      ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
-      harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
-      additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
-      additionalAgentsWorkspaceMappings: featureContext.additionalAgentsWorkspaceMappings,
-      sessionContextInjectWarning: featureContext.sessionContextInjectWarning,
-      agentmdLoadStatus: featureContext.agentmdLoadStatus,
-      pluginOutputDir: featureContext.pluginOutputDir,
-      systemId: featureContext.systemId,
-      pluginRoot: featureContext.pluginRoot,
-      pluginId: featureContext.pluginId,
-      pluginName: featureContext.pluginName,
-      pluginWorkspace: featureContext.pluginWorkspace,
-      featureId: featureContext.featureId,
-      harnessProjectId: featureContext.harnessProjectId,
-      harnessAdapterName: featureContext.harnessAdapterName,
-      harnessAdapterVersion: featureContext.harnessAdapterVersion,
-      ...currentStage,
-      projectCode: featureContext.projectCode,
-      projectDir: featureContext.projectDir
-    }
   } catch (error) {
-    console.warn("[HarnessBoard] Failed to build harness agent context:", error)
+    const unavailable = new HarnessAgentContextUnavailableError(
+      "Harness 上下文加载失败，请重试后再运行任务。",
+      {
+        cause: error,
+        featureId: harnessFeature?.slug,
+        harnessProjectId: harnessFeature?.projectId
+      }
+    )
+    console.warn("[HarnessBoard] Failed to build harness agent context:", unavailable)
+    throw unavailable
+  }
+  if (!featureContext) {
     return {
       ...(disableAgentsPrompt ? { enableAgentsPrompt: false } : {}),
-      ...(harnessFeature
-        ? { featureId: harnessFeature.slug, harnessProjectId: harnessFeature.projectId }
-        : {}),
       ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {})
     }
+  }
+  let currentStage: Pick<HarnessAgentContext, "harnessNodeName" | "harnessNodeStatus">
+  if (options.featureBinding !== undefined) {
+    currentStage = {
+      harnessNodeName: options.featureBinding.nodeName,
+      harnessNodeStatus: options.featureBinding.nodeStatus
+    }
+  } else {
+    try {
+      currentStage = await resolveHarnessCurrentStageForContext(
+        featureContext.harnessProjectId,
+        featureContext.featureId
+      )
+    } catch (error) {
+      console.warn("[HarnessBoard] Failed to resolve optional current stage:", error)
+      currentStage = {}
+    }
+  }
+
+  return {
+    pluginPromptInject: featureContext.systemPromptInject,
+    enableAgentsPrompt: featureContext.enableAgentsPrompt,
+    subagentConfig: featureContext.agentConfig?.subagentConfig,
+    requestUserInputConfig: featureContext.agentConfig?.toolConfig?.requestUserInput,
+    ...(isHarnessProjectSession ? { isHarnessProjectSession: true } : {}),
+    harnessAgentsPrompt: featureContext.harnessAgentsPrompt,
+    additionalAgentsWorkspacePaths: featureContext.additionalAgentsWorkspacePaths,
+    additionalAgentsWorkspaceMappings: featureContext.additionalAgentsWorkspaceMappings,
+    sessionContextInjectWarning: featureContext.sessionContextInjectWarning,
+    agentmdLoadStatus: featureContext.agentmdLoadStatus,
+    pluginOutputDir: featureContext.pluginOutputDir,
+    systemId: featureContext.systemId,
+    pluginRoot: featureContext.pluginRoot,
+    pluginId: featureContext.pluginId,
+    pluginName: featureContext.pluginName,
+    pluginWorkspace: featureContext.pluginWorkspace,
+    featureId: featureContext.featureId,
+    harnessProjectId: featureContext.harnessProjectId,
+    harnessAdapterName: featureContext.harnessAdapterName,
+    harnessAdapterVersion: featureContext.harnessAdapterVersion,
+    ...currentStage,
+    projectCode: featureContext.projectCode,
+    projectDir: featureContext.projectDir
   }
 }
 
