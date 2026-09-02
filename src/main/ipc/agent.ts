@@ -72,6 +72,7 @@ import {
   getHookLoggingConfig
 } from "../storage"
 import { getDefaultModelConfig, getModelConfigByRef } from "../models/registry"
+import { getRequirementRuntimeOptions } from "../agent/library/requirement-mode"
 import { resolveModel, rememberRoutingDecision, rememberRoutingFeedback } from "../routing"
 import { notifyIfBackground, stripThink } from "../services/notify"
 import { showPetCompletedTaskNotice } from "../pet"
@@ -320,44 +321,6 @@ const MAX_PERSISTED_GOAL_ATTACHMENT_NAMES = 5
 const MAX_PERSISTED_GOAL_ATTACHMENT_SUMMARY_CHARS = 260
 const STOP_HOOK_REVISION_PROMPT_PREFIX = "[[CMBDEVCLAW_STOP_HOOK_REVISION]]"
 const SYSTEM_PROMPT_PREVIEW_IDS_ENV = "VITE_SYSTEM_PROMPT_PREVIEW_YST_IDS"
-const REQUIREMENT_MODE_SYSTEM_PROMPT = `## Requirement Mode
-You are handling one requirement-management conversation only.
-
-Allowed work: understand the current requirement, inspect its requirement workspace, clarify business rules, assess scope and acceptance criteria, generate or review PRD documents through the requirement-to-prd skill, and publish only after explicit user authorization.
-
-Do not write application code, design UI, run Git operations, create schedules, or answer unrelated questions. When a request is outside the current requirement, reply exactly: "当前处于需求模式，请补充、澄清、评审或确认当前需求；其他任务请新建普通会话。"
-
-Before any PRD work, call the task subagent with subagent_type="analyst". Give it the current requirement and ask for missing questions, scope risks, assumptions, edge cases, and pass/fail acceptance criteria. When source materials exist, ask it to inspect them; for a text requirement, analyze the stated goal and identify the first questions needed to discover the requirement through conversation. Use its findings to drive clarification. Do not treat analyst suggestions as user-confirmed decisions.
-
-Use the requirement-to-prd skill for PRD work. Do not generate a formal PRD before the user has confirmed the initial PRD. Do not publish unless the user has explicitly authorized publication after the formal PRD is ready.`
-
-/**
- * Derives the requirement-mode flag and the runtime options that gate a
- * requirement conversation to its dedicated isolation stack
- * (analyst-only subagents, requirement-to-prd-only skills, requirement
- * System Prompt, no scheduler/agents prompt, subagents forced on).
- * Callers spread `runtimeOptions` AFTER the default fields so the
- * requirement-mode overrides take effect; in non-requirement mode
- * `runtimeOptions` is `{}` and the defaults remain untouched.
- */
-function buildRequirementRuntimeOptions(metadata: Record<string, unknown>): {
-  requirementMode: boolean
-  runtimeOptions: Record<string, unknown>
-} {
-  const requirementMode =
-    typeof metadata.requirementId === "string" && metadata.requirementId.trim().length > 0
-  const runtimeOptions = requirementMode
-    ? {
-        requirementMode: true,
-        extraSystemPrompt: REQUIREMENT_MODE_SYSTEM_PROMPT,
-        enableAgentsPrompt: false,
-        noSchedulerTool: true,
-        disableSubagents: false
-      }
-    : {}
-  return { requirementMode, runtimeOptions }
-}
-
 function splitEnvIds(value: string | undefined): Set<string> {
   return new Set(
     String(value || "")
@@ -6543,7 +6506,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const {
           requirementMode,
           runtimeOptions: requirementRuntimeOptions
-        } = buildRequirementRuntimeOptions(metadata)
+        } = getRequirementRuntimeOptions(metadata)
         const metadataAgentMode = getAgentModeFromMetadata(metadata)
         const hasExplicitNormalAgentMode = metadata.agentMode === "normal"
         const requestedMode =
@@ -9232,7 +9195,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         metadata
       )
       const { runtimeOptions: requirementRuntimeOptions } =
-        buildRequirementRuntimeOptions(metadata)
+        getRequirementRuntimeOptions(metadata)
       // Resume = same logical turn as the interrupted invoke. Keep hook scope
       // continuity while pruning scopes that did not opt in to interrupt persistence.
       if (onAgentsPromptLoadStatus) {
@@ -10291,7 +10254,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       metadata
     )
     const { runtimeOptions: requirementRuntimeOptions } =
-      buildRequirementRuntimeOptions(metadata)
+      getRequirementRuntimeOptions(metadata)
     if (onAgentsPromptLoadStatus) {
       onAgentsPromptLoadStatus = guardPhysicalStreamRunCallback(
         threadId,

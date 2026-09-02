@@ -43,7 +43,6 @@ import {
 import { approvalMatchesRuntimeThread } from "./approval-thread-match"
 import { SkillLifecycleRegistry } from "./skill-lifecycle/registry"
 import { combineSkillMiddlewareSources } from "./skill-sources"
-import { discoverSkills } from "../skills/discovery"
 import type { SkillUseTracker } from "./skill-lifecycle/tracker"
 import type { AgentFileMutationKind } from "../services/agent-auto-commit"
 import type { HookResultCallback } from "../hooks/runner"
@@ -261,7 +260,11 @@ import {
   stripCustomModelPrefix,
   type AgentShellAccess
 } from "./agent-registry"
-import { REQUIREMENT_MODE_CONFIG } from "./library/requirement-mode"
+import {
+  REQUIREMENT_MODE_CONFIG,
+  createRequirementSkillsBackend,
+  resolveRequirementSkillRootDirs
+} from "./library/requirement-mode"
 import {
   createWorkerValuesSnapshotContext,
   extractWorkerFinalText,
@@ -1769,6 +1772,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     name,
     memory,
     skills,
+    allowedSkillRootDirs = [],
     filesystemSystemPrompt,
     summarizationTrigger,
     summarizationKeep,
@@ -1839,9 +1843,13 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
+  const skillsBackend =
+    requirementMode
+      ? createRequirementSkillsBackend(filesystemBackend, skills ?? [], allowedSkillRootDirs)
+      : filesystemBackend
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
-      ? [createSkillsMiddleware({ backend: filesystemBackend, sources: skills })]
+      ? [createSkillsMiddleware({ backend: skillsBackend, sources: skills })]
       : []
 
   const memoryMiddlewareArray =
@@ -4779,17 +4787,9 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
-  const restrictedSkillSources =
-    !requirementMode
-      ? allSkillsSources
-      : Array.from(
-          new Map(
-            (await Promise.all(allSkillsSources.map((source) => discoverSkills(source))))
-              .flat()
-              .filter((skill) => REQUIREMENT_MODE_CONFIG.skillNames.includes(skill.name))
-              .map((skill) => [resolve(skill.rootDir), skill.rootDir])
-          ).values()
-        )
+  const requirementSkillRootDirs = requirementMode
+    ? await resolveRequirementSkillRootDirs(allSkillsSources)
+    : []
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(
@@ -6072,7 +6072,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     })
   }
   const mainSkillSources =
-    !isCoordinatorMode && restrictedSkillSources.length > 0 ? restrictedSkillSources : undefined
+    !isCoordinatorMode && allSkillsSources.length > 0 ? allSkillsSources : undefined
   // memory is NOT gated by coordinator mode (unlike todos/fs/skills above, which are
   // "doing-work" capabilities a pure orchestrator shouldn't have). The coordinator
   // main agent is the ONLY agent that talks directly to the user, so user-collaboration
@@ -6118,6 +6118,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       !isCoordinatorMode &&
       isGeneralPurposeSubagentEnabled(projectModeSoloSubagentConfig),
     skills: mainSkillSources,
+    allowedSkillRootDirs: requirementSkillRootDirs,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
     // mode it skips initial approvals but still prompts before sandbox escape.
