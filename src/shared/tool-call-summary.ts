@@ -69,7 +69,7 @@ export function getCollapsedToolCallSummary(toolCall: CollapsedToolCallLike): st
   if (typeof rawPath === "string" && rawPath) {
     parameter = rawPath.split("/").pop() || rawPath
   } else if (typeof args.command === "string" && args.command) {
-    parameter = `${args.command.slice(0, 30)}${args.command.length > 30 ? "..." : ""}`
+    parameter = args.command
   } else {
     const rawPattern = args.pattern ?? args.query
     if (typeof rawPattern === "string") parameter = rawPattern
