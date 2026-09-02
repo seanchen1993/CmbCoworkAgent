@@ -74,7 +74,8 @@ import {
 import {
   TRACE_COLLECTION_MAX_BYTES,
   TRACE_PERSISTED_MAX_BYTES,
-  TraceCollectionBudget
+  TraceCollectionBudget,
+  clampText
 } from "./bounds"
 import {
   appendSkillEvalWindowTurn,
@@ -457,9 +458,12 @@ const TRACE_MAX_NODES = 512
 const TRACE_MAX_SKILLS = 128
 
 function boundTraceToolCall(call: TraceToolCall, budget: TraceCollectionBudget): TraceToolCall {
+  // Take the name first: args can drain the budget, and a nameless (or
+  // placeholder-named) tool call corrupts per-tool analytics.
+  const name = budget.takeText(String(call.name ?? "unknown"), 512)
   const args = budget.takeValue(call.args, 32 * 1024)
   return {
-    name: budget.takeText(String(call.name ?? "unknown"), 512),
+    name: name || "unknown",
     args:
       args && typeof args === "object" && !Array.isArray(args)
         ? (args as Record<string, unknown>)
@@ -490,17 +494,14 @@ function boundTraceChatMessage(
   }
 }
 
-function boundStringList(
-  values: readonly string[],
-  budget: TraceCollectionBudget,
-  maxItems = TRACE_MAX_SKILLS
-): string[] {
-  const output: string[] = []
-  for (const value of values.slice(0, maxItems)) {
-    if (!budget.canAdd()) break
-    output.push(budget.takeText(String(value), 1024))
-  }
-  return output
+/**
+ * Skill name lists are top-level analytic dimensions, not tool/model payloads:
+ * they stay out of the collection budget so a heavy conversation cannot blank
+ * or truncate the very skill names the dashboard groups on. The item cap still
+ * bounds the field.
+ */
+function boundStringList(values: readonly string[], maxItems = TRACE_MAX_SKILLS): string[] {
+  return values.slice(0, maxItems).map((value) => clampText(String(value), 1024))
 }
 
 function boundSkillEvalExtension(
@@ -602,33 +603,28 @@ export class TraceCollector {
     modelId: string,
     options: TraceCollectorOptions = {}
   ) {
-    this.traceId = this.collectionBudget.takeText(options.traceId ?? uuid(), 256)
-    this.threadId = this.collectionBudget.takeText(threadId, 256)
+    this.traceId = clampText(options.traceId ?? uuid(), 256)
+    this.threadId = clampText(threadId, 256)
     this.suspectedTechnicalDetailSupplement = hasSuspectedTechnicalDetailSupplement(userMessage)
-    this.userMessage = this.collectionBudget.takeText(userMessage, 64 * 1024)
-    this.modelId = this.collectionBudget.takeText(modelId, 1024)
+    this.userMessage = clampText(userMessage, 64 * 1024)
+    this.modelId = clampText(modelId, 1024)
     this.triggerSource = options.triggerSource ?? "chat"
     this.harnessFeature = options.harnessFeature
       ? {
-          projectId: this.collectionBudget.takeText(options.harnessFeature.projectId, 1024),
-          slug: this.collectionBudget.takeText(options.harnessFeature.slug, 1024),
+          projectId: clampText(options.harnessFeature.projectId, 1024),
+          slug: clampText(options.harnessFeature.slug, 1024),
           ...(options.harnessFeature.nodeName
-            ? { nodeName: this.collectionBudget.takeText(options.harnessFeature.nodeName, 1024) }
+            ? { nodeName: clampText(options.harnessFeature.nodeName, 1024) }
             : {}),
           ...(options.harnessFeature.nodeStatus
-            ? {
-                nodeStatus: this.collectionBudget.takeText(options.harnessFeature.nodeStatus, 256)
-              }
+            ? { nodeStatus: clampText(options.harnessFeature.nodeStatus, 256) }
             : {})
         }
       : undefined
     this.harnessAdapterPromise = this.harnessFeature
       ? getHarnessProjectAdapterSnapshot(this.harnessFeature.projectId).catch(() => null)
       : Promise.resolve(null)
-    this.observability = this.collectionBudget.takeValue(
-      buildObservabilityContext(this.traceId, this.threadId, options),
-      32 * 1024
-    ) as TraceObservabilityContext
+    this.observability = buildObservabilityContext(this.traceId, this.threadId, options)
     this.includeSkillEval = options.includeSkillEval ?? this.observability.traceKind === "root"
     this.startedAt = nowIsoLocal()
     this.rootNodeId = `trace:${this.traceId}`
@@ -701,13 +697,14 @@ export class TraceCollector {
   }
 
   setObservabilityContext(patch: Partial<TraceObservabilityContext>): void {
-    const boundedPatch = this.collectionBudget.takeValue(
-      patch,
-      16 * 1024
-    ) as Partial<TraceObservabilityContext>
+    // Observability is trace linkage (root/parent/subagent/workflow ids), all
+    // first-party and short. It must not be budgeted: a drained budget makes
+    // takeValue return the placeholder *string*, which then spreads into this
+    // object character by character and corrupts both the trace tree and the
+    // adoption context.
     this.observability = compactUndefined({
       ...this.observability,
-      ...boundedPatch
+      ...patch
     }) as TraceObservabilityContext
     const root = this.getNode(this.rootNodeId)
     if (root) {
@@ -726,7 +723,7 @@ export class TraceCollector {
 
   /** Update the modelId (can be resolved after construction). */
   setModelId(id: string): void {
-    this.modelId = this.collectionBudget.takeText(id, 1024)
+    this.modelId = clampText(id, 1024)
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelId: this.modelId }
@@ -740,7 +737,7 @@ export class TraceCollector {
 
   /** Set the human-readable model name (e.g. "minmax") for display in trace UI. */
   setModelName(name: string): void {
-    this.modelName = this.collectionBudget.takeText(name, 1024)
+    this.modelName = clampText(name, 1024)
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), modelName: this.modelName }
@@ -780,7 +777,7 @@ export class TraceCollector {
    * and risks bypassing the sticky attribution if ever called on its own.
    */
   setUsedSkills(skills: string[]): void {
-    this.usedSkills = boundStringList(skills, this.collectionBudget)
+    this.usedSkills = boundStringList(skills)
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), usedSkills: [...this.usedSkills] }
@@ -789,7 +786,7 @@ export class TraceCollector {
 
   /** Set source markers keyed by the same skill identifier used in usedSkills. */
   setSkillSource(skillSource: string[]): void {
-    this.skillSource = normalizeSkillSourceRefs(boundStringList(skillSource, this.collectionBudget))
+    this.skillSource = normalizeSkillSourceRefs(boundStringList(skillSource))
     const root = this.getNode(this.rootNodeId)
     if (root) {
       const metadata = { ...(root.metadata ?? {}) }
@@ -802,7 +799,7 @@ export class TraceCollector {
 
   /** Set which used skills came from cloud trace evolution. */
   setEvolvedSkills(skills: string[]): void {
-    this.evolvedSkills = boundStringList(skills, this.collectionBudget)
+    this.evolvedSkills = boundStringList(skills)
     const root = this.getNode(this.rootNodeId)
     if (root) {
       root.metadata = { ...(root.metadata ?? {}), evolvedSkills: [...this.evolvedSkills] }
@@ -866,10 +863,8 @@ export class TraceCollector {
       .map((toolCall) => boundTraceToolCall(toolCall, this.collectionBudget))
     const tokenUsage = this.collectionBudget.takeValue(call.tokenUsage, 1024)
     this.modelCalls.push({
-      ...(typeof call.messageId === "string"
-        ? { messageId: this.collectionBudget.takeText(call.messageId, 512) }
-        : {}),
-      startedAt: this.collectionBudget.takeText(call.startedAt, 64),
+      ...(typeof call.messageId === "string" ? { messageId: clampText(call.messageId, 512) } : {}),
+      startedAt: clampText(call.startedAt, 64),
       inputMessages,
       outputMessage: boundTraceChatMessage(call.outputMessage, this.collectionBudget),
       toolCalls,
@@ -1116,14 +1111,13 @@ export class TraceCollector {
         if (collectAuthors) {
           skillAuthorByRawName = buildSkillAuthorByRawName(resolved, allSkills)
         }
-        return boundStringList(resolved, this.collectionBudget)
+        return boundStringList(resolved)
       } catch (e) {
         console.warn("[Tracer] Failed to resolve skill versions:", e)
         return boundStringList(
           Array.from(
             new Set(skills.map((skill) => ensureVersionedSkillIdentifier(skill)).filter(Boolean))
-          ),
-          this.collectionBudget
+          )
         )
       }
     }
@@ -1152,9 +1146,7 @@ export class TraceCollector {
     const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
     const userInfo = getUserInfo()
-    const boundedPathName = userInfo?.pathName
-      ? this.collectionBudget.takeText(userInfo.pathName, 4096)
-      : undefined
+    const boundedPathName = userInfo?.pathName ? clampText(userInfo.pathName, 4096) : undefined
     const upperOrgLevels = deriveUpperOrgLevelsFromPath(boundedPathName)
 
     // Project-mode traces also record the bound adapter plugin's version, so
@@ -1170,9 +1162,9 @@ export class TraceCollector {
         const adapter = await this.harnessAdapterPromise
         if (adapter) {
           harnessAdapterFields = {
-            harnessAdapterId: this.collectionBudget.takeText(adapter.id, 1024),
-            harnessAdapterName: this.collectionBudget.takeText(adapter.name, 1024),
-            harnessAdapterVersion: this.collectionBudget.takeText(adapter.version, 1024)
+            harnessAdapterId: clampText(adapter.id, 1024),
+            harnessAdapterName: clampText(adapter.name, 1024),
+            harnessAdapterVersion: clampText(adapter.version, 1024)
           }
         }
       } catch (e) {
@@ -1180,9 +1172,7 @@ export class TraceCollector {
       }
     }
 
-    const boundedErrorMessage = errorMessage
-      ? this.collectionBudget.takeText(errorMessage, 16 * 1024)
-      : undefined
+    const boundedErrorMessage = errorMessage ? clampText(errorMessage, 16 * 1024) : undefined
     const trace: AgentTrace = {
       traceId: this.traceId,
       threadId: this.threadId,
@@ -1194,33 +1184,28 @@ export class TraceCollector {
       suspectedTechnicalDetailSupplement: this.suspectedTechnicalDetailSupplement,
       modelId: this.modelId,
       ...(this.modelName ? { modelName: this.modelName } : {}),
-      userIp: this.collectionBudget.takeText(getLocalIP(), 256),
-      userName: userInfo?.userName
-        ? this.collectionBudget.takeText(userInfo.userName, 1024)
-        : undefined,
-      sapId: userInfo?.sapId ? this.collectionBudget.takeText(userInfo.sapId, 256) : undefined,
-      ystId: userInfo?.ystId ? this.collectionBudget.takeText(userInfo.ystId, 256) : undefined,
-      originOrgId: userInfo?.originOrgId
-        ? this.collectionBudget.takeText(userInfo.originOrgId, 1024)
-        : undefined,
-      orgName: userInfo?.orgName
-        ? this.collectionBudget.takeText(userInfo.orgName, 2048)
-        : undefined,
+      // Identity and org fields come from getUserInfo(), not from tools or
+      // models, so they are deliberately outside the collection budget: a
+      // long conversation must never be able to rename its own author.
+      userIp: clampText(getLocalIP(), 256),
+      userName: userInfo?.userName ? clampText(userInfo.userName, 1024) : undefined,
+      sapId: userInfo?.sapId ? clampText(userInfo.sapId, 256) : undefined,
+      ystId: userInfo?.ystId ? clampText(userInfo.ystId, 256) : undefined,
+      originOrgId: userInfo?.originOrgId ? clampText(userInfo.originOrgId, 1024) : undefined,
+      orgName: userInfo?.orgName ? clampText(userInfo.orgName, 2048) : undefined,
       pathName: boundedPathName,
-      pathId: userInfo?.originPathId
-        ? this.collectionBudget.takeText(userInfo.originPathId, 1024)
-        : undefined,
+      pathId: userInfo?.originPathId ? clampText(userInfo.originPathId, 1024) : undefined,
       upperOrgLv0: upperOrgLevels.upperOrgLv0
-        ? this.collectionBudget.takeText(upperOrgLevels.upperOrgLv0, 1024)
+        ? clampText(upperOrgLevels.upperOrgLv0, 1024)
         : undefined,
       upperOrgLv1: upperOrgLevels.upperOrgLv1
-        ? this.collectionBudget.takeText(upperOrgLevels.upperOrgLv1, 1024)
+        ? clampText(upperOrgLevels.upperOrgLv1, 1024)
         : undefined,
       upperOrgLv2: upperOrgLevels.upperOrgLv2
-        ? this.collectionBudget.takeText(upperOrgLevels.upperOrgLv2, 1024)
+        ? clampText(upperOrgLevels.upperOrgLv2, 1024)
         : undefined,
       upperOrgLv3: upperOrgLevels.upperOrgLv3
-        ? this.collectionBudget.takeText(upperOrgLevels.upperOrgLv3, 1024)
+        ? clampText(upperOrgLevels.upperOrgLv3, 1024)
         : undefined,
       appVersion: getAppVersionForTrace(),
       steps: this.steps,
@@ -1404,11 +1389,14 @@ export class TraceCollector {
     const metadata = this.collectionBudget.takeValue(node.metadata, 32 * 1024)
     const boundedNode: TraceNode = {
       ...node,
-      id: this.collectionBudget.takeText(node.id, 512),
-      parentId: node.parentId ? this.collectionBudget.takeText(node.parentId, 512) : null,
-      ...(node.name ? { name: this.collectionBudget.takeText(node.name, 512) } : {}),
-      startedAt: this.collectionBudget.takeText(node.startedAt, 64),
-      ...(node.endedAt ? { endedAt: this.collectionBudget.takeText(node.endedAt, 64) } : {}),
+      // Structure (ids, parent links, timestamps) stays out of the budget:
+      // nodeIndexById and the parentId chain are keyed on these, so a budget
+      // that could blank them would silently flatten the trace tree.
+      id: clampText(node.id, 512),
+      parentId: node.parentId ? clampText(node.parentId, 512) : null,
+      ...(node.name ? { name: clampText(node.name, 512) } : {}),
+      startedAt: clampText(node.startedAt, 64),
+      ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
       ...(node.input !== undefined
         ? { input: this.collectionBudget.takeValue(node.input, 32 * 1024) }
         : {}),

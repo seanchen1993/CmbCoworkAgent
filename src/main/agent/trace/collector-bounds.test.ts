@@ -14,13 +14,13 @@ function makeRoot(prefix: string): string {
   return root
 }
 
-function mockCollectorDependencies(): void {
+function mockCollectorDependencies(userInfo?: Record<string, unknown>): void {
   vi.doMock("electron", () => ({
     app: { getVersion: () => "test", isPackaged: false },
     safeStorage: {}
   }))
   vi.doMock("../../net-utils", () => ({ getLocalIP: () => "127.0.0.1" }))
-  vi.doMock("../../storage", () => ({ getUserInfo: () => undefined }))
+  vi.doMock("../../storage", () => ({ getUserInfo: () => userInfo }))
   vi.doMock("../../ipc/skills", () => ({ listAllSkills: async () => [] }))
   vi.doMock("../../harness-board/service", () => ({
     getHarnessProjectAdapterSnapshot: (projectId: string) =>
@@ -31,10 +31,7 @@ function mockCollectorDependencies(): void {
       adoptionContexts.set(threadId, { ...(adoptionContexts.get(threadId) ?? {}), ...patch })
     },
     clearAdoptionContext: (threadId: string, expectedTraceId?: string) => {
-      if (
-        expectedTraceId &&
-        adoptionContexts.get(threadId)?.traceId !== expectedTraceId
-      ) {
+      if (expectedTraceId && adoptionContexts.get(threadId)?.traceId !== expectedTraceId) {
         return
       }
       adoptionContexts.delete(threadId)
@@ -86,12 +83,9 @@ describe("bounded trace telemetry", () => {
       role: "user" as const,
       content: hugeText
     }))
-    const tracer = new TraceCollector(
-      "thread-bounds",
-      hugeText,
-      "model-bounds",
-      { includeSkillEval: false }
-    )
+    const tracer = new TraceCollector("thread-bounds", hugeText, "model-bounds", {
+      includeSkillEval: false
+    })
     for (let index = 0; index < 1_000; index += 1) {
       tracer.beginStep()
       tracer.recordToolCall({
@@ -123,10 +117,87 @@ describe("bounded trace telemetry", () => {
     expect(diagnostics.queuedBytes).toBe(0)
     const persistedPath = join(root, "thread-bounds", `${trace.traceId}.jsonl`)
     expect(existsSync(persistedPath)).toBe(true)
-    expect(Buffer.byteLength(readFileSync(persistedPath, "utf8"), "utf8")).toBeLessThan(
-      1024 * 1024
-    )
+    expect(Buffer.byteLength(readFileSync(persistedPath, "utf8"), "utf8")).toBeLessThan(1024 * 1024)
   }, 15_000)
+
+  it("keeps identity and tree structure intact after the collection budget is spent", async () => {
+    const root = makeRoot("trace-collector-identity-")
+    process.env.CMB_COWORK_TRACES_DIR = root
+    process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
+    // Synthetic fixture identity. "信息技术部" is the literal
+    // deriveUpperOrgLevelsFromPath keys on, so it has to stay; every other
+    // segment is invented.
+    mockCollectorDependencies({
+      userName: "测试用户甲",
+      sapId: "00000001",
+      ystId: "yst-00000001",
+      originOrgId: "org-1",
+      orgName: "测试三级部门",
+      pathName: "测试总行/信息技术部/测试一级部门/测试二级部门/测试三级部门",
+      originPathId: "path-1"
+    })
+    const { TraceCollector, flushTraceWriteQueue } = await import("./collector")
+
+    const hugeObject: Record<string, unknown> = {}
+    for (let index = 0; index < 100_000; index += 1) hugeObject[`key-${index}`] = index
+    const hugeText = "x".repeat(1024 * 1024)
+    const hugeMessages = Array.from({ length: 1_000 }, () => ({
+      role: "user" as const,
+      content: hugeText
+    }))
+    const tracer = new TraceCollector("thread-identity", hugeText, "model-identity", {
+      includeSkillEval: false
+    })
+    tracer.setUsedSkills(["pdf-report@1.0.0", "xlsx-clean@2.1.0"])
+    for (let index = 0; index < 1_000; index += 1) {
+      tracer.beginStep()
+      tracer.recordToolCall({ name: "exec_command", args: hugeObject, result: hugeText })
+      tracer.endStep(hugeText)
+      tracer.recordModelCall({
+        startedAt: new Date().toISOString(),
+        inputMessages: hugeMessages,
+        outputMessage: { role: "assistant", content: hugeText },
+        toolCalls: []
+      })
+      tracer.addToolNode({ name: "tool", input: hugeObject, metadata: hugeObject })
+    }
+
+    const trace = await tracer.finish("success")
+    await flushTraceWriteQueue()
+
+    // Identity is first-party and must survive a fully drained budget: before
+    // this was fixed every one of these became "[trace budget exhausted]",
+    // collapsing unrelated users into a single phantom row on the dashboard.
+    expect(trace.userName).toBe("测试用户甲")
+    expect(trace.sapId).toBe("00000001")
+    expect(trace.ystId).toBe("yst-00000001")
+    expect(trace.orgName).toBe("测试三级部门")
+    expect(trace.pathName).toContain("测试三级部门")
+    expect(trace.pathId).toBe("path-1")
+    expect(trace.userIp).toBe("127.0.0.1")
+    // pathName drives the org dimension; a placeholder silently emptied it.
+    expect(trace.upperOrgLv3).toBe("测试一级部门")
+    expect(trace.upperOrgLv2).toBe("测试二级部门")
+    expect(trace.upperOrgLv1).toBe("测试三级部门")
+    expect(trace.usedSkills).toHaveLength(2)
+    expect(trace.usedSkills[0]).toContain("pdf-report")
+    expect(trace.usedSkills[1]).toContain("xlsx-clean")
+
+    const serializedTrace = JSON.stringify(trace)
+    expect(serializedTrace).not.toContain("trace budget exhausted")
+    expect(Buffer.byteLength(serializedTrace, "utf8")).toBeLessThan(1024 * 1024)
+
+    // Structure: ids stay unique and every parent link resolves, so the tree
+    // still rebuilds after the budget is gone.
+    const nodes = trace.nodes ?? []
+    const ids = new Set(nodes.map((node) => node.id))
+    expect(ids.size).toBe(nodes.length)
+    expect(nodes.every((node) => Boolean(node.id) && Boolean(node.startedAt))).toBe(true)
+    expect(nodes.every((node) => node.parentId === null || ids.has(node.parentId))).toBe(true)
+    expect(trace.steps.every((step) => step.toolCalls.every((call) => Boolean(call.name)))).toBe(
+      true
+    )
+  }, 20_000)
 
   it("keeps late adapter enrichment in its trace epoch and bounds the write queue", async () => {
     const root = makeRoot("trace-collector-epoch-")
@@ -155,10 +226,12 @@ describe("bounded trace telemetry", () => {
     const ticker = setInterval(() => {
       ticks += 1
     }, 5)
-    const traces = Array.from({ length: 40 }, (_, index) =>
-      new TraceCollector(`queue-thread-${index}`, `message-${index}`, "model", {
-        includeSkillEval: false
-      })
+    const traces = Array.from(
+      { length: 40 },
+      (_, index) =>
+        new TraceCollector(`queue-thread-${index}`, `message-${index}`, "model", {
+          includeSkillEval: false
+        })
     )
     await Promise.all([
       first.finish("success"),
@@ -182,8 +255,7 @@ describe("bounded trace telemetry", () => {
     process.env.CMB_COWORK_TRACES_DIR = root
     process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
     mockCollectorDependencies()
-    const { TraceCollector, flushTraceWriteQueue, setTraceReporter } =
-      await import("./collector")
+    const { TraceCollector, flushTraceWriteQueue, setTraceReporter } = await import("./collector")
     const report = vi.fn(async () => undefined)
     setTraceReporter({ report })
     const tracer = new TraceCollector("thread-finish-once", "message", "model", {

@@ -18,7 +18,11 @@ export interface BoundedTelemetryResult {
   truncated: boolean
 }
 
-function truncateString(value: string, maxChars: number, maxBytes: number): {
+function truncateString(
+  value: string,
+  maxChars: number,
+  maxBytes: number
+): {
   value: string
   bytes: number
   truncated: boolean
@@ -152,12 +156,28 @@ export function boundTelemetryValue(
   }
 }
 
+/**
+ * Truncate a first-party scalar field without touching the shared collection
+ * budget.
+ *
+ * Top-level trace fields — identity, org path, ids, model name, error message —
+ * are produced by this app, not by tools or models, so they can never be the
+ * source of trace bloat that the budget exists to contain. They must also never
+ * be replaced by a truncation placeholder: downstream analytics group, filter
+ * and de-duplicate on their exact values, so a placeholder does not read as
+ * "missing", it reads as a real user named "[trace budget exhausted]".
+ */
+export function clampText(value: string, maxChars: number): string {
+  return value.length > maxChars ? value.slice(0, maxChars) : value
+}
+
 export class TraceCollectionBudget {
   private remainingBytes: number
 
   constructor(maxBytes = TRACE_COLLECTION_MAX_BYTES) {
-    // Leave room for fixed field names, punctuation and finish-time identity
-    // metadata that is not supplied by tools/models.
+    // Leave room for the fixed field names and punctuation that wrap the
+    // budgeted containers. Top-level scalars are not funded from here — they
+    // use clampText and are bounded by their own nature.
     this.remainingBytes = Math.max(0, maxBytes - 32 * 1024)
   }
 
@@ -170,6 +190,12 @@ export class TraceCollectionBudget {
   }
 
   takeText(value: string, maxChars: number): string {
+    // A drained budget must never turn a scalar into the "[trace budget
+    // exhausted]" placeholder. boundTelemetryValue emits that marker for a
+    // string input only when the budget is already at zero, and for a scalar
+    // field the marker is indistinguishable from real content downstream — an
+    // empty string is the only honest representation of "dropped".
+    if (this.remainingBytes <= 0) return ""
     const result = boundTelemetryValue(value, {
       maxBytes: this.remainingBytes,
       maxStringChars: maxChars,
@@ -186,11 +212,5 @@ export class TraceCollectionBudget {
     })
     this.remainingBytes = Math.max(0, this.remainingBytes - result.estimatedBytes)
     return result.value
-  }
-
-  reserve(bytes: number): boolean {
-    if (bytes > this.remainingBytes) return false
-    this.remainingBytes -= Math.max(0, bytes)
-    return true
   }
 }
