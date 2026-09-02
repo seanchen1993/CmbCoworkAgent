@@ -72,6 +72,7 @@ import {
   type TraceKeyProtector,
   type TraceStorageInitializationResult
 } from "./local-storage"
+import { TraceContentInterner, makeContentRef, rehydrateTraceContent } from "./content-refs"
 import {
   TRACE_COLLECTION_MAX_BYTES,
   TRACE_PERSISTED_MAX_BYTES,
@@ -634,6 +635,13 @@ export class TraceCollector {
    */
   private readonly storedChatMessageIds = new Set<string>()
 
+  /**
+   * Assigns the canonical copy of every repeated value in this trace. Recorders
+   * run steps-first, so the literal lands on the flattest structure and the
+   * later copies keep only an id.
+   */
+  private readonly contentInterner = new TraceContentInterner()
+
   /** The step currently being built (between beginStep / endStep). */
   private currentStepIndex = 0
   private currentStepStartedAt: string = nowIsoLocal()
@@ -872,7 +880,9 @@ export class TraceCollector {
     ) {
       return
     }
-    this.currentToolCalls.push(boundTraceToolCall(call, this.collectionBudget))
+    this.currentToolCalls.push(
+      this.internToolCallArgs(boundTraceToolCall(call, this.collectionBudget))
+    )
     this.recordedToolCallCount += 1
   }
 
@@ -892,6 +902,59 @@ export class TraceCollector {
       return sum + Math.floor(count)
     }, 0)
     return Math.max(stepToolCalls, nodeToolCalls, metadataToolCalls, metadataToolCallCounts)
+  }
+
+  /**
+   * Claim a value for whichever recorder got there first. The winner keeps the
+   * bytes and stamps the id; everyone after it keeps only the id. Values too
+   * small to pay for a ref are left alone.
+   */
+  private internValue(value: unknown): { mid: string } | { ref: string } | undefined {
+    return this.contentInterner.claim(value)
+  }
+
+  /** Tool args: canonical on the step, ids on the model call and the tool node. */
+  private internToolCallArgs(call: TraceToolCall): TraceToolCall {
+    const claim = this.internValue(call.args)
+    if (!claim) return call
+    return "mid" in claim
+      ? { ...call, argsMid: claim.mid }
+      : { ...call, args: {}, argsRef: claim.ref }
+  }
+
+  /**
+   * The output message repeats the step's assistant text and, once the llm node
+   * copies it, the reasoning too. Keep whichever copy arrived first.
+   */
+  private internMessageText(message: TraceChatMessage): TraceChatMessage {
+    let output = message
+    const contentClaim = this.internValue(output.content)
+    if (contentClaim) {
+      output =
+        "mid" in contentClaim
+          ? { ...output, contentMid: contentClaim.mid }
+          : { ...output, content: "", contentRef: contentClaim.ref }
+    }
+    if (typeof output.reasoning === "string") {
+      const reasoningClaim = this.internValue(output.reasoning)
+      if (reasoningClaim) {
+        if ("mid" in reasoningClaim) {
+          output = { ...output, reasoningMid: reasoningClaim.mid }
+        } else {
+          const rest = { ...output }
+          delete rest.reasoning
+          output = { ...rest, reasoningRef: reasoningClaim.ref }
+        }
+      }
+    }
+    return output
+  }
+
+  /** Node input/output/metadata values, which are untyped and often duplicates. */
+  private internNodeValue(value: unknown): unknown {
+    const claim = this.internValue(value)
+    if (!claim) return value
+    return "mid" in claim ? value : makeContentRef(claim.ref)
   }
 
   /**
@@ -920,13 +983,17 @@ export class TraceCollector {
     ).map((message) => boundTraceChatMessage(message, this.collectionBudget))
     const toolCalls = call.toolCalls
       .slice(0, TRACE_MAX_TOOL_CALLS_PER_STEP)
-      .map((toolCall) => boundTraceToolCall(toolCall, this.collectionBudget))
+      .map((toolCall) =>
+        this.internToolCallArgs(boundTraceToolCall(toolCall, this.collectionBudget))
+      )
     const tokenUsage = this.collectionBudget.takeValue(call.tokenUsage, 1024)
     this.modelCalls.push({
       ...(typeof call.messageId === "string" ? { messageId: clampText(call.messageId, 512) } : {}),
       startedAt: clampText(call.startedAt, 64),
       inputMessages,
-      outputMessage: boundTraceChatMessage(call.outputMessage, this.collectionBudget),
+      outputMessage: this.internMessageText(
+        boundTraceChatMessage(call.outputMessage, this.collectionBudget)
+      ),
       toolCalls,
       ...(tokenUsage && typeof tokenUsage === "object"
         ? { tokenUsage: tokenUsage as TraceModelCall["tokenUsage"] }
@@ -1066,12 +1133,16 @@ export class TraceCollector {
     node.status = params.status ?? "success"
     node.endedAt = params.endedAt ?? nowIsoLocal()
     if (params.output !== undefined) {
-      node.output = this.collectionBudget.takeValue(params.output, 32 * 1024)
+      node.output = this.internNodeValue(this.collectionBudget.takeValue(params.output, 32 * 1024))
     }
     if (params.metadata) {
       const metadata = this.collectionBudget.takeValue(params.metadata, 32 * 1024)
       if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
-        node.metadata = { ...(node.metadata ?? {}), ...(metadata as Record<string, unknown>) }
+        const interned: Record<string, unknown> = {}
+        for (const [key, value] of Object.entries(metadata as Record<string, unknown>)) {
+          interned[key] = this.internNodeValue(value)
+        }
+        node.metadata = { ...(node.metadata ?? {}), ...interned }
       }
     }
   }
@@ -1118,10 +1189,14 @@ export class TraceCollector {
       this.currentToolCalls = []
       return
     }
+    const boundedText = this.collectionBudget.takeText(assistantText, 32 * 1024)
+    const textClaim = this.internValue(boundedText)
     const step: TraceStep = {
       index: this.currentStepIndex++,
       startedAt: this.currentStepStartedAt,
-      assistantText: this.collectionBudget.takeText(assistantText, 32 * 1024),
+      // Steps are canonical for assistant text, so this is always the literal.
+      assistantText: boundedText,
+      ...(textClaim && "mid" in textClaim ? { assistantTextMid: textClaim.mid } : {}),
       toolCalls: [...this.currentToolCalls]
     }
     this.steps.push(step)
@@ -1459,8 +1534,15 @@ export class TraceCollector {
       ...(node.name ? { name: clampText(node.name, 512) } : {}),
       startedAt: clampText(node.startedAt, 64),
       ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
+      // Intern after bounding, never before: ids are content addresses, so a id
+      // taken from the pre-truncation value would match nothing. Chat-message
+      // arrays are skipped — they have their own per-message dedupe.
       ...(node.input !== undefined
-        ? { input: this.collectionBudget.takeValue(node.input, 32 * 1024) }
+        ? {
+            input: isChatMessageArray(node.input)
+              ? node.input
+              : this.internNodeValue(this.collectionBudget.takeValue(node.input, 32 * 1024))
+          }
         : {}),
       ...(node.output !== undefined
         ? { output: this.collectionBudget.takeValue(node.output, 32 * 1024) }
@@ -1653,7 +1735,9 @@ async function readTraceFileBounded(
       lineCount += 1
       if (!line.trim()) continue
       try {
-        traces.push(parseStoredTraceLine(line))
+        // Storage keeps one copy of each repeated value; every reader gets the
+        // whole thing back, so no caller has to know refs exist.
+        traces.push(rehydrateTraceContent(parseStoredTraceLine(line)))
       } catch {
         // Skip malformed or undecryptable trace lines.
       }

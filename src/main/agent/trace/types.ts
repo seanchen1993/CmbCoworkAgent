@@ -20,8 +20,18 @@
 export interface TraceToolCall {
   /** Tool name, e.g. "read_file", "manage_skill" */
   name: string
-  /** Raw arguments passed to the tool (sanitized before trace storage/reporting). */
+  /**
+   * Raw arguments passed to the tool (sanitized before trace storage/reporting).
+   *
+   * Steps are the canonical home for tool args — the flattest place a query can
+   * reach them — so the literal stays on the step and the copies on model calls
+   * and tool nodes carry an id instead.
+   */
   args: Record<string, unknown>
+  /** Id of `args` as stored here — this is the copy others point at. */
+  argsMid?: string
+  /** `args` is empty; the real value lives under this id elsewhere in the trace. */
+  argsRef?: string
   /** Tool result (string representation, may be truncated) */
   result?: string
   /** Wall-clock time in ms for this tool call */
@@ -47,6 +57,14 @@ export interface TraceChatMessage {
   mid?: string
   /** Set on a repeat: the `mid` of the occurrence that holds the content. */
   ref?: string
+  /** Id of `content` as stored here — this is the copy others point at. */
+  contentMid?: string
+  /** `content` is empty; the text lives under this id elsewhere in the trace. */
+  contentRef?: string
+  /** Id of `reasoning` as stored here. */
+  reasoningMid?: string
+  /** `reasoning` is absent; the text lives under this id elsewhere in the trace. */
+  reasoningRef?: string
 }
 
 /** Token usage attached to a model call (if provider reports it). */
@@ -107,8 +125,16 @@ export interface TraceStep {
   index: number
   /** ISO timestamp when the model started this step */
   startedAt: string
-  /** The assistant's text reasoning for this step (may be empty) */
+  /**
+   * The assistant's text reasoning for this step (may be empty).
+   *
+   * Steps are the canonical home for assistant text: they are the flattest
+   * structure a cloud query can reach, so the literal always stays here and the
+   * copies on model calls and llm nodes carry ids instead.
+   */
   assistantText: string
+  /** Id of `assistantText` as stored here — this is the copy others point at. */
+  assistantTextMid?: string
   /** All tool calls made during this step */
   toolCalls: TraceToolCall[]
 }

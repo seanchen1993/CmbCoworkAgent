@@ -12,6 +12,7 @@ import { getUserInfo } from "../storage"
 import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
+import { rehydrateTraceContent } from "../agent/trace/content-refs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import {
   redactTraceDetailForDisplay,
@@ -2397,10 +2398,14 @@ function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
 }
 
 function normalizeParsedTrace(
-  trace: AgentTrace,
+  rawTrace: AgentTrace,
   source: Record<string, unknown>,
   hit: EsSearchHit
 ): AgentTrace {
+  // Uploaded traces keep one copy of each repeated value. This is the boundary
+  // where cloud data re-enters the app, so put the copies back here — every
+  // consumer downstream (trace detail, conversation view) sees a whole trace.
+  const trace = rehydrateTraceContent(rawTrace)
   const candidate = trace as Partial<AgentTrace>
   const startedAt = candidate.startedAt || asString(source.startedAt)
   const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
