@@ -700,12 +700,12 @@ function MarketItemCard({
           {/*  </div>*/}
           {/*)}*/}
           {item.user_id ? (
-            <div className="flex items-center gap-1">
+            <div className="flex min-w-0 max-w-full items-center gap-1">
               <User className="size-3 shrink-0" />
               {showResolvedUploader ? (
                 renderUploaderProfile(uploaderProfile, item.user_id)
               ) : (
-                <span>用户 {item.user_id}</span>
+                <span className="min-w-0 truncate">用户 {item.user_id}</span>
               )}
             </div>
           ) : null}
