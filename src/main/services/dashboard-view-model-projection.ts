@@ -548,8 +548,7 @@ function projectAdvancedEvent(raw: unknown): Record<string, unknown> {
     imCancelled: countByKey(im.by_outcome, "cancelled"),
     imError: countByKey(im.by_outcome, "error") + countByKey(im.by_outcome, "outcome_unknown"),
     hookTotal: asNumber(hooks.doc_count),
-    hookBlocked: asNumber(asRecord(hooks.blocked).doc_count),
-    claudeCodeLaunches: asNumber(asRecord(aggs.claude_code_launches).doc_count)
+    hookBlocked: asNumber(asRecord(hooks.blocked).doc_count)
   }
 }
 

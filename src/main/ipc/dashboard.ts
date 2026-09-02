@@ -6167,7 +6167,6 @@ interface AdvFeatureMetrics {
   hookBlocked: number
   codeExec: number
   savedTool: number
-  claudeCodeLaunches: number
 }
 
 function assembleAdvancedFeatureCards(
@@ -6259,14 +6258,6 @@ function assembleAdvancedFeatureCards(
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
           { label: "保存工具", count: m.savedTool, tone: "neutral" }
         ]
-      },
-      {
-        key: "claudeCode",
-        label: "Claude Code",
-        value: m.claudeCodeLaunches,
-        valueLabel: "启动次数",
-        hint: `选择目录启动会话 ${m.claudeCodeLaunches} 次`,
-        items: [{ label: "目录启动", count: m.claudeCodeLaunches, tone: "good" }]
       }
     ]
   }
@@ -6309,16 +6300,6 @@ async function fetchAdvancedFeatures(
       hooks: {
         filter: { term: { eventName: "hook.executed" } },
         aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
-      },
-      claude_code_launches: {
-        filter: {
-          bool: {
-            filter: [
-              { term: { eventName: "workspace.launch.started" } },
-              { term: { "properties.surface": "claude_code" } }
-            ]
-          }
-        }
       }
     }
   }
@@ -6398,8 +6379,7 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    savedTool: k(6),
-    claudeCodeLaunches: k(11)
+    savedTool: k(6)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")
