@@ -14,6 +14,14 @@ const previewReader = readFileSync(
   "utf8"
 )
 const rightPanel = readFileSync(new URL("../panels/RightPanel.tsx", import.meta.url), "utf8")
+const resourcePreviewRequestHook = readFileSync(
+  new URL("../../lib/use-resource-preview-request.ts", import.meta.url),
+  "utf8"
+)
+const resourcePanelOverlay = readFileSync(
+  new URL("../panels/ResourcePanelOverlay.tsx", import.meta.url),
+  "utf8"
+)
 const latestCompletedResource = readFileSync(
   new URL("../../lib/latest-completed-resource.ts", import.meta.url),
   "utf8"
@@ -96,6 +104,9 @@ describe("persisted active file preview isolation", () => {
     expect(messageBubble).toContain("toolCallId: resolvedToolCall.id")
     expect(rightPanel).toContain("toolCallId: latestResourceEvent.toolCallId")
     expect(rightPanel).toContain("isCurrentOpenResourcePreviewIntent(")
+    expect(resourcePreviewRequestHook).toContain("isCurrentOpenResourcePreviewIntent(")
+    expect(resourcePreviewRequestHook).toContain("beginOpenResourcePreviewIntent(previousThreadId)")
+    expect(resourcePanelOverlay).toContain("!request.externalPreviewGrant")
     expect(agentRuntime).toContain("createTrustedToolFilePreviewContextMiddleware(threadId)")
     expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "read")')
     expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "write")')
