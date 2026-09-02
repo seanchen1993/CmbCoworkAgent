@@ -1,4 +1,5 @@
 import type { HookConfig } from "./hooks/types"
+import type { ImChannelId } from "../shared/im-gateway-contract"
 import type {
   ForkableCheckpoint as SharedForkableCheckpoint,
   ThreadForkCheckpointForMessageParams as SharedThreadForkCheckpointForMessageParams,
@@ -33,6 +34,8 @@ export interface AgentInvokeParams {
   message: string
   modelId?: string
   agentMode?: "normal" | "coordinator" | "workflow"
+  /** One-run ManagedRun launch authorization; bridges currentSession persistence startup races. */
+  managedExecution?: boolean
   coordinatorInternalNotification?: boolean
   /** Renderer user message id for the turn, used to group hook log events. */
   userMessageId?: string
@@ -591,6 +594,13 @@ export type ScheduledTaskFrequency =
   | "interval"
 export type ScheduledTaskType = "action" | "reminder"
 
+export interface ScheduledTaskImDeliveryContext {
+  provider: ImChannelId
+  principalId: string
+  conversationKey: string
+  inboxThreadId: string
+}
+
 export interface ScheduledTask {
   id: string
   name: string
@@ -599,7 +609,7 @@ export interface ScheduledTask {
   taskType: ScheduledTaskType // "action" = agent 执行操作, "reminder" = 暖心提醒
   modelId: string | null
   workDir: string | null
-  chatxRobotChatId: string | null // 关联的机器人会话ID，执行完后 HTTP 回复
+  imDeliveryContext: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes: number | null // 仅 interval 类型使用，如 5 表示每5分钟
   runAt: string | null // ISO 时间戳，仅 once 类型使用
@@ -621,7 +631,7 @@ export interface ScheduledTaskUpsert {
   taskType?: ScheduledTaskType
   modelId: string | null
   workDir: string | null
-  chatxRobotChatId?: string | null
+  imDeliveryContext?: ScheduledTaskImDeliveryContext | null
   frequency: ScheduledTaskFrequency
   intervalMinutes?: number | null
   runAt?: string | null
@@ -639,6 +649,105 @@ export interface TaskRunRecord {
   status: "ok" | "error"
   error: string | null
   durationMs: number
+}
+
+export interface BuiltinRobotSettings {
+  enabled: boolean
+  /** Optional runtime override. When null, the build-time environment value is used. */
+  gatewayUrl: string | null
+  remoteAccess: "inbox-only" | "inbox-and-features"
+  remoteApprovalEnabled: boolean
+  waitingDesktopTtlMinutes: number
+}
+
+export type BuiltinRobotConnectionState = "connecting" | "online" | "offline" | "error"
+export type BuiltinRobotIdentityState = "verified" | "verifying" | "missing" | "error"
+
+export interface BuiltinRobotRouteStatus {
+  /** Opaque enterprise subject asserted by the authenticated Gateway session. */
+  principalId: string
+  conversationKey: string
+  state: "active" | "suspended" | "revoked"
+}
+
+export interface BuiltinRobotFeatureBindingStatus {
+  conversationKey: string
+  bindingId: string
+  projectId: string
+  featureSlug: string
+  threadId: string
+  state: "pending" | "active" | "suspended" | "revoked" | "historical"
+  suspendReason: string | null
+  activeTarget: boolean
+}
+
+export interface BuiltinRobotThreadGrantStatus {
+  kind: "thread"
+  grantId: string
+  threadId: string
+  title: string
+  state: "active" | "suspended" | "revoked"
+  grantVersion: number
+  conversationKey: string
+  suspendReason: string | null
+}
+
+export interface BuiltinRobotFeatureGrantStatus {
+  kind: "feature"
+  grantId: string
+  projectId: string
+  featureSlug: string
+  projectName: string
+  featureTitle: string
+  state: "active" | "suspended" | "revoked"
+  grantVersion: number
+  suspendReason: string | null
+}
+
+export interface BuiltinRobotRemoteAccessOverview {
+  principalAvailable: boolean
+  principalReason: string | null
+  routeAvailable: boolean
+  routeReason: string | null
+  activeRoute: BuiltinRobotRouteStatus | null
+  threadGrants: BuiltinRobotThreadGrantStatus[]
+  featureGrants: BuiltinRobotFeatureGrantStatus[]
+}
+
+export interface BuiltinRobotGrantableFeature {
+  projectId: string
+  projectName: string
+  featureSlug: string
+  featureTitle: string
+  featureStatus: string
+  granted: boolean
+}
+
+export interface BuiltinRobotDiagnostics {
+  appVersion: string
+  gatewayUrl: string | null
+  authenticationFailed: boolean
+  lastHandshakeStatus: number | null
+  lastCloseCode: number | null
+  lastCloseReason: string | null
+  lastTransportError: string | null
+  reconnectAttempt: number
+}
+
+export interface BuiltinRobotStatus {
+  settings: BuiltinRobotSettings
+  connectionState: BuiltinRobotConnectionState
+  identityState: BuiltinRobotIdentityState
+  sessionId: string | null
+  principalId: string | null
+  lastConnectedAt: string | null
+  lastError: string | null
+  legacyConfigDetected: boolean
+  routes: BuiltinRobotRouteStatus[]
+  featureBindings: BuiltinRobotFeatureBindingStatus[]
+  eventCounts: Record<string, number>
+  pendingOutboxCount: number
+  diagnostics: BuiltinRobotDiagnostics
 }
 
 // Heartbeat types
@@ -1086,26 +1195,6 @@ export interface UserInputResponse {
   answers: Record<string, UserInputAnswer>
   submittedAt?: string
   ignored?: boolean
-}
-
-// ChatX types
-export interface ChatXRobotConfig {
-  chatId: string
-  httpUrl: string
-  fromId: string
-  clientId: string
-  clientSecret: string
-  channel: string
-  toUserList: string[]
-  modelId: string | null
-  workDir: string | null
-}
-
-export interface ChatXConfig {
-  enabled: boolean
-  wsUrl: string
-  userIp: string
-  robots: ChatXRobotConfig[]
 }
 
 /**

@@ -45,7 +45,9 @@ const SandboxPanel = lazy(() => import("./SandboxPanel").then((m) => ({ default:
 const EvolutionPanel = lazy(() =>
   import("./EvolutionPanel").then((m) => ({ default: m.EvolutionPanel }))
 )
-const ChatXPanel = lazy(() => import("./ChatXPanel").then((m) => ({ default: m.ChatXPanel })))
+const BuiltinRobotPanel = lazy(() =>
+  import("./BuiltinRobotPanel").then((m) => ({ default: m.BuiltinRobotPanel }))
+)
 const UserInfoPanel = lazy(() =>
   import("./UserInfoPanel").then((m) => ({ default: m.UserInfoPanel }))
 )
@@ -71,7 +73,7 @@ type CustomizeTab =
   | "market"
   | "sandbox"
   | "evolution"
-  | "chatx"
+  | "robot"
   | "userinfo"
   | "pet"
   | "hooks"
@@ -118,7 +120,7 @@ const MENU_GROUPS: MenuGroup[] = [
       { tab: "taskMmd", label: "任务画布", icon: Network },
       { tab: "lsp", label: "Java LSP", icon: Code2 },
       { tab: "evolution", label: "自优化", icon: GitBranch },
-      { tab: "chatx", label: "机器人管理", icon: Cpu },
+      { tab: "robot", label: "机器人管理", icon: Cpu },
       { tab: "hooks", label: "钩子", icon: Webhook },
       { tab: "codeExecTools", label: "编程式工具调用", icon: Wrench, truncate: true }
     ]
@@ -287,8 +289,8 @@ export function CustomizeView(): React.JSX.Element {
           <MarketPanel />
         ) : activeTab === "evolution" ? (
           <EvolutionPanel />
-        ) : activeTab === "chatx" ? (
-          <ChatXPanel />
+        ) : activeTab === "robot" ? (
+          <BuiltinRobotPanel />
         ) : activeTab === "lsp" ? (
           <LspPanel threadId={currentThreadId} />
         ) : activeTab === "sandbox" ? (

@@ -146,7 +146,7 @@ export type EventCategory =
   | "heartbeat"
   | "memory"
   | "hook"
-  | "chatx"
+  | "im"
   | "workspace"
 
 /**

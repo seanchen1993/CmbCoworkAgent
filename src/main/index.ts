@@ -120,7 +120,7 @@ const EVENT_CATEGORIES = new Set<EventCategory>([
   "heartbeat",
   "memory",
   "hook",
-  "chatx",
+  "im",
   "workspace"
 ])
 
@@ -356,7 +356,6 @@ import { registerPluginHandlers } from "./ipc/plugins"
 import { registerPluginFileHandlers } from "./ipc/plugin-files"
 import { registerSandboxHandlers } from "./ipc/sandbox"
 import { registerOptimizerHandlers } from "./ipc/optimizer"
-import { registerChatXHandlers } from "./ipc/chatx"
 import { registerHooksHandlers } from "./ipc/hooks"
 import { closeHookCatalogWorker } from "./hook-catalog/client"
 import { flushHookLogs, pruneOldHookLogs } from "./hooks/persistence"
@@ -368,6 +367,14 @@ import { closeDashboardEsWorker } from "./services/dashboard-es-client"
 import { registerAdoptionTraceHandlers } from "./ipc/adoption-trace"
 import { registerFeatureGateHandlers } from "./ipc/feature-gates"
 import { registerHarnessBoardHandlers } from "./ipc/harness-board"
+import { recoverManagedRunsAtStartup } from "./harness-board/managed-run-recovery"
+import { recoverHumanGatesAtStartup } from "./harness-board/human-gate-service"
+import { configureManagedRunProjectDirectories } from "./harness-board/managed-run-store"
+import {
+  getHarnessProjectRootPath,
+  initializeHarnessManagedRunProjectDirectories,
+  listHarnessManagedRunProjectDirectories
+} from "./harness-board/service"
 import { registerLspHandlers } from "./ipc/lsp"
 import { registerAutoCommitHandlers } from "./ipc/auto-commit"
 import { registerExpertAgentsHandlers } from "./ipc/expert-agents"
@@ -383,10 +390,11 @@ import { closeHarnessKnowledgePreviewWorker } from "./harness-board/knowledge-pr
 import { closeHarnessEnterpriseProjectionWorker } from "./harness-board/enterprise-projection-client"
 import { closeHarnessJsonCodecWorker } from "./harness-board/json-codec-client"
 import { registerUserInputHandlers } from "./ipc/user-input"
+import { registerBuiltinRobotHandlers } from "./ipc/builtin-robot"
 import { registerBuiltinBrowserIpc } from "./ipc/browser"
 import {
   beginBuiltinBrowserAppQuitCleanup,
-  disposeBuiltinBrowserForMainWindowEvent,
+  disposeBuiltinBrowserForMainWindowEvent
 } from "./browser/builtin-browser-lifecycle"
 import { stopAllLsp } from "./lsp"
 import {
@@ -424,7 +432,6 @@ import {
   stopHeartbeat,
   stopHeartbeatAndWait
 } from "./services/heartbeat"
-import { hasActiveChatXRuns, startChatX, stopChatX, stopChatXAndWait } from "./services/chatx"
 import { startHookConfigWatcher, stopHookConfigWatcher } from "./services/hook-config-watcher"
 import { LocalSandbox } from "./agent/local-sandbox"
 import { closeRuntime } from "./agent/runtime"
@@ -451,6 +458,7 @@ import {
 import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
+import { builtinRobotManager } from "./services/im/manager"
 import {
   configurePetWindow,
   createPetWindow,
@@ -566,14 +574,16 @@ function applyMacDockIcon(): void {
 
   // 宠物透明窗口会额外创建 BrowserWindow；macOS 下重复应用 Dock 图标可避免开发态图标被重置。
   app.dock.show()
-  const iconPath = getFirstExistingPath([
-    ...(isDev ? [getDevMacDockIconPath()] : []),
-    join(__dirname, "../../resources/icon.png"),
-    join(app.getAppPath(), "resources/icon.png"),
-    join(__dirname, "../resources/icon.png"),
-    join(app.getAppPath(), "build/icon.png"),
-    join(process.cwd(), "build/icon.png")
-  ].filter((path): path is string => Boolean(path)))
+  const iconPath = getFirstExistingPath(
+    [
+      ...(isDev ? [getDevMacDockIconPath()] : []),
+      join(__dirname, "../../resources/icon.png"),
+      join(app.getAppPath(), "resources/icon.png"),
+      join(__dirname, "../resources/icon.png"),
+      join(app.getAppPath(), "build/icon.png"),
+      join(process.cwd(), "build/icon.png")
+    ].filter((path): path is string => Boolean(path))
+  )
 
   if (isDev) {
     console.log(`[icon] mac dock icon path: ${iconPath ?? "not found"}`)
@@ -620,9 +630,9 @@ function clearCloseToTrayPromptState(): void {
 function hasActiveForegroundRuns(): boolean {
   return (
     hasAnyActiveAgentTasks() ||
-    hasActiveChatXRuns() ||
     hasActiveScheduledTaskRuns() ||
-    isHeartbeatRunning()
+    isHeartbeatRunning() ||
+    builtinRobotManager.hasActiveRuns()
   )
 }
 
@@ -758,8 +768,7 @@ function createWindow(): void {
   // mid-turn reload/reconnect contract, so block browser refresh shortcuts.
   mainWindow.webContents.on("before-input-event", (event, input) => {
     const isRefreshShortcut =
-      input.key === "F5" ||
-      ((input.meta || input.control) && input.key.toLowerCase() === "r")
+      input.key === "F5" || ((input.meta || input.control) && input.key.toLowerCase() === "r")
     if (isRefreshShortcut) event.preventDefault()
   })
 
@@ -771,14 +780,17 @@ function createWindow(): void {
     }
   })
 
-  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    clearCloseToTrayPromptState()
-    console.error("[Main] Renderer failed to load:", {
-      errorCode,
-      errorDescription,
-      validatedURL
-    })
-  })
+  mainWindow.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL) => {
+      clearCloseToTrayPromptState()
+      console.error("[Main] Renderer failed to load:", {
+        errorCode,
+        errorDescription,
+        validatedURL
+      })
+    }
+  )
 
   mainWindow.webContents.on("did-start-loading", () => {
     mainLogForwardingGate.disableForLifecycle()
@@ -813,7 +825,7 @@ function createWindow(): void {
     const renderUrl = import.meta.env.VITE_RENDER_URL
     if (!renderUrl) {
       mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
-    }else{
+    } else {
       mainWindow.loadURL(renderUrl)
     }
   }
@@ -935,9 +947,7 @@ if (browserNativeMessagingHostLaunch) {
   app.whenReady().then(async () => {
     configureAgentGraphRecursionLimit(getStoredAgentGraphRecursionLimit())
     configureWorkflowWorktreeTimeoutMinutes(getStoredWorkflowWorktreeTimeoutMinutes())
-    configureWorkflowWorktreeRemoveTimeoutMinutes(
-      getStoredWorkflowWorktreeRemoveTimeoutMinutes()
-    )
+    configureWorkflowWorktreeRemoveTimeoutMinutes(getStoredWorkflowWorktreeRemoveTimeoutMinutes())
 
     // Set app user model id for windows
     if (process.platform === "win32") {
@@ -1026,6 +1036,12 @@ if (browserNativeMessagingHostLaunch) {
       console.log("[Main] HttpEventReporter registered, sending events to:", traceBaseUrl)
     }
 
+    await initializeHarnessManagedRunProjectDirectories()
+    configureManagedRunProjectDirectories({
+      resolveProjectDirectory: getHarnessProjectRootPath,
+      listProjectDirectories: listHarnessManagedRunProjectDirectories
+    })
+
     // Periodically upsert Harness Board project/feature status into the event
     // index. Prefers the backend event service (VITE_API_TRACE_BASE_URL) and
     // falls back to writing ES directly (VITE_ES_NODES); no-ops when neither is
@@ -1034,6 +1050,8 @@ if (browserNativeMessagingHostLaunch) {
 
     // Initialize database
     await initializeDatabase()
+    await recoverHumanGatesAtStartup()
+    recoverManagedRunsAtStartup()
     cleanupLegacySkillEvalRecords()
 
     // Initialize adoption tracker (side-effect only; never blocks startup)
@@ -1062,7 +1080,6 @@ if (browserNativeMessagingHostLaunch) {
     registerPluginFileHandlers(ipcMain)
     registerSandboxHandlers(ipcMain)
     registerOptimizerHandlers(ipcMain)
-    registerChatXHandlers(ipcMain)
     registerHooksHandlers(ipcMain)
     // Best-effort cleanup of stale hook-log jsonl files. Doesn't block startup.
     void pruneOldHookLogs().catch((e) => console.warn("[Main] pruneOldHookLogs error:", e))
@@ -1083,6 +1100,7 @@ if (browserNativeMessagingHostLaunch) {
     registerManagedLinkHandlers(ipcMain)
     registerPetHandlers(ipcMain)
     registerUserInputHandlers(ipcMain)
+    registerBuiltinRobotHandlers(ipcMain)
     browserService = registerBuiltinBrowserIpc(ipcMain, () => mainWindow, browserCdpPort)
 
     ipcMain.on(APP_ATTENTION_CHANNEL, (event, payload: unknown) => {
@@ -1248,8 +1266,8 @@ if (browserNativeMessagingHostLaunch) {
         return
       }
 
-      // A background ChatX message can start while the ordinary close prompt is
-      // open. Upgrade to the non-suppressible safety prompt before quitting.
+      // A background task can start while the ordinary close prompt is open.
+      // Upgrade to the non-suppressible safety prompt before quitting.
       if (needsActiveRunConfirmation()) {
         clearCloseToTrayPromptState()
         requestWindowCloseChoice(promptWindow, "active-runs")
@@ -1361,14 +1379,19 @@ if (browserNativeMessagingHostLaunch) {
             contextIsolation: true,
             nodeIntegration: false,
             webviewTag: true,
-            preload: join(__dirname, "../preload/index.js"),
-          },
+            preload: join(__dirname, "../preload/index.js")
+          }
         })
       }
-      loginWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-        "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-        "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-        "&response_type=code")
+      loginWindow.loadURL(
+        `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+          "&redirect_uri=" +
+          encodeURIComponent(
+            `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+          ) +
+          "&response_type=code"
+      )
     })
 
     ipcMain.handle("close-login-window", async () => {
@@ -1376,23 +1399,28 @@ if (browserNativeMessagingHostLaunch) {
         loginWindow.close()
         loginWindow = null
       }
-      if(mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("notify-login-msg",'login')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("notify-login-msg", "login")
       }
     })
 
     ipcMain.handle("open-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed() && !isDev) {
+      if (mainWindow && !mainWindow.isDestroyed() && !isDev) {
         mainLogForwardingGate.disableForLifecycle()
-        mainWindow.loadURL(`https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
-          "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
-          "&redirect_uri=" + encodeURIComponent(`https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`) +
-          "&response_type=code")
+        mainWindow.loadURL(
+          `https://oa-auth.paas.${import.meta.env.VITE_LOGIN_PT}.com/auth/sso-login` +
+            "?client_id=5221ab160e0145d9b0736c2f8fb84229" +
+            "&redirect_uri=" +
+            encodeURIComponent(
+              `https://cmbdevclawweb.paas.${import.meta.env.VITE_LOGIN_PT}.cn/login.html`
+            ) +
+            "&response_type=code"
+        )
       }
     })
 
     ipcMain.handle("close-login-page", async () => {
-      if(mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.loadFile(join(__dirname, "../renderer/index.html"))
       }
     })
@@ -1421,9 +1449,9 @@ if (browserNativeMessagingHostLaunch) {
     await initialModelCatalogLoad
 
     // Start scheduled task scheduler and heartbeat service
+    await builtinRobotManager.start(app.getVersion())
     startScheduler()
     startHeartbeat()
-    startChatX()
     startHookConfigWatcher()
     startUpdateChecker()
     markFullBackupCleanupReady(selfCheckResult)
@@ -1494,9 +1522,9 @@ if (browserNativeMessagingHostLaunch) {
       try {
         const shutdownResults = await Promise.allSettled([
           shutdownAllAgentTasks(5_000),
-          stopChatXAndWait(5_000),
           stopSchedulerAndWait(5_000),
-          stopHeartbeatAndWait(5_000)
+          stopHeartbeatAndWait(5_000),
+          builtinRobotManager.stop()
         ])
         for (const result of shutdownResults) {
           if (result.status === "rejected") {
@@ -1554,7 +1582,6 @@ if (browserNativeMessagingHostLaunch) {
     LocalSandbox.killAll()
     stopScheduler()
     stopHeartbeat()
-    stopChatX()
     stopAllHarnessWatchRefs()
     stopHookConfigWatcher()
     stopAllWatching()
@@ -1568,6 +1595,9 @@ if (browserNativeMessagingHostLaunch) {
     }
 
     const cleanup = Promise.all([
+      builtinRobotManager
+        .stop()
+        .catch((err) => console.warn("[Main] stop built-in robot error:", err)),
       stopAllLsp().catch((err) => console.warn("[Main] stopAllLsp error:", err)),
       closeRuntime().catch((err) => console.warn("[Main] closeRuntime error:", err)),
       closeThreadMessageHydrationWorker().catch((err) =>

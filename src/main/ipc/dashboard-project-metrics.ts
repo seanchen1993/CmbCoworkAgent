@@ -18,6 +18,8 @@ interface ProjectMetricDependencies {
   eventIndex: string
   traceIndex: string
   factIndex: string
+  /** null 表示管理员不限室；空数组表示当前用户无可访问室。 */
+  allowedRoomNames: string[] | null
 }
 
 interface LeanSnapshotProject {
@@ -187,13 +189,27 @@ function projectDateRange(range: ProjectMetricFilters["range"]): {
   }
 }
 
-function buildFactBaseFilters(filters: ProjectMetricFilters): Record<string, unknown>[] {
+function effectiveRoomNames(
+  requestedRoomNames: string[],
+  allowedRoomNames: string[] | null
+): string[] | null {
+  if (allowedRoomNames === null) return requestedRoomNames.length > 0 ? requestedRoomNames : null
+  const allowed = uniqueSorted(allowedRoomNames)
+  if (requestedRoomNames.length === 0) return allowed
+  const allowedSet = new Set(allowed)
+  return requestedRoomNames.filter((roomName) => allowedSet.has(roomName))
+}
+
+function buildFactBaseFilters(
+  filters: ProjectMetricFilters,
+  allowedRoomNames: string[] | null
+): Record<string, unknown>[] {
   const result: Record<string, unknown>[] = [
     { range: { createDate: projectDateRange(filters.range) } }
   ]
-  const rooms = uniqueSorted(filters.upperOrgLv1 ?? [])
+  const rooms = effectiveRoomNames(uniqueSorted(filters.upperOrgLv1 ?? []), allowedRoomNames)
   const phases = uniqueSorted(filters.phaseStatuses ?? [])
-  if (rooms.length > 0) result.push({ terms: { roomName: rooms } })
+  if (rooms !== null) result.push(matchNoneOrTerms("roomName", rooms))
   if (phases.length > 0) result.push({ terms: { phaseStatus: phases } })
 
   const minimum = filters.functionPointMin
@@ -371,6 +387,26 @@ function ratio(numerator: number, denominator: number, multiplier: number): numb
   return denominator > 0 ? (numerator * multiplier) / denominator : null
 }
 
+function hasTokenConsumptionFilter(filters: ProjectMetricFilters): boolean {
+  return (
+    (filters.tokenConsumptionMin !== null && filters.tokenConsumptionMin !== undefined) ||
+    (filters.tokenConsumptionMax !== null && filters.tokenConsumptionMax !== undefined)
+  )
+}
+
+function matchesTokenConsumptionFilter(
+  tokens: HarnessTokenTotals,
+  filters: ProjectMetricFilters
+): boolean {
+  const total = tokens.input + tokens.output
+  const minimum = filters.tokenConsumptionMin
+  const maximum = filters.tokenConsumptionMax
+  return (
+    (minimum === null || minimum === undefined || total >= minimum) &&
+    (maximum === null || maximum === undefined || total <= maximum)
+  )
+}
+
 function parseSummaryGroup(
   developmentMode: ProjectMetricSummaryGroup["developmentMode"],
   bucket: Record<string, unknown>
@@ -419,7 +455,7 @@ async function fetchFactSummary(
   const raw = (await queryProjectMetricEs(deps, "总体事实聚合", deps.factIndex, {
     size: 0,
     track_total_hits: false,
-    query: { bool: { filter: buildFactBaseFilters(filters) } },
+    query: { bool: { filter: buildFactBaseFilters(filters, deps.allowedRoomNames) } },
     aggs: {
       by_project_type: {
         filters: {
@@ -451,7 +487,10 @@ async function fetchSelectedDevclawFacts(
     track_total_hits: false,
     query: {
       bool: {
-        filter: [...buildFactBaseFilters(filters), { terms: { prjCode: selectedDevclawCodes } }]
+        filter: [
+          ...buildFactBaseFilters(filters, deps.allowedRoomNames),
+          { terms: { prjCode: selectedDevclawCodes } }
+        ]
       }
     },
     _source: { includes: FACT_SOURCE_INCLUDES }
@@ -677,11 +716,25 @@ function normalizePage(value: number | undefined, pageSize: number): number {
 }
 
 function factSort(options: ProjectMetricListOptions): Record<string, unknown>[] {
-  const field =
-    options.sortBy === "bugNum" || options.sortBy === "notAdjustFuns"
-      ? options.sortBy
-      : "firstOnlineDate"
   const order = options.sortOrder === "asc" ? "asc" : "desc"
+  if (!options.sortBy || options.sortBy === "deliveryDays") {
+    return [
+      {
+        _script: {
+          type: "number",
+          order,
+          script: {
+            lang: "painless",
+            source:
+              "if (doc['approvedDate'].size() == 0 || doc['firstOnlineDate'].size() == 0) return params.missing; def approved = doc['approvedDate'].value; def online = doc['firstOnlineDate'].value; if (online.isBefore(approved)) return params.missing; return ChronoUnit.MILLIS.between(approved, online);",
+            params: { missing: order === "asc" ? 9e18 : -1 }
+          }
+        }
+      },
+      { prjCode: { order: "asc" } }
+    ]
+  }
+  const field = options.sortBy === "bugNum" ? "bugNum" : "notAdjustFuns"
   return [{ [field]: { order, missing: "_last" } }, { prjCode: { order: "asc" } }]
 }
 
@@ -719,7 +772,8 @@ function sortByDerivedMetric(
 async function enrichProjectFacts(
   facts: FactProject[],
   snapshot: LeanSnapshotState,
-  deps: ProjectMetricDependencies
+  deps: ProjectMetricDependencies,
+  requireTokens = false
 ): Promise<ProjectMetricProjectItem[]> {
   const devclawCodes = facts
     .filter((project) => snapshot.harnessProjectIdsByPrjCode.has(project.prjCode))
@@ -729,6 +783,7 @@ async function enrichProjectFacts(
     fetchPushedAdoptedLinesByHarnessProject(deps, harnessProjectIds),
     fetchTokensByHarnessProject(deps, harnessProjectIds)
   ] as const)
+  if (requireTokens && tokenResult.status === "rejected") throw tokenResult.reason
   return facts.map((fact) =>
     buildProjectItem(
       fact,
@@ -745,6 +800,7 @@ export async function fetchProjectMetricSummary(
 ): Promise<ProjectMetricSummaryData> {
   const snapshot = await fetchLeanSnapshotState(deps)
   const selectedCodes = selectedDevclawPrjCodes(snapshot, filters.adapterName)
+  const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
   let factSummary!: FactSummaryGroups
   let devclawFacts!: FactProject[]
   await Promise.all([
@@ -763,6 +819,23 @@ export async function fetchProjectMetricSummary(
     fetchPushedAdoptedLinesByHarnessProject(deps, harnessProjectIds),
     fetchTokensByHarnessProject(deps, harnessProjectIds)
   ] as const)
+
+  if (tokenConsumptionFiltered) {
+    if (tokenResult.status === "rejected") throw tokenResult.reason
+    devclawFacts = devclawFacts.filter((project) =>
+      matchesTokenConsumptionFilter(
+        sumTokens(snapshot, tokenResult.value, project.prjCode),
+        filters
+      )
+    )
+    const filteredSummary = await fetchFactSummary(
+      deps,
+      filters,
+      snapshot.prjCodes,
+      devclawFacts.map((project) => project.prjCode)
+    )
+    factSummary.devclaw = filteredSummary.devclaw
+  }
 
   const devclaw = factSummary.devclaw
   const devclawProjectCount = devclawFacts.length
@@ -841,12 +914,17 @@ export async function fetchProjectMetricProjects(
 ): Promise<ProjectMetricProjectsData> {
   const snapshot = await fetchLeanSnapshotState(deps)
   const selectedCodes = selectedDevclawPrjCodes(snapshot, filters.adapterName)
-  const factFilters = buildFactBaseFilters(filters)
+  const factFilters = buildFactBaseFilters(filters, deps.allowedRoomNames)
   const developmentMode = options.developmentMode ?? "all"
-  if (filters.adapterName || developmentMode === "devclaw") {
+  const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
+  if (developmentMode === "non_devclaw") {
+    factFilters.push(
+      filters.adapterName || tokenConsumptionFiltered
+        ? { match_none: {} }
+        : notTerms("prjCode", snapshot.prjCodes)
+    )
+  } else if (filters.adapterName || tokenConsumptionFiltered || developmentMode === "devclaw") {
     factFilters.push(matchNoneOrTerms("prjCode", selectedCodes))
-  } else if (developmentMode === "non_devclaw") {
-    factFilters.push(notTerms("prjCode", snapshot.prjCodes))
   }
   const keywordFilter = buildKeywordFilter(options.keyword)
   if (keywordFilter) factFilters.push(keywordFilter)
@@ -857,13 +935,14 @@ export async function fetchProjectMetricProjects(
   const page = normalizePage(options.page, pageSize)
   const derivedSortBy = isDerivedMetricSort(options.sortBy) ? options.sortBy : null
   const derivedSort = derivedSortBy !== null
+  const applicationFiltered = derivedSort || tokenConsumptionFiltered
   const raw = (await queryProjectMetricEs(
     deps,
-    derivedSort ? "项目明细派生指标排序事实集" : "项目明细",
+    applicationFiltered ? "项目明细派生筛选排序候选事实集" : "项目明细",
     deps.factIndex,
     {
-      ...(derivedSort ? {} : { from: (page - 1) * pageSize }),
-      size: derivedSort ? PROJECT_METRIC_JOIN_KEY_LIMIT : pageSize,
+      ...(applicationFiltered ? {} : { from: (page - 1) * pageSize }),
+      size: applicationFiltered ? PROJECT_METRIC_JOIN_KEY_LIMIT : pageSize,
       track_total_hits: true,
       query: { bool: { filter: factFilters } },
       sort: derivedSort ? [{ prjCode: { order: "asc" } }] : factSort(options),
@@ -873,19 +952,29 @@ export async function fetchProjectMetricProjects(
   const facts = (raw.hits?.hits ?? [])
     .map(parseFactProject)
     .filter((project): project is FactProject => project !== null)
-  const enriched = await enrichProjectFacts(facts, snapshot, deps)
-  const ordered = derivedSortBy
-    ? sortByDerivedMetric(enriched, derivedSortBy, options.sortOrder)
+  const enriched = await enrichProjectFacts(facts, snapshot, deps, tokenConsumptionFiltered)
+  const tokenFiltered = tokenConsumptionFiltered
+    ? enriched.filter((item) =>
+        matchesTokenConsumptionFilter(
+          { input: item.totalInputTokens ?? 0, output: item.totalOutputTokens ?? 0 },
+          filters
+        )
+      )
     : enriched
-  const items = derivedSort ? ordered.slice((page - 1) * pageSize, page * pageSize) : ordered
+  const ordered = derivedSortBy
+    ? sortByDerivedMetric(tokenFiltered, derivedSortBy, options.sortOrder)
+    : tokenFiltered
+  const items = applicationFiltered
+    ? ordered.slice((page - 1) * pageSize, page * pageSize)
+    : ordered
   const actualTotal = getTotalHits(raw, facts.length)
 
   return {
     items,
-    total: derivedSort ? facts.length : actualTotal,
+    total: applicationFiltered ? ordered.length : actualTotal,
     page,
     pageSize,
-    truncated: snapshot.truncated || (derivedSort && actualTotal > facts.length)
+    truncated: snapshot.truncated || (applicationFiltered && actualTotal > facts.length)
   }
 }
 
@@ -1039,8 +1128,18 @@ export function makeMockProjectMetricProjects(
   const keyword = asString(options.keyword).toLocaleLowerCase("zh-CN")
   const departmentKeyword = asString(options.departmentKeyword).toLocaleLowerCase("zh-CN")
   const adapterName = asString(filters.adapterName)
+  const tokenConsumptionFiltered = hasTokenConsumptionFilter(filters)
   const filtered = MOCK_PROJECTS.filter((item) => mode === "all" || item.developmentMode === mode)
     .filter((item) => !adapterName || item.plugins.includes(adapterName))
+    .filter(
+      (item) =>
+        !tokenConsumptionFiltered ||
+        (item.developmentMode === "devclaw" &&
+          matchesTokenConsumptionFilter(
+            { input: item.totalInputTokens ?? 0, output: item.totalOutputTokens ?? 0 },
+            filters
+          ))
+    )
     .filter(
       (item) =>
         !keyword ||
@@ -1053,18 +1152,11 @@ export function makeMockProjectMetricProjects(
         item.roomName.toLocaleLowerCase("zh-CN").includes(departmentKeyword) ||
         item.groupName.toLocaleLowerCase("zh-CN").includes(departmentKeyword)
     )
-  const sortBy = options.sortBy ?? "firstOnlineDate"
+  const sortBy = options.sortBy ?? "deliveryDays"
   const direction = options.sortOrder === "asc" ? 1 : -1
   const sorted = [...filtered].sort((left, right) => {
-    const read = (item: ProjectMetricProjectItem): number | null => {
-      if (sortBy === "firstOnlineDate") {
-        const timestamp = item.firstOnlineDate ? Date.parse(item.firstOnlineDate) : Number.NaN
-        return Number.isFinite(timestamp) ? timestamp : null
-      }
-      return item[sortBy]
-    }
-    const leftValue = read(left)
-    const rightValue = read(right)
+    const leftValue = left[sortBy]
+    const rightValue = right[sortBy]
     if (leftValue === null && rightValue !== null) return 1
     if (leftValue !== null && rightValue === null) return -1
     if (leftValue !== null && rightValue !== null && leftValue !== rightValue) {

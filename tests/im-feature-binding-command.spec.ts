@@ -1,0 +1,914 @@
+import assert from "node:assert/strict"
+import { mkdtemp, realpath, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import initSqlJs from "sql.js"
+import type { ThreadRow } from "../src/main/db"
+import { ImRemoteCapabilityGuard } from "../src/main/services/im/capability-guard"
+import { ImCommandRouter, parseImCommand } from "../src/main/services/im/command-router"
+import { ImConversationStateStore } from "../src/main/services/im/conversation-state"
+import { ImEventStore, type ImEventRecord } from "../src/main/services/im/event-store"
+import { ImFeatureBindingService } from "../src/main/services/im/feature-binding-service"
+import type {
+  ImExecutionPermitResult,
+  ImGatewayClientPort,
+  ImReplySubmissionResult
+} from "../src/main/services/im/gateway-client"
+import { ImInboxService } from "../src/main/services/im/inbox-service"
+import { ImIngressSequencer } from "../src/main/services/im/ingress-sequencer"
+import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
+import { ImReplyClient } from "../src/main/services/im/reply-client"
+import {
+  ImRemoteAccessError,
+  ImRemoteAccessService
+} from "../src/main/services/im/remote-access-service"
+import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
+import { eventShortCode } from "../src/main/services/im/reply-segmentation"
+import {
+  ImSelectionContextError,
+  ImSelectionContextStore
+} from "../src/main/services/im/selection-context"
+import { ensureImServiceSchema } from "../src/main/services/im/schema"
+import type {
+  RemoteImAckV1,
+  RemoteImEventV1,
+  RemoteImReplyV1
+} from "../src/shared/im-gateway-contract"
+import { DEFAULT_IM_CHANNEL_ID } from "../src/shared/im-gateway-contract"
+
+class TestGateway implements ImGatewayClientPort {
+  readonly acknowledgements: RemoteImAckV1[] = []
+  readonly replies: RemoteImReplyV1[] = []
+
+  isAuthenticated(): boolean {
+    return true
+  }
+
+  async sendAcknowledgement(ack: RemoteImAckV1): Promise<void> {
+    this.acknowledgements.push(ack)
+  }
+
+  async acquireExecutionPermit(): Promise<ImExecutionPermitResult> {
+    return { status: "denied" }
+  }
+
+  async renewExecutionPermit(): Promise<ImExecutionPermitResult> {
+    return { status: "denied" }
+  }
+
+  async submitReply(reply: RemoteImReplyV1): Promise<ImReplySubmissionResult> {
+    this.replies.push(reply)
+    return { state: "accepted", platformReplyId: `reply-${this.replies.length}` }
+  }
+}
+
+function eventFixture(sequence: number, text: string): RemoteImEventV1 {
+  return {
+    schemaVersion: 1,
+    eventId: `command-${sequence}`,
+    platformMessageId: `platform-command-${sequence}`,
+    principalId: "principal-1",
+    conversationKey: "conversation-1",
+    conversationSeq: sequence,
+    message: { type: "text", text },
+    occurredAt: `2026-07-23T08:00:${String(sequence).padStart(2, "0")}.000Z`,
+    lease: { id: `lease-${sequence}`, expiresAt: "2026-07-23T09:00:00.000Z" }
+  }
+}
+
+async function createContext() {
+  const root = await mkdtemp(join(tmpdir(), "cmb-im-feature-"))
+  const SQL = await initSqlJs()
+  const database = new SQL.Database()
+  ensureImServiceSchema(database)
+  const clock = { now: Date.parse("2026-07-23T08:00:00.000Z") }
+  const persistence: ImPersistenceDependencies = {
+    getDatabase: () => database,
+    markDirty: () => undefined,
+    flushStrict: async () => undefined,
+    now: () => clock.now
+  }
+  const conversations = new ImConversationStateStore(persistence)
+  const events = new ImEventStore(persistence)
+  const selections = new ImSelectionContextStore(persistence, () => "selection-token", 60_000)
+  await conversations.ensureConversation({
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  })
+
+  const threads = new Map<string, ThreadRow>()
+  const makeThread = (threadId: string, metadata?: Record<string, unknown>): ThreadRow => {
+    const row: ThreadRow = {
+      thread_id: threadId,
+      created_at: clock.now,
+      updated_at: clock.now,
+      title: typeof metadata?.title === "string" ? metadata.title : null,
+      status: "idle",
+      thread_values: null,
+      metadata: JSON.stringify(metadata ?? {})
+    }
+    threads.set(threadId, row)
+    return row
+  }
+  const updateLocalThread = (
+    threadId: string,
+    patch: Partial<Omit<ThreadRow, "thread_id" | "created_at">>
+  ): ThreadRow | null => {
+    const row = threads.get(threadId)
+    if (!row) return null
+    const updated = { ...row, ...patch, updated_at: clock.now }
+    threads.set(threadId, updated)
+    return updated
+  }
+  let id = 0
+  const featureService = new ImFeatureBindingService({
+    conversationState: conversations,
+    getSettings: () => ({ enabled: true, remoteAccess: "inbox-and-features" }),
+    projectModeEnabled: async () => true,
+    listProjects: () =>
+      [
+        {
+          projectId: "project-secret-id",
+          name: "支付平台",
+          lifecycle: { status: "active", createAt: "2026-07-23T00:00:00.000Z" },
+          boardCompatibility: { compatible: true }
+        }
+      ] as never,
+    getProjectDetail: () =>
+      ({
+        project: {
+          projectId: "project-secret-id",
+          name: "支付平台",
+          projectRootPath: root,
+          workspacePath: "/must-not-leak",
+          sessionWorkspacePath: root
+        },
+        projectState: { label: "active", uiKind: "active" },
+        runs: [
+          {
+            slug: "feature-pay",
+            title: "快捷支付",
+            location: "active",
+            featureStatus: "in_progress",
+            overallStatus: { label: "进行中", uiKind: "active" }
+          }
+        ],
+        error: null
+      }) as never,
+    getRunDetail: () => ({ sessions: [] }) as never,
+    buildFeatureContext: () => ({ featureId: "feature-pay" }) as never,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    createThread: makeThread as never,
+    createId: () => `generated-${++id}`
+  })
+  const inbox = new ImInboxService({
+    conversationState: conversations,
+    openworkDirectory: () => root,
+    createId: () => `inbox-${++id}`,
+    createThread: makeThread,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    ensureDirectory: async () => undefined
+  })
+  const grants = new ImRemoteGrantStore(persistence, () => `grant-${++id}`)
+  const access = new ImRemoteAccessService({
+    conversations,
+    grants,
+    features: featureService,
+    getThread: (threadId) => threads.get(threadId) ?? null,
+    deleteThread: (threadId) => {
+      threads.delete(threadId)
+    },
+    createId: () => `target-${++id}`,
+    getGoal: () => null,
+    coordinator: {
+      hasRunningWorkersForThread: () => false,
+      hasNotifications: () => false,
+      hasTerminalWorkerAwaitingNotificationForThread: () => false
+    },
+    workflow: { isBusyForThread: () => false },
+    hasPendingApproval: () => false,
+    hasPendingUserInput: () => false
+  })
+  return {
+    root,
+    database,
+    clock,
+    persistence,
+    conversations,
+    events,
+    selections,
+    threads,
+    updateLocalThread,
+    featureService,
+    grants,
+    access,
+    makeThread,
+    inbox
+  }
+}
+
+function selectionIndexContaining(list: string, marker: string): number {
+  const line = list.split("\n").find((candidate) => candidate.includes(marker))
+  const match = line?.match(/^(\d+)\./u)
+  if (!match) throw new Error(`selection containing ${marker} not found`)
+  return Number(match[1])
+}
+
+async function testFeatureCreateGrantCreatesIndependentThreadGrants(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections,
+    getCurrentEventId: () => null,
+    abortCurrent: () => false
+  })
+  const commandInput = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  }
+  try {
+    const retired = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/项目")!
+    })
+    assert(retired.includes("已合并为 /会话"))
+
+    await context.access.enableFeature({
+      principalId: commandInput.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const sessions = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(sessions.includes("支付平台 / 快捷支付"))
+    assert(!sessions.includes(context.root))
+    assert(!sessions.includes("project-secret-id"))
+    assert(!sessions.includes("must-not-leak"))
+    assert(sessions.includes("（特性，可创建新会话）"))
+
+    const bound = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/绑定 1")!
+    })
+    assert(bound.includes("新建会话并切换"))
+    const firstTarget = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(firstTarget?.kind, "thread")
+    if (firstTarget?.kind !== "thread") throw new Error("thread target expected")
+    const metadata = JSON.parse(context.threads.get(firstTarget.threadId)!.metadata!) as Record<
+      string,
+      unknown
+    >
+    assert.deepEqual(metadata.harnessFeature, {
+      projectId: "project-secret-id",
+      slug: "feature-pay",
+      source: "autobizdevops"
+    })
+    assert.deepEqual(metadata.imDeliveryContext, {
+      provider: DEFAULT_IM_CHANNEL_ID,
+      principalId: commandInput.principalId,
+      conversationKey: commandInput.conversationKey,
+      targetId: firstTarget.targetId
+    })
+    assert.equal(context.grants.getThreadGrant(firstTarget.threadId)?.state, "active")
+
+    const withFirstSession = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(withFirstSession.includes("（项目会话）"))
+    assert(withFirstSession.includes("（特性，可创建新会话）"))
+    const createIndex = selectionIndexContaining(withFirstSession, "（特性，可创建新会话）")
+
+    const secondBound = await router.handle({
+      ...commandInput,
+      command: parseImCommand(`/绑定 ${createIndex}`)!
+    })
+    assert(secondBound.includes("新建会话并切换"))
+    const secondTarget = context.conversations.getActiveTarget("conversation-1")
+    assert.equal(secondTarget?.kind, "thread")
+    if (secondTarget?.kind !== "thread") throw new Error("second thread target expected")
+    assert.notEqual(secondTarget.threadId, firstTarget.threadId)
+    assert.equal(context.grants.getThreadGrant(secondTarget.threadId)?.state, "active")
+    assert.equal(
+      context.grants
+        .listThreadGrants(commandInput.conversationKey)
+        .filter((candidate) => candidate.state === "active").length,
+      2
+    )
+
+    await context.access.disableFeature("project-secret-id", "feature-pay")
+    assert.equal(
+      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
+      "revoked"
+    )
+    assert.equal(context.grants.getThreadGrant(firstTarget.threadId)?.state, "active")
+    assert.equal(context.grants.getThreadGrant(secondTarget.threadId)?.state, "active")
+    assert.equal(
+      context.conversations
+        .listTargets(commandInput.conversationKey)
+        .find((candidate) => candidate.snapshot.targetId === secondTarget.targetId)?.state,
+      "active"
+    )
+
+    const afterCreateDisabled = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/会话")!
+    })
+    assert(!afterCreateDisabled.includes("（特性，可创建新会话）"))
+    assert.equal(afterCreateDisabled.match(/（项目会话）/gu)?.length, 2)
+
+    const switched = await router.handle({
+      ...commandInput,
+      command: parseImCommand("/收件箱")!
+    })
+    assert(switched.includes("已切换到【收件箱】"))
+    assert.equal(context.conversations.getActiveTarget("conversation-1")?.kind, "inbox")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation(): Promise<void> {
+  const context = await createContext()
+  const firstRoute = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  }
+  const secondRoute = {
+    conversationKey: "conversation-2",
+    principalId: "principal-1"
+  }
+  const foreignRoute = {
+    conversationKey: "conversation-foreign",
+    principalId: "principal-2"
+  }
+  try {
+    await context.conversations.ensureConversation(secondRoute)
+    await context.conversations.ensureConversation(foreignRoute)
+    const grant = await context.access.enableFeature({
+      principalId: firstRoute.principalId,
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+
+    assert(!("conversationKey" in grant), "Feature grant must not retain a chat route")
+    for (const route of [firstRoute, secondRoute]) {
+      const targets = await context.access.listAuthorizedTargets(route)
+      assert(
+        targets.some(
+          (target) => target.kind === "feature_grant" && target.grantId === grant.grantId
+        ),
+        `Feature grant must be visible from ${route.conversationKey}`
+      )
+    }
+    assert.equal(
+      (await context.access.listAuthorizedTargets(foreignRoute)).some(
+        (target) => target.kind === "feature_grant"
+      ),
+      false,
+      "Feature grant must not cross principals"
+    )
+    await assert.rejects(() =>
+      context.access.bindFeatureGrant({
+        route: foreignRoute,
+        grantId: grant.grantId,
+        grantVersion: grant.grantVersion
+      })
+    )
+
+    const target = await context.access.bindFeatureGrant({
+      route: secondRoute,
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.conversationKey, "conversation-2")
+    assert.equal(context.conversations.getActiveTarget("conversation-2")?.targetId, target.targetId)
+    const metadata = JSON.parse(context.threads.get(target.threadId)!.metadata!) as Record<
+      string,
+      unknown
+    >
+    assert.equal(
+      (metadata.imDeliveryContext as Record<string, unknown>).conversationKey,
+      "conversation-2"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession(): Promise<void> {
+  const context = await createContext()
+  let projectModeAvailable = true
+  try {
+    const grant = await context.access.enableFeature({
+      principalId: "principal-1",
+      projectId: "project-secret-id",
+      featureSlug: "feature-pay"
+    })
+    const target = await context.access.bindFeatureGrant({
+      route: {
+        conversationKey: "conversation-1",
+        principalId: "principal-1"
+      },
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    const event: ImEventRecord = {
+      eventId: "feature-event",
+      platformMessageId: "feature-platform",
+      conversationKey: "conversation-1",
+      conversationSeq: 1,
+      principalId: "principal-1",
+      leaseId: "lease",
+      leaseExpiresAt: context.clock.now + 60_000,
+      permitState: "unacquired",
+      permitExpiresAt: null,
+      messageText: "hello",
+      occurredAt: context.clock.now,
+      targetSnapshot: target,
+      state: "queued",
+      runId: null,
+      retryOfEventId: null,
+      resultText: null,
+      reasonCode: null,
+      retryable: null,
+      createdAt: context.clock.now,
+      updatedAt: context.clock.now,
+      acceptedAt: context.clock.now,
+      executionStartedAt: null,
+      finishedAt: null
+    }
+    const guard = new ImRemoteCapabilityGuard({
+      conversationState: context.conversations,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      updateThread: context.updateLocalThread,
+      getGoal: () => null,
+      coordinator: {
+        hasRunningWorkersForThread: () => false,
+        hasNotifications: () => false,
+        hasTerminalWorkerAwaitingNotificationForThread: () => false
+      },
+      workflow: { isBusyForThread: () => false },
+      hasPendingApproval: () => false,
+      hasPendingUserInput: () => false,
+      validateExistingFeatureThread: async () =>
+        (projectModeAvailable
+          ? {
+              valid: true,
+              project: { id: "project-secret-id", name: "支付平台" },
+              feature: {
+                projectId: "project-secret-id",
+                slug: "feature-pay",
+                title: "快捷支付",
+                status: "进行中"
+              },
+              workspacePath: context.root
+            }
+          : {
+              valid: false,
+              reasonCode: "REMOTE_FEATURE_UNAVAILABLE",
+              message: "Feature 已归档。"
+            }) as never,
+      grants: context.grants
+    })
+
+    await context.access.disableFeature("project-secret-id", "feature-pay")
+    const allowed = await guard.evaluate(event)
+    assert.equal(allowed.allowed, true, JSON.stringify(allowed))
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.state, "active")
+    assert.equal(
+      context.grants.getFeatureGrant("project-secret-id", "feature-pay")?.state,
+      "revoked"
+    )
+    assert.equal(
+      context.conversations
+        .listTargets("conversation-1")
+        .find((candidate) => candidate.snapshot.targetId === target.targetId)?.state,
+      "active"
+    )
+
+    projectModeAvailable = false
+    const unavailable = await guard.evaluate(event)
+    assert.equal(unavailable.allowed, false)
+    assert.equal(unavailable.allowed ? null : unavailable.reasonCode, "REMOTE_FEATURE_UNAVAILABLE")
+    assert.equal(context.grants.getThreadGrant(target.threadId)?.state, "suspended")
+    assert.equal(
+      context.conversations
+        .listTargets("conversation-1")
+        .find((candidate) => candidate.snapshot.targetId === target.targetId)?.state,
+      "suspended"
+    )
+
+    await context.access.disableThread(target.threadId)
+    const revoked = await guard.evaluate(event)
+    assert.equal(revoked.allowed, false)
+    assert.equal(revoked.allowed ? null : revoked.reasonCode, "REMOTE_TARGET_INVALID")
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<void> {
+  const context = await createContext()
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections
+  })
+  const route = {
+    conversationKey: "conversation-1",
+    principalId: "principal-1"
+  }
+  try {
+    const originalMetadata = {
+      title: "支付排障会话",
+      workspacePath: context.root,
+      agentMode: "normal"
+    }
+    context.makeThread("desktop-thread", originalMetadata)
+    await context.access.enableThread({ route, threadId: "desktop-thread" })
+    context.updateLocalThread("desktop-thread", { title: "支付排障会话（已更新）" })
+
+    const sessions = await router.handle({ ...route, command: parseImCommand("/会话")! })
+    assert(sessions.includes("支付排障会话（已更新）"))
+    assert(!sessions.includes("1. 支付排障会话（普通会话）"))
+    const bound = await router.handle({ ...route, command: parseImCommand("/绑定 1")! })
+    assert(bound.includes("支付排障会话（已更新）"))
+    const target = context.conversations.getActiveTarget(route.conversationKey)
+    assert.equal(target?.kind, "thread")
+    assert.equal(target?.threadId, "desktop-thread")
+    if (target?.kind !== "thread") throw new Error("thread target expected")
+    assert.equal(target.title, "支付排障会话（已更新）")
+    assert.deepEqual(
+      JSON.parse(context.threads.get("desktop-thread")!.metadata!),
+      originalMetadata,
+      "grant authority stays in dedicated tables and does not mutate desktop metadata"
+    )
+
+    const event: ImEventRecord = {
+      eventId: "desktop-thread-event",
+      platformMessageId: "desktop-thread-platform",
+      conversationKey: route.conversationKey,
+      conversationSeq: 1,
+      principalId: route.principalId,
+      leaseId: "lease",
+      leaseExpiresAt: context.clock.now + 60_000,
+      permitState: "unacquired",
+      permitExpiresAt: null,
+      messageText: "检查支付代码",
+      occurredAt: context.clock.now,
+      targetSnapshot: target,
+      state: "queued",
+      runId: null,
+      retryOfEventId: null,
+      resultText: null,
+      reasonCode: null,
+      retryable: null,
+      createdAt: context.clock.now,
+      updatedAt: context.clock.now,
+      acceptedAt: context.clock.now,
+      executionStartedAt: null,
+      finishedAt: null
+    }
+    const guard = new ImRemoteCapabilityGuard({
+      conversationState: context.conversations,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      getGoal: () => null,
+      coordinator: {
+        hasRunningWorkersForThread: () => false,
+        hasNotifications: () => false,
+        hasTerminalWorkerAwaitingNotificationForThread: () => false
+      },
+      workflow: { isBusyForThread: () => false },
+      hasPendingApproval: () => false,
+      hasPendingUserInput: () => false,
+      grants: context.grants
+    })
+    const allowed = await guard.evaluate(event)
+    assert.equal(allowed.allowed, true, JSON.stringify(allowed))
+
+    context.updateLocalThread("desktop-thread", { title: "支付排障会话（再次更新）" })
+    await context.conversations.refreshGrantTarget({
+      targetId: target.targetId,
+      grantId: target.grantId,
+      grantVersion: target.grantVersion,
+      workspacePath: target.workspacePath,
+      title: "支付排障会话（再次更新）"
+    })
+    const allowedAfterQueuedTitleChange = await guard.evaluate(event)
+    assert.equal(
+      allowedAfterQueuedTitleChange.allowed,
+      true,
+      "a mutable title change must not invalidate an already queued event"
+    )
+
+    const projectModeMetadata = {
+      title: "快捷支付 Project Mode 会话",
+      workspacePath: context.root,
+      agentMode: "normal",
+      harnessFeature: {
+        projectId: "project-secret-id",
+        slug: "feature-pay",
+        source: "autobizdevops"
+      }
+    }
+    context.makeThread("desktop-project-thread", projectModeMetadata)
+    await context.access.enableThread({ route, threadId: "desktop-project-thread" })
+    const projectModeGrant = (await context.access.listAuthorizedTargets(route)).find(
+      (candidate) =>
+        candidate.kind === "thread_grant" && candidate.threadId === "desktop-project-thread"
+    )
+    assert(projectModeGrant, "an existing Project Mode thread can be granted as a thread")
+    assert.deepEqual(
+      JSON.parse(context.threads.get("desktop-project-thread")!.metadata!),
+      projectModeMetadata,
+      "granting a Project Mode thread preserves its harness context"
+    )
+    await context.access.disableThread("desktop-project-thread")
+
+    const transientlyBusyAccess = new ImRemoteAccessService({
+      conversations: context.conversations,
+      grants: context.grants,
+      features: context.featureService,
+      getThread: (threadId) => context.threads.get(threadId) ?? null,
+      getGoal: () => ({ status: "active" }),
+      coordinator: {
+        hasRunningWorkersForThread: () => true,
+        hasNotifications: () => true,
+        hasTerminalWorkerAwaitingNotificationForThread: () => true
+      },
+      workflow: { isBusyForThread: () => true },
+      hasPendingApproval: () => true,
+      hasPendingUserInput: () => true
+    })
+    const deliveryTarget =
+      transientlyBusyAccess.validateThreadForCompletionDelivery("desktop-thread")
+    assert.equal(deliveryTarget.thread.thread_id, "desktop-thread")
+    assert.equal(deliveryTarget.workspacePath, await realpath(context.root))
+    assert.throws(
+      () => transientlyBusyAccess.validateThreadForRemoteAccess("desktop-thread"),
+      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
+    )
+
+    context.updateLocalThread("desktop-thread", {
+      metadata: JSON.stringify({ ...originalMetadata, agentMode: "coordinator" })
+    })
+    assert.equal(
+      context.access.validateThreadForCompletionDelivery("desktop-thread").thread.thread_id,
+      "desktop-thread"
+    )
+    assert.throws(
+      () => context.access.validateThreadForRemoteAccess("desktop-thread"),
+      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
+    )
+    const unsupported = await guard.evaluate(event)
+    assert.equal(unsupported.allowed, false)
+    assert.equal(
+      unsupported.allowed ? null : unsupported.reasonCode,
+      "REMOTE_AGENT_MODE_UNSUPPORTED"
+    )
+
+    context.updateLocalThread("desktop-thread", { metadata: JSON.stringify(originalMetadata) })
+    await context.grants.revokeThreadGrant("desktop-thread")
+    const revoked = await guard.evaluate(event)
+    assert.equal(revoked.allowed, false)
+    assert.equal(revoked.allowed ? null : revoked.reasonCode, "REMOTE_GRANT_INVALID")
+
+    await context.access.disableThread("desktop-thread")
+    assert.equal(
+      context.conversations.getSelectedTarget(route.conversationKey),
+      null,
+      "without an existing inbox, revocation clears the invalid active pointer"
+    )
+    const recovered = await router.handle({ ...route, command: parseImCommand("/收件箱")! })
+    assert(recovered.includes("已切换到【收件箱】"))
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testControlIngressCompletesOutsideTurnQueueAndSelectionExpires(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const replyClient = new ImReplyClient(gateway, context.events, () => context.clock.now)
+  const ingress = new ImIngressSequencer({
+    conversationState: context.conversations,
+    eventStore: context.events,
+    inboxService: context.inbox,
+    replyClient,
+    emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
+  })
+  try {
+    const result = await ingress.receiveControlEvent(
+      eventFixture(1, "/当前"),
+      async () => "当前目标：收件箱"
+    )
+    assert.equal(result.event.state, "completed")
+    assert.deepEqual(
+      gateway.acknowledgements.map((ack) => ack.type),
+      ["received", "completed"]
+    )
+    assert.equal(gateway.replies[0].message.content, "当前目标：收件箱")
+
+    await context.selections.create("conversation-1", "project", [
+      { id: "project-1", label: "项目一" }
+    ])
+    context.clock.now += 60_001
+    await assert.rejects(
+      () => context.selections.select("conversation-1", "project", 1),
+      (error: unknown) =>
+        error instanceof ImSelectionContextError && error.code === "SELECTION_EXPIRED"
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testDeletedSelectedThreadFallsBackToInbox(): Promise<void> {
+  const context = await createContext()
+  const route = { conversationKey: "conversation-1", principalId: "principal-1" }
+  const gateway = new TestGateway()
+  const ingress = new ImIngressSequencer({
+    conversationState: context.conversations,
+    eventStore: context.events,
+    inboxService: context.inbox,
+    replyClient: new ImReplyClient(gateway, context.events, () => context.clock.now),
+    emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
+  })
+  try {
+    const inbox = await context.inbox.ensureInbox(route)
+    context.makeThread("deleting-thread", {
+      title: "待删除会话",
+      workspacePath: context.root,
+      agentMode: "normal"
+    })
+    const grant = await context.access.enableThread({ route, threadId: "deleting-thread" })
+    const target = await context.access.bindThreadGrant({
+      route,
+      grantId: grant.grantId,
+      grantVersion: grant.grantVersion
+    })
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      target.targetId
+    )
+
+    await context.access.disableThread("deleting-thread")
+    context.threads.delete("deleting-thread")
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      inbox.targetId,
+      "normal deletion immediately returns an active route to inbox"
+    )
+
+    // Reproduce a database left by the old implementation: the selected pointer
+    // still references a suspended target. New ingress must repair it before the
+    // event store freezes its target snapshot, including for control commands.
+    await context.conversations.updateTargetState(target.targetId, "active")
+    await context.conversations.setActiveTarget(route.conversationKey, target.targetId)
+    await context.conversations.updateTargetState(target.targetId, "suspended", "THREAD_DELETED")
+    const recovered = await ingress.receiveControlEvent(
+      eventFixture(9, "/当前"),
+      async () => "已恢复"
+    )
+    assert.equal(recovered.event.state, "completed")
+    assert.equal(recovered.event.targetSnapshot?.targetId, inbox.targetId)
+    assert.equal(
+      context.conversations.getActiveTarget(route.conversationKey)?.targetId,
+      inbox.targetId
+    )
+
+    // Even a corrupted legacy row that still marks a missing desktop Thread as
+    // active must recover before the next event snapshot is persisted.
+    await context.conversations.updateTargetState(target.targetId, "active")
+    await context.conversations.setActiveTarget(route.conversationKey, target.targetId)
+    const recoveredFromActiveMissing = await ingress.receiveControlEvent(
+      eventFixture(10, "/当前"),
+      async () => "再次恢复"
+    )
+    assert.equal(recoveredFromActiveMissing.event.state, "completed")
+    assert.equal(recoveredFromActiveMissing.event.targetSnapshot?.targetId, inbox.targetId)
+    assert.deepEqual(
+      context.conversations
+        .listTargets(route.conversationKey)
+        .find(({ snapshot }) => snapshot.targetId === target.targetId),
+      {
+        snapshot: target,
+        state: "suspended",
+        suspendReason: "TARGET_THREAD_MISSING"
+      }
+    )
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+async function testExplicitRetryCreatesNewEventWithOriginalSnapshot(): Promise<void> {
+  const context = await createContext()
+  const gateway = new TestGateway()
+  const replyClient = new ImReplyClient(gateway, context.events, () => context.clock.now)
+  const ingress = new ImIngressSequencer({
+    conversationState: context.conversations,
+    eventStore: context.events,
+    inboxService: context.inbox,
+    replyClient,
+    emitAcknowledgement: (ack) => gateway.sendAcknowledgement(ack)
+  })
+  const router = new ImCommandRouter({
+    conversations: context.conversations,
+    events: context.events,
+    inbox: context.inbox,
+    access: context.access,
+    selections: context.selections
+  })
+  try {
+    const inbox = await context.inbox.ensureInbox({
+      conversationKey: "conversation-1",
+      principalId: "principal-1"
+    })
+    const originalRemote = eventFixture(1, "执行一次可能有副作用的任务")
+    await context.events.receiveEvent(originalRemote, inbox)
+    await context.events.queueEvent(originalRemote.eventId)
+    await context.events.recordExecutionPermit({
+      eventId: originalRemote.eventId,
+      leaseId: originalRemote.lease.id,
+      expiresAt: "2026-07-23T09:00:00.000Z"
+    })
+    await context.events.beginExecution(originalRemote.eventId, "run-original")
+    await context.events.handlePermitRevoked(originalRemote.eventId)
+
+    const code = eventShortCode(originalRemote.eventId)
+    const resolved = router.resolveRetryEvent("conversation-1", code)
+    assert("event" in resolved)
+    if (!("event" in resolved)) throw new Error("retry event expected")
+    const retryRemote = eventFixture(2, `/重试 ${code}`)
+    const queued = await ingress.receiveOrdinaryEvent(
+      { ...retryRemote, message: { type: "text", text: resolved.event.messageText } },
+      {
+        targetSnapshot: resolved.event.targetSnapshot!,
+        retryOfEventId: resolved.event.eventId
+      }
+    )
+    assert.equal(queued.event.state, "queued")
+    assert.equal(queued.event.retryOfEventId, originalRemote.eventId)
+    assert.equal(queued.event.messageText, "执行一次可能有副作用的任务")
+    assert.deepEqual(queued.event.targetSnapshot, inbox)
+  } finally {
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
+const tests: Array<[string, () => Promise<void>]> = [
+  [
+    "testFeatureCreateGrantCreatesIndependentThreadGrants",
+    testFeatureCreateGrantCreatesIndependentThreadGrants
+  ],
+  [
+    "testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation",
+    testFeatureGrantIsPrincipalScopedAndUsesInvokingConversation
+  ],
+  [
+    "testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession",
+    testFeatureCreateGrantRevocationDoesNotRevokeCreatedSession
+  ],
+  [
+    "testDesktopThreadGrantBindsWithoutMutatingMetadata",
+    testDesktopThreadGrantBindsWithoutMutatingMetadata
+  ],
+  [
+    "testControlIngressCompletesOutsideTurnQueueAndSelectionExpires",
+    testControlIngressCompletesOutsideTurnQueueAndSelectionExpires
+  ],
+  ["testDeletedSelectedThreadFallsBackToInbox", testDeletedSelectedThreadFallsBackToInbox],
+  [
+    "testExplicitRetryCreatesNewEventWithOriginalSnapshot",
+    testExplicitRetryCreatesNewEventWithOriginalSnapshot
+  ]
+]
+
+async function main(): Promise<void> {
+  for (const [name, test] of tests) {
+    await test()
+    console.log(`PASS ${name}`)
+  }
+  console.log("im-feature-binding-command.spec.ts passed")
+}
+
+main().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

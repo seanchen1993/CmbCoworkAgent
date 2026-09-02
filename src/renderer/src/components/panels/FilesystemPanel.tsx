@@ -15,18 +15,25 @@ import { useAppStore } from "@/lib/store"
 import { useThreadState } from "@/lib/thread-context"
 import { canChangeThreadWorkspace } from "@/lib/workspace-switch-availability"
 import { getWorkspaceSelectionErrorMessage } from "@/lib/workspace-utils"
-import {
-  loadWorkspaceFilesDeduped,
-  markWorkspaceFilesStale
-} from "@/lib/workspace-file-load"
+import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
+import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
 import type { FileInfo } from "@/types"
 import { toast } from "sonner"
 
 export function FilesystemPanel() {
   const currentThreadId = useAppStore((state) => state.currentThreadId)
+  const currentThread = useAppStore((state) =>
+    currentThreadId
+      ? (state.threads.find((thread) => thread.thread_id === currentThreadId) ?? null)
+      : null
+  )
   const threadState = useThreadState(currentThreadId)
   const workspaceFiles = threadState?.workspaceFiles ?? []
   const workspacePath = threadState?.workspacePath ?? null
+  const concealWorkspacePath = isRemoteInboxThread(currentThread)
+  const workspaceName = concealWorkspacePath
+    ? REMOTE_INBOX_WORKSPACE_NAME
+    : workspacePath?.split(/[\\/]/).filter(Boolean).pop()
   const canChangeWorkspace = canChangeThreadWorkspace(threadState ?? undefined)
   const setWorkspacePath = threadState?.setWorkspacePath
   const setWorkspaceFiles = threadState?.setWorkspaceFiles
@@ -60,12 +67,7 @@ export function FilesystemPanel() {
 
   // Handle selecting a workspace folder
   async function handleSelectFolder() {
-    if (
-      !canChangeWorkspace ||
-      !currentThreadId ||
-      !setWorkspacePath ||
-      !setWorkspaceFiles
-    ) {
+    if (!canChangeWorkspace || !currentThreadId || !setWorkspacePath || !setWorkspaceFiles) {
       return
     }
 
@@ -291,9 +293,9 @@ export function FilesystemPanel() {
           <div className="flex items-center gap-2">
             <span
               className="text-[10px] text-muted-foreground truncate max-w-[80px]"
-              title={workspacePath}
+              title={concealWorkspacePath ? REMOTE_INBOX_WORKSPACE_NAME : workspacePath}
             >
-              {workspacePath.split("/").pop()}
+              {workspaceName}
             </span>
             <Button
               variant="ghost"

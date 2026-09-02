@@ -90,8 +90,6 @@ import type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -172,6 +170,9 @@ import type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateSnapshot,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 } from "../../shared/harness-board-types"
@@ -193,8 +194,6 @@ export type {
   HeartbeatConfig,
   PluginMetadata,
   PluginManifest,
-  ChatXConfig,
-  ChatXRobotConfig,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -271,6 +270,9 @@ export type {
   HarnessBoardCompatibility,
   HarnessStatus,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateSnapshot,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
   HarnessWorkflowNextAction,
   HarnessWorkflow
 }
@@ -532,3 +534,16 @@ export type {
   HookInjectUserContext,
   HookUserContextField
 } from "../../main/hooks/types"
+export type {
+  BuiltinRobotConnectionState,
+  BuiltinRobotDiagnostics,
+  BuiltinRobotFeatureGrantStatus,
+  BuiltinRobotIdentityState,
+  BuiltinRobotFeatureBindingStatus,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotRouteStatus,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
+  BuiltinRobotThreadGrantStatus
+} from "../../main/types"

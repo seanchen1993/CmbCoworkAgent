@@ -20,6 +20,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -29,7 +33,6 @@ import type {
   LspCallHierarchyIncomingCall,
   LspCallHierarchyOutgoingCall,
   LspStatus,
-  ChatXConfig,
   HookLoggingConfig,
   PluginHookMetadata,
   PluginDetail,
@@ -112,8 +115,21 @@ import type {
   HarnessSkipNodeInput,
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
+  ManagedAutoSendStreamStartEvent,
   HarnessDynamicWorkflowConfig,
   HarnessWatchRefChangedEvent,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
+  HarnessHumanGateSnapshot,
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunChangeEvent,
+  ManagedRunStartInput,
+  ManagedRunStartValidationInput,
+  ManagedRunStopInput,
+  ManagedRunSummary,
+  ManagedRunThreadCreatedEvent,
   HarnessBoardCatalogPageInput,
   HarnessBoardCatalogPageResult
 } from "../shared/harness-board-types"
@@ -975,6 +991,13 @@ interface CustomAPI {
       threadId: string,
       decision: HITLDecision,
       onEvent?: (event: StreamEvent) => void
+    ) => () => void
+    onManagedAutoSendStreamStart: (
+      callback: (event: ManagedAutoSendStreamStartEvent) => void
+    ) => () => void
+    observeManagedAutoSendStream: (
+      runId: string,
+      callback: (event: StreamEvent) => void
     ) => () => void
     goalControl: (
       threadId: string,
@@ -2056,6 +2079,9 @@ interface CustomAPI {
       threadId: string,
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
+    listenToThreadActivity: (
+      callback: (activity: { threadId: string; type: string }) => void
+    ) => () => void
   }
   heartbeat: {
     getConfig: () => Promise<HeartbeatConfig>
@@ -2071,6 +2097,25 @@ interface CustomAPI {
       threadId: string,
       callback: (event: { type: string; [key: string]: unknown }) => void
     ) => () => void
+  }
+  builtinRobot: {
+    getStatus: () => Promise<BuiltinRobotStatus>
+    getRemoteAccess: () => Promise<BuiltinRobotRemoteAccessOverview>
+    setThreadRemoteAccess: (
+      threadId: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    setFeatureRemoteAccess: (
+      projectId: string,
+      featureSlug: string,
+      enabled: boolean
+    ) => Promise<BuiltinRobotRemoteAccessOverview>
+    listGrantableFeatures: () => Promise<BuiltinRobotGrantableFeature[]>
+    saveSettings: (updates: Partial<BuiltinRobotSettings>) => Promise<BuiltinRobotStatus>
+    reconnect: () => Promise<BuiltinRobotStatus>
+    disconnect: () => Promise<BuiltinRobotStatus>
+    cleanupLegacy: () => Promise<BuiltinRobotStatus>
+    onStatus: (callback: (status: BuiltinRobotStatus) => void) => () => void
   }
   plugins: {
     list: () => Promise<PluginMetadata[]>
@@ -2115,12 +2160,6 @@ interface CustomAPI {
       content: string
     ) => Promise<{ success: boolean; error?: string }>
   }
-  chatx: {
-    getConfig: () => Promise<ChatXConfig>
-    saveConfig: (updates: Partial<ChatXConfig>) => Promise<void>
-    restart: () => Promise<void>
-    cancelByThread: (threadId: string) => Promise<boolean>
-  }
   sandbox: {
     getMode: () => Promise<"none" | "unelevated" | "readonly" | "elevated">
     setMode: (mode: "none" | "unelevated" | "readonly" | "elevated") => Promise<void>
@@ -2149,6 +2188,10 @@ interface CustomAPI {
       pushResult?: { success: boolean; error?: string }
     }) => void
     onApprovalRequest: (threadId: string, callback: (request: unknown) => void) => () => void
+    onApprovalResolved: (
+      threadId: string,
+      callback: (data: { requestId: string; decision: "approve" | "reject" }) => void
+    ) => () => void
     onApprovalTimeout: (
       threadId: string,
       callback: (data: { requestId: string }) => void
@@ -2161,6 +2204,7 @@ interface CustomAPI {
   }
   userInput: {
     sendResponse: (response: UserInputResponse) => void
+    getPending: (threadId: string) => Promise<UserInputRequest | null>
     onRequest: (threadId: string, callback: (request: UserInputRequest) => void) => () => void
     onCancel: (
       threadId: string,
@@ -2808,6 +2852,9 @@ interface CustomAPI {
     }>
     registry: () => Promise<HarnessAdapterRegistryItem[]>
     listProjects: () => Promise<HarnessProjectListItem[]>
+    getHumanGateForThread: (threadId: string) => Promise<HarnessHumanGateSnapshot | undefined>
+    approveHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
+    rejectHumanGate: (input: HarnessHumanGateDecisionInput) => Promise<boolean>
     getDeployUnitMappings: () => Promise<HarnessDeployUnitMapping[]>
     getLeanTokenConfig: () => Promise<HarnessLeanTokenConfig>
     saveDeployUnitMappings: (
@@ -2839,6 +2886,9 @@ interface CustomAPI {
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
+    validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
+    startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
+    stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>
     getPublicAgentmdDeployUnits: (projectId: string) => Promise<string[]>
     getLocalAgentmdDeployUnitMappings: (mappings: HarnessDeployUnitMapping[]) => Promise<string[]>
@@ -2863,8 +2913,16 @@ interface CustomAPI {
     ) => Promise<HarnessRunArtifactRevealResult>
     skipNode: (input: HarnessSkipNodeInput) => Promise<HarnessSkipNodeResult>
     getDialogTips: (projectId: string, slug: string) => Promise<string | null>
+    getManagedRunEvents: (
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ) => Promise<ManagedRunEventsPage>
     cancelDialogTips: () => Promise<void>
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void) => () => void
+    onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void) => () => void
+    onManagedRunThreadCreated: (
+      callback: (event: ManagedRunThreadCreatedEvent) => void
+    ) => () => void
+    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void) => () => void
   }
   app: {
     restart: () => Promise<void>

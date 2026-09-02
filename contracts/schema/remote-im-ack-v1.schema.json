@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chatx.cmb.local/contracts/remote-im-ack-v1.schema.json",
+  "title": "RemoteImAckV1",
+  "oneOf": [
+    { "$ref": "#/$defs/received" },
+    { "$ref": "#/$defs/accepted" },
+    { "$ref": "#/$defs/waitingDesktop" },
+    { "$ref": "#/$defs/completed" },
+    { "$ref": "#/$defs/cancelled" },
+    { "$ref": "#/$defs/failed" },
+    { "$ref": "#/$defs/busy" }
+  ],
+  "$defs": {
+    "baseProperties": {
+      "eventId": { "type": "string", "minLength": 1 },
+      "leaseId": { "type": "string", "minLength": 1 }
+    },
+    "received": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "leaseId"],
+      "properties": {
+        "type": { "const": "received" },
+        "eventId": { "$ref": "#/$defs/baseProperties/eventId" },
+        "leaseId": { "$ref": "#/$defs/baseProperties/leaseId" }
+      }
+    },
+    "accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "leaseId"],
+      "properties": {
+        "type": { "const": "accepted" },
+        "eventId": { "$ref": "#/$defs/baseProperties/eventId" },
+        "leaseId": { "$ref": "#/$defs/baseProperties/leaseId" }
+      }
+    },
+    "waitingDesktop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "leaseId"],
+      "properties": {
+        "type": { "const": "waiting_desktop" },
+        "eventId": { "$ref": "#/$defs/baseProperties/eventId" },
+        "leaseId": { "$ref": "#/$defs/baseProperties/leaseId" }
+      }
+    },
+    "completed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "leaseId"],
+      "properties": {
+        "type": { "const": "completed" },
+        "eventId": { "$ref": "#/$defs/baseProperties/eventId" },
+        "leaseId": { "$ref": "#/$defs/baseProperties/leaseId" }
+      }
+    },
+    "cancelled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "leaseId"],
+      "properties": {
+        "type": { "const": "cancelled" },
+        "eventId": { "$ref": "#/$defs/baseProperties/eventId" },
+        "leaseId": { "$ref": "#/$defs/baseProperties/leaseId" }
+      }
+    },
+    "failed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "leaseId", "retryable", "reasonCode"],
+      "properties": {
+        "type": { "const": "failed" },
+        "eventId": { "$ref": "#/$defs/baseProperties/eventId" },
+        "leaseId": { "$ref": "#/$defs/baseProperties/leaseId" },
+        "retryable": { "type": "boolean" },
+        "reasonCode": { "type": "string", "minLength": 1 }
+      }
+    },
+    "busy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "eventId", "leaseId"],
+      "properties": {
+        "type": { "const": "busy" },
+        "eventId": { "$ref": "#/$defs/baseProperties/eventId" },
+        "leaseId": { "$ref": "#/$defs/baseProperties/leaseId" }
+      }
+    }
+  }
+}

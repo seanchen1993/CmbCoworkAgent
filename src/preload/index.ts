@@ -26,6 +26,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsert,
   HeartbeatConfig,
+  BuiltinRobotGrantableFeature,
+  BuiltinRobotRemoteAccessOverview,
+  BuiltinRobotSettings,
+  BuiltinRobotStatus,
   LspConfig,
   LspDiagnostic,
   LspLocation,
@@ -39,7 +43,6 @@ import type {
   PluginDetail,
   PluginMetadata,
   SkillHookMetadata,
-  ChatXConfig,
   HookCatalogPage,
   HookCatalogPageInput,
   SkillPluginCatalogPage,
@@ -99,10 +102,7 @@ import type {
   AttachmentGrantParseRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
-import type {
-  SkillPreviewGrantRequest,
-  SkillPreviewGrantResult
-} from "../shared/skill-preview"
+import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
 import type { HookConfig, HookUpsert } from "../main/hooks/types"
 import { UserInfoConfig } from "../main/storage"
 import type {
@@ -148,7 +148,23 @@ import type {
   HarnessSkipNodeResult,
   HarnessAdapterRegistryItem,
   HarnessDynamicWorkflowConfig,
-  HarnessWatchRefChangedEvent
+  HarnessWatchRefChangedEvent,
+  HarnessHumanGateChangedEvent,
+  HarnessHumanGateDecisionInput,
+  HarnessHumanGateSnapshot,
+  ManagedRunEventCursor,
+  ManagedRunEventsPage,
+  ManagedRunIdentity,
+  ManagedRunChangeEvent,
+  ManagedRunStartInput,
+  ManagedRunStartValidationInput,
+  ManagedRunStopInput,
+  ManagedRunSummary,
+  ManagedRunThreadCreatedEvent
+} from "../shared/harness-board-types"
+import {
+  AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
+  type ManagedAutoSendStreamStartEvent
 } from "../shared/harness-board-types"
 import type { ProjectMetricFilters, ProjectMetricListOptions } from "../shared/project-metrics"
 import type {
@@ -534,6 +550,92 @@ function listenForAgentStreamRequest(
   return cleanup
 }
 
+interface ManagedAutoSendStreamBuffer {
+  start: ManagedAutoSendStreamStartEvent
+  requestChannel: string
+  requestHandler: (_event: unknown, data: StreamEvent) => void
+  bufferedEvents: StreamEvent[]
+  listeners: Set<(event: StreamEvent) => void>
+  terminal: boolean
+  cleanupTimer?: ReturnType<typeof setTimeout>
+}
+
+const MAX_MANAGED_AUTO_SEND_STREAMS = 100
+const MAX_MANAGED_AUTO_SEND_BUFFERED_EVENTS = 10000
+const MANAGED_AUTO_SEND_TERMINAL_RETENTION_MS = 30000
+const managedAutoSendStreams = new Map<string, ManagedAutoSendStreamBuffer>()
+const managedAutoSendStartListeners = new Set<
+  (event: ManagedAutoSendStreamStartEvent) => void
+>()
+
+function disposeManagedAutoSendStream(runId: string): void {
+  const stream = managedAutoSendStreams.get(runId)
+  if (!stream) return
+  ipcRenderer.removeListener(stream.requestChannel, stream.requestHandler)
+  if (stream.cleanupTimer) clearTimeout(stream.cleanupTimer)
+  managedAutoSendStreams.delete(runId)
+}
+
+function scheduleManagedAutoSendStreamCleanup(
+  runId: string,
+  stream: ManagedAutoSendStreamBuffer
+): void {
+  if (stream.cleanupTimer) clearTimeout(stream.cleanupTimer)
+  stream.cleanupTimer = setTimeout(() => {
+    if (managedAutoSendStreams.get(runId) === stream) {
+      disposeManagedAutoSendStream(runId)
+    }
+  }, MANAGED_AUTO_SEND_TERMINAL_RETENTION_MS)
+  stream.cleanupTimer.unref?.()
+}
+
+function registerManagedAutoSendStream(start: ManagedAutoSendStreamStartEvent): void {
+  disposeManagedAutoSendStream(start.runId)
+  const requestChannel = resolveAgentStreamRequestChannel(
+    `agent:stream:${start.threadId}`,
+    start.streamRequestId
+  )
+  const stream: ManagedAutoSendStreamBuffer = {
+    start,
+    requestChannel,
+    requestHandler: () => {},
+    bufferedEvents: [],
+    listeners: new Set(),
+    terminal: false
+  }
+  stream.requestHandler = (_event, data) => {
+    if (stream.listeners.size > 0) {
+      for (const listener of stream.listeners) listener(data)
+    } else {
+      stream.bufferedEvents.push(data)
+      if (stream.bufferedEvents.length > MAX_MANAGED_AUTO_SEND_BUFFERED_EVENTS) {
+        stream.bufferedEvents.shift()
+      }
+    }
+    if (classifyAgentStreamDelivery("request", data.type) === "deliver-and-close") {
+      stream.terminal = true
+      ipcRenderer.removeListener(stream.requestChannel, stream.requestHandler)
+      scheduleManagedAutoSendStreamCleanup(start.runId, stream)
+    }
+  }
+  managedAutoSendStreams.set(start.runId, stream)
+  ipcRenderer.on(requestChannel, stream.requestHandler)
+
+  while (managedAutoSendStreams.size > MAX_MANAGED_AUTO_SEND_STREAMS) {
+    const oldestRunId = managedAutoSendStreams.keys().next().value
+    if (!oldestRunId) break
+    disposeManagedAutoSendStream(oldestRunId)
+  }
+  for (const listener of managedAutoSendStartListeners) listener(start)
+}
+
+ipcRenderer.on(
+  AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL,
+  (_event, start: ManagedAutoSendStreamStartEvent) => {
+    registerManagedAutoSendStream(start)
+  }
+)
+
 // Custom APIs for renderer
 const api = {
   agent: {
@@ -584,8 +686,8 @@ const api = {
       const ambientChannel = command
         ? `agent:stream:${threadId}`
         : coordinatorInternalNotification
-        ? `agent:stream:${threadId}:coordinator-internal`
-        : `agent:stream:${threadId}`
+          ? `agent:stream:${threadId}:coordinator-internal`
+          : `agent:stream:${threadId}`
       const streamRequestId = randomUUID()
       const requestChannel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       const cleanup = listenForAgentStreamRequest(
@@ -635,6 +737,42 @@ const api = {
       )
       ipcRenderer.send("agent:interrupt", { threadId, streamRequestId, decision })
       return cleanup
+    },
+    onManagedAutoSendStreamStart: (
+      callback: (event: ManagedAutoSendStreamStartEvent) => void
+    ): (() => void) => {
+      managedAutoSendStartListeners.add(callback)
+      for (const stream of managedAutoSendStreams.values()) callback(stream.start)
+      return () => managedAutoSendStartListeners.delete(callback)
+    },
+    observeManagedAutoSendStream: (
+      runId: string,
+      callback: (event: StreamEvent) => void
+    ): (() => void) => {
+      const stream = managedAutoSendStreams.get(runId)
+      if (!stream) {
+        callback({
+          type: "error",
+          error: `Managed auto-send stream is unavailable: ${runId}`
+        })
+        return () => {}
+      }
+
+      if (stream.cleanupTimer) {
+        clearTimeout(stream.cleanupTimer)
+        delete stream.cleanupTimer
+      }
+      stream.listeners.add(callback)
+      const bufferedEvents = stream.bufferedEvents.splice(0)
+      for (const event of bufferedEvents) callback(event)
+      return () => {
+        stream.listeners.delete(callback)
+        if (stream.terminal && stream.listeners.size === 0) {
+          disposeManagedAutoSendStream(runId)
+        } else if (stream.listeners.size === 0) {
+          scheduleManagedAutoSendStreamCleanup(runId, stream)
+        }
+      }
     },
     goalControl: (
       threadId: string,
@@ -1489,7 +1627,12 @@ const api = {
           workspacePath
         })) as WorkspaceFileScanOpenResult
         if (!opened.success || !opened.scanId) {
-          return { success: false, files: [], error: opened.error, workspacePath: opened.workspacePath }
+          return {
+            success: false,
+            files: [],
+            error: opened.error,
+            workspacePath: opened.workspacePath
+          }
         }
         const files: WorkspaceFileScanPageResult["files"] = []
         try {
@@ -1499,7 +1642,12 @@ const api = {
               threadId
             })) as WorkspaceFileScanPageResult
             if (!page.success) {
-              return { success: false, files: [], error: page.error, workspacePath: page.workspacePath }
+              return {
+                success: false,
+                files: [],
+                error: page.error,
+                workspacePath: page.workspacePath
+              }
             }
             files.push(...page.files)
             if (page.truncated) {
@@ -1992,9 +2140,7 @@ const api = {
       }>
     },
     // Listen for file changes in the workspace
-    onFilesChanged: (
-      callback: (data: WorkspaceFilesChangedPayload) => void
-    ): (() => void) => {
+    onFilesChanged: (callback: (data: WorkspaceFilesChangedPayload) => void): (() => void) => {
       const handler = (_: unknown, data: unknown): void => {
         const payload = normalizeWorkspaceFilesChangedPayload(data)
         if (payload) callback(payload)
@@ -2107,9 +2253,7 @@ const api = {
     listPlugins: (): Promise<SkillMetadata[]> => {
       return ipcRenderer.invoke("skills:listPlugins")
     },
-    requestPreviewGrant: (
-      request: SkillPreviewGrantRequest
-    ): Promise<SkillPreviewGrantResult> => {
+    requestPreviewGrant: (request: SkillPreviewGrantRequest): Promise<SkillPreviewGrantResult> => {
       return ipcRenderer.invoke("skills:requestPreviewGrant", request)
     },
     cancelPreviewGrant: (): Promise<void> => {
@@ -2455,6 +2599,18 @@ const api = {
       return () => {
         ipcRenderer.removeListener(channel, handler)
       }
+    },
+    listenToThreadActivity: (
+      callback: (activity: { threadId: string; type: string }) => void
+    ): (() => void) => {
+      const channel = "scheduler:thread-activity"
+      const handler = (_: unknown, activity: { threadId: string; type: string }): void => {
+        callback(activity)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
     }
   },
   memory: {
@@ -2681,6 +2837,51 @@ const api = {
       }
     }
   },
+  builtinRobot: {
+    getStatus: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:getStatus") as Promise<BuiltinRobotStatus>,
+    getRemoteAccess: (): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke(
+        "builtinRobot:getRemoteAccess"
+      ) as Promise<BuiltinRobotRemoteAccessOverview>,
+    setThreadRemoteAccess: (
+      threadId: string,
+      enabled: boolean
+    ): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke("builtinRobot:setThreadRemoteAccess", {
+        id: threadId,
+        enabled
+      }) as Promise<BuiltinRobotRemoteAccessOverview>,
+    setFeatureRemoteAccess: (
+      projectId: string,
+      featureSlug: string,
+      enabled: boolean
+    ): Promise<BuiltinRobotRemoteAccessOverview> =>
+      ipcRenderer.invoke("builtinRobot:setFeatureRemoteAccess", {
+        projectId,
+        featureSlug,
+        enabled
+      }) as Promise<BuiltinRobotRemoteAccessOverview>,
+    listGrantableFeatures: (): Promise<BuiltinRobotGrantableFeature[]> =>
+      ipcRenderer.invoke("builtinRobot:listGrantableFeatures") as Promise<
+        BuiltinRobotGrantableFeature[]
+      >,
+    saveSettings: (updates: Partial<BuiltinRobotSettings>): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:saveSettings", updates) as Promise<BuiltinRobotStatus>,
+    reconnect: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:reconnect") as Promise<BuiltinRobotStatus>,
+    disconnect: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:disconnect") as Promise<BuiltinRobotStatus>,
+    cleanupLegacy: (): Promise<BuiltinRobotStatus> =>
+      ipcRenderer.invoke("builtinRobot:cleanupLegacy", {
+        confirmed: true
+      }) as Promise<BuiltinRobotStatus>,
+    onStatus: (callback: (status: BuiltinRobotStatus) => void): (() => void) => {
+      const handler = (_event: unknown, status: BuiltinRobotStatus): void => callback(status)
+      ipcRenderer.on("builtinRobot:status", handler)
+      return () => ipcRenderer.removeListener("builtinRobot:status", handler)
+    }
+  },
   skillEvolution: {
     // ── Phase 1: Intent banner ("Want to save as skill?") ──────────
     onIntentRequest: (
@@ -2880,15 +3081,6 @@ const api = {
         error?: string
       }>
   },
-  chatx: {
-    getConfig: (): Promise<ChatXConfig> =>
-      ipcRenderer.invoke("chatx:get-config") as Promise<ChatXConfig>,
-    saveConfig: (updates: Partial<ChatXConfig>): Promise<void> =>
-      ipcRenderer.invoke("chatx:save-config", updates) as Promise<void>,
-    restart: (): Promise<void> => ipcRenderer.invoke("chatx:restart") as Promise<void>,
-    cancelByThread: (threadId: string): Promise<boolean> =>
-      ipcRenderer.invoke("chatx:cancel-by-thread", threadId) as Promise<boolean>
-  },
   sandbox: {
     getMode: (): Promise<"none" | "unelevated" | "readonly" | "elevated"> =>
       ipcRenderer.invoke("sandbox:getMode") as Promise<
@@ -2956,6 +3148,23 @@ const api = {
         ipcRenderer.removeListener(channel, handler)
       }
     },
+    // Listen for approval decisions completed outside the desktop renderer (for example via IM).
+    onApprovalResolved: (
+      threadId: string,
+      callback: (data: { requestId: string; decision: "approve" | "reject" }) => void
+    ): (() => void) => {
+      const channel = `approval:resolved:${threadId}`
+      const handler = (
+        _: unknown,
+        data: { requestId: string; decision: "approve" | "reject" }
+      ): void => {
+        callback(data)
+      }
+      ipcRenderer.on(channel, handler)
+      return () => {
+        ipcRenderer.removeListener(channel, handler)
+      }
+    },
     // Listen for approval timeout notifications from main → renderer
     onApprovalTimeout: (
       threadId: string,
@@ -2998,6 +3207,8 @@ const api = {
     sendResponse: (response: UserInputResponse): void => {
       ipcRenderer.send("userInput:response", response)
     },
+    getPending: (threadId: string): Promise<UserInputRequest | null> =>
+      ipcRenderer.invoke("userInput:getPending", threadId) as Promise<UserInputRequest | null>,
     onRequest: (threadId: string, callback: (request: UserInputRequest) => void): (() => void) => {
       const channel = `userInput:request:${threadId}`
       const handler = (_: unknown, request: UserInputRequest): void => {
@@ -3850,11 +4061,7 @@ const api = {
     userProfiles: (
       sapIds: string[],
       options?: {
-        family?:
-          | "dashboard-market"
-          | "project-mode-market"
-          | "harness-market"
-          | "customize-market"
+        family?: "dashboard-market" | "project-mode-market" | "harness-market" | "customize-market"
       }
     ): Promise<{
       success: boolean
@@ -3877,8 +4084,7 @@ const api = {
         upperOrgLv1?: string
       }>
       error?: string
-    }> =>
-      ipcRenderer.invoke("dashboard:queryAllUser"),
+    }> => ipcRenderer.invoke("dashboard:queryAllUser"),
     productivity: (
       range: { from: string; to: string },
       granularity: "day" | "week" | "month" | "custom",
@@ -4014,7 +4220,10 @@ const api = {
   },
   harnessBoard: {
     catalogPage: (input: HarnessBoardCatalogPageInput): Promise<HarnessBoardCatalogPageResult> =>
-      ipcRenderer.invoke("harnessBoard:catalogPage", input) as Promise<HarnessBoardCatalogPageResult>,
+      ipcRenderer.invoke(
+        "harnessBoard:catalogPage",
+        input
+      ) as Promise<HarnessBoardCatalogPageResult>,
     cancelCatalogRequests: (
       scope?: "board" | "board-registry" | "board-sidebar" | "board-settings" | "chat-binding"
     ): Promise<void> =>
@@ -4031,6 +4240,14 @@ const api = {
       ipcRenderer.invoke("harnessBoard:registry") as Promise<HarnessAdapterRegistryItem[]>,
     listProjects: (): Promise<HarnessProjectListItem[]> =>
       ipcRenderer.invoke("harnessBoard:listProjects") as Promise<HarnessProjectListItem[]>,
+    getHumanGateForThread: (threadId: string): Promise<HarnessHumanGateSnapshot | undefined> =>
+      ipcRenderer.invoke("harnessBoard:getHumanGateForThread", threadId) as Promise<
+        HarnessHumanGateSnapshot | undefined
+      >,
+    approveHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
+      ipcRenderer.invoke("harnessBoard:approveHumanGate", input) as Promise<boolean>,
+    rejectHumanGate: (input: HarnessHumanGateDecisionInput): Promise<boolean> =>
+      ipcRenderer.invoke("harnessBoard:rejectHumanGate", input) as Promise<boolean>,
     getDeployUnitMappings: (): Promise<HarnessDeployUnitMapping[]> =>
       ipcRenderer.invoke("harnessBoard:getDeployUnitMappings") as Promise<
         HarnessDeployUnitMapping[]
@@ -4116,6 +4333,12 @@ const api = {
         "harnessBoard:updateFeatureDeployUnits",
         input
       ) as Promise<HarnessFeatureDeployUnitBinding>,
+    validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
+    startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>
+      ipcRenderer.invoke("harnessBoard:startManagedRun", input) as Promise<ManagedRunSummary>,
+    stopManagedRun: (input: ManagedRunStopInput): Promise<boolean> =>
+      ipcRenderer.invoke("harnessBoard:stopManagedRun", input) as Promise<boolean>,
     getDynamicWorkflowConfig: (projectId: string): Promise<HarnessDynamicWorkflowConfig | null> =>
       ipcRenderer.invoke(
         "harnessBoard:getDynamicWorkflowConfig",
@@ -4187,6 +4410,10 @@ const api = {
       ipcRenderer.invoke("harnessBoard:getDialogTips", { projectId, slug }) as Promise<
         string | null
       >,
+    getManagedRunEvents: (
+      input: ManagedRunIdentity & { cursor?: ManagedRunEventCursor; limit?: number }
+    ): Promise<ManagedRunEventsPage> =>
+      ipcRenderer.invoke("harnessBoard:getManagedRunEvents", input) as Promise<ManagedRunEventsPage>,
     cancelDialogTips: (): Promise<void> =>
       ipcRenderer.invoke("harnessBoard:cancelDialogTips") as Promise<void>,
     onWatchRefsChanged: (callback: (event: HarnessWatchRefChangedEvent) => void): (() => void) => {
@@ -4194,6 +4421,25 @@ const api = {
         callback(payload)
       ipcRenderer.on("harnessBoard:watchRefsChanged", handler)
       return () => ipcRenderer.removeListener("harnessBoard:watchRefsChanged", handler)
+    },
+    onManagedRunChanged: (callback: (event: ManagedRunChangeEvent) => void): (() => void) => {
+      const handler = (_event: unknown, payload: ManagedRunChangeEvent): void => callback(payload)
+      ipcRenderer.on("harnessBoard:managedRunChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:managedRunChanged", handler)
+    },
+    onManagedRunThreadCreated: (
+      callback: (event: ManagedRunThreadCreatedEvent) => void
+    ): (() => void) => {
+      const handler = (_event: unknown, payload: ManagedRunThreadCreatedEvent): void =>
+        callback(payload)
+      ipcRenderer.on("harnessBoard:managedRunThreadCreated", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:managedRunThreadCreated", handler)
+    },
+    onHumanGateChanged: (callback: (event: HarnessHumanGateChangedEvent) => void): (() => void) => {
+      const handler = (_event: unknown, payload: HarnessHumanGateChangedEvent): void =>
+        callback(payload)
+      ipcRenderer.on("harnessBoard:humanGateChanged", handler)
+      return () => ipcRenderer.removeListener("harnessBoard:humanGateChanged", handler)
     }
   },
   app: {

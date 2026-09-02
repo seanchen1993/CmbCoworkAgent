@@ -250,7 +250,12 @@ export interface HookResult {
   /** Reason message for halting; shown to user when continue=false. */
   stopReason?: string
   /** PostToolUse only: "block" re-feeds the hook reason to the LLM for retry. */
-  decision?: "block" | "approve"
+  decision?: "block" | "approve" | "human_gate"
+  /** Runtime-derived source of a structured decision; never accepted from Hook stdout. */
+  decisionSource?: {
+    hookId: string
+    pluginId?: string
+  }
   /** Explanation paired with decision="block" — forwarded to the agent. */
   reason?: string
   /**

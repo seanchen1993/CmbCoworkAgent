@@ -2448,7 +2448,7 @@ test("workflow notification turn is recognized on a FULL prompt match, not just 
   )
   assert.match(
     agentIpcSource,
-    /matchesWorkflowNotificationPrompt &&\s+getAgentModeFromMetadata\(metadata\) === "workflow"/,
+    /matchesWorkflowNotificationPrompt &&\s+parsedThreadMetadata\.agentMode === "workflow"/,
     "the full-match gate is combined with workflow agent mode"
   )
 })
@@ -2727,6 +2727,41 @@ test("workflow notification is at-least-once: delivered persisted only on SUCCES
     /await workflowRunManager\.claimPendingNotificationAsync\(\s*workspacePath,\s*threadId\s*\)/,
     "notification turn uses the atomic async claim"
   )
+  const notificationClaimStart = agentIpcSource.indexOf(
+    "claimWorkflowNotification(pendingWorkflowRun.runId, runToken)"
+  )
+  const notificationClaimHandoff = agentIpcSource.indexOf(
+    "workflowNotificationToSettle = {",
+    notificationClaimStart
+  )
+  const notificationClaimFailureRelease = agentIpcSource.indexOf(
+    "releaseWorkflowNotification(pendingWorkflowRun.runId, runToken)",
+    notificationClaimHandoff
+  )
+  const notificationClaimBlockEnd = agentIpcSource.indexOf(
+    "} else if (hasWorkflowNotificationPrefix)",
+    notificationClaimHandoff
+  )
+  const notificationClaimTry = agentIpcSource.indexOf("try {", notificationClaimStart)
+  const notificationClaimCatch = agentIpcSource.indexOf(
+    "} catch (error) {",
+    notificationClaimHandoff
+  )
+  assert.ok(
+    notificationClaimStart >= 0 &&
+      notificationClaimTry > notificationClaimStart &&
+      notificationClaimTry < notificationClaimHandoff &&
+      notificationClaimHandoff > notificationClaimStart &&
+      notificationClaimCatch > notificationClaimHandoff &&
+      notificationClaimFailureRelease > notificationClaimCatch &&
+      notificationClaimFailureRelease < notificationClaimBlockEnd,
+    "notification construction releases its owned claim when handoff to outer settlement fails"
+  )
+  assert.equal(
+    (agentIpcSource.match(/workflowRunManager\.clearNotificationInFlight\(/g) ?? []).length,
+    1,
+    "all notification settlement paths clear through the owned claim fence helper"
+  )
   // delivered (markNotified) is persisted ONLY on the success/ack path, and its
   // boolean return gates the backlog kick (a failed write must not let the same
   // still-undelivered run be re-selected newest-first and double-reported).
@@ -2817,6 +2852,21 @@ test("workflow state gates switch-to-normal, and thread delete clears tool-concu
     agentIpcSource,
     /getAgentModeFromMetadata\(latestMetadata\) === "workflow" &&\s*requestedResumeMode !== "workflow"/,
     "resume path blocks leaving workflow using the latest serialized metadata"
+  )
+  assert.doesNotMatch(
+    agentIpcSource,
+    /const latestMetadata = metadata/,
+    "resume must re-read latest serialized metadata instead of aliasing its entry snapshot"
+  )
+  assert.match(
+    agentIpcSource,
+    /withThreadTransitionLease\(threadId,[\s\S]*?withThreadRunMutationLock\(threadId,[\s\S]*?const latestThread = getThreadCore\(threadId\)[\s\S]*?const latestMetadata = parseThreadMetadata\(latestThread\.metadata\)/,
+    "resume revalidates the latest thread row while holding the transition and mutation locks"
+  )
+  assert.match(
+    agentIpcSource,
+    /metadata = persistAgentOwnedMetadataFields\(threadId, commitMetadata, \["agentMode"\]\)/,
+    "resume commits only its agent-owned mode field instead of overwriting all metadata"
   )
   // Regression guard: the workflow guard must NOT be bound to "switch to normal"
   // (isNormalModeBlocked) — that was the half-fix that let workflow → coordinator

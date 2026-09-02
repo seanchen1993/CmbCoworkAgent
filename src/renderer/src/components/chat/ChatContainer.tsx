@@ -50,7 +50,7 @@ import {
   Check,
   SlidersHorizontal
 } from "lucide-react"
-import type { FileAttachment, QueuedMessage } from "@/types"
+import type { FileAttachment, HarnessRunDetailViewModel, QueuedMessage } from "@/types"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import {
@@ -101,6 +101,7 @@ import { AgentModeSwitcher, type ChatAgentMode } from "./AgentModeSwitcher"
 import { WorkflowRunPanel, WorkflowHistoryButton } from "./WorkflowRunPanel"
 import { SandboxModeSwitcher } from "./SandboxModeSwitcher"
 import { MemorySessionSwitcher } from "./MemorySessionSwitcher"
+import { ThreadRemoteAccessSwitcher } from "./ThreadRemoteAccessSwitcher"
 import { OutputStyleSwitcher } from "./OutputStyleSwitcher"
 import { WorkspacePicker } from "./WorkspacePicker"
 import { ChatTodos } from "./ChatTodos"
@@ -113,6 +114,7 @@ import {
 import type {
   GoalUiState,
   ForkableCheckpoint,
+  HarnessHumanGateSnapshot,
   Message,
   SkillMetadata,
   Thread,
@@ -178,6 +180,7 @@ import {
   type MentionedWorkspaceFile
 } from "@/features/mentions/atFileAttachments"
 import { MentionFileChip } from "@/features/mentions/MentionFileChip"
+import { DEFAULT_IM_CHANNEL_ID } from "../../../../shared/im-gateway-contract"
 import { splitGoalTransportPayload } from "../../../../shared/goal-slash"
 import { normalizeWorkspacePathKey } from "../../../../shared/workspace-path"
 import {
@@ -276,6 +279,27 @@ import {
 const PROJECT_MODE_AGENT_TEAM_ENABLED = isProjectModeAgentTeamEnabled(
   import.meta.env.VITE_PROJECT_MODE_AGENT_TEAM_ENABLED
 )
+const REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY = "chat:remote-thread-tip-dismissals"
+
+function loadRemoteThreadTipDismissals(): Set<string> {
+  try {
+    const raw = sessionStorage.getItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY)
+    if (!raw) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((threadId): threadId is string => typeof threadId === "string"))
+  } catch {
+    return new Set()
+  }
+}
+
+function persistRemoteThreadTipDismissals(threadIds: Set<string>): void {
+  try {
+    sessionStorage.setItem(REMOTE_THREAD_TIP_DISMISSALS_STORAGE_KEY, JSON.stringify([...threadIds]))
+  } catch {
+    // Tip dismissal is a best-effort, renderer-session-only preference.
+  }
+}
 const CHAT_AT_BOTTOM_THRESHOLD_PX = 32
 const CHAT_SCROLL_UP_DETACH_DELTA_PX = 1
 const CHAT_USER_SCROLL_INTENT_WINDOW_MS = 350
@@ -1117,6 +1141,39 @@ interface MessageForkDialogTarget {
   checkpoint: ForkableCheckpoint
 }
 
+interface RemoteThreadDisplayInfo {
+  kind: "inbox" | "feature"
+  historical: boolean
+  featureLabel?: string
+}
+
+function getRemoteThreadDisplayInfo(thread: Thread | null): RemoteThreadDisplayInfo | null {
+  const metadata = thread?.metadata
+  if (!metadata || (metadata.targetKind !== "inbox" && metadata.targetKind !== "feature")) {
+    return null
+  }
+  const delivery = metadata.imDeliveryContext
+  if (!delivery || typeof delivery !== "object" || Array.isArray(delivery)) return null
+  const context = delivery as Record<string, unknown>
+  if (context.provider !== DEFAULT_IM_CHANNEL_ID || typeof context.conversationKey !== "string") {
+    return null
+  }
+  if (metadata.targetKind === "inbox") {
+    return { kind: "inbox", historical: metadata.remoteState === "historical" }
+  }
+  const harnessFeature = metadata.harnessFeature
+  if (!harnessFeature || typeof harnessFeature !== "object" || Array.isArray(harnessFeature)) {
+    return null
+  }
+  const feature = harnessFeature as Record<string, unknown>
+  if (typeof feature.projectId !== "string" || typeof feature.slug !== "string") return null
+  return {
+    kind: "feature",
+    historical: metadata.remoteState === "historical",
+    featureLabel: feature.slug
+  }
+}
+
 function getForkWorkspacePath(thread: Thread | null): string | null {
   const workspacePath = thread?.metadata?.workspacePath
   return typeof workspacePath === "string" && workspacePath.trim() ? workspacePath : null
@@ -1197,6 +1254,7 @@ function RotatingHeadline() {
 interface HarnessFeatureBinding {
   projectId: string
   slug: string
+  runId?: string
 }
 
 function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFeatureBinding | null {
@@ -1208,7 +1266,10 @@ function getHarnessFeatureBinding(thread: Thread | null | undefined): HarnessFea
   const metadata = harnessFeature as Record<string, unknown>
   const projectId = typeof metadata.projectId === "string" ? metadata.projectId.trim() : ""
   const slug = typeof metadata.slug === "string" ? metadata.slug.trim() : ""
-  return projectId && slug ? { projectId, slug } : null
+  const runId = typeof metadata.runId === "string" ? metadata.runId.trim() : ""
+  return projectId && slug
+    ? { projectId, slug, ...(runId ? { runId } : {}) }
+    : null
 }
 
 type HarnessPreferredPlugin = { id?: string; name?: string } | null
@@ -1599,13 +1660,24 @@ export function ChatContainer({
   onThreadGitStatusChange,
   onHarnessSessionCreated
 }: ChatContainerProps): React.JSX.Element {
+  const remoteThread = useAppStore(
+    (state) => state.threads.find((thread) => thread.thread_id === threadId) ?? null
+  )
+  const remoteThreadInfo = useMemo(() => getRemoteThreadDisplayInfo(remoteThread), [remoteThread])
+  const resolvedReadOnlyReason =
+    readOnlyReason ??
+    (remoteThreadInfo?.historical
+      ? "设备接管前的远程历史 Thread 仅可查看"
+      : remoteThreadInfo?.kind === "inbox"
+        ? "远程收件箱在桌面仅可查看；请从招乎继续发送消息"
+        : null)
   const surfaceConfig = CHAT_SURFACE_CONFIG[surface]
   const [threadProjectionRuntime] = useState(() => getChatThreadProjectionRuntime(threadId))
   const [initialChatScrollView] = useState(() => chatScrollSessionStore.open(threadId))
   const initialChatScrollSession = initialChatScrollView.session
   const chatScrollSessionLeaseRef = useRef(initialChatScrollView.lease)
   const initialPendingDurableRevealMessageId = initialChatScrollView.pendingRevealMessageId
-  const readOnly = Boolean(readOnlyReason)
+  const readOnly = Boolean(resolvedReadOnlyReason)
   const shouldShowWelcomeHeadline = surfaceConfig.showWelcomeHeadline
   const shouldShowWelcomeSkillTabs = surfaceConfig.showWelcomeSkillTabs && !hideWelcomeSkillTabs
   const shouldShowHarnessDialogTips = surfaceConfig.showHarnessDialogTips && !readOnly
@@ -1613,6 +1685,9 @@ export function ChatContainer({
   const textareaResizeFrameRef = useRef<number | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const chatRootRef = useRef<HTMLDivElement>(null)
+  const [dismissedRemoteTipThreadIds, setDismissedRemoteTipThreadIds] = useState(
+    loadRemoteThreadTipDismissals
+  )
   const virtuosoRef = useRef<VirtuosoHandle | null>(null)
   const chatScrollStateRef = useRef<ChatScrollState | null>(initialChatScrollSession?.state ?? null)
   if (chatScrollStateRef.current === null) {
@@ -1847,6 +1922,94 @@ export function ChatContainer({
     surface === "harness-project" ||
     surface === "harness-feature-session" ||
     Boolean(harnessFeatureBinding)
+  const [isManagedRunSessionActive, setIsManagedRunSessionActive] = useState(false)
+  const [humanGate, setHumanGate] = useState<HarnessHumanGateSnapshot | null>(null)
+  const [humanGateDecisionBusy, setHumanGateDecisionBusy] = useState<"approve" | "reject" | null>(
+    null
+  )
+
+  useEffect(() => {
+    const runId = harnessFeatureBinding?.runId
+    if (!runId) {
+      setIsManagedRunSessionActive(false)
+      return
+    }
+
+    let cancelled = false
+    const applyManagedRunStatus = (managedRun: HarnessRunDetailViewModel["run"]["managedRun"]): void => {
+      if (cancelled) return
+      setIsManagedRunSessionActive(
+        managedRun?.status === "running" &&
+          managedRun.runId === runId &&
+          managedRun.currentSession?.threadId === threadId
+      )
+    }
+
+    const unsubscribe = window.api.harnessBoard.onManagedRunChanged((event) => {
+      if (
+        event.projectId !== harnessFeatureBinding.projectId ||
+        event.featureId !== harnessFeatureBinding.slug ||
+        event.run.runId !== runId
+      ) {
+        return
+      }
+      applyManagedRunStatus(event.run)
+    })
+    void window.api.harnessBoard
+      .getRunDetail(harnessFeatureBinding.projectId, harnessFeatureBinding.slug)
+      .then((detail) => applyManagedRunStatus(detail.run.managedRun))
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn("[ChatContainer] Failed to load managed run status:", error)
+          setIsManagedRunSessionActive(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [harnessFeatureBinding, threadId])
+
+  useEffect(() => {
+    let cancelled = false
+    void window.api.harnessBoard.getHumanGateForThread(threadId).then((gate) => {
+      if (cancelled) return
+      setHumanGate(gate ?? null)
+    })
+    const unsubscribe = window.api.harnessBoard.onHumanGateChanged((event) => {
+      if (event.sourceThreadId !== threadId) return
+      setHumanGate(event.humanGate ?? null)
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [threadId])
+
+  const decideHumanGate = useCallback(
+    async (decision: "approve" | "reject"): Promise<void> => {
+      if (!humanGate || humanGateDecisionBusy) return
+      setHumanGateDecisionBusy(decision)
+      try {
+        const input = {
+          projectId: humanGate.projectId,
+          featureId: humanGate.featureId,
+          gateId: humanGate.gateId
+        }
+        const changed =
+          decision === "approve"
+            ? await window.api.harnessBoard.approveHumanGate(input)
+            : await window.api.harnessBoard.rejectHumanGate(input)
+        if (!changed) toast.error("Human Gate 已发生变化，请刷新后重试")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : String(error))
+      } finally {
+        setHumanGateDecisionBusy(null)
+      }
+    },
+    [humanGate, humanGateDecisionBusy]
+  )
   const disableCoordinatorModeOption = isProjectModeAgentTeamSelectionDisabled(
     currentThread?.metadata,
     isProjectModeAgentContext,
@@ -2243,6 +2406,9 @@ export function ChatContainer({
   const handleOpenMemorySettings = useCallback((): void => {
     setShowCustomizeView(true, "memory")
   }, [setShowCustomizeView])
+  const handleOpenRobotSettings = useCallback((): void => {
+    setShowCustomizeView(true, "robot")
+  }, [setShowCustomizeView])
 
   const canChangeAgentMode = canChangeThreadAgentMode({
     historyLoading,
@@ -2281,6 +2447,22 @@ export function ChatContainer({
       }
       const requestId = ++agentModeChangeRequestRef.current
       const operation = agentModeChangeChainRef.current.then(async () => {
+        // Temporary guard: a Thread granted to the Zhaohu robot must not change
+        // its execution mode. Remote turns are hard-wired to the normal/Multi
+        // runtime, so Team/Workflow on a granted thread would render a mode the
+        // IM side never executes. Remove together with per-mode remote support.
+        const remoteAccess = await window.api.builtinRobot
+          .getRemoteAccess()
+          .catch(() => null)
+        if (requestId !== agentModeChangeRequestRef.current) return
+        if (
+          remoteAccess?.threadGrants.some(
+            (grant) => grant.threadId === threadId && grant.state === "active"
+          )
+        ) {
+          toast.error("当前会话已接入招乎，暂不能切换执行模式")
+          return
+        }
         if (disableCoordinatorModeOption && nextMode === "coordinator") {
           toast.error("项目模式暂不支持 Agent Team。")
           return
@@ -4824,7 +5006,7 @@ export function ChatContainer({
   const effectiveComposerControlsDisabled =
     composerControlsDisabled || contextReminderPending || readOnly
   const inputPlaceholder = useMemo(() => {
-    if (readOnlyReason) return readOnlyReason
+    if (resolvedReadOnlyReason) return resolvedReadOnlyReason
     if (contextReminderPending) return "请先处理上下文提醒"
     const goal = goalUi.goal
     if (isLoading) {
@@ -4852,7 +5034,7 @@ export function ChatContainer({
     hasActiveGoalRunning,
     goalControlAllowedWhileLoading,
     isLoading,
-    readOnlyReason,
+    resolvedReadOnlyReason,
     scheduledTaskLoading,
     streamData.isLoading
   ])
@@ -6455,13 +6637,9 @@ export function ChatContainer({
       }
       threadContext.reconcileScheduledRunStates()
     } else if (scheduledTaskLoading) {
-      // ChatX bot thread: scheduledTaskLoading is true but no scheduledTaskId
-      try {
-        const cancelled = await window.api.chatx.cancelByThread(threadId)
-        if (!cancelled) console.warn("[ChatContainer] ChatX thread not found for cancel:", threadId)
-      } catch (err) {
-        console.error("[ChatContainer] Failed to cancel ChatX thread:", err)
-      }
+      // Passive remote streams are owned by IM. Desktop must not cross-source
+      // cancel them; use /停止 from the originating conversation instead.
+      return
     } else {
       // Match Claude Code coordinator semantics: the main stop button stops the
       // foreground turn only. Durable background workers are stopped explicitly
@@ -6475,6 +6653,9 @@ export function ChatContainer({
       setQueueAutoDrainSuppressed(true)
       try {
         await Promise.all([stream?.stop(), window.api.agent.cancel(threadId)])
+        if (isManagedRunSessionActive) {
+          toast.success("已退出托管模式")
+        }
       } finally {
         if (goalUi.goal) {
           void refreshGoalUi({ includeEvents: true })
@@ -6482,6 +6663,18 @@ export function ChatContainer({
       }
     }
   }
+
+  const stopGenerationButton = (
+    <button
+      type="button"
+      onClick={handleCancel}
+      aria-label="停止生成"
+      title="停止生成"
+      className="flex items-center justify-center size-7 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+    >
+      <Square className="size-3 fill-current" />
+    </button>
+  )
 
   const handleCancelBackgroundWorkers = async (): Promise<void> => {
     try {
@@ -7235,9 +7428,42 @@ export function ChatContainer({
     messageForkTarget?.sourceWorkspacePath ?? currentForkWorkspacePath
   const currentForkWorkspaceLabel = getForkWorkspaceLabel(messageForkSourceWorkspacePath)
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
+  const remoteLifecycleState = remoteThread?.metadata?.remoteState
+  const remoteThreadStatus = pendingApproval
+    ? "等待桌面审批"
+    : pendingUserInput
+      ? "等待桌面补充输入"
+      : remoteLifecycleState === "historical"
+        ? "接管前历史"
+        : remoteLifecycleState === "waiting_desktop"
+          ? "等待桌面处理"
+          : remoteLifecycleState === "suspended"
+            ? "绑定已暂停"
+            : remoteLifecycleState === "outcome_unknown"
+              ? "执行结果未知"
+              : remoteLifecycleState === "rejected"
+                ? "远程能力不支持"
+                : remoteLifecycleState === "failed"
+                  ? "执行失败"
+                  : isLoading
+                    ? "任务执行中"
+                    : remoteThread?.status === "error"
+                      ? "执行失败"
+                      : remoteThread?.status === "interrupted"
+                        ? "已中止"
+                        : "空闲"
   const interruptionNotice = hookInterruption
     ? interruptionNoticeCopy(hookInterruption.event, hookInterruption.action)
     : null
+  const remoteThreadTipLabel = remoteThreadInfo?.kind === "inbox" ? "远程收件箱" : "远程会话"
+  const handleDismissRemoteThreadTip = useCallback(() => {
+    setDismissedRemoteTipThreadIds((current) => {
+      const next = new Set(current)
+      next.add(threadId)
+      persistRemoteThreadTipDismissals(next)
+      return next
+    })
+  }, [threadId])
   const chatMessageListFooter = (
     <div
       className="space-y-4 pt-4 pb-4"
@@ -7325,6 +7551,42 @@ export function ChatContainer({
 
   return (
     <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+      {remoteThreadInfo && !dismissedRemoteTipThreadIds.has(threadId) ? (
+        <div className="flex shrink-0 items-start gap-2 border-b border-status-info/20 bg-status-info/5 px-4 py-2 text-xs">
+          <Info className="mt-0.5 size-3.5 shrink-0 text-status-info" />
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="rounded bg-status-info/15 px-1.5 py-0.5 font-medium text-status-info-foreground">
+                {remoteThreadInfo.kind === "inbox" ? "远程收件箱" : "远程会话"}
+              </span>
+              {remoteThreadInfo.kind === "feature" && remoteThreadInfo.featureLabel ? (
+                <span className="font-medium">{remoteThreadInfo.featureLabel}</span>
+              ) : null}
+              <span className="text-muted-foreground">{remoteThreadStatus}</span>
+            </div>
+            <p className="text-muted-foreground">
+              {remoteThreadInfo.kind === "inbox"
+                ? remoteThreadInfo.historical
+                  ? "此 Thread 已停用，仅保留历史，不会接收新消息。"
+                  : "桌面仅用于查看历史和运行状态；请从招乎继续聊天。"
+                : remoteThreadInfo.historical
+                  ? "此远程会话已停用，仅保留历史；请重新绑定。"
+                  : isLoading
+                    ? "当前任务占用远程运行租约，结束后可在桌面继续。"
+                    : "可在桌面继续处理。"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleDismissRemoteThreadTip}
+            className="ml-1 inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-status-info/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-status-info/50"
+            aria-label={`关闭${remoteThreadTipLabel}提示`}
+            title="关闭提示"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
+      ) : null}
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         open={searchOpen}
@@ -7588,6 +7850,38 @@ export function ChatContainer({
                 </div>
               </div>
             </ScrollArea>
+            {humanGate && (
+              <div className={cn("px-4 pb-2", reserveLeftSpace && "md:pl-[20px]")}>
+                <div className="mx-auto flex w-full max-w-3xl items-center gap-3 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2.5">
+                  <PauseCircle className="size-4 shrink-0 text-status-warning" />
+                  <div className="min-w-0 flex-1 text-left">
+                    <div className="text-sm font-medium text-status-warning-foreground">
+                      等待人工确认
+                    </div>
+                    <div className="truncate text-xs text-status-warning-foreground/80">
+                      {humanGate.message}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void decideHumanGate("reject")}
+                  >
+                    拒绝
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={Boolean(humanGateDecisionBusy)}
+                    onClick={() => void decideHumanGate("approve")}
+                  >
+                    批准推进
+                  </Button>
+                </div>
+              </div>
+            )}
             {/* Orchestrator approval bar — placed outside ScrollArea so it's always visible */}
             {pendingApproval &&
               Boolean(
@@ -8583,6 +8877,10 @@ export function ChatContainer({
                             }
                             onChange={handleAgentModeChange}
                           />
+                          <ThreadRemoteAccessSwitcher
+                            threadId={threadId}
+                            onOpenSettings={handleOpenRobotSettings}
+                          />
                         </div>
                         <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5">
                           {isLoading ? (
@@ -8597,15 +8895,18 @@ export function ChatContainer({
                                   <ArrowUp className="size-5" strokeWidth={1.75} />
                                 </button>
                               )}
-                              <button
-                                type="button"
-                                onClick={handleCancel}
-                                aria-label="停止生成"
-                                title="停止生成"
-                                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-destructive text-destructive-foreground transition-colors hover:bg-destructive/90"
-                              >
-                                <Square className="size-3 fill-current" />
-                              </button>
+                              {isManagedRunSessionActive ? (
+                                <TooltipProvider delayDuration={180}>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>{stopGenerationButton}</TooltipTrigger>
+                                    <TooltipContent side="top" sideOffset={6}>
+                                      手动终止会话将退出托管模式
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              ) : (
+                                stopGenerationButton
+                              )}
                             </>
                           ) : (
                             <>

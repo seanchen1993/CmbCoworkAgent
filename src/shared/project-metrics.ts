@@ -6,6 +6,8 @@ export interface ProjectMetricFilters {
   phaseStatuses?: string[]
   functionPointMin?: number | null
   functionPointMax?: number | null
+  tokenConsumptionMin?: number | null
+  tokenConsumptionMax?: number | null
   adapterName?: string | null
 }
 
@@ -16,7 +18,7 @@ export interface ProjectMetricListOptions {
   page?: number
   pageSize?: 20 | 50 | 100
   sortBy?:
-    | "firstOnlineDate"
+    | "deliveryDays"
     | "bugNum"
     | "notAdjustFuns"
     | "pushedAdoptedLines"

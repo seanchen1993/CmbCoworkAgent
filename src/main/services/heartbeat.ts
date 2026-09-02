@@ -24,6 +24,12 @@ import { StreamConverter } from "../agent/stream-converter"
 import { notifyIfBackground } from "./notify"
 import { emitAppAttention } from "../app-attention-events"
 import { trackEvent } from "./event-reporter"
+import { v4 as uuid } from "uuid"
+import {
+  assertLocalThreadRunLease,
+  claimLocalThreadRunLease,
+  releaseLocalThreadRunLease
+} from "../agent/thread-run-lease"
 import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
 import { createStreamDataSerializer } from "../ipc/stream-data-serialization"
 import { withThreadRunMutationLock } from "../ipc/thread-run-mutation-lock"
@@ -301,6 +307,8 @@ async function executeHeartbeat(): Promise<void> {
   // Pinned only after the pre-run gates pass; the finally must not close a
   // checkpointer this run never opened.
   const checkpointerPin: { release: (() => void) | null } = { release: null }
+  const heartbeatRunId = uuid()
+  let leaseAcquired = false
 
   try {
     const config = getHeartbeatConfig()
@@ -345,12 +353,30 @@ async function executeHeartbeat(): Promise<void> {
       return
     }
 
+    const leaseClaim = claimLocalThreadRunLease({
+      threadId,
+      owner: "scheduler",
+      runId: heartbeatRunId
+    })
+    if (!leaseClaim.acquired) {
+      console.log(
+        `[Heartbeat] Thread is busy with ${leaseClaim.conflict.owner}; skipping this beat`
+      )
+      saveHeartbeatConfig({
+        lastRunStatus: "skipped",
+        lastRunError: "Heartbeat thread is busy",
+        lastRunAt: new Date().toISOString()
+      })
+      notifyRenderer("heartbeat:changed")
+      return
+    }
+    leaseAcquired = true
     const { checkpointer, preHeartbeatSnapshot } = await withThreadRunMutationLock(
       threadId,
       async () => {
-        // Pin before reviving or publishing the fixed DB id. Once this short critical section
-        // ends, a concurrent delete may enter the same thread lock, but its checkpointer retire
-        // must still wait for this run's finally to release the pin.
+        // Pin while holding the same mutation lock used by thread deletion. The
+        // run lease prevents another execution source from entering this Thread;
+        // the pin keeps deletion from retiring its checkpointer mid-run.
         checkpointerPin.release = pinCheckpointer(threadId)
 
         // The delete handler holds this same lock through all context-history/coordinator sweeps.
@@ -403,6 +429,7 @@ async function executeHeartbeat(): Promise<void> {
       "- 主动但不打扰：有事做事，无事安静"
     ].join("\n")
     const heartbeatContext = `${heartbeatGuidelines}\n\n# Project Context\n\n## HEARTBEAT.md\n\n${content}`
+    assertLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)
     const agent = await createAgentRuntime({
       threadId,
       workspacePath: config.workDir,
@@ -450,8 +477,11 @@ async function executeHeartbeat(): Promise<void> {
     for await (const chunk of stream) {
       if (controller.signal.aborted) break
       const [mode, data] = chunk as [string, unknown]
-      const { data: serialized, valuesMessageIndexOffset, valuesSnapshotKind } =
-        serializeForRun(mode, data)
+      const {
+        data: serialized,
+        valuesMessageIndexOffset,
+        valuesSnapshotKind
+      } = serializeForRun(mode, data)
       const events = converter.processChunk(mode, serialized, {
         valuesMessageIndexOffset,
         valuesSnapshotScope: "turn",
@@ -569,6 +599,9 @@ async function executeHeartbeat(): Promise<void> {
     // this run never opened a checkpointer, so there is nothing to close.
     if (checkpointerPin.release) {
       await closeCheckpointer(HEARTBEAT_THREAD_ID).catch(() => {})
+    }
+    if (leaseAcquired) {
+      releaseLocalThreadRunLease(threadId, "scheduler", heartbeatRunId)
     }
     running = false
     notifyRenderer("heartbeat:changed")

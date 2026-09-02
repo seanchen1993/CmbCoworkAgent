@@ -23,6 +23,7 @@ import {
   PanelRightOpen
 } from "lucide-react"
 import { ThreadSidebar } from "@/components/sidebar/ThreadSidebar"
+import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import { TabbedPanel } from "@/components/tabs"
 import { RightPanel } from "@/components/panels/RightPanel"
 import { WorkerStreamPanel } from "@/components/chat/WorkerStreamPanel"
@@ -58,6 +59,7 @@ import { toast, Toaster } from "sonner"
 import { useShallow } from "zustand/react/shallow"
 import { evolutionApi } from "@/api/evolution"
 import {
+  canPresentReviewCandidateNotification,
   cloudEvolutionUpdateSignature,
   getCloudEvolutionPromptSignature,
   hasUnreadCloudEvolutionUpdates,
@@ -941,26 +943,40 @@ function App(): React.JSX.Element {
     setShowCustomizeView
   ])
 
-  // 「待审批发布」提醒：本分支把进化审批权限放开给个人后，技能创建者需要被
-  // 提醒自己上传的技能跑出了优化候选、正等待其审批发布。仅面向个人，管理员不在此提醒范围内。
+  // 「待审批发布」提醒：按技能归属提醒创建者，不向管理员广播与其无关的候选。
   useEffect(() => {
     let cancelled = false
+    let checkInFlight = false
+
+    const notificationSurfaceIsActive = (): boolean =>
+      canPresentReviewCandidateNotification({
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus()
+      })
 
     const checkPendingReviewCandidates = async (): Promise<void> => {
+      // An in-renderer toast is not a delivery when the app is hidden or behind another
+      // application. Defer both the request and its receipt until focus returns.
+      if (!notificationSurfaceIsActive() || checkInFlight) return
+
       try {
         // 个人只有上传过技能才可能拥有可审批候选；无技能时直接跳过拉取。
         if (ownedSkillKeys.size === 0) return
+        checkInFlight = true
 
         const awaiting = await evolutionApi.listCandidates("awaiting_review", 50)
         if (cancelled) return
 
         const reviewable = reviewableCandidates(awaiting, ownedSkillKeys)
+        // The badge represents outstanding work, not merely a toast that has never fired.
+        if (reviewable.length > 0) setPendingEvolution(true)
+
         // 只对「从未通知过」的新候选提醒，保证每条候选只发一次。
         const fresh = unnotifiedReviewCandidates(reviewable)
         if (fresh.length === 0) return
-        markReviewCandidatesNotified(fresh)
-
-        setPendingEvolution(true)
+        // Focus may have changed while the request was in flight. Do not consume the
+        // notification if the user can no longer see it.
+        if (!notificationSurfaceIsActive()) return
 
         const first = fresh[0]
         const message =
@@ -977,16 +993,27 @@ function App(): React.JSX.Element {
             }
           }
         })
+        // Record delivery only after a visible toast has actually been scheduled.
+        markReviewCandidatesNotified(fresh)
       } catch (error) {
         console.warn("[SkillReviewPrompt] failed to check pending review candidates:", error)
+      } finally {
+        checkInFlight = false
       }
     }
 
     void checkPendingReviewCandidates()
-    const timer = window.setInterval(() => void checkPendingReviewCandidates(), 30 * 60 * 1000)
+    const checkWhenForeground = (): void => {
+      if (notificationSurfaceIsActive()) void checkPendingReviewCandidates()
+    }
+    window.addEventListener("focus", checkWhenForeground)
+    window.addEventListener("online", checkWhenForeground)
+    document.addEventListener("visibilitychange", checkWhenForeground)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      window.removeEventListener("focus", checkWhenForeground)
+      window.removeEventListener("online", checkWhenForeground)
+      document.removeEventListener("visibilitychange", checkWhenForeground)
     }
   }, [ownedSkillKeys, setEvolutionTab, setPendingEvolution, setShowCustomizeView])
 
@@ -1093,71 +1120,8 @@ function App(): React.JSX.Element {
             }}
             className="flex flex-1 min-w-0 items-center justify-center gap-1.5"
           >
-            <svg
-              className="size-7 shrink-0"
-              viewBox="0 0 120 120"
-              fill="none"
-              style={{ animation: "lobster-sway-bounce 2.5s ease-in-out infinite" }}
-            >
-              <defs>
-                <linearGradient id="title-lobster" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#ff4d4d" />
-                  <stop offset="100%" stopColor="#991b1b" />
-                </linearGradient>
-              </defs>
-              <path
-                d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z"
-                fill="url(#title-lobster)"
-              />
-              <path
-                d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z"
-                fill="url(#title-lobster)"
-              />
-              <path
-                d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z"
-                fill="url(#title-lobster)"
-              />
-              <g
-                style={{
-                  animation: "antenna-left 2.5s ease-in-out infinite",
-                  transformOrigin: "45px 15px"
-                }}
-              >
-                <path
-                  d="M45 15 Q35 5 30 8"
-                  stroke="#ff4d4d"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                />
-              </g>
-              <g
-                style={{
-                  animation: "antenna-right 2.5s ease-in-out infinite 0.3s",
-                  transformOrigin: "75px 15px"
-                }}
-              >
-                <path
-                  d="M75 15 Q85 5 90 8"
-                  stroke="#ff4d4d"
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                />
-              </g>
-              <g
-                style={{
-                  animation: "lobster-blink 4s ease-in-out infinite",
-                  transformOrigin: "60px 35px"
-                }}
-              >
-                <circle cx="45" cy="35" r="6" fill="#050810" />
-                <circle cx="75" cy="35" r="6" fill="#050810" />
-                <circle cx="46" cy="34" r="2.5" fill="#00e5cc" />
-                <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
-              </g>
-            </svg>
-            <span className="app-badge-name">
-              CMBDev<span className="text-red-500">Claw</span>
-            </span>
+            <CmbDevClawLogo className="size-7 shrink-0 object-contain" />
+            <span className="app-badge-name">CMBDev<span className="text-red-500">Claw</span></span>
           </div>
           {/* Right: right panel toggle */}
           <div className="flex flex-1 h-full items-center justify-end pl-1 gap-1">

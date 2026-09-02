@@ -1,10 +1,7 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_CHATX_WS_URL?: string
-  readonly VITE_CHATX_HTTP_URL?: string
-  readonly VITE_CHATX_CHANNEL?: string
-  readonly VITE_CHATX_CALLBACK_URL?: string
+  readonly VITE_UNIFIED_IM_GATEWAY_WS_URL?: string
   readonly VITE_API_BASE_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_QUERY_URL?: string
   readonly VITE_ENTERPRISE_PROJECT_LIST?: string
@@ -20,6 +17,7 @@ interface ImportMetaEnv {
   readonly VITE_ES_INDEX_PROJECT_INFO?: string
   readonly VITE_TRACE_EVOLVER_REVIEW_ADMIN_YST_IDS?: string
   readonly VITE_ADMIN_YST_IDS?: string
+  readonly VITE_BUILTIN_ROBOT_DEBUG_YST_IDS?: string
   readonly VITE_DASHBOARD_AWARDS_ADMIN_YST_IDS?: string
   readonly VITE_DASHBOARD_SKILL_EVAL_YST_IDS?: string
   readonly VITE_DASHBOARD_SUSPECTED_TECHNICAL_DETAIL_YST_IDS?: string

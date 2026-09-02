@@ -1,5 +1,5 @@
 import { LocalSandbox } from "../agent/local-sandbox"
-import { isChatXThreadRunning } from "./chatx"
+import { getLocalThreadRunLease } from "../agent/thread-run-lease"
 import { isHeartbeatRunning } from "./heartbeat"
 import { HEARTBEAT_THREAD_ID } from "./heartbeat-session"
 import { isTaskRunning } from "./scheduler"
@@ -13,7 +13,7 @@ export function isExternallyManagedThreadRunBusy(
   threadId: string,
   metadata: Record<string, unknown>
 ): boolean {
-  if (isChatXThreadRunning(threadId)) return true
+  if (getLocalThreadRunLease(threadId)) return true
   if (threadId === HEARTBEAT_THREAD_ID && isHeartbeatRunning()) return true
 
   const scheduledTaskId =

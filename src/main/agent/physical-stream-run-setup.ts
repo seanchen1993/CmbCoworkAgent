@@ -6,6 +6,38 @@ export type PhysicalStreamRunSetupGuard = {
   handoff: () => void
 }
 
+export type PhysicalStreamRunFailureDisposition = "stale" | "cancelled" | "error"
+
+/**
+ * Decide whether a failed physical run still owns its terminal side effects.
+ *
+ * An aborted run is no longer "active", but it still needs to persist its own
+ * cancelled trace while it owns both the controller and queue lease. A run
+ * superseded by a replacement has lost that lease and must not finalize into
+ * the replacement lifecycle.
+ */
+export function classifyPhysicalStreamRunFailure({
+  ownsLease,
+  signalAborted,
+  error
+}: {
+  ownsLease: boolean
+  signalAborted: boolean
+  error: unknown
+}): PhysicalStreamRunFailureDisposition {
+  if (!ownsLease) return "stale"
+  if (signalAborted) return "cancelled"
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" ||
+      error.message.includes("aborted") ||
+      error.message.includes("Controller is already closed"))
+  ) {
+    return "cancelled"
+  }
+  return "error"
+}
+
 export function physicalStreamRunHasSuccessor({
   runToken,
   currentTurnRunToken,

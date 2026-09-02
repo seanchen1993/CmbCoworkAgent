@@ -11,7 +11,6 @@ import {
   Briefcase,
   LayoutDashboard,
   Workflow,
-  Cpu,
   BarChart3,
   ChevronDown,
   ChevronRight,
@@ -25,13 +24,13 @@ import {
   HeartPulse
 } from "lucide-react"
 import { toast } from "sonner"
-import type { ChatXRobotConfig } from "@/types"
 import { Button } from "@/components/ui/button"
 import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { UpdateActionButton } from "@/components/update/UpdateActionButton"
+import { CmbDevClawLogo } from "@/components/branding/CmbDevClawLogo"
 import {
   Dialog,
   DialogContent,
@@ -62,6 +61,7 @@ import {
   type ThreadGroupSelectionEntry
 } from "@/lib/thread-group-selection"
 import { isHarnessFeatureThread, isHarnessProjectModeThread } from "@/lib/thread-classification"
+import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-thread-display"
 import { FEATURE_GATES } from "../../../../shared/feature-gates"
 import {
   ContextMenu,
@@ -91,6 +91,7 @@ interface ThreadProject {
   defaultName: string
   path: string | null
   threads: Thread[]
+  isManagedInbox: boolean
   isPinned: boolean
   hasCustomName: boolean
   sortIndex: number
@@ -175,10 +176,22 @@ function getDisplayThreadTitle(thread: Thread): string {
   return title
 }
 
+function getRemoteThreadKind(thread: Thread): "inbox" | "feature" | null {
+  const metadata = thread.metadata
+  if (!metadata?.imDeliveryContext || typeof metadata.imDeliveryContext !== "object") return null
+  if (metadata.targetKind === "inbox") return "inbox"
+  if (metadata.targetKind === "feature" || metadata.harnessFeature) return "feature"
+  return null
+}
+
 function getProjectDisplayName(
   path: string | null,
-  projectNameOverrides: Record<string, string>
+  projectNameOverrides: Record<string, string>,
+  fixedName?: string
 ): { defaultName: string; name: string; hasCustomName: boolean } {
+  if (fixedName) {
+    return { defaultName: fixedName, name: fixedName, hasCustomName: false }
+  }
   const defaultName = getWorkspaceName(path)
   const customName = path ? projectNameOverrides[path]?.trim() : ""
 
@@ -284,6 +297,8 @@ function ThreadListItemImpl({
   }, [isRunning])
 
   const displayTitle = getDisplayThreadTitle(thread)
+  const remoteThreadKind = getRemoteThreadKind(thread)
+  const remoteThreadHistorical = remoteThreadKind && thread.metadata?.remoteState === "historical"
   const pendingUserInputBadge = hasPendingUserInput ? (
     <span className="ml-1 shrink-0 rounded-sm border border-status-warning/45 bg-status-warning/10 px-1.5 py-0.5 text-[10px] leading-none text-status-warning">
       等待用户回复
@@ -331,7 +346,20 @@ function ThreadListItemImpl({
                 className="flex min-w-0 items-center text-sm"
                 title={hoverTitle ?? thread.title ?? thread.thread_id}
               >
-                {thread.title?.startsWith("[定时]") ? (
+                {remoteThreadKind ? (
+                  <>
+                    <span className="mr-1 inline-flex shrink-0 items-center gap-0.5 rounded bg-blue-500/15 px-1 py-px text-[10px] font-medium text-blue-700 dark:text-blue-300">
+                      <MessageSquare className="size-2.5" />
+                      {remoteThreadHistorical
+                        ? "远程历史"
+                        : remoteThreadKind === "inbox"
+                          ? "远程收件箱"
+                          : "远程会话"}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{displayTitle}</span>
+                    {pendingUserInputBadge}
+                  </>
+                ) : thread.title?.startsWith("[定时]") ? (
                   <>
                     <span className="shrink-0 text-[10px] px-1 py-px rounded bg-primary/15 text-primary font-medium">
                       定时
@@ -482,7 +510,6 @@ export function ThreadSidebar(): React.JSX.Element {
     mainView,
     previousThreadId,
     pendingEvolution,
-    showCustomizeView,
     setShowCustomizeView,
     showKanbanView,
     setShowKanbanView,
@@ -509,7 +536,6 @@ export function ThreadSidebar(): React.JSX.Element {
       mainView: state.mainView,
       previousThreadId: state.previousThreadId,
       pendingEvolution: state.pendingEvolution,
-      showCustomizeView: state.showCustomizeView,
       setShowCustomizeView: state.setShowCustomizeView,
       showKanbanView: state.showKanbanView,
       setShowKanbanView: state.setShowKanbanView,
@@ -550,20 +576,6 @@ export function ThreadSidebar(): React.JSX.Element {
     streamChangeRef.current = { ...allStreamLoadingStates }
   }, [allStreamLoadingStates, touchThreadSummaries])
 
-  const [robots, setRobots] = useState<ChatXRobotConfig[]>([])
-  const [showRobotPicker, setShowRobotPicker] = useState(false)
-  const robotPickerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!showRobotPicker) return
-    const handleClickOutside = (e: MouseEvent): void => {
-      if (robotPickerRef.current && !robotPickerRef.current.contains(e.target as Node)) {
-        setShowRobotPicker(false)
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside)
-    return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [showRobotPicker])
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [unreadIds, setUnreadIds] = useState<Set<string>>(() =>
@@ -734,13 +746,21 @@ export function ThreadSidebar(): React.JSX.Element {
       )
       const key = path || NO_WORKSPACE_PROJECT_KEY
       const existing = projectMap.get(key)
+      const isManagedInbox = isRemoteInboxThread(thread)
 
       if (existing) {
         existing.threads.push(thread)
+        if (isManagedInbox && !existing.isManagedInbox) {
+          existing.isManagedInbox = true
+          existing.defaultName = REMOTE_INBOX_WORKSPACE_NAME
+          existing.name = REMOTE_INBOX_WORKSPACE_NAME
+          existing.hasCustomName = false
+        }
       } else {
         const { defaultName, name, hasCustomName } = getProjectDisplayName(
           path,
-          projectNameOverrides
+          projectNameOverrides,
+          isManagedInbox ? REMOTE_INBOX_WORKSPACE_NAME : undefined
         )
         projectMap.set(key, {
           key,
@@ -748,6 +768,7 @@ export function ThreadSidebar(): React.JSX.Element {
           defaultName,
           path,
           threads: [thread],
+          isManagedInbox,
           isPinned: pinnedProjectKeys.has(key),
           hasCustomName,
           sortIndex: sortIndex++
@@ -910,7 +931,7 @@ export function ThreadSidebar(): React.JSX.Element {
   }, [])
 
   const openProjectRenameDialog = useCallback((project: ThreadProject) => {
-    if (!project.path) return
+    if (!project.path || project.isManagedInbox) return
     setProjectToRename(project)
   }, [])
 
@@ -943,33 +964,6 @@ export function ThreadSidebar(): React.JSX.Element {
     setEditingTitle("")
   }
 
-  const loadRobots = useCallback(async () => {
-    try {
-      const config = await window.api.chatx.getConfig()
-      if (!config.enabled) {
-        setRobots([])
-        return
-      }
-      // Only show robots that have all required fields filled
-      const valid = (config.robots || []).filter(
-        (r) =>
-          r.chatId &&
-          r.fromId &&
-          r.clientId &&
-          r.clientSecret &&
-          r.workDir &&
-          r.toUserList.length > 0
-      )
-      setRobots(valid)
-    } catch {
-      /* ignore */
-    }
-  }, [])
-
-  useEffect(() => {
-    loadRobots()
-  }, [loadRobots, showCustomizeView])
-
   const handleNewThread = async (): Promise<void> => {
     const metadata: Record<string, unknown> = {
       title: `Thread ${new Date().toLocaleDateString()}`
@@ -992,8 +986,6 @@ export function ThreadSidebar(): React.JSX.Element {
     })
   }
 
-  const [creatingRobot, setCreatingRobot] = useState(false)
-
   const handleAddProject = async (): Promise<void> => {
     if (selectingProjectFolder) return
     setSelectingProjectFolder(true)
@@ -1006,29 +998,6 @@ export function ThreadSidebar(): React.JSX.Element {
       })
     } finally {
       setSelectingProjectFolder(false)
-    }
-  }
-
-  const handleNewRobotThread = async (robot: ChatXRobotConfig): Promise<void> => {
-    if (creatingRobot) return
-    setCreatingRobot(true)
-    setShowRobotPicker(false)
-    try {
-      if (!robot.workDir) {
-        alert("该机器人未配置工作目录")
-        return
-      }
-      const now = new Date()
-      const timeTag = `${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`
-      await createThread({
-        workspacePath: robot.workDir,
-        title: `[机器人] ${robot.chatId} · ${timeTag}`,
-        chatxChatId: robot.chatId,
-        chatxRobotChatId: robot.chatId,
-        model: robot.modelId || undefined
-      })
-    } finally {
-      setCreatingRobot(false)
     }
   }
 
@@ -1378,35 +1347,6 @@ export function ThreadSidebar(): React.JSX.Element {
                 <span className="text-muted-foreground">运营面板</span>
               </Button>
             )}
-            {robots.length > 0 && (
-              <div className="relative" ref={robotPickerRef}>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full justify-start gap-2 text-sm font-semibold"
-                  onClick={() => setShowRobotPicker(!showRobotPicker)}
-                >
-                  <div className="flex size-5 items-center justify-center rounded-full bg-muted-foreground/15">
-                    <Cpu className="size-3" />
-                  </div>
-                  <span className="text-muted-foreground">机器人</span>
-                </Button>
-                {showRobotPicker && (
-                  <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-border bg-popover p-1 shadow-md">
-                    {robots.map((robot, i) => (
-                      <button
-                        key={i}
-                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-muted transition-colors"
-                        onClick={() => handleNewRobotThread(robot)}
-                      >
-                        <Cpu className="size-3 shrink-0 text-blue-400" />
-                        <span className="truncate">{robot.chatId || `机器人 ${i + 1}`}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
           </>
         ) : null}
       </div>
@@ -1456,7 +1396,8 @@ export function ThreadSidebar(): React.JSX.Element {
             <div className="px-2 pb-2 space-y-1 overflow-hidden">
               {visibleProjectWindow.items.map((project) => {
                 const isCollapsed = collapsedProjectKeys.has(project.key)
-                const canCustomizeProject = Boolean(project.path)
+                const canManageProject = Boolean(project.path)
+                const canRenameProject = canManageProject && !project.isManagedInbox
                 const hasSelectedThread = project.key === currentProjectKey
                 const requestedVisibleThreads =
                   visibleThreadCounts[project.key] ?? DEFAULT_VISIBLE_THREADS
@@ -1541,27 +1482,29 @@ export function ThreadSidebar(): React.JSX.Element {
                                     popoverContent={
                                       project.isPinned ? "取消置顶工作区" : "置顶工作区"
                                     }
-                                    disabled={!canCustomizeProject}
+                                    disabled={!canManageProject}
                                     stopPropagation
                                     className={cn(
                                       "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
                                       project.isPinned && "text-primary opacity-100",
-                                      !canCustomizeProject && "cursor-not-allowed !opacity-30"
+                                      !canManageProject && "cursor-not-allowed !opacity-30"
                                     )}
                                     onClick={() => toggleProjectPin(project.key)}
                                   />
                                   <IconPopoverButton
                                     icon={<Pencil className="size-3" />}
                                     popoverContent={
-                                      canCustomizeProject
+                                      canRenameProject
                                         ? "修改工作区名称"
-                                        : "未关联工作区无法重命名"
+                                        : project.isManagedInbox
+                                          ? "远程收件箱名称由应用管理"
+                                          : "未关联工作区无法重命名"
                                     }
-                                    disabled={!canCustomizeProject}
+                                    disabled={!canRenameProject}
                                     stopPropagation
                                     className={cn(
                                       "size-6 shrink-0 rounded-sm p-0 opacity-70 hover:bg-accent/20",
-                                      !canCustomizeProject && "cursor-not-allowed !opacity-30"
+                                      !canRenameProject && "cursor-not-allowed !opacity-30"
                                     )}
                                     onClick={() => openProjectRenameDialog(project)}
                                   />
@@ -1600,15 +1543,19 @@ export function ThreadSidebar(): React.JSX.Element {
                           onMouseEnter={() => setHoveredProjectKey(project.key)}
                           onMouseLeave={() => setHoveredProjectKey(null)}
                         >
-                          <div className="mb-1 font-medium text-muted-foreground">工作区路径</div>
+                          <div className="mb-1 font-medium text-muted-foreground">
+                            {project.isManagedInbox ? "工作区说明" : "工作区路径"}
+                          </div>
                           <div className="break-all text-foreground">
-                            {project.path || "未关联工作区"}
+                            {project.isManagedInbox
+                              ? "应用托管目录，路径已隐藏"
+                              : project.path || "未关联工作区"}
                           </div>
                         </PopoverContent>
                       </Popover>
                       <ContextMenuContent>
                         <ContextMenuItem
-                          disabled={!canCustomizeProject}
+                          disabled={!canManageProject}
                           onClick={() => toggleProjectPin(project.key)}
                         >
                           {project.isPinned ? (
@@ -1619,7 +1566,7 @@ export function ThreadSidebar(): React.JSX.Element {
                           {project.isPinned ? "取消置顶工作区" : "置顶工作区"}
                         </ContextMenuItem>
                         <ContextMenuItem
-                          disabled={!canCustomizeProject}
+                          disabled={!canRenameProject}
                           onClick={() => openProjectRenameDialog(project)}
                         >
                           <Pencil className="size-4 mr-2" />
@@ -1755,30 +1702,7 @@ export function ThreadSidebar(): React.JSX.Element {
       )}
 
       <div className="px-3 py-2.5 flex items-center justify-center gap-1.5 select-none">
-        <svg className="size-5 shrink-0" viewBox="0 0 120 120" fill="none">
-          <defs>
-            <linearGradient id="sidebar-lobster" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#ff4d4d" />
-              <stop offset="100%" stopColor="#991b1b" />
-            </linearGradient>
-          </defs>
-          <path
-            d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z"
-            fill="url(#sidebar-lobster)"
-          />
-          <path
-            d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z"
-            fill="url(#sidebar-lobster)"
-          />
-          <path
-            d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z"
-            fill="url(#sidebar-lobster)"
-          />
-          <circle cx="45" cy="35" r="6" fill="#050810" />
-          <circle cx="75" cy="35" r="6" fill="#050810" />
-          <circle cx="46" cy="34" r="2.5" fill="#00e5cc" />
-          <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
-        </svg>
+        <CmbDevClawLogo className="size-5 shrink-0 object-contain" />
         <div className="flex items-baseline">
           <span
             className="text-[14px] text-foreground/70"

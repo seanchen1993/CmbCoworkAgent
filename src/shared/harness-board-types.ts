@@ -133,6 +133,31 @@ export interface HarnessLeanTokenConfig {
 
 export type HarnessSessionContextInjectionSource = "cmbdevclaw" | "plugin"
 
+export interface HarnessHumanGateSnapshot {
+  gateId: string
+  status: "pending"
+  projectId: string
+  featureId: string
+  sourceThreadId: string
+  sourceManagedRunId?: string
+  hookId: string
+  message: string
+  createdAt: string
+}
+
+export interface HarnessHumanGateDecisionInput {
+  projectId: string
+  featureId: string
+  gateId: string
+}
+
+export interface HarnessHumanGateChangedEvent {
+  projectId: string
+  featureId: string
+  sourceThreadId: string
+  humanGate?: HarnessHumanGateSnapshot
+}
+
 export interface HarnessAgentmdLoadStatusItem {
   deployUnitId: string
   path: string
@@ -153,6 +178,7 @@ export interface HarnessFeatureDeployUnitBinding {
   featureId: string
   selectedDeployUnitMappings: HarnessDeployUnitMapping[]
   sessionContextInjectionSource: HarnessSessionContextInjectionSource
+  humanGate?: HarnessHumanGateSnapshot
 }
 
 function normalizeHarnessText(value: unknown): string {
@@ -368,6 +394,23 @@ export interface HarnessFeatureDeployUnitUpdateInput {
   selectedDeployUnits: HarnessDeployUnitMapping[]
 }
 
+export interface ManagedRunStartInput {
+  projectId: string
+  featureId: string
+  workspacePath: string
+}
+
+export interface ManagedRunStartValidationInput {
+  projectId: string
+  featureId: string
+}
+
+export interface ManagedRunStopInput {
+  projectId: string
+  featureId: string
+  runId: string
+}
+
 export interface HarnessSkipNodeInput {
   projectId: string
   slug: string
@@ -489,6 +532,182 @@ export interface HarnessSessionBinding {
   source: string
 }
 
+export type ManagedRunStatus = "running" | "failed" | "completed" | "cancelled"
+export type ManagedRunViewStatus = ManagedRunStatus | "corrupt"
+
+export const MANAGED_RUN_STATUS_LABELS: Record<ManagedRunViewStatus, string> = {
+  running: "托管运行中",
+  failed: "托管失败",
+  completed: "托管已完成",
+  cancelled: "托管已取消",
+  corrupt: "托管记录损坏"
+}
+
+export interface ManagedRunIdentity {
+  projectId: string
+  featureId: string
+  runId: string
+}
+
+export interface ManagedRunSnapshot {
+  version: 2
+  runId: string
+  projectId: string
+  featureId: string
+  status: ManagedRunStatus
+  workspacePath?: string
+  currentSession?: {
+    threadId: string
+    workspacePath?: string
+  }
+  decisionBaseline?: {
+    nodeId: string
+    featureStateHash: string
+    featureStatus: HarnessFeatureStatus
+    nodeStatus: HarnessNodeStatus
+    nextActionHash: string
+  }
+  providerRetryCount: number
+  bizRetryCount: number
+  nextRetryAt?: string
+  failureReason?: string
+  cancellationReason?: string
+  startedAt: string
+  updatedAt: string
+  completedAt?: string
+  lastDecision?: {
+    decision: string
+    reasonCode?: string
+    summary?: string
+    facts?: ManagedRunDecisionFacts
+    rule?: string
+    createTime: string
+  }
+}
+
+export type ManagedRunDecisionChangedField =
+  | "currentNode"
+  | "featureStatus"
+  | "currentNodeStatus"
+  | "nextAction"
+
+export type ManagedBizRetryMode = "reuse_thread" | "new_thread"
+
+export interface ManagedRunDecisionFacts {
+  currentNodeId: string
+  featureStatus: HarnessFeatureStatus
+  currentNodeStatus: HarnessNodeStatus
+  slashSkill?: string
+  changedFields: ManagedRunDecisionChangedField[]
+  initialInspection: boolean
+  previousNodeId?: string
+  bizRetryCount: number
+  providerRetryCount: number
+  contextInputTokens?: number
+  contextMaxTokens?: number
+  contextUsageRatio?: number
+  contextReuseThreshold?: number
+  contextReusable?: boolean
+  terminalOutcome?: AgentTurnEndEvent["outcome"]
+  terminalReason?: string
+}
+
+export type ManagedRunEventType =
+  | "run_started"
+  | "feature_inspected"
+  | "decision_made"
+  | "session_created"
+  | "session_started"
+  | "session_completed"
+  | "provider_retry_scheduled"
+  | "provider_retry_sent"
+  | "provider_retry_reset"
+  | "biz_retry_reuse_thread"
+  | "biz_retry_new_thread"
+  | "human_gate_requested"
+  | "human_gate_approved"
+  | "human_gate_rejected"
+  | "human_gate_conflict"
+  | "run_cancelled"
+  | "run_failed"
+  | "run_completed"
+
+export interface ManagedRunEvent {
+  version: 2
+  eventId: string
+  createTime: string
+  type: ManagedRunEventType
+  runId: string
+  scope: "global" | "stage"
+  source?:
+    | "feature_status"
+    | "agent_end_reason"
+    | "controller_policy"
+    | "managed_run"
+    | "human_gate"
+  nodeId?: string
+  featureStatus?: HarnessFeatureStatus
+  nodeStatus?: HarnessNodeStatus
+  slashSkill?: string
+  threadId?: string
+  workspacePath?: string
+  sourceThreadId?: string
+  targetThreadId?: string
+  decision?: string
+  reasonCode?: string
+  decisionFacts?: ManagedRunDecisionFacts
+  decisionRule?: string
+  outcome?: AgentTurnEndEvent["outcome"]
+  endReason?: AgentTurnEndEvent["endReason"]
+  summary?: string
+  [key: string]: unknown
+}
+
+export interface ManagedRunSummary extends Omit<ManagedRunSnapshot, "status"> {
+  status: ManagedRunViewStatus
+  corrupt?: boolean
+}
+
+export interface ManagedRunEventsPage {
+  events: ManagedRunEvent[]
+  nextCursor?: ManagedRunEventCursor
+  hasMore: boolean
+}
+
+export type ManagedRunEventCursor = string
+
+export interface ManagedRunChangeEvent {
+  projectId: string
+  featureId: string
+  run: ManagedRunSummary
+}
+
+export interface ManagedRunThreadCreatedEvent {
+  projectId: string
+  featureId: string
+  runId: string
+  threadId: string
+  thread: {
+    thread_id: string
+    created_at: Date
+    updated_at: Date
+    metadata?: Record<string, unknown>
+    status: "idle" | "busy" | "interrupted" | "error"
+    thread_values?: Record<string, unknown>
+    title?: string
+  }
+}
+
+export interface ManagedFeatureStatusSnapshot {
+  featureStatus: HarnessFeatureStatus
+  currentNodeId: string
+  currentNodeStatus: HarnessNodeStatus
+  isFinalNode: boolean
+  nextAction?: HarnessWorkflowNextAction
+  featureStateHash: string
+  nextActionHash: string
+}
+
 export interface HarnessWatchRef {
   path: string
   purpose: "run-list" | "run-state" | "artifacts" | "hook-log" | string
@@ -509,6 +728,7 @@ export interface HarnessFeatureSummary {
   location: "active" | "archived" | string
   featureStatus: HarnessFeatureStatus
   featureStatusLabel?: string
+  managedRunStatus?: ManagedRunViewStatus
   /**
    * Feature-level status for summary cards. Plugins can provide it explicitly;
    * otherwise the framework derives it from the current node and workflow.
@@ -518,6 +738,7 @@ export interface HarnessFeatureSummary {
   currentNodeId: string
   currentNodeStatus: HarnessNodeStatus
   currentNodeStatusLabel?: string
+  humanGate?: HarnessHumanGateSnapshot
   summary: {
     text: string
     updatedAt: string
@@ -582,6 +803,47 @@ export interface HarnessWorkflowNextAction {
     id?: string
     name?: string
   }
+}
+
+export interface AutoModeEventBase {
+  eventId: string
+  eventType: string
+  eventTime: string
+  threadId: string
+}
+
+export interface AgentTurnEndEvent extends AutoModeEventBase {
+  eventType: "agent_turn_end"
+  outcome: "success" | "error"
+  endReason: {
+    code: "normal" | "provider_error" | "hook_halt" | "failure_fuse" | "unknown"
+    message?: string
+  }
+  contextUsage?: {
+    inputTokens: number
+    maxTokens: number
+  }
+  executionFacts?: AgentTurnExecutionFacts
+}
+
+export interface AgentTurnExecutionFacts {
+  /** Detached Dynamic Workflow runs successfully launched during this physical Turn. */
+  workflowLaunchedRunIds?: string[]
+}
+
+export interface ManagedRunSessionAction {
+  slashSkill: string
+  userMessage: string
+}
+
+export const AUTO_MODE_MANAGED_STREAM_STARTED_CHANNEL =
+  "harnessBoard:managedAutoSendStreamStarted"
+
+export interface ManagedAutoSendStreamStartEvent {
+  runId: string
+  threadId: string
+  streamRequestId: string
+  agentMode?: "normal" | "coordinator" | "workflow"
 }
 
 export interface HarnessWorkflowStateDefinition {
@@ -721,6 +983,8 @@ export interface HarnessRunDetailViewModel {
     currentNodeId: string
     nodes: HarnessRunNode[]
     unmatchedHooks: HarnessHookLogView[]
+    managedRun?: ManagedRunSummary
+    humanGate?: HarnessHumanGateSnapshot
   }
   sessions: HarnessSessionBinding[]
 }

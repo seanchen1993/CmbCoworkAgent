@@ -791,7 +791,8 @@ function testExecuteAvailabilityGatesBackgroundExecPrompt(): void {
   // Wiring: the runtime derives executeToolAvailable from blockedToolNamesForAccess
   // and forwards it to getSystemPrompt, which gates the section on the flag.
   assert(
-    RUNTIME_SRC.includes("const executeToolAvailable = options.filesystemAccess") &&
+    RUNTIME_SRC.includes("const executeToolAvailable =") &&
+      RUNTIME_SRC.includes('!runtimeBlockedToolNames.has("execute")') &&
       RUNTIME_SRC.includes('blockedToolNamesForAccess(options.filesystemAccess).has("execute")'),
     "runtime computes execute availability from the access policy"
   )
@@ -1491,8 +1492,9 @@ function testDeferredInventoryGatedOnBridge(): void {
   //     a bridge-less restricted leaf never sees IDs it can't use.
   assert(
     RUNTIME_SRC.includes(
-      "if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {\n      systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"
-    ),
+      "if (runtimePolicy.includeDeferredToolInventoryPrompt && hasInvokeDeferredTool) {"
+    ) &&
+      RUNTIME_SRC.includes("systemPrompt += renderAvailableDeferredToolsPrompt(deferredToolIds)"),
     "runtime gates the deferred-tool inventory on the invoke bridge being available"
   )
 }

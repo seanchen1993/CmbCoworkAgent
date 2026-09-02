@@ -159,6 +159,7 @@ export class NativeSqliteStatement {
  */
 export class NativeSqliteAdapter {
   private closed = false
+  private lastRowsModified = 0
 
   constructor(private readonly native: DatabaseSync) {}
 
@@ -166,10 +167,26 @@ export class NativeSqliteAdapter {
     this.assertOpen()
     if (bindings === undefined) {
       this.native.exec(sql)
-      return this
+    } else {
+      runStatement(this.native.prepare(sql), normalizeBindings(bindings))
     }
-    runStatement(this.native.prepare(sql), normalizeBindings(bindings))
+    this.lastRowsModified = this.readChanges()
     return this
+  }
+
+  /**
+   * sql.js-compatible row count for the most recent run(): the number of rows
+   * affected by the last completed INSERT/UPDATE/DELETE on this connection.
+   */
+  getRowsModified(): number {
+    return this.lastRowsModified
+  }
+
+  private readChanges(): number {
+    const row = this.native.prepare("SELECT changes() AS changed_rows").get()
+    const value = row?.changed_rows
+    if (typeof value === "bigint") return Number(value) || 0
+    return Number(value ?? 0) || 0
   }
 
   exec(sql: string, bindings?: NativeSqliteBindings): NativeSqliteExecResult[] {

@@ -87,6 +87,13 @@ export interface StreamConverterChunkOptions {
   valuesSnapshotKind?: "full" | "append" | "tail"
 }
 
+export type SchedulerLifecycleEvent =
+  | { type: "started" }
+  | { type: "done" }
+  | { type: "error"; error: string }
+
+export type SchedulerRendererEvent = SchedulerEvent | SchedulerLifecycleEvent
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -393,9 +400,7 @@ export class StreamConverter {
         (this.activeSubagents.has(ownerHint) ? ownerHint : undefined))
       : undefined
     this.currentSubagentOwnerHint =
-      ownerExecutionId && this.activeSubagents.has(ownerExecutionId)
-        ? ownerExecutionId
-        : undefined
+      ownerExecutionId && this.activeSubagents.has(ownerExecutionId) ? ownerExecutionId : undefined
     // Scope tool-call-chunk stitching to this message so interleaved concurrent
     // subagent streams (all using index 0) never cross-contaminate.
     this.currentChunkMessageId = typeof kwargs.id === "string" ? kwargs.id : undefined
@@ -418,8 +423,7 @@ export class StreamConverter {
       (kwargs.name === "task" ||
         (typeof kwargs.name !== "string" && !(ns && ns.includes("tools:"))))
     const isInterior =
-      !!this.currentSubagentOwnerHint ||
-      (!!ns && ns.includes("tools:") && !isKnownParentTaskResult)
+      !!this.currentSubagentOwnerHint || (!!ns && ns.includes("tools:") && !isKnownParentTaskResult)
     let subagentId: string | undefined
     if (isInterior) {
       subagentId = this.resolveSubagentId(ns)
@@ -429,9 +433,7 @@ export class StreamConverter {
     if (className.includes("AI")) {
       const content = extractContent(kwargs.content ?? msgChunk.content)
       const reasoning = extractVisibleReasoning(kwargs)
-      const contentWireMode = readStreamMessageWireMode(
-        metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY]
-      )
+      const contentWireMode = readStreamMessageWireMode(metadata?.[STREAM_MESSAGE_CONTENT_MODE_KEY])
       const reasoningWireMode = readStreamMessageWireMode(
         metadata?.[STREAM_MESSAGE_REASONING_MODE_KEY]
       )
@@ -442,8 +444,7 @@ export class StreamConverter {
         kwargs.tool_calls,
         kwargs.tool_call_chunks
       )
-      const hasSnapshotUpdate =
-        contentWireMode === "snapshot" || reasoningWireMode === "snapshot"
+      const hasSnapshotUpdate = contentWireMode === "snapshot" || reasoningWireMode === "snapshot"
       if (hasSnapshotUpdate && !subagentId) {
         events.push({
           type: "custom",
@@ -510,11 +511,7 @@ export class StreamConverter {
           for (let toolCallIndex = 0; toolCallIndex < toolCalls.length; toolCallIndex += 1) {
             const tc = toolCalls[toolCallIndex]
             if (tc.name === "task" && tc.id) {
-              const registration = this.registerSubagent(
-                tc.id,
-                tc.args || {},
-                msgId
-              )
+              const registration = this.registerSubagent(tc.id, tc.args || {}, msgId)
               if (registration.created || registration.updated) {
                 events.push(this.subagentCustomEvent())
               }
@@ -683,9 +680,8 @@ export class StreamConverter {
       !Array.isArray(kwargs.additional_kwargs)
         ? (kwargs.additional_kwargs as Record<string, unknown>)
         : undefined
-    const providerOccurrence = getMessageProviderTupleFromMetadata(
-      additionalKwargs
-    )?.provider_occurrence
+    const providerOccurrence =
+      getMessageProviderTupleFromMetadata(additionalKwargs)?.provider_occurrence
     let parentOccurrence: number
     if (providerOccurrence) {
       parentOccurrence = providerOccurrence
@@ -707,10 +703,7 @@ export class StreamConverter {
     return resolved
   }
 
-  private adoptLiveSubagentExecution(
-    toolCallId: string,
-    persistedInvocationScope: string
-  ): void {
+  private adoptLiveSubagentExecution(toolCallId: string, persistedInvocationScope: string): void {
     const invocationKey = JSON.stringify([toolCallId, persistedInvocationScope])
     if (this.subagentExecutionIdByInvocation.has(invocationKey)) return
     const liveExecutionId = (this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? [])
@@ -775,8 +768,7 @@ export class StreamConverter {
         const rawToolCallId = kwargs.tool_call_id
         const content = extractContent(kwargs.content ?? message.content)
         const resultMessageId =
-          (typeof kwargs.id === "string" && kwargs.id) ||
-          `values-tool-${absoluteMessageIndex}`
+          (typeof kwargs.id === "string" && kwargs.id) || `values-tool-${absoluteMessageIndex}`
         const isError = isToolMessageError(kwargs)
         const status = typeof kwargs.status === "string" ? kwargs.status : undefined
         const resultIdentity = this.buildSubagentTaskResultIdentity(
@@ -786,8 +778,7 @@ export class StreamConverter {
           status,
           isError
         )
-        const mappedExecutionId =
-          this.subagentTaskResultExecutionIdByIdentity.get(resultIdentity)
+        const mappedExecutionId = this.subagentTaskResultExecutionIdByIdentity.get(resultIdentity)
         const executionId =
           (mappedExecutionId && this.activeSubagents.has(mappedExecutionId)
             ? mappedExecutionId
@@ -845,9 +836,7 @@ export class StreamConverter {
       options.valuesSnapshotKind !== undefined &&
       options.valuesSnapshotKind !== "full"
     ) {
-      events.push(
-        ...this.processIncrementalValuesMessages(state.messages, messageIndexOffset)
-      )
+      events.push(...this.processIncrementalValuesMessages(state.messages, messageIndexOffset))
       const converted = convertValuesMessages(state.messages, messageIndexOffset)
       if (converted.length > 0) {
         events.push({
@@ -869,8 +858,7 @@ export class StreamConverter {
         const currentTurnUserIndex = state.messages.findLastIndex((message) => {
           const kwargs = (message.kwargs || {}) as Record<string, unknown>
           return (
-            getClassName(message).includes("Human") &&
-            kwargs.id === this.valuesTurnUserMessageId
+            getClassName(message).includes("Human") && kwargs.id === this.valuesTurnUserMessageId
           )
         })
         // A ChatX converter is scoped to one inbound turn. If its user marker
@@ -924,13 +912,9 @@ export class StreamConverter {
         for (let index = 0; index < adoptionCount; index += 1) {
           const invocationKey = JSON.stringify([toolCallId, scopesToAdopt[index]])
           if (
-            this.subagentExecutionIdByInvocation.get(invocationKey) !==
-            executionsToAdopt[index]
+            this.subagentExecutionIdByInvocation.get(invocationKey) !== executionsToAdopt[index]
           ) {
-            this.subagentExecutionIdByInvocation.set(
-              invocationKey,
-              executionsToAdopt[index]
-            )
+            this.subagentExecutionIdByInvocation.set(invocationKey, executionsToAdopt[index])
             this.subagentSnapshotVersion += 1
           }
           this.mappedSubagentExecutionIds.add(executionsToAdopt[index])
@@ -1002,8 +986,7 @@ export class StreamConverter {
             status,
             isError
           )
-          const mappedExecutionId =
-            this.subagentTaskResultExecutionIdByIdentity.get(resultIdentity)
+          const mappedExecutionId = this.subagentTaskResultExecutionIdByIdentity.get(resultIdentity)
           const executionId =
             snapshotExecutionIdByToolCallId.get(rawToolCallId) ??
             (mappedExecutionId && this.activeSubagents.has(mappedExecutionId)
@@ -1013,13 +996,7 @@ export class StreamConverter {
           if (executionId) {
             this.subagentTaskResultExecutionIdByIdentity.set(resultIdentity, executionId)
             events.push(
-              ...this.processSubagentTaskResult(
-                executionId,
-                content,
-                status,
-                isError,
-                false
-              )
+              ...this.processSubagentTaskResult(executionId, content, status, isError, false)
             )
           }
         }
@@ -1189,19 +1166,12 @@ export class StreamConverter {
 
       if (chunk.name) accumulated.name = chunk.name
       const wireMode = readStreamMessageWireMode(chunk[STREAM_TOOL_CALL_ARGS_MODE_KEY])
-      if (
-        typeof chunk.args === "string" &&
-        (chunk.args.length > 0 || wireMode === "snapshot")
-      ) {
+      if (typeof chunk.args === "string" && (chunk.args.length > 0 || wireMode === "snapshot")) {
         if (wireMode === "snapshot") {
           resetAccumulatedToolCallArgs(accumulated, chunk.args)
         } else {
           const previousArgs = accumulated.args
-          const mergedArgs = mergeStreamToolCallArgs(
-            previousArgs,
-            chunk.args,
-            wireMode ?? "auto"
-          )
+          const mergedArgs = mergeStreamToolCallArgs(previousArgs, chunk.args, wireMode ?? "auto")
           if (mergedArgs !== previousArgs) {
             const fragment =
               wireMode !== "delta" &&
@@ -1296,8 +1266,7 @@ export class StreamConverter {
         const parentTaskKey = JSON.stringify([parentMessageId, toolCallId])
         const liveState = this.liveSubagentInvocationByParentTask.get(parentTaskKey)
         if (liveState) liveState.executionId = executionId
-        const liveExecutions =
-          this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
+        const liveExecutions = this.liveSubagentExecutionIdsByToolCallId.get(toolCallId) ?? []
         if (!liveExecutions.includes(executionId)) liveExecutions.push(executionId)
         this.liveSubagentExecutionIdsByToolCallId.set(toolCallId, liveExecutions)
       }
@@ -1427,7 +1396,11 @@ export class StreamConverter {
   ): SchedulerEvent | null {
     const candidate = this.subagentLatestAssistantByExecutionId.get(executionId)
     const inputHasVisibleContent = /\S/.test(content)
-    const finalContent = inputHasVisibleContent ? content : isError ? "" : (candidate?.content ?? "")
+    const finalContent = inputHasVisibleContent
+      ? content
+      : isError
+        ? ""
+        : (candidate?.content ?? "")
     const candidateIsCompatible =
       !!candidate && this.isCompatibleSubagentFinalContent(candidate.content, finalContent)
     const replacedMessageId =
@@ -1444,7 +1417,8 @@ export class StreamConverter {
     const replacementSignatureKey = replacedMessageId
       ? `replacement:${executionId}:${replacedMessageId}`
       : undefined
-    const contentIsKnown = this.subagentFinalSignatureByExecutionId.get(contentSignatureKey) === signature
+    const contentIsKnown =
+      this.subagentFinalSignatureByExecutionId.get(contentSignatureKey) === signature
     const replacementIsKnown =
       !replacementSignatureKey ||
       this.subagentFinalSignatureByExecutionId.get(replacementSignatureKey) === signature

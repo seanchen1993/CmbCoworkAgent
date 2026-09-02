@@ -435,6 +435,7 @@ export class ToolOrchestrator {
             id: randomUUID(),
             tool_call: { id: randomUUID(), name: "execute", args: { command } },
             safety_level: "needs_approval",
+            operation: "execute",
             command,
             cwd,
             reason: safety.reason,

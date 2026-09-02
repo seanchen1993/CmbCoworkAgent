@@ -34,6 +34,18 @@ import { runBestEffortCommittedDeletionCleanups } from "./thread-group-deletion"
 
 const MAX_WORKER_FOCUS_MESSAGES = 2_000
 const MAX_WORKER_SIGNATURE_CHARS = 512
+const rendererDeletingThreadIds = new Set<string>()
+const rendererRetiredThreadIds = new Set<string>()
+
+/** Prevent delayed renderer work from touching a Thread once deletion starts. */
+export function isThreadDeletionPending(threadId: string): boolean {
+  return rendererDeletingThreadIds.has(threadId) || rendererRetiredThreadIds.has(threadId)
+}
+
+/** A successful backend delete permanently retires this renderer incarnation. */
+export function isThreadRetired(threadId: string): boolean {
+  return rendererRetiredThreadIds.has(threadId)
+}
 const THREAD_DIRECTORY_PAGE_LIMIT = 128
 const THREAD_DIRECTORY_PAGE_BYTE_BUDGET = 512 * 1024
 const THREAD_DIRECTORY_LOAD_MORE_PAGE_BATCH = 4
@@ -999,6 +1011,7 @@ interface AppState {
 
   // Thread actions
   loadThreads: (options?: ThreadDirectoryLoadOptions) => Promise<void>
+  addThreadSummary: (thread: Thread) => void
   loadMoreThreads: () => Promise<void>
   touchThreadSummaries: (threadIds: Iterable<string>, updatedAt: Date) => void
   createThread: (
@@ -1303,6 +1316,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
+  addThreadSummary: (thread) => {
+    markThreadDirectoryMutation(thread.thread_id)
+    set((state) => ({
+      threads: adoptThreadDirectorySnapshot([
+        thread,
+        ...state.threads.filter((item) => item.thread_id !== thread.thread_id)
+      ])
+    }))
+  },
+
   createThread: async (metadata?: Record<string, unknown>, options?: ThreadNavigationOptions) => {
     const thread = await window.api.threads.create(metadata)
     markThreadDirectoryMutation(thread.thread_id)
@@ -1397,6 +1420,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     options?: ThreadDeleteOptions & { deferDirectoryUpdate?: boolean }
   ) => {
     console.log("[Store] Deleting thread:", threadId)
+    rendererDeletingThreadIds.add(threadId)
     markThreadDirectoryMutation(threadId)
     try {
       await window.api.threads.delete(
@@ -1405,6 +1429,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           ? undefined
           : { requireIdle: options?.requireIdle, groupGuard: options?.groupGuard }
       )
+      rendererDeletingThreadIds.delete(threadId)
+      rendererRetiredThreadIds.add(threadId)
       // A directory refresh may start after the optimistic fence but still read
       // before the database commit becomes visible. Advance the epoch again at
       // the commit acknowledgement so that stale page cannot resurrect the row.
@@ -1439,6 +1465,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             ])
       ])
     } catch (error) {
+      rendererDeletingThreadIds.delete(threadId)
       console.error("[Store] Failed to delete thread:", error)
       throw error
     }
@@ -1498,8 +1525,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   updateThread: async (threadId: string, updates: Partial<Thread>) => {
+    if (isThreadDeletionPending(threadId)) return
     markThreadDirectoryMutation(threadId)
     const updated = await window.api.threads.update(threadId, updates)
+    if (isThreadDeletionPending(threadId)) return
     set((state) => {
       const index = getThreadDirectoryIndex(state.threads).get(threadId)
       if (index === undefined) return state

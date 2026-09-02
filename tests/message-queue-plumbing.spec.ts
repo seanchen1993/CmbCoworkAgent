@@ -57,6 +57,7 @@ function assertSourceOrder(value: string, before: string, after: string, label: 
 
 const runtime = read("src/main/agent/runtime.ts")
 const queueModule = read("src/main/agent/current-run-message-queue.ts")
+const standardTurn = read("src/main/agent/standard-thread-turn.ts")
 const physicalStreamRunSetup = read("src/main/agent/physical-stream-run-setup.ts")
 const runSettlementFence = read("src/main/agent/run-settlement-fence.ts")
 const localSandbox = read("src/main/agent/local-sandbox.ts")
@@ -188,8 +189,8 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "active runs expose a thread-scoped prompt preparer"
   )
   assertIncludes(
-    agentIpc,
-    "async function prepareUserPromptForRun({",
+    standardTurn,
+    "export async function prepareStandardUserPrompt({",
     "normal and steered prompts share one preparation pipeline"
   )
   assertIncludes(
@@ -199,7 +200,7 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
   )
   assertIncludes(
     agentIpc,
-    "const prepared = await prepareUserPromptForRun({",
+    "const prepared = await prepareStandardUserPrompt({",
     "the current-run preparer delegates steered messages to the shared pipeline"
   )
   assertOccurrences(
@@ -208,13 +209,13 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     4,
     "invoke, resume, and interrupt each register the shared preparer"
   )
-  assertMatches(
-    agentIpc,
-    /"UserPromptSubmit",\r?\n\s*promptSubmitContext,/,
+  assertIncludes(
+    standardTurn,
+    '"UserPromptSubmit",\n    promptSubmitContext,',
     "shared preparation executes UserPromptSubmit hooks"
   )
   assertIncludes(
-    agentIpc,
+    standardTurn,
     "activateExplicitSkillFromMessage({",
     "shared preparation activates explicit skills"
   )
@@ -229,7 +230,7 @@ function testGuideUsesCurrentRunPromptPipeline(): void {
     "async steer preparation snapshots run-scoped hook state"
   )
   assertIncludes(
-    agentIpc,
+    standardTurn,
     "isPreparationCurrent && !isPreparationCurrent()",
     "stale async hook results stop before committing skill and prompt side effects"
   )
@@ -482,7 +483,7 @@ function testClearOnEveryRunExit(): void {
   )
   const continuationReleaseCleanups =
     agentIpc.match(
-      /if \(!wasOwner\) return\s+revokeSandboxAclsForRun\(runToken\)\s+discardAgentAutoCommitTracking\(threadId\)\s+releaseAbandonedContinuationTurnState\(/g
+      /if \(!wasOwner\) return\s+revokeSandboxAclsForRun\(threadId\)\s+discardAgentAutoCommitTracking\(threadId\)\s+releaseLocalThreadRunLease\(threadId, "desktop", runToken\)\s+releaseAbandonedContinuationTurnState\(/g
     )?.length ?? 0
   assert(
     continuationReleaseCleanups === 2,
@@ -564,9 +565,7 @@ function testClearOnEveryRunExit(): void {
     "return waitForReplacedRunToSettle(threadId)",
     "thread deletion aborts and bounded-waits for its foreground run"
   )
-  const deletedRuntimeStart = agentIpc.indexOf(
-    "export function disposeDeletedAgentThreadRuntime("
-  )
+  const deletedRuntimeStart = agentIpc.indexOf("export function disposeDeletedAgentThreadRuntime(")
   assert(deletedRuntimeStart >= 0, "deleted-thread runtime cleanup exists")
   const deletedRuntimeBody = agentIpc.slice(deletedRuntimeStart, deletedRuntimeStart + 500)
   assertSourceOrder(
@@ -623,9 +622,10 @@ function testClearOnEveryRunExit(): void {
     "turnStates",
     "thread-state deletion must not prevent the physical owner from reclaiming ACLs"
   )
-  assertIncludes(
-    agentIpc,
-    "revokeSandboxAclsForRun(runToken)\n        discardAgentAutoCommitTracking(threadId)",
+  assert(
+    /revokeSandboxAclsForRun\(runToken\)\s+discardAgentAutoCommitTracking\(threadId\)/.test(
+      agentIpc
+    ),
     "a failed new-invoke setup reclaims inherited ACL and auto-commit tracking"
   )
   assertOccurrences(
@@ -642,8 +642,8 @@ function testClearOnEveryRunExit(): void {
   assertOccurrences(
     agentIpc,
     "currentRunMessageQueueOwnerToken: runToken",
-    7,
-    "invoke, resume, interrupt, and failover runtimes all receive the owner token"
+    3,
+    "invoke, resume, and interrupt factories pass the owner token to every failover runtime"
   )
 }
 
@@ -943,15 +943,54 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
   )
 }
 
+function testManagedAutoModeTerminalRunsInsideSettlementFence(): void {
+  const settlementHelperStart = agentIpc.indexOf("async function settlePhysicalAgentRun({")
+  const settlementHelperBody = agentIpc.slice(settlementHelperStart, settlementHelperStart + 9000)
+  assertSourceOrder(
+    settlementHelperBody,
+    "...criticalBeforeReleasePhases",
+    'name: "release-active-controller"',
+    "managed terminal phases run before physical ownership is released"
+  )
+  assertOccurrences(
+    agentIpc,
+    'name: "queue-managed-auto-mode-terminal"',
+    3,
+    "invoke, resume, and interrupt each queue exactly one managed terminal phase"
+  )
+  let managedPhaseIndex = agentIpc.indexOf('name: "queue-managed-auto-mode-terminal"')
+  for (const kind of ["invoke", "resume", "interrupt"]) {
+    assert(managedPhaseIndex >= 0, `${kind} managed terminal phase exists`)
+    const managedPhaseBody = agentIpc.slice(managedPhaseIndex, managedPhaseIndex + 5_000)
+    assertIncludes(
+      managedPhaseBody,
+      "isStillCurrent: () =>",
+      `${kind} managed terminal delivery carries an ownership predicate`
+    )
+    assertIncludes(
+      managedPhaseBody,
+      "isPhysicalStreamRunActive(threadId, runToken, abortController.signal)",
+      `${kind} managed terminal delivery is fenced to its physical run`
+    )
+    managedPhaseIndex = agentIpc.indexOf(
+      'name: "queue-managed-auto-mode-terminal"',
+      managedPhaseIndex + 1
+    )
+  }
+  assertIncludes(
+    agentIpc,
+    'name: "settle-managed-workflow-handoff"',
+    "invoke settles an exhausted workflow handoff before managed terminal delivery"
+  )
+}
+
 function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   assertIncludes(
     agentIpc,
     "pendingStreamTranscriptKey(threadId, runToken)",
     "stream transcript buffers are keyed by the physical run owner"
   )
-  const transcriptFlushStart = agentIpc.indexOf(
-    "function flushPendingStreamTranscriptMessages("
-  )
+  const transcriptFlushStart = agentIpc.indexOf("function flushPendingStreamTranscriptMessages(")
   assert(transcriptFlushStart >= 0, "stream transcript flush helper exists")
   const transcriptFlushBody = agentIpc.slice(transcriptFlushStart, transcriptFlushStart + 5000)
   assertSourceOrder(
@@ -1117,9 +1156,8 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "renderer delegates explicit delta/snapshot tool-call args semantics to the shared policy"
   )
   const physicalSideEffectGuardCount =
-    agentIpc.split(
-      "if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal))"
-    ).length - 1
+    agentIpc.split("if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal))")
+      .length - 1
   assert(
     physicalSideEffectGuardCount >= 9,
     `physical callbacks and catches stay run-scoped: got ${physicalSideEffectGuardCount}`
@@ -1328,9 +1366,9 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "const onHookResult = guardPhysicalStreamRunCallback(",
     "invoke, resume, and interrupt hook-result emitters are run-scoped"
   )
-  assertIncludes(
+  assertMatches(
     agentIpc,
-    "onSystemMessage: (notice) => {\n              sendHookNotice(notice)",
+    /onSystemMessage: \(notice\) => \{\s+sendHookNotice\(notice\)/,
     "prompt hook system messages use the run-scoped sender"
   )
 
@@ -1384,7 +1422,10 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   )
 
   const forkBoundaryHelperStart = agentIpc.indexOf("async function markLatestForkBoundary(")
-  const forkBoundaryHelperBody = agentIpc.slice(forkBoundaryHelperStart, forkBoundaryHelperStart + 2800)
+  const forkBoundaryHelperBody = agentIpc.slice(
+    forkBoundaryHelperStart,
+    forkBoundaryHelperStart + 2800
+  )
   assertIncludes(
     forkBoundaryHelperBody,
     "activeRuns.get(threadId) === controller",
@@ -1450,10 +1491,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   const completionBoundaryMarker = 'source: "agent_run_complete"'
   const completionBoundaryIndexes: number[] = []
   const registeredHandlersStart = agentIpc.indexOf("export function registerAgentHandlers(")
-  let completionBoundaryIndex = agentIpc.indexOf(
-    completionBoundaryMarker,
-    registeredHandlersStart
-  )
+  let completionBoundaryIndex = agentIpc.indexOf(completionBoundaryMarker, registeredHandlersStart)
   while (completionBoundaryIndex >= 0) {
     completionBoundaryIndexes.push(completionBoundaryIndex)
     completionBoundaryIndex = agentIpc.indexOf(
@@ -1468,7 +1506,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
     const body = agentIpc.slice(
       completionBoundaryIndexes[index],
-      completionBoundaryIndexes[index] + (label === "invoke" ? 18_000 : 1_800)
+      completionBoundaryIndexes[index] + 1000
     )
     const fence =
       label === "invoke"
@@ -1560,7 +1598,7 @@ function testPreparingGuidesParticipateInReconciliation(): void {
     "if (!cancelled) setQueuePumpTick((tick) => tick + 1)",
     "reload reconciliation retries while main still owns a preparing or pending handoff"
   )
-  const reconcileCatchStart = rendererReconcileBody.indexOf('.catch((error) => {')
+  const reconcileCatchStart = rendererReconcileBody.indexOf(".catch((error) => {")
   assert(reconcileCatchStart >= 0, "renderer reconcile catch branch not found")
   const reconcileCatchBody = rendererReconcileBody.slice(reconcileCatchStart)
   assertIncludes(
@@ -1623,18 +1661,18 @@ function testInjectionPayloadHasNoRedundantIdsField(): void {
     "messageIds: messages.map",
     "runtime's injection notifier payload no longer carries a redundant messageIds field"
   )
-  const listenerStart = threadContext.indexOf(
-    "window.api.agent.onQueuedMessagesInjected"
-  )
-  assert(listenerStart >= 0, "queued-message injection listener not found")
-  const listenerBody = threadContext.slice(listenerStart, listenerStart + 2400)
+  const injectionStart = threadContext.indexOf("window.api.agent.onQueuedMessagesInjected(")
+  const injectionEnd = threadContext.indexOf("window.api.sandbox", injectionStart)
+  assert(injectionStart >= 0, "queued-message injection listener is present")
+  assert(injectionEnd > injectionStart, "queued-message injection listener has a stable boundary")
+  const injectionListener = threadContext.slice(injectionStart, injectionEnd)
   assertNotIncludes(
-    listenerBody,
+    injectionListener,
     "fallbackMessages",
     "the unreachable content-fallback branch was removed, not just left dead"
   )
   assertIncludes(
-    listenerBody,
+    injectionListener,
     "const injectedIds = new Set(messages.map((message) => message.id))",
     "injectedIds is derived directly from messages, not a separate wire field"
   )
@@ -2146,7 +2184,10 @@ function testSteerAcknowledgementIsDurableAndReconciled(): void {
   )
   const durableDraftReconcileStart = chat.indexOf("// Reconcile handed-off drafts")
   assert(durableDraftReconcileStart >= 0, "durable draft reconciliation effect not found")
-  const durableDraftReconcileBody = chat.slice(durableDraftReconcileStart, durableDraftReconcileStart + 5000)
+  const durableDraftReconcileBody = chat.slice(
+    durableDraftReconcileStart,
+    durableDraftReconcileStart + 5000
+  )
   assertSourceOrder(
     durableDraftReconcileBody,
     "await syncDurableTranscript(missingDurableIds)",
@@ -2779,6 +2820,7 @@ function main(): void {
     testGuideUsesCurrentRunPromptPipeline,
     testClearOnEveryRunExit,
     testPhysicalRunSettlementCannotStrandQueuedReplacements,
+    testManagedAutoModeTerminalRunsInsideSettlementFence,
     testStreamTranscriptBuffersArePhysicalRunScoped,
     testPreparingGuidesParticipateInReconciliation,
     testPreloadExposesApi,

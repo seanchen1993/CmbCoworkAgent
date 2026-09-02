@@ -91,6 +91,13 @@ export interface CreateWorkflowToolOptions {
   modelId?: string
   /** Reads the current global YOLO state when the run-before gate is reached. */
   readYoloMode?: () => boolean
+  /** Physical-run observer. Called after the run manager accepts and schedules
+   * a launch, intentionally before initial persistence settles: even a later
+   * fail-closed spawn produces an error notification that ManagedRun must await.
+   * Observer failures are isolated so they cannot change the launched contract. */
+  onLaunched?: (runId: string) => void
+  /** Backward-compatible fixed YOLO value for non-production callers. */
+  yoloMode?: boolean
   /** Caches an "Approve for this session" decision so re-runs don't re-prompt. */
   approvalStore?: ApprovalStore
   /** Surfaces the approval card on the parent thread's UI. */
@@ -283,6 +290,11 @@ export function createWorkflowTool(options: CreateWorkflowToolOptions): DynamicS
         subagentDeps,
         runExclusiveFileWrite: options.runExclusiveFileWrite
       })
+      try {
+        options.onLaunched?.(launch.runId)
+      } catch (error) {
+        console.warn("[Workflow] onLaunched observer failed:", error)
+      }
 
       // Make the run and editable script durable BEFORE telling the model it
       // launched. A run-state write fault retains the warning behavior below;
@@ -333,7 +345,7 @@ async function ensureWorkflowApproved(
   tokenBudget: number | null,
   executionProfiles: readonly AgentProfile[]
 ): Promise<boolean> {
-  if (options.readYoloMode?.()) return true
+  if ((options.readYoloMode?.() ?? options.yoloMode) === true) return true
   const { approvalStore, requestApproval } = options
   if (!approvalStore || !requestApproval) {
     // Fail CLOSED, not open: a workflow can fan out and execute many file/shell
