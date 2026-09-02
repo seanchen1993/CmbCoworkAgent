@@ -292,8 +292,7 @@ describe("dashboard worker view-model projection", () => {
               }
             },
             memory_write: { doc_count: 2 },
-            hooks: { doc_count: 7, blocked: { doc_count: 3 } },
-            claude_code_launches: { doc_count: 5 }
+            hooks: { doc_count: 7, blocked: { doc_count: 3 } }
           }
         },
         { kind: "advanced-event" }
@@ -322,7 +321,6 @@ describe("dashboard worker view-model projection", () => {
       memWrite: 2,
       hookTotal: 7,
       hookBlocked: 3,
-      claudeCodeLaunches: 5,
       memSearch: 6,
       codeExec: 9,
       evolvedTraces: 2,
