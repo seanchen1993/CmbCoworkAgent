@@ -15,9 +15,7 @@ function nativeErrorCode(error: unknown): string {
   return typeof code === "string" && code ? code : error.name
 }
 
-export function classifyWorkspaceFilePreviewError(
-  error: unknown
-): WorkspaceFilePreviewErrorCode {
+export function classifyWorkspaceFilePreviewError(error: unknown): WorkspaceFilePreviewErrorCode {
   const code = nativeErrorCode(error).toUpperCase()
   const message = errorMessage(error).toLowerCase()
 
@@ -30,10 +28,11 @@ export function classifyWorkspaceFilePreviewError(
   if (code === "EACCES" || code === "EPERM" || /permission denied/.test(message)) {
     return WORKSPACE_FILE_PREVIEW_ERROR_CODES.FILESYSTEM_PERMISSION_DENIED
   }
+  if (/no trusted source grant/.test(message)) {
+    return WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_MISSING
+  }
   if (
-    /invalid or expired grant|grant expired|missing or invalid grant|sender mismatch|no trusted source grant/.test(
-      message
-    )
+    /invalid or expired grant|grant expired|missing or invalid grant|sender mismatch/.test(message)
   ) {
     return WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_INVALID
   }

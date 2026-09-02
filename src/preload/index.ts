@@ -94,7 +94,9 @@ import type {
   WorkspaceFilePreviewOpenMediaResult,
   WorkspaceFilePreviewReadRequest,
   WorkspaceFilePreviewReadResult,
-  WorkspaceFilePreviewReleaseRequest
+  WorkspaceFilePreviewReleaseRequest,
+  ToolFilePreviewGrantRequest,
+  ToolFilePreviewGrantResult
 } from "../shared/workspace-file-preview"
 import type {
   AttachmentBytesParseRequest,
@@ -1697,6 +1699,11 @@ const api = {
       threadId: string | null
     ): Promise<{ success: boolean; restarted?: boolean; workspacePath?: string | null }> => {
       return ipcRenderer.invoke("workspace:setActiveThread", { threadId })
+    },
+    authorizeToolFilePreview: (
+      request: ToolFilePreviewGrantRequest
+    ): Promise<ToolFilePreviewGrantResult> => {
+      return ipcRenderer.invoke("workspace:authorizeToolFilePreview", request)
     },
     readFilePreview: (
       request: WorkspaceFilePreviewReadRequest

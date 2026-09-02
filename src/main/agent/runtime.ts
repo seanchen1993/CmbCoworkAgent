@@ -33,6 +33,7 @@ import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import { getProjectThreadDataDirectory } from "./context-history-path"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
+import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
@@ -778,6 +779,27 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
         if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
         return handler(request)
       })
+    }
+  })
+}
+
+function createTrustedToolFilePreviewContextMiddleware(threadId: string) {
+  return createMiddleware({
+    name: "trustedToolFilePreviewContext",
+    wrapToolCall: (request, handler) => {
+      const toolCall = request.toolCall as { id?: string; name?: string } | undefined
+      const toolCallId = toolCall?.id?.trim()
+      const toolName = toolCall?.name?.trim()
+      if (
+        !toolCallId ||
+        !toolName ||
+        !["read_file", "write_file", "edit_file"].includes(toolName)
+      ) {
+        return handler(request)
+      }
+      return runWithTrustedToolFilePreviewContext({ threadId, toolCallId, toolName }, () =>
+        handler(request)
+      )
     }
   })
 }
@@ -2667,6 +2689,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           })
         ]
       : []),
+    ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
     todoListMiddleware(),
     createFsMiddleware(),
     ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
@@ -2865,6 +2888,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             })
           ]
         : []),
+      ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
       ...postFsToolDocStripMiddleware,

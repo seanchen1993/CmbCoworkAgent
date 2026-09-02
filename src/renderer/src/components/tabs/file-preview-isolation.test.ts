@@ -28,6 +28,19 @@ const externalGrants = readFileSync(
   new URL("../../../../main/services/external-file-read-tokens.ts", import.meta.url),
   "utf8"
 )
+const trustedToolPreview = readFileSync(
+  new URL("../../../../main/services/trusted-tool-file-preview.ts", import.meta.url),
+  "utf8"
+)
+const messageBubble = readFileSync(new URL("../chat/MessageBubble.tsx", import.meta.url), "utf8")
+const agentRuntime = readFileSync(
+  new URL("../../../../main/agent/runtime.ts", import.meta.url),
+  "utf8"
+)
+const localSandbox = readFileSync(
+  new URL("../../../../main/agent/local-sandbox.ts", import.meta.url),
+  "utf8"
+)
 const mediaProtocol = readFileSync(
   new URL("../../../../main/workspace-file-preview/media-protocol.ts", import.meta.url),
   "utf8"
@@ -70,6 +83,23 @@ describe("persisted active file preview isolation", () => {
     expect(harnessIpc).toContain("issueExternalFileReadGrant(")
     expect(externalGrants).toContain("realpath(entry.rootPath)")
     expect(externalGrants).toContain("realpath(candidate)")
+    expect(previewIpc).toContain('"workspace:authorizeToolFilePreview"')
+    expect(previewIpc).toContain("authorizeTrustedToolFilePreview(")
+    expect(trustedToolPreview).toContain(
+      "AsyncLocalStorage<ActiveTrustedToolFilePreviewContext>"
+    )
+    expect(trustedToolPreview).toContain("recordTrustedToolFilePreviewSource")
+    expect(trustedToolPreview).toContain("threadGeneration !== currentThreadGeneration")
+    expect(trustedToolPreview).toContain("external: false")
+    expect(messageBubble).toContain("authorizeToolFilePreview")
+    expect(messageBubble).toContain("beginOpenResourcePreviewIntent(threadId)")
+    expect(messageBubble).toContain("toolCallId: resolvedToolCall.id")
+    expect(rightPanel).toContain("toolCallId: latestResourceEvent.toolCallId")
+    expect(rightPanel).toContain("isCurrentOpenResourcePreviewIntent(")
+    expect(agentRuntime).toContain("createTrustedToolFilePreviewContextMiddleware(threadId)")
+    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "read")')
+    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "write")')
+    expect(localSandbox).toContain('recordTrustedToolFilePreviewSource(resolvedPath, "edit")')
     for (const removedChannel of [
       "workspace:requestExternalFileRead",
       "workspace:readExternalFile",

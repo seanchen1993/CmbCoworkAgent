@@ -79,7 +79,12 @@ import {
   type WorkspaceFileTreeNode
 } from "@/lib/workspace-file-tree-projection"
 import { Badge } from "@/components/ui/badge"
-import { emitOpenResourcePreview, onOpenResourcePreview } from "@/lib/resource-preview-events"
+import {
+  beginOpenResourcePreviewIntent,
+  emitOpenResourcePreview,
+  isCurrentOpenResourcePreviewIntent,
+  onOpenResourcePreview
+} from "@/lib/resource-preview-events"
 import { marketApi, type MarketItem } from "@/api/market"
 import type { Todo, SkillMetadata, PluginMetadata, LspConfig, LspStatus } from "@/types"
 import { SubagentCard } from "@/components/panels/SubagentPanel"
@@ -109,7 +114,10 @@ import {
   resolveResourcePreviewPaths,
   selectResourcePreviewFileSource
 } from "@/lib/resource-preview-paths"
-import type { WorkspaceFilePreviewWorkspacePathKind } from "../../../../shared/workspace-file-preview"
+import type {
+  ToolFilePreviewGrantResult,
+  WorkspaceFilePreviewWorkspacePathKind
+} from "../../../../shared/workspace-file-preview"
 import {
   getRightPanelSkillProjection,
   getRightPanelSkillProjectionAsync,
@@ -359,7 +367,13 @@ interface PreviewExternalAuthorization {
   expiresAt?: number
   projectId?: string
   slug?: string
+  toolCallId?: string
 }
+
+type SuccessfulToolFilePreviewGrant = Extract<
+  ToolFilePreviewGrantResult,
+  { success: true; external: true }
+> & { toolCallId: string }
 
 function toHarnessArtifactPreviewAuthorization(
   authorization: PreviewExternalAuthorization
@@ -386,6 +400,7 @@ function previewExternalAuthorizationIdentity(authorization: PreviewExternalAuth
     authorization.threadId,
     authorization.projectId ?? "",
     authorization.slug ?? "",
+    authorization.toolCallId ?? "",
     authorization.filePath
   ].join("\u0000")
 }
@@ -409,7 +424,9 @@ const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
   onApplyPreview: (
     path: string,
     workspacePathKind: WorkspaceFilePreviewWorkspacePathKind,
-    switchToPreview: boolean
+    switchToPreview: boolean,
+    intentId: number,
+    authorization?: SuccessfulToolFilePreviewGrant
   ) => void
 }): null {
   const streamData = useThreadStream(threadId)
@@ -417,6 +434,7 @@ const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
   const [projectCompletedResources] = useState(() =>
     createCompletedResourceProjector(window.electron.process.platform)
   )
+  const mountedRef = useRef(true)
   const previousLoadingRef = useRef(false)
   const lastAppliedPreviewKeyRef = useRef<string | null>(null)
   const lastRecordedBatchKeyRef = useRef<string | null>(null)
@@ -427,35 +445,64 @@ const RightPanelStreamEffects = memo(function RightPanelStreamEffects({
   )
 
   useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
     const wasLoading = previousLoadingRef.current
     const isLoading = streamData.isLoading
     previousLoadingRef.current = isLoading
     if (!(wasLoading && !isLoading) || !latestResourceEvent) return
 
-    const applyPreviewUpdate = (switchToPreview: boolean): void => {
-      if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
-      lastAppliedPreviewKeyRef.current = latestResourceEvent.key
-      onApplyPreview(
-        latestResourceEvent.path,
-        latestResourceEvent.workspacePathKind,
-        switchToPreview
-      )
-    }
+    if (lastAppliedPreviewKeyRef.current === latestResourceEvent.key) return
+    lastAppliedPreviewKeyRef.current = latestResourceEvent.key
+    const intentId = beginOpenResourcePreviewIntent(threadId)
+    let switchToPreview = moduleMode !== "git" && moduleMode !== "browser"
     if (
       latestCompletedLlmBatch?.files.length &&
       lastAutoSwitchedBatchKeyRef.current !== latestCompletedLlmBatch.batchKey
     ) {
       lastAutoSwitchedBatchKeyRef.current = latestCompletedLlmBatch.batchKey
-      applyPreviewUpdate(moduleMode !== "git" && moduleMode !== "browser")
-      return
+      switchToPreview = moduleMode !== "git" && moduleMode !== "browser"
     }
-    applyPreviewUpdate(moduleMode !== "git" && moduleMode !== "browser")
+
+    void window.api.workspace
+      .authorizeToolFilePreview({
+        threadId,
+        toolCallId: latestResourceEvent.toolCallId
+      })
+      .then((authorization) => {
+        if (!mountedRef.current) return
+        onApplyPreview(
+          authorization.success ? authorization.filePath : latestResourceEvent.path,
+          authorization.success ? "absolute" : latestResourceEvent.workspacePathKind,
+          switchToPreview,
+          intentId,
+          authorization.success && authorization.external
+            ? { ...authorization, toolCallId: latestResourceEvent.toolCallId }
+            : undefined
+        )
+      })
+      .catch((error) => {
+        if (!mountedRef.current) return
+        console.error("[RightPanel] Failed to authorize completed resource preview:", error)
+        onApplyPreview(
+          latestResourceEvent.path,
+          latestResourceEvent.workspacePathKind,
+          switchToPreview,
+          intentId
+        )
+      })
   }, [
     latestCompletedLlmBatch,
     latestResourceEvent,
     moduleMode,
     onApplyPreview,
-    streamData.isLoading
+    streamData.isLoading,
+    threadId
   ])
 
   useEffect(() => {
@@ -526,6 +573,10 @@ export function RightPanel({
   const coordinatorWorkers =
     useThreadStateSelector(currentThreadId, (state) => state.coordinatorWorkers) ?? []
   const workspacePath = useThreadStateSelector(currentThreadId, (state) => state.workspacePath)
+  const workspacePathRef = useRef(workspacePath)
+  workspacePathRef.current = workspacePath
+  const moduleModeRef = useRef(moduleMode)
+  moduleModeRef.current = moduleMode
   const gitContext = useThreadStateSelector(currentThreadId, (state) => state.gitContext)
   const harnessAgentmdLoadStatus = useThreadStateSelector(
     currentThreadId,
@@ -544,6 +595,7 @@ export function RightPanel({
   const [previewWorkspacePathKind, setPreviewWorkspacePathKind] =
     useState<WorkspaceFilePreviewWorkspacePathKind>("relative")
   const previewThreadIdRef = useRef<string | null>(null)
+  const latestPreviewIntentIdRef = useRef(0)
   const [previewExternalAuthorization, setPreviewExternalAuthorization] =
     useState<PreviewExternalAuthorization | null>(null)
   const previewExternalAuthorizationRef = useRef<PreviewExternalAuthorization | null>(null)
@@ -563,8 +615,12 @@ export function RightPanel({
     const current = previewExternalAuthorizationRef.current
     if (!current) throw new Error("当前外部文件预览没有可信来源授权")
     const renewable = toHarnessArtifactPreviewAuthorization(current)
-    if (!renewable) return current.grant
-    if (isHarnessPluginRunArtifactGrantFresh(renewable.grant, renewable.expiresAt)) {
+    const toolGrantFresh = current.toolCallId
+      ? isHarnessPluginRunArtifactGrantFresh(current.grant, current.expiresAt)
+      : false
+    if (toolGrantFresh) return current.grant
+    if (!current.toolCallId && !renewable) return current.grant
+    if (renewable && isHarnessPluginRunArtifactGrantFresh(renewable.grant, renewable.expiresAt)) {
       return renewable.grant
     }
 
@@ -574,13 +630,32 @@ export function RightPanel({
       const marker = {}
       const promise = (async (): Promise<PreviewExternalAuthorization> => {
         try {
-          const refreshed = await ensureHarnessPluginRunArtifactPreviewAuthorization(
-            renewable,
-            (input) => window.api.harnessBoard.refreshRunArtifactGrant(input)
-          )
+          let refreshed: { grant: string; expiresAt: number; filePath: string }
+          if (current.toolCallId) {
+            const result = await window.api.workspace.authorizeToolFilePreview({
+              threadId: current.threadId,
+              toolCallId: current.toolCallId
+            })
+            if (!result.success) throw new Error(result.error)
+            if (!result.external) throw new Error("工具文件已移入工作区，外部授权不再适用")
+            refreshed = result
+          } else {
+            const result = await ensureHarnessPluginRunArtifactPreviewAuthorization(
+              renewable!,
+              (input) => window.api.harnessBoard.refreshRunArtifactGrant(input)
+            )
+            refreshed = result
+          }
           const latest = previewExternalAuthorizationRef.current
           if (!latest || previewExternalAuthorizationIdentity(latest) !== identity) {
-            throw new Error("产物预览已切换，已忽略过期授权续签")
+            throw new Error("文件预览已切换，已忽略过期授权续签")
+          }
+          if (
+            current.toolCallId &&
+            normalizeWorkspaceFileKey(refreshed.filePath) !==
+              normalizeWorkspaceFileKey(latest.filePath)
+          ) {
+            throw new Error("工具文件预览来源已变化，已拒绝复用授权")
           }
           const next = {
             ...latest,
@@ -1247,17 +1322,49 @@ export function RightPanel({
     (
       path: string,
       workspacePathKind: WorkspaceFilePreviewWorkspacePathKind,
-      switchToPreview: boolean
+      switchToPreview: boolean,
+      intentId: number,
+      authorization?: SuccessfulToolFilePreviewGrant
     ): void => {
       if (!currentThreadId) return
+      if (
+        !isCurrentOpenResourcePreviewIntent(
+          currentThreadId,
+          intentId,
+          latestPreviewIntentIdRef.current
+        )
+      ) {
+        return
+      }
+      latestPreviewIntentIdRef.current = intentId
+      const shouldUseExternalAuthorization = Boolean(
+        authorization &&
+          !resolveResourcePreviewPaths(
+            path,
+            workspacePathRef.current ?? null,
+            window.electron.process.platform,
+            workspacePathKind
+          ).inWorkspace
+      )
       previewThreadIdRef.current = currentThreadId
       setPreviewPath(path)
       setPreviewWorkspacePathKind(workspacePathKind)
       previewExternalGrantRefreshPromiseRef.current = null
-      replacePreviewExternalAuthorization(null)
+      replacePreviewExternalAuthorization(
+        authorization && shouldUseExternalAuthorization
+          ? {
+              threadId: currentThreadId,
+              filePath: path,
+              grant: authorization.grant,
+              expiresAt: authorization.expiresAt,
+              toolCallId: authorization.toolCallId
+            }
+          : null
+      )
       setPreviewReloadToken((version) => version + 1)
       if (!switchToPreview) return
-      if (isHtmlPreviewPath(path)) {
+      if (moduleModeRef.current === "git" || moduleModeRef.current === "browser") return
+      if (isHtmlPreviewPath(path) && !shouldUseExternalAuthorization) {
         onRequestBrowserMode?.()
       } else {
         onRequestPreviewMode?.()
@@ -1273,6 +1380,8 @@ export function RightPanel({
 
   useEffect(() => {
     if (lastThreadIdRef.current !== currentThreadId) {
+      const previousThreadId = lastThreadIdRef.current
+      if (previousThreadId) beginOpenResourcePreviewIntent(previousThreadId)
       lastThreadIdRef.current = currentThreadId
       previewThreadIdRef.current = null
       setPreviewPath(null)
@@ -1281,6 +1390,10 @@ export function RightPanel({
       replacePreviewExternalAuthorization(null)
     }
   }, [currentThreadId, replacePreviewExternalAuthorization])
+
+  useEffect(() => {
+    if (currentThreadId) beginOpenResourcePreviewIntent(currentThreadId)
+  }, [currentThreadId, moduleMode])
 
   useEffect(() => {
     if (!currentThreadId) return
@@ -1301,27 +1414,49 @@ export function RightPanel({
         externalPreviewGrant,
         externalPreviewGrantExpiresAt,
         externalPreviewProjectId,
-        externalPreviewSlug
+        externalPreviewSlug,
+        toolCallId,
+        intentId
       }) => {
         if (!currentThreadId || threadId !== currentThreadId) return
+        if (
+          !isCurrentOpenResourcePreviewIntent(
+            threadId,
+            intentId,
+            latestPreviewIntentIdRef.current
+          )
+        ) {
+          return
+        }
+        latestPreviewIntentIdRef.current = intentId
+        const shouldUseExternalAuthorization = Boolean(
+          externalPreviewGrant &&
+            !resolveResourcePreviewPaths(
+              filePath,
+              workspacePath ?? null,
+              window.electron.process.platform,
+              workspacePathKind
+            ).inWorkspace
+        )
         previewThreadIdRef.current = threadId
         setPreviewPath(filePath)
         setPreviewWorkspacePathKind(workspacePathKind)
         previewExternalGrantRefreshPromiseRef.current = null
         replacePreviewExternalAuthorization(
-          externalPreviewGrant
+          externalPreviewGrant && shouldUseExternalAuthorization
             ? {
                 threadId,
                 filePath,
                 grant: externalPreviewGrant,
                 expiresAt: externalPreviewGrantExpiresAt,
                 projectId: externalPreviewProjectId,
-                slug: externalPreviewSlug
+                slug: externalPreviewSlug,
+                toolCallId
               }
             : null
         )
         setPreviewReloadToken((v) => v + 1)
-        if (isHtmlPreviewPath(filePath) && !externalPreviewGrant) {
+        if (isHtmlPreviewPath(filePath) && !shouldUseExternalAuthorization) {
           onRequestBrowserMode?.()
         } else {
           onRequestPreviewMode?.()
@@ -1333,7 +1468,8 @@ export function RightPanel({
     currentThreadId,
     onRequestBrowserMode,
     onRequestPreviewMode,
-    replacePreviewExternalAuthorization
+    replacePreviewExternalAuthorization,
+    workspacePath
   ])
 
   useEffect(() => {
@@ -2792,6 +2928,7 @@ function PluginRunArtifactsContent({
   const openArtifact = useCallback(
     async (artifact: HarnessPluginRunArtifactsContext["files"][number]): Promise<void> => {
       if (!threadId) return
+      const intentId = beginOpenResourcePreviewIntent(threadId)
       const actionGeneration = artifactActionGenerationRef.current
       const filePath = resolveHarnessPluginRunArtifactPath(context.projectRootPath, artifact.path)
       if (!filePath) {
@@ -2830,6 +2967,7 @@ function PluginRunArtifactsContent({
       emitOpenResourcePreview({
         threadId,
         filePath,
+        intentId,
         externalPreviewGrant: previewAuthorization.grant,
         externalPreviewGrantExpiresAt: previewAuthorization.expiresAt,
         externalPreviewProjectId: context.projectId,
@@ -2943,7 +3081,7 @@ function ResourcePreview({
     () =>
       selectResourcePreviewFileSource(
         resolved,
-        Boolean(externalPreviewGrant || resolveExternalPreviewGrant)
+        !resolved.inWorkspace && Boolean(externalPreviewGrant || resolveExternalPreviewGrant)
       ),
     [externalPreviewGrant, resolveExternalPreviewGrant, resolved]
   )
@@ -4192,6 +4330,7 @@ function SkillsContent({
         toast.error("技能身份不完整，无法安全预览")
         return
       }
+      const intentId = beginOpenResourcePreviewIntent(threadId)
       const generation = previewGrantGenerationRef.current + 1
       previewGrantGenerationRef.current = generation
       try {
@@ -4209,6 +4348,7 @@ function SkillsContent({
         emitOpenResourcePreview({
           threadId,
           filePath: authorized.filePath,
+          intentId,
           externalPreviewGrant: authorized.grant
         })
       } catch (error) {

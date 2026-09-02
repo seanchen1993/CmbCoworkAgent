@@ -163,7 +163,9 @@ import type {
   WorkspaceFilePreviewOpenMediaResult,
   WorkspaceFilePreviewReadRequest,
   WorkspaceFilePreviewReadResult,
-  WorkspaceFilePreviewReleaseRequest
+  WorkspaceFilePreviewReleaseRequest,
+  ToolFilePreviewGrantRequest,
+  ToolFilePreviewGrantResult
 } from "../shared/workspace-file-preview"
 import type {
   AttachmentBytesParseRequest,
@@ -1417,6 +1419,9 @@ interface CustomAPI {
       restarted?: boolean
       workspacePath?: string | null
     }>
+    authorizeToolFilePreview: (
+      request: ToolFilePreviewGrantRequest
+    ) => Promise<ToolFilePreviewGrantResult>
     readFilePreview: (
       request: WorkspaceFilePreviewReadRequest
     ) => Promise<WorkspaceFilePreviewReadResult>
