@@ -120,6 +120,64 @@ describe("bounded trace telemetry", () => {
     expect(Buffer.byteLength(readFileSync(persistedPath, "utf8"), "utf8")).toBeLessThan(1024 * 1024)
   }, 15_000)
 
+  it("keeps countable skeletons once the byte budget is spent", async () => {
+    const root = makeRoot("trace-collector-skeleton-")
+    process.env.CMB_COWORK_TRACES_DIR = root
+    process.env.CMB_COWORK_TRACE_STORAGE_MODE = "plaintext"
+    mockCollectorDependencies()
+    const { TraceCollector } = await import("./collector")
+
+    const tracer = new TraceCollector("thread-skeleton", "hi", "model", {
+      includeSkillEval: false
+    })
+    // Under every TRACE_MAX_* cap, so this isolates the byte-budget behaviour:
+    // the caps are a separate, still-hard limit.
+    const TURNS = 60
+    for (let i = 0; i < TURNS; i += 1) {
+      const messageId = `m-${i}`
+      const blob = `${i}-` + "a".repeat(8 * 1024)
+      tracer.beginStep()
+      tracer.recordToolCall({ name: "exec_command", args: { i, blob } })
+      tracer.endStep(blob)
+      const nodeId = tracer.beginLlmNode({ messageId })
+      tracer.recordModelCall({
+        messageId,
+        startedAt: new Date().toISOString(),
+        inputMessages: [{ role: "tool", content: blob }],
+        outputMessage: { role: "assistant", content: blob },
+        toolCalls: [{ name: "exec_command", args: { i } }],
+        tokenUsage: { inputTokens: 1000, outputTokens: 50, totalTokens: 1050 }
+      })
+      tracer.endLlmNode({ nodeId, output: blob })
+    }
+    const trace = await tracer.finish("success")
+
+    // The budget runs out long before 120 turns. Dropping the entries outright
+    // used to take the counts with them, understating exactly the longest turns
+    // — and the dashboard sums tool counts and tokens off these arrays.
+    expect(trace.totalToolCalls).toBe(TURNS)
+    expect(trace.steps).toHaveLength(TURNS)
+    expect(trace.modelCalls).toHaveLength(TURNS)
+    const tokens = (trace.modelCalls ?? []).reduce(
+      (sum, call) => sum + (call.tokenUsage?.inputTokens ?? 0),
+      0
+    )
+    expect(tokens).toBe(TURNS * 1000)
+
+    // Skeletons carry shape, not payload.
+    const skeletons = (trace.modelCalls ?? []).filter((call) => call.truncated)
+    expect(skeletons.length).toBeGreaterThan(0)
+    expect(skeletons.every((call) => call.inputMessages.length === 0)).toBe(true)
+    expect(skeletons.every((call) => Boolean(call.startedAt))).toBe(true)
+    const skeletonTools = trace.steps.flatMap((step) =>
+      step.toolCalls.filter((call) => call.truncated)
+    )
+    expect(skeletonTools.length).toBeGreaterThan(0)
+    // The tool name survives — it is a queried dimension.
+    expect(skeletonTools.every((call) => call.name === "exec_command")).toBe(true)
+    expect(skeletonTools.every((call) => Object.keys(call.args).length === 0)).toBe(true)
+  }, 30_000)
+
   it("holds a trace under the persist limit even when every field is maxed out", async () => {
     const root = makeRoot("trace-collector-ceiling-")
     process.env.CMB_COWORK_TRACES_DIR = root

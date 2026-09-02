@@ -36,6 +36,13 @@ export interface TraceToolCall {
   result?: string
   /** Wall-clock time in ms for this tool call */
   durationMs?: number
+  /**
+   * The byte budget was spent when this was recorded, so only the shape was
+   * kept — name and timing, no args or result. The entry still exists because
+   * dropping it would also drop the count, and per-trace tool counts and tool
+   * names are operational metrics.
+   */
+  truncated?: boolean
 }
 
 /** A normalized chat message used by model-call traces. */
@@ -90,6 +97,12 @@ export interface TraceModelCall {
   toolCalls: TraceToolCall[]
   /** Provider token usage metadata */
   tokenUsage?: TraceTokenUsage
+  /**
+   * Recorded after the byte budget was spent: messages and tool args dropped,
+   * tokenUsage kept. Token totals are summed from this array, so a dropped
+   * entry would silently understate a long turn's cost.
+   */
+  truncated?: boolean
 }
 
 export type TraceNodeType =
@@ -117,6 +130,8 @@ export interface TraceNode {
   input?: unknown
   output?: unknown
   metadata?: Record<string, unknown>
+  /** Recorded after the byte budget was spent: structure kept, payload dropped. */
+  truncated?: boolean
 }
 
 /** One reasoning step (one model message + its tool calls). */
@@ -137,6 +152,8 @@ export interface TraceStep {
   assistantTextMid?: string
   /** All tool calls made during this step */
   toolCalls: TraceToolCall[]
+  /** Recorded after the byte budget was spent: shape kept, assistantText dropped. */
+  truncated?: boolean
 }
 
 // ─────────────────────────────────────────────────────────

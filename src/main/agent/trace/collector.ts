@@ -873,11 +873,27 @@ export class TraceCollector {
 
   /** Record a tool call within the current step. */
   recordToolCall(call: TraceToolCall): void {
+    // The count caps are hard: past them the array itself must stop growing.
     if (
       this.recordedToolCallCount >= TRACE_MAX_TOOL_CALLS ||
-      this.currentToolCalls.length >= TRACE_MAX_TOOL_CALLS_PER_STEP ||
-      !this.collectionBudget.canAdd(256)
+      this.currentToolCalls.length >= TRACE_MAX_TOOL_CALLS_PER_STEP
     ) {
+      return
+    }
+    // A spent byte budget is not a reason to forget the call happened. Keep the
+    // name and drop the payload: totalToolCalls is counted off this array and
+    // tool names are a queried dimension, so dropping the entry would understate
+    // exactly the longest turns.
+    if (!this.collectionBudget.canAdd(256)) {
+      this.currentToolCalls.push({
+        name: clampText(String(call.name ?? "unknown"), 128),
+        args: {},
+        ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs)
+          ? { durationMs: Math.max(0, Math.min(call.durationMs, 24 * 60 * 60 * 1000)) }
+          : {}),
+        truncated: true
+      })
+      this.recordedToolCallCount += 1
       return
     }
     this.currentToolCalls.push(
@@ -976,8 +992,23 @@ export class TraceCollector {
 
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
-    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512))
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS) return
+    // Token totals are summed off this array by the dashboard, so a spent
+    // budget must cost the messages, not the entry: keep timing and usage.
+    if (!this.collectionBudget.canAdd(512)) {
+      this.modelCalls.push({
+        ...(typeof call.messageId === "string"
+          ? { messageId: clampText(call.messageId, 128) }
+          : {}),
+        startedAt: clampText(call.startedAt, 64),
+        inputMessages: [],
+        outputMessage: { role: "assistant", content: "" },
+        toolCalls: [],
+        ...(call.tokenUsage ? { tokenUsage: call.tokenUsage } : {}),
+        truncated: true
+      })
       return
+    }
     const inputMessages = this.dedupeChatMessages(
       call.inputMessages.slice(0, TRACE_MAX_MODEL_MESSAGES)
     ).map((message) => boundTraceChatMessage(message, this.collectionBudget))
@@ -1185,7 +1216,21 @@ export class TraceCollector {
    * @param assistantText - The assistant's text reasoning for this step.
    */
   endStep(assistantText: string): void {
-    if (this.steps.length >= TRACE_MAX_STEPS || !this.collectionBudget.canAdd(128)) {
+    if (this.steps.length >= TRACE_MAX_STEPS) {
+      this.currentToolCalls = []
+      return
+    }
+    // Keep the step (and the tool calls already attached to it) even with no
+    // budget left for its text — the step count and its tool calls are what
+    // totalToolCalls is derived from.
+    if (!this.collectionBudget.canAdd(128)) {
+      this.steps.push({
+        index: this.currentStepIndex++,
+        startedAt: this.currentStepStartedAt,
+        assistantText: "",
+        toolCalls: [...this.currentToolCalls],
+        truncated: true
+      })
       this.currentToolCalls = []
       return
     }
@@ -1522,7 +1567,26 @@ export class TraceCollector {
   }
 
   private pushNode(node: TraceNode): boolean {
-    if (this.nodes.length >= TRACE_MAX_NODES || !this.collectionBudget.canAdd(256)) return false
+    if (this.nodes.length >= TRACE_MAX_NODES) return false
+    // Structure is what makes the tree readable and countable; only the payload
+    // is negotiable. With no budget left, keep the node and drop input/output.
+    if (!this.collectionBudget.canAdd(256)) {
+      const skeleton: TraceNode = {
+        ...node,
+        id: clampText(node.id, 512),
+        parentId: node.parentId ? clampText(node.parentId, 512) : null,
+        ...(node.name ? { name: clampText(node.name, 512) } : {}),
+        startedAt: clampText(node.startedAt, 64),
+        ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
+        input: undefined,
+        output: undefined,
+        metadata: undefined,
+        truncated: true
+      }
+      const skeletonIndex = this.nodes.push(skeleton) - 1
+      this.nodeIndexById.set(skeleton.id, skeletonIndex)
+      return true
+    }
     const metadata = this.collectionBudget.takeValue(node.metadata, 32 * 1024)
     const boundedNode: TraceNode = {
       ...node,
