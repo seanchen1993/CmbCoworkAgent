@@ -1,4 +1,10 @@
-import type { AgentTrace, TraceNode, TraceNodeStatus, TraceToolCall } from "./types"
+import type {
+  AgentTrace,
+  TraceChatMessage,
+  TraceNode,
+  TraceNodeStatus,
+  TraceToolCall
+} from "./types"
 
 function outcomeToStatus(outcome: AgentTrace["outcome"]): TraceNodeStatus {
   if (outcome === "error") return "error"
@@ -87,9 +93,54 @@ function pickToolCalls(
   return stepToolCalls
 }
 
+function isChatMessageArray(value: unknown): value is TraceChatMessage[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        item !== null &&
+        typeof item === "object" &&
+        typeof (item as TraceChatMessage).role === "string"
+    )
+  )
+}
+
+/**
+ * The collector stores each chat message once per trace and records later
+ * occurrences as `{ role, ref }`. Rebuild the full windows here — this is the
+ * single entry point every display path goes through, so nothing downstream
+ * ever sees a ref.
+ */
+function rehydrateChatMessages(trace: AgentTrace, nodes: TraceNode[]): TraceNode[] {
+  const byId = new Map<string, TraceChatMessage>()
+  const collect = (messages: readonly TraceChatMessage[]): void => {
+    for (const message of messages) {
+      if (typeof message.mid === "string" && !byId.has(message.mid)) byId.set(message.mid, message)
+    }
+  }
+  for (const node of nodes) if (isChatMessageArray(node.input)) collect(node.input)
+  for (const call of trace.modelCalls ?? []) collect(call.inputMessages ?? [])
+  if (byId.size === 0) return nodes
+
+  const resolve = (messages: readonly TraceChatMessage[]): TraceChatMessage[] =>
+    messages.map((message) => {
+      if (typeof message.ref !== "string") return message
+      const source = byId.get(message.ref)
+      // A dangling ref means the occurrence holding the content was dropped by
+      // a cap or the byte budget. Keep the placeholder shape rather than
+      // inventing content.
+      if (!source) return { ...message, content: "" }
+      return { ...source, ...(message.name ? { name: message.name } : {}) }
+    })
+
+  return nodes.map((node) =>
+    isChatMessageArray(node.input) ? { ...node, input: resolve(node.input) } : node
+  )
+}
+
 export function buildTraceTree(trace: AgentTrace): TraceNode[] {
   if (Array.isArray(trace.nodes) && trace.nodes.length > 0) {
-    return ensureRootNode(trace, trace.nodes)
+    return rehydrateChatMessages(trace, ensureRootNode(trace, trace.nodes))
   }
 
   const rootId = `trace:${trace.traceId}`
@@ -237,5 +288,7 @@ export function buildTraceTree(trace: AgentTrace): TraceNode[] {
     })
   }
 
-  return nodes
+  // Legacy traces with no persisted nodes: the windows come from modelCalls,
+  // which carry the same refs, so they need the same rehydration.
+  return rehydrateChatMessages(trace, nodes)
 }

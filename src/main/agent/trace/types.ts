@@ -36,6 +36,17 @@ export interface TraceChatMessage {
   reasoning?: string
   name?: string
   toolCallId?: string
+  /**
+   * Content-addressed id, present on the FIRST occurrence of a message within a
+   * trace. The LLM input window slides by one call while advancing only a
+   * message or two, so the same message is recorded by several consecutive
+   * calls — and each call records its window twice (llm node input + model
+   * call). Later occurrences carry `ref` instead of the content; buildTraceTree
+   * puts the content back before anything renders it.
+   */
+  mid?: string
+  /** Set on a repeat: the `mid` of the occurrence that holds the content. */
+  ref?: string
 }
 
 /** Token usage attached to a model call (if provider reports it). */

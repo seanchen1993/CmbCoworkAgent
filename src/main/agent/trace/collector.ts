@@ -14,6 +14,7 @@
  *   await tracer.finish("success")
  */
 
+import { createHash } from "crypto"
 import { join } from "path"
 import { homedir } from "os"
 import { lstat, opendir, readFile, rename, rmdir, unlink, writeFile } from "fs/promises"
@@ -475,6 +476,39 @@ function boundTraceToolCall(call: TraceToolCall, budget: TraceCollectionBudget):
   }
 }
 
+/**
+ * Content-addressed id for one chat message. Two messages with the same role,
+ * text and tool linkage are the same message as far as a trace reader is
+ * concerned, so they collapse to one stored copy.
+ */
+function chatMessageId(message: TraceChatMessage): string {
+  return createHash("sha1")
+    .update(
+      [
+        message.role,
+        message.content ?? "",
+        message.reasoning ?? "",
+        message.name ?? "",
+        message.toolCallId ?? ""
+      ].join("\u0000")
+    )
+    .digest("hex")
+    .slice(0, 16)
+}
+
+/** True for the LLM input windows recorded by beginLlmNode / recordModelCall. */
+function isChatMessageArray(value: unknown): value is TraceChatMessage[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        item !== null &&
+        typeof item === "object" &&
+        typeof (item as TraceChatMessage).role === "string"
+    )
+  )
+}
+
 function boundTraceChatMessage(
   message: TraceChatMessage,
   budget: TraceCollectionBudget
@@ -483,6 +517,8 @@ function boundTraceChatMessage(
   const role = allowedRoles.has(message.role) ? message.role : "unknown"
   return {
     role,
+    ...(typeof message.mid === "string" ? { mid: message.mid } : {}),
+    ...(typeof message.ref === "string" ? { ref: message.ref } : {}),
     content: budget.takeText(String(message.content ?? ""), 16 * 1024),
     ...(typeof message.reasoning === "string"
       ? { reasoning: budget.takeText(message.reasoning, 8 * 1024) }
@@ -590,6 +626,13 @@ export class TraceCollector {
   private readonly rootNodeId: string
   private terminalNodeAdded = false
   private finishPromise: Promise<AgentTrace> | undefined
+
+  /**
+   * Ids of chat messages whose content is already stored somewhere in this
+   * trace. Shared by beginLlmNode and recordModelCall, so the second recording
+   * of the same window collapses to refs.
+   */
+  private readonly storedChatMessageIds = new Set<string>()
 
   /** The step currently being built (between beginStep / endStep). */
   private currentStepIndex = 0
@@ -851,13 +894,30 @@ export class TraceCollector {
     return Math.max(stepToolCalls, nodeToolCalls, metadataToolCalls, metadataToolCallCounts)
   }
 
+  /**
+   * Replace every message already stored in this trace with a ref to the stored
+   * copy. The window slides one call at a time and each call records it twice,
+   * so without this the same text lands in the trace roughly nine times and
+   * crowds out everything recorded later.
+   */
+  private dedupeChatMessages(messages: readonly TraceChatMessage[]): TraceChatMessage[] {
+    return messages.map((message) => {
+      const mid = chatMessageId(message)
+      if (this.storedChatMessageIds.has(mid)) {
+        return { role: message.role, content: "", ref: mid }
+      }
+      this.storedChatMessageIds.add(mid)
+      return { ...message, mid }
+    })
+  }
+
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512))
       return
-    const inputMessages = call.inputMessages
-      .slice(0, TRACE_MAX_MODEL_MESSAGES)
-      .map((message) => boundTraceChatMessage(message, this.collectionBudget))
+    const inputMessages = this.dedupeChatMessages(
+      call.inputMessages.slice(0, TRACE_MAX_MODEL_MESSAGES)
+    ).map((message) => boundTraceChatMessage(message, this.collectionBudget))
     const toolCalls = call.toolCalls
       .slice(0, TRACE_MAX_TOOL_CALLS_PER_STEP)
       .map((toolCall) => boundTraceToolCall(toolCall, this.collectionBudget))
@@ -900,7 +960,9 @@ export class TraceCollector {
       name: params?.name ?? "LLM Call",
       status: "running",
       startedAt: params?.startedAt ?? nowIsoLocal(),
-      input: params?.input,
+      input: isChatMessageArray(params?.input)
+        ? this.dedupeChatMessages(params.input)
+        : params?.input,
       metadata: {
         ...metadata,
         ...(messageId ? { messageId } : {})
