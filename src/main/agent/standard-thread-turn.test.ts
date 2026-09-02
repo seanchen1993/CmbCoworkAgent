@@ -19,6 +19,10 @@ import {
 } from "./standard-thread-turn"
 import { extractErrorDetail } from "./failover"
 import type { CreateAgentRuntimeOptions } from "./runtime"
+import {
+  HarnessDeployUnitContextLimitError,
+  HarnessSessionContextLimitError
+} from "../harness-board/context-integrity"
 
 describe("getHarnessAgentContext", () => {
   beforeEach(() => {
@@ -117,6 +121,40 @@ describe("getHarnessAgentContext", () => {
       harnessProjectId: "project-1",
       featureId: "feature-1",
       pluginPromptInject: "critical harness constraints"
+    })
+  })
+
+  it("surfaces an actionable error when plugin session context exceeds the safety budget", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    harnessServiceMocks.buildHarnessFeatureAgentContext.mockRejectedValue(
+      new HarnessSessionContextLimitError(60_001)
+    )
+
+    const error = await getHarnessAgentContext({ harnessFeature: {} }).catch(
+      (caught: unknown) => caught
+    )
+
+    expect(extractErrorDetail(error)).toMatchObject({
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文超限",
+      reason: expect.stringContaining("60001")
+    })
+  })
+
+  it("surfaces the framework workspace limit instead of omitting repositories", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    harnessServiceMocks.buildHarnessFeatureAgentContext.mockRejectedValue(
+      new HarnessDeployUnitContextLimitError("cmbdevclaw", 65)
+    )
+
+    const error = await getHarnessAgentContext({ harnessFeature: {} }).catch(
+      (caught: unknown) => caught
+    )
+
+    expect(extractErrorDetail(error)).toMatchObject({
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 仓库上下文超限",
+      reason: expect.stringContaining("received 65")
     })
   })
 

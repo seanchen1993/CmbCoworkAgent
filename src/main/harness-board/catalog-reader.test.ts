@@ -24,6 +24,10 @@ import {
 } from "./catalog-protocol"
 import { HARNESS_WORKER_RESOURCE_LIMITS, harnessWorkerOptions } from "./worker-limits"
 import { HARNESS_PROJECT_TEXT_MAX_CHARS } from "./store-limits"
+import {
+  HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES,
+  HARNESS_FRAMEWORK_DEPLOY_UNIT_CONTEXT_MAX_ENTRIES
+} from "./context-integrity"
 
 const tempDirs: string[] = []
 let workerBuildDirectory = ""
@@ -217,6 +221,303 @@ describe("Harness catalog reader", () => {
     ])
     expect(result.projects["project-0"]?.sessionContextInjectionSource).toBe("cmbdevclaw")
     expect(result.stats.responseBytes).toBeLessThanOrEqual(HARNESS_CATALOG_MAX_RESPONSE_BYTES)
+  })
+
+  it("projects more than 64 selected deploy units without silently dropping the tail", async () => {
+    const paths = await makeCatalog(1)
+    const root = join(paths.projects, "..")
+    const featureBindingStorePath = join(root, "harness-board-features.json")
+    const deployUnitMappingStorePath = join(root, "harness-deployUnitId-mapping.json")
+    const selectedCount = 65
+    const snapshots = Array.from({ length: selectedCount }, (_, index) => ({
+      deployUnitIdMapping: `mapping-${index}`,
+      deployUnitId: `snapshot-${index}`,
+      localRepoPath: `C:/snapshot/${index}`
+    }))
+    const configured = snapshots.map((mapping, index) => ({
+      ...mapping,
+      deployUnitId: `current-${index}`,
+      localRepoPath: `C:/current/${index}`
+    }))
+    const pluginRows = JSON.parse(readFileSync(paths.plugins, "utf8")) as Array<{ path: string }>
+    writeFileSync(
+      join(pluginRows[0]!.path, "board_core", "board_config.json"),
+      JSON.stringify({
+        apiVersion: 1,
+        inspectCommands: { [process.platform]: { session_context_inject: "run" } },
+        supported_deploy_units: configured.map((mapping) => mapping.deployUnitId)
+      })
+    )
+    writeFileSync(
+      featureBindingStorePath,
+      JSON.stringify({
+        version: 1,
+        bindings: [
+          {
+            projectId: "project-0",
+            featureId: "feature-many",
+            selectedDeployUnitMappings: snapshots,
+            sessionContextInjectionSource: "plugin"
+          }
+        ]
+      })
+    )
+    writeFileSync(
+      deployUnitMappingStorePath,
+      JSON.stringify({ version: 1, mappings: configured })
+    )
+
+    const result = readHarnessProjectContexts(
+      paths.projects,
+      paths.plugins,
+      ["project-0"],
+      undefined,
+      undefined,
+      {
+        featureSlug: "feature-many",
+        featureBindingStorePath,
+        deployUnitMappingStorePath
+      }
+    )
+
+    expect(HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES).toBe(512)
+    expect(result.projects["project-0"]?.sessionContextInjectionSource).toBe("plugin")
+    expect(result.projects["project-0"]?.selectedDeployUnits).toHaveLength(selectedCount)
+    expect(result.projects["project-0"]?.selectedDeployUnits?.at(-1)).toMatchObject({
+      deployUnitIdMapping: "mapping-64",
+      deployUnitId: "current-64",
+      localRepoPath: "C:/current/64"
+    })
+    expect(
+      result.projects["project-0"]?.configSnapshot?.value?.supported_deploy_units
+    ).toHaveLength(selectedCount)
+    expect(result.stats.responseBytes).toBeLessThanOrEqual(HARNESS_CATALOG_MAX_RESPONSE_BYTES)
+  })
+
+  it("rejects an oversized complete deploy-unit projection instead of returning a partial list", async () => {
+    const paths = await makeCatalog(1)
+    const root = join(paths.projects, "..")
+    const featureBindingStorePath = join(root, "harness-board-features.json")
+    const deployUnitMappingStorePath = join(root, "harness-deployUnitId-mapping.json")
+    const mappings = Array.from({ length: 65 }, (_, index) => ({
+      deployUnitIdMapping: `mapping-${index}`,
+      deployUnitId: `unit-${index}`,
+      localRepoPath: `C:/${index}/${"x".repeat(8_000)}`
+    }))
+    writeFileSync(
+      featureBindingStorePath,
+      JSON.stringify({
+        version: 1,
+        bindings: [
+          {
+            projectId: "project-0",
+            featureId: "feature-oversized",
+            selectedDeployUnitMappings: mappings,
+            sessionContextInjectionSource: "plugin"
+          }
+        ]
+      })
+    )
+    writeFileSync(
+      deployUnitMappingStorePath,
+      JSON.stringify({ version: 1, mappings })
+    )
+
+    expect(() =>
+      readHarnessProjectContexts(
+        paths.projects,
+        paths.plugins,
+        ["project-0"],
+        undefined,
+        undefined,
+        {
+          featureSlug: "feature-oversized",
+          featureBindingStorePath,
+          deployUnitMappingStorePath
+        }
+      )
+    ).toThrow(`Harness project context result exceeded ${HARNESS_CATALOG_MAX_RESPONSE_BYTES} bytes`)
+  })
+
+  it("rejects deploy-unit metadata beyond the 512-entry store boundary", async () => {
+    const paths = await makeCatalog(1)
+    const root = join(paths.projects, "..")
+    const featureBindingStorePath = join(root, "harness-board-features.json")
+    const deployUnitMappingStorePath = join(root, "harness-deployUnitId-mapping.json")
+    const overLimit = Array.from(
+      { length: HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES + 1 },
+      (_, index) => ({
+        deployUnitIdMapping: `mapping-${index}`,
+        deployUnitId: `unit-${index}`,
+        localRepoPath: `C:/repo/${index}`
+      })
+    )
+    writeFileSync(
+      featureBindingStorePath,
+      JSON.stringify({
+        version: 1,
+        bindings: [
+          {
+            projectId: "project-0",
+            featureId: "feature-over-limit",
+            selectedDeployUnitMappings: overLimit,
+            sessionContextInjectionSource: "plugin"
+          }
+        ]
+      })
+    )
+    writeFileSync(
+      deployUnitMappingStorePath,
+      JSON.stringify({ version: 1, mappings: [] })
+    )
+
+    const readOverLimitFeature = (): unknown =>
+      readHarnessProjectContexts(
+        paths.projects,
+        paths.plugins,
+        ["project-0"],
+        undefined,
+        undefined,
+        {
+          featureSlug: "feature-over-limit",
+          featureBindingStorePath,
+          deployUnitMappingStorePath
+        }
+      )
+    expect(readOverLimitFeature).toThrow(
+      `Harness plugin deploy-unit context exceeded ` +
+        `${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} entries; received ` +
+        `${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES + 1}, no entries were omitted`
+    )
+
+    writeFileSync(
+      featureBindingStorePath,
+      JSON.stringify({
+        version: 1,
+        bindings: [
+          {
+            projectId: "project-0",
+            featureId: "feature-over-limit",
+            selectedDeployUnitMappings: []
+          }
+        ]
+      })
+    )
+    const pluginRows = JSON.parse(readFileSync(paths.plugins, "utf8")) as Array<{ path: string }>
+    writeFileSync(
+      join(pluginRows[0]!.path, "board_core", "board_config.json"),
+      JSON.stringify({
+        apiVersion: 1,
+        inspectCommands: { [process.platform]: { session_context_inject: "run" } },
+        supported_deploy_units: overLimit.map((mapping) => mapping.deployUnitId)
+      })
+    )
+    resetHarnessCatalogReaderCacheForTests()
+
+    expect(readOverLimitFeature).toThrow(
+      `Harness board config supported_deploy_units exceeded ` +
+        `${HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES} entries`
+    )
+  })
+
+  it("fails closed when feature-binding or mapping stores cannot be read completely", async () => {
+    const paths = await makeCatalog(1)
+    const root = join(paths.projects, "..")
+    const featureBindingStorePath = join(root, "harness-board-features.json")
+    const deployUnitMappingStorePath = join(root, "harness-deployUnitId-mapping.json")
+    const readFeature = (): unknown =>
+      readHarnessProjectContexts(
+        paths.projects,
+        paths.plugins,
+        ["project-0"],
+        undefined,
+        undefined,
+        {
+          featureSlug: "feature-integrity",
+          featureBindingStorePath,
+          deployUnitMappingStorePath
+        }
+      )
+
+    writeFileSync(featureBindingStorePath, "{invalid")
+    writeFileSync(deployUnitMappingStorePath, JSON.stringify({ version: 1, mappings: [] }))
+    expect(readFeature).toThrow()
+
+    writeFileSync(
+      featureBindingStorePath,
+      JSON.stringify({
+        version: 1,
+        bindings: [
+          {
+            projectId: "project-0",
+            featureId: "feature-integrity",
+            selectedDeployUnitMappings: [
+              {
+                deployUnitIdMapping: "mapping-1",
+                deployUnitId: "unit-1",
+                localRepoPath: "C:/snapshot"
+              }
+            ],
+            sessionContextInjectionSource: "plugin"
+          }
+        ]
+      })
+    )
+    writeFileSync(deployUnitMappingStorePath, "{invalid")
+    resetHarnessCatalogReaderCacheForTests()
+    expect(readFeature).toThrow()
+  })
+
+  it("fails closed above 64 framework AGENTS workspaces instead of scanning an unbounded tail", async () => {
+    const paths = await makeCatalog(1)
+    const root = join(paths.projects, "..")
+    const featureBindingStorePath = join(root, "harness-board-features.json")
+    const deployUnitMappingStorePath = join(root, "harness-deployUnitId-mapping.json")
+    const mappings = Array.from(
+      { length: HARNESS_FRAMEWORK_DEPLOY_UNIT_CONTEXT_MAX_ENTRIES + 1 },
+      (_, index) => ({
+        deployUnitIdMapping: `mapping-${index}`,
+        deployUnitId: `unit-${index}`,
+        localRepoPath: `C:/repo/${index}`
+      })
+    )
+    writeFileSync(
+      featureBindingStorePath,
+      JSON.stringify({
+        version: 1,
+        bindings: [
+          {
+            projectId: "project-0",
+            featureId: "feature-framework-over-limit",
+            selectedDeployUnitMappings: mappings,
+            sessionContextInjectionSource: "cmbdevclaw"
+          }
+        ]
+      })
+    )
+    writeFileSync(
+      deployUnitMappingStorePath,
+      JSON.stringify({ version: 1, mappings })
+    )
+
+    expect(() =>
+      readHarnessProjectContexts(
+        paths.projects,
+        paths.plugins,
+        ["project-0"],
+        undefined,
+        undefined,
+        {
+          featureSlug: "feature-framework-over-limit",
+          featureBindingStorePath,
+          deployUnitMappingStorePath
+        }
+      )
+    ).toThrow(
+      `Harness cmbdevclaw deploy-unit context exceeded ` +
+        `${HARNESS_FRAMEWORK_DEPLOY_UNIT_CONTEXT_MAX_ENTRIES} entries; received ` +
+        `${HARNESS_FRAMEWORK_DEPLOY_UNIT_CONTEXT_MAX_ENTRIES + 1}, no entries were omitted`
+    )
   })
 
   it("keeps the main ticker moving while the worker opens a cold near-limit store", async () => {
