@@ -14,6 +14,7 @@ export type ApiErrorCode =
   | "server_error"
   | "network_error"
   | "local_storage_error"
+  | "harness_context_unavailable"
   | "unknown"
 
 // ─── Gateway status-code dictionary ──────────────────────────────────────────
@@ -438,6 +439,19 @@ export function extractErrorDetail(
   error: unknown,
   fetchDetail?: { status?: number; requestId?: string; rawBody?: string }
 ): ApiErrorDetail {
+  const harnessContextError = findErrorWithCode(error, "HARNESS_AGENT_CONTEXT_UNAVAILABLE")
+  if (harnessContextError) {
+    const harnessContextCause = asErrorLike(harnessContextError)?.cause
+    const harnessContextMessage =
+      cleanProviderMessage(harnessContextCause) ?? cleanProviderMessage(harnessContextError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文不可用",
+      hint: "请重试；如仍失败，请检查 Harness 配置、项目目录和后台 Worker 日志。",
+      reason: harnessContextMessage ?? "Harness 上下文加载失败，请重试后再运行任务。",
+      providerMessage: harnessContextMessage
+    }
+  }
   const localStorageError = findErrorWithCode(
     error,
     "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"

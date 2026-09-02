@@ -63,6 +63,26 @@ assertIncludes(
   "assertLocalThreadRunLease(options.threadId, input.runLease.owner, input.runLease.runId)",
   "controlled factory refuses Runtime creation without the exact local lease"
 )
+assertIncludes(
+  shared,
+  "requestUserInputConfig: featureContext.agentConfig?.toolConfig?.requestUserInput",
+  "Harness request-user-input policy reaches the shared Runtime context"
+)
+assertIncludes(
+  shared,
+  'export const HARNESS_AGENT_CONTEXT_UNAVAILABLE = "HARNESS_AGENT_CONTEXT_UNAVAILABLE"',
+  "Harness context failures expose a stable error code"
+)
+assertIncludes(
+  shared,
+  "throw unavailable",
+  "Harness context failures block Runtime creation instead of silently degrading"
+)
+assertIncludes(
+  shared,
+  "const runtimeOptions = { ...context }",
+  "the controlled factory forwards the complete Harness context to the Runtime"
+)
 assertNotIncludes(
   desktop,
   "createAgentRuntime(",
@@ -82,6 +102,10 @@ assertNotIncludes(
   desktop,
   "JSON.parse(thread.metadata",
   "desktop Runtime entrypoints use the shared Thread metadata parser"
+)
+assert(
+  count(desktop, "sendHarnessAgentContextLoadError(window, channel, error, modelId)") === 2,
+  "resume and interrupt surface Harness context failures before Runtime setup"
 )
 assert(
   count(desktop, "parseStandardThreadMetadata(") === 9,
