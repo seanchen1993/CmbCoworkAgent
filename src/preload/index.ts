@@ -4072,6 +4072,18 @@ const api = {
         requirement?: RequirementRuntimeItem
         error?: string
       }>,
+    detachThread: (payload: { reqId: string; threadId: string }) =>
+      ipcRenderer.invoke("requirements:detach-thread", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
+    rename: (payload: { reqId: string; title: string }) =>
+      ipcRenderer.invoke("requirements:rename", payload) as Promise<{
+        success: boolean
+        requirement?: RequirementRuntimeItem
+        error?: string
+      }>,
     savePrd: (payload: {
       reqId: string
       version: string

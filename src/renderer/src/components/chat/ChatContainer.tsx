@@ -6689,7 +6689,13 @@ export function ChatContainer({
   const selectedForkWorkspaceLabel = getForkWorkspaceLabel(forkWorkspacePath)
 
   return (
-    <div ref={chatRootRef} className="relative flex flex-1 flex-col min-h-0 overflow-hidden">
+    <div
+      ref={chatRootRef}
+      className={cn(
+        "relative flex flex-1 flex-col min-h-0 overflow-hidden",
+        isRequirementMode && "bg-grid-subtle"
+      )}
+    >
       {/* In-session keyword search (Ctrl/Cmd+F) */}
       <ChatSearchOverlay
         open={searchOpen}

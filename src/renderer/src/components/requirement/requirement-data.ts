@@ -26,6 +26,7 @@ export type RequirementPrdManifest = {
 export type RequirementRecord = {
   id: string
   threadId: string | null
+  threadIds?: string[]
   systemId: string
   title: string
   requirementPath: string
@@ -46,6 +47,18 @@ export type RequirementRecord = {
   prd: "是" | "否"
 }
 
+export function getRequirementThreadIds(
+  requirement: Pick<RequirementRecord, "threadId" | "threadIds">
+): string[] {
+  return [
+    ...new Set(
+      [...(requirement.threadId ? [requirement.threadId] : []), ...(requirement.threadIds ?? [])]
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  ]
+}
+
 function formatRequirementTime(value: string): string {
   const date = new Date(value)
   if (!Number.isFinite(date.getTime())) return value
@@ -61,6 +74,7 @@ export function fromPersistedRequirement(
   return {
     id: item.reqId,
     threadId: item.threadId,
+    threadIds: getRequirementThreadIds(item),
     systemId: item.systemId,
     title: item.title,
     requirementPath: item.requirementPath,

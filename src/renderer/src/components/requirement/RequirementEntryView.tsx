@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
+import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { NewRequirementDialog } from "./NewRequirementDialog"
 import { RequirementConversationView } from "./RequirementConversationView"
@@ -6,6 +7,7 @@ import { RequirementHistoryView } from "./RequirementHistoryView"
 import { SystemSelectionDialog } from "./SystemSelectionDialog"
 import {
   fromPersistedRequirement,
+  getRequirementThreadIds,
   sortRequirementsByUpdatedAt,
   type RequirementRecord
 } from "./requirement-data"
@@ -19,6 +21,7 @@ export function RequirementEntryView(): React.JSX.Element {
   const [selectedRequirement, setSelectedRequirement] = useState<RequirementRecord | null>(null)
   const [autoGeneratePrd, setAutoGeneratePrd] = useState(false)
   const [requirements, setRequirements] = useState<RequirementRecord[]>([])
+  const [requirementsLoaded, setRequirementsLoaded] = useState(false)
   const [systemDialogOpen, setSystemDialogOpen] = useState(false)
   const [requirementDialogOpen, setRequirementDialogOpen] = useState(false)
   const setSystemList = useRequirementStore((state) => state.setSystemList)
@@ -31,29 +34,37 @@ export function RequirementEntryView(): React.JSX.Element {
   const deleteThread = useAppStore((state) => state.deleteThread)
   const selectThread = useAppStore((state) => state.selectThread)
 
-  const loadRequirements = useCallback(async (): Promise<void> => {
+  const loadRequirements = useCallback(async (): Promise<RequirementRecord[]> => {
     const [systems, persistedRequirements] = await Promise.all([
       window.api.design.listSystems(),
       window.api.requirements.list()
     ])
     setSystemList(systems)
     const systemNames = new Map(systems.map((system) => [system.id, system.name]))
-    setRequirements(
-      sortRequirementsByUpdatedAt(
-        persistedRequirements.map((item) =>
-          fromPersistedRequirement(item, systemNames.get(item.systemId) ?? item.systemId)
-        )
+    const nextRequirements = sortRequirementsByUpdatedAt(
+      persistedRequirements.map((item) =>
+        fromPersistedRequirement(item, systemNames.get(item.systemId) ?? item.systemId)
       )
     )
+    return nextRequirements
   }, [setSystemList])
 
   useEffect(() => {
     let cancelled = false
-    void loadRequirements().catch((error: unknown) => {
-      if (!cancelled) {
-        toast.error(error instanceof Error ? error.message : "加载需求历史失败")
-      }
-    })
+    void loadRequirements()
+      .then((nextRequirements) => {
+        if (cancelled) return
+        setRequirements(nextRequirements)
+        setSelectedRequirement((current) => current ?? nextRequirements[0] ?? null)
+        if (nextRequirements.length > 0) setScreen("conversation")
+        setRequirementsLoaded(true)
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          toast.error(error instanceof Error ? error.message : "加载需求历史失败")
+          setRequirementsLoaded(true)
+        }
+      })
     return () => {
       cancelled = true
     }
@@ -82,11 +93,12 @@ export function RequirementEntryView(): React.JSX.Element {
   const ensureRequirementThread = async (
     requirement: RequirementRecord
   ): Promise<RequirementRecord> => {
-    if (requirement.threadId) {
-      const existingThread = await window.api.threads.get(requirement.threadId)
+    const threadIds = getRequirementThreadIds(requirement)
+    for (const threadId of threadIds) {
+      const existingThread = await window.api.threads.get(threadId)
       if (existingThread) {
-        await selectThread(requirement.threadId, { preserveView: true })
-        return requirement
+        await selectThread(threadId, { preserveView: true })
+        return threadId === requirement.threadId ? requirement : { ...requirement, threadId }
       }
     }
 
@@ -114,9 +126,13 @@ export function RequirementEntryView(): React.JSX.Element {
     return fromPersistedRequirement(result.requirement, systemName)
   }
 
-  const openRequirement = async (requirement: RequirementRecord): Promise<void> => {
+  const openRequirement = async (
+    requirement: RequirementRecord,
+    threadId?: string
+  ): Promise<void> => {
     try {
-      const nextRequirement = await ensureRequirementThread(requirement)
+      const nextRequirement = threadId ? requirement : await ensureRequirementThread(requirement)
+      if (threadId) await selectThread(threadId, { preserveView: true })
       replaceRequirement(nextRequirement)
       setSelectedRequirement(nextRequirement)
       setAutoGeneratePrd(false)
@@ -127,11 +143,10 @@ export function RequirementEntryView(): React.JSX.Element {
   }
 
   const deleteRequirement = async (requirement: RequirementRecord): Promise<void> => {
-    if (requirement.threadId) {
-      const thread = await window.api.threads.get(requirement.threadId)
-      if (thread) {
-        await deleteThread(requirement.threadId)
-      }
+    const threadIds = getRequirementThreadIds(requirement)
+    for (const threadId of threadIds) {
+      const thread = await window.api.threads.get(threadId)
+      if (thread) await deleteThread(threadId)
     }
 
     const result = await window.api.requirements.delete(requirement.id)
@@ -145,6 +160,14 @@ export function RequirementEntryView(): React.JSX.Element {
       setScreen("history")
     }
     toast.success("需求、关联会话和归档文件已删除")
+  }
+
+  if (!requirementsLoaded) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-background">
+        <Loader2 className="size-5 animate-spin text-muted-foreground" aria-label="加载需求" />
+      </div>
+    )
   }
 
   return (
@@ -163,6 +186,8 @@ export function RequirementEntryView(): React.JSX.Element {
           requirement={selectedRequirement}
           requirements={requirements}
           onSelectRequirement={openRequirement}
+          onRequirementUpdated={replaceRequirement}
+          onDeleteRequirement={deleteRequirement}
           onBack={() => setScreen("history")}
           onNew={startNewRequirement}
           autoGeneratePrd={autoGeneratePrd}

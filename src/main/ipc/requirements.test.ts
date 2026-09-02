@@ -434,4 +434,44 @@ describe("requirement source preview", () => {
     }
     expect(deleted.success, deleted.error).toBe(true)
   })
+
+  it("keeps multiple conversations and persists requirement renames", async () => {
+    const workDir = join(tempHome, "multi-thread-workspace")
+    mkdirSync(workDir)
+    const create = handlers.get("requirements:create")
+    const attach = handlers.get("requirements:attach-thread")
+    const detach = handlers.get("requirements:detach-thread")
+    const rename = handlers.get("requirements:rename")
+    const remove = handlers.get("requirements:delete")
+    const created = (await create!(null, {
+      systemId: "system-multi",
+      title: "多会话需求",
+      workDir,
+      source: { type: "text", fileName: "" }
+    })) as { success: boolean; requirement: { reqId: string; requirementPath: string } }
+    expect(created.success).toBe(true)
+
+    const first = (await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-a" })) as {
+      requirement: { threadId: string; threadIds: string[] }
+    }
+    expect(first.requirement.threadIds).toEqual(["thread-a"])
+    const second = (await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-b" })) as {
+      requirement: { threadId: string; threadIds: string[] }
+    }
+    expect(second.requirement.threadId).toBe("thread-a")
+    expect(second.requirement.threadIds).toEqual(["thread-a", "thread-b"])
+
+    const renamed = (await rename!(null, {
+      reqId: created.requirement.reqId,
+      title: "重命名后的需求"
+    })) as { requirement: { title: string } }
+    expect(renamed.requirement.title).toBe("重命名后的需求")
+    const detached = (await detach!(null, {
+      reqId: created.requirement.reqId,
+      threadId: "thread-a"
+    })) as { requirement: { threadId: string; threadIds: string[] } }
+    expect(detached.requirement.threadId).toBe("thread-b")
+    expect(detached.requirement.threadIds).toEqual(["thread-b"])
+    await remove!(null, created.requirement.reqId)
+  })
 })

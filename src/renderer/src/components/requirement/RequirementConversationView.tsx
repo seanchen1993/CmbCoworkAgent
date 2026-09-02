@@ -1,22 +1,21 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   Bot,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   ExternalLink,
   Eye,
   KeyRound,
-  ListTodo,
   Loader2,
-  Plus,
-  Search,
   Send
 } from "lucide-react"
 import { toast } from "sonner"
 import { ChatContainer } from "@/components/chat/ChatContainer"
 import { SubagentStreamPanel } from "@/components/chat/SubagentStreamPanel"
+import {
+  RequirementThreadSidebar,
+  type RequirementSidebarMode
+} from "@/components/sidebar/RequirementThreadSidebar"
 import { FileTree, ResourcePreview } from "@/components/panels/RightPanel"
 import MarkdownPreview from "@/components/ui/MarkdownPreview/MarkdownPreview"
 import { Button } from "@/components/ui/button"
@@ -33,13 +32,11 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAppStore } from "@/lib/store"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
-import { useAllStreamLoadingStates, useAllThreadStates } from "@/lib/thread-context"
 import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
 import { cn } from "@/lib/utils"
-import { RequirementBreadcrumbHeader } from "./RequirementBreadcrumbHeader"
 import {
+  fromPersistedRequirement,
   isRequirementPublished,
-  sortRequirementsByUpdatedAt,
   type RequirementPrdManifest,
   type RequirementRecord
 } from "./requirement-data"
@@ -48,7 +45,6 @@ const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
 const PRD_COMPLETION_CHECK_MAX_ATTEMPTS = 4
 const PRD_COMPLETION_CHECK_RETRY_DELAY_MS = 500
-const requirementListScrollPositions = new Map<string, number>()
 
 type PreviewTab = "expert-process" | "source" | "prd" | "requirement-space"
 function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
@@ -146,41 +142,32 @@ function buildRequirementInitializationMessage(requirement: RequirementRecord): 
   return `为「${requirement.title}」撰写一份产品需求文档。${sourceInstruction}，梳理目标用户、使用场景、用户故事、关键流程、业务规则、异常处理、权限、通知机制、成功指标和验收标准；先与我确认待澄清事项，再生成正式 PRD。${initialDescription ? `\n\n用户的初始需求描述：\n${initialDescription}` : ""}`
 }
 
-function getRequirementStartTypeLabel(requirement: RequirementRecord): string {
-  const sourceType = requirement.sourceType ?? (requirement.fileName ? "file" : "text")
-  switch (sourceType) {
-    case "file":
-      return "上传文件"
-    case "text":
-      return "输入"
-    case "link":
-      return "链接"
-    default:
-      return "输入"
-  }
-}
-
 function RequirementConversationSession({
   requirement,
   requirements,
   onSelectRequirement,
+  onRequirementUpdated,
+  onDeleteRequirement,
   onBack,
   onNew,
   autoGeneratePrd
 }: {
   requirement: RequirementRecord
   requirements: RequirementRecord[]
-  onSelectRequirement: (requirement: RequirementRecord) => Promise<void>
+  onSelectRequirement: (requirement: RequirementRecord, threadId?: string) => Promise<void>
+  onRequirementUpdated: (requirement: RequirementRecord) => void
+  onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
   onBack: () => void
   onNew: () => void
   autoGeneratePrd: boolean
 }): React.JSX.Element {
   const selectThread = useAppStore((state) => state.selectThread)
+  const createThread = useAppStore((state) => state.createThread)
+  const deleteThread = useAppStore((state) => state.deleteThread)
   const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
-  const streamLoadingStates = useAllStreamLoadingStates()
-  const allThreadStates = useAllThreadStates()
-  const threadId = requirement.threadId ?? null
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(requirement.threadId)
+  const threadId = selectedThreadId ?? requirement.threadId ?? null
   const threadState = useThreadState(threadId)
   const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
   const observedSubagentStatesRef = useRef(new Map<string, string>())
@@ -196,7 +183,6 @@ function RequirementConversationSession({
   const [sourcePreview, setSourcePreview] = useState("")
   const [sourcePreviewLoading, setSourcePreviewLoading] = useState(false)
   const [sourcePreviewError, setSourcePreviewError] = useState<string | null>(null)
-  const [switchingRequirementId, setSwitchingRequirementId] = useState<string | null>(null)
   const [requirementSpaceManifest, setRequirementSpaceManifest] =
     useState<RequirementPrdManifest | null>(() => requirement.prdManifest)
   const [manifestLoading, setManifestLoading] = useState(false)
@@ -205,9 +191,6 @@ function RequirementConversationSession({
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
   const [tokenSaving, setTokenSaving] = useState(false)
-  const [requirementQuery, setRequirementQuery] = useState("")
-  const [collapsedSystemIds, setCollapsedSystemIds] = useState<Set<string>>(new Set())
-  const requirementListRef = useRef<HTMLDivElement>(null)
   const focusExpertProcess = useCallback((): boolean => {
     if (!threadId || subagents.length === 0) return false
     const isAnalyst = (item: (typeof subagents)[number]): boolean => {
@@ -247,31 +230,10 @@ function RequirementConversationSession({
       subagents.map((subagent) => [subagent.id, subagent.status])
     )
   }, [focusExpertProcess, subagents])
-  const orderedRequirements = useMemo(
-    () => sortRequirementsByUpdatedAt(requirements),
-    [requirements]
-  )
-  const groupedRequirements = useMemo(() => {
-    const normalizedQuery = requirementQuery.trim().toLocaleLowerCase()
-    const matchingRequirements = normalizedQuery
-      ? orderedRequirements.filter((item) =>
-          item.title.toLocaleLowerCase().includes(normalizedQuery)
-        )
-      : orderedRequirements
-    return Array.from(
-      matchingRequirements.reduce((groups, item) => {
-        const group = groups.get(item.systemId)
-        if (group) group.items.push(item)
-        else groups.set(item.systemId, { name: item.system, items: [item] })
-        return groups
-      }, new Map<string, { name: string; items: RequirementRecord[] }>())
-    )
-  }, [orderedRequirements, requirementQuery])
-
-  useLayoutEffect(() => {
-    const list = requirementListRef.current
-    if (list) list.scrollTop = requirementListScrollPositions.get("conversation") ?? 0
-  }, [])
+  useEffect(() => {
+    if (previewTab !== "expert-process" || subagentFocusView?.threadId === threadId) return
+    focusExpertProcess()
+  }, [focusExpertProcess, previewTab, subagentFocusView?.threadId, threadId])
   const prdFiles = useMemo(
     () =>
       (threadState?.workspaceFiles ?? []).filter(
@@ -304,6 +266,114 @@ function RequirementConversationSession({
   const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
   const hasThreadState = threadState !== null
 
+  useEffect(() => {
+    setSelectedThreadId(requirement.threadId)
+  }, [requirement.id, requirement.threadId])
+
+  const attachConversation = useCallback(
+    async (
+      nextRequirement: RequirementRecord,
+      nextThreadId: string
+    ): Promise<RequirementRecord> => {
+      const result = await window.api.requirements.attachThread({
+        reqId: nextRequirement.id,
+        threadId: nextThreadId
+      })
+      if (!result.success || !result.requirement)
+        throw new Error(result.error || "保存需求会话失败")
+      const updated = fromPersistedRequirement(result.requirement, requirement.system)
+      onRequirementUpdated(updated)
+      return updated
+    },
+    [onRequirementUpdated, requirement.system]
+  )
+
+  const modeDetachConversation = useCallback(
+    async (item: RequirementRecord, deletedThreadId: string): Promise<void> => {
+      const result = await window.api.requirements.detachThread({
+        reqId: item.id,
+        threadId: deletedThreadId
+      })
+      if (!result.success || !result.requirement)
+        throw new Error(result.error || "更新需求会话失败")
+      const updated = fromPersistedRequirement(result.requirement, requirement.system)
+      onRequirementUpdated(updated)
+      if (deletedThreadId === threadId) {
+        setSelectedThreadId(updated.threadId)
+        if (updated.threadId) await onSelectRequirement(updated, updated.threadId)
+      }
+    },
+    [onRequirementUpdated, onSelectRequirement, requirement.system, threadId]
+  )
+
+  const requirementSidebarMode = useMemo<RequirementSidebarMode>(
+    () => ({
+      requirements,
+      onSelectRequirement: async (item, nextThreadId) => {
+        if (nextThreadId) {
+          setSelectedThreadId(nextThreadId)
+          await onSelectRequirement(item, nextThreadId)
+        } else {
+          await onSelectRequirement(item)
+        }
+      },
+      onCreateConversation: async (item) => {
+        const thread = await createThread(
+          {
+            title: `PRD 沟通 · ${item.title}`,
+            requirementId: item.id,
+            requirementTitle: item.title,
+            requirementSystem: item.system,
+            requirementSourceType: item.sourceType,
+            requirementSourceName: item.sourceName,
+            workspacePath: item.requirementPath
+          },
+          { preserveView: true }
+        )
+        const updated = await attachConversation(item, thread.thread_id)
+        setSelectedThreadId(thread.thread_id)
+        await onSelectRequirement(updated, thread.thread_id)
+      },
+      onAttachConversation: attachConversation,
+      onDeleteConversation: modeDetachConversation,
+      onDeleteRequirement,
+      onDeleteAllConversations: async (item, threadIds) => {
+        for (const id of threadIds) {
+          const result = await window.api.requirements.detachThread({
+            reqId: item.id,
+            threadId: id
+          })
+          if (!result.success) throw new Error(result.error || "更新需求会话失败")
+          if (result.requirement)
+            onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+          await deleteThread(id)
+        }
+        if (threadId && threadIds.includes(threadId)) setSelectedThreadId(null)
+      },
+      onRenameRequirement: async (item, title) => {
+        const result = await window.api.requirements.rename({ reqId: item.id, title })
+        if (!result.success || !result.requirement)
+          throw new Error(result.error || "重命名需求失败")
+        onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
+      },
+      onNewRequirement: onNew,
+      onBackToHistory: onBack
+    }),
+    [
+      attachConversation,
+      createThread,
+      deleteThread,
+      modeDetachConversation,
+      onBack,
+      onDeleteRequirement,
+      onNew,
+      onRequirementUpdated,
+      onSelectRequirement,
+      requirements,
+      threadId,
+      requirement.system
+    ]
+  )
   const loadSourcePreview = useCallback(async (): Promise<void> => {
     setSourcePreviewLoading(true)
     setSourcePreviewError(null)
@@ -601,225 +671,21 @@ function RequirementConversationSession({
   ])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#f6f1ea]">
-      <RequirementBreadcrumbHeader
-        items={[
-          { label: "需求模式", onClick: onBack },
-          { label: "需求历史", onClick: onBack },
-          { label: "需求沟通", onClick: onBack },
-          { label: requirement.title }
-        ]}
-        ariaLabel="需求沟通路径"
-      />
-
-      <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-[#ebe4db]">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
+      <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden bg-background">
         <div className="grid h-full min-h-0 min-w-[1242px] grid-cols-[minmax(240px,0.5fr)_minmax(380px,1fr)_minmax(620px,1.5fr)] gap-x-[0.5px]">
-          <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-[#f7f4ef]">
-            <div className="flex h-[37px] shrink-0 items-center justify-between border-b border-border/80 bg-[#fffdf9] px-4">
-              <div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold text-foreground">
-                <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                  <ListTodo className="size-3.5" />
-                </span>
-                <span>需求列表</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  aria-label="查看需求列表"
-                  title="查看需求列表"
-                  onClick={onBack}
-                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  <ListTodo className="size-3.5" />
-                </button>
-                <button
-                  type="button"
-                  aria-label="新增需求"
-                  title="新增需求"
-                  onClick={onNew}
-                  className="flex size-7 items-center justify-center rounded-md text-primary hover:bg-primary/10"
-                >
-                  <Plus className="size-4" />
-                </button>
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-[#eee7df] text-[11px] font-semibold tabular-nums text-[#74695f]">
-                  {requirements.length}
-                </span>
-              </div>
-            </div>
-
-            <div className="border-b border-border/70 bg-white p-2.5">
-              <label className="relative block">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={requirementQuery}
-                  onChange={(event) => setRequirementQuery(event.target.value)}
-                  placeholder="搜索需求名称"
-                  aria-label="搜索需求名称"
-                  className="h-8 pl-8 text-[12px]"
-                />
-              </label>
-            </div>
-
-            <div
-              ref={requirementListRef}
-              onScroll={(event) => {
-                requirementListScrollPositions.set("conversation", event.currentTarget.scrollTop)
-              }}
-              className="min-h-0 flex-1 overflow-y-auto bg-white p-2.5"
-            >
-              {requirements.length > 0 ? (
-                <div className="flex flex-col gap-1.5">
-                  {groupedRequirements.map(([systemId, group]) => {
-                    const collapsed = collapsedSystemIds.has(systemId)
-                    return (
-                      <div key={systemId} className="space-y-1.5">
-                        <button
-                          type="button"
-                          aria-expanded={!collapsed}
-                          onClick={() =>
-                            setCollapsedSystemIds((current) => {
-                              const next = new Set(current)
-                              if (next.has(systemId)) next.delete(systemId)
-                              else next.add(systemId)
-                              return next
-                            })
-                          }
-                          className="flex h-7 w-full items-center gap-1.5 px-1 text-left text-[11px] font-semibold text-muted-foreground hover:text-foreground"
-                        >
-                          {collapsed ? (
-                            <ChevronRight className="size-3.5" />
-                          ) : (
-                            <ChevronDown className="size-3.5" />
-                          )}
-                          <span className="min-w-0 flex-1 truncate">{group.name}</span>
-                          <span className="tabular-nums">{group.items.length}</span>
-                        </button>
-                        {!collapsed &&
-                          group.items.map((item) => {
-                            const isActive = item.id === requirement.id
-                            const isConversationLoading = Boolean(
-                              item.threadId &&
-                              (streamLoadingStates[item.threadId] ||
-                                allThreadStates[item.threadId]?.scheduledTaskLoading)
-                            )
-                            const status =
-                              item.coreFilesMissing || item.workspaceMissing
-                                ? "异常"
-                                : isRequirementPublished(item)
-                                  ? "已发布"
-                                  : item.prdGenerated
-                                    ? "已生成"
-                                    : isConversationLoading
-                                      ? "沟通中"
-                                      : "未规范"
-                            return (
-                              <button
-                                key={item.id}
-                                type="button"
-                                disabled={switchingRequirementId !== null}
-                                aria-current={isActive ? "page" : undefined}
-                                onClick={() => {
-                                  if (isActive || switchingRequirementId !== null) return
-                                  const list = requirementListRef.current
-                                  if (list)
-                                    requirementListScrollPositions.set(
-                                      "conversation",
-                                      list.scrollTop
-                                    )
-                                  setSwitchingRequirementId(item.id)
-                                  void onSelectRequirement(item).finally(() => {
-                                    setSwitchingRequirementId(null)
-                                  })
-                                }}
-                                title={`${item.title} · ${item.system}`}
-                                className={cn(
-                                  "group relative flex min-h-[80px]  w-full min-w-0 gap-3 rounded border p-2 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-wait disabled:opacity-70",
-                                  isActive
-                                    ? "bg-white text-foreground border-[#c4956af7]"
-                                    : "bg-white text-muted-foreground "
-                                )}
-                              >
-                                <span className="flex min-w-0 flex-1 flex-col justify-between gap-1">
-                                  <span className="flex min-w-0 items-center gap-2 ">
-                                    <span className="min-w-0 flex-1 truncate text-sm font-semibold leading-5">
-                                      {item.title}
-                                    </span>
-                                    <span
-                                      className={cn(
-                                        "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium leading-none",
-                                        item.coreFilesMissing || item.workspaceMissing
-                                          ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
-                                          : isRequirementPublished(item)
-                                            ? "border-status-warning/30 bg-status-warning/10 text-status-warning"
-                                            : item.prdGenerated
-                                              ? "border-status-nominal/20 bg-status-nominal/10 text-status-nominal"
-                                              : isConversationLoading
-                                                ? "border-status-info/20 bg-status-info/10 text-status-info"
-                                                : "border-border/70 bg-muted/30 text-muted-foreground",
-                                        item.coreFilesMissing || item.workspaceMissing
-                                          ? "font-semibold"
-                                          : ""
-                                      )}
-                                      title={
-                                        item.coreFilesMissingReason ||
-                                        (item.workspaceMissing
-                                          ? "需求归档目录已被删除或不可用"
-                                          : undefined)
-                                      }
-                                    >
-                                      {item.coreFilesMissing || item.workspaceMissing ? (
-                                        <AlertTriangle className="size-2.5" aria-hidden="true" />
-                                      ) : isRequirementPublished(item) ? (
-                                        <CheckCircle2 className="size-2.5" aria-hidden="true" />
-                                      ) : item.prdGenerated ? (
-                                        <CheckCircle2 className="size-2.5" aria-hidden="true" />
-                                      ) : isConversationLoading ? (
-                                        <Loader2
-                                          className="size-2.5 animate-spin"
-                                          aria-hidden="true"
-                                        />
-                                      ) : null}
-                                      {status}
-                                    </span>
-                                  </span>
-                                  <span className="flex min-w-0 items-center justify-between gap-2 text-[11px] leading-4">
-                                    <span className="min-w-0 truncate text-[#81766b]">
-                                      {getRequirementStartTypeLabel(item)}
-                                    </span>
-                                    <span className="shrink-0 tabular-nums text-[#a0958a]">
-                                      {item.updatedAt}
-                                    </span>
-                                  </span>
-                                </span>
-                              </button>
-                            )
-                          })}
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : (
-                <div className="px-2 py-8 text-center text-[12px] text-muted-foreground">
-                  暂无需求
-                </div>
-              )}
-            </div>
+          <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+            <RequirementThreadSidebar mode={requirementSidebarMode} />
           </aside>
 
-          <main className="flex min-h-0 min-w-0 flex-col bg-white">
+          <main className="flex min-h-0 min-w-0 flex-col border-x border-border/60 bg-background">
             <div className="flex h-[37px] shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-[#fffdf9] px-4">
               <div className="flex min-w-0 items-center gap-2.5 text-sm font-semibold text-foreground">
                 <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                   <Bot className="size-3.5" />
                 </span>
-                <span>需求澄清会话</span>
-                <span className="inline-flex shrink-0 items-center rounded-full border border-status-info/20 bg-status-info/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-status-info">
-                  需求工作台
-                </span>
+                <span className="truncate">{requirement.title}</span>
               </div>
-              <span className="truncate text-[11px] text-muted-foreground">
-                结合原始需求持续完善 PRD
-              </span>
             </div>
             {threadId ? (
               <ChatContainer key={threadId} threadId={threadId} surface="requirement-session" />
@@ -1316,13 +1182,17 @@ export function RequirementConversationView({
   requirement,
   requirements,
   onSelectRequirement,
+  onRequirementUpdated,
+  onDeleteRequirement,
   onBack,
   onNew,
   autoGeneratePrd = false
 }: {
   requirement: RequirementRecord
   requirements: RequirementRecord[]
-  onSelectRequirement: (requirement: RequirementRecord) => Promise<void>
+  onSelectRequirement: (requirement: RequirementRecord, threadId?: string) => Promise<void>
+  onRequirementUpdated: (requirement: RequirementRecord) => void
+  onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
   onBack: () => void
   onNew: () => void
   autoGeneratePrd?: boolean
@@ -1333,6 +1203,8 @@ export function RequirementConversationView({
       requirement={requirement}
       requirements={requirements}
       onSelectRequirement={onSelectRequirement}
+      onRequirementUpdated={onRequirementUpdated}
+      onDeleteRequirement={onDeleteRequirement}
       onBack={onBack}
       onNew={onNew}
       autoGeneratePrd={autoGeneratePrd}

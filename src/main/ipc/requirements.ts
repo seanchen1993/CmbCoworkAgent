@@ -18,6 +18,8 @@ export type RequirementSource = {
 export type RequirementIndexItem = {
   reqId: string
   threadId: string | null
+  /** All conversations belonging to this requirement. threadId remains for legacy readers. */
+  threadIds?: string[]
   systemId: string
   title: string
   requirementPath?: string
@@ -144,6 +146,19 @@ type RequirementsIndexFile = {
   lastWorkDir?: string
 }
 
+function getRequirementThreadIds(
+  item: Pick<RequirementIndexItem, "threadId" | "threadIds">
+): string[] {
+  return [
+    ...new Set(
+      [...(item.threadId ? [item.threadId] : []), ...(item.threadIds ?? [])]
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  ]
+}
+
 function safeSegment(value: string, fallback: string): string {
   const cleaned = Array.from(value.trim())
     .map((character) =>
@@ -264,6 +279,7 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
   const list = Array.isArray(data.list) ? data.list : []
   const normalized = list.map((rawItem) => {
     const item = { ...rawItem }
+    const normalizedThreadIds = getRequirementThreadIds(item)
     delete item.workDir
     delete item.prdVersion
     delete item.prdPublished
@@ -277,6 +293,8 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
           : "text"
     return {
       ...item,
+      threadId: normalizedThreadIds[0] ?? null,
+      threadIds: normalizedThreadIds,
       source: {
         ...item.source,
         type: sourceType
@@ -554,6 +572,7 @@ async function createRequirement(
   const item: RequirementIndexItem = {
     reqId,
     threadId: null,
+    threadIds: [],
     systemId,
     title,
     requirementPath: getRequirementWorkspacePath(workDir, reqId, title),
@@ -602,11 +621,44 @@ async function attachRequirementThread(
   const list = await readRequirementIndex()
   const index = list.findIndex((item) => item.reqId === reqId)
   if (index < 0) throw new Error(`需求不存在：${reqId}`)
+  const normalizedThreadId = threadId.trim()
+  const currentThreadIds = getRequirementThreadIds(list[index])
   const next = {
     ...list[index],
     // Binding a thread only enables conversation. It is not a requirement content update.
-    threadId: threadId.trim() || null
+    threadId: currentThreadIds[0] ?? (normalizedThreadId || null),
+    threadIds: normalizedThreadId
+      ? Array.from(new Set([...currentThreadIds, normalizedThreadId]))
+      : currentThreadIds
   }
+  list[index] = next
+  await writeRequirementIndex(list)
+  return toRuntimeRequirement(next)
+}
+
+async function detachRequirementThread(reqId: string, threadId: string): Promise<RequirementRuntimeItem> {
+  const normalizedReqId = reqId?.trim()
+  const normalizedThreadId = threadId?.trim()
+  if (!normalizedReqId || !normalizedThreadId) throw new Error("需求编号和会话编号不能为空")
+  const list = await readRequirementIndex()
+  const index = list.findIndex((item) => item.reqId === normalizedReqId)
+  if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+  const currentThreadIds = getRequirementThreadIds(list[index])
+  const threadIds = currentThreadIds.filter((value) => value !== normalizedThreadId)
+  const next = { ...list[index], threadId: threadIds[0] ?? null, threadIds }
+  list[index] = next
+  await writeRequirementIndex(list)
+  return toRuntimeRequirement(next)
+}
+
+async function renameRequirement(reqId: string, title: string): Promise<RequirementRuntimeItem> {
+  const normalizedReqId = reqId?.trim()
+  const normalizedTitle = title?.trim()
+  if (!normalizedReqId || !normalizedTitle) throw new Error("需求编号和名称不能为空")
+  const list = await readRequirementIndex()
+  const index = list.findIndex((item) => item.reqId === normalizedReqId)
+  if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
+  const next = { ...list[index], title: normalizedTitle, updatedAt: new Date().toISOString() }
   list[index] = next
   await writeRequirementIndex(list)
   return toRuntimeRequirement(next)
@@ -871,6 +923,29 @@ export function registerRequirementHandlers(ipcMain: IpcMain): void {
           success: false,
           error: error instanceof Error ? error.message : "保存需求会话失败"
         }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:detach-thread",
+    async (_event, { reqId, threadId }: { reqId: string; threadId: string }) => {
+      try {
+        return { success: true, requirement: await detachRequirementThread(reqId, threadId) }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : "删除需求会话绑定失败"
+        }
+      }
+    }
+  )
+  ipcMain.handle(
+    "requirements:rename",
+    async (_event, { reqId, title }: { reqId: string; title: string }) => {
+      try {
+        return { success: true, requirement: await renameRequirement(reqId, title) }
+      } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : "重命名需求失败" }
       }
     }
   )

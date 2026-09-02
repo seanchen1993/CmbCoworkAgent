@@ -8,7 +8,8 @@ import {
   FolderOpen,
   Link2,
   Loader2,
-  Trash2
+  Trash2,
+  X
 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
@@ -24,6 +25,7 @@ import { IconPopoverButton } from "@/components/ui/icon-popover-button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
 import {
+  getRequirementThreadIds,
   getRequirementModules,
   isRequirementPublished,
   type RequirementRecord
@@ -33,6 +35,8 @@ import { filterRequirementsBySystem } from "./requirement-history-filter"
 const PAGE_SIZE = 10
 const HISTORY_GRID_COLUMNS =
   "grid-cols-[88px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
+const SELECTION_HISTORY_GRID_COLUMNS =
+  "grid-cols-[32px_88px_minmax(120px,1.12fr)_70px_minmax(160px,1.45fr)_minmax(130px,1.1fr)_120px_minmax(120px,1.15fr)_100px_120px_110px]"
 
 const SYSTEM_COLOR_OPTIONS = [
   { text: "#9b4b3a", background: "#fcebe5" },
@@ -184,27 +188,61 @@ function RequirementWorkDir({
   )
 }
 
+function SelectionCheckbox({
+  checked,
+  indeterminate = false,
+  onChange,
+  ariaLabel
+}: {
+  checked: boolean
+  indeterminate?: boolean
+  onChange: () => void
+  ariaLabel: string
+}): React.JSX.Element {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (inputRef.current) inputRef.current.indeterminate = indeterminate
+  }, [indeterminate])
+
+  return (
+    <input
+      ref={inputRef}
+      type="checkbox"
+      checked={checked}
+      onChange={onChange}
+      aria-label={ariaLabel}
+      className="size-4 cursor-pointer rounded border-[#cfc3b7] accent-[#c26b4f] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c26b4f]/45"
+    />
+  )
+}
+
 export function RequirementHistoryList({
   requirements,
   query,
   systemId,
   onOpen,
-  onDelete
+  onDelete,
+  selectionMode,
+  onSelectionModeChange
 }: {
   requirements: RequirementRecord[]
   query: string
   systemId: string | null
   onOpen: (requirement: RequirementRecord) => void
   onDelete: (requirement: RequirementRecord) => Promise<void>
+  selectionMode: boolean
+  onSelectionModeChange: (enabled: boolean) => void
 }): React.JSX.Element {
   const filterKey = `${systemId ?? "all"}\u0000${query}`
   const [pageState, setPageState] = useState({ filterKey: "", page: 1 })
-  const [requirementToDelete, setRequirementToDelete] = useState<RequirementRecord | null>(null)
+  const [requirementsToDelete, setRequirementsToDelete] = useState<RequirementRecord[]>([])
   const [requirementToOpen, setRequirementToOpen] = useState<RequirementRecord | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [openingWorkDirId, setOpeningWorkDirId] = useState<string | null>(null)
   const [expandedRequirementIds, setExpandedRequirementIds] = useState<Set<string>>(new Set())
+  const [selectedRequirementIds, setSelectedRequirementIds] = useState<Set<string>>(new Set())
   const page = pageState.filterKey === filterKey ? pageState.page : 1
 
   const visibleItems = useMemo(() => {
@@ -232,25 +270,80 @@ export function RequirementHistoryList({
   const totalPages = Math.max(1, Math.ceil(visibleItems.length / PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
   const pageItems = visibleItems.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const selectedRequirements = useMemo(
+    () => requirements.filter((item) => selectedRequirementIds.has(item.id)),
+    [requirements, selectedRequirementIds]
+  )
+  const allPageSelected =
+    pageItems.length > 0 && pageItems.every((item) => selectedRequirementIds.has(item.id))
+  const somePageSelected = pageItems.some((item) => selectedRequirementIds.has(item.id))
+  const requirementToDelete = requirementsToDelete[0] ?? null
+  const isBatchDelete = requirementsToDelete.length > 1
+  const conversationCountToDelete = requirementsToDelete.reduce(
+    (count, item) => count + getRequirementThreadIds(item).length,
+    0
+  )
+  const historyGridColumns = selectionMode ? SELECTION_HISTORY_GRID_COLUMNS : HISTORY_GRID_COLUMNS
+
+  useEffect(() => {
+    const availableIds = new Set(requirements.map((item) => item.id))
+    setSelectedRequirementIds((current) => {
+      const next = new Set([...current].filter((id) => availableIds.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [requirements])
 
   const closeDeleteDialog = (): void => {
     if (isDeleting) return
-    setRequirementToDelete(null)
+    setRequirementsToDelete([])
     setDeleteError(null)
   }
 
   const confirmDelete = async (): Promise<void> => {
-    if (!requirementToDelete) return
+    if (requirementsToDelete.length === 0) return
     setIsDeleting(true)
     setDeleteError(null)
+    const completedIds = new Set<string>()
     try {
-      await onDelete(requirementToDelete)
-      setRequirementToDelete(null)
+      for (const requirement of requirementsToDelete) {
+        await onDelete(requirement)
+        completedIds.add(requirement.id)
+      }
+      setRequirementsToDelete([])
     } catch (error) {
+      setRequirementsToDelete((current) => current.filter((item) => !completedIds.has(item.id)))
       setDeleteError(error instanceof Error ? error.message : "删除需求失败，请重试")
     } finally {
+      if (completedIds.size > 0) {
+        setSelectedRequirementIds((current) => {
+          const next = new Set(current)
+          completedIds.forEach((id) => next.delete(id))
+          return next
+        })
+      }
       setIsDeleting(false)
     }
+  }
+
+  const togglePageSelection = (): void => {
+    setSelectedRequirementIds((current) => {
+      const next = new Set(current)
+      if (allPageSelected) {
+        pageItems.forEach((item) => next.delete(item.id))
+      } else {
+        pageItems.forEach((item) => next.add(item.id))
+      }
+      return next
+    })
+  }
+
+  const toggleRequirementSelection = (requirementId: string): void => {
+    setSelectedRequirementIds((current) => {
+      const next = new Set(current)
+      if (next.has(requirementId)) next.delete(requirementId)
+      else next.add(requirementId)
+      return next
+    })
   }
 
   const openWorkDir = async (requirement: RequirementRecord): Promise<void> => {
@@ -281,9 +374,56 @@ export function RequirementHistoryList({
       <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <div className="min-h-0 flex-1 overflow-auto">
           <div className="px-0 pb-3">
+            {selectionMode ? (
+              <div className="mb-2 flex min-h-10 items-center gap-2 border border-[#eadfd4] bg-[#fffaf5] px-3 text-[12px] text-[#74695f]">
+                <span className="font-medium">批量选择需求</span>
+                {selectedRequirements.length > 0 ? (
+                  <>
+                    <span>
+                      已选择{" "}
+                      <b className="tabular-nums text-[#5d4c3e]">{selectedRequirements.length}</b>{" "}
+                      项需求
+                    </span>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      className="ml-auto h-7 gap-1.5 px-2.5 text-[12px]"
+                      onClick={() => {
+                        setDeleteError(null)
+                        setRequirementsToDelete(selectedRequirements)
+                      }}
+                    >
+                      <Trash2 className="size-3.5" />
+                      删除所选
+                    </Button>
+                  </>
+                ) : null}
+                <IconPopoverButton
+                  icon={<X className="size-3.5" />}
+                  popoverContent="退出批量选择"
+                  aria-label="退出批量选择"
+                  className="size-7 shrink-0 rounded-[6px] text-[#8b715b] hover:bg-[#f1eae1] hover:text-[#5d4c3e]"
+                  onClick={() => {
+                    onSelectionModeChange(false)
+                    setSelectedRequirementIds(new Set())
+                  }}
+                />
+              </div>
+            ) : null}
             <div
-              className={`${HISTORY_GRID_COLUMNS} grid items-center gap-2.5 whitespace-nowrap border-b border-[#f0f0f0] bg-[#fbf9f6] px-3 text-[11.5px] text-[#958a7f]`}
+              className={`${historyGridColumns} grid items-center gap-2.5 whitespace-nowrap border-b border-[#f0f0f0] bg-[#fbf9f6] px-3 text-[11.5px] text-[#958a7f]`}
             >
+              {selectionMode ? (
+                <span className="flex h-[38px] items-center justify-center">
+                  <SelectionCheckbox
+                    checked={allPageSelected}
+                    indeterminate={somePageSelected && !allPageSelected}
+                    onChange={togglePageSelection}
+                    ariaLabel={allPageSelected ? "取消全选当前页" : "全选当前页"}
+                  />
+                </span>
+              ) : null}
               <span className="flex h-[38px] items-center">系统</span>
               <span>需求名称</span>
               <span>需求来源</span>
@@ -304,8 +444,17 @@ export function RequirementHistoryList({
               return (
                 <div key={item.id} className="border-b border-[#eee8e1]">
                   <div
-                    className={`${HISTORY_GRID_COLUMNS} grid min-h-[52px] w-full items-center gap-2.5 bg-white px-3 text-left text-sm transition-colors hover:bg-[#fdf8f3]`}
+                    className={`${historyGridColumns} grid min-h-[52px] w-full items-center gap-2.5 bg-white px-3 text-left text-sm transition-colors hover:bg-[#fdf8f3]`}
                   >
+                    {selectionMode ? (
+                      <span className="flex justify-center">
+                        <SelectionCheckbox
+                          checked={selectedRequirementIds.has(item.id)}
+                          onChange={() => toggleRequirementSelection(item.id)}
+                          ariaLabel={`选择需求 ${item.title}`}
+                        />
+                      </span>
+                    ) : null}
                     <span className="min-w-0 truncate">
                       <RequirementSystem systemId={item.systemId} name={item.system} />
                     </span>
@@ -324,11 +473,7 @@ export function RequirementHistoryList({
                             : "text-[#756a5f]"
                       )}
                     >
-                      {sourceType === "file"
-                        ? "文件"
-                        : sourceType === "link"
-                          ? "链接"
-                          : "输入"}
+                      {sourceType === "file" ? "文件" : sourceType === "link" ? "链接" : "输入"}
                     </span>
                     <span className="flex min-w-0 items-center gap-1.5 font-mono text-[11.5px]">
                       <span className="shrink-0 rounded-[5px] bg-[#f1eae1] px-1.5 py-0.5 text-[10px] font-sans text-[#958a7f]">
@@ -444,14 +589,17 @@ export function RequirementHistoryList({
                         type="button"
                         aria-label={`删除需求 ${item.title}`}
                         title="删除需求"
-                        disabled={isDeleting && requirementToDelete?.id === item.id}
+                        disabled={
+                          isDeleting && requirementsToDelete.some((target) => target.id === item.id)
+                        }
                         onClick={() => {
                           setDeleteError(null)
-                          setRequirementToDelete(item)
+                          setRequirementsToDelete([item])
                         }}
                         className="flex size-7 shrink-0 items-center justify-center rounded-[6px] text-[#aa5d4d] transition-colors hover:bg-[#fae9e3] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#c26b4f]/45 disabled:cursor-wait disabled:opacity-50"
                       >
-                        {isDeleting && requirementToDelete?.id === item.id ? (
+                        {isDeleting &&
+                        requirementsToDelete.some((target) => target.id === item.id) ? (
                           <Loader2 className="size-3.5 animate-spin" />
                         ) : (
                           <Trash2 className="size-3.5" />
@@ -584,13 +732,15 @@ export function RequirementHistoryList({
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>确认删除需求</DialogTitle>
+            <DialogTitle>{isBatchDelete ? "确认批量删除需求" : "确认删除需求"}</DialogTitle>
             <DialogDescription className="leading-6">
-              {`确定要删除「${requirementToDelete?.title ?? ""}」吗？这会同步删除 PRD Agent
-              会话、需求索引映射以及工作目录中的该需求文件夹，删除后不可恢复。`}
+              {isBatchDelete
+                ? `确定删除所选 ${requirementsToDelete.length} 项需求及其关联的 ${conversationCountToDelete} 个会话吗？这会同步删除需求索引映射以及工作目录中的需求文件夹，删除后不可恢复。`
+                : `确定要删除「${requirementToDelete?.title ?? ""}」吗？这会同步删除 PRD Agent
+                会话、需求索引映射以及工作目录中的该需求文件夹，删除后不可恢复。`}
             </DialogDescription>
           </DialogHeader>
-          {requirementToDelete?.requirementPath ? (
+          {!isBatchDelete && requirementToDelete?.requirementPath ? (
             <p className="rounded-lg border border-[#e5d9ce] bg-[#fbf8f4] px-3 py-2 font-mono text-[11px] leading-5 text-[#74695f] break-all">
               {requirementToDelete.requirementPath}
             </p>
@@ -620,7 +770,7 @@ export function RequirementHistoryList({
               ) : (
                 <Trash2 className="size-4" />
               )}
-              删除需求
+              {isBatchDelete ? "删除所选需求" : "删除需求"}
             </Button>
           </DialogFooter>
         </DialogContent>

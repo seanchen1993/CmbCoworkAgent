@@ -2064,6 +2064,16 @@ interface CustomAPI {
       requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
       error?: string
     }>
+    detachThread: (payload: { reqId: string; threadId: string }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
+    rename: (payload: { reqId: string; title: string }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
     savePrd: (payload: {
       reqId: string
       version: string
