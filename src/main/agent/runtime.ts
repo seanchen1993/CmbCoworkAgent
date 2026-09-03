@@ -1757,7 +1757,7 @@ function extractExecuteCommand(args: unknown): string | null {
 }
 
 /**
- * Tool-access guard for a Solo task subagent (registry agents with a non-default
+ * Tool-access guard for a registry task subagent (agents with a non-default
  * tool policy — built-in Explore/Plan/verification + user agents). deepagents
  * shares the main fs middleware — which provides write_file/edit_file/execute —
  * across ALL task subagents, and a per-subagent middleware can only be APPENDED,
@@ -1813,7 +1813,7 @@ export function createAgentToolGuardMiddleware(
             status: "error"
           })
         }
-        // This guards a Solo registry subagent that SHARES the main agent's
+        // This guards a registry task subagent that SHARES the main agent's
         // (non-read-only) LocalSandbox, so the sandbox's instance flag is off.
         // Run the execute call inside the read-only context so the sandbox's
         // post-hook gate still fires if a PreToolUse hook rewrites this safe
@@ -2842,7 +2842,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // observes the appended section) keyed on the SAME access policy: it drops
   // `## Execute Tool` only when execute is in the blocked set, so
   // read_only/verify/full (which KEEP execute, command-gated) are untouched. The
-  // Solo Level-2 path already gets this via createAgentToolGuardMiddleware; this
+  // Registry task path already gets this via createAgentToolGuardMiddleware; this
   // covers the Level-1 workflow-leaf + coordinator-worker (filesystemAccess)
   // path, which has no such guard.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -4387,7 +4387,7 @@ export interface CreateAgentRuntimeOptions {
   requestUserInputConfig?: HarnessRequestUserInputConfig
   /** Load workspace AGENTS.md hierarchy into the main system prompt. */
   enableAgentsPrompt?: boolean
-  /** Project-mode Solo selection of bundled and explicit user-format subagents. */
+  /** Project-mode inline-task selection of bundled and explicit user-format subagents. */
   subagentConfig?: HarnessProjectModeSubagentConfig
   /** Optional Harness project AGENTS.md prompt appended without changing workspace AGENTS.md loading. */
   harnessAgentsPrompt?: string
@@ -4626,8 +4626,11 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     agentMode,
     memoryEnabled: memoryEnabledForThread
   })
-  const projectModeSoloSubagentConfig =
-    runtimePolicy.isProjectMode && agentMode === "normal" ? subagentConfig : undefined
+  // Keep the registry catalogue tied to the task tool itself. This enables the
+  // same task types in Multi and Workflow while excluding Solo, coordinator,
+  // and every leaf runtime through the existing mainSubagentsEnabled policy.
+  const projectModeTaskSubagentConfig =
+    runtimePolicy.isProjectMode && mainSubagentsEnabled ? subagentConfig : undefined
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -4691,12 +4694,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   console.log("[Runtime] Conversation history directory:", conversationHistoryPathPrefix)
   console.log("[Runtime] Large tool results directory:", largeToolResultsDir)
 
-  // Open agent-type registry → deepagents task-tool subagents for the Solo main
-  // agent. Gated to the Solo main agent ONLY: coordinator (agentMode
-  // "coordinator") and the workflow orchestrator (agentMode "workflow") are
-  // excluded, as is every leaf runtime (workflow/coordinator subagents run with
-  // disableSubagents=true). This keeps requirement-2 (coordinator untouched) and
-  // routes workflow agent-types through their own Level-1 path, not here.
+  // Open agent-type registry → deepagents task-tool subagents for the Multi and
+  // Workflow main agents. Coordinator stays on its dedicated worker mechanism,
+  // and leaf runtimes stay excluded through disableSubagents=true.
   const resolveRegistryModelInstance = (
     profileModel?: string
   ): ReturnType<typeof getModelInstance> | undefined => {
@@ -4705,7 +4705,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     // above) and the workflow agentType path (workflow/subagent.ts prepends
     // `custom:`, then the runtime slices it) do. Without this, a profile
     // `model: custom:foo` resolves fine under a workflow agentType but SILENTLY
-    // inherits the main model for a Solo task subagent.
+    // inherits the main model for an inline task subagent.
     const lookup = stripCustomModelPrefix(profileModel)
     const cfg = getModelConfigByRef(profileModel) ?? getModelConfigByRef(lookup)
     if (!cfg) {
@@ -4724,17 +4724,18 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return undefined
     }
   }
-  const registrySubagentSpecs =
-    agentMode === "normal" && !disableSubagents
-      ? (await loadAgentProfilesAsync(workspacePath, projectModeSoloSubagentConfig)).map((profile) => ({
+  const registrySubagentSpecs = mainSubagentsEnabled
+    ? (await loadAgentProfilesAsync(workspacePath, projectModeTaskSubagentConfig)).map(
+        (profile) => ({
           name: profile.name,
           description: profile.description,
           systemPrompt: profile.systemPrompt,
           disallowedTools: profile.disallowedTools,
           shellAccess: profile.shellAccess,
           model: resolveRegistryModelInstance(profile.model)
-        }))
-      : []
+        })
+      )
+    : []
 
   const checkpointer = await getCheckpointer(threadId)
   console.log("[Runtime] Checkpointer ready for thread:", threadId)
@@ -6613,7 +6614,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
   const mainMemorySources =
     !disableMemoryInjection && memorySources?.length ? memorySources : undefined
   const projectModeTaskSubagentsInheritFullContext =
-    runtimePolicy.isProjectMode && agentMode === "normal" && !disableSubagents
+    runtimePolicy.isProjectMode && mainSubagentsEnabled
   const taskSubagentExtraSystemPrompt = projectModeTaskSubagentsInheritFullContext
     ? resolvedProjectContextPrompt
     : combinedAgentsPrompt
@@ -6647,7 +6648,7 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent:
-      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeSoloSubagentConfig),
+      !isCoordinatorMode && isGeneralPurposeSubagentEnabled(projectModeTaskSubagentConfig),
     skills: mainSkillSources,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
