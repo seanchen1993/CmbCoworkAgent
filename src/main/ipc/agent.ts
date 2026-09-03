@@ -253,7 +253,8 @@ import {
 } from "../agent/coordinator-worker-manager"
 import {
   isRetryableApiError,
-  isStreamDisconnectLikeError,
+  isEmptyModelResponseError,
+  isResumableStreamFailure,
   extractErrorDetail,
   type FailoverAttempt,
   type ApiErrorDetail
@@ -4619,7 +4620,8 @@ function streamDisconnectRetryDelay(attempt: number): number {
 function notifyStreamDisconnectRetry(
   window: BrowserWindow,
   channel: string,
-  attempt: number
+  attempt: number,
+  reason = "流连接中断，正在重连当前模型"
 ): void {
   safeSendToWindow(window, channel, {
     type: "custom",
@@ -4627,7 +4629,7 @@ function notifyStreamDisconnectRetry(
       type: "model_retry",
       attempt,
       maxRetries: STREAM_DISCONNECT_MAX_RETRIES,
-      reason: "流连接中断，正在重连当前模型",
+      reason,
       delayMs: streamDisconnectRetryDelay(attempt)
     }
   })
@@ -4692,15 +4694,21 @@ export async function retryStreamAfterDisconnect<T>(
   let retryError = error
   let nextRetries = retries
 
-  while (isStreamDisconnectLikeError(retryError) && nextRetries < STREAM_DISCONNECT_MAX_RETRIES) {
+  while (isResumableStreamFailure(retryError) && nextRetries < STREAM_DISCONNECT_MAX_RETRIES) {
     if (abortSignal.aborted || !isActive()) throw retryError
 
+    const emptyResponse = isEmptyModelResponseError(retryError)
     nextRetries += 1
     const delayMs = streamDisconnectRetryDelay(nextRetries)
     console.warn(
-      `[Agent][Retry] ${label} ${modelId ?? "unknown"} stream disconnected; retry ${nextRetries}/${STREAM_DISCONNECT_MAX_RETRIES}`
+      `[Agent][Retry] ${label} ${modelId ?? "unknown"} ${emptyResponse ? "returned an empty response" : "stream disconnected"}; retry ${nextRetries}/${STREAM_DISCONNECT_MAX_RETRIES}`
     )
-    notifyStreamDisconnectRetry(window, channel, nextRetries)
+    notifyStreamDisconnectRetry(
+      window,
+      channel,
+      nextRetries,
+      emptyResponse ? "模型返回空响应，正在重试当前模型" : undefined
+    )
     await new Promise((resolve) => setTimeout(resolve, delayMs))
     if (abortSignal.aborted || !isActive()) throw retryError
 

@@ -3848,8 +3848,11 @@ function createRetryingFetch(
         // content-type text/event-stream; application/json means the gateway buffered
         // the whole completion — long generations on that path will hit the 60s
         // first-byte watchdog above.
+        // request-id is logged alongside status/content-type so an empty-body
+        // turn ("Received empty response from chat model call.") can be traced
+        // back to the exact upstream response that produced it.
         console.log(
-          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}`
+          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
         )
 
         // Success or non-retryable error — return as-is.
