@@ -455,6 +455,18 @@ const TRACE_MAX_STEPS = 128
 const TRACE_MAX_TOOL_CALLS = 512
 const TRACE_MAX_TOOL_CALLS_PER_STEP = 64
 const TRACE_MAX_MODEL_CALLS = 64
+/**
+ * Past TRACE_MAX_MODEL_CALLS a call still gets a skeleton — timing and
+ * tokenUsage — so per-call token usage survives a long turn instead of
+ * stopping at 64.
+ *
+ * Four times the full-entry cap rather than more: a skeleton is ~410 bytes,
+ * not the ~120 its own fields suggest, because TraceModelCall requires
+ * inputMessages, outputMessage and toolCalls to be present even when empty. At
+ * 512 that was 209KB and put the maxed-out trace within 14% of the size where
+ * the write queue drops it whole.
+ */
+const TRACE_MAX_MODEL_CALL_SKELETONS = 256
 const TRACE_MAX_MODEL_MESSAGES = 64
 const TRACE_MAX_NODES = 512
 const TRACE_MAX_SKILLS = 128
@@ -1042,10 +1054,14 @@ export class TraceCollector {
       this.observedOutputTokens += output
       this.observedTotalTokens += usage.totalTokens ?? input + output
     }
-    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS) return
-    // Token totals are summed off this array by the dashboard, so a spent
-    // budget must cost the messages, not the entry: keep timing and usage.
-    if (!this.collectionBudget.canAdd(512)) {
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALL_SKELETONS) return
+    // Token totals are summed off this array by the dashboard, and per-call
+    // usage is worth keeping on its own. Neither a spent budget nor the
+    // full-entry cap should cost the entry: they cost its messages.
+    if (
+      this.modelCalls.length >= TRACE_MAX_MODEL_CALLS ||
+      !this.collectionBudget.canAdd(512)
+    ) {
       this.modelCalls.push({
         ...(typeof call.messageId === "string"
           ? { messageId: clampText(call.messageId, 128) }

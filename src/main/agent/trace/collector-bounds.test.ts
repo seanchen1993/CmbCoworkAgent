@@ -110,7 +110,8 @@ describe("bounded trace telemetry", () => {
 
     expect(trace.userMessage.length).toBeLessThanOrEqual(64 * 1024)
     expect(trace.steps.length).toBeLessThanOrEqual(128)
-    expect(trace.modelCalls?.length ?? 0).toBeLessThanOrEqual(64)
+    // 64 full entries, then skeletons up to TRACE_MAX_MODEL_CALL_SKELETONS.
+    expect(trace.modelCalls?.length ?? 0).toBeLessThanOrEqual(256)
     expect(trace.nodes?.length ?? 0).toBeLessThanOrEqual(512)
     expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(1024 * 1024)
     expect(diagnostics.queuedItems).toBe(0)
@@ -161,9 +162,14 @@ describe("bounded trace telemetry", () => {
     expect(trace.totalInputTokens).toBe(TURNS * 1000)
     expect(trace.totalOutputTokens).toBe(TURNS * 50)
     expect(trace.totalTokens).toBe(TURNS * 1050)
-    // The arrays themselves still stop at their caps.
-    expect(trace.modelCalls?.length).toBeLessThanOrEqual(64)
+    // The arrays still stop at their caps: 64 full model calls, then skeletons
+    // to 256, and 128 steps.
+    expect(trace.modelCalls?.length).toBeLessThanOrEqual(256)
     expect(trace.steps.length).toBeLessThanOrEqual(128)
+    // Per-call token usage survives past the full-entry cap, so a future
+    // "tokens per model call" view is not limited to the first 64.
+    const withUsage = (trace.modelCalls ?? []).filter((call) => call.tokenUsage)
+    expect(withUsage.length).toBeGreaterThan(64)
 
     // Skeletons carry shape, not payload.
     const skeletons = (trace.modelCalls ?? []).filter((call) => call.truncated)
@@ -194,10 +200,14 @@ describe("bounded trace telemetry", () => {
     })
     tracer.setUsedSkills(Array.from({ length: 128 }, (_, i) => `skill-${i}-${"s".repeat(200)}`))
     tracer.setEvolvedSkills(Array.from({ length: 128 }, (_, i) => `evo-${i}-${"e".repeat(200)}`))
-    // The budget is spent within ~13 turns; the rest only adds GC pressure.
-    for (let i = 0; i < 60; i += 1) {
+    // Past every cap, including TRACE_MAX_MODEL_CALL_SKELETONS (256), so the
+    // skeleton paths are covered. Kept to the smallest count that does that:
+    // the byte budget is spent within ~13 turns and the rest is pure CPU, and
+    // this suite runs in parallel with tests that assert the event loop keeps
+    // ticking.
+    for (let i = 0; i < 300; i += 1) {
       const messageId = `m-${i}`
-      const blob = `${i}-` + "a".repeat(16 * 1024)
+      const blob = `${i}-` + "a".repeat(8 * 1024)
       tracer.beginStep()
       tracer.recordToolCall({ name: "exec", args: { i, blob } })
       tracer.endStep(blob)
@@ -234,8 +244,13 @@ describe("bounded trace telemetry", () => {
     // Over TRACE_PERSISTED_MAX_BYTES the write queue drops the trace outright,
     // and only an in-memory counter records that it happened. A node input that
     // skipped the byte budget once pushed this to ~1.1MB, so pin the headroom.
+    // TRACE_PERSISTED_MAX_BYTES is 1MB, and over it the write queue drops the
+    // trace whole while only an in-memory counter notices. Everything outside
+    // the 480KB collection pool — the clamped top-level fields and the
+    // skeletons that outlive it — now adds up to ~350KB, so the margin is real
+    // but not generous: weigh any further budget-exempt field against it.
     const bytes = Buffer.byteLength(JSON.stringify(trace), "utf8")
-    expect(bytes).toBeLessThan(768 * 1024)
+    expect(bytes).toBeLessThan(900 * 1024)
     const persistedPath = join(root, "thread-ceiling", `${trace.traceId}.jsonl`)
     expect(existsSync(persistedPath)).toBe(true)
   }, 30_000)
