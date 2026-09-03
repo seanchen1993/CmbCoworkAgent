@@ -20,12 +20,29 @@
 export interface TraceToolCall {
   /** Tool name, e.g. "read_file", "manage_skill" */
   name: string
-  /** Raw arguments passed to the tool (sanitized before trace storage/reporting). */
+  /**
+   * Raw arguments passed to the tool (sanitized before trace storage/reporting).
+   *
+   * Steps are the canonical home for tool args — the flattest place a query can
+   * reach them — so the literal stays on the step and the copies on model calls
+   * and tool nodes carry an id instead.
+   */
   args: Record<string, unknown>
+  /** Id of `args` as stored here — this is the copy others point at. */
+  argsMid?: string
+  /** `args` is empty; the real value lives under this id elsewhere in the trace. */
+  argsRef?: string
   /** Tool result (string representation, may be truncated) */
   result?: string
   /** Wall-clock time in ms for this tool call */
   durationMs?: number
+  /**
+   * The byte budget was spent when this was recorded, so only the shape was
+   * kept — name and timing, no args or result. The entry still exists because
+   * dropping it would also drop the count, and per-trace tool counts and tool
+   * names are operational metrics.
+   */
+  truncated?: boolean
 }
 
 /** A normalized chat message used by model-call traces. */
@@ -36,6 +53,25 @@ export interface TraceChatMessage {
   reasoning?: string
   name?: string
   toolCallId?: string
+  /**
+   * Content-addressed id, present on the FIRST occurrence of a message within a
+   * trace. The LLM input window slides by one call while advancing only a
+   * message or two, so the same message is recorded by several consecutive
+   * calls — and each call records its window twice (llm node input + model
+   * call). Later occurrences carry `ref` instead of the content; buildTraceTree
+   * puts the content back before anything renders it.
+   */
+  mid?: string
+  /** Set on a repeat: the `mid` of the occurrence that holds the content. */
+  ref?: string
+  /** Id of `content` as stored here — this is the copy others point at. */
+  contentMid?: string
+  /** `content` is empty; the text lives under this id elsewhere in the trace. */
+  contentRef?: string
+  /** Id of `reasoning` as stored here. */
+  reasoningMid?: string
+  /** `reasoning` is absent; the text lives under this id elsewhere in the trace. */
+  reasoningRef?: string
 }
 
 /** Token usage attached to a model call (if provider reports it). */
@@ -61,6 +97,12 @@ export interface TraceModelCall {
   toolCalls: TraceToolCall[]
   /** Provider token usage metadata */
   tokenUsage?: TraceTokenUsage
+  /**
+   * Recorded after the byte budget was spent: messages and tool args dropped,
+   * tokenUsage kept. Token totals are summed from this array, so a dropped
+   * entry would silently understate a long turn's cost.
+   */
+  truncated?: boolean
 }
 
 export type TraceNodeType =
@@ -86,8 +128,22 @@ export interface TraceNode {
   startedAt: string
   endedAt?: string
   input?: unknown
+  /**
+   * `input` is omitted; its value lives under this id elsewhere in the trace.
+   *
+   * A sibling string rather than a marker object inside `input`: the upload is
+   * ingested into Elasticsearch by the server, and putting an object where a
+   * string had been indexed risks a mapping conflict that rejects the whole
+   * document. A new field of its own can never collide.
+   */
+  inputRef?: string
   output?: unknown
+  /** `output` is omitted; its value lives under this id. Same reasoning as inputRef. */
+  outputRef?: string
+  /** Metadata values are interned as a sibling `<key>Ref` string, for the same reason. */
   metadata?: Record<string, unknown>
+  /** Recorded after the byte budget was spent: structure kept, payload dropped. */
+  truncated?: boolean
 }
 
 /** One reasoning step (one model message + its tool calls). */
@@ -96,10 +152,20 @@ export interface TraceStep {
   index: number
   /** ISO timestamp when the model started this step */
   startedAt: string
-  /** The assistant's text reasoning for this step (may be empty) */
+  /**
+   * The assistant's text reasoning for this step (may be empty).
+   *
+   * Steps are the canonical home for assistant text: they are the flattest
+   * structure a cloud query can reach, so the literal always stays here and the
+   * copies on model calls and llm nodes carry ids instead.
+   */
   assistantText: string
+  /** Id of `assistantText` as stored here — this is the copy others point at. */
+  assistantTextMid?: string
   /** All tool calls made during this step */
   toolCalls: TraceToolCall[]
+  /** Recorded after the byte budget was spent: shape kept, assistantText dropped. */
+  truncated?: boolean
 }
 
 // ─────────────────────────────────────────────────────────
@@ -481,6 +547,18 @@ export interface AgentTrace {
    * LangChain adapters fold cache counts into `input_tokens`.
    */
   cacheReadTokens?: number
+  /**
+   * Σ token usage across every model call the turn actually made, counted as
+   * calls arrive rather than summed from `modelCalls`. That array stops at
+   * TRACE_MAX_MODEL_CALLS, so summing it understates long turns by exactly the
+   * amount that makes them interesting. Flattened for the same reason
+   * cacheReadTokens is: a `sum` agg cannot reach into a nested array.
+   */
+  totalInputTokens?: number
+  totalOutputTokens?: number
+  totalTokens?: number
+  /** Model calls the turn made, including any past TRACE_MAX_MODEL_CALLS. */
+  totalModelCalls?: number
   /** Unified LangSmith-style run tree nodes */
   nodes?: TraceNode[]
   /** Total number of tool calls across all steps */
