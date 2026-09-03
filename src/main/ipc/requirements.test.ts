@@ -246,7 +246,7 @@ describe("requirement source preview", () => {
     }>
     expect(history).toHaveLength(1)
     expect(history[0].requirementPath).toBe(created.requirement?.requirementPath)
-    expect(history[0].prdGenerated).toBe(true)
+    expect(history[0].prdGenerated).toBe(false)
     expect(history[0].coreFilesMissing).toBe(false)
     expect(history[0].prdManifest).toEqual({
       prd: {
@@ -296,7 +296,7 @@ describe("requirement source preview", () => {
       }>
     }
     expect(index.list[0].requirementPath).toBe(created.requirement?.requirementPath)
-    expect(index.list[0].prdGenerated).toBe(true)
+    expect(index.list[0].prdGenerated).toBe(false)
     expect(index.list[0].prdManifest).toEqual(history[0].prdManifest)
     expect(index.list[0]).not.toHaveProperty("workDir")
     expect(index.list[0]).not.toHaveProperty("prdVersion")

@@ -69,7 +69,7 @@ export function fromPersistedRequirement(
   item: Awaited<ReturnType<typeof window.api.requirements.list>>[number],
   systemName: string
 ): RequirementRecord {
-  const generated = item.prdGenerated
+  const generated = item.prdManifest.prd.status.trim().toLowerCase() === "generated"
   const abnormal = item.coreFilesMissing || item.workspaceMissing
   return {
     id: item.reqId,
@@ -98,7 +98,7 @@ export function fromPersistedRequirement(
     sourceType: item.source.type,
     sourceName: item.source.fileName,
     initialDescription: item.source.initialDescription ?? "",
-    prdGenerated: item.prdGenerated,
+    prdGenerated: generated,
     prdManifest: item.prdManifest,
     prd: generated ? "是" : "否"
   }
@@ -116,6 +116,10 @@ export function getRequirementModules(requirement: RequirementRecord): Requireme
 
 export function isRequirementPublished(requirement: RequirementRecord): boolean {
   return requirement.prdManifest.prd.status.trim().toLowerCase() === "published"
+}
+
+export function isRequirementGenerated(requirement: RequirementRecord): boolean {
+  return requirement.prdManifest.prd.status.trim().toLowerCase() === "generated"
 }
 
 function getRequirementUpdatedAtTimestamp(requirement: RequirementRecord): number {

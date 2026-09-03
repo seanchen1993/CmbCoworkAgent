@@ -455,6 +455,10 @@ function normalizePrdManifest(value: unknown): IndexedPrdManifest {
   return normalized
 }
 
+function isPrdGenerated(manifest: IndexedPrdManifest): boolean {
+  return manifest.prd.status === "generated"
+}
+
 async function convertRequirementSourceToMarkdown(sourcePath: string): Promise<string> {
   if (path.extname(sourcePath).toLocaleLowerCase() !== ".docx") {
     const preview = (await fs.readFile(sourcePath, "utf-8")).trim()
@@ -545,14 +549,15 @@ async function getRequirementCoreFileStatus(
 async function toRuntimeRequirement(item: RequirementIndexItem): Promise<RequirementRuntimeItem> {
   const workspaceMissing = await isRequirementWorkspaceMissing(item)
   const coreFileStatus = await getRequirementCoreFileStatus(item, workspaceMissing)
+  const prdManifest = normalizePrdManifest(item.prdManifest)
   return {
     ...item,
     requirementPath: getRequirementRoot(item),
     workspaceMissing,
     coreFilesMissing: coreFileStatus.missing,
     coreFilesMissingReason: coreFileStatus.reason,
-    prdGenerated: item.prdGenerated === true,
-    prdManifest: normalizePrdManifest(item.prdManifest)
+    prdGenerated: isPrdGenerated(prdManifest),
+    prdManifest
   }
 }
 
@@ -760,7 +765,7 @@ async function syncRequirementManifest(
   const manifest = normalizePrdManifest(payload.manifest)
   list[index] = {
     ...list[index],
-    prdGenerated: true,
+    prdGenerated: isPrdGenerated(manifest),
     prdManifest: manifest
   }
   await writeRequirementIndex(list)

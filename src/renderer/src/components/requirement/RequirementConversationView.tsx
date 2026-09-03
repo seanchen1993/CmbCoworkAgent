@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertTriangle,
   Bot,
+  Brain,
   CheckCircle2,
   ExternalLink,
   Eye,
@@ -36,6 +37,7 @@ import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/worksp
 import { cn } from "@/lib/utils"
 import {
   fromPersistedRequirement,
+  isRequirementGenerated,
   isRequirementPublished,
   type RequirementPrdManifest,
   type RequirementRecord
@@ -47,13 +49,16 @@ const PRD_COMPLETION_CHECK_MAX_ATTEMPTS = 4
 const PRD_COMPLETION_CHECK_RETRY_DELAY_MS = 500
 
 type PreviewTab = "expert-process" | "source" | "prd" | "requirement-space"
-function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
-  if (isRequirementPublished(requirement) || requirement.prdGenerated) return "requirement-space"
-  return "source"
+
+function getSourceTabLabel(sourceType: RequirementRecord["sourceType"]): string {
+  if (sourceType === "file") return "旧需求（文件）"
+  if (sourceType === "link") return "旧需求（链接）"
+  return "旧需求（描述）"
 }
 
-function hasGeneratedPrdFile(files: Array<{ path: string; is_dir?: boolean }>): boolean {
-  return files.some((file) => !file.is_dir && file.path === "/prd/full-prd.md")
+function getInitialPreviewTab(requirement: RequirementRecord): PreviewTab {
+  if (isRequirementPublished(requirement) || isRequirementGenerated(requirement)) return "requirement-space"
+  return "source"
 }
 
 function normalizePrdFilePath(filePath: string): string {
@@ -170,6 +175,7 @@ function RequirementConversationSession({
   const threadId = selectedThreadId ?? requirement.threadId ?? null
   const threadState = useThreadState(threadId)
   const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
+  const expertProcessRunning = subagents.some((item) => item.status === "running")
   const observedSubagentStatesRef = useRef(new Map<string, string>())
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
@@ -256,7 +262,8 @@ function RequirementConversationSession({
     (file) => !file.is_dir && file.path === effectiveSelectedPrdPath
   )
   const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
-  const prdGenerationCompleted = requirement.prdGenerated || hasGeneratedPrdFile(prdFiles)
+  const prdGenerationCompleted =
+    isRequirementGenerated(requirement) || isRequirementPublished(requirement)
   const requirementSpacePublished =
     requirementSpaceManifest !== null
       ? isRequirementSpacePublished(requirementSpaceManifest)
@@ -407,10 +414,10 @@ function RequirementConversationSession({
     if (result.success && result.files && result.workspacePath === workspacePath) {
       workspaceFilesRef.current = result.files
       setWorkspaceFiles(result.files)
-      return requirement.prdGenerated || hasGeneratedPrdFile(result.files)
+      return isRequirementGenerated(requirement) || isRequirementPublished(requirement)
     }
-    return requirement.prdGenerated || hasGeneratedPrdFile(workspaceFilesRef.current)
-  }, [requirement.prdGenerated, setWorkspaceFiles, threadId, workspacePath])
+    return isRequirementGenerated(requirement) || isRequirementPublished(requirement)
+  }, [requirement, setWorkspaceFiles, threadId, workspacePath])
 
   const loadRequirementSpaceManifest = useCallback(async (): Promise<void> => {
     setManifestLoading(true)
@@ -573,7 +580,7 @@ function RequirementConversationSession({
     if (
       !autoGeneratePrd ||
       autoQueuedPrdGenerationRef.current ||
-      requirement.prdGenerated ||
+      (isRequirementGenerated(requirement) || isRequirementPublished(requirement)) ||
       !threadState ||
       threadState.historyLoading ||
       threadState.messages.length > 0 ||
@@ -593,7 +600,6 @@ function RequirementConversationSession({
   }, [
     autoGeneratePrd,
     requirement,
-    requirement.prdGenerated,
     threadState,
     threadState?.historyLoading,
     threadState?.messages.length,
@@ -753,15 +759,20 @@ function RequirementConversationSession({
                     className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
                   >
                     专家过程
-                    {subagents.some((item) => item.status === "running") ? (
-                      <Loader2 className="size-2.5 animate-spin text-status-info" />
+                    {subagents.length > 0 ? (
+                      <Brain
+                        className={cn(
+                          "size-3 text-status-info",
+                          expertProcessRunning ? "animate-pulse" : undefined
+                        )}
+                      />
                     ) : null}
                   </TabsTrigger>
                   <TabsTrigger
                     value="source"
                     className="h-9 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
                   >
-                    旧需求文件
+                    {getSourceTabLabel(requirement.sourceType)}
                   </TabsTrigger>
                   <TabsTrigger
                     value="prd"
@@ -819,8 +830,16 @@ function RequirementConversationSession({
                 {subagentFocusView?.threadId === threadId ? (
                   <SubagentStreamPanel showCloseButton={false} />
                 ) : (
-                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 text-center text-sm text-muted-foreground">
-                    暂无专家执行记录
+                  <div className="flex h-full min-h-[260px] items-center justify-center px-6 py-10 text-center">
+                    <div className="flex max-w-xs flex-col items-center">
+                      <div className="mb-4 flex size-14 items-center justify-center rounded-full border border-status-info/25 bg-status-info/10 text-status-info">
+                        <Brain className="size-7" strokeWidth={1.7} />
+                      </div>
+                      <div className="text-sm font-semibold text-foreground">暂无专家执行记录</div>
+                      <div className="mt-1.5 text-xs leading-5 text-muted-foreground">
+                        专家分析启动后，执行过程会显示在这里
+                      </div>
+                    </div>
                   </div>
                 )}
               </TabsContent>
