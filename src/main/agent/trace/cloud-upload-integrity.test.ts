@@ -121,6 +121,69 @@ describe("cloud upload integrity", () => {
     }
   }, 60_000)
 
+  it("carries skeletons and their pairing keys through the oversized summary", async () => {
+    const { TraceCollector } = await import("./collector")
+    const { sanitizeTraceForCloudUpload } = await import("./sanitizer")
+    const { rehydrateTraceContent } = await import("./content-refs")
+
+    // Big enough to spend the collection budget (so skeletons exist) and to
+    // pass HARD_TRACE_BYTES (so the summarising pass runs). That pass rebuilds
+    // model calls and nodes field by field rather than spreading them, which is
+    // where a marker or a metadata key silently stops travelling.
+    const tracer = new TraceCollector("th-summary", "分析", "model", {
+      includeSkillEval: false
+    })
+    for (let i = 0; i < 200; i += 1) {
+      const blob = `${i}-` + "a".repeat(8 * 1024)
+      tracer.beginStep()
+      tracer.recordToolCall({ name: "exec_command", args: { blob } })
+      tracer.endStep(blob)
+      const nodeId = tracer.beginLlmNode({ messageId: `m${i}` })
+      tracer.recordModelCall({
+        messageId: `m${i}`,
+        startedAt: "2026-01-01T00:00:00Z",
+        inputMessages: [{ role: "user", content: blob }],
+        outputMessage: { role: "assistant", content: blob },
+        toolCalls: [{ name: "exec_command", args: { blob } }],
+        tokenUsage: { inputTokens: 100, outputTokens: 5, totalTokens: 105 }
+      })
+      tracer.endLlmNode({ nodeId, output: blob })
+      tracer.addToolNode({
+        name: "exec_command",
+        input: { blob },
+        llmMessageId: `m${i}`,
+        toolCallId: `tc-${i}`
+      })
+      tracer.addToolResultNode({ toolCallId: `tc-${i}`, output: blob })
+    }
+    const trace = await tracer.finish("success")
+    const uploaded = sanitizeTraceForCloudUpload(rehydrateTraceContent(trace))
+
+    const localSkeletonNodes = (trace.nodes ?? []).filter((node) => node.truncated).length
+    expect(localSkeletonNodes).toBeGreaterThan(0)
+    expect((uploaded.nodes ?? []).length).toBe((trace.nodes ?? []).length)
+    // Without the marker a skeleton reads as a step that produced nothing.
+    expect((uploaded.nodes ?? []).filter((node) => node.truncated).length).toBe(localSkeletonNodes)
+    // The conversation view pairs a tool with its result on this key.
+    const localPaired = (trace.nodes ?? []).filter((node) => node.metadata?.toolCallId).length
+    expect(localPaired).toBeGreaterThan(0)
+    expect((uploaded.nodes ?? []).filter((node) => node.metadata?.toolCallId).length).toBe(
+      localPaired
+    )
+
+    const localSkeletonCalls = (trace.modelCalls ?? []).filter((call) => call.truncated).length
+    expect(localSkeletonCalls).toBeGreaterThan(0)
+    expect((uploaded.modelCalls ?? []).filter((call) => call.truncated).length).toBe(
+      localSkeletonCalls
+    )
+    // Per-call usage is why the skeletons exist; it has to reach the cloud.
+    expect((uploaded.modelCalls ?? []).filter((call) => call.tokenUsage).length).toBeGreaterThan(64)
+
+    const localSkeletonSteps = trace.steps.filter((step) => step.truncated).length
+    expect(localSkeletonSteps).toBeGreaterThan(0)
+    expect(uploaded.steps.filter((step) => step.truncated).length).toBe(localSkeletonSteps)
+  }, 60_000)
+
   it("still renders a conversation from the uploaded document", async () => {
     const { sanitizeTraceForCloudUpload } = await import("./sanitizer")
     const { rehydrateTraceContent } = await import("./content-refs")
