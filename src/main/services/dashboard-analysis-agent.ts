@@ -15,6 +15,7 @@ import type {
   DashboardEsQueryInput,
   DashboardEsQueryResult
 } from "./dashboard-es-query"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 export type DashboardAnalysisScope = "platform" | "project"
 
@@ -106,12 +107,11 @@ function createDashboardAnalysisModel(config: CustomModelConfig): ChatOpenAI {
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     maxRetries: 0,
     modelKwargs: {
       parallel_tool_calls: false,
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     }
   })
 }

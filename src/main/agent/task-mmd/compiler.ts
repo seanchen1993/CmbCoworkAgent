@@ -16,6 +16,7 @@ import {
 } from "./storage"
 import { stripAnsiText } from "./sanitizer"
 import type { TaskMmdCompileModelInfo, TaskMmdToolEntry } from "./types"
+import { samplingFields } from "../../models/sampling-params"
 
 const compileInFlight = new Set<string>()
 const MIN_FAILURE_BACKOFF_MS = 60_000
@@ -231,7 +232,7 @@ async function createCompileModel(threadId: string): Promise<ChatOpenAI | null> 
     apiKey: cfg.apiKey,
     configuration: { baseURL: cfg.baseUrl },
     maxTokens: Math.min(cfg.maxOutputTokens ?? 2000, 2000),
-    temperature: 0,
+    ...samplingFields(cfg.model, { temperature: 0 }),
     maxRetries: 0
   })
 }

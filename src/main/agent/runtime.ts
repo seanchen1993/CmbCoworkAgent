@@ -30,6 +30,7 @@ import {
   getGlobalRoutingMode
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import { getProjectThreadDataDirectory } from "./context-history-path"
 import { withRawApiCallCapture } from "../services/llm-api-request-capture"
@@ -4207,8 +4208,7 @@ export function getModelInstance(
     // separate model instance because its invoke() must consume SSE internally.
     ...(purpose === "context-compaction" ? { streaming: true } : {}),
     maxTokens: maxOutputTokens,
-    temperature,
-    topP,
+    ...samplingFields(resolvedModel, { temperature, topP }),
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
     // timeout live in retryingFetch below. Setting SDK timeout here would
     // create a shared AbortSignal that, once fired, permanently blocks all
@@ -4216,7 +4216,7 @@ export function getModelInstance(
     maxRetries: 0,
     modelKwargs: {
       parallel_tool_calls: true,
-      ...(topK > 0 ? { top_k: topK } : {}),
+      ...topKModelKwargs(resolvedModel, topK),
       chat_template_kwargs: {
         enable_thinking: enableThinking,
         ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})

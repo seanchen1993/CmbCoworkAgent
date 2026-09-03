@@ -260,6 +260,7 @@ import {
   type ApiErrorDetail
 } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import {
   normalizePathKey,
   normalizePluginId,
@@ -4835,10 +4836,9 @@ async function judgeSkillWorthiness(
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     }
   })
 
@@ -4927,10 +4927,9 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       apiKey: config.apiKey,
       configuration: { baseURL: config.baseUrl },
       maxTokens: config.maxOutputTokens,
-      temperature: config.temperature,
-      topP: config.topP,
+      ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
       modelKwargs: {
-        ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+        ...topKModelKwargs(config.model, config.topK)
       },
       streaming: true
     })
@@ -9394,10 +9393,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                         apiKey: config.apiKey,
                         configuration: { baseURL: config.baseUrl },
                         maxTokens: config.maxOutputTokens,
-                        temperature: config.temperature,
-                        topP: config.topP,
+                        ...samplingFields(config.model, {
+                          temperature: config.temperature,
+                          topP: config.topP
+                        }),
                         modelKwargs: {
-                          ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+                          ...topKModelKwargs(config.model, config.topK)
                         }
                       })
                     }

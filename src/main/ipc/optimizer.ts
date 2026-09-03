@@ -50,6 +50,7 @@ import {
 import { getDefaultModelConfig } from "../models/registry"
 import { trackEvent } from "../services/event-reporter"
 import { bumpHookCatalogGlobalRevision } from "../hook-catalog/revision"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 function notifyRenderer(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -120,10 +121,9 @@ function getDefaultModel(): ChatOpenAI | null {
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     },
     streaming: true
   })
