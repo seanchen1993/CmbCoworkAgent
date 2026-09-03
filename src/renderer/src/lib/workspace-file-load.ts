@@ -112,6 +112,7 @@ interface WorkspaceContinuationState {
 
 const continuationsByWorkspace = new Map<string, WorkspaceContinuationState>()
 const continuationLoadsByWorkspace = new Map<string, Promise<WorkspaceLoadResult>>()
+const resumeLoadsByWorkspace = new Map<string, Promise<WorkspaceLoadResult>>()
 const taskYieldResolvers: Array<() => void> = []
 let taskYieldSequence = 0
 const taskYieldChannel =
@@ -1232,6 +1233,102 @@ export function continueWorkspaceFilesDeduped(
     }
   })
   continuationLoadsByWorkspace.set(key, tracked)
+  return tracked
+}
+
+/**
+ * Continue a paused scan and transparently rebuild its cursor if the main
+ * process already evicted the live worker session. Paused cursors are an
+ * optimization, not durable state: the main process bounds their count and
+ * the renderer expires idle cursors. A stale Files-panel button must therefore
+ * recover by replaying bounded segments until it passes the previously visible
+ * file count instead of reporting a successful no-op.
+ */
+async function resumeWorkspaceFiles(
+  threadId: string,
+  workspacePath: string,
+  options: Omit<WorkspaceLoadOptions, "requestTrailingRescan"> = {}
+): Promise<WorkspaceLoadResult> {
+  const key = normalizeWorkspaceFileKey(workspacePath)
+  const previousResult = cachedResults.get(key)?.result
+  const previousCount = previousResult?.files.length ?? 0
+  let continuationError: unknown
+
+  try {
+    const continued = await continueWorkspaceFilesDeduped(threadId, workspacePath, options)
+    if (
+      continued.success &&
+      (continued.files.length > previousCount || continued.truncated !== true)
+    ) {
+      return continued
+    }
+    continuationError = new Error("Workspace file continuation made no progress")
+  } catch (error) {
+    if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw error
+    }
+    continuationError = error
+  }
+
+  // There was no retained snapshot to resume. Preserve the original failure
+  // instead of turning an unrelated first-load error into an implicit rescan.
+  if (!previousResult) {
+    if (continuationError) throw continuationError
+    return {
+      success: false,
+      files: [],
+      workspacePath,
+      error: "Workspace file continuation is no longer available"
+    }
+  }
+
+  markWorkspaceFilesStale(threadId, workspacePath)
+  const reportRecoveryProgress = options.onProgress
+    ? (loadedCount: number): void => options.onProgress?.(Math.max(previousCount, loadedCount))
+    : undefined
+  let result = await loadWorkspaceFilesDeduped(threadId, workspacePath, {
+    requestTrailingRescan: true,
+    signal: options.signal,
+    onProgress: reportRecoveryProgress
+  })
+  if (!result.success) return result
+
+  // Replaying to the old boundary is necessary because a recovered first
+  // segment contains the same prefix. The extra segment is the actual user
+  // requested progress. Each iteration remains bounded by the worker budget.
+  const maximumRecoverySegments = Math.max(
+    1,
+    Math.ceil(previousCount / WORKSPACE_FILE_SCAN_SEGMENT_MAX_ENTRIES) + 1
+  )
+  for (
+    let recoverySegment = 0;
+    result.continuationAvailable === true &&
+    result.files.length <= previousCount &&
+    recoverySegment < maximumRecoverySegments;
+    recoverySegment += 1
+  ) {
+    result = await continueWorkspaceFilesDeduped(threadId, workspacePath, {
+      signal: options.signal,
+      onProgress: reportRecoveryProgress
+    })
+    if (!result.success) return result
+  }
+  return result
+}
+
+export function resumeWorkspaceFilesDeduped(
+  threadId: string,
+  workspacePath: string,
+  options: Omit<WorkspaceLoadOptions, "requestTrailingRescan"> = {}
+): Promise<WorkspaceLoadResult> {
+  const key = normalizeWorkspaceFileKey(workspacePath)
+  const existing = resumeLoadsByWorkspace.get(key)
+  if (existing) return existing
+  const operation = resumeWorkspaceFiles(threadId, workspacePath, options)
+  const tracked = operation.finally(() => {
+    if (resumeLoadsByWorkspace.get(key) === tracked) resumeLoadsByWorkspace.delete(key)
+  })
+  resumeLoadsByWorkspace.set(key, tracked)
   return tracked
 }
 

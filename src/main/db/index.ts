@@ -530,6 +530,41 @@ export async function initializeDatabase(): Promise<NativeSqliteAdapter> {
   `)
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS trusted_tool_file_preview_sources (
+      thread_id TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      file_path_key TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY(thread_id, tool_call_id, file_path_key)
+    )
+  `)
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_trusted_tool_file_preview_sources_updated
+     ON trusted_tool_file_preview_sources(updated_at)`
+  )
+  db.run(`
+    CREATE TRIGGER IF NOT EXISTS trusted_tool_file_preview_source_requires_thread
+    BEFORE INSERT ON trusted_tool_file_preview_sources
+    WHEN NOT EXISTS (
+      SELECT 1 FROM threads WHERE thread_id = NEW.thread_id
+    )
+    BEGIN
+      SELECT RAISE(IGNORE);
+    END
+  `)
+  db.run(`
+    CREATE TRIGGER IF NOT EXISTS trusted_tool_file_preview_sources_delete_with_thread
+    AFTER DELETE ON threads
+    BEGIN
+      DELETE FROM trusted_tool_file_preview_sources WHERE thread_id = OLD.thread_id;
+    END
+  `)
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS thread_subagent_messages (
       thread_id TEXT NOT NULL,
       subagent_id TEXT NOT NULL,
@@ -5647,6 +5682,7 @@ export function deleteThread(threadId: string): void {
     database.run("DELETE FROM thread_message_fragment_states WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_messages WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM thread_message_buckets WHERE thread_id = ?", [threadId])
+    database.run("DELETE FROM trusted_tool_file_preview_sources WHERE thread_id = ?", [threadId])
     database.run("DELETE FROM legacy_checkpoint_transcript_migrations WHERE thread_id = ?", [
       threadId
     ])

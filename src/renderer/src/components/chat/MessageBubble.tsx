@@ -4,7 +4,10 @@ import { StreamingMarkdown } from "./StreamingMarkdown"
 import { getCollapsedToolCallSummary } from "../../../../shared/tool-call-summary"
 import { parseGoalNoticeText } from "../../../../shared/goal-notice-presentation"
 import { stripThinkBlocksForDisplay } from "../../../../shared/think-block-display"
-import { emitOpenResourcePreview } from "@/lib/resource-preview-events"
+import {
+  beginOpenResourcePreviewIntent,
+  emitOpenResourcePreview
+} from "@/lib/resource-preview-events"
 import React, { useEffect, useMemo, useRef, useState } from "react"
 import {
   ChevronDown,
@@ -1029,7 +1032,47 @@ function MessageBubbleImpl({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation()
-                            emitOpenResourcePreview({ threadId, filePath: previewPath })
+                            const intentId = beginOpenResourcePreviewIntent(threadId)
+                            void (async () => {
+                              const authorized =
+                                await window.api.workspace.authorizeToolFilePreview({
+                                  threadId,
+                                  toolCallId: resolvedToolCall.id
+                                })
+                              if (!authorized.success) {
+                                emitOpenResourcePreview({
+                                  threadId,
+                                  filePath: previewPath,
+                                  intentId,
+                                  toolCallId: resolvedToolCall.id
+                                })
+                                return
+                              }
+                              emitOpenResourcePreview({
+                                threadId,
+                                filePath: authorized.filePath,
+                                intentId,
+                                workspacePathKind: "absolute",
+                                toolCallId: resolvedToolCall.id,
+                                externalPreviewGrant: authorized.external
+                                  ? authorized.grant
+                                  : undefined,
+                                externalPreviewGrantExpiresAt: authorized.external
+                                  ? authorized.expiresAt
+                                  : undefined
+                              })
+                            })().catch((error) => {
+                              console.error(
+                                "[MessageBubble] Failed to authorize file preview:",
+                                error
+                              )
+                              emitOpenResourcePreview({
+                                threadId,
+                                filePath: previewPath,
+                                intentId,
+                                toolCallId: resolvedToolCall.id
+                              })
+                            })
                           }}
                           className="inline-flex items-center justify-center rounded border border-border/70 bg-background px-1.5 py-1 text-muted-foreground hover:text-foreground hover:bg-accent/30 transition-colors"
                           title="在右侧资源预览中打开"

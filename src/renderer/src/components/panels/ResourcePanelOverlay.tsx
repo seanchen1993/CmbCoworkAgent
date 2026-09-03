@@ -3,19 +3,11 @@ import { RightPanel } from "@/components/panels/RightPanel"
 import { OverlayDrawer } from "@/components/panels/OverlayDrawer"
 import { useBrowserViewLifecycle } from "@/components/browser/useBrowserViewLifecycle"
 import { useAppStore } from "@/lib/store"
+import {
+  onOpenResourcePanelOverlay,
+  type ResourcePanelOverlayMode
+} from "@/lib/resource-panel-overlay-events"
 import { useResourcePreviewRequest } from "@/lib/use-resource-preview-request"
-
-export type ResourcePanelOverlayMode = "preview" | "git" | "browser"
-
-const RESOURCE_PANEL_OVERLAY_OPEN_EVENT = "resource-panel-overlay:open"
-
-export function openResourcePanelOverlay(mode: ResourcePanelOverlayMode): void {
-  window.dispatchEvent(
-    new CustomEvent<ResourcePanelOverlayMode>(RESOURCE_PANEL_OVERLAY_OPEN_EVENT, {
-      detail: mode
-    })
-  )
-}
 
 interface ResourcePanelOverlayProps {
   isAgentFocusActive: boolean
@@ -38,9 +30,21 @@ export function ResourcePanelOverlay({
     Boolean(renderedPanelThreadId)
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<ResourcePanelOverlayMode>("preview")
+  const handlePreviewRequest = useCallback(
+    (request: { filePath: string; externalPreviewGrant?: string }): void => {
+      setMode(
+        /\.html?$/i.test(request.filePath) && !request.externalPreviewGrant
+          ? "browser"
+          : "preview"
+      )
+      setOpen(true)
+    },
+    []
+  )
   const { request: previewRequest, clear: clearPreviewRequest } = useResourcePreviewRequest(
     activeThreadId,
-    !standardRightPanelMounted
+    !standardRightPanelMounted,
+    handlePreviewRequest
   )
   const overlayThreadId = renderedPanelThreadId
 
@@ -62,20 +66,8 @@ export function ResourcePanelOverlay({
   )
 
   useEffect(() => {
-    const handleOpen = (event: Event): void => {
-      const nextMode = (event as CustomEvent<ResourcePanelOverlayMode>).detail
-      if (nextMode !== "preview" && nextMode !== "git" && nextMode !== "browser") return
-      selectMode(nextMode)
-    }
-    window.addEventListener(RESOURCE_PANEL_OVERLAY_OPEN_EVENT, handleOpen)
-    return () => window.removeEventListener(RESOURCE_PANEL_OVERLAY_OPEN_EVENT, handleOpen)
+    return onOpenResourcePanelOverlay(selectMode)
   }, [selectMode])
-
-  useEffect(() => {
-    if (!previewRequest || standardRightPanelMounted) return
-    setMode(/\.html?$/i.test(previewRequest.filePath) ? "browser" : "preview")
-    setOpen(true)
-  }, [previewRequest, standardRightPanelMounted])
 
   const handleBrowserPanelRequest = useCallback(() => {
     selectMode("browser")

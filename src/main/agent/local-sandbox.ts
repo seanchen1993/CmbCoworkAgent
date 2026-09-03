@@ -108,6 +108,7 @@ import {
   type HarnessStageAttribution
 } from "../services/harness-stage-attribution"
 import { recordSystemConstraintRead } from "../services/system-constraint-read-reporter"
+import { recordTrustedToolFilePreviewSource } from "../services/trusted-tool-file-preview"
 import { resolvePluginSystemConstraintPath } from "./plugin-system-constraint"
 import {
   READ_FILE_DEFAULT_LIMIT,
@@ -4169,6 +4170,7 @@ export class LocalSandbox
       await this.recordReadTime(resolvedPath)
 
       if (!hasNonWhitespace) {
+        recordTrustedToolFilePreviewSource(resolvedPath, "read")
         return await this.applyPostToolUseHookToText(
           "read_file",
           LocalSandbox.readFileHookArgs(effectiveFilePath, effectiveOffset, effectiveLimit),
@@ -4183,6 +4185,8 @@ export class LocalSandbox
           `Error: Line offset ${effectiveOffset} exceeds file length (${totalLines} lines)`
         )
       }
+
+      recordTrustedToolFilePreviewSource(resolvedPath, "read")
 
       const total = totalLines
       const hasMore = effectiveOffset + effectiveLimit < total
@@ -4796,6 +4800,7 @@ export class LocalSandbox
       return r
     })
     if (!result.error) {
+      recordTrustedToolFilePreviewSource(resolvedPath, "write")
       this._onFileMutation?.(effectiveFilePath, "write")
       if (!isCodeFile(effectiveFilePath)) this.markHarnessStageAttributionDirty()
       // Adoption tracking (side-effect only, never throws)
@@ -5103,6 +5108,7 @@ export class LocalSandbox
         }
       })
       if (!result.error) {
+        recordTrustedToolFilePreviewSource(resolvedPath, "edit")
         // The host-issued workflow script is orchestration state, not a project
         // deliverable: keep normal approval/Hooks, but do not enqueue it for Git
         // auto-commit, Harness attribution, or generated-code adoption.

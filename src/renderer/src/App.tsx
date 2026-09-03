@@ -47,10 +47,8 @@ const DashboardView = lazy(() =>
   import("@/components/dashboard/DashboardView").then((m) => ({ default: m.DashboardView }))
 )
 import { ResizeHandle } from "@/components/ui/resizable"
-import {
-  openResourcePanelOverlay,
-  ResourcePanelOverlay
-} from "@/components/panels/ResourcePanelOverlay"
+import { ResourcePanelOverlay } from "@/components/panels/ResourcePanelOverlay"
+import { openResourcePanelOverlay } from "@/lib/resource-panel-overlay-events"
 import { PetStateBridge } from "@/components/pet/PetStateBridge"
 import { DEFAULT_BROWSER_CDP_CONFIG, useAppStore } from "@/lib/store"
 import { ThreadProvider } from "@/lib/thread-context"

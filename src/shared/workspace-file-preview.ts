@@ -12,6 +12,7 @@ export const WORKSPACE_FILE_PREVIEW_ERROR_CODES = {
   CANCELLED: "cancelled",
   NOT_FOUND: "not-found",
   FILESYSTEM_PERMISSION_DENIED: "filesystem-permission-denied",
+  SOURCE_AUTHORIZATION_MISSING: "source-authorization-missing",
   SOURCE_AUTHORIZATION_INVALID: "source-authorization-invalid",
   SOURCE_OUTSIDE_TRUSTED_ROOT: "source-outside-trusted-root",
   WORKSPACE_UNAVAILABLE: "workspace-unavailable",
@@ -69,6 +70,29 @@ export interface WorkspaceFilePreviewCancelRequest {
 export interface WorkspaceFilePreviewReleaseRequest {
   previewUrl: string
 }
+
+export interface ToolFilePreviewGrantRequest {
+  threadId: string
+  toolCallId: string
+}
+
+export type ToolFilePreviewGrantResult =
+  | {
+      success: true
+      external: false
+      filePath: string
+    }
+  | {
+      success: true
+      external: true
+      filePath: string
+      grant: string
+      expiresAt: number
+    }
+  | {
+      success: false
+      error: string
+    }
 
 export interface WorkspaceFilePreviewTextResult {
   success: true

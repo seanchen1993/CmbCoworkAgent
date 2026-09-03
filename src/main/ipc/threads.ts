@@ -46,6 +46,10 @@ import {
   pendingApprovals
 } from "../agent/runtime"
 import {
+  clearTrustedToolFilePreviewSourcesForThread,
+  collectTrustedToolFilePreviewScopeKeysForThread
+} from "../services/trusted-tool-file-preview"
+import {
   cancelAndWaitForAgentThreadRun,
   disposeAgentThreadState,
   disposeDeletedAgentThreadRuntime,
@@ -1616,7 +1620,9 @@ async function cleanupFailedFork(
   }
   if (options.rowCreated) {
     try {
+      const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(targetThreadId)
       dbDeleteThread(targetThreadId)
+      clearTrustedToolFilePreviewSourcesForThread(targetThreadId, previewScopeKeys)
     } catch (error) {
       console.warn("[Threads] Failed to cleanup fork thread row:", error)
     }
@@ -3680,7 +3686,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
 
       // Delete from our metadata store — the point of no return.
+      const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
       dbDeleteThread(threadId)
+      clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
       // subscriber lists and per-change IPC fan-out cannot grow forever.

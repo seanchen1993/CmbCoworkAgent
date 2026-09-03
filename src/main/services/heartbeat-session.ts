@@ -6,6 +6,10 @@ import {
 import { deleteThread as dbDeleteThread } from "../db"
 import { deleteProjectThreadDataDirectory } from "../agent/context-history-path"
 import { retireThreadCheckpointers } from "../agent/runtime"
+import {
+  clearTrustedToolFilePreviewSourcesForThread,
+  collectTrustedToolFilePreviewScopeKeysForThread
+} from "./trusted-tool-file-preview"
 
 /** Fixed service-thread identity shared by heartbeat scheduling and cleanup. */
 export const HEARTBEAT_THREAD_ID = "heartbeat"
@@ -34,5 +38,7 @@ export async function resetHeartbeatSessionForWorkspaceChange(
   // caller leaves the old config in place and the existing metadata remains a
   // truthful description of the still-configured workspace.
   await deleteProjectThreadDataDirectory(previousWorkDir, HEARTBEAT_THREAD_ID)
+  const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(HEARTBEAT_THREAD_ID)
   dbDeleteThread(HEARTBEAT_THREAD_ID)
+  clearTrustedToolFilePreviewSourcesForThread(HEARTBEAT_THREAD_ID, previewScopeKeys)
 }
