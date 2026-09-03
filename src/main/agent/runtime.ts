@@ -106,6 +106,7 @@ import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
 import {
+  appendTaskCompletionAndRepetitionPrompt,
   getOutputStylePrompt,
   getOutputStyleTurnReminder,
   MEMORY_SYSTEM_PROMPT,
@@ -2792,9 +2793,28 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       }
     })
 
-  const availableSubagents = includeGeneralPurposeSubagent
+  const unresolvedSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
+  // Task-tool subagents have role-specific prompts and do not inherit the main
+  // BASE_SYSTEM_PROMPT. Apply the shared completion/repetition contract at the
+  // common exit so general-purpose, registry, and custom string-prompt agents
+  // receive the same guidance exactly once. Opaque Runnable agents own their
+  // prompt assembly and cannot be safely rewritten here.
+  const availableSubagents = unresolvedSubagents.map((subagent: any) => {
+    if (
+      Runnable.isRunnable(subagent) ||
+      !subagent ||
+      typeof subagent !== "object" ||
+      typeof subagent.systemPrompt !== "string"
+    ) {
+      return subagent
+    }
+    return {
+      ...subagent,
+      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt)
+    }
+  })
 
   if (mainSubagentsEnabled && onTaskSubagentPromptsResolved) {
     onTaskSubagentPromptsResolved(
