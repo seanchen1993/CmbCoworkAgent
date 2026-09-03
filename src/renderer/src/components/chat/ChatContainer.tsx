@@ -264,6 +264,8 @@ import {
   createChatScrollState,
   isChatScrollDetached,
   mergeChatScrollEffects,
+  resolveChatBottomScrollWriter,
+  shouldConfirmChatViewportBottom,
   shouldFollowChatOutput,
   transitionChatScroll,
   type ChatScrollEffect,
@@ -3994,31 +3996,6 @@ export function ChatContainer({
           return
         }
 
-        if (messageVirtualizationEnabledRef.current && virtuosoRef.current) {
-          virtuosoRef.current.scrollToIndex({
-            index: lastVisibleIndex,
-            align: "end",
-            behavior: "auto"
-          })
-        }
-        // The Virtuoso footer lives after the last indexed message (queued rows, loading state,
-        // approvals, user-input cards). scrollToIndex mounts/measures the last row; this final
-        // bounded write includes the footer and is skipped when the viewport is already settled.
-        const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-        if (Math.abs(viewport.scrollTop - bottom) > 1) {
-          viewport.scrollTo({ top: bottom, behavior: "auto" })
-        }
-
-        const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-        if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
-          bottomSettleAttemptRef.current = 0
-          applyChatScrollEvent({
-            type: "BOTTOM_CONFIRMED",
-            generation: pending.generation
-          })
-          return
-        }
-
         const longSettle =
           pending.reason === "initial-position" ||
           pending.reason === "return-to-bottom" ||
@@ -4028,6 +4005,42 @@ export function ChatContainer({
           bottomSettleEffectKeyRef.current = settleKey
           bottomSettleAttemptRef.current = 0
         }
+        const virtualized = Boolean(messageVirtualizationEnabledRef.current && virtuosoRef.current)
+        const writer = resolveChatBottomScrollWriter(
+          virtualized,
+          pending.reason,
+          bottomSettleAttemptRef.current
+        )
+
+        if (writer === "virtual-index" && virtuosoRef.current) {
+          virtuosoRef.current.scrollToIndex({
+            index: lastVisibleIndex,
+            align: "end",
+            behavior: "auto"
+          })
+        } else {
+          // The viewport write includes Virtuoso's measured footer (queued rows, approvals, and
+          // user-input cards). It deliberately runs on a different frame from virtual tail priming.
+          const bottom = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
+          if (Math.abs(viewport.scrollTop - bottom) > 1) {
+            viewport.scrollTo({ top: bottom, behavior: "auto" })
+          }
+        }
+
+        const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
+        // A virtual-index write only guarantees that the final message is mounted. The Virtuoso
+        // footer sits after that item, so confirm only after the next-frame viewport phase has had
+        // a chance to include the measured footer as well.
+        if (writer === "viewport" && distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+          bottomSettleAttemptRef.current = 0
+          bottomSettleEffectKeyRef.current = ""
+          applyChatScrollEvent({
+            type: "BOTTOM_CONFIRMED",
+            generation: pending.generation
+          })
+          return
+        }
+
         const settleLimit = longSettle
           ? CHAT_BOTTOM_SETTLE_MAX_FRAMES
           : CHAT_FOLLOW_SETTLE_MAX_FRAMES
@@ -4235,20 +4248,19 @@ export function ChatContainer({
         dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
         return
       }
-      if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
-        const state = chatScrollStateRef.current
-        // Explicit wheel/touch/keyboard/scrollbar handlers own detachment. Do not let the scroll
-        // event immediately re-attach a detached reader while the viewport is still moving up
-        // inside the at-bottom threshold. Downward movement to the bottom still re-attaches.
-        if (
-          state &&
-          isChatScrollDetached(state) &&
-          (nextTop <= previousTop + CHAT_SCROLL_UP_DETACH_DELTA_PX ||
-            (performance.now() > downwardUserScrollIntentUntilRef.current &&
-              !scrollbarUserIntentActiveRef.current))
-        ) {
-          return
-        }
+      const state = chatScrollStateRef.current
+      if (
+        state &&
+        shouldConfirmChatViewportBottom({
+          distanceToBottom,
+          movementDelta: nextTop - previousTop,
+          atBottomThreshold: CHAT_AT_BOTTOM_THRESHOLD_PX,
+          detachDelta: CHAT_SCROLL_UP_DETACH_DELTA_PX,
+          detached: isChatScrollDetached(state),
+          downwardIntentActive: performance.now() <= downwardUserScrollIntentUntilRef.current,
+          scrollbarPointerActive: scrollbarUserIntentActiveRef.current
+        })
+      ) {
         dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
       }
     }
@@ -4291,8 +4303,18 @@ export function ChatContainer({
         dispatchChatScrollEvent({ type: "USER_DETACH", source: "user-input" })
       }
     }
-    const clearScrollbarPointerIntent = (): void => {
+    const cancelScrollbarPointerIntent = (): void => {
       scrollbarUserIntentActiveRef.current = false
+    }
+    const finishScrollbarPointerIntent = (): void => {
+      if (!scrollbarUserIntentActiveRef.current) return
+      scrollbarUserIntentActiveRef.current = false
+      lastObservedScrollTopRef.current = scrollParent.scrollTop
+      const distanceToBottom =
+        scrollParent.scrollHeight - scrollParent.scrollTop - scrollParent.clientHeight
+      if (distanceToBottom <= CHAT_AT_BOTTOM_THRESHOLD_PX) {
+        dispatchChatScrollEvent({ type: "BOTTOM_CONFIRMED" })
+      }
     }
     let lastTouchY: number | null = null
     const rememberTouchPosition = (event: TouchEvent): void => {
@@ -4361,9 +4383,9 @@ export function ChatContainer({
     scrollParent.addEventListener("touchstart", rememberTouchPosition, { passive: true })
     scrollParent.addEventListener("touchmove", detachFromTouchScroll, { passive: true })
     window.addEventListener("keydown", detachFromKeyboardScroll, true)
-    window.addEventListener("pointerup", clearScrollbarPointerIntent, true)
-    window.addEventListener("pointercancel", clearScrollbarPointerIntent, true)
-    window.addEventListener("blur", clearScrollbarPointerIntent)
+    window.addEventListener("pointerup", finishScrollbarPointerIntent, true)
+    window.addEventListener("pointercancel", cancelScrollbarPointerIntent, true)
+    window.addEventListener("blur", cancelScrollbarPointerIntent)
     confirmOrDetachFromScroll()
     return () => {
       scrollParent.removeEventListener("scroll", confirmOrDetachFromScroll)
@@ -4372,9 +4394,9 @@ export function ChatContainer({
       scrollParent.removeEventListener("touchstart", rememberTouchPosition)
       scrollParent.removeEventListener("touchmove", detachFromTouchScroll)
       window.removeEventListener("keydown", detachFromKeyboardScroll, true)
-      window.removeEventListener("pointerup", clearScrollbarPointerIntent, true)
-      window.removeEventListener("pointercancel", clearScrollbarPointerIntent, true)
-      window.removeEventListener("blur", clearScrollbarPointerIntent)
+      window.removeEventListener("pointerup", finishScrollbarPointerIntent, true)
+      window.removeEventListener("pointercancel", cancelScrollbarPointerIntent, true)
+      window.removeEventListener("blur", cancelScrollbarPointerIntent)
     }
   }, [dispatchChatScrollEvent, invalidateDurableMessageReveal, scrollParent])
 

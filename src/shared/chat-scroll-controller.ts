@@ -23,10 +23,50 @@ export type ChatScrollToBottomReason =
   | "return-to-bottom"
   | "restore-complete"
 
+export type ChatBottomScrollWriter = "virtual-index" | "viewport"
+
+export interface ChatViewportBottomObservation {
+  distanceToBottom: number
+  movementDelta: number
+  atBottomThreshold: number
+  detachDelta: number
+  detached: boolean
+  downwardIntentActive: boolean
+  scrollbarPointerActive: boolean
+}
+
 export interface ChatScrollToBottomEffect {
   type: "scroll-to-bottom"
   reason: ChatScrollToBottomReason
   generation: number
+}
+
+/**
+ * A scrollbar thumb drag owns scrollTop until the pointer is released. Confirming the bottom while
+ * the thumb is still held lets streaming layout updates start a competing programmatic scroll.
+ */
+export function shouldConfirmChatViewportBottom(
+  observation: ChatViewportBottomObservation
+): boolean {
+  if (observation.distanceToBottom > observation.atBottomThreshold) return false
+  if (!observation.detached) return true
+  if (observation.scrollbarPointerActive) return false
+  return observation.movementDelta > observation.detachDelta && observation.downwardIntentActive
+}
+
+/**
+ * Prime an unmounted virtual tail once, then let the viewport include the measured footer on the
+ * next frame. Streaming height growth already has a mounted tail and needs only one viewport write.
+ */
+export function resolveChatBottomScrollWriter(
+  virtualized: boolean,
+  reason: ChatScrollToBottomReason,
+  settleAttempt: number
+): ChatBottomScrollWriter {
+  if (virtualized && reason !== "content-grown" && settleAttempt === 0) {
+    return "virtual-index"
+  }
+  return "viewport"
 }
 
 export type ChatScrollEffect = ChatScrollToBottomEffect

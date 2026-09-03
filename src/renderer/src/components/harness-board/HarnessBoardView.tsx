@@ -1,5 +1,6 @@
 import {
   Fragment,
+  startTransition,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -8859,7 +8860,10 @@ export function HarnessBoardView({
   ])
 
   const loadProjectDetail = useCallback(
-    async (projectId: string, options: { showLoading?: boolean; reportError?: boolean } = {}) => {
+    async (
+      projectId: string,
+      options: { showLoading?: boolean; reportError?: boolean; deferCommit?: boolean } = {}
+    ) => {
       const generation = detailLoadGenerationRef.current
       const showLoading = options.showLoading !== false
       const reportError = options.reportError ?? showLoading
@@ -8882,7 +8886,11 @@ export function HarnessBoardView({
           [projectId]: detail
         })
         detailsByProjectIdRef.current = nextDetails
-        setDetailsByProjectId(nextDetails)
+        if (options.deferCommit) {
+          startTransition(() => setDetailsByProjectId(nextDetails))
+        } else {
+          setDetailsByProjectId(nextDetails)
+        }
       } catch (error) {
         if (reportError && generation === detailLoadGenerationRef.current) {
           setLoadError(cleanIpcError(error))
@@ -9011,7 +9019,7 @@ export function HarnessBoardView({
       if (generation !== detailLoadGenerationRef.current) return
       const nextDetails = mergeProjectDetailsIfChanged(detailsByProjectIdRef.current, details)
       detailsByProjectIdRef.current = nextDetails
-      setDetailsByProjectId(nextDetails)
+      startTransition(() => setDetailsByProjectId(nextDetails))
     } catch (error) {
       if (generation === detailLoadGenerationRef.current) {
         setLoadError((current) => current ?? cleanIpcError(error))
@@ -9294,7 +9302,7 @@ export function HarnessBoardView({
       if (generation !== detailLoadGenerationRef.current) return
       const nextDetails = mergeProjectDetailsIfChanged(detailsByProjectIdRef.current, details)
       detailsByProjectIdRef.current = nextDetails
-      setDetailsByProjectId(nextDetails)
+      startTransition(() => setDetailsByProjectId(nextDetails))
     } catch {
       // Background refresh should not replace stable on-screen state with a transient global error.
     } finally {
@@ -9317,7 +9325,11 @@ export function HarnessBoardView({
 
     selectedProjectRefreshInFlightRef.current = true
     try {
-      await loadProjectDetail(projectId, { showLoading: false, reportError: false })
+      await loadProjectDetail(projectId, {
+        showLoading: false,
+        reportError: false,
+        deferCommit: true
+      })
     } finally {
       selectedProjectRefreshInFlightRef.current = false
     }

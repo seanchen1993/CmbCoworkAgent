@@ -142,4 +142,13 @@ describe("harness board cache", () => {
     expect(source).not.toContain("function areHarnessValuesEqual")
     expect(HARNESS_PROJECT_DETAIL_BATCH_SIZE).toBeLessThanOrEqual(8)
   })
+
+  it("commits periodic project refreshes as interruptible renderer work", () => {
+    const source = readFileSync(new URL("./HarnessBoardView.tsx", import.meta.url), "utf8")
+    const deferredDetailCommits = source.match(
+      /startTransition\(\(\) => setDetailsByProjectId\(nextDetails\)\)/g
+    )
+    expect(deferredDetailCommits?.length).toBeGreaterThanOrEqual(3)
+    expect(source).toContain("deferCommit: true")
+  })
 })
