@@ -120,7 +120,7 @@ import { notifyIfBackground, stripThink } from "../services/notify"
 import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
 import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
-import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
+import { clearAdoptionContext } from "../services/adoption-tracker"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -202,12 +202,14 @@ import {
   shouldResetSkillEvolutionSessionAfterIntent
 } from "../agent/skill-evolution/session-state"
 import {
+  observeExplicitSkillActivation,
+  observeToolCallForAttribution,
+  syncTurnSkillAttribution
+} from "../agent/turn-attribution"
+import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
   getRecentSkillUsageNames,
-  getThreadActiveSkillSource,
-  getThreadActiveSkills,
-  setThreadActiveSkills,
   snapshotSkillProposalWindow,
   isSkillProposalWindowContext,
   type SkillProposalWindowContext
@@ -6398,45 +6400,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const consumedCoordinatorNotificationIds = new Set<string>()
         const trackedCoordinatorNotificationIds = new Set<string>()
 
-        // Code-gen skill attribution: a skill stays "active" for the rest of the
-        // thread once used and is attributed to all subsequent generated code —
-        // even in later turns that don't re-read its SKILL.md — until a later turn
-        // uses a *different* skill set, which supersedes it (no turn-distance cap).
-        // The sticky set lives in proposal-window.ts so it survives skill-evolution
-        // session resets. This feeds ONLY the adoption context (code_gen /
-        // code_adopt → commit 明细的关联 Skill); the trace's own usedSkills is set
-        // separately via tracer.setUsedSkills(currentRunSkills) and is unaffected.
-        const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
-          if (currentRunSkills.length > 0) return currentRunSkills
-          return getThreadActiveSkills(threadId)
-        }
-
-        const computeCodeGenAttributionSkillSource = (
-          currentRunSkills: string[],
-          currentRunSkillSource: string[]
-        ): string[] => {
-          if (currentRunSkills.length > 0) return currentRunSkillSource
-          return getThreadActiveSkillSource(threadId)
-        }
-
+        // Code-gen skill attribution (sticky active-skill set, adoption context
+        // and the trace's own usedSkills) lives in turn-attribution.ts so the
+        // desktop and IM paths cannot drift apart on it.
         const syncUsedSkillsContext = (): void => {
-          const currentRunSkills = skillUsageDetector.getUsedSkillNames()
-          const currentRunSkillSource = skillUsageDetector.getUsedSkillSourceRefs()
-          tracer.setUsedSkills(currentRunSkills)
-          tracer.setSkillSource(currentRunSkillSource)
-          tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
-          // A non-empty current-run skill set becomes (supersedes) the thread's
-          // active skills; a skill-less run leaves the prior active set intact.
-          if (currentRunSkills.length > 0) {
-            setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource)
-          }
-          setAdoptionContext(threadId, {
-            usedSkills: computeCodeGenAttributionSkills(currentRunSkills),
-            skillSource: computeCodeGenAttributionSkillSource(
-              currentRunSkills,
-              currentRunSkillSource
-            )
-          })
+          syncTurnSkillAttribution({ threadId, tracer, detector: skillUsageDetector })
         }
 
         syncUsedSkillsContext()
@@ -6997,8 +6965,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onHookSkippedFactory,
               onExplicitSkillActivated: (skill) => {
                 if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-                skillUsageDetector.onSkillsMetadata([{ name: skill.name, path: skill.path }])
-                skillUsageDetector.onReadFilePath(skill.path)
+                observeExplicitSkillActivation(skillUsageDetector, skill)
                 syncUsedSkillsContext()
               },
               onSystemMessage: (notice) => {
@@ -7063,8 +7030,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult,
             onHookSkippedFactory,
             onExplicitSkillActivated: (skill) => {
-              skillUsageDetector.onSkillsMetadata([{ name: skill.name, path: skill.path }])
-              skillUsageDetector.onReadFilePath(skill.path)
+              observeExplicitSkillActivation(skillUsageDetector, skill)
               syncUsedSkillsContext()
             }
           })
@@ -8085,32 +8051,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
                 const counted = toolCallCounter.register(tc, msgId, tcIndex)
 
-                if (tcName === "read_file") {
-                  const readPathRaw =
-                    (typeof tc.args?.path === "string" && tc.args.path) ||
-                    (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                    ""
-                  if (readPathRaw) {
-                    const hit = skillUsageDetector.onReadFilePath(readPathRaw)
-                    // Sync tracer + adoption context immediately when the hit set
-                    // grows. Without this, a write_file/edit_file that follows in
-                    // the *same* values batch would snapshot an empty usedSkills
-                    // and the resulting code_gen would be missing skill attribution.
-                    if (hit) {
-                      syncUsedSkillsContext()
-                    }
-                  }
-                }
-
-                if (tcName === "write_file" || tcName === "edit_file") {
-                  const writePath =
-                    (typeof tc.args?.path === "string" && tc.args.path) ||
-                    (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                    ""
-                  if (writePath) {
-                    fileWritePaths.push(writePath.replace(/\\/g, "/"))
-                  }
-                }
+                // Which tools mark a skill used and which count as writing a
+                // file is decided in turn-attribution.ts, shared with the IM
+                // path. Sync the moment the skill set grows: a write_file later
+                // in the same batch would otherwise snapshot an empty usedSkills
+                // and its code_gen would lose skill attribution.
+                const attributed = observeToolCallForAttribution(skillUsageDetector, tc)
+                if (attributed.skillHit) syncUsedSkillsContext()
+                if (attributed.writePath) fileWritePaths.push(attributed.writePath)
 
                 if (counted) {
                   const turnCount = toolCallCounter.getCount()
@@ -8324,17 +8272,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                       )
                     }
 
-                    if (tc?.name !== "read_file") continue
-                    const readPathRaw =
-                      (typeof tc.args?.path === "string" && tc.args.path) ||
-                      (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                      ""
-                    if (readPathRaw) {
-                      const hit = skillUsageDetector.onReadFilePath(readPathRaw)
-                      if (hit) {
-                        syncUsedSkillsContext()
-                      }
-                    }
+                    // Re-run the shared rule against the values snapshot: its
+                    // tool args are complete, while a streamed chunk can still
+                    // carry `args: {}`. Both the detector and the write-path
+                    // collection are idempotent, so observing twice is free.
+                    const fromValues = observeToolCallForAttribution(skillUsageDetector, tc)
+                    if (fromValues.skillHit) syncUsedSkillsContext()
                   }
                 }
 

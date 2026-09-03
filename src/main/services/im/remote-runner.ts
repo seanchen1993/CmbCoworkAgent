@@ -35,6 +35,7 @@ import {
 import { isRetryableApiError } from "../../agent/failover"
 import { runCompletionHooksWithRevision } from "../../agent/skill-lifecycle/completion-hooks"
 import { createSkillUseTracker } from "../../agent/skill-lifecycle/tracker"
+import { TurnAttributionRecorder } from "../../agent/turn-attribution"
 import { createPersistentThreadHookScope } from "../../hooks/thread-scope-persistence"
 import { makeBroadcastHookResultCallback } from "../../hooks/result-callback"
 import { flushStrict, getThread, getThreadMessages, updateThread } from "../../db"
@@ -298,6 +299,10 @@ export async function executePreparedRemoteStandardTurn(
     }
   })
   tracer.setExecutionMode("normal")
+  // Skill attribution feeds the adoption statistics: recordGen runs inside the
+  // sandbox tools for every path, but reads usedSkills/skillSource off this
+  // thread's adoption context, which only this recorder populates.
+  const attribution = new TurnAttributionRecorder({ threadId, tracer, userMessageId })
 
   persistStandardTurnUserMessage({
     threadId,
@@ -313,6 +318,7 @@ export async function executePreparedRemoteStandardTurn(
     harnessAgentContext: harnessContext,
     onHookResult,
     onHookSkippedFactory,
+    onExplicitSkillActivated: (skill) => attribution.onExplicitSkillActivated(skill),
     isPreparationCurrent: () => !signal.aborted
   })
   if (!preparedPrompt.accepted) {
@@ -342,7 +348,8 @@ export async function executePreparedRemoteStandardTurn(
   const streamConsumer = new StandardTurnStreamConsumer(
     threadId,
     (streamEvent) => mirrorStandardTurnStreamToRenderer(threadId, streamEvent),
-    tracer
+    tracer,
+    { attribution }
   )
 
   try {
@@ -468,7 +475,7 @@ export async function executePreparedRemoteStandardTurn(
 
     await streamConsumer.flush()
     const finalText = streamConsumer.getFinalAssistantText().trim() || "处理完成。"
-    tracer.setUsedSkills(skillUseTracker.getUsedSkillNames())
+    attribution.sync()
     await tracer.finish("success")
     await maybeAutoCommitAfterAgentRun({
       threadId,

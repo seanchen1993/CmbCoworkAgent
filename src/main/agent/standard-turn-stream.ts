@@ -2,6 +2,7 @@ import type { Message } from "../types"
 import { flushStrict, upsertThreadMessages } from "../db"
 import { StreamConverter, type SchedulerEvent } from "./stream-converter"
 import type { TraceCollector } from "./trace/collector"
+import { TurnAttributionRecorder } from "./turn-attribution"
 
 export type StandardTurnStreamSink = (event: SchedulerEvent) => void
 
@@ -42,16 +43,41 @@ export function persistStandardTurnUserMessage(input: {
   if (count !== 1) throw new Error("Failed to persist the remote user transcript message")
 }
 
+export interface StandardTurnStreamOptions {
+  /** Anchors skill attribution to this turn inside a whole-thread snapshot. */
+  userMessageId?: string
+  /** Injectable for tests; built from threadId + trace when omitted. */
+  attribution?: TurnAttributionRecorder
+}
+
 export class StandardTurnStreamConsumer {
   private readonly converter = new StreamConverter()
   private finalAssistantText = ""
   private readonly toolNames = new Set<string>()
+  /**
+   * Skill attribution runs off the raw stream, not the converted events: the
+   * renderer event shapes drop `skillsMetadata` and carry only partially
+   * streamed tool-call args, so a consumer built on them cannot attribute code
+   * generations to the skills that produced them.
+   */
+  private readonly attribution?: TurnAttributionRecorder
 
   constructor(
     private readonly threadId: string,
     private readonly sink?: StandardTurnStreamSink,
-    private readonly trace?: TraceCollector
-  ) {}
+    private readonly trace?: TraceCollector,
+    options: StandardTurnStreamOptions = {}
+  ) {
+    this.attribution =
+      options.attribution ??
+      (trace
+        ? new TurnAttributionRecorder({
+            threadId,
+            tracer: trace,
+            ...(options.userMessageId ? { userMessageId: options.userMessageId } : {})
+          })
+        : undefined)
+  }
 
   getFinalAssistantText(): string {
     return this.finalAssistantText
@@ -61,11 +87,17 @@ export class StandardTurnStreamConsumer {
     return [...this.toolNames]
   }
 
+  /** Files this turn wrote, for callers that drive memory maintenance. */
+  getFileWritePaths(): string[] {
+    return this.attribution?.getFileWritePaths() ?? []
+  }
+
   async consume(stream: AsyncIterable<unknown>, signal?: AbortSignal): Promise<void> {
     for await (const chunk of stream) {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError")
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data)) as unknown
+      this.attribution?.onStreamChunk(mode, serialized)
       for (const event of this.converter.processChunk(mode, serialized)) {
         this.observe(event)
         this.sink?.(event)
