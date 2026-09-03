@@ -30,7 +30,6 @@ export interface ProjectMetricSamples {
   bug: number
   functionPoint: number
   defectDensity: number
-  defectRate: number
   testLead: number
   delivery: number
   token: number
@@ -44,7 +43,6 @@ export interface ProjectMetricSummaryGroup {
   avgBugCount: number | null
   avgFuncPointCount: number | null
   defectDensityPer100Fp: number | null
-  defectRatePerKloc: number | null
   avgTestLeadDays: number | null
   avgDeliveryDays: number | null
   avgInputTokens: number | null
@@ -73,7 +71,6 @@ export interface ProjectMetricProjectItem {
   notAdjustFuns: number | null
   defectDensityPer100Fp: number | null
   pushedAdoptedLines: number | null
-  defectRatePerKloc: number | null
   createDate: string | null
   firstStStartDate: string | null
   firstOnlineDate: string | null

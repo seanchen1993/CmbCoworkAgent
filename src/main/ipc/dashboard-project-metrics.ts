@@ -424,7 +424,6 @@ function parseSummaryGroup(
     avgBugCount: nullableAggValue(bucket, "avg_bug_count"),
     avgFuncPointCount: nullableAggValue(bucket, "avg_function_points"),
     defectDensityPer100Fp: ratio(densityBug, densityFp, 100),
-    defectRatePerKloc: null,
     avgTestLeadDays: testLeadSeconds === null ? null : testLeadSeconds / 86_400,
     avgDeliveryDays: deliverySeconds === null ? null : deliverySeconds / 86_400,
     avgInputTokens: developmentMode === "devclaw" ? 0 : null,
@@ -436,7 +435,6 @@ function parseSummaryGroup(
       bug: asNumber(nestedRecord(bucket, "bug_sample_count").value),
       functionPoint: asNumber(nestedRecord(bucket, "function_point_sample_count").value),
       defectDensity: asNumber(density.doc_count),
-      defectRate: 0,
       testLead: asNumber(testLead.doc_count),
       delivery: asNumber(delivery.doc_count),
       token: 0,
@@ -655,10 +653,6 @@ function buildProjectItem(
         ? (fact.bugNum * 100) / fact.notAdjustFuns
         : null,
     pushedAdoptedLines,
-    defectRatePerKloc:
-      fact.bugNum !== null && pushedAdoptedLines !== null && pushedAdoptedLines > 0
-        ? (fact.bugNum * 1000) / pushedAdoptedLines
-        : null,
     testLeadDays: testLeadMs === null ? null : testLeadMs / DAY_MS,
     deliveryDays: deliveryMs === null ? null : deliveryMs / DAY_MS,
     totalInputTokens: tokens?.input ?? null,
@@ -826,25 +820,15 @@ export async function fetchProjectMetricSummary(
   const devclaw = factSummary.devclaw
   const devclawProjectCount = devclawFacts.length
   if (codeResult.status === "fulfilled") {
-    let bugTotal = 0
-    let defectRateLineTotal = 0
-    let defectRateSampleCount = 0
     let allProjectLineTotal = 0
     for (const project of devclawFacts) {
       const pushedAdoptedLines = sumPushedAdoptedLines(snapshot, codeResult.value, project.prjCode)
       allProjectLineTotal += pushedAdoptedLines
-      if (project.bugNum === null || pushedAdoptedLines <= 0) continue
-      bugTotal += project.bugNum
-      defectRateLineTotal += pushedAdoptedLines
-      defectRateSampleCount += 1
     }
-    devclaw.defectRatePerKloc = ratio(bugTotal, defectRateLineTotal, 1000)
     devclaw.avgPushedAdoptedLines =
       devclawProjectCount > 0 ? allProjectLineTotal / devclawProjectCount : null
-    devclaw.samples.defectRate = defectRateSampleCount
     devclaw.samples.codeLines = devclawProjectCount
   } else {
-    devclaw.defectRatePerKloc = null
     devclaw.avgPushedAdoptedLines = null
   }
 
@@ -976,7 +960,6 @@ export function makeMockProjectMetricSummary(
         avgBugCount: 6.4,
         avgFuncPointCount: 112.8,
         defectDensityPer100Fp: 5.67,
-        defectRatePerKloc: 1.42,
         avgTestLeadDays: 24.6,
         avgDeliveryDays: 18.2,
         avgInputTokens: 678_571,
@@ -988,7 +971,6 @@ export function makeMockProjectMetricSummary(
           bug: pluginSelected ? 18 : 42,
           functionPoint: pluginSelected ? 17 : 40,
           defectDensity: pluginSelected ? 17 : 39,
-          defectRate: pluginSelected ? 15 : 36,
           testLead: pluginSelected ? 16 : 38,
           delivery: pluginSelected ? 16 : 37,
           token: pluginSelected ? 18 : 42,
@@ -1002,7 +984,6 @@ export function makeMockProjectMetricSummary(
         avgBugCount: 8.9,
         avgFuncPointCount: 105.2,
         defectDensityPer100Fp: 8.46,
-        defectRatePerKloc: null,
         avgTestLeadDays: 31.4,
         avgDeliveryDays: 22.8,
         avgInputTokens: null,
@@ -1014,7 +995,6 @@ export function makeMockProjectMetricSummary(
           bug: 136,
           functionPoint: 129,
           defectDensity: 126,
-          defectRate: 0,
           testLead: 121,
           delivery: 124,
           token: 0,
@@ -1041,7 +1021,6 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     notAdjustFuns: 348.12,
     defectDensityPer100Fp: 1.72,
     pushedAdoptedLines: 6000,
-    defectRatePerKloc: 1,
     createDate: "2026-07-06 00:00:00",
     firstStStartDate: "2026-07-27 09:44:49",
     firstOnlineDate: "2026-08-03 00:00:00",
@@ -1066,7 +1045,6 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     notAdjustFuns: 126.5,
     defectDensityPer100Fp: 2.37,
     pushedAdoptedLines: 3000,
-    defectRatePerKloc: 1,
     createDate: "2026-07-12 00:00:00",
     firstStStartDate: "2026-07-30 10:00:00",
     firstOnlineDate: "2026-08-08 00:00:00",
@@ -1091,7 +1069,6 @@ const MOCK_PROJECTS: ProjectMetricProjectItem[] = [
     notAdjustFuns: null,
     defectDensityPer100Fp: null,
     pushedAdoptedLines: null,
-    defectRatePerKloc: null,
     createDate: "2026-07-18 00:00:00",
     firstStStartDate: "2026-08-02 09:30:00",
     firstOnlineDate: null,
