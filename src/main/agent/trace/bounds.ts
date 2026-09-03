@@ -12,10 +12,16 @@ const DEFAULT_MAX_STRING_CHARS = 16 * 1024
  * two sides now share this format, and the uploader narrows the two halves
  * separately instead of slicing across them.
  */
-export const TRACE_TRUNCATION_MARKER_PREFIX = "\n...[trace truncated: omitted "
-export const TRACE_TRUNCATION_MARKER_SUFFIX = " chars]...\n"
+export const TRACE_TRUNCATION_MARKER_PREFIX = "\n...[已省略 "
+export const TRACE_TRUNCATION_MARKER_SUFFIX = " 字符]...\n"
 
-const TRACE_TRUNCATION_MARKER_PATTERN = /\n\.\.\.\[trace truncated: omitted (\d+) chars\]\.\.\.\n/
+/**
+ * Also matches the English form this marker used to take, so a trace recorded
+ * before the change still splits into a head and a tail instead of being
+ * narrowed across its own marker.
+ */
+const TRACE_TRUNCATION_MARKER_PATTERN =
+  /\n\.\.\.\[(?:已省略 (\d+) 字符|trace truncated: omitted (\d+) chars)\]\.\.\.\n/
 
 export interface SplitTruncatedText {
   head: string
@@ -30,7 +36,7 @@ export function splitTruncatedText(value: string): SplitTruncatedText | undefine
   return {
     head: value.slice(0, match.index),
     tail: value.slice(match.index + match[0].length),
-    omitted: Number.parseInt(match[1], 10) || 0
+    omitted: Number.parseInt(match[1] ?? match[2], 10) || 0
   }
 }
 

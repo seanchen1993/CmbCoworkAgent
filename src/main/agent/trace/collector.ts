@@ -481,6 +481,18 @@ const TRACE_MAX_MODEL_CALLS = 64
 const TRACE_MAX_MODEL_CALL_SKELETONS = 512
 const TRACE_MAX_MODEL_MESSAGES = 64
 const TRACE_MAX_NODES = 512
+/**
+ * Slots held back for the end of the turn, out of TRACE_MAX_NODES rather than
+ * on top of it — the node count, and so the trace's size, is unchanged.
+ *
+ * At roughly three nodes a turn the old cap stopped the tree around turn 170,
+ * and the conversation view reads assistant replies off llm nodes, so
+ * everything after that was invisible no matter how much byte budget was left.
+ * Nodes past the head now go into a ring that keeps the most recent, and
+ * finish() appends them.
+ */
+const TRACE_MAX_NODE_TAIL = 128
+const TRACE_MAX_HEAD_NODES = TRACE_MAX_NODES - TRACE_MAX_NODE_TAIL
 const TRACE_MAX_SKILLS = 128
 /** Restored tail content shares one limit so the three copies intern as one. */
 const RESTORED_TAIL_MAX_CHARS = 16 * 1024
@@ -669,6 +681,13 @@ export class TraceCollector {
   private modelCalls: TraceModelCall[] = []
   private nodes: TraceNode[] = []
   private nodeIndexById = new Map<string, number>()
+
+  /**
+   * Nodes recorded after the head filled up, most recent kept. Insertion-ordered
+   * so eviction is "delete the first key"; keyed by id so getNode still finds
+   * them while the turn is running and endLlmNode can still set their output.
+   */
+  private readonly tailNodes = new Map<string, TraceNode>()
   private llmNodeByMessageId = new Map<string, string>()
   private toolNodeByCallId = new Map<string, string>()
   private readonly rootNodeId: string
@@ -1513,6 +1532,7 @@ export class TraceCollector {
     })
     const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
+    this.mergeTailNodes()
     this.restoreTailContent()
 
     const userInfo = getUserInfo()
@@ -1783,9 +1803,7 @@ export class TraceCollector {
         metadata: pickCountableMetadata(node.metadata),
         truncated: true
       }
-      const skeletonIndex = this.nodes.push(skeleton) - 1
-      this.nodeIndexById.set(skeleton.id, skeletonIndex)
-      return true
+      return this.storeNode(skeleton)
     }
     const metadata = this.collectionBudget.takeValue(node.metadata, 32 * 1024)
     const rawInput =
@@ -1827,15 +1845,47 @@ export class TraceCollector {
         ? { metadata: metadata as Record<string, unknown> }
         : {})
     }
-    const index = this.nodes.push(boundedNode) - 1
-    this.nodeIndexById.set(boundedNode.id, index)
+    return this.storeNode(boundedNode)
+  }
+
+  /** Head first, then the tail ring once the head is full. */
+  private storeNode(node: TraceNode): boolean {
+    if (this.nodes.length < TRACE_MAX_HEAD_NODES) {
+      const index = this.nodes.push(node) - 1
+      this.nodeIndexById.set(node.id, index)
+      return true
+    }
+    if (this.tailNodes.size >= TRACE_MAX_NODE_TAIL && !this.tailNodes.has(node.id)) {
+      const oldest = this.tailNodes.keys().next().value
+      if (typeof oldest === "string") this.tailNodes.delete(oldest)
+    }
+    this.tailNodes.set(node.id, node)
     return true
+  }
+
+  /**
+   * Fold the tail into the node list. A tail node whose parent was evicted is
+   * re-parented to the root: a broken link would drop its whole subtree from
+   * the rendered tree, and the root is the one parent that always exists.
+   */
+  private mergeTailNodes(): void {
+    if (this.tailNodes.size === 0) return
+    for (const node of this.tailNodes.values()) {
+      const index = this.nodes.push(node) - 1
+      this.nodeIndexById.set(node.id, index)
+    }
+    this.tailNodes.clear()
+    for (const node of this.nodes) {
+      if (node.parentId && !this.nodeIndexById.has(node.parentId)) {
+        node.parentId = this.rootNodeId
+      }
+    }
   }
 
   private getNode(id: string): TraceNode | undefined {
     const idx = this.nodeIndexById.get(id)
-    if (idx === undefined) return undefined
-    return this.nodes[idx]
+    if (idx !== undefined) return this.nodes[idx]
+    return this.tailNodes.get(id)
   }
 
   private endNode(id: string, status: TraceNodeStatus): void {

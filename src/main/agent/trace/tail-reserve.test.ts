@@ -102,6 +102,33 @@ describe("tail reserve", () => {
     expect(String(lastOutput)).toContain("助手回复")
   }, 60_000)
 
+  it("keeps nodes for the real last turns, not just the first 170", async () => {
+    const { rehydrateTraceContent } = await import("./content-refs")
+    const trace = rehydrateTraceContent(await longTurnOnce())
+    const llmNodes = (trace.nodes ?? []).filter((node) => node.type === "llm")
+    const turnOf = (node: { metadata?: Record<string, unknown> }): number =>
+      Number(String(node.metadata?.messageId ?? "m-1").slice(1))
+    const turns = llmNodes.map(turnOf).sort((a, b) => a - b)
+
+    // Three nodes a turn against a 512 cap used to stop the tree around turn
+    // 170, and the conversation view reads assistant replies off llm nodes — so
+    // the last thirty turns were invisible whatever the byte budget did. The
+    // cap is unchanged; the slots are just no longer all spent at the front.
+    expect(turns[0]).toBe(0)
+    expect(turns[turns.length - 1]).toBe(TURNS - 1)
+
+    // Whatever survives has a parent that exists, or the renderer drops its
+    // whole subtree.
+    const ids = new Set((trace.nodes ?? []).map((node) => node.id))
+    expect(
+      (trace.nodes ?? []).every((node) => node.parentId === null || ids.has(node.parentId))
+    ).toBe(true)
+
+    // And the final turn carries its real text, not a skeleton.
+    const lastNode = llmNodes.find((node) => turnOf(node) === TURNS - 1)
+    expect(String(lastNode?.output ?? "")).toContain("助手回复")
+  }, 60_000)
+
   it("takes the reserve out of the pool rather than adding to the trace", async () => {
     const { TRACE_COLLECTION_MAX_BYTES, TRACE_TAIL_RESERVE_RATIO, TraceCollectionBudget } =
       await import("./bounds")

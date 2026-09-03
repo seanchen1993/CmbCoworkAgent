@@ -1,4 +1,8 @@
-import { splitTruncatedText } from "./bounds"
+import {
+  TRACE_TRUNCATION_MARKER_PREFIX,
+  TRACE_TRUNCATION_MARKER_SUFFIX,
+  splitTruncatedText
+} from "./bounds"
 import type {
   AgentTrace,
   TraceChatMessage,
@@ -67,7 +71,7 @@ function truncateString(
   state.originalBytesApprox += byteSize(value)
 
   if (effective.tail <= 0) {
-    return `${value.slice(0, effective.head)}\n...[trace truncated: binary-like value, omitted ${value.length - effective.head} chars]...`
+    return `${value.slice(0, effective.head)}\n...[二进制内容，已省略 ${value.length - effective.head} 字符]...`
   }
 
   // Collection may already have cut this to a head and a tail. Narrow the two
@@ -80,11 +84,11 @@ function truncateString(
     const tail = existing.tail.slice(-effective.tail)
     const omitted =
       existing.omitted + (existing.head.length - head.length) + (existing.tail.length - tail.length)
-    return `${head}\n...[trace truncated: omitted ${omitted} chars]...\n${tail}`
+    return `${head}${TRACE_TRUNCATION_MARKER_PREFIX}${omitted}${TRACE_TRUNCATION_MARKER_SUFFIX}${tail}`
   }
 
   const omitted = Math.max(0, value.length - effective.head - effective.tail)
-  return `${value.slice(0, effective.head)}\n...[trace truncated: omitted ${omitted} chars]...\n${value.slice(-effective.tail)}`
+  return `${value.slice(0, effective.head)}${TRACE_TRUNCATION_MARKER_PREFIX}${omitted}${TRACE_TRUNCATION_MARKER_SUFFIX}${value.slice(-effective.tail)}`
 }
 
 function truncateSerialized(
@@ -114,7 +118,7 @@ function sanitizeUnknown(
   if (depth >= MAX_DEPTH) {
     state.fields.add(path)
     state.originalBytesApprox += byteSize(value)
-    return "[trace truncated: max depth]"
+    return "[已省略：超出嵌套深度]"
   }
 
   if (Array.isArray(value)) {

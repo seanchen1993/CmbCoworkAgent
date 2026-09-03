@@ -123,6 +123,77 @@ describe("cloud upload integrity", () => {
     }
   }, 60_000)
 
+  it("renders the operations dashboard view of a long turn without gaps or leaks", async () => {
+    const { TraceCollector } = await import("./collector")
+    const { sanitizeTraceForCloudUpload } = await import("./sanitizer")
+    const { rehydrateTraceContent } = await import("./content-refs")
+    const { buildTraceTree } = await import("./tree-builder")
+    const { buildTraceConversation } =
+      await import("../../../renderer/src/components/trace/TraceConversation")
+
+    const TURNS = 300
+    const tracer = new TraceCollector("th-dash", "分析仓库", "model", { includeSkillEval: false })
+    for (let i = 0; i < TURNS; i += 1) {
+      const blob = `${i}-` + "a".repeat(8 * 1024)
+      tracer.beginStep()
+      tracer.recordToolCall({ name: "read_file", args: { path: `/a/${i}.ts`, blob } })
+      tracer.endStep(`助手回复 ${i} ${blob}`)
+      const nodeId = tracer.beginLlmNode({ messageId: `m${i}` })
+      tracer.recordModelCall({
+        messageId: `m${i}`,
+        startedAt: new Date().toISOString(),
+        inputMessages: [{ role: "user", content: blob }],
+        outputMessage: { role: "assistant", content: `助手回复 ${i} ${blob}` },
+        toolCalls: [{ name: "read_file", args: { path: `/a/${i}.ts` } }],
+        tokenUsage: { inputTokens: 100, outputTokens: 5, totalTokens: 105 }
+      })
+      tracer.endLlmNode({ nodeId, output: `助手回复 ${i} ${blob}` })
+      tracer.addToolNode({
+        name: "read_file",
+        input: { path: `/a/${i}.ts` },
+        llmMessageId: `m${i}`,
+        toolCallId: `tc-${i}`
+      })
+      tracer.addToolResultNode({ toolCallId: `tc-${i}`, output: blob })
+    }
+    const local = await tracer.finish("success")
+
+    // The whole path the dashboard takes: upload, then back out of _raw,
+    // rehydrate, build the tree. The detail payload carries nodes and neither
+    // steps nor modelCalls, so the node tree is all the view has to work with.
+    const uploaded = sanitizeTraceForCloudUpload(rehydrateTraceContent(local))
+    const fromCloud = rehydrateTraceContent(JSON.parse(JSON.stringify(uploaded)))
+    const conversation = buildTraceConversation({
+      ...fromCloud,
+      nodes: buildTraceTree(fromCloud),
+      steps: undefined,
+      modelCalls: undefined
+    } as never)
+
+    const assistants = conversation.messages.filter((message) => message.role === "assistant")
+    const text = (message: (typeof assistants)[number]): string =>
+      String((message as unknown as { content?: string }).content ?? "")
+    // Both ends of the turn are readable, which is the point of the reserve.
+    expect(text(assistants[0])).toContain("助手回复 0 ")
+    expect(text(assistants[assistants.length - 1])).toContain(`助手回复 ${TURNS - 1} `)
+
+    // And the gap between them is stated rather than left as a silent jump.
+    const notices = conversation.messages.filter((message) => message.role === "notice")
+    expect(notices.length).toBeGreaterThan(0)
+    expect(String((notices[0] as unknown as { content?: string }).content)).toContain("未记录")
+
+    const tools = conversation.messages.flatMap(
+      (message) => (message as unknown as { tools?: Array<{ truncated?: boolean }> }).tools ?? []
+    )
+    expect(tools.filter((tool) => tool.truncated).length).toBeGreaterThan(0)
+
+    // Nothing internal reaches the reader.
+    const rendered = JSON.stringify(conversation.messages)
+    expect(rendered).not.toContain("budget exhausted")
+    expect(rendered).not.toContain("trace truncated")
+    expect(rendered).not.toContain('Ref":')
+  }, 120_000)
+
   it("carries skeletons and their pairing keys through the oversized summary", async () => {
     const { TraceCollector } = await import("./collector")
     const { sanitizeTraceForCloudUpload } = await import("./sanitizer")
