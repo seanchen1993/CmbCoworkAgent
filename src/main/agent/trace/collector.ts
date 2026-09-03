@@ -14,6 +14,7 @@
  *   await tracer.finish("success")
  */
 
+import { createHash } from "crypto"
 import { join } from "path"
 import { homedir } from "os"
 import { lstat, opendir, readFile, rename, rmdir, unlink, writeFile } from "fs/promises"
@@ -71,11 +72,14 @@ import {
   type TraceKeyProtector,
   type TraceStorageInitializationResult
 } from "./local-storage"
+import { TraceContentInterner, rehydrateTraceContent } from "./content-refs"
+import { TraceTailContentBuffer, tailKeys } from "./tail-buffer"
 import {
   TRACE_COLLECTION_MAX_BYTES,
   TRACE_PERSISTED_MAX_BYTES,
   TraceCollectionBudget,
-  clampText
+  clampText,
+  truncateKeepingEnds
 } from "./bounds"
 import {
   appendSkillEvalWindowTurn,
@@ -102,7 +106,13 @@ export function getTraceReporter(): ITraceReporter {
 function reportTraceInBackground(trace: AgentTrace): void {
   const reporter = _reporter
   const reportTask = Promise.resolve()
-    .then(() => reporter.report(sanitizeTraceForCloudUpload(trace)))
+    // Rehydrate before sanitising. Deduplication exists to protect the
+    // collection budget and the local file; the cloud copy is bounded by the
+    // sanitiser's own limits instead. And the sanitiser's oversized path
+    // rebuilds model calls and nodes field by field, which would drop the
+    // pointers while keeping the emptied values — the upload would arrive with
+    // blank args and blank text wherever a value had been shared.
+    .then(() => reporter.report(sanitizeTraceForCloudUpload(rehydrateTraceContent(trace))))
     .catch((error) => {
       console.warn("[Tracer] Reporter.report() threw:", error)
     })
@@ -453,9 +463,39 @@ const TRACE_MAX_STEPS = 128
 const TRACE_MAX_TOOL_CALLS = 512
 const TRACE_MAX_TOOL_CALLS_PER_STEP = 64
 const TRACE_MAX_MODEL_CALLS = 64
+/**
+ * Past TRACE_MAX_MODEL_CALLS a call still gets a skeleton — timing and
+ * tokenUsage — so per-call token usage survives a long turn instead of
+ * stopping at 64.
+ *
+ * A skeleton costs ~410 bytes, not the ~120 its own fields suggest, because
+ * TraceModelCall requires inputMessages, outputMessage and toolCalls to be
+ * present even when empty. 512 of them is ~209KB, which puts a maxed-out trace
+ * at ~883KB against the 1MB where the write queue drops it whole — a 12%
+ * margin, deliberately spent to keep per-call usage available for long turns.
+ *
+ * If this ever needs to cover more than 512 calls, do not raise it: a compact
+ * top-level series of [startedAtMs, input, output] costs ~30 bytes a call, so
+ * a thousand calls fit in 30KB instead of the 209KB these skeletons spend.
+ */
+const TRACE_MAX_MODEL_CALL_SKELETONS = 512
 const TRACE_MAX_MODEL_MESSAGES = 64
 const TRACE_MAX_NODES = 512
+/**
+ * Slots held back for the end of the turn, out of TRACE_MAX_NODES rather than
+ * on top of it — the node count, and so the trace's size, is unchanged.
+ *
+ * At roughly three nodes a turn the old cap stopped the tree around turn 170,
+ * and the conversation view reads assistant replies off llm nodes, so
+ * everything after that was invisible no matter how much byte budget was left.
+ * Nodes past the head now go into a ring that keeps the most recent, and
+ * finish() appends them.
+ */
+const TRACE_MAX_NODE_TAIL = 128
+const TRACE_MAX_HEAD_NODES = TRACE_MAX_NODES - TRACE_MAX_NODE_TAIL
 const TRACE_MAX_SKILLS = 128
+/** Restored tail content shares one limit so the three copies intern as one. */
+const RESTORED_TAIL_MAX_CHARS = 16 * 1024
 
 function boundTraceToolCall(call: TraceToolCall, budget: TraceCollectionBudget): TraceToolCall {
   // Take the name first: args can drain the budget, and a nameless (or
@@ -468,11 +508,65 @@ function boundTraceToolCall(call: TraceToolCall, budget: TraceCollectionBudget):
       args && typeof args === "object" && !Array.isArray(args)
         ? (args as Record<string, unknown>)
         : {},
-    ...(typeof call.result === "string" ? { result: budget.takeText(call.result, 16 * 1024) } : {}),
+    ...(typeof call.result === "string"
+      ? { result: budget.takeText(call.result, 16 * 1024, true) }
+      : {}),
     ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs)
       ? { durationMs: Math.max(0, Math.min(call.durationMs, 24 * 60 * 60 * 1000)) }
       : {})
   }
+}
+
+/**
+ * Content-addressed id for one chat message. Two messages with the same role,
+ * text and tool linkage are the same message as far as a trace reader is
+ * concerned, so they collapse to one stored copy.
+ */
+function chatMessageId(message: TraceChatMessage): string {
+  return createHash("sha1")
+    .update(
+      [
+        message.role,
+        message.content ?? "",
+        message.reasoning ?? "",
+        message.name ?? "",
+        message.toolCallId ?? ""
+      ].join("\u0000")
+    )
+    .digest("hex")
+    .slice(0, 16)
+}
+
+/** True for the LLM input windows recorded by beginLlmNode / recordModelCall. */
+function isChatMessageArray(value: unknown): value is TraceChatMessage[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (item) =>
+        item !== null &&
+        typeof item === "object" &&
+        typeof (item as TraceChatMessage).role === "string"
+    )
+  )
+}
+
+const COUNTABLE_NODE_METADATA_KEYS = [
+  "toolCallId",
+  "messageId",
+  "toolCallCount",
+  "toolNames",
+  "index"
+] as const
+
+function pickCountableMetadata(
+  metadata: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!metadata) return undefined
+  const picked: Record<string, unknown> = {}
+  for (const key of COUNTABLE_NODE_METADATA_KEYS) {
+    if (metadata[key] !== undefined) picked[key] = metadata[key]
+  }
+  return Object.keys(picked).length > 0 ? picked : undefined
 }
 
 function boundTraceChatMessage(
@@ -483,9 +577,11 @@ function boundTraceChatMessage(
   const role = allowedRoles.has(message.role) ? message.role : "unknown"
   return {
     role,
-    content: budget.takeText(String(message.content ?? ""), 16 * 1024),
+    ...(typeof message.mid === "string" ? { mid: message.mid } : {}),
+    ...(typeof message.ref === "string" ? { ref: message.ref } : {}),
+    content: budget.takeText(String(message.content ?? ""), 16 * 1024, true),
     ...(typeof message.reasoning === "string"
-      ? { reasoning: budget.takeText(message.reasoning, 8 * 1024) }
+      ? { reasoning: budget.takeText(message.reasoning, 8 * 1024, true) }
       : {}),
     ...(typeof message.name === "string" ? { name: budget.takeText(message.name, 512) } : {}),
     ...(typeof message.toolCallId === "string"
@@ -585,17 +681,56 @@ export class TraceCollector {
   private modelCalls: TraceModelCall[] = []
   private nodes: TraceNode[] = []
   private nodeIndexById = new Map<string, number>()
+
+  /**
+   * Nodes recorded after the head filled up, most recent kept. Insertion-ordered
+   * so eviction is "delete the first key"; keyed by id so getNode still finds
+   * them while the turn is running and endLlmNode can still set their output.
+   */
+  private readonly tailNodes = new Map<string, TraceNode>()
   private llmNodeByMessageId = new Map<string, string>()
   private toolNodeByCallId = new Map<string, string>()
   private readonly rootNodeId: string
   private terminalNodeAdded = false
   private finishPromise: Promise<AgentTrace> | undefined
 
+  /**
+   * Ids of chat messages whose content is already stored somewhere in this
+   * trace. Shared by beginLlmNode and recordModelCall, so the second recording
+   * of the same window collapses to refs.
+   */
+  private readonly storedChatMessageIds = new Set<string>()
+
+  /**
+   * Assigns the canonical copy of every repeated value in this trace. Recorders
+   * run steps-first, so the literal lands on the flattest structure and the
+   * later copies keep only an id.
+   */
+  private readonly contentInterner = new TraceContentInterner()
+
+  /**
+   * Content the budget could not afford, held so the end of the turn can be
+   * written back at finish(). Sized from the reserve the budget held back, so
+   * the trace does not grow — the spend just stops being entirely front-loaded.
+   */
+  private readonly tailContent = new TraceTailContentBuffer(this.collectionBudget.tailReserveBytes)
+
   /** The step currently being built (between beginStep / endStep). */
   private currentStepIndex = 0
   private currentStepStartedAt: string = nowIsoLocal()
   private currentToolCalls: TraceToolCall[] = []
   private recordedToolCallCount = 0
+
+  /**
+   * Counted as work arrives, independent of every array. The arrays stop at
+   * their TRACE_MAX_* caps; the turn does not, and these totals are what the
+   * operations dashboard aggregates.
+   */
+  private observedToolCallCount = 0
+  private observedModelCallCount = 0
+  private observedInputTokens = 0
+  private observedOutputTokens = 0
+  private observedTotalTokens = 0
 
   constructor(
     threadId: string,
@@ -822,15 +957,108 @@ export class TraceCollector {
 
   /** Record a tool call within the current step. */
   recordToolCall(call: TraceToolCall): void {
+    this.observedToolCallCount += 1
+    // The count caps are hard: past them the array itself must stop growing.
     if (
       this.recordedToolCallCount >= TRACE_MAX_TOOL_CALLS ||
-      this.currentToolCalls.length >= TRACE_MAX_TOOL_CALLS_PER_STEP ||
-      !this.collectionBudget.canAdd(256)
+      this.currentToolCalls.length >= TRACE_MAX_TOOL_CALLS_PER_STEP
     ) {
       return
     }
-    this.currentToolCalls.push(boundTraceToolCall(call, this.collectionBudget))
+    // A spent byte budget is not a reason to forget the call happened. Keep the
+    // name and drop the payload: totalToolCalls is counted off this array and
+    // tool names are a queried dimension, so dropping the entry would understate
+    // exactly the longest turns.
+    if (!this.collectionBudget.canAdd(256)) {
+      // Only if the step will exist to receive it — past TRACE_MAX_STEPS the
+      // reserve would be spent on a destination finish() cannot find.
+      if (this.steps.length < TRACE_MAX_STEPS) {
+        this.tailContent.remember(
+          tailKeys.stepToolArgs(this.currentStepIndex, this.currentToolCalls.length),
+          call.args
+        )
+      }
+      this.currentToolCalls.push({
+        name: clampText(String(call.name ?? "unknown"), 128),
+        args: {},
+        ...(typeof call.durationMs === "number" && Number.isFinite(call.durationMs)
+          ? { durationMs: Math.max(0, Math.min(call.durationMs, 24 * 60 * 60 * 1000)) }
+          : {}),
+        truncated: true
+      })
+      this.recordedToolCallCount += 1
+      return
+    }
+    this.currentToolCalls.push(
+      this.internToolCallArgs(boundTraceToolCall(call, this.collectionBudget))
+    )
     this.recordedToolCallCount += 1
+  }
+
+  /**
+   * Write the reserved tail back over the skeletons it belongs to. Runs once,
+   * at finish, because only then is it known which entries were last.
+   */
+  private restoreTailContent(): void {
+    if (this.tailContent.count === 0) return
+    // One limit for every restored field. The three positions hold the same
+    // text, and interning only collapses them if the strings are identical —
+    // restoring at each field's own limit would write three different strings
+    // and put back three copies of the tail instead of one.
+    const restore = (value: unknown): string | undefined =>
+      typeof value === "string" && value
+        ? truncateKeepingEnds(value, RESTORED_TAIL_MAX_CHARS)
+        : undefined
+
+    for (const step of this.steps) {
+      const text = restore(this.tailContent.take(tailKeys.stepText(step.index)))
+      if (text !== undefined) {
+        // Steps are the canonical home for assistant text, so this copy keeps
+        // the bytes and the model call and node below point at it.
+        const claim = this.contentInterner.claim(text)
+        step.assistantText = text
+        if (claim && "mid" in claim) step.assistantTextMid = claim.mid
+        delete step.truncated
+      }
+      step.toolCalls.forEach((call, toolIndex) => {
+        const args = this.tailContent.take(tailKeys.stepToolArgs(step.index, toolIndex))
+        if (!args || typeof args !== "object" || Array.isArray(args)) return
+        const claim = this.contentInterner.claim(args)
+        const next: TraceToolCall = { ...call, args: args as Record<string, unknown> }
+        delete next.truncated
+        if (claim && "mid" in claim) next.argsMid = claim.mid
+        step.toolCalls[toolIndex] = next
+      })
+    }
+
+    this.modelCalls.forEach((call, index) => {
+      const text = restore(this.tailContent.take(tailKeys.modelCallContent(index)))
+      if (text === undefined) return
+      const claim = this.contentInterner.claim(text)
+      call.outputMessage =
+        claim && "ref" in claim
+          ? { ...call.outputMessage, content: "", contentRef: claim.ref }
+          : {
+              ...call.outputMessage,
+              content: text,
+              ...(claim ? { contentMid: claim.mid } : {})
+            }
+      delete call.truncated
+    })
+
+    for (const node of this.nodes) {
+      const text = restore(this.tailContent.take(tailKeys.nodeOutput(node.id)))
+      if (text === undefined) continue
+      const claim = this.contentInterner.claim(text)
+      if (claim && "ref" in claim) {
+        node.output = undefined
+        node.outputRef = claim.ref
+      } else {
+        node.output = text
+        delete node.outputRef
+      }
+      delete node.truncated
+    }
   }
 
   private getTotalToolCalls(): number {
@@ -848,25 +1076,144 @@ export class TraceCollector {
       if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return sum
       return sum + Math.floor(count)
     }, 0)
-    return Math.max(stepToolCalls, nodeToolCalls, metadataToolCalls, metadataToolCallCounts)
+    return Math.max(
+      this.observedToolCallCount,
+      stepToolCalls,
+      nodeToolCalls,
+      metadataToolCalls,
+      metadataToolCallCounts
+    )
+  }
+
+  /**
+   * Claim a value for whichever recorder got there first. The winner keeps the
+   * bytes and stamps the id; everyone after it keeps only the id. Values too
+   * small to pay for a ref are left alone.
+   */
+  private internValue(value: unknown): { mid: string } | { ref: string } | undefined {
+    return this.contentInterner.claim(value)
+  }
+
+  /** Tool args: canonical on the step, ids on the model call and the tool node. */
+  private internToolCallArgs(call: TraceToolCall): TraceToolCall {
+    const claim = this.internValue(call.args)
+    if (!claim) return call
+    return "mid" in claim
+      ? { ...call, argsMid: claim.mid }
+      : { ...call, args: {}, argsRef: claim.ref }
+  }
+
+  /**
+   * The output message repeats the step's assistant text and, once the llm node
+   * copies it, the reasoning too. Keep whichever copy arrived first.
+   */
+  private internMessageText(message: TraceChatMessage): TraceChatMessage {
+    let output = message
+    const contentClaim = this.internValue(output.content)
+    if (contentClaim) {
+      output =
+        "mid" in contentClaim
+          ? { ...output, contentMid: contentClaim.mid }
+          : { ...output, content: "", contentRef: contentClaim.ref }
+    }
+    if (typeof output.reasoning === "string") {
+      const reasoningClaim = this.internValue(output.reasoning)
+      if (reasoningClaim) {
+        if ("mid" in reasoningClaim) {
+          output = { ...output, reasoningMid: reasoningClaim.mid }
+        } else {
+          const rest = { ...output }
+          delete rest.reasoning
+          output = { ...rest, reasoningRef: reasoningClaim.ref }
+        }
+      }
+    }
+    return output
+  }
+
+  /**
+   * Node input/output/metadata values, which are untyped and often duplicates.
+   * Returns the id to store in a sibling `*Ref` field when the value is a
+   * repeat, or undefined when this copy is the one keeping the bytes.
+   */
+  private internNodeValue(value: unknown): string | undefined {
+    const claim = this.internValue(value)
+    if (!claim || "mid" in claim) return undefined
+    return claim.ref
+  }
+
+  /**
+   * Replace every message already stored in this trace with a ref to the stored
+   * copy. The window slides one call at a time and each call records it twice,
+   * so without this the same text lands in the trace roughly nine times and
+   * crowds out everything recorded later.
+   */
+  private dedupeChatMessages(messages: readonly TraceChatMessage[]): TraceChatMessage[] {
+    return messages.map((message) => {
+      const mid = chatMessageId(message)
+      if (this.storedChatMessageIds.has(mid)) {
+        return { role: message.role, content: "", ref: mid }
+      }
+      this.storedChatMessageIds.add(mid)
+      return { ...message, mid }
+    })
   }
 
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
-    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512))
+    this.observedModelCallCount += 1
+    const usage = call.tokenUsage
+    if (usage) {
+      const input = usage.inputTokens ?? 0
+      const output = usage.outputTokens ?? 0
+      this.observedInputTokens += input
+      this.observedOutputTokens += output
+      this.observedTotalTokens += usage.totalTokens ?? input + output
+    }
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALL_SKELETONS) return
+    // Token totals are summed off this array by the dashboard, and per-call
+    // usage is worth keeping on its own. Neither a spent budget nor the
+    // full-entry cap should cost the entry: they cost its messages.
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512)) {
+      // Only when this turn has an llm node. The conversation view reads
+      // assistant text off nodes first, so once nodes hit their cap the same
+      // text on a model call is not displayable — remembering it anyway would
+      // spend the reserve evicting node content that is.
+      if (typeof call.messageId === "string" && this.llmNodeByMessageId.has(call.messageId)) {
+        this.tailContent.remember(
+          tailKeys.modelCallContent(this.modelCalls.length),
+          call.outputMessage?.content
+        )
+      }
+      this.modelCalls.push({
+        ...(typeof call.messageId === "string"
+          ? { messageId: clampText(call.messageId, 128) }
+          : {}),
+        startedAt: clampText(call.startedAt, 64),
+        inputMessages: [],
+        outputMessage: { role: "assistant", content: "" },
+        toolCalls: [],
+        ...(call.tokenUsage ? { tokenUsage: call.tokenUsage } : {}),
+        truncated: true
+      })
       return
-    const inputMessages = call.inputMessages
-      .slice(0, TRACE_MAX_MODEL_MESSAGES)
-      .map((message) => boundTraceChatMessage(message, this.collectionBudget))
+    }
+    const inputMessages = this.dedupeChatMessages(
+      call.inputMessages.slice(0, TRACE_MAX_MODEL_MESSAGES)
+    ).map((message) => boundTraceChatMessage(message, this.collectionBudget))
     const toolCalls = call.toolCalls
       .slice(0, TRACE_MAX_TOOL_CALLS_PER_STEP)
-      .map((toolCall) => boundTraceToolCall(toolCall, this.collectionBudget))
+      .map((toolCall) =>
+        this.internToolCallArgs(boundTraceToolCall(toolCall, this.collectionBudget))
+      )
     const tokenUsage = this.collectionBudget.takeValue(call.tokenUsage, 1024)
     this.modelCalls.push({
       ...(typeof call.messageId === "string" ? { messageId: clampText(call.messageId, 512) } : {}),
       startedAt: clampText(call.startedAt, 64),
       inputMessages,
-      outputMessage: boundTraceChatMessage(call.outputMessage, this.collectionBudget),
+      outputMessage: this.internMessageText(
+        boundTraceChatMessage(call.outputMessage, this.collectionBudget)
+      ),
       toolCalls,
       ...(tokenUsage && typeof tokenUsage === "object"
         ? { tokenUsage: tokenUsage as TraceModelCall["tokenUsage"] }
@@ -900,7 +1247,9 @@ export class TraceCollector {
       name: params?.name ?? "LLM Call",
       status: "running",
       startedAt: params?.startedAt ?? nowIsoLocal(),
-      input: params?.input,
+      input: isChatMessageArray(params?.input)
+        ? this.dedupeChatMessages(params.input)
+        : params?.input,
       metadata: {
         ...metadata,
         ...(messageId ? { messageId } : {})
@@ -1004,12 +1353,30 @@ export class TraceCollector {
     node.status = params.status ?? "success"
     node.endedAt = params.endedAt ?? nowIsoLocal()
     if (params.output !== undefined) {
-      node.output = this.collectionBudget.takeValue(params.output, 32 * 1024)
+      if (!this.collectionBudget.canAdd(64)) {
+        // The conversation view reads assistant replies off llm nodes first, so
+        // this is the copy that decides whether the end of a turn is readable.
+        this.tailContent.remember(tailKeys.nodeOutput(targetId), params.output)
+      }
+      const bounded = this.collectionBudget.takeValue(params.output, 32 * 1024)
+      const ref = this.internNodeValue(bounded)
+      if (ref) {
+        node.output = undefined
+        node.outputRef = ref
+      } else {
+        node.output = bounded
+      }
     }
     if (params.metadata) {
       const metadata = this.collectionBudget.takeValue(params.metadata, 32 * 1024)
       if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
-        node.metadata = { ...(node.metadata ?? {}), ...(metadata as Record<string, unknown>) }
+        const interned: Record<string, unknown> = {}
+        for (const [key, value] of Object.entries(metadata as Record<string, unknown>)) {
+          const ref = this.internNodeValue(value)
+          if (ref) interned[`${key}Ref`] = ref
+          else interned[key] = value
+        }
+        node.metadata = { ...(node.metadata ?? {}), ...interned }
       }
     }
   }
@@ -1052,14 +1419,34 @@ export class TraceCollector {
    * @param assistantText - The assistant's text reasoning for this step.
    */
   endStep(assistantText: string): void {
-    if (this.steps.length >= TRACE_MAX_STEPS || !this.collectionBudget.canAdd(128)) {
+    if (this.steps.length >= TRACE_MAX_STEPS) {
       this.currentToolCalls = []
       return
     }
+    // Keep the step (and the tool calls already attached to it) even with no
+    // budget left for its text — the step count and its tool calls are what
+    // totalToolCalls is derived from.
+    if (!this.collectionBudget.canAdd(128)) {
+      const index = this.currentStepIndex++
+      this.tailContent.remember(tailKeys.stepText(index), assistantText)
+      this.steps.push({
+        index,
+        startedAt: this.currentStepStartedAt,
+        assistantText: "",
+        toolCalls: [...this.currentToolCalls],
+        truncated: true
+      })
+      this.currentToolCalls = []
+      return
+    }
+    const boundedText = this.collectionBudget.takeText(assistantText, 32 * 1024, true)
+    const textClaim = this.internValue(boundedText)
     const step: TraceStep = {
       index: this.currentStepIndex++,
       startedAt: this.currentStepStartedAt,
-      assistantText: this.collectionBudget.takeText(assistantText, 32 * 1024),
+      // Steps are canonical for assistant text, so this is always the literal.
+      assistantText: boundedText,
+      ...(textClaim && "mid" in textClaim ? { assistantTextMid: textClaim.mid } : {}),
       toolCalls: [...this.currentToolCalls]
     }
     this.steps.push(step)
@@ -1145,6 +1532,9 @@ export class TraceCollector {
     })
     const evolvedSkillsWithVersions = await resolveSkillVersions(this.evolvedSkills)
 
+    this.mergeTailNodes()
+    this.restoreTailContent()
+
     const userInfo = getUserInfo()
     const boundedPathName = userInfo?.pathName ? clampText(userInfo.pathName, 4096) : undefined
     const upperOrgLevels = deriveUpperOrgLevelsFromPath(boundedPathName)
@@ -1213,6 +1603,11 @@ export class TraceCollector {
       // Flattened for dashboard aggregation — `sum` cannot reach into the
       // per-call array above.
       ...summarizeTraceCacheTokens(this.modelCalls),
+      // Counted as the turn ran, so these stay right past TRACE_MAX_MODEL_CALLS.
+      totalInputTokens: this.observedInputTokens,
+      totalOutputTokens: this.observedOutputTokens,
+      totalTokens: this.observedTotalTokens,
+      totalModelCalls: this.observedModelCallCount,
       nodes: this.finalizeNodes(
         outcome,
         endedAt,
@@ -1384,9 +1779,39 @@ export class TraceCollector {
     return this.nodes
   }
 
+  /**
+   * Structural and countable metadata only: the tool/result pairing key, the
+   * llm message id, and the per-node tool counts getTotalToolCalls reads.
+   */
   private pushNode(node: TraceNode): boolean {
-    if (this.nodes.length >= TRACE_MAX_NODES || !this.collectionBudget.canAdd(256)) return false
+    if (this.nodes.length >= TRACE_MAX_NODES) return false
+    // Structure is what makes the tree readable and countable; only the payload
+    // is negotiable. With no budget left, keep the node and drop input/output.
+    if (!this.collectionBudget.canAdd(256)) {
+      const skeleton: TraceNode = {
+        ...node,
+        id: clampText(node.id, 512),
+        parentId: node.parentId ? clampText(node.parentId, 512) : null,
+        ...(node.name ? { name: clampText(node.name, 512) } : {}),
+        startedAt: clampText(node.startedAt, 64),
+        ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
+        input: undefined,
+        output: undefined,
+        // Payload goes, but these keys are how the tree pairs a tool with its
+        // result and how getTotalToolCalls counts — dropping them would undo
+        // the very thing the skeleton exists to preserve.
+        metadata: pickCountableMetadata(node.metadata),
+        truncated: true
+      }
+      return this.storeNode(skeleton)
+    }
     const metadata = this.collectionBudget.takeValue(node.metadata, 32 * 1024)
+    const rawInput =
+      node.input !== undefined && !isChatMessageArray(node.input)
+        ? this.collectionBudget.takeValue(node.input, 32 * 1024)
+        : undefined
+    const boundedInputRef = rawInput !== undefined ? this.internNodeValue(rawInput) : undefined
+    const boundedInput = boundedInputRef ? undefined : rawInput
     const boundedNode: TraceNode = {
       ...node,
       // Structure (ids, parent links, timestamps) stays out of the budget:
@@ -1397,9 +1822,22 @@ export class TraceCollector {
       ...(node.name ? { name: clampText(node.name, 512) } : {}),
       startedAt: clampText(node.startedAt, 64),
       ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
+      // Everything passes through the byte budget — a node input has no
+      // exemption, and letting chat-message arrays skip it put the whole llm
+      // input window outside the 480KB pool.
+      //
+      // Interning comes after bounding, never before: ids are content
+      // addresses, so one taken from the pre-truncation value would match
+      // nothing. Chat-message arrays are bounded but not interned, because
+      // their messages already carry per-message refs.
       ...(node.input !== undefined
-        ? { input: this.collectionBudget.takeValue(node.input, 32 * 1024) }
+        ? {
+            input: isChatMessageArray(node.input)
+              ? this.collectionBudget.takeValue(node.input, 32 * 1024)
+              : boundedInput
+          }
         : {}),
+      ...(boundedInputRef ? { inputRef: boundedInputRef } : {}),
       ...(node.output !== undefined
         ? { output: this.collectionBudget.takeValue(node.output, 32 * 1024) }
         : {}),
@@ -1407,15 +1845,47 @@ export class TraceCollector {
         ? { metadata: metadata as Record<string, unknown> }
         : {})
     }
-    const index = this.nodes.push(boundedNode) - 1
-    this.nodeIndexById.set(boundedNode.id, index)
+    return this.storeNode(boundedNode)
+  }
+
+  /** Head first, then the tail ring once the head is full. */
+  private storeNode(node: TraceNode): boolean {
+    if (this.nodes.length < TRACE_MAX_HEAD_NODES) {
+      const index = this.nodes.push(node) - 1
+      this.nodeIndexById.set(node.id, index)
+      return true
+    }
+    if (this.tailNodes.size >= TRACE_MAX_NODE_TAIL && !this.tailNodes.has(node.id)) {
+      const oldest = this.tailNodes.keys().next().value
+      if (typeof oldest === "string") this.tailNodes.delete(oldest)
+    }
+    this.tailNodes.set(node.id, node)
     return true
+  }
+
+  /**
+   * Fold the tail into the node list. A tail node whose parent was evicted is
+   * re-parented to the root: a broken link would drop its whole subtree from
+   * the rendered tree, and the root is the one parent that always exists.
+   */
+  private mergeTailNodes(): void {
+    if (this.tailNodes.size === 0) return
+    for (const node of this.tailNodes.values()) {
+      const index = this.nodes.push(node) - 1
+      this.nodeIndexById.set(node.id, index)
+    }
+    this.tailNodes.clear()
+    for (const node of this.nodes) {
+      if (node.parentId && !this.nodeIndexById.has(node.parentId)) {
+        node.parentId = this.rootNodeId
+      }
+    }
   }
 
   private getNode(id: string): TraceNode | undefined {
     const idx = this.nodeIndexById.get(id)
-    if (idx === undefined) return undefined
-    return this.nodes[idx]
+    if (idx !== undefined) return this.nodes[idx]
+    return this.tailNodes.get(id)
   }
 
   private endNode(id: string, status: TraceNodeStatus): void {
@@ -1591,7 +2061,9 @@ async function readTraceFileBounded(
       lineCount += 1
       if (!line.trim()) continue
       try {
-        traces.push(parseStoredTraceLine(line))
+        // Storage keeps one copy of each repeated value; every reader gets the
+        // whole thing back, so no caller has to know refs exist.
+        traces.push(rehydrateTraceContent(parseStoredTraceLine(line)))
       } catch {
         // Skip malformed or undecryptable trace lines.
       }

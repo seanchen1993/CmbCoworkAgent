@@ -12,6 +12,7 @@ import { getUserInfo } from "../storage"
 import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
+import { rehydrateTraceContent } from "../agent/trace/content-refs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import {
   redactTraceDetailForDisplay,
@@ -2361,11 +2362,26 @@ function codeSkillAdoptionBucketAggs(
   }
 }
 
-function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+/**
+ * Prefer the totals the collector counted as the turn ran. Summing modelCalls
+ * understates any turn that went past TRACE_MAX_MODEL_CALLS, and the array is
+ * still the only source for traces recorded before those fields existed.
+ */
+function summarizeTraceTokenUsage(
+  trace: Pick<AgentTrace, "modelCalls" | "totalInputTokens" | "totalOutputTokens" | "totalTokens">
+): {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
 } {
+  if (typeof trace.totalTokens === "number" || typeof trace.totalInputTokens === "number") {
+    return {
+      totalInputTokens: trace.totalInputTokens ?? 0,
+      totalOutputTokens: trace.totalOutputTokens ?? 0,
+      totalTokens: trace.totalTokens ?? 0
+    }
+  }
+  const modelCalls = trace.modelCalls
   if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
     return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
   }
@@ -2397,10 +2413,14 @@ function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
 }
 
 function normalizeParsedTrace(
-  trace: AgentTrace,
+  rawTrace: AgentTrace,
   source: Record<string, unknown>,
   hit: EsSearchHit
 ): AgentTrace {
+  // Uploaded traces keep one copy of each repeated value. This is the boundary
+  // where cloud data re-enters the app, so put the copies back here — every
+  // consumer downstream (trace detail, conversation view) sees a whole trace.
+  const trace = rehydrateTraceContent(rawTrace)
   const candidate = trace as Partial<AgentTrace>
   const startedAt = candidate.startedAt || asString(source.startedAt)
   const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
@@ -2456,7 +2476,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
 
   if (parsed.trace) {
     const trace = normalizeParsedTrace(parsed.trace, source, hit)
-    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const usage = summarizeTraceTokenUsage(trace)
     const fallbackInputTokens = asNumber(source.totalInputTokens)
     const fallbackOutputTokens = asNumber(source.totalOutputTokens)
     const fallbackTotalTokens = asNumber(
@@ -2549,7 +2569,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
 }
 
 function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
-  const usage = summarizeTraceTokenUsage(trace.modelCalls)
+  const usage = summarizeTraceTokenUsage(trace)
   let nodes: TraceNode[] | undefined
   let rawError: string | undefined
   try {
