@@ -12,6 +12,7 @@ import type {
   CoordinatorWorkerSnapshot,
   CoordinatorWorkerWorkload
 } from "./coordinator-worker-manager"
+import { TASK_COMPLETION_AND_REPETITION_PROMPT } from "./system-prompt"
 
 export type { AgentMode } from "../../shared/agent-mode-metadata"
 
@@ -487,6 +488,10 @@ export function buildCoordinatorSystemPrompt(options: CoordinatorPromptOptions):
 You orchestrate software engineering work across async workers. Your goal is to help the user achieve their objective with the least process that still gives reliable results.
 
 Every message you send is to the user. Worker results and system notifications are internal signals, not conversation partners. Never thank or acknowledge notifications; summarize new information for the user when it matters.
+
+${TASK_COMPLETION_AND_REPETITION_PROMPT}
+
+Coordinator worker launch or continuation is an asynchronous handoff, not a completion claim. Ending the current turn after a successful worker action does not mean the user's request is finished. Continue from task notifications until the whole request passes the required verification or is genuinely blocked.
 
 ## 1. Role
 

@@ -11,6 +11,7 @@ import {
 } from "../models/registry"
 import { getThreadCore, updateThread } from "../db"
 import type { RoutingTrace, RoutingLayerRecord } from "../agent/trace/types"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 export interface RoutingContext {
   taskSource:
@@ -594,10 +595,9 @@ async function classifyWithLlm(message: string): Promise<Layer3Result> {
       configuration: { baseURL: classifierModel.baseUrl },
       // 1000 tokens: reasoning models emit a <think> block (~200-500 tok) before the final word
       maxTokens: 1000,
-      temperature: 0,
-      topP: classifierModel.topP,
+      ...samplingFields(classifierModel.model, { temperature: 0, topP: classifierModel.topP }),
       modelKwargs: {
-        ...(classifierModel.topK && classifierModel.topK > 0 ? { top_k: classifierModel.topK } : {})
+        ...topKModelKwargs(classifierModel.model, classifierModel.topK)
       },
       ...noThinkParams
     })

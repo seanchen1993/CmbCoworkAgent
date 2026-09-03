@@ -51,8 +51,9 @@ describe("trace reasoning sanitization", () => {
     const nodeReasoning = typeof rawNodeReasoning === "string" ? rawNodeReasoning : undefined
     const nodeContent = sanitized.nodes?.[0]?.output
 
-    expect(modelReasoning).toContain("trace truncated")
-    expect(nodeReasoning).toContain("trace truncated")
+    // The marker is shown to readers, so it is in the interface's language.
+    expect(modelReasoning).toContain("已省略")
+    expect(nodeReasoning).toContain("已省略")
     expect(sanitized.nodes?.[0]?.metadata?.providerMessageId).toBe("message-1")
     expect(modelReasoning).toHaveLength(modelContent?.length ?? 0)
     expect(nodeReasoning).toHaveLength(typeof nodeContent === "string" ? nodeContent.length : 0)

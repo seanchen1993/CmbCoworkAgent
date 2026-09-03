@@ -351,3 +351,57 @@ describe("Trace conversation event timeline", () => {
     expect(result.messages.filter((message) => message.content === "继续处理")).toHaveLength(2)
   })
 })
+
+describe("skeleton entries", () => {
+  it("marks a tool call whose payload the byte budget could not afford", () => {
+    // The collector keeps such a call's name and drops its args and result, so
+    // without the flag the panel shows a tool invoked with no arguments that
+    // returned nothing — which reads as a failed call, not a recording limit.
+    const conversation = buildTraceConversation({
+      traceId: "trace-skeleton",
+      startedAt: "2026-07-14T15:21:00.000Z",
+      executionMode: "normal",
+      userMessage: "分析仓库",
+      steps: [
+        {
+          startedAt: "2026-07-14T15:21:01.000Z",
+          assistantText: "先读文件",
+          toolCalls: [{ name: "read_file", args: { path: "README.md" }, result: "ok" }]
+        },
+        {
+          startedAt: "2026-07-14T15:21:02.000Z",
+          assistantText: "",
+          truncated: true,
+          toolCalls: [{ name: "read_file", args: {}, truncated: true }]
+        }
+      ]
+    } as unknown as TraceConversationSource)
+
+    const tools = conversation.messages.flatMap(
+      (message) =>
+        (message as unknown as { tools?: Array<{ name: string; truncated?: boolean }> }).tools ?? []
+    )
+    expect(tools).toHaveLength(2)
+    expect(tools[0].truncated).toBeUndefined()
+    expect(tools[1].truncated).toBe(true)
+    // The name is what the skeleton exists to keep.
+    expect(tools[1].name).toBe("read_file")
+  })
+
+  it("does not invent an empty assistant reply for a skeleton turn", () => {
+    const conversation = buildTraceConversation({
+      traceId: "trace-skeleton-2",
+      startedAt: "2026-07-14T15:21:00.000Z",
+      executionMode: "normal",
+      userMessage: "分析仓库",
+      modelCalls: [
+        { startedAt: "2026-07-14T15:21:01.000Z", outputMessage: { content: "有内容" } },
+        { startedAt: "2026-07-14T15:21:02.000Z", outputMessage: { content: "" }, truncated: true }
+      ]
+    } as unknown as TraceConversationSource)
+
+    const assistants = conversation.messages.filter((message) => message.role === "assistant")
+    expect(assistants).toHaveLength(1)
+    expect(String((assistants[0] as unknown as { content?: string }).content)).toContain("有内容")
+  })
+})
