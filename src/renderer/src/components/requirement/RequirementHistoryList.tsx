@@ -27,6 +27,7 @@ import { cn } from "@/lib/utils"
 import {
   getRequirementThreadIds,
   getRequirementModules,
+  isRequirementGenerated,
   isRequirementPublished,
   type RequirementRecord
 } from "./requirement-data"
@@ -559,10 +560,10 @@ export function RequirementHistoryList({
                     <span
                       className={cn(
                         "text-[12px] font-semibold tabular-nums flex  items-center",
-                        item.prdGenerated ? "text-[#5d554d]" : "text-[#958a7f]"
+                        isRequirementGenerated(item) ? "text-[#5d554d]" : "text-[#958a7f]"
                       )}
                     >
-                      {item.prdGenerated ? `${modules.length} 个` : "—"}
+                      {isRequirementGenerated(item) ? `${modules.length} 个` : "—"}
 
                       {hasModules ? (
                         <button

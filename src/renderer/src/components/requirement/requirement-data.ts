@@ -41,7 +41,6 @@ export type RequirementRecord = {
   sourceType: "file" | "text" | "link"
   sourceName: string
   initialDescription: string
-  prdGenerated: boolean
   prdManifest: RequirementPrdManifest
   prd: "是" | "否"
 }
@@ -86,17 +85,14 @@ export function fromPersistedRequirement(
       ? "异常"
       : item.prdManifest.prd.status.trim().toLowerCase() === "published"
         ? "已发布"
-        : item.status === "delivered"
-          ? "已交付"
-          : generated
-            ? "已生成"
-            : "沟通中",
+        : generated
+          ? "已生成"
+          : "沟通中",
     fileName: item.source.fileName,
     link: item.source.url ?? "",
     sourceType: item.source.type,
     sourceName: item.source.fileName,
     initialDescription: item.source.initialDescription ?? "",
-    prdGenerated: generated,
     prdManifest: item.prdManifest,
     prd: generated ? "是" : "否"
   }

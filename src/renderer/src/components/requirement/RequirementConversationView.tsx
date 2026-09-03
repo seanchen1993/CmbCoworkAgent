@@ -372,12 +372,13 @@ function RequirementConversationSession({
       },
       onRefreshRequirementStatus: async (item) => {
         const manifestThreadId = item.threadIds[0]
-        if (!manifestThreadId) throw new Error("该需求尚未关联沟通会话")
+        if (!manifestThreadId) return false
         const readResult = await window.api.workspace.readFile(
           manifestThreadId,
           "/prd/prd-manifest.json"
         )
         if (!readResult.success || readResult.content === undefined) {
+          if (readResult.error?.includes("ENOENT")) return false
           throw new Error(readResult.error || "未找到 prd-manifest.json")
         }
         let manifest: unknown
@@ -394,6 +395,7 @@ function RequirementConversationSession({
           throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
         }
         onRequirementUpdated(fromPersistedRequirement(syncResult.requirement, item.system))
+        return true
       },
       onNewRequirement: onNew,
       onBackToHistory: onBack
@@ -800,34 +802,48 @@ function RequirementConversationSession({
                   >
                     {getSourceTabLabel(requirement.sourceType)}
                   </TabsTrigger>
-                  <TabsTrigger
-                    value="prd"
-                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none"
-                  >
-                    新PRD文件
-                    <span
-                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
-                        requirement.coreFilesMissing || requirement.workspaceMissing
-                          ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
-                          : prdGenerationCompleted
-                            ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
-                            : "border-status-info/30 bg-status-info/15 text-status-info"
-                      }`}
-                    >
-                      {requirement.coreFilesMissing || requirement.workspaceMissing ? (
-                        <AlertTriangle className="size-2.5" />
-                      ) : prdGenerationCompleted ? (
-                        <CheckCircle2 className="size-2.5" />
-                      ) : (
-                        <Loader2 className="size-2.5 animate-spin" />
-                      )}
-                      {requirement.coreFilesMissing || requirement.workspaceMissing
-                        ? "异常"
-                        : prdGenerationCompleted
-                          ? "生成完成"
-                          : "生成中"}
-                    </span>
-                  </TabsTrigger>
+                  <TooltipProvider delayDuration={180}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex">
+                          <TabsTrigger
+                            value="prd"
+                            disabled={!prdGenerationCompleted}
+                            className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            新PRD文件
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
+                                requirement.coreFilesMissing || requirement.workspaceMissing
+                                  ? "border-status-critical/30 bg-status-critical/10 text-status-critical"
+                                  : prdGenerationCompleted
+                                    ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
+                                    : "border-status-info/30 bg-status-info/15 text-status-info"
+                              }`}
+                            >
+                              {requirement.coreFilesMissing || requirement.workspaceMissing ? (
+                                <AlertTriangle className="size-2.5" />
+                              ) : prdGenerationCompleted ? (
+                                <CheckCircle2 className="size-2.5" />
+                              ) : (
+                                <Loader2 className="size-2.5 animate-spin" />
+                              )}
+                              {requirement.coreFilesMissing || requirement.workspaceMissing
+                                ? "异常"
+                                : prdGenerationCompleted
+                                  ? "生成完成"
+                                  : "生成中"}
+                            </span>
+                          </TabsTrigger>
+                        </span>
+                      </TooltipTrigger>
+                      {!prdGenerationCompleted ? (
+                        <TooltipContent side="bottom" className="max-w-64 text-xs leading-relaxed">
+                          需求文档还在生成中，请完成需求梳理后再试。
+                        </TooltipContent>
+                      ) : null}
+                    </Tooltip>
+                  </TooltipProvider>
                   <TooltipProvider delayDuration={180}>
                     <Tooltip>
                       <TooltipTrigger asChild>

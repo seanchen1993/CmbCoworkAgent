@@ -6,7 +6,6 @@ import mammoth from "mammoth"
 import { getOpenworkDir } from "../storage"
 
 type RequirementSourceType = "file" | "text" | "link"
-type RequirementStatus = "draft" | "normalized" | "delivered"
 
 export type RequirementSource = {
   type: RequirementSourceType
@@ -22,10 +21,8 @@ export type RequirementIndexItem = {
   title: string
   requirementPath?: string
   source: RequirementSource
-  status: RequirementStatus
   createdAt: string
   updatedAt: string
-  prdGenerated?: boolean
   prdManifest?: IndexedPrdManifest
 }
 
@@ -51,7 +48,6 @@ export type RequirementRuntimeItem = RequirementIndexItem & {
   workspaceMissing: boolean
   coreFilesMissing: boolean
   coreFilesMissingReason: string | null
-  prdGenerated: boolean
   prdManifest: IndexedPrdManifest
 }
 
@@ -278,12 +274,16 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
   const normalized = list.map((rawItem) => {
     const { threadId: _legacyThreadId, ...item } = rawItem as typeof rawItem & {
       threadId?: unknown
+      status?: unknown
+      prdGenerated?: unknown
     }
     const normalizedThreadIds = getRequirementThreadIds(item)
     delete item.workDir
     delete item.prdVersion
     delete item.prdPublished
     delete item.prdManifestSynced
+    delete item.status
+    delete item.prdGenerated
     const rawSourceType = (item.source as { type?: unknown } | undefined)?.type
     const sourceType: RequirementSourceType =
       rawSourceType === "file" || rawSourceType === "link" || rawSourceType === "text"
@@ -298,7 +298,6 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
         ...item.source,
         type: sourceType
       },
-      prdGenerated: item.prdGenerated === true,
       prdManifest: normalizePrdManifest(item.prdManifest)
     }
   })
@@ -454,10 +453,6 @@ function normalizePrdManifest(value: unknown): IndexedPrdManifest {
   return normalized
 }
 
-function isPrdGenerated(manifest: IndexedPrdManifest): boolean {
-  return manifest.prd.status === "generated"
-}
-
 async function convertRequirementSourceToMarkdown(sourcePath: string): Promise<string> {
   if (path.extname(sourcePath).toLocaleLowerCase() !== ".docx") {
     const preview = (await fs.readFile(sourcePath, "utf-8")).trim()
@@ -555,7 +550,6 @@ async function toRuntimeRequirement(item: RequirementIndexItem): Promise<Require
     workspaceMissing,
     coreFilesMissing: coreFileStatus.missing,
     coreFilesMissingReason: coreFileStatus.reason,
-    prdGenerated: isPrdGenerated(prdManifest),
     prdManifest
   }
 }
@@ -587,10 +581,8 @@ async function createRequirement(
         ? { initialDescription: source.initialDescription?.trim() || "" }
         : {})
     },
-    status: "draft",
     createdAt: now,
     updatedAt: now,
-    prdGenerated: false,
     prdManifest: createEmptyPrdManifest()
   }
   if (source.type !== "text") {
@@ -731,9 +723,7 @@ async function saveRequirementPrd(payload: SavePrdPayload): Promise<RequirementR
 
   const next: RequirementIndexItem = {
     ...item,
-    status: "normalized",
     updatedAt: new Date().toISOString(),
-    prdGenerated: true,
     prdManifest
   }
   list[index] = next
@@ -762,7 +752,6 @@ async function syncRequirementManifest(
   const manifest = normalizePrdManifest(payload.manifest)
   list[index] = {
     ...list[index],
-    prdGenerated: isPrdGenerated(manifest),
     prdManifest: manifest
   }
   await writeRequirementIndex(list)

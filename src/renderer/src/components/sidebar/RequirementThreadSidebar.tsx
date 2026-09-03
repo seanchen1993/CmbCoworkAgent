@@ -63,7 +63,7 @@ export type RequirementSidebarMode = {
   onDeleteAllConversations: (requirement: RequirementRecord, threadIds: string[]) => Promise<void>
   onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
   onRenameRequirement: (requirement: RequirementRecord, title: string) => Promise<void>
-  onRefreshRequirementStatus: (requirement: RequirementRecord) => Promise<void>
+  onRefreshRequirementStatus: (requirement: RequirementRecord) => Promise<boolean>
   onNewRequirement?: () => void
   onBackToHistory?: () => void
 }
@@ -289,8 +289,9 @@ export function RequirementThreadSidebar({
   const refreshRequirementStatus = async (requirement: RequirementRecord): Promise<void> => {
     setRefreshingRequirementId(requirement.id)
     try {
-      await mode.onRefreshRequirementStatus(requirement)
-      toast.success("需求状态已刷新")
+      if (await mode.onRefreshRequirementStatus(requirement)) {
+        toast.success("需求状态已刷新")
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "刷新需求状态失败")
     } finally {

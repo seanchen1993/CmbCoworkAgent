@@ -225,7 +225,6 @@ describe("requirement source preview", () => {
 
     const history = (await list!(null)) as Array<{
       requirementPath: string
-      prdGenerated: boolean
       coreFilesMissing: boolean
       prdManifest: {
         prd: {
@@ -246,7 +245,6 @@ describe("requirement source preview", () => {
     }>
     expect(history).toHaveLength(1)
     expect(history[0].requirementPath).toBe(created.requirement?.requirementPath)
-    expect(history[0].prdGenerated).toBe(false)
     expect(history[0].coreFilesMissing).toBe(false)
     expect(history[0].prdManifest).toEqual({
       prd: {
@@ -284,24 +282,28 @@ describe("requirement source preview", () => {
     expect(history[0]).not.toHaveProperty("prdPreview")
     expect(history[0]).not.toHaveProperty("moduleCount")
     expect(history[0]).not.toHaveProperty("modules")
+    expect(history[0]).not.toHaveProperty("status")
+    expect(history[0]).not.toHaveProperty("prdGenerated")
 
     const index = JSON.parse(readFileSync(indexPath, "utf-8")) as {
       list: Array<{
         requirementPath?: string
         prdManifest?: unknown
-        prdGenerated?: boolean
+        status?: unknown
+        prdGenerated?: unknown
         prdVersion?: string | null
         prdPublished?: boolean
         prdManifestSynced?: boolean
       }>
     }
     expect(index.list[0].requirementPath).toBe(created.requirement?.requirementPath)
-    expect(index.list[0].prdGenerated).toBe(false)
     expect(index.list[0].prdManifest).toEqual(history[0].prdManifest)
     expect(index.list[0]).not.toHaveProperty("workDir")
     expect(index.list[0]).not.toHaveProperty("prdVersion")
     expect(index.list[0]).not.toHaveProperty("prdPublished")
     expect(index.list[0]).not.toHaveProperty("prdManifestSynced")
+    expect(index.list[0]).not.toHaveProperty("status")
+    expect(index.list[0]).not.toHaveProperty("prdGenerated")
 
     const emptyToken = (await getToken!(null)) as {
       success: boolean
@@ -327,7 +329,14 @@ describe("requirement source preview", () => {
     writeFileSync(
       indexPath,
       JSON.stringify({
-        list: [{ ...index.list[0], prdVersion: "v1.0" }]
+        list: [
+          {
+            ...index.list[0],
+            status: "normalized",
+            prdGenerated: true,
+            prdVersion: "v1.0"
+          }
+        ]
       }),
       "utf-8"
     )
@@ -344,6 +353,8 @@ describe("requirement source preview", () => {
       list: Array<Record<string, unknown>>
     }
     expect(migratedIndex.list[0]).not.toHaveProperty("prdVersion")
+    expect(migratedIndex.list[0]).not.toHaveProperty("status")
+    expect(migratedIndex.list[0]).not.toHaveProperty("prdGenerated")
 
     const opened = (await openWorkDir!(null, created.requirement!.reqId)) as {
       success: boolean
