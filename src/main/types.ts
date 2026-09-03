@@ -217,6 +217,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Durable transcript order. Present on messages read from thread_messages pages. */
+  ordinal?: number
   provider_source_id?: string
   provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"

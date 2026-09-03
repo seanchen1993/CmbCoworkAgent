@@ -126,6 +126,7 @@ import type {
   ManagedRunIdentity,
   ManagedRunChangeEvent,
   ManagedRunStartInput,
+  ManagedRunStartValidationInput,
   ManagedRunStopInput,
   ManagedRunSummary,
   ManagedRunThreadCreatedEvent,
@@ -162,7 +163,9 @@ import type {
   WorkspaceFilePreviewOpenMediaResult,
   WorkspaceFilePreviewReadRequest,
   WorkspaceFilePreviewReadResult,
-  WorkspaceFilePreviewReleaseRequest
+  WorkspaceFilePreviewReleaseRequest,
+  ToolFilePreviewGrantRequest,
+  ToolFilePreviewGrantResult
 } from "../shared/workspace-file-preview"
 import type {
   AttachmentBytesParseRequest,
@@ -170,10 +173,7 @@ import type {
   AttachmentGrantParseRequest
 } from "../shared/file-attachment"
 import type { ParsedAttachment } from "../main/file-parser"
-import type {
-  SkillPreviewGrantRequest,
-  SkillPreviewGrantResult
-} from "../shared/skill-preview"
+import type { SkillPreviewGrantRequest, SkillPreviewGrantResult } from "../shared/skill-preview"
 import type {
   BrowserRecordingSession,
   BrowserAttachOptions,
@@ -1387,7 +1387,10 @@ interface CustomAPI {
     get: (threadId?: string) => Promise<string | null>
     set: (threadId: string | undefined, path: string | null) => Promise<string | null>
     select: (threadId?: string) => Promise<string | null>
-    loadFromDisk: (threadId: string, workspacePath?: string) => Promise<{
+    loadFromDisk: (
+      threadId: string,
+      workspacePath?: string
+    ) => Promise<{
       success: boolean
       files: Array<{
         path: string
@@ -1400,10 +1403,7 @@ interface CustomAPI {
       truncated?: boolean
       continuationAvailable?: boolean
     }>
-    fileScanOpen: (
-      threadId: string,
-      workspacePath?: string
-    ) => Promise<WorkspaceFileScanOpenResult>
+    fileScanOpen: (threadId: string, workspacePath?: string) => Promise<WorkspaceFileScanOpenResult>
     fileScanNext: (
       scanId: string,
       threadId: string,
@@ -1416,15 +1416,16 @@ interface CustomAPI {
       restarted?: boolean
       workspacePath?: string | null
     }>
+    authorizeToolFilePreview: (
+      request: ToolFilePreviewGrantRequest
+    ) => Promise<ToolFilePreviewGrantResult>
     readFilePreview: (
       request: WorkspaceFilePreviewReadRequest
     ) => Promise<WorkspaceFilePreviewReadResult>
     openMediaPreview: (
       request: WorkspaceFilePreviewOpenMediaRequest
     ) => Promise<WorkspaceFilePreviewOpenMediaResult>
-    cancelFilePreview: (
-      request: WorkspaceFilePreviewCancelRequest
-    ) => Promise<{ success: boolean }>
+    cancelFilePreview: (request: WorkspaceFilePreviewCancelRequest) => Promise<{ success: boolean }>
     releaseFilePreview: (
       request: WorkspaceFilePreviewReleaseRequest
     ) => Promise<{ success: boolean }>
@@ -1652,9 +1653,7 @@ interface CustomAPI {
       success: boolean
       error?: string
     }>
-    onFilesChanged: (
-      callback: (data: WorkspaceFilesChangedPayload) => void
-    ) => () => void
+    onFilesChanged: (callback: (data: WorkspaceFilesChangedPayload) => void) => () => void
   }
   pet: {
     // 列出内置 pets/ 与 OPENWORK_DIR/pets 下可用宠物。
@@ -2404,6 +2403,8 @@ interface CustomAPI {
         input?: unknown
         output?: unknown
         metadata?: Record<string, unknown>
+        /** Recorded after the byte budget was spent: shape kept, payload dropped. */
+        truncated?: boolean
       }>
       modelCalls?: Array<{
         messageId?: string
@@ -2425,6 +2426,7 @@ interface CustomAPI {
           args: Record<string, unknown>
           result?: string
           durationMs?: number
+          truncated?: boolean
         }>
         tokenUsage?: {
           inputTokens?: number
@@ -2433,6 +2435,7 @@ interface CustomAPI {
           cacheReadTokens?: number
           cacheCreationTokens?: number
         }
+        truncated?: boolean
       }>
       steps: Array<{
         index: number
@@ -2443,7 +2446,9 @@ interface CustomAPI {
           args: Record<string, unknown>
           result?: string
           durationMs?: number
+          truncated?: boolean
         }>
+        truncated?: boolean
       }>
     } | null>
     deleteTraces: (traceIds: string[]) => Promise<{
@@ -2723,11 +2728,7 @@ interface CustomAPI {
     userProfiles: (
       sapIds: string[],
       options?: {
-        family?:
-          | "dashboard-market"
-          | "project-mode-market"
-          | "harness-market"
-          | "customize-market"
+        family?: "dashboard-market" | "project-mode-market" | "harness-market" | "customize-market"
       }
     ) => Promise<{ success: boolean; data?: DashboardAllUserItem[]; error?: string }>
     queryAllUser: () => Promise<{
@@ -2885,6 +2886,7 @@ interface CustomAPI {
     updateFeatureDeployUnits: (
       input: HarnessFeatureDeployUnitUpdateInput
     ) => Promise<HarnessFeatureDeployUnitBinding>
+    validateManagedRunStart: (input: ManagedRunStartValidationInput) => Promise<void>
     startManagedRun: (input: ManagedRunStartInput) => Promise<ManagedRunSummary>
     stopManagedRun: (input: ManagedRunStopInput) => Promise<boolean>
     getDynamicWorkflowConfig: (projectId: string) => Promise<HarnessDynamicWorkflowConfig | null>

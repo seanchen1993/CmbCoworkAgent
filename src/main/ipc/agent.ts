@@ -121,7 +121,7 @@ import { notifyIfBackground, stripThink } from "../services/notify"
 import { imDesktopCompletionObserver } from "../services/im/desktop-completion"
 import { showPetCompletedTaskNotice } from "../pet"
 import { trackEvent } from "../services/event-reporter"
-import { clearAdoptionContext, setAdoptionContext } from "../services/adoption-tracker"
+import { clearAdoptionContext } from "../services/adoption-tracker"
 import { markHarnessStageAttributionDirty } from "../services/harness-stage-attribution"
 import {
   GOAL_USER_MESSAGE_EVENT_PREFIX,
@@ -203,12 +203,29 @@ import {
   shouldResetSkillEvolutionSessionAfterIntent
 } from "../agent/skill-evolution/session-state"
 import {
+  MAX_TRACE_CONTENT,
+  MODEL_INPUT_WINDOW,
+  clampTraceContent as trimContent,
+  extractTraceRawText as extractRawText,
+  extractTraceText as extractText,
+  extractTraceTextBlocks as extractTextBlocks,
+  getTraceUsageMetadata as getUsageMetadata,
+  isTraceToolError,
+  recordAssistantMessageTrace,
+  recordToolCallTraceNode,
+  recordToolResultTraceNode,
+  stableTraceJson as stableJson,
+  traceMessageRole as toRole
+} from "../agent/trace/turn-trace-recorder"
+import {
+  observeExplicitSkillActivation,
+  observeToolCallForAttribution,
+  syncTurnSkillAttribution
+} from "../agent/turn-attribution"
+import {
   appendSkillProposalWindowTurn,
   buildSkillProposalWindowContext,
   getRecentSkillUsageNames,
-  getThreadActiveSkillSource,
-  getThreadActiveSkills,
-  setThreadActiveSkills,
   snapshotSkillProposalWindow,
   isSkillProposalWindowContext,
   type SkillProposalWindowContext
@@ -254,12 +271,14 @@ import {
 } from "../agent/coordinator-worker-manager"
 import {
   isRetryableApiError,
-  isStreamDisconnectLikeError,
+  isEmptyModelResponseError,
+  isResumableStreamFailure,
   extractErrorDetail,
   type FailoverAttempt,
   type ApiErrorDetail
 } from "../agent/failover"
 import { runHooks, type HookContext, type HookResultCallback } from "../hooks/runner"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import {
   normalizePathKey,
   normalizePluginId,
@@ -4750,7 +4769,8 @@ function streamDisconnectRetryDelay(attempt: number): number {
 function notifyStreamDisconnectRetry(
   window: BrowserWindow,
   channel: string,
-  attempt: number
+  attempt: number,
+  reason = "流连接中断，正在重连当前模型"
 ): void {
   safeSendToWindow(window, channel, {
     type: "custom",
@@ -4758,7 +4778,7 @@ function notifyStreamDisconnectRetry(
       type: "model_retry",
       attempt,
       maxRetries: STREAM_DISCONNECT_MAX_RETRIES,
-      reason: "流连接中断，正在重连当前模型",
+      reason,
       delayMs: streamDisconnectRetryDelay(attempt)
     }
   })
@@ -4823,15 +4843,21 @@ export async function retryStreamAfterDisconnect<T>(
   let retryError = error
   let nextRetries = retries
 
-  while (isStreamDisconnectLikeError(retryError) && nextRetries < STREAM_DISCONNECT_MAX_RETRIES) {
+  while (isResumableStreamFailure(retryError) && nextRetries < STREAM_DISCONNECT_MAX_RETRIES) {
     if (abortSignal.aborted || !isActive()) throw retryError
 
+    const emptyResponse = isEmptyModelResponseError(retryError)
     nextRetries += 1
     const delayMs = streamDisconnectRetryDelay(nextRetries)
     console.warn(
-      `[Agent][Retry] ${label} ${modelId ?? "unknown"} stream disconnected; retry ${nextRetries}/${STREAM_DISCONNECT_MAX_RETRIES}`
+      `[Agent][Retry] ${label} ${modelId ?? "unknown"} ${emptyResponse ? "returned an empty response" : "stream disconnected"}; retry ${nextRetries}/${STREAM_DISCONNECT_MAX_RETRIES}`
     )
-    notifyStreamDisconnectRetry(window, channel, nextRetries)
+    notifyStreamDisconnectRetry(
+      window,
+      channel,
+      nextRetries,
+      emptyResponse ? "模型返回空响应，正在重试当前模型" : undefined
+    )
     await new Promise((resolve) => setTimeout(resolve, delayMs))
     if (abortSignal.aborted || !isActive()) throw retryError
 
@@ -4909,6 +4935,20 @@ function emitErrorDetail(
   return detail
 }
 
+function sendHarnessAgentContextLoadError(
+  window: BrowserWindow,
+  channel: string,
+  error: unknown,
+  modelId?: string
+): void {
+  console.error("[Agent] Harness context load failed:", error)
+  emitErrorDetail(window, channel, error, { modelId })
+  safeSendToWindow(window, channel, {
+    type: "error",
+    error: error instanceof Error ? error.message : "Harness 上下文加载失败，请重试。"
+  })
+}
+
 /**
  * Max fetch attempts per model based on the current global routing mode.
  *
@@ -4944,10 +4984,9 @@ async function judgeSkillWorthiness(
     apiKey: config.apiKey,
     configuration: { baseURL: config.baseUrl },
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     }
   })
 
@@ -5036,10 +5075,9 @@ Based on this conversation, generate a reusable skill. Output JSON only.`
       apiKey: config.apiKey,
       configuration: { baseURL: config.baseUrl },
       maxTokens: config.maxOutputTokens,
-      temperature: config.temperature,
-      topP: config.topP,
+      ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
       modelKwargs: {
-        ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+        ...topKModelKwargs(config.model, config.topK)
       },
       streaming: true
     })
@@ -6514,45 +6552,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const consumedCoordinatorNotificationIds = new Set<string>()
         const trackedCoordinatorNotificationIds = new Set<string>()
 
-        // Code-gen skill attribution: a skill stays "active" for the rest of the
-        // thread once used and is attributed to all subsequent generated code —
-        // even in later turns that don't re-read its SKILL.md — until a later turn
-        // uses a *different* skill set, which supersedes it (no turn-distance cap).
-        // The sticky set lives in proposal-window.ts so it survives skill-evolution
-        // session resets. This feeds ONLY the adoption context (code_gen /
-        // code_adopt → commit 明细的关联 Skill); the trace's own usedSkills is set
-        // separately via tracer.setUsedSkills(currentRunSkills) and is unaffected.
-        const computeCodeGenAttributionSkills = (currentRunSkills: string[]): string[] => {
-          if (currentRunSkills.length > 0) return currentRunSkills
-          return getThreadActiveSkills(threadId)
-        }
-
-        const computeCodeGenAttributionSkillSource = (
-          currentRunSkills: string[],
-          currentRunSkillSource: string[]
-        ): string[] => {
-          if (currentRunSkills.length > 0) return currentRunSkillSource
-          return getThreadActiveSkillSource(threadId)
-        }
-
+        // Code-gen skill attribution (sticky active-skill set, adoption context
+        // and the trace's own usedSkills) lives in turn-attribution.ts so the
+        // desktop and IM paths cannot drift apart on it.
         const syncUsedSkillsContext = (): void => {
-          const currentRunSkills = skillUsageDetector.getUsedSkillNames()
-          const currentRunSkillSource = skillUsageDetector.getUsedSkillSourceRefs()
-          tracer.setUsedSkills(currentRunSkills)
-          tracer.setSkillSource(currentRunSkillSource)
-          tracer.setEvolvedSkills(skillUsageDetector.getUsedEvolvedSkillNames())
-          // A non-empty current-run skill set becomes (supersedes) the thread's
-          // active skills; a skill-less run leaves the prior active set intact.
-          if (currentRunSkills.length > 0) {
-            setThreadActiveSkills(threadId, currentRunSkills, currentRunSkillSource)
-          }
-          setAdoptionContext(threadId, {
-            usedSkills: computeCodeGenAttributionSkills(currentRunSkills),
-            skillSource: computeCodeGenAttributionSkillSource(
-              currentRunSkills,
-              currentRunSkillSource
-            )
-          })
+          syncTurnSkillAttribution({ threadId, tracer, detector: skillUsageDetector })
         }
 
         syncUsedSkillsContext()
@@ -7135,8 +7139,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onHookSkippedFactory,
               onExplicitSkillActivated: (skill) => {
                 if (!isPhysicalStreamRunActive(threadId, runToken, abortController.signal)) return
-                skillUsageDetector.onSkillsMetadata([{ name: skill.name, path: skill.path }])
-                skillUsageDetector.onReadFilePath(skill.path)
+                observeExplicitSkillActivation(skillUsageDetector, skill)
                 syncUsedSkillsContext()
               },
               onSystemMessage: (notice) => {
@@ -7201,8 +7204,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             onHookResult,
             onHookSkippedFactory,
             onExplicitSkillActivated: (skill) => {
-              skillUsageDetector.onSkillsMetadata([{ name: skill.name, path: skill.path }])
-              skillUsageDetector.onReadFilePath(skill.path)
+              observeExplicitSkillActivation(skillUsageDetector, skill)
               syncUsedSkillsContext()
             }
           })
@@ -8013,15 +8015,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           const _reasoningByAiMessageId = new Map<string, string>()
           const _toolNodeByRef = new Map<string, string>()
           const _toolNameByCallId = new Map<string, string>()
-          const MODEL_INPUT_WINDOW = 12
-          const MAX_TRACE_CONTENT = 2000
           const MAX_GOAL_TOOL_EVIDENCE_ITEMS = 60
           const goalEvidenceBuffer = new GoalEvidenceBuffer(MAX_GOAL_TOOL_EVIDENCE_ITEMS)
           let currentTurnToolCallStart = 0
           let currentTurnEvidenceStart = 0
-
-          const trimContent = (s: string): string =>
-            s.length > MAX_TRACE_CONTENT ? `${s.slice(0, MAX_TRACE_CONTENT)}\n…(truncated)` : s
 
           const getCurrentTurnToolCalls = (): string[] =>
             toolCallCounter.getNamesSince(currentTurnToolCallStart)
@@ -8030,34 +8027,6 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
 
           const normalizeMessageText = (s: string): string => s.replace(/\r\n/g, "\n").trim()
 
-          const stableJson = (value: unknown): string => {
-            if (value === null || value === undefined) return String(value)
-            if (typeof value !== "object") return JSON.stringify(value)
-            if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`
-            const obj = value as Record<string, unknown>
-            return `{${Object.keys(obj)
-              .sort()
-              .map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`)
-              .join(",")}}`
-          }
-
-          // Providers may surface usage as top-level `usage_metadata` or under
-          // `response_metadata.token_usage` / `response_metadata.usage`.
-          // Normalize all variants so trace capture and UI stay aligned.
-          const asRecord = (value: unknown): Record<string, unknown> | undefined =>
-            value && typeof value === "object" && !Array.isArray(value)
-              ? (value as Record<string, unknown>)
-              : undefined
-          const getUsageMetadata = (
-            kwargs: Record<string, unknown>
-          ): Record<string, unknown> | undefined => {
-            const responseMetadata = asRecord(kwargs.response_metadata)
-            return (
-              asRecord(kwargs.usage_metadata) ??
-              asRecord(responseMetadata?.token_usage) ??
-              asRecord(responseMetadata?.usage)
-            )
-          }
           if (effectiveAgentMode !== "coordinator") {
             activeCoordinatorTurnPrompts.delete(threadId)
             activeCoordinatorSelectedSkills.delete(threadId)
@@ -8065,52 +8034,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             activeCoordinatorNotificationSelectedSkills.delete(threadId)
           }
 
-          const extractRawText = (raw: unknown): string => {
-            if (typeof raw === "string") return raw
-            if (!Array.isArray(raw)) return ""
-            const text = raw
-              .map((b) => {
-                if (typeof b === "string") return b
-                if (!b || typeof b !== "object") return ""
-                const record = b as { text?: unknown; content?: unknown }
-                if (typeof record.text === "string") return record.text
-                if (typeof record.content === "string") return record.content
-                if (Array.isArray(record.content)) return extractRawText(record.content)
-                return ""
-              })
-              .filter(Boolean)
-              .join("\n")
-            return text
-          }
-          const extractText = (raw: unknown): string => trimContent(extractRawText(raw))
-
-          const toRole = (
-            className: string,
-            kwargs: Record<string, unknown>
-          ): "system" | "user" | "assistant" | "tool" | "unknown" => {
-            if (className.includes("Human")) return "user"
-            if (className.includes("AI")) return "assistant"
-            if (className.includes("System")) return "system"
-            if (className.includes("Tool")) return "tool"
-            if (kwargs?.type === "human") return "user"
-            if (kwargs?.type === "ai") return "assistant"
-            if (kwargs?.type === "system") return "system"
-            if (kwargs?.type === "tool") return "tool"
-            return "unknown"
-          }
-
           const normalizeTokenUsage = normalizeTraceTokenUsage
-
-          const extractTextBlocks = (raw: unknown): string => {
-            if (typeof raw === "string") return raw
-            if (Array.isArray(raw)) {
-              return (raw as Array<{ type?: string; text?: string }>)
-                .filter((b) => b?.type === "text")
-                .map((b) => b.text ?? "")
-                .join("")
-            }
-            return ""
-          }
 
           const forwardStreamChunk = (
             mode: string,
@@ -8218,32 +8142,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 }
                 const counted = toolCallCounter.register(tc, msgId, tcIndex)
 
-                if (tcName === "read_file") {
-                  const readPathRaw =
-                    (typeof tc.args?.path === "string" && tc.args.path) ||
-                    (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                    ""
-                  if (readPathRaw) {
-                    const hit = skillUsageDetector.onReadFilePath(readPathRaw)
-                    // Sync tracer + adoption context immediately when the hit set
-                    // grows. Without this, a write_file/edit_file that follows in
-                    // the *same* values batch would snapshot an empty usedSkills
-                    // and the resulting code_gen would be missing skill attribution.
-                    if (hit) {
-                      syncUsedSkillsContext()
-                    }
-                  }
-                }
-
-                if (tcName === "write_file" || tcName === "edit_file") {
-                  const writePath =
-                    (typeof tc.args?.path === "string" && tc.args.path) ||
-                    (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                    ""
-                  if (writePath) {
-                    fileWritePaths.push(writePath.replace(/\\/g, "/"))
-                  }
-                }
+                // Which tools mark a skill used and which count as writing a
+                // file is decided in turn-attribution.ts, shared with the IM
+                // path. Sync the moment the skill set grows: a write_file later
+                // in the same batch would otherwise snapshot an empty usedSkills
+                // and its code_gen would lose skill attribution.
+                const attributed = observeToolCallForAttribution(skillUsageDetector, tc)
+                if (attributed.skillHit) syncUsedSkillsContext()
+                if (attributed.writePath) fileWritePaths.push(attributed.writePath)
 
                 if (counted) {
                   const turnCount = toolCallCounter.getCount()
@@ -8350,79 +8256,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 } else if (isNewAiMessage) {
                   _countedModelMsgIds.add(aiMsgKey)
 
-                  // Extract the real model name from API response metadata (e.g. "MiniMax-M2.7")
-                  // This takes precedence over the user-configured model name (config.model)
-                  const apiModelName =
-                    kwargs.response_metadata?.model_name ?? kwargs.response_metadata?.model
-                  if (typeof apiModelName === "string" && apiModelName) {
-                    tracer.setModelName(apiModelName)
-                  }
-
-                  const inputSlice = state.messages
-                    .slice(Math.max(0, i - MODEL_INPUT_WINDOW), i)
-                    .map((m) => {
-                      const k = m?.kwargs || {}
-                      const cid = Array.isArray(m?.id) ? m.id : []
-                      const cname = cid[cid.length - 1] || ""
-                      return {
-                        role: toRole(cname, k),
-                        content: extractText(k.content),
-                        ...(typeof k.name === "string" ? { name: k.name } : {}),
-                        ...(typeof k.tool_call_id === "string"
-                          ? { toolCallId: k.tool_call_id }
-                          : {})
-                      }
-                    })
-                    .filter((m) => m.content || m.role === "tool")
-
-                  const outputToolCalls = Array.isArray(tcs)
-                    ? tcs.map((tc) => ({
-                        name: tc?.name ?? "unknown",
-                        args: tc?.args ?? {}
-                      }))
-                    : []
-
-                  const llmNodeId = tracer.beginLlmNode({
-                    messageId: aiMsgKey,
-                    startedAt: nowIsoLocal(),
-                    input: inputSlice,
-                    metadata: {
-                      ...(rawAiMsgId ? { providerMessageId: rawAiMsgId } : {}),
-                      toolCallCount: outputToolCalls.length
-                    }
+                  // Model name, input window, model call and llm node all come
+                  // from turn-trace-recorder.ts, shared with the IM path.
+                  const recorded = recordAssistantMessageTrace({
+                    tracer,
+                    messages: state.messages,
+                    index: i,
+                    messageKey: aiMsgKey,
+                    ...(rawAiMsgId ? { providerMessageId: rawAiMsgId } : {}),
+                    ...(_reasoningByAiMessageId.has(rawAiMsgId)
+                      ? { streamedReasoning: _reasoningByAiMessageId.get(rawAiMsgId) }
+                      : {})
                   })
-                  _llmNodeByMessageId.set(aiMsgKey, llmNodeId)
-
-                  const usageForTrace = usageForRunAccounting
-                  const reasoning = truncateReasoningForTrace(
-                    extractVisibleReasoning(kwargs, MAX_TRACE_CONTENT + 1) ||
-                      _reasoningByAiMessageId.get(rawAiMsgId) ||
-                      "",
-                    MAX_TRACE_CONTENT
-                  )
-
-                  tracer.recordModelCall({
-                    messageId: rawAiMsgId || aiMsgKey,
-                    startedAt: nowIsoLocal(),
-                    inputMessages: inputSlice,
-                    outputMessage: {
-                      role: "assistant",
-                      content: extractText(kwargs.content),
-                      ...(reasoning ? { reasoning } : {})
-                    },
-                    toolCalls: outputToolCalls,
-                    tokenUsage: usageForTrace
-                  })
-
-                  tracer.endLlmNode({
-                    nodeId: llmNodeId,
-                    output: extractText(kwargs.content),
-                    status: "success",
-                    metadata: {
-                      tokenUsage: usageForTrace,
-                      ...(reasoning ? { reasoning } : {})
-                    }
-                  })
+                  _llmNodeByMessageId.set(aiMsgKey, recorded.llmNodeId)
                 }
 
                 if (Array.isArray(tcs)) {
@@ -8439,13 +8285,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     const counted = toolCallCounter.register(tc, aiMsgKey, tcIndex)
                     if (!isSoloTaskToolCall && !_toolNodeByRef.has(toolRef)) {
                       const parentId = _llmNodeByMessageId.get(aiMsgKey)
-                      const toolNodeId = tracer.addToolNode({
-                        name: tc?.name ?? "unknown",
-                        input: tc?.args ?? {},
-                        parentId,
+                      const toolNodeId = recordToolCallTraceNode({
+                        tracer,
+                        toolCall: tc,
+                        index: tcIndex,
                         llmMessageId: aiMsgKey,
-                        toolCallId: tcId || undefined,
-                        metadata: { index: tcIndex }
+                        ...(parentId ? { parentId } : {})
                       })
                       _toolNodeByRef.set(toolRef, toolNodeId)
                     }
@@ -8457,17 +8302,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                       )
                     }
 
-                    if (tc?.name !== "read_file") continue
-                    const readPathRaw =
-                      (typeof tc.args?.path === "string" && tc.args.path) ||
-                      (typeof tc.args?.file_path === "string" && tc.args.file_path) ||
-                      ""
-                    if (readPathRaw) {
-                      const hit = skillUsageDetector.onReadFilePath(readPathRaw)
-                      if (hit) {
-                        syncUsedSkillsContext()
-                      }
-                    }
+                    // Re-run the shared rule against the values snapshot: its
+                    // tool args are complete, while a streamed chunk can still
+                    // carry `args: {}`. Both the detector and the write-path
+                    // collection are idempotent, so observing twice is free.
+                    const fromValues = observeToolCallForAttribution(skillUsageDetector, tc)
+                    if (fromValues.skillHit) syncUsedSkillsContext()
                   }
                 }
 
@@ -8491,25 +8331,15 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     (toolCallId ? _toolNameByCallId.get(toolCallId) : undefined) ||
                     "tool"
                   goalEvidenceBuffer.appendToolResult({ toolName, output: toolOutput, toolCallId })
-                  // Detect tool error: explicit status field, is_error flag, or error-prefix in output
-                  const additionalKwargs = kwargs.additional_kwargs as
-                    | Record<string, unknown>
-                    | undefined
-                  const isToolError =
-                    kwargs.status === "error" ||
-                    kwargs.is_error === true ||
-                    additionalKwargs?.is_error === true ||
-                    /^(error:|mcp tool error:|tool error:|failed:)/i.test(toolOutput.trim())
-                  if (isToolError) toolErrorCount += 1
+                  if (isTraceToolError(kwargs, toolOutput)) toolErrorCount += 1
                   if (!toolCallId || !_soloTaskToolCallIds.has(toolCallId)) {
-                    tracer.addToolResultNode({
-                      parentId,
-                      toolCallId: toolCallId || undefined,
+                    recordToolResultTraceNode({
+                      tracer,
+                      kwargs,
+                      messageId: toolMsgId,
                       output: toolOutput,
-                      status: isToolError ? "error" : "success",
-                      metadata: {
-                        messageId: toolMsgId
-                      }
+                      ...(toolCallId ? { toolCallId } : {}),
+                      ...(parentId ? { parentId } : {})
                     })
                   }
                 }
@@ -9536,10 +9366,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                         apiKey: config.apiKey,
                         configuration: { baseURL: config.baseUrl },
                         maxTokens: config.maxOutputTokens,
-                        temperature: config.temperature,
-                        topP: config.topP,
+                        ...samplingFields(config.model, {
+                          temperature: config.temperature,
+                          topP: config.topP
+                        }),
                         modelKwargs: {
-                          ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+                          ...topKModelKwargs(config.model, config.topK)
                         }
                       })
                     }
@@ -10115,7 +9947,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       let metadata = parsedThreadMetadata.metadata
       ensureThreadForkBoundaryMarkerEra(threadId, metadata)
       const workspacePath = parsedThreadMetadata.workspacePath
-      const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+      let harnessAgentContext: HarnessAgentContext
+      try {
+        harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+      } catch (error) {
+        sendHarnessAgentContextLoadError(window, channel, error, modelId)
+        return
+      }
       harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
       sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
       let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(
@@ -11435,7 +11273,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
     ensureThreadForkBoundaryMarkerEra(threadId, metadata)
     const workspacePath = parsedThreadMetadata.workspacePath
     const modelId = parsedThreadMetadata.modelId
-    const harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+    let harnessAgentContext: HarnessAgentContext
+    try {
+      harnessAgentContext = await getHarnessAgentContext(metadata, { workspacePath })
+    } catch (error) {
+      sendHarnessAgentContextLoadError(window, channel, error, modelId)
+      return
+    }
     harnessAgentContext.managedExecution = isActiveManagedRunSession(threadId)
     sendHarnessSessionContextInjectWarning(window, channel, harnessAgentContext)
     let onAgentsPromptLoadStatus = createHarnessAgentmdLoadStatusHandler(

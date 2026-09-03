@@ -362,7 +362,7 @@ export function SkillEvolutionReviewPanel({
                       "relative mt-px h-5 w-9 shrink-0 rounded-full border transition-colors",
                       useLocalDebugEndpoint
                         ? "border-primary bg-primary"
-                        : "border-border-emphasis bg-background-interactive"
+                        : "border-border-emphasis bg-muted-foreground/20"
                     )}
                     title="开启后所有 Trace Evolver 请求走本地 8017"
                   >

@@ -205,6 +205,18 @@ export function revokeExternalFileReadGrantsForOwner(senderId: number): number {
   return removed
 }
 
+/** Main-process lifecycle cleanup for capabilities issued by deleted trusted sources. */
+export function revokeExternalFileReadGrantsForScopes(scopeKeys: ReadonlySet<string>): number {
+  if (scopeKeys.size === 0) return 0
+  let removed = 0
+  for (const [grant, entry] of externalFileGrants) {
+    if (!scopeKeys.has(entry.scopeKey)) continue
+    externalFileGrants.delete(grant)
+    removed += 1
+  }
+  return removed
+}
+
 export function externalFileReadGrantCountForTests(): number {
   return externalFileGrants.size
 }

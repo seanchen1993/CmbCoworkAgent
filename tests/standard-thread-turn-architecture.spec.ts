@@ -30,6 +30,8 @@ function count(source: string, needle: string): number {
 
 const shared = read("src/main/agent/standard-thread-turn.ts")
 const desktop = read("src/main/ipc/agent.ts")
+const harnessService = read("src/main/harness-board/service.ts")
+const harnessCatalogReader = read("src/main/harness-board/catalog-reader.ts")
 const packageJson = read("package.json")
 
 for (const electronDependency of ['from "electron"', "BrowserWindow", "ipcMain", "webContents"]) {
@@ -63,6 +65,26 @@ assertIncludes(
   "assertLocalThreadRunLease(options.threadId, input.runLease.owner, input.runLease.runId)",
   "controlled factory refuses Runtime creation without the exact local lease"
 )
+assertIncludes(
+  shared,
+  "requestUserInputConfig: featureContext.agentConfig?.toolConfig?.requestUserInput",
+  "Harness request-user-input policy reaches the shared Runtime context"
+)
+assertIncludes(
+  shared,
+  'export const HARNESS_AGENT_CONTEXT_UNAVAILABLE = "HARNESS_AGENT_CONTEXT_UNAVAILABLE"',
+  "Harness context failures expose a stable error code"
+)
+assertIncludes(
+  shared,
+  "throw unavailable",
+  "Harness context failures block Runtime creation instead of silently degrading"
+)
+assertIncludes(
+  shared,
+  "const runtimeOptions = { ...context }",
+  "the controlled factory forwards the complete Harness context to the Runtime"
+)
 assertNotIncludes(
   desktop,
   "createAgentRuntime(",
@@ -82,6 +104,50 @@ assertNotIncludes(
   desktop,
   "JSON.parse(thread.metadata",
   "desktop Runtime entrypoints use the shared Thread metadata parser"
+)
+assert(
+  count(desktop, "sendHarnessAgentContextLoadError(window, channel, error, modelId)") === 2,
+  "resume and interrupt surface Harness context failures before Runtime setup"
+)
+assertIncludes(
+  harnessService,
+  "const sessionContext = requireCompleteHarnessSessionContext(",
+  "plugin session context is validated before entering the Runtime prompt"
+)
+assertIncludes(
+  harnessService,
+  "if (error instanceof HarnessSessionContextLimitError) throw error",
+  "oversized plugin context blocks execution instead of falling back silently"
+)
+assertNotIncludes(
+  harnessService,
+  "sessionContext.slice(0, HARNESS_SESSION_CONTEXT_MAX_CHARS)",
+  "plugin session context is never silently truncated"
+)
+assertIncludes(
+  harnessCatalogReader,
+  "HARNESS_DEPLOY_UNIT_MAPPING_MAX_ENTRIES",
+  "selected deploy-unit projection uses the complete bounded store limit"
+)
+assertNotIncludes(
+  harnessCatalogReader,
+  "MAX_SELECTED_DEPLOY_UNIT_MAPPINGS = 64",
+  "selected deploy-unit projection no longer drops entries after 64"
+)
+assertIncludes(
+  harnessCatalogReader,
+  "supported_deploy_units exceeded ` +",
+  "Harness deploy-unit support metadata rejects data beyond the bounded store limit"
+)
+assertNotIncludes(
+  harnessCatalogReader,
+  "parsed.bindings.slice(0, MAX_FEATURE_BINDINGS)",
+  "Harness feature bindings are rejected above the store limit instead of being truncated"
+)
+assertIncludes(
+  harnessCatalogReader,
+  'throw new Error("Harness feature binding store has an invalid bindings field")',
+  "invalid feature bindings cannot silently remove Harness repository context"
 )
 assert(
   count(desktop, "parseStandardThreadMetadata(") === 9,

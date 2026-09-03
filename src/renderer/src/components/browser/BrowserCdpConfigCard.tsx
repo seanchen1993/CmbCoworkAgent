@@ -143,7 +143,7 @@ export function BrowserCdpConfigCard({
     <>
       <div
         className={cn(
-          "overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.16)]",
+          "overflow-hidden rounded-xl border border-border bg-background-elevated shadow-[0_14px_38px_rgba(0,0,0,0.08)]",
           className
         )}
       >
@@ -153,7 +153,7 @@ export function BrowserCdpConfigCard({
         </div>
 
         <div className="space-y-2 p-2">
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background-interactive px-3 py-2.5">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-muted/50 px-3 py-2.5">
             <div className="min-w-0">
               <p className="text-xs font-medium text-foreground">
                 开启 Agent操控内置浏览器
@@ -170,7 +170,7 @@ export function BrowserCdpConfigCard({
             />
           </div>
 
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background-interactive px-3 py-2.5">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-muted/50 px-3 py-2.5">
             <div className="min-w-0">
               <p className="text-xs font-medium text-foreground">
                 开启 导入已有Chrome登陆数据

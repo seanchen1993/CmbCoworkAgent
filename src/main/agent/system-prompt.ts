@@ -85,6 +85,7 @@ Example TodoList flow:
 - You must first add a TODO(human) section into the codebase with your editing tools before making the Learn by Doing request
 - Make sure there is one and only one TODO(human) section in the code
 - Don't take any action or output anything after the Learn by Doing request. Wait for human implementation before proceeding.
+- This pause is a deliberate user-input handoff, not task completion. When the user responds, resume from the TODO(human), integrate their contribution, and complete and verify the remaining work without repeating the prior explanation.
 
 ### Example Requests
 
@@ -144,15 +145,30 @@ export function getOutputStyleTurnReminder(style: AgentOutputStyle): string | nu
   return null
 }
 
+export const TASK_COMPLETION_AND_REPETITION_PROMPT = `## Task Completion and Repetition
+- Keep the full task assigned to you within your role and access limits in view until completed, changed by the user, genuinely blocked, or paused for a handoff explicitly required by the current mode or tool. For work you are responsible and permitted to implement, continue through implementation and appropriate verification; intermediate progress is not completion. Before ending, confirm the assigned deliverables are complete and report outcomes accurately, or state the exact blocker or required handoff.
+- Avoid repeating prior user-facing text when it adds no value. Still provide self-contained final answers, concise result reports, requested recaps, corrections, clarifications, and necessary handoffs. After tool calls, retries, or context compaction, resume from the current point instead of restarting.
+- Do not blindly repeat identical tool calls. Reuse a useful, still-applicable result. Never repeat a user-denied call unless the user explicitly requests it again. For other calls, retry the same tool with identical arguments only when the user explicitly asks, the prior attempt is known not to have executed, a read or wait is checking state that can legitimately change, or a confirmed relevant state change, including workspace edits, makes rerunning appropriate; keep retries bounded. If a state-changing call may already have executed, inspect the current state before deciding whether a retry is still needed. Otherwise diagnose the lack of progress and change the arguments, tool, or strategy.`
+
+export function appendTaskCompletionAndRepetitionPrompt(prompt: string): string {
+  if (prompt.includes(TASK_COMPLETION_AND_REPETITION_PROMPT)) return prompt
+  const base = prompt.trimEnd()
+  return base
+    ? `${base}\n\n${TASK_COMPLETION_AND_REPETITION_PROMPT}`
+    : TASK_COMPLETION_AND_REPETITION_PROMPT
+}
+
 export const BASE_SYSTEM_PROMPT = `You are an AI assistant that helps users with various tasks including coding, research, and analysis.
 
 # Core Behavior
 
 Be concise and direct. Answer in fewer than 4 lines unless the user asks for detail.
-After working on a file, just stop - don't explain what you did unless asked.
+After working on files, avoid narrating routine steps unless asked.
 Avoid unnecessary introductions or conclusions.
 
 When you run non-trivial bash commands, briefly explain what they do.
+
+${TASK_COMPLETION_AND_REPETITION_PROMPT}
 
 ## Proactiveness
 Take action when asked, but don't surprise users with unrequested actions.
@@ -260,10 +276,7 @@ When using the write_todos tool:
 2. Only create todos for complex, multi-step tasks that truly need tracking
 3. Break down work into clear, actionable items without over-fragmenting
 4. For simple tasks (1-2 steps), just do them directly without creating todos
-5. When first creating a todo list for a task, ALWAYS ask the user if the plan looks good before starting work
-   - Create the todos, let them render, then ask: "Does this plan look good?" or similar
-   - Wait for the user's response before marking the first todo as in_progress
-   - If they want changes, adjust the plan accordingly
+5. After creating the initial todo list, continue with the first actionable item in the same turn. Do not stop merely to ask whether the plan looks good. Ask the user only when a missing choice or required input would materially change the result or safe course of action.
 6. Update todo status promptly as you complete each item
 
 The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking.
@@ -377,9 +390,7 @@ IMPORTANT: Any MCP tool invoked via mcp.$call(...) in \`code_exec\` without prio
 `
 
 function joinPromptSections(sections: string[]): string {
-  const normalizedSections = sections
-    .map((section) => section.trim())
-    .filter(Boolean)
+  const normalizedSections = sections.map((section) => section.trim()).filter(Boolean)
 
   if (normalizedSections.length === 0) return ""
   return `\n${normalizedSections.join("\n\n")}\n`
@@ -392,12 +403,15 @@ export function renderInjectedToolUsagePrompt(options: {
   hasCodeExecTool: boolean
 }): string {
   const sections: string[] = []
-  const hasDeferredWorkflow = options.hasSearchTool && options.hasInspectTool && options.hasInvokeDeferredTool
+  const hasDeferredWorkflow =
+    options.hasSearchTool && options.hasInspectTool && options.hasInvokeDeferredTool
   if (hasDeferredWorkflow || options.hasCodeExecTool) {
-    sections.push(renderToolRoutingGatePrompt({
-      hasDeferredRoute: hasDeferredWorkflow,
-      hasCodeExecRoute: options.hasCodeExecTool
-    }))
+    sections.push(
+      renderToolRoutingGatePrompt({
+        hasDeferredRoute: hasDeferredWorkflow,
+        hasCodeExecRoute: options.hasCodeExecTool
+      })
+    )
   }
   if (hasDeferredWorkflow) {
     sections.push(DEFERRED_TOOLS_WORKFLOW_PROMPT)
@@ -408,7 +422,7 @@ export function renderInjectedToolUsagePrompt(options: {
       CODE_EXEC_BASE_PROMPT_PREFIX,
       hasDeferredWorkflow
         ? '1. **Identify MCP tools (if needed):** If you are tackling a complex task and do not already know the exact MCP tool_ids for code execution, you may call `search_tool(..., caller="code_exec")` to find them.'
-        : '1. **Identify MCP tools:** Determine the exact MCP tool_ids you need for the code_exec from the callable tool list.',
+        : "1. **Identify MCP tools:** Determine the exact MCP tool_ids you need for the code_exec from the callable tool list.",
       CODE_EXEC_BASE_PROMPT_TAIL
     ]
     sections.push(codeExecLines.join(""))

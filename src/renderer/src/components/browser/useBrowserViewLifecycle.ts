@@ -19,6 +19,9 @@ interface UseBrowserViewLifecycleOptions {
   mainView: string
   rightPanelCollapsed: boolean
   isAgentFocusActive: boolean
+  overlayModule?: "preview" | "git" | "browser" | null
+  overlayThreadId?: string | null
+  onRequestBrowserPanel: () => void
 }
 
 export function useBrowserViewLifecycle({
@@ -26,20 +29,23 @@ export function useBrowserViewLifecycle({
   harnessSessionThreadId,
   mainView,
   rightPanelCollapsed,
-  isAgentFocusActive
+  isAgentFocusActive,
+  overlayModule = null,
+  overlayThreadId = null,
+  onRequestBrowserPanel
 }: UseBrowserViewLifecycleOptions): void {
   const rightModule = useAppStore((state) => state.rightModule)
-  const requestOpenBrowserPanel = useAppStore((state) => state.requestOpenBrowserPanel)
   const wasBrowserPanelVisibleRef = useRef(false)
   const rendererUnloadBrowserCleanupSentRef = useRef(false)
   const modalDialogOpenRef = useRef(false)
 
   const isBrowserPanelVisible =
-    rightModule === "browser" &&
-    !rightPanelCollapsed &&
-    !isAgentFocusActive &&
-    ((mainView === "thread" && Boolean(currentThreadId)) ||
-      (mainView === "harness" && Boolean(harnessSessionThreadId)))
+    (rightModule === "browser" &&
+      !rightPanelCollapsed &&
+      !isAgentFocusActive &&
+      ((mainView === "thread" && Boolean(currentThreadId)) ||
+        (mainView === "harness" && Boolean(harnessSessionThreadId)))) ||
+    (overlayModule === "browser" && Boolean(overlayThreadId))
 
   const hideBrowserSession = useCallback((reason: string) => {
     console.info(`${BROWSER_APP_LOG_PREFIX} Hiding Browser session ${BROWSER_SESSION_ID} because ${reason}.`)
@@ -60,6 +66,8 @@ export function useBrowserViewLifecycle({
     isAgentFocusActive,
     isBrowserPanelVisible,
     mainView,
+    overlayModule,
+    overlayThreadId,
     rightModule,
     rightPanelCollapsed
   ])
@@ -146,7 +154,7 @@ export function useBrowserViewLifecycle({
       const activeThreadId = mainView === "harness" ? harnessSessionThreadId : currentThreadId
       if (requestedThreadId && activeThreadId && requestedThreadId !== activeThreadId) return
       if (requestedThreadId && !activeThreadId) return
-      requestOpenBrowserPanel()
+      onRequestBrowserPanel()
       console.info(
         `${BROWSER_APP_LOG_PREFIX} Showing Browser panel for ${requestedThreadId || activeThreadId || "active thread"}.`
       )
@@ -155,6 +163,6 @@ export function useBrowserViewLifecycle({
     currentThreadId,
     harnessSessionThreadId,
     mainView,
-    requestOpenBrowserPanel
+    onRequestBrowserPanel
   ])
 }

@@ -46,6 +46,10 @@ import {
   pendingApprovals
 } from "../agent/runtime"
 import {
+  clearTrustedToolFilePreviewSourcesForThread,
+  collectTrustedToolFilePreviewScopeKeysForThread
+} from "../services/trusted-tool-file-preview"
+import {
   cancelAndWaitForAgentThreadRun,
   disposeAgentThreadState,
   disposeDeletedAgentThreadRuntime,
@@ -222,6 +226,7 @@ import {
 } from "../../shared/subagent-transcript-storage"
 import { createThreadService } from "../services/thread-service"
 import { collectReferencedTranscriptHashesFromPages } from "./thread-transcript-gc-scan"
+import { getCapturedRawApiCall } from "../services/llm-api-request-capture"
 
 type ExportMessageRole = "user" | "assistant" | "system" | "tool"
 interface ExportAttachment {
@@ -1615,7 +1620,9 @@ async function cleanupFailedFork(
   }
   if (options.rowCreated) {
     try {
+      const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(targetThreadId)
       dbDeleteThread(targetThreadId)
+      clearTrustedToolFilePreviewSourcesForThread(targetThreadId, previewScopeKeys)
     } catch (error) {
       console.warn("[Threads] Failed to cleanup fork thread row:", error)
     }
@@ -3174,7 +3181,8 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
           return selectedPage
         }
 
-        const deferredMessage = selectedPage.messages[0]
+        const deferredMessage =
+          selectedPage.messages[selectedPage.deferredHydrationIndex ?? 0]
         const hasSidecar =
           deferredMessage &&
           typeof deferredMessage === "object" &&
@@ -3209,14 +3217,17 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       // focused request. Concurrent GC may make a blob unavailable; hydration
       // deliberately degrades to the compact projection in that case.
       const hydrated = await hydrateSubagentTranscriptManifestPage(page)
-      const deferredMessage = page.deferredHydration ? page.messages[0] : undefined
+      const deferredHydrationIndex = page.deferredHydrationIndex ?? 0
+      const deferredMessage = page.deferredHydration
+        ? page.messages[deferredHydrationIndex]
+        : undefined
       const deferredExport =
         deferredMessage &&
         typeof deferredMessage === "object" &&
         !Array.isArray(deferredMessage) &&
         typeof (deferredMessage as Record<string, unknown>).id === "string"
           ? {
-              messageIndex: page.start,
+              messageIndex: page.start + deferredHydrationIndex,
               expectedMessageId: (deferredMessage as Record<string, unknown>).id as string,
               fields: (["content", "reasoning", "tool_calls"] as const).filter((field) =>
                 isSubagentTranscriptBlobRef(
@@ -3675,7 +3686,9 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       }
 
       // Delete from our metadata store — the point of no return.
+      const previewScopeKeys = collectTrustedToolFilePreviewScopeKeysForThread(threadId)
       dbDeleteThread(threadId)
+      clearTrustedToolFilePreviewSourcesForThread(threadId, previewScopeKeys)
       forgetLegacySubagentTranscriptMigration(threadId)
       // Detach the deleted task from its shared physical workspace watcher so
       // subscriber lists and per-change IPC fan-out cannot grow forever.
@@ -4025,6 +4038,7 @@ export function registerThreadHandlers(ipcMain: IpcMain): void {
       const zip = new AdmZip()
       zip.addFile("session.md", Buffer.from(formatMarkdown(payload), "utf-8"))
       zip.addFile("session.json", Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf-8"))
+      zip.addFile("raw_api_call.json", Buffer.from(getCapturedRawApiCall(threadId), "utf-8"))
       zip.writeZip(result.filePath)
 
       return { success: true, filePath: result.filePath }

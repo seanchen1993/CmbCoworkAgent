@@ -400,6 +400,11 @@ export interface ManagedRunStartInput {
   workspacePath: string
 }
 
+export interface ManagedRunStartValidationInput {
+  projectId: string
+  featureId: string
+}
+
 export interface ManagedRunStopInput {
   projectId: string
   featureId: string
@@ -723,6 +728,7 @@ export interface HarnessFeatureSummary {
   location: "active" | "archived" | string
   featureStatus: HarnessFeatureStatus
   featureStatusLabel?: string
+  managedRunStatus?: ManagedRunViewStatus
   /**
    * Feature-level status for summary cards. Plugins can provide it explicitly;
    * otherwise the framework derives it from the current node and workflow.

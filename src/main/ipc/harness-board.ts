@@ -173,6 +173,7 @@ import type {
   ManagedRunEventsPage,
   ManagedRunIdentity,
   ManagedRunStartInput,
+  ManagedRunStartValidationInput,
   ManagedRunStopInput,
   ManagedRunSummary
 } from "../../shared/harness-board-types"
@@ -483,6 +484,13 @@ export function registerHarnessBoardHandlers(ipcMain: IpcMain): void {
       input: HarnessFeatureDeployUnitUpdateInput
     ): Promise<HarnessFeatureDeployUnitBinding> => {
       return updateHarnessFeatureDeployUnits(input)
+    }
+  )
+
+  ipcMain.handle(
+    "harnessBoard:validateManagedRunStart",
+    async (_event, input: ManagedRunStartValidationInput): Promise<void> => {
+      return managedRunController.validateStart(input)
     }
   )
 

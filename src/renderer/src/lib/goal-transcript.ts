@@ -9,6 +9,7 @@ import {
   isVisibleGoalUserEventMessage
 } from "../../../shared/goal-events"
 import { splitGoalTransportPayload } from "../../../shared/goal-slash"
+import { getMessageProviderOccurrenceIdentity } from "../../../shared/message-role-collision"
 import { isInternalGoalPromptMessage, type GoalNoticeEvent } from "./goal-notice-messages"
 
 export function isGoalTranscriptArtifact(message: Pick<Message, "role" | "content">): boolean {
@@ -51,7 +52,9 @@ export function goalNoticeEventsToGoalUiEvents(
     goal_id: event.goal_id ?? null,
     active_window_id: event.active_window_id ?? null,
     message: event.message,
-    created_at: event.created_at
+    created_at: event.created_at,
+    transcript_ordinal: event.transcript_ordinal,
+    transcript_message_id: event.transcript_message_id
   }))
 }
 
@@ -72,6 +75,10 @@ export function goalUserEventToMessage(event: GoalEvent): Message | null {
   const createdAt = toGoalEventDate(event.created_at)
   return {
     id: `goal-user-event-${event.event_id}`,
+    ...(Number.isSafeInteger(event.transcript_ordinal) &&
+    (event.transcript_ordinal ?? -1) >= 0
+      ? { ordinal: event.transcript_ordinal as number }
+      : {}),
     role: "user",
     content,
     goal_id: event.goal_id,
@@ -372,6 +379,124 @@ class GoalCommandDuplicateIndex {
   }
 }
 
+function durableMessageOrdinal(message: Message): number | null {
+  return Number.isSafeInteger(message.ordinal) && (message.ordinal ?? -1) >= 0
+    ? (message.ordinal as number)
+    : null
+}
+
+/** Carry durable ordinals onto checkpoint rows whose reconstructed timestamps are not reliable. */
+export function restoreDurableTranscriptOrdinals(
+  messages: readonly Message[],
+  durableMessages: readonly Message[]
+): Message[] {
+  const durableOrdinals = new Map<string, number>()
+  for (const message of durableMessages) {
+    const ordinal = durableMessageOrdinal(message)
+    if (ordinal === null) continue
+    durableOrdinals.set(getMessageProviderOccurrenceIdentity(message), ordinal)
+  }
+  if (durableOrdinals.size === 0) return [...messages]
+  return messages.map((message) => {
+    if (durableMessageOrdinal(message) !== null) return message
+    const ordinal = durableOrdinals.get(getMessageProviderOccurrenceIdentity(message))
+    return ordinal === undefined ? message : { ...message, ordinal }
+  })
+}
+
+/**
+ * Restrict side-channel Goal rows to the durable page that owns their ordinal. An event without a
+ * legacy anchor is retained only when its equivalent durable command is already in this page, so
+ * an old timestamp can never pull it across a pagination boundary.
+ */
+export function filterGoalEventsForDurablePage(
+  durableMessages: readonly Message[],
+  goalEvents: readonly GoalEvent[]
+): GoalEvent[] {
+  const ordinals = durableMessages.flatMap((message) => {
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal === null ? [] : [ordinal]
+  })
+  if (ordinals.length === 0) return [...goalEvents]
+  const minimum = Math.min(...ordinals)
+  const maximum = Math.max(...ordinals)
+  const durableCommands = new GoalCommandDuplicateIndex(durableMessages)
+  const durableUserMessageIds = new Set(
+    durableMessages.filter((message) => message.role === "user").map((message) => message.id)
+  )
+  return goalEvents.filter((event) => {
+    const message = goalUserEventToMessage(event)
+    if (!message) return true
+    if (event.transcript_message_id && durableUserMessageIds.has(event.transcript_message_id)) {
+      return true
+    }
+    if (durableCommands.hasEquivalent(message)) return true
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal !== null && ordinal >= minimum && ordinal <= maximum
+  })
+}
+
+/** Merge only Goal rows proven to belong to this durable ordinal window. */
+export function mergeGoalUserEventsIntoDurablePage(
+  durableMessages: Message[],
+  goalEvents: readonly GoalEvent[],
+  pageBoundaryMessages: readonly Message[] = durableMessages
+): Message[] {
+  if (pageBoundaryMessages.length === 0 || goalEvents.length === 0) return durableMessages
+  const checkpointCommands = new GoalCommandDuplicateIndex(durableMessages)
+  const durableUserMessageIds = new Set(
+    durableMessages.filter((message) => message.role === "user").map((message) => message.id)
+  )
+  const ordinals = pageBoundaryMessages.flatMap((message) => {
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal === null ? [] : [ordinal]
+  })
+  if (ordinals.length === 0) return durableMessages
+  const minimum = Math.min(...ordinals)
+  const maximum = Math.max(...ordinals)
+  const extras = goalEvents
+    .map((event, sourceIndex) => ({ event, message: goalUserEventToMessage(event), sourceIndex }))
+    .filter(
+      (entry): entry is { event: GoalEvent; message: Message; sourceIndex: number } =>
+        !!entry.message &&
+        !(
+          entry.event.transcript_message_id &&
+          durableUserMessageIds.has(entry.event.transcript_message_id)
+        ) &&
+        !checkpointCommands.hasEquivalent(entry.message) &&
+        durableMessageOrdinal(entry.message) !== null &&
+        (durableMessageOrdinal(entry.message) as number) >= minimum &&
+        (durableMessageOrdinal(entry.message) as number) <= maximum
+    )
+    .sort((left, right) => {
+      const ordinalDifference =
+        (durableMessageOrdinal(left.message) as number) -
+        (durableMessageOrdinal(right.message) as number)
+      return ordinalDifference || left.sourceIndex - right.sourceIndex
+    })
+  if (extras.length === 0) return durableMessages
+
+  const merged: Message[] = []
+  let extraIndex = 0
+  for (const durableMessage of durableMessages) {
+    const ordinal = durableMessageOrdinal(durableMessage)
+    while (
+      ordinal !== null &&
+      extraIndex < extras.length &&
+      (durableMessageOrdinal(extras[extraIndex].message) as number) <= ordinal
+    ) {
+      merged.push(extras[extraIndex].message)
+      extraIndex += 1
+    }
+    merged.push(durableMessage)
+  }
+  while (extraIndex < extras.length) {
+    merged.push(extras[extraIndex].message)
+    extraIndex += 1
+  }
+  return merged
+}
+
 function insertMessagesByTimePreservingCheckpointOrder(
   checkpointMessages: Message[],
   extraMessages: readonly Message[],
@@ -380,6 +505,51 @@ function insertMessagesByTimePreservingCheckpointOrder(
   if (extraMessages.length === 0) return checkpointMessages
 
   const checkpointCommands = new GoalCommandDuplicateIndex(checkpointMessages)
+  const checkpointOrdinals = checkpointMessages.flatMap((message) => {
+    const ordinal = durableMessageOrdinal(message)
+    return ordinal === null ? [] : [ordinal]
+  })
+  if (checkpointOrdinals.length > 0) {
+    const minimum = Math.min(...checkpointOrdinals)
+    const maximum = Math.max(...checkpointOrdinals)
+    const eligible = extraMessages
+      .map((message, sourceIndex) => ({ message, sourceIndex }))
+      .filter(({ message }) => {
+        const ordinal = durableMessageOrdinal(message)
+        return (
+          ordinal !== null &&
+          ordinal >= minimum &&
+          ordinal <= maximum &&
+          !checkpointCommands.hasEquivalent(message)
+        )
+      })
+      .sort((left, right) => {
+        const difference =
+          (durableMessageOrdinal(left.message) as number) -
+          (durableMessageOrdinal(right.message) as number)
+        return difference || left.sourceIndex - right.sourceIndex
+      })
+    if (eligible.length === 0) return checkpointMessages
+    const merged: Message[] = []
+    let extraIndex = 0
+    for (const checkpoint of checkpointMessages) {
+      const checkpointOrdinal = durableMessageOrdinal(checkpoint)
+      while (
+        checkpointOrdinal !== null &&
+        extraIndex < eligible.length &&
+        (durableMessageOrdinal(eligible[extraIndex].message) as number) <= checkpointOrdinal
+      ) {
+        merged.push(eligible[extraIndex].message)
+        extraIndex += 1
+      }
+      merged.push(checkpoint)
+    }
+    while (extraIndex < eligible.length) {
+      merged.push(eligible[extraIndex].message)
+      extraIndex += 1
+    }
+    return merged
+  }
   const eligibleMessages = extraMessages.filter(
     (message) =>
       message.created_at.getTime() >= pageStartTime &&

@@ -25,8 +25,7 @@ describe("file preview error presentation", () => {
     const normalized = normalizeFilePreviewError(
       new Error("Access denied: external file preview has no trusted source grant")
     )
-    expect(normalized.code).toBe(
-      WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_INVALID
-    )
+    expect(normalized.code).toBe(WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_MISSING)
+    expect(formatFilePreviewError(normalized).title).toBe("文件预览需要授权")
   })
 })

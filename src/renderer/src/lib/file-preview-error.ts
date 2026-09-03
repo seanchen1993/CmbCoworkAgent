@@ -22,7 +22,10 @@ function isWorkspaceFilePreviewErrorCode(value: unknown): value is WorkspaceFile
 }
 
 function inferLegacyErrorCode(message: string): WorkspaceFilePreviewErrorCode {
-  if (/invalid or expired grant|grant expired|no trusted source grant|missing or invalid grant/i.test(message)) {
+  if (/no trusted source grant/i.test(message)) {
+    return WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_MISSING
+  }
+  if (/invalid or expired grant|grant expired|missing or invalid grant/i.test(message)) {
     return WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_INVALID
   }
   if (
@@ -58,19 +61,16 @@ export function normalizeFilePreviewError(error: unknown): FilePreviewErrorState
     const candidate = (error as Error & { code?: unknown }).code
     return {
       message: error.message,
-      code:
-        isWorkspaceFilePreviewErrorCode(candidate)
-          ? candidate
-          : inferLegacyErrorCode(error.message)
+      code: isWorkspaceFilePreviewErrorCode(candidate)
+        ? candidate
+        : inferLegacyErrorCode(error.message)
     }
   }
   const message = String(error)
   return { message, code: inferLegacyErrorCode(message) }
 }
 
-export function formatFilePreviewError(
-  error: FilePreviewErrorState
-): FriendlyFilePreviewError {
+export function formatFilePreviewError(error: FilePreviewErrorState): FriendlyFilePreviewError {
   const message = error.message.trim()
   const code = error.code ?? inferLegacyErrorCode(message)
   const missingPath = message.match(/'([^']+)'/)?.[1]
@@ -94,6 +94,12 @@ export function formatFilePreviewError(
         title: "文件预览授权已失效",
         description: "外部文件的临时访问授权不存在或已经过期。",
         detail: "请从文件、技能或产物列表中重新打开该文件。"
+      }
+    case WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_MISSING:
+      return {
+        title: "文件预览需要授权",
+        description: "该工作区外文件还没有获得可信来源授权。",
+        detail: "请从原工具结果、文件、技能或产物列表中重新打开该文件。"
       }
     case WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_OUTSIDE_TRUSTED_ROOT:
       return {

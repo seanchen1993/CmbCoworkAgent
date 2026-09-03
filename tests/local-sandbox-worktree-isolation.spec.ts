@@ -168,7 +168,7 @@ async function run(): Promise<void> {
         new ApprovalStore(),
         (command, mode, cwd) => sandbox.executeRaw(command, mode, undefined, undefined, { cwd }),
         async () => ({ type: "reject", tool_call_id: "unexpected" }),
-        true,
+        () => true,
         false,
         false
       )

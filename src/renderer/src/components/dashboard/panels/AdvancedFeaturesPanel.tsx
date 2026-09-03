@@ -7,7 +7,6 @@ import {
   Bot,
   Webhook,
   Terminal,
-  Command,
   type LucideIcon
 } from "lucide-react"
 import type {
@@ -24,8 +23,7 @@ const CARD_ICON: Record<string, LucideIcon> = {
   evolvedUsage: GitBranch,
   im: Bot,
   hooks: Webhook,
-  programmatic: Terminal,
-  claudeCode: Command
+  programmatic: Terminal
 }
 
 const CARD_ICON_COLOR: Record<string, string> = {
@@ -36,8 +34,7 @@ const CARD_ICON_COLOR: Record<string, string> = {
   evolvedUsage: "bg-teal-500",
   im: "bg-sky-500",
   hooks: "bg-indigo-500",
-  programmatic: "bg-emerald-500",
-  claudeCode: "bg-stone-800"
+  programmatic: "bg-emerald-500"
 }
 
 const TONE_CLASS: Record<AdvancedFeatureTone, string> = {

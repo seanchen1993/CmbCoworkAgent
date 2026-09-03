@@ -14,6 +14,7 @@ import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models
 import { persistHookResultRecord } from "./log-record"
 import { trackEvent } from "../services/event-reporter"
 import { getCurrentHookAgentId } from "./execution-context"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 
 /**
  * Resolve the effective timeout (ms) for a hook by consulting the handler-type
@@ -847,10 +848,9 @@ function getPromptHookModel(modelId: string | undefined, timeout: number): ChatO
     maxRetries: 0,
     timeout,
     maxTokens: config.maxOutputTokens,
-    temperature: config.temperature,
-    topP: config.topP,
+    ...samplingFields(config.model, { temperature: config.temperature, topP: config.topP }),
     modelKwargs: {
-      ...(config.topK && config.topK > 0 ? { top_k: config.topK } : {})
+      ...topKModelKwargs(config.model, config.topK)
     },
     configuration: { baseURL: config.baseUrl }
   })

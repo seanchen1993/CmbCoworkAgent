@@ -24,6 +24,12 @@ import {
   normalizeFilePreviewError,
   type FilePreviewErrorState
 } from "@/lib/file-preview-error"
+import {
+  assembleBoundedTextPreview,
+  shouldAssembleWebSourcePreview,
+  WEB_SOURCE_PREVIEW_MAX_BYTES,
+  WEB_SOURCE_PREVIEW_MAX_PAGES
+} from "@/lib/text-preview-pages"
 
 interface FileViewerProps {
   filePath: string
@@ -85,9 +91,10 @@ export function FileViewer({
     : `workspace:${threadId ?? ""}:${workspacePathKind ?? "relative"}:${filePath}\u0000`
 
   const fileName = displayPath.split(/[/\\]/).pop() || displayPath
-  const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() ?? "" : ""
+  const ext = fileName.includes(".") ? (fileName.split(".").pop()?.toLowerCase() ?? "") : ""
   const markdownLike = ext === "md" || ext === "markdown" || ext === "mdx"
   const htmlLike = ext === "html" || ext === "htm"
+  const webSourceLike = shouldAssembleWebSourcePreview(fileName)
   const fileTypeInfo = useMemo(() => getFileType(fileName), [fileName])
   const isBinary = useMemo(() => isBinaryFile(fileName), [fileName])
 
@@ -141,13 +148,7 @@ export function FileViewer({
     ): Promise<WorkspaceFilePreviewTextResult | null> => {
       const cacheKey = `${sourceCachePrefix}${offset}`
       const cached = allowCache ? readWorkspaceFilePreviewCache(cacheKey) : undefined
-      if (cached) {
-        if (generation === generationRef.current) {
-          setTextPage(cached)
-          setIsLoading(false)
-        }
-        return cached
-      }
+      if (cached) return cached
 
       const previewSource = await previewSourceForPath(displayPath)
       if (generation !== generationRef.current) return null
@@ -168,10 +169,35 @@ export function FileViewer({
         return null
       }
       writeWorkspaceFilePreviewCache(cacheKey, result)
-      setTextPage(result)
       return result
     },
     [displayPath, lane, previewSourceForPath, sourceCachePrefix]
+  )
+
+  const loadTextPreview = useCallback(
+    async (
+      offset: number,
+      generation: number,
+      requestToken: string,
+      allowCache: boolean
+    ): Promise<WorkspaceFilePreviewTextResult | null> => {
+      const first = await loadTextPage(offset, generation, requestToken, allowCache)
+      if (!first || generation !== generationRef.current) return null
+
+      const result = webSourceLike
+        ? await assembleBoundedTextPreview(
+            first,
+            (nextOffset) => loadTextPage(nextOffset, generation, requestToken, allowCache),
+            {
+              maxBytes: WEB_SOURCE_PREVIEW_MAX_BYTES,
+              maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
+            }
+          )
+        : first
+      if (generation === generationRef.current) setTextPage(result)
+      return generation === generationRef.current ? result : null
+    },
+    [loadTextPage, webSourceLike]
   )
 
   useEffect(() => {
@@ -228,7 +254,7 @@ export function FileViewer({
           releasedMediaUrl = result.previewUrl
           setMedia(result)
         } else {
-          await loadTextPage(0, generation, requestToken, reloadToken === undefined)
+          await loadTextPreview(0, generation, requestToken, reloadToken === undefined)
         }
       } catch (caught) {
         if (generation === generationRef.current) {
@@ -252,7 +278,7 @@ export function FileViewer({
     fileTypeInfo.mimeType,
     isBinary,
     lane,
-    loadTextPage,
+    loadTextPreview,
     displayPath,
     previewSourceForPath,
     reloadToken,
@@ -281,15 +307,19 @@ export function FileViewer({
       setIsLoading(true)
       setError(null)
       try {
-        const result = await loadTextPage(offset, generation, requestToken, true)
+        const result = await loadTextPreview(offset, generation, requestToken, true)
         if (!result || generation !== generationRef.current) return
         setPageOffsets(nextOffsets)
         setPageIndex(nextIndex)
+      } catch (caught) {
+        if (generation === generationRef.current) {
+          setError(normalizeFilePreviewError(caught))
+        }
       } finally {
         if (generation === generationRef.current) setIsLoading(false)
       }
     },
-    [lane, loadTextPage]
+    [lane, loadTextPreview]
   )
 
   const showNextPage = useCallback((): void => {
@@ -312,16 +342,29 @@ export function FileViewer({
       const budget = dependencyBudgetRef.current
       if (budget.htmlRequests >= MAX_HTML_DEPENDENCY_REQUESTS) return null
       budget.htmlRequests += 1
-      const previewSource = await previewSourceForPath(resolvedPath)
-      if (generation !== generationRef.current) return null
-      const result = await window.api.workspace.readFilePreview({
-        source: previewSource,
-        offset: 0,
-        lane: `${lane}:html:${shortPathHash(resolvedPath)}`,
-        requestToken: requestTokenRef.current
+      const dependencyLane = `${lane}:html:${shortPathHash(resolvedPath)}`
+      const readPage = async (offset: number): Promise<WorkspaceFilePreviewTextResult | null> => {
+        const previewSource = await previewSourceForPath(resolvedPath)
+        if (generation !== generationRef.current) return null
+        const result = await window.api.workspace.readFilePreview({
+          source: previewSource,
+          offset,
+          lane: dependencyLane,
+          requestToken: requestTokenRef.current
+        })
+        return generation === generationRef.current && result.success ? result : null
+      }
+      const first = await readPage(0)
+      if (!first) return null
+      const result = await assembleBoundedTextPreview(first, readPage, {
+        maxBytes: MAX_HTML_DEPENDENCY_BYTES,
+        maxPages: WEB_SOURCE_PREVIEW_MAX_PAGES
       })
-      if (generation !== generationRef.current || !result.success) return null
-      if (budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES) return null
+      // Dependency reads run concurrently. Re-check and claim the shared budget
+      // synchronously after assembly so parallel assets cannot oversubscribe it.
+      if (result.truncated || budget.htmlBytes + result.contentBytes > MAX_HTML_DEPENDENCY_BYTES) {
+        return null
+      }
       budget.htmlBytes += result.contentBytes
       return result.content
     },
@@ -426,12 +469,7 @@ export function FileViewer({
       )
     }
     if (fileTypeInfo.type === "image") {
-      return (
-        <ImageViewer
-          filePath={displayPath}
-          sourceUrl={mediaPreviewUrl}
-        />
-      )
+      return <ImageViewer filePath={displayPath} sourceUrl={mediaPreviewUrl} />
     }
     if (fileTypeInfo.type === "video" || fileTypeInfo.type === "audio") {
       return (
@@ -466,7 +504,7 @@ export function FileViewer({
         />
       </div>
     )
-  } else if (htmlLike) {
+  } else if (htmlLike && !textPage?.truncated) {
     body = (
       <HtmlPreview
         content={content}
@@ -487,7 +525,8 @@ export function FileViewer({
       {textPage?.truncated ? (
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-status-warning/30 bg-status-warning/10 px-3 py-2 text-xs text-muted-foreground">
           <span>
-            大文件按页预览 · 第 {pageIndex + 1} 页 · 文件 {formatBytes(textPage.size)}
+            {htmlLike ? "HTML 文件过大，源码按页预览" : "大文件按页预览"} · 第 {pageIndex + 1} 页 ·
+            文件 {formatBytes(textPage.size)}
           </span>
           <div className="flex items-center gap-1">
             <button

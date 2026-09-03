@@ -13,7 +13,9 @@ export type ApiErrorCode =
   | "rate_limit"
   | "server_error"
   | "network_error"
+  | "empty_response"
   | "local_storage_error"
+  | "harness_context_unavailable"
   | "unknown"
 
 // ─── Gateway status-code dictionary ──────────────────────────────────────────
@@ -94,6 +96,13 @@ const STREAM_DISCONNECT_CODES = new Set([
 const STREAM_DISCONNECT_MESSAGE_RE =
   /\bterminated\b|\bstream\b.*\b(closed|disconnected|terminated|reset)\b|\b(premature close|body stream|other side closed|socket hang up|connection reset)\b/i
 
+// LangChain throws this from BaseChatModel when a streaming call produced no
+// aggregatable chunk at all (HTTP 200, but an empty or non-SSE body). The
+// upstream check runs *after* its own signal.aborted branch, so reaching this
+// message means the turn produced no message and no tool call — nothing was
+// executed that a resume could duplicate.
+const EMPTY_MODEL_RESPONSE_RE = /received empty response from chat model/i
+
 type ErrorLike = {
   name?: unknown
   message?: unknown
@@ -169,7 +178,47 @@ export function isStreamDisconnectLikeError(error: unknown): boolean {
 }
 
 /**
- * Map an arbitrary error value to one of six coarse buckets. Order matters:
+ * Match the "model returned nothing" failure: headers said 200 but the body
+ * yielded no chunk LangChain could aggregate. Distinct from a disconnect —
+ * nothing was interrupted, the response was simply empty.
+ */
+export function isEmptyModelResponseError(error: unknown): boolean {
+  const visited = new Set<object>()
+  const chain: ErrorLike[] = []
+  let current: unknown = error
+  while (true) {
+    const detail = asErrorLike(current)
+    if (!detail || visited.has(detail as object)) break
+    visited.add(detail as object)
+    chain.push(detail)
+    current = detail.cause
+  }
+
+  // Cancellation wins, same as isStreamDisconnectLikeError: a wrapper that
+  // looks empty must never outrank an AbortError the user caused.
+  if (chain.some((detail) => isAbortLikeError(detail))) return false
+
+  // Message-only signal, so restrict it to real Error instances — classifyApiError
+  // also runs over arbitrary tool output (hooks/tool-failure.ts), which must not
+  // be reclassified because it happens to quote this sentence.
+  return chain.some(
+    (detail) =>
+      detail instanceof Error &&
+      typeof detail.message === "string" &&
+      EMPTY_MODEL_RESPONSE_RE.test(detail.message)
+  )
+}
+
+/**
+ * Stream failures that can be recovered by re-running the current model from
+ * the LangGraph checkpoint, without replaying the user's whole turn.
+ */
+export function isResumableStreamFailure(error: unknown): boolean {
+  return isStreamDisconnectLikeError(error) || isEmptyModelResponseError(error)
+}
+
+/**
+ * Map an arbitrary error value to one of the coarse buckets. Order matters:
  * status code > rate-limit text > server text > network code/text > unknown.
  */
 export function classifyApiError(error: unknown): ApiErrorCode {
@@ -193,6 +242,7 @@ export function classifyApiError(error: unknown): ApiErrorCode {
   const code = (error as { code?: unknown }).code
   if (typeof code === "string" && NETWORK_CODES.has(code)) return "network_error"
   if (isStreamDisconnectLikeError(error)) return "network_error"
+  if (isEmptyModelResponseError(error)) return "empty_response"
 
   const msg = (error instanceof Error ? error.message : String(error)).toLowerCase()
   if (RATE_LIMIT_MESSAGE_TOKENS.some((t) => msg.includes(t))) return "rate_limit"
@@ -256,6 +306,10 @@ export function isRetryableApiError(error: unknown): boolean {
   if (isAbortLikeError(error)) return false
 
   if (isStreamDisconnectLikeError(error)) return true
+
+  // Empty model response — the upstream produced nothing; another attempt or
+  // another model is exactly what can fix it.
+  if (isEmptyModelResponseError(error)) return true
 
   // Check HTTP status code (may be on error.status, error.response?.status, etc.)
   const status = getStatusCode(error)
@@ -438,6 +492,51 @@ export function extractErrorDetail(
   error: unknown,
   fetchDetail?: { status?: number; requestId?: string; rawBody?: string }
 ): ApiErrorDetail {
+  const deployUnitContextLimitError = findErrorWithCode(
+    error,
+    "HARNESS_DEPLOY_UNIT_CONTEXT_LIMIT_EXCEEDED"
+  )
+  if (deployUnitContextLimitError) {
+    const deployUnitContextLimitMessage = cleanProviderMessage(deployUnitContextLimitError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 仓库上下文超限",
+      hint: "请减少发布单元；框架模式最多 64 个，插件注入模式最多 512 个。",
+      reason:
+        deployUnitContextLimitMessage ??
+        "Harness 发布单元上下文超过安全上限，已阻止不完整执行。",
+      providerMessage: deployUnitContextLimitMessage
+    }
+  }
+  const sessionContextLimitError = findErrorWithCode(
+    error,
+    "HARNESS_SESSION_CONTEXT_LIMIT_EXCEEDED"
+  )
+  if (sessionContextLimitError) {
+    const sessionContextLimitMessage = cleanProviderMessage(sessionContextLimitError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文超限",
+      hint: "请缩短插件返回的 session_context_inject 内容，再重新运行任务。",
+      reason:
+        sessionContextLimitMessage ??
+        "Harness session_context_inject 超过安全上限，已阻止不完整执行。",
+      providerMessage: sessionContextLimitMessage
+    }
+  }
+  const harnessContextError = findErrorWithCode(error, "HARNESS_AGENT_CONTEXT_UNAVAILABLE")
+  if (harnessContextError) {
+    const harnessContextCause = asErrorLike(harnessContextError)?.cause
+    const harnessContextMessage =
+      cleanProviderMessage(harnessContextCause) ?? cleanProviderMessage(harnessContextError)
+    return {
+      code: "harness_context_unavailable",
+      statusLabel: "Harness 上下文不可用",
+      hint: "请重试；如仍失败，请检查 Harness 配置、项目目录和后台 Worker 日志。",
+      reason: harnessContextMessage ?? "Harness 上下文加载失败，请重试后再运行任务。",
+      providerMessage: harnessContextMessage
+    }
+  }
   const localStorageError = findErrorWithCode(
     error,
     "LOCAL_CHECKPOINT_MESSAGE_RECOVERY_FAILED"
@@ -452,6 +551,15 @@ export function extractErrorDetail(
         localStorageMessage ??
         "本地会话消息索引不完整，自动恢复失败，但已保存的会话消息没有被删除。",
       providerMessage: localStorageMessage
+    }
+  }
+  if (!fetchDetail?.status && isEmptyModelResponseError(error)) {
+    return {
+      code: "empty_response",
+      statusLabel: "模型返回空响应",
+      hint: "已自动重试并尝试备用模型，仍未取得输出；请稍后重试或更换模型。",
+      reason: "模型接口返回成功，但响应体没有任何可用内容。",
+      providerMessage: cleanProviderMessage(error)
     }
   }
   const status = fetchDetail?.status ?? getStatusCode(error) ?? statusFromMessage(error)

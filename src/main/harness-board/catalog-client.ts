@@ -59,7 +59,10 @@ export class HarnessCatalogClient {
     if (response.ok) pending.resolve(response.result)
     else
       pending.reject(
-        Object.assign(new Error(response.error.message), { stack: response.error.stack })
+        Object.assign(new Error(response.error.message), {
+          stack: response.error.stack,
+          ...(response.error.code ? { code: response.error.code } : {})
+        })
       )
   }
 

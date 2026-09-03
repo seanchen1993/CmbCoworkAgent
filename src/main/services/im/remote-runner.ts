@@ -43,11 +43,13 @@ import {
 import { isRetryableApiError } from "../../agent/failover"
 import { runCompletionHooksWithRevision } from "../../agent/skill-lifecycle/completion-hooks"
 import { createSkillUseTracker } from "../../agent/skill-lifecycle/tracker"
+import { TurnAttributionRecorder } from "../../agent/turn-attribution"
 import { createPersistentThreadHookScope } from "../../hooks/thread-scope-persistence"
 import { makeBroadcastHookResultCallback } from "../../hooks/result-callback"
 import { flushStrict, getThread, getThreadMessages, updateThread } from "../../db"
 import type { ScheduledTaskImDeliveryContext } from "../../types"
 import { rememberRoutingDecision } from "../../routing"
+import { getModelConfigByRef } from "../../models/registry"
 import { generateTitle } from "../title-generator"
 import {
   discardAgentAutoCommitTracking,
@@ -350,6 +352,10 @@ export async function executePreparedRemoteStandardTurn(
     }
   })
   tracer.setExecutionMode(agentMode)
+  // Skill attribution feeds the adoption statistics: recordGen runs inside the
+  // sandbox tools for every path, but reads usedSkills/skillSource off this
+  // thread's adoption context, which only this recorder populates.
+  const attribution = new TurnAttributionRecorder({ threadId, tracer, userMessageId })
 
   if (persistUserMessage) {
     persistStandardTurnUserMessage({
@@ -371,6 +377,7 @@ export async function executePreparedRemoteStandardTurn(
       harnessAgentContext: harnessContext,
       onHookResult,
       onHookSkippedFactory,
+      onExplicitSkillActivated: (skill) => attribution.onExplicitSkillActivated(skill),
       isPreparationCurrent: () => !signal.aborted
     })
     if (!preparedPrompt.accepted) {
@@ -410,7 +417,8 @@ export async function executePreparedRemoteStandardTurn(
   const streamConsumer = new StandardTurnStreamConsumer(
     threadId,
     (streamEvent) => mirrorStandardTurnStreamToRenderer(threadId, streamEvent),
-    tracer
+    tracer,
+    { attribution }
   )
 
   try {
@@ -477,7 +485,13 @@ export async function executePreparedRemoteStandardTurn(
       const modelId = candidates[index]
       try {
         agent = await runtimeFactory.create(modelId)
-        if (modelId) tracer.setModelId(modelId)
+        if (modelId) {
+          tracer.setModelId(modelId)
+          // Fallback name until the API reports its own: config.model is the
+          // real API model name, config.name is only a display label.
+          const modelConfig = getModelConfigByRef(modelId)
+          if (modelConfig?.model) tracer.setModelName(modelConfig.model)
+        }
         const stream = await agent.stream(
           index === 0
             ? {
@@ -564,7 +578,7 @@ export async function executePreparedRemoteStandardTurn(
 
     await streamConsumer.flush()
     const finalText = streamConsumer.getFinalAssistantText().trim() || "处理完成。"
-    tracer.setUsedSkills(skillUseTracker.getUsedSkillNames())
+    attribution.sync()
     await tracer.finish("success")
     if (!disableAutoCommit) {
       await maybeAutoCommitAfterAgentRun({

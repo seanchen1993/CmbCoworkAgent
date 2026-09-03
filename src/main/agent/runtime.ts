@@ -30,8 +30,11 @@ import {
   getGlobalRoutingMode
 } from "../storage"
 import { getAvailableModelConfigOrDefault, getModelConfigByRef } from "../models/registry"
+import { samplingFields, topKModelKwargs } from "../models/sampling-params"
 import { createCmbSummarizationMiddleware } from "./context-summarization-middleware"
 import { getProjectThreadDataDirectory } from "./context-history-path"
+import { withRawApiCallCapture } from "../services/llm-api-request-capture"
+import { runWithTrustedToolFilePreviewContext } from "../services/trusted-tool-file-preview"
 
 import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai"
 import { DynamicStructuredTool, ToolInputParsingException, tool } from "@langchain/core/tools"
@@ -104,6 +107,7 @@ import { createGunzip } from "zlib"
 import { pipeline } from "stream/promises"
 import { app, BrowserWindow } from "electron"
 import {
+  appendTaskCompletionAndRepetitionPrompt,
   getOutputStylePrompt,
   getOutputStyleTurnReminder,
   MEMORY_SYSTEM_PROMPT,
@@ -777,6 +781,27 @@ function createGradedToolConcurrencyMiddleware(queueId: string) {
         if (waited > 50) console.log(`[Runtime] exclusive-lock acquired ${label} after ${waited}ms`)
         return handler(request)
       })
+    }
+  })
+}
+
+function createTrustedToolFilePreviewContextMiddleware(threadId: string) {
+  return createMiddleware({
+    name: "trustedToolFilePreviewContext",
+    wrapToolCall: (request, handler) => {
+      const toolCall = request.toolCall as { id?: string; name?: string } | undefined
+      const toolCallId = toolCall?.id?.trim()
+      const toolName = toolCall?.name?.trim()
+      if (
+        !toolCallId ||
+        !toolName ||
+        !["read_file", "write_file", "edit_file"].includes(toolName)
+      ) {
+        return handler(request)
+      }
+      return runWithTrustedToolFilePreviewContext({ threadId, toolCallId, toolName }, () =>
+        handler(request)
+      )
     }
   })
 }
@@ -2666,6 +2691,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
           })
         ]
       : []),
+    ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
     todoListMiddleware(),
     createFsMiddleware(),
     ...(threadId ? [createTaskMmdMiddleware({ threadId, scope: "subagent" })] : []),
@@ -2768,9 +2794,28 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       }
     })
 
-  const availableSubagents = includeGeneralPurposeSubagent
+  const unresolvedSubagents = includeGeneralPurposeSubagent
     ? [generalPurposeSubagent, ...processedSubagents, ...registrySubagents]
     : [...processedSubagents, ...registrySubagents]
+  // Task-tool subagents have role-specific prompts and do not inherit the main
+  // BASE_SYSTEM_PROMPT. Apply the shared completion/repetition contract at the
+  // common exit so general-purpose, registry, and custom string-prompt agents
+  // receive the same guidance exactly once. Opaque Runnable agents own their
+  // prompt assembly and cannot be safely rewritten here.
+  const availableSubagents = unresolvedSubagents.map((subagent: any) => {
+    if (
+      Runnable.isRunnable(subagent) ||
+      !subagent ||
+      typeof subagent !== "object" ||
+      typeof subagent.systemPrompt !== "string"
+    ) {
+      return subagent
+    }
+    return {
+      ...subagent,
+      systemPrompt: appendTaskCompletionAndRepetitionPrompt(subagent.systemPrompt)
+    }
+  })
 
   if (mainSubagentsEnabled && onTaskSubagentPromptsResolved) {
     onTaskSubagentPromptsResolved(
@@ -2864,6 +2909,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
             })
           ]
         : []),
+      ...(threadId ? [createTrustedToolFilePreviewContextMiddleware(threadId)] : []),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled ? [createFsMiddleware("\n")] : []),
       ...postFsToolDocStripMiddleware,
@@ -3847,8 +3893,11 @@ function createRetryingFetch(
         // content-type text/event-stream; application/json means the gateway buffered
         // the whole completion — long generations on that path will hit the 60s
         // first-byte watchdog above.
+        // request-id is logged alongside status/content-type so an empty-body
+        // turn ("Received empty response from chat model call.") can be traced
+        // back to the exact upstream response that produced it.
         console.log(
-          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}`
+          `[Runtime] fetch headers in ${Date.now() - attemptStartedAt}ms: status=${res.status}, stream requested=${requestedStream}, content-type=${res.headers.get("content-type") ?? "unknown"}, request-id=${res.headers.get("x-request-id") ?? "unknown"}`
         )
 
         // Success or non-retryable error — return as-is.
@@ -4135,7 +4184,8 @@ export function getModelInstance(
   },
   retryHooks?: ModelRetryHooks,
   maxRetryAttempts?: number,
-  purpose: ModelInstancePurpose = "agent"
+  purpose: ModelInstancePurpose = "agent",
+  captureThreadId?: string
 ): ChatOpenAI {
   const apiKey = customConfig.apiKey
   if (!apiKey) {
@@ -4162,6 +4212,14 @@ export function getModelInstance(
   // return empty content, so keep thinking exclusive to normal agent calls.
   const enableThinking = purpose === "agent" && thinkingConfigured
   const enableThinkingEffort = enableThinking && customConfig.enableThinkingEffort === true
+  const retryingFetch =
+    retryHooks || maxRetryAttempts !== undefined
+      ? createRetryingFetch(retryHooks, maxRetryAttempts)
+      : defaultRetryingFetch
+  const modelFetch =
+    purpose === "agent" && captureThreadId
+      ? withRawApiCallCapture(retryingFetch, captureThreadId)
+      : retryingFetch
 
   const baseFields = {
     model: resolvedModel,
@@ -4170,8 +4228,7 @@ export function getModelInstance(
     // separate model instance because its invoke() must consume SSE internally.
     ...(purpose === "context-compaction" ? { streaming: true } : {}),
     maxTokens: maxOutputTokens,
-    temperature,
-    topP,
+    ...samplingFields(resolvedModel, { temperature, topP }),
     // SDK-level retry AND timeout disabled — unified retry + per-attempt
     // timeout live in retryingFetch below. Setting SDK timeout here would
     // create a shared AbortSignal that, once fired, permanently blocks all
@@ -4179,7 +4236,7 @@ export function getModelInstance(
     maxRetries: 0,
     modelKwargs: {
       parallel_tool_calls: true,
-      ...(topK > 0 ? { top_k: topK } : {}),
+      ...topKModelKwargs(resolvedModel, topK),
       chat_template_kwargs: {
         enable_thinking: enableThinking,
         ...(enableThinkingEffort ? { reasoning_effort: thinkingEffort } : {})
@@ -4188,10 +4245,7 @@ export function getModelInstance(
     },
     configuration: {
       baseURL: customConfig.baseUrl,
-      fetch:
-        retryHooks || maxRetryAttempts !== undefined
-          ? createRetryingFetch(retryHooks, maxRetryAttempts)
-          : defaultRetryingFetch
+      fetch: modelFetch
     }
   }
 
@@ -4614,7 +4668,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     throw new Error("Custom model not configured. Please configure a model in Settings.")
   }
 
-  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts)
+  const model = getModelInstance(customConfig, retryHooks, maxRetryAttempts, "agent", threadId)
   const contextCompactionModel = getModelInstance(
     customConfig,
     retryHooks,
@@ -4817,7 +4871,6 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   }
 
   // ── Wire up the approval orchestrator ──
-  const yoloMode = getYoloMode()
   // Keep approval IPC available even in YOLO mode. YOLO skips the initial shell/file
   // approval, but escaping the sandbox after a sandbox denial still needs explicit
   // one-shot user approval, matching Codex's retry-without-sandbox flow.
@@ -4947,7 +5000,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
         // PR-01: exposed to hooks as PERMISSION_MODE env / permission_mode JSON.
         // Lets a Notification hook know whether the user is in YOLO mode (where
         // approvals only fire for sandbox-escape) vs the default approve flow.
-        permissionMode: yoloMode ? "yolo" : "approve",
+        permissionMode: getYoloMode() ? "yolo" : "approve",
         // PR-16 follow-up — CC matcher target for Notification is
         // `notification_type`. The approval queue is the only Notification
         // fire path today, so the value is always "permission_prompt".
@@ -4983,7 +5036,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     approvalStore,
     rawExecute,
     requestApproval,
-    yoloMode,
+    getYoloMode,
     options.autoApproveFileEdits === true,
     !options.worktreeIsolation,
     workspacePath
@@ -5413,7 +5466,7 @@ The workspace root is: ${fileRoot}`
         // workflow before running"): the model writing a workflow can fan out
         // many file-editing subagents and spend real tokens, so the user
         // confirms once (Approve / Approve-session / Reject) before launch.
-        yoloMode,
+        readYoloMode: getYoloMode,
         approvalStore,
         requestApproval,
         // Run-level exclusive file-write lock keyed on this (parent) threadId — the
@@ -5591,7 +5644,7 @@ The workspace root is: ${fileRoot}`
         workspacePath,
         threadId: options.threadId,
         modelId: options.modelId,
-        yoloMode,
+        readYoloMode: getYoloMode,
         capabilityService,
         approvalStore,
         requestApproval

@@ -1,3 +1,4 @@
+import { rehydrateTraceContent } from "./content-refs"
 import type { AgentTrace, TraceNode, TraceNodeStatus, TraceToolCall } from "./types"
 
 function outcomeToStatus(outcome: AgentTrace["outcome"]): TraceNodeStatus {
@@ -87,7 +88,10 @@ function pickToolCalls(
   return stepToolCalls
 }
 
-export function buildTraceTree(trace: AgentTrace): TraceNode[] {
+export function buildTraceTree(rawTrace: AgentTrace): TraceNode[] {
+  // Storage keeps one copy of each repeated value; put them back before any
+  // caller can look at a node.
+  const trace = rehydrateTraceContent(rawTrace)
   if (Array.isArray(trace.nodes) && trace.nodes.length > 0) {
     return ensureRootNode(trace, trace.nodes)
   }

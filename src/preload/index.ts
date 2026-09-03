@@ -94,7 +94,9 @@ import type {
   WorkspaceFilePreviewOpenMediaResult,
   WorkspaceFilePreviewReadRequest,
   WorkspaceFilePreviewReadResult,
-  WorkspaceFilePreviewReleaseRequest
+  WorkspaceFilePreviewReleaseRequest,
+  ToolFilePreviewGrantRequest,
+  ToolFilePreviewGrantResult
 } from "../shared/workspace-file-preview"
 import type {
   AttachmentBytesParseRequest,
@@ -157,6 +159,7 @@ import type {
   ManagedRunIdentity,
   ManagedRunChangeEvent,
   ManagedRunStartInput,
+  ManagedRunStartValidationInput,
   ManagedRunStopInput,
   ManagedRunSummary,
   ManagedRunThreadCreatedEvent
@@ -1696,6 +1699,11 @@ const api = {
       threadId: string | null
     ): Promise<{ success: boolean; restarted?: boolean; workspacePath?: string | null }> => {
       return ipcRenderer.invoke("workspace:setActiveThread", { threadId })
+    },
+    authorizeToolFilePreview: (
+      request: ToolFilePreviewGrantRequest
+    ): Promise<ToolFilePreviewGrantResult> => {
+      return ipcRenderer.invoke("workspace:authorizeToolFilePreview", request)
     },
     readFilePreview: (
       request: WorkspaceFilePreviewReadRequest
@@ -4332,6 +4340,8 @@ const api = {
         "harnessBoard:updateFeatureDeployUnits",
         input
       ) as Promise<HarnessFeatureDeployUnitBinding>,
+    validateManagedRunStart: (input: ManagedRunStartValidationInput): Promise<void> =>
+      ipcRenderer.invoke("harnessBoard:validateManagedRunStart", input) as Promise<void>,
     startManagedRun: (input: ManagedRunStartInput): Promise<ManagedRunSummary> =>
       ipcRenderer.invoke("harnessBoard:startManagedRun", input) as Promise<ManagedRunSummary>,
     stopManagedRun: (input: ManagedRunStopInput): Promise<boolean> =>

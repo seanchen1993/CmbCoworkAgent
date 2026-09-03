@@ -284,6 +284,8 @@ interface GoalEventProjectionRow {
   active_window_id?: unknown
   message?: unknown
   created_at?: unknown
+  transcript_ordinal?: unknown
+  transcript_message_id?: unknown
 }
 
 function goalEventFromRow(row: GoalEventProjectionRow): ThreadGoalHydrationEvent | null {
@@ -297,7 +299,12 @@ function goalEventFromRow(row: GoalEventProjectionRow): ThreadGoalHydrationEvent
     goal_id: typeof row.goal_id === "string" ? row.goal_id : null,
     active_window_id: typeof row.active_window_id === "string" ? row.active_window_id : null,
     message: row.message,
-    created_at: createdAt
+    created_at: createdAt,
+    transcript_ordinal: Number.isSafeInteger(Number(row.transcript_ordinal))
+      ? Number(row.transcript_ordinal)
+      : null,
+    transcript_message_id:
+      typeof row.transcript_message_id === "string" ? row.transcript_message_id : null
   }
 }
 
@@ -319,10 +326,39 @@ export function readThreadGoalEventsProjection(
   )
   const statement = database.prepare(
     `SELECT * FROM (
-       SELECT event_id, thread_id, goal_id, active_window_id, message, created_at
-       FROM thread_goal_events
-       WHERE thread_id = ?
-       ORDER BY created_at DESC, event_id DESC
+       SELECT event.event_id, event.thread_id, event.goal_id, event.active_window_id,
+              event.message, event.created_at,
+              anchor.ordinal AS transcript_ordinal,
+              anchor.message_id AS transcript_message_id
+       FROM thread_goal_events AS event
+       LEFT JOIN thread_messages AS anchor
+         ON anchor.rowid = COALESCE(
+           (
+             SELECT candidate.rowid
+             FROM thread_messages AS candidate
+             WHERE candidate.thread_id = event.thread_id
+               AND event.active_window_id IS NOT NULL AND event.active_window_id != ''
+               AND candidate.active_window_id IS NOT NULL
+               AND candidate.active_window_id != ''
+               AND candidate.active_window_id = event.active_window_id
+             ORDER BY CASE WHEN candidate.role = 'user' THEN 0 ELSE 1 END,
+                      candidate.ordinal ASC, candidate.message_id ASC
+             LIMIT 1
+           ),
+           (
+             SELECT candidate.rowid
+             FROM thread_messages AS candidate
+             WHERE candidate.thread_id = event.thread_id
+               AND event.goal_id IS NOT NULL AND event.goal_id != ''
+               AND candidate.goal_id IS NOT NULL AND candidate.goal_id != ''
+               AND candidate.goal_id = event.goal_id
+             ORDER BY CASE WHEN candidate.role = 'user' THEN 0 ELSE 1 END,
+                      candidate.ordinal ASC, candidate.message_id ASC
+             LIMIT 1
+           )
+         )
+       WHERE event.thread_id = ?
+       ORDER BY event.created_at DESC, event.event_id DESC
        LIMIT ?
      ) ORDER BY created_at ASC, event_id ASC`
   )

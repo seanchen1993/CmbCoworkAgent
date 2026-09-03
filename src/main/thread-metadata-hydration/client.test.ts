@@ -68,6 +68,15 @@ function fixture(): { database: DatabaseSync; path: string } {
       message TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE thread_messages (
+      thread_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      goal_id TEXT,
+      active_window_id TEXT,
+      ordinal INTEGER NOT NULL,
+      PRIMARY KEY(thread_id, message_id)
+    );
     CREATE INDEX idx_thread_goal_events_thread_order
       ON thread_goal_events(thread_id, created_at, event_id);
   `)
@@ -416,6 +425,44 @@ describe("ThreadMetadataHydrationClient", () => {
     expect(
       Math.max(...result.events.map((event) => Buffer.byteLength(event.message)))
     ).toBeLessThanOrEqual(128 * 1024)
+  })
+
+  it("restores a Goal durable ordinal after SQLite is closed and reopened", async () => {
+    const { database, path } = fixture()
+    const insertMessage = database.prepare(
+      `INSERT INTO thread_messages
+       (thread_id, message_id, role, goal_id, active_window_id, ordinal)
+       VALUES ('goal-page-thread', ?, ?, ?, ?, ?)`
+    )
+    database.exec("BEGIN")
+    for (let ordinal = 0; ordinal < 502; ordinal += 1) {
+      insertMessage.run(
+        `message-${ordinal}`,
+        ordinal === 1 ? "user" : "assistant",
+        ordinal === 1 ? "goal-page" : null,
+        ordinal === 1 ? "window-page" : null,
+        ordinal
+      )
+    }
+    database.prepare(
+      `INSERT INTO thread_goal_events
+       (thread_id, goal_id, active_window_id, message, created_at)
+       VALUES ('goal-page-thread', 'goal-page', 'window-page', ?, 1)`
+    ).run(`${GOAL_USER_MESSAGE_EVENT_PREFIX}/goal historical`)
+    database.exec("COMMIT")
+    database.close()
+
+    const result = await clientFor(path).readGoalEvents("goal-page-thread", {
+      restore: true,
+      recentLimit: 20,
+      scanLimit: 500,
+      byteBudget: 512 * 1024
+    })
+    expect(result.events).toHaveLength(1)
+    expect(result.events[0]).toMatchObject({
+      transcript_ordinal: 1,
+      transcript_message_id: "message-1"
+    })
   })
 })
 

@@ -11,9 +11,9 @@ describe("workspace file preview errors", () => {
     expect(classifyWorkspaceFilePreviewError(errno("EACCES"))).toBe(
       WORKSPACE_FILE_PREVIEW_ERROR_CODES.FILESYSTEM_PERMISSION_DENIED
     )
-    expect(classifyWorkspaceFilePreviewError(new Error("Access denied: path outside workspace"))).toBe(
-      WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_OUTSIDE_TRUSTED_ROOT
-    )
+    expect(
+      classifyWorkspaceFilePreviewError(new Error("Access denied: path outside workspace"))
+    ).toBe(WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_OUTSIDE_TRUSTED_ROOT)
   })
 
   it("identifies expired capabilities and unavailable workspace metadata", () => {
@@ -23,6 +23,11 @@ describe("workspace file preview errors", () => {
     expect(classifyWorkspaceFilePreviewError(new Error("No workspace folder linked"))).toBe(
       WORKSPACE_FILE_PREVIEW_ERROR_CODES.WORKSPACE_UNAVAILABLE
     )
+    expect(
+      classifyWorkspaceFilePreviewError(
+        new Error("Access denied: external file preview has no trusted source grant")
+      )
+    ).toBe(WORKSPACE_FILE_PREVIEW_ERROR_CODES.SOURCE_AUTHORIZATION_MISSING)
   })
 
   it("preserves cancellation as a non-user-visible failure", () => {

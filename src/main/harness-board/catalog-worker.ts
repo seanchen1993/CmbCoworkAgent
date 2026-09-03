@@ -89,6 +89,7 @@ workerPort.on("message", (request: HarnessCatalogWorkerRequest) => {
     } satisfies HarnessCatalogWorkerResponse)
   } catch (error) {
     const normalized = error instanceof Error ? error : new Error(String(error))
+    const code = (normalized as Error & { code?: unknown }).code
     workerPort.postMessage({
       type:
         request.type === "read-dialog-tips"
@@ -102,7 +103,8 @@ workerPort.on("message", (request: HarnessCatalogWorkerRequest) => {
       ok: false,
       error: {
         message: normalized.message,
-        ...(normalized.stack ? { stack: normalized.stack } : {})
+        ...(normalized.stack ? { stack: normalized.stack } : {}),
+        ...(typeof code === "string" ? { code } : {})
       }
     } satisfies HarnessCatalogWorkerResponse)
   }

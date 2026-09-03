@@ -334,6 +334,7 @@ function rowToMessage(
   return {
     message: {
       id: row.message_id,
+      ordinal: row.ordinal,
       ...(row.provider_source_id ? { provider_source_id: row.provider_source_id } : {}),
       ...(typeof row.provider_occurrence === "number" && row.provider_occurrence >= 1
         ? { provider_occurrence: row.provider_occurrence }

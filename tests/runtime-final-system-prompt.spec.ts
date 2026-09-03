@@ -12,6 +12,8 @@ import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/
 import { convertMessagesToCompletionsMessageParams } from "@langchain/openai"
 
 import { loadAgentsPromptForWorkspace } from "../src/main/agent/agents-md.ts"
+import { buildCoordinatorSystemPrompt } from "../src/main/agent/coordinator-mode.ts"
+import { WORKFLOW_MODE_SYSTEM_PROMPT } from "../src/main/agent/workflow/prompts.ts"
 import {
   createConciseOutputStyleTurnReminderMiddleware,
   createDeepAgent,
@@ -25,7 +27,8 @@ import {
   EXPLANATORY_OUTPUT_STYLE_TURN_REMINDER,
   LEARNING_OUTPUT_STYLE_PROMPT,
   LEARNING_OUTPUT_STYLE_TURN_REMINDER,
-  OUTPUT_STYLE_IDENTITY_PROMPT
+  OUTPUT_STYLE_IDENTITY_PROMPT,
+  TASK_COMPLETION_AND_REPETITION_PROMPT
 } from "../src/main/agent/system-prompt.ts"
 import type { HarnessFeatureAgentContext } from "../src/main/harness-board/service.ts"
 import type { AgentOutputStyle } from "../src/shared/agent-output-style.ts"
@@ -98,7 +101,11 @@ function usage(): string {
   ].join("\n")
 }
 
-function readOptionValue(argv: string[], index: number, name: string): { value: string; next: number } {
+function readOptionValue(
+  argv: string[],
+  index: number,
+  name: string
+): { value: string; next: number } {
   const current = argv[index]
   const equalsIndex = current.indexOf("=")
   if (equalsIndex >= 0) {
@@ -172,7 +179,9 @@ function resolveExistingWorkspace(workspacePath: string): string {
     return realpathSync(workspacePath)
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`Workspace path does not exist or cannot be resolved: ${workspacePath}\n${detail}`)
+    throw new Error(
+      `Workspace path does not exist or cannot be resolved: ${workspacePath}\n${detail}`
+    )
   }
 }
 
@@ -318,6 +327,13 @@ function captureTaskSubagentPrompts(options: {
     conciseModeEnabled: options.conciseModeEnabled ?? false,
     subagentExtraSystemPrompt: options.projectContext,
     subagentExtraSystemPromptForRestrictedRoles: options.projectMode,
+    subagents: [
+      {
+        name: "custom",
+        description: "Custom task subagent",
+        systemPrompt: "CUSTOM_BASE_PROMPT"
+      }
+    ],
     registrySubagentSpecs: [
       {
         name: "Explore",
@@ -761,6 +777,12 @@ async function testAdditionalOutputStyleContracts(): Promise<void> {
     !defaultPrompt.includes(OUTPUT_STYLE_IDENTITY_PROMPT),
     "default output style must not inject Claude Code's style identity framing"
   )
+  assert(
+    LEARNING_OUTPUT_STYLE_PROMPT.includes(
+      "This pause is a deliberate user-input handoff, not task completion"
+    ) && LEARNING_OUTPUT_STYLE_PROMPT.includes("complete and verify the remaining work"),
+    "learning style should resume and finish after its intentional user contribution pause"
+  )
 }
 
 function printFinalPrompt(label: string, prompt: string): void {
@@ -786,7 +808,9 @@ function printRuntimePromptDiagnostics(
     }`
   )
   console.log(`workspaceAgentsTruncated: ${result.agentsTruncated}`)
-  console.log(`sessionContextInjectWarning: ${harnessContext.sessionContextInjectWarning ?? "<none>"}`)
+  console.log(
+    `sessionContextInjectWarning: ${harnessContext.sessionContextInjectWarning ?? "<none>"}`
+  )
   console.log(
     `agentmdLoadStatus: ${
       harnessContext.agentmdLoadStatus ? JSON.stringify(harnessContext.agentmdLoadStatus) : "<none>"
@@ -843,6 +867,73 @@ function testSoloPromptOmitsTaskToolGuidance(workspacePath: string): void {
   )
 }
 
+function assertCompletionAndRepetitionContract(prompt: string, agentLabel: string): void {
+  assert(
+    countOccurrences(prompt, TASK_COMPLETION_AND_REPETITION_PROMPT) === 1,
+    `${agentLabel} should receive the shared completion and repetition contract exactly once`
+  )
+  assert(
+    !prompt.includes("After working on a file, just stop"),
+    `${agentLabel} must not retain the premature-stop instruction`
+  )
+  assert(
+    !prompt.includes("ALWAYS ask the user if the plan looks good") &&
+      !prompt.includes("Wait for the user's response before marking the first todo"),
+    `${agentLabel} should not require an unnecessary planning-confirmation pause`
+  )
+  assert(
+    prompt.includes("Never repeat a user-denied call unless the user explicitly requests it again"),
+    `${agentLabel} should prioritize the user-denial rule before other retry conditions`
+  )
+  assert(
+    !prompt.includes("Retry identical arguments only when"),
+    `${agentLabel} must not retain the ambiguous retry rule that preceded user-denial handling`
+  )
+}
+
+function testDefaultCompletionAndRepetitionContract(workspacePath: string): void {
+  const finalMainPrompt = captureFinalSystemPrompt(buildBaseRuntimePrompt(workspacePath))
+  assertCompletionAndRepetitionContract(finalMainPrompt, "ordinary main agent")
+  assert(
+    finalMainPrompt.includes("continue with the first actionable item in the same turn"),
+    "ordinary main agent should continue after creating a todo list"
+  )
+
+  const finalCoordinatorPrompt = captureFinalSystemPrompt(
+    buildCoordinatorSystemPrompt({
+      threadId: "runtime-final-coordinator",
+      workspacePath,
+      platform: process.platform,
+      shell: "zsh",
+      timezone: "Asia/Shanghai",
+      currentTime: "2026-09-03T00:00:00+08:00",
+      hasCodeExecTool: false,
+      deferredToolIds: []
+    })
+  )
+  assertCompletionAndRepetitionContract(finalCoordinatorPrompt, "coordinator main agent")
+  assert(
+    finalCoordinatorPrompt.includes("asynchronous handoff, not a completion claim") &&
+      finalCoordinatorPrompt.includes("Continue from task notifications until the whole request"),
+    "coordinator main agent should distinguish asynchronous turn boundaries from completion"
+  )
+
+  const finalWorkflowPrompt = captureFinalSystemPrompt(
+    `${buildBaseRuntimePrompt(workspacePath)}${WORKFLOW_MODE_SYSTEM_PROMPT}`
+  )
+  assertCompletionAndRepetitionContract(finalWorkflowPrompt, "workflow main agent")
+  assert(
+    finalWorkflowPrompt.includes("an asynchronous handoff, not a claim") &&
+      finalWorkflowPrompt.includes("continue when the task notification arrives"),
+    "workflow main agent should distinguish asynchronous turn boundaries from completion"
+  )
+
+  const taskSubagentPrompts = captureTaskSubagentPrompts({ projectMode: false })
+  for (const [name, prompt] of taskSubagentPrompts) {
+    assertCompletionAndRepetitionContract(prompt, `task subagent ${name}`)
+  }
+}
+
 async function run(): Promise<void> {
   const cliOptions = parseCliOptions(process.argv.slice(2))
   if (cliOptions.help) {
@@ -864,6 +955,8 @@ async function run(): Promise<void> {
     console.log("PASS plugin AGENTS final system prompt")
     testSoloPromptOmitsTaskToolGuidance(workspacePath)
     console.log("PASS Solo task-tool prompt exclusion")
+    testDefaultCompletionAndRepetitionContract(workspacePath)
+    console.log("PASS default completion and repetition contract")
     testTaskSubagentPromptModeMatrix()
     console.log("PASS task subagent prompt mode matrix")
     await testConciseOutputStyleContract()
@@ -874,12 +967,12 @@ async function run(): Promise<void> {
 }
 
 async function runHarnessCliMode(cliOptions: CliOptions): Promise<void> {
-  const workspacePath = resolveExistingWorkspace(requireCliOption(cliOptions.workspace, "--workspace"))
+  const workspacePath = resolveExistingWorkspace(
+    requireCliOption(cliOptions.workspace, "--workspace")
+  )
   const projectId = requireCliOption(cliOptions.projectId, "--project-id")
   const feature = requireCliOption(cliOptions.feature, "--feature")
-  const { buildHarnessFeatureAgentContext } = await import(
-    "../src/main/harness-board/service.ts"
-  )
+  const { buildHarnessFeatureAgentContext } = await import("../src/main/harness-board/service.ts")
   const harnessContext = await buildHarnessFeatureAgentContext({
     harnessFeature: {
       projectId,

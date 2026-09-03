@@ -12,6 +12,7 @@ import { getUserInfo } from "../storage"
 import { deriveUpperOrgLv1FromPath } from "../org-levels"
 import * as fs from "fs"
 import AdmZip from "adm-zip"
+import { rehydrateTraceContent } from "../agent/trace/content-refs"
 import { buildTraceTree } from "../agent/trace/tree-builder"
 import {
   redactTraceDetailForDisplay,
@@ -1313,6 +1314,12 @@ function buildProjectModeOrgFilter(
   return { bool: { filter: filters } }
 }
 
+function projectMetricAllowedRoomNames(access: DashboardAccessContext): string[] | null {
+  if (isDashboardProjectModeAdmin(access)) return null
+  const roomName = access.upperOrgLv1.trim()
+  return roomName ? [roomName] : []
+}
+
 function getDashboardEsIndexByAlias(): Record<DashboardEsIndexAlias, string> {
   return {
     event: getEsIndex("event"),
@@ -2355,11 +2362,26 @@ function codeSkillAdoptionBucketAggs(
   }
 }
 
-function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+/**
+ * Prefer the totals the collector counted as the turn ran. Summing modelCalls
+ * understates any turn that went past TRACE_MAX_MODEL_CALLS, and the array is
+ * still the only source for traces recorded before those fields existed.
+ */
+function summarizeTraceTokenUsage(
+  trace: Pick<AgentTrace, "modelCalls" | "totalInputTokens" | "totalOutputTokens" | "totalTokens">
+): {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
 } {
+  if (typeof trace.totalTokens === "number" || typeof trace.totalInputTokens === "number") {
+    return {
+      totalInputTokens: trace.totalInputTokens ?? 0,
+      totalOutputTokens: trace.totalOutputTokens ?? 0,
+      totalTokens: trace.totalTokens ?? 0
+    }
+  }
+  const modelCalls = trace.modelCalls
   if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
     return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
   }
@@ -2391,10 +2413,14 @@ function parseRawTrace(raw: unknown): { trace?: AgentTrace; error?: string } {
 }
 
 function normalizeParsedTrace(
-  trace: AgentTrace,
+  rawTrace: AgentTrace,
   source: Record<string, unknown>,
   hit: EsSearchHit
 ): AgentTrace {
+  // Uploaded traces keep one copy of each repeated value. This is the boundary
+  // where cloud data re-enters the app, so put the copies back here — every
+  // consumer downstream (trace detail, conversation view) sees a whole trace.
+  const trace = rehydrateTraceContent(rawTrace)
   const candidate = trace as Partial<AgentTrace>
   const startedAt = candidate.startedAt || asString(source.startedAt)
   const endedAt = candidate.endedAt || asString(source.endedAt, startedAt)
@@ -2450,7 +2476,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
 
   if (parsed.trace) {
     const trace = normalizeParsedTrace(parsed.trace, source, hit)
-    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const usage = summarizeTraceTokenUsage(trace)
     const fallbackInputTokens = asNumber(source.totalInputTokens)
     const fallbackOutputTokens = asNumber(source.totalOutputTokens)
     const fallbackTotalTokens = asNumber(
@@ -2543,7 +2569,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
 }
 
 function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
-  const usage = summarizeTraceTokenUsage(trace.modelCalls)
+  const usage = summarizeTraceTokenUsage(trace)
   let nodes: TraceNode[] | undefined
   let rawError: string | undefined
   try {
@@ -6161,7 +6187,6 @@ interface AdvFeatureMetrics {
   hookBlocked: number
   codeExec: number
   savedTool: number
-  claudeCodeLaunches: number
 }
 
 function assembleAdvancedFeatureCards(
@@ -6253,14 +6278,6 @@ function assembleAdvancedFeatureCards(
           { label: "code_exec", count: m.codeExec, tone: "neutral" },
           { label: "保存工具", count: m.savedTool, tone: "neutral" }
         ]
-      },
-      {
-        key: "claudeCode",
-        label: "Claude Code",
-        value: m.claudeCodeLaunches,
-        valueLabel: "启动次数",
-        hint: `选择目录启动会话 ${m.claudeCodeLaunches} 次`,
-        items: [{ label: "目录启动", count: m.claudeCodeLaunches, tone: "good" }]
       }
     ]
   }
@@ -6303,16 +6320,6 @@ async function fetchAdvancedFeatures(
       hooks: {
         filter: { term: { eventName: "hook.executed" } },
         aggs: { blocked: { filter: { term: { "properties.blocked": true } } } }
-      },
-      claude_code_launches: {
-        filter: {
-          bool: {
-            filter: [
-              { term: { eventName: "workspace.launch.started" } },
-              { term: { "properties.surface": "claude_code" } }
-            ]
-          }
-        }
       }
     }
   }
@@ -6392,8 +6399,7 @@ function makeMockAdvancedFeatures(range: TimeRange): AdvancedFeaturesResult {
     hookTotal: k(140),
     hookBlocked: k(12),
     codeExec: k(9),
-    savedTool: k(6),
-    claudeCodeLaunches: k(11)
+    savedTool: k(6)
   }
 
   return assembleAdvancedFeatureCards(metrics, "mock")
@@ -14929,14 +14935,15 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: makeMockProjectMetricSummary(filters) }
       }
       try {
-        requireDashboardProjectModeAccess()
+        const access = requireDashboardProjectModeAccess()
         return {
           success: true,
           data: await fetchProjectMetricSummary(filters, {
             query: esQuery,
             eventIndex: getEsIndex("event"),
             traceIndex: getEsIndex("trace"),
-            factIndex: getEsIndex("projectFact")
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
           })
         }
       } catch (e) {
@@ -14954,14 +14961,15 @@ export function registerDashboardHandlers(_ipcMain: typeof ipcMain): void {
         return { success: true, data: makeMockProjectMetricProjects(filters, options) }
       }
       try {
-        requireDashboardProjectModeAccess()
+        const access = requireDashboardProjectModeAccess()
         return {
           success: true,
           data: await fetchProjectMetricProjects(filters, options ?? {}, {
             query: esQuery,
             eventIndex: getEsIndex("event"),
             traceIndex: getEsIndex("trace"),
-            factIndex: getEsIndex("projectFact")
+            factIndex: getEsIndex("projectFact"),
+            allowedRoomNames: projectMetricAllowedRoomNames(access)
           })
         }
       } catch (e) {

@@ -19,6 +19,7 @@ export interface ResourceMessage {
 export interface PreviewEvent {
   path: string
   key: string
+  toolCallId: string
   workspacePathKind: WorkspaceFilePreviewWorkspacePathKind
   codeDiff?: {
     oldValue: string
@@ -81,20 +82,19 @@ function buildPreviewEvent(
 
   const key = `${messageId}:${toolCall.id ?? `t-${toolIndex}`}:${filePath}`
   const workspacePathKind = inferWorkspacePreviewPathKind(filePath, platform)
-  if (!codeLike) return { path: filePath, key, workspacePathKind }
+  const toolCallId = toolCall.id
+  if (!toolCallId) return null
+  if (!codeLike) return { path: filePath, key, toolCallId, workspacePathKind }
 
   const args = toolCall.args || {}
   const oldValue = ((args.old_string ?? args.old_str) as string | undefined) || ""
-  const newValue =
-    ((args.new_string ?? args.new_str ?? args.content) as string | undefined) || ""
+  const newValue = ((args.new_string ?? args.new_str ?? args.content) as string | undefined) || ""
   return {
     path: filePath,
     key,
+    toolCallId,
     workspacePathKind,
-    codeDiff:
-      toolCall.name === "write_file"
-        ? { oldValue: "", newValue }
-        : { oldValue, newValue }
+    codeDiff: toolCall.name === "write_file" ? { oldValue: "", newValue } : { oldValue, newValue }
   }
 }
 

@@ -89,12 +89,15 @@ import {
 } from "./goal-notice-messages"
 import {
   buildRestoredCheckpointTranscript,
+  filterGoalEventsForDurablePage,
   formatGoalEventMessage,
   getInternalGoalPromptIdentity,
   goalNoticeEventsToGoalUiEvents,
   hasGoalResumeUserEvent,
   isGoalResumeCommandContent,
   isVisibleCheckpointTranscriptMessage,
+  mergeGoalUserEventsIntoDurablePage,
+  restoreDurableTranscriptOrdinals,
   sameGoalCommandMessage
 } from "./goal-transcript"
 import { mergeGoalUiEvents } from "./goal-ui-events"
@@ -5149,11 +5152,12 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               limit: 500
             })
             if (!isCurrentLoad()) return 0
-            const olderMessages = normalizePersistedThreadMessages(page.messages).filter(
+            const olderPageMessages = normalizePersistedThreadMessages(page.messages)
+            const olderDurableMessages = olderPageMessages.filter(
               isVisibleCheckpointTranscriptMessage
             )
-            rememberDurableMessageIds(threadId, olderMessages)
-            const pageWindow = createThreadMessagePageWindow(olderMessages, cursor)
+            rememberDurableMessageIds(threadId, olderDurableMessages)
+            const pageWindow = createThreadMessagePageWindow(olderDurableMessages, cursor)
             let prependedMessageCount = 0
             updateThreadState(threadId, (latest) => {
               if (
@@ -5162,6 +5166,11 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               ) {
                 return { historyPageLoading: false }
               }
+              const olderMessages = mergeGoalUserEventsIntoDurablePage(
+                olderDurableMessages,
+                latest.goalUi.events,
+                olderPageMessages
+              )
               const pageWindows = prependThreadMessagePageWindow(
                 latest.historyPageWindows,
                 pageWindow
@@ -5170,7 +5179,7 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
               const durableBoundaryIds = collectKnownDurableMessageIds(
                 pageWindows,
                 knownDurableMessageIdsRef.current[threadId],
-                olderMessages
+                olderDurableMessages
               )
               const windowResult = prependBoundedThreadMessagePage(latest.messages, olderMessages, {
                 maximumResidentMessages: THREAD_MESSAGE_RESIDENT_LIMIT,
@@ -6509,6 +6518,10 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
       }
 
       const restoredGoalUiEvents = goalNoticeEventsToGoalUiEvents(threadId, restoredGoalEvents)
+      const restoredPageGoalUiEvents = filterGoalEventsForDurablePage(
+        persistedThreadMessages,
+        restoredGoalUiEvents
+      )
       if (checkpointMessagesLoaded) {
         const persistedMessagesByIdentity = new Map(
           persistedThreadMessages.map((message) => [
@@ -6548,10 +6561,18 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
           if (!isCurrentLoad()) return
         }
       }
-      const checkpointTranscript = buildRestoredCheckpointTranscript(
+      const ordinalRestoredRawMessages = restoreDurableTranscriptOrdinals(
         checkpointMessagesLoaded ? rawRestoredMessages : persistedThreadMessages,
+        persistedThreadMessages
+      )
+      const ordinalRestoredVisibleMessages = restoreDurableTranscriptOrdinals(
         checkpointMessagesLoaded ? restoredMessages : visiblePersistedThreadMessages,
-        restoredGoalUiEvents
+        persistedThreadMessages
+      )
+      const checkpointTranscript = buildRestoredCheckpointTranscript(
+        ordinalRestoredRawMessages,
+        ordinalRestoredVisibleMessages,
+        restoredPageGoalUiEvents
       )
       const restoredTranscript = mergePersistedMessagesIntoTranscript(
         checkpointTranscript,

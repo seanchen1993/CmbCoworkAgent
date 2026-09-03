@@ -185,6 +185,32 @@ describe("Harness catalog worker client", () => {
     await client.close()
   })
 
+  it("preserves structured context-integrity error codes across the worker boundary", async () => {
+    const worker = new FakeCatalogWorker()
+    const client = new HarnessCatalogClient(async () => worker as unknown as Worker)
+    const pending = client.readProjectContexts(["project"], "renderer:integrity")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const request = worker.requests.at(-1)!
+
+    worker.emit("message", {
+      type: "read-project-contexts-result",
+      requestId: request.requestId,
+      ok: false,
+      error: {
+        code: "HARNESS_DEPLOY_UNIT_CONTEXT_LIMIT_EXCEEDED",
+        message: "Harness context is incomplete",
+        stack: "worker stack"
+      }
+    })
+
+    await expect(pending).rejects.toMatchObject({
+      code: "HARNESS_DEPLOY_UNIT_CONTEXT_LIMIT_EXCEEDED",
+      message: "Harness context is incomplete",
+      stack: "worker stack"
+    })
+    await client.close()
+  })
+
   it("rejects pending work on a clean unexpected exit and restarts", async () => {
     const firstWorker = new FakeCatalogWorker()
     const replacement = new FakeCatalogWorker()

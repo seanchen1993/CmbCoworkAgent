@@ -302,9 +302,9 @@ export function BuiltinRobotPanel(): React.JSX.Element {
             <div className="rounded-md border bg-muted/20 p-3">
               <div className="flex items-center gap-2 text-sm font-medium">
                 {identityVerified ? (
-                  <ShieldCheck className="size-4 text-emerald-500" />
+                  <ShieldCheck className="size-4 text-status-nominal" />
                 ) : (
-                  <CircleAlert className="size-4 text-amber-500" />
+                  <CircleAlert className="size-4 text-status-warning" />
                 )}
                 登录状态
               </div>
@@ -509,7 +509,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 <MessageSquareText className="size-4" /> 已有桌面会话
               </div>
               {!remoteAccessLoading && !remoteAccess?.routeAvailable && (
-                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
+                <div className="rounded-md border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-sm text-muted-foreground">
                   {remoteAccess?.routeReason ?? "正在读取招乎路由…"}
                 </div>
               )}
@@ -573,7 +573,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
                 <FolderKanban className="size-4" /> Feature 远程新建会话
               </div>
               {!remoteAccessLoading && !remoteAccess?.principalAvailable && (
-                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
+                <div className="rounded-md border border-status-warning/30 bg-status-warning/5 px-3 py-2 text-sm text-muted-foreground">
                   {remoteAccess?.principalReason ?? "正在读取登录状态…"}
                 </div>
               )}
@@ -639,7 +639,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
               招乎只展示会话、项目与 Feature 名称；本地绝对路径、插件路径和工作区配置不会上传。
             </p>
 
-            <div className="flex items-start justify-between gap-4 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+            <div className="flex items-start justify-between gap-4 rounded-md border border-status-warning/30 bg-status-warning/5 p-3">
               <div>
                 <p className="text-sm font-medium">允许从招乎批准工具调用</p>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
@@ -665,7 +665,7 @@ export function BuiltinRobotPanel(): React.JSX.Element {
         </Card>
 
         {status.legacyConfigDetected && (
-          <Card className="border-amber-500/40">
+          <Card className="border-status-warning/40">
             <CardHeader>
               <CardTitle>检测到旧版机器人凭据</CardTitle>
               <CardDescription>

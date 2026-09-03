@@ -89,12 +89,14 @@ export interface CreateWorkflowToolOptions {
   threadId: string
   workspacePath: string
   modelId?: string
+  /** Reads the current global YOLO state when the run-before gate is reached. */
+  readYoloMode?: () => boolean
   /** Physical-run observer. Called after the run manager accepts and schedules
    * a launch, intentionally before initial persistence settles: even a later
    * fail-closed spawn produces an error notification that ManagedRun must await.
    * Observer failures are isolated so they cannot change the launched contract. */
   onLaunched?: (runId: string) => void
-  /** When true (YOLO), the run-before approval gate is skipped. */
+  /** Backward-compatible fixed YOLO value for non-production callers. */
   yoloMode?: boolean
   /** Caches an "Approve for this session" decision so re-runs don't re-prompt. */
   approvalStore?: ApprovalStore
@@ -343,7 +345,7 @@ async function ensureWorkflowApproved(
   tokenBudget: number | null,
   executionProfiles: readonly AgentProfile[]
 ): Promise<boolean> {
-  if (options.yoloMode) return true
+  if ((options.readYoloMode?.() ?? options.yoloMode) === true) return true
   const { approvalStore, requestApproval } = options
   if (!approvalStore || !requestApproval) {
     // Fail CLOSED, not open: a workflow can fan out and execute many file/shell

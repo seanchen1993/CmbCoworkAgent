@@ -236,9 +236,13 @@ export function useAtFileMentions(params: {
             return loadMoreWorkspaceFiles(signal)
           }
         : undefined,
-      onUpdate: ({ suggestions }) => {
+      onUpdate: ({ files, suggestions }) => {
         if (!controller.signal.aborted) {
-          setSuggestionResult({ key: activeToken.key, files: workspaceFiles, suggestions })
+          // Progressive continuation publishes this exact shared array to the
+          // thread state. Tag suggestions with the array that was actually
+          // indexed so the next render cannot discard a valid later-page match
+          // as if it belonged to the previous 10k snapshot.
+          setSuggestionResult({ key: activeToken.key, files, suggestions })
         }
       }
     }).then(

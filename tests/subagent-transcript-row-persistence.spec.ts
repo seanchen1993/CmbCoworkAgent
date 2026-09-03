@@ -247,6 +247,46 @@ async function main(): Promise<void> {
     assert.equal(latest.total, 20_000)
     assert.equal((latest.messages.at(-1) as { content?: unknown }).content, "completed tail")
 
+    const boundarySubagentId = "worker-tool-boundary"
+    db.upsertThreadSubagentManifestMessages(threadId, boundarySubagentId, [
+      {
+        id: "boundary-assistant",
+        role: "assistant",
+        content: "calling",
+        tool_calls: [{ id: "boundary-call", name: "read", args: {} }]
+      },
+      {
+        id: "boundary-tool",
+        role: "tool",
+        tool_call_id: "boundary-call",
+        content: "done"
+      },
+      ...Array.from({ length: 99 }, (_, index) => ({
+        id: `boundary-tail-${index}`,
+        role: "assistant",
+        content: `tail ${index}`
+      }))
+    ])
+    const atomicBoundaryPage = db.getThreadSubagentManifestPage(
+      threadId,
+      boundarySubagentId,
+      undefined,
+      100
+    )
+    assert.equal(atomicBoundaryPage.messages.length, 101)
+    assert.equal(
+      (atomicBoundaryPage.messages[0] as { id?: unknown }).id,
+      "boundary-assistant",
+      "row-backed paging must prepend the owning assistant at a tool-result boundary"
+    )
+    assert.equal(
+      atomicBoundaryPage.start,
+      0,
+      "the next cursor must advance past the complete assistant/tool group"
+    )
+    assert.equal(atomicBoundaryPage.hasMore, false)
+    assert.equal(atomicBoundaryPage.nextBefore, undefined)
+
     const ipcSource = await readFile(
       join(process.cwd(), "src/main/ipc/threads.ts"),
       "utf8"

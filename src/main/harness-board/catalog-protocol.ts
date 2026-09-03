@@ -127,7 +127,7 @@ export interface HarnessCatalogReadFailure {
   type: "read-page-result"
   requestId: number
   ok: false
-  error: { message: string; stack?: string }
+  error: { message: string; stack?: string; code?: string }
 }
 
 export interface HarnessProjectContextReadSuccess {
@@ -141,7 +141,7 @@ export interface HarnessProjectContextReadFailure {
   type: "read-project-contexts-result"
   requestId: number
   ok: false
-  error: { message: string; stack?: string }
+  error: { message: string; stack?: string; code?: string }
 }
 
 export interface HarnessDialogTipsReadSuccess {
@@ -155,7 +155,7 @@ export interface HarnessDialogTipsReadFailure {
   type: "read-dialog-tips-result"
   requestId: number
   ok: false
-  error: { message: string; stack?: string }
+  error: { message: string; stack?: string; code?: string }
 }
 
 export interface HarnessLeanTokenReadSuccess {
@@ -169,7 +169,7 @@ export interface HarnessLeanTokenReadFailure {
   type: "read-lean-token-result"
   requestId: number
   ok: false
-  error: { message: string; stack?: string }
+  error: { message: string; stack?: string; code?: string }
 }
 
 export interface HarnessCatalogShutdownComplete {

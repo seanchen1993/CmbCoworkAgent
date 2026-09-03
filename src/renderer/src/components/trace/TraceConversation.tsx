@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Bot, ChevronDown, ChevronRight, Route, User, Wrench } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, Info, Route, User, Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { parseSkillUseBlock } from "@/features/slash-commands/skill-marker"
 import {
@@ -8,7 +8,13 @@ import {
 } from "../../../../shared/internal-notification-turn"
 import { summarizeThreadProjectNodes } from "./trace-project-node-summary"
 
-type TraceRole = "user" | "assistant" | "tool" | "subagent"
+/**
+ * "notice" is the collector speaking, not the agent: it stands in for a run of
+ * turns whose content the byte budget could not record. Kept out of "assistant"
+ * so summaries and last-reply lookups never mistake it for something the model
+ * said.
+ */
+type TraceRole = "user" | "assistant" | "tool" | "subagent" | "notice"
 
 interface TraceConversationNode {
   id?: string
@@ -21,6 +27,7 @@ interface TraceConversationNode {
   startedAt?: string
   endedAt?: string
   metadata?: Record<string, unknown>
+  truncated?: boolean
 }
 
 interface TraceConversationToolCall {
@@ -28,6 +35,7 @@ interface TraceConversationToolCall {
   args?: unknown
   result?: unknown
   durationMs?: number
+  truncated?: boolean
 }
 
 interface TraceConversationModelCall {
@@ -37,6 +45,7 @@ interface TraceConversationModelCall {
     reasoning?: unknown
   }
   toolCalls?: TraceConversationToolCall[]
+  truncated?: boolean
 }
 
 interface TraceConversationStep {
@@ -114,6 +123,12 @@ interface TraceConversationToolInfo {
   output?: unknown
   durationMs?: number
   status?: string
+  /**
+   * The collector kept this call's name but not its payload, because the byte
+   * budget was spent. Without saying so the panel reads as a tool invoked with
+   * no arguments that returned nothing.
+   */
+  truncated?: boolean
 }
 
 interface TraceConversationSubagentRun {
@@ -356,6 +371,7 @@ function extractTimedToolGroups(trace: TraceConversationSource): TimedToolGroup[
       group.occurredAt = validEventTime(group.occurredAt, occurredAt)
       group.tools.push({
         name: node.name ?? "unknown",
+        ...(node.truncated ? { truncated: true } : {}),
         input: node.input,
         output: resultNode?.output,
         durationMs: nodeDurationMs(node),
@@ -370,6 +386,7 @@ function extractTimedToolGroups(trace: TraceConversationSource): TimedToolGroup[
     const tools = (step.toolCalls ?? []).map(
       (tool): TraceConversationToolInfo => ({
         name: tool.name ?? "unknown",
+        ...(tool.truncated ? { truncated: true } : {}),
         input: tool.args,
         output: tool.result,
         durationMs: tool.durationMs
@@ -385,6 +402,7 @@ function extractTimedToolGroups(trace: TraceConversationSource): TimedToolGroup[
     const tools = (call.toolCalls ?? []).map(
       (tool): TraceConversationToolInfo => ({
         name: tool.name ?? "unknown",
+        ...(tool.truncated ? { truncated: true } : {}),
         input: tool.args,
         output: tool.result,
         durationMs: tool.durationMs
@@ -532,13 +550,44 @@ function buildTraceTimeline(trace: TraceConversationSource, traceOrder: number):
   }
 
   if (nodeAssistantCandidates.length > 0) {
-    for (const node of nodeAssistantCandidates) {
-      addAssistant(
-        textFromUnknown(node.output),
-        textFromUnknown(node.metadata?.reasoning),
-        validEventTime(node.endedAt, node.startedAt, trace.endedAt, trace.startedAt)
+    // A run of calls whose replies the byte budget could not afford collapses
+    // into one line. Without it the conversation simply skips them, and a long
+    // turn reads as if it stopped early rather than as one that was recorded in
+    // part — the operations dashboard shows exactly this view, built from nodes
+    // alone, so there is nothing else there to hint at the gap.
+    let elided = 0
+    let elidedAt: string | undefined
+    const flushElided = (): void => {
+      if (elided === 0) return
+      add(
+        {
+          role: "notice",
+          label: responseLabel(trace),
+          content: `其间 ${elided} 次模型调用的回复因单条 Trace 体积上限未记录`
+        },
+        elidedAt
       )
+      elided = 0
+      elidedAt = undefined
     }
+    for (const node of nodeAssistantCandidates) {
+      const content = textFromUnknown(node.output)
+      const reasoning = textFromUnknown(node.metadata?.reasoning)
+      const occurredAt = validEventTime(
+        node.endedAt,
+        node.startedAt,
+        trace.endedAt,
+        trace.startedAt
+      )
+      if (!isUsefulAssistantText(content) && !reasoning) {
+        elided += 1
+        elidedAt ??= occurredAt
+        continue
+      }
+      flushElided()
+      addAssistant(content, reasoning, occurredAt)
+    }
+    flushElided()
   } else if ((trace.modelCalls ?? []).length > 0) {
     for (const call of trace.modelCalls ?? []) {
       addAssistant(
@@ -681,6 +730,7 @@ export function buildThreadConversation(
 function roleIcon(role: TraceRole): React.JSX.Element {
   if (role === "user") return <User className="size-3.5" />
   if (role === "tool") return <Wrench className="size-3.5" />
+  if (role === "notice") return <Info className="size-3.5" />
   return <Bot className="size-3.5" />
 }
 
@@ -805,8 +855,16 @@ function ToolCallDetails({
                   </span>
                 ) : null}
               </div>
-              <ExpandableValue label="输入" value={tool.input} />
-              <ExpandableValue label="输出" value={tool.output} />
+              {tool.truncated && tool.input === undefined && tool.output === undefined ? (
+                <p className="text-[11px] text-muted-foreground">
+                  参数与结果因单条 Trace 体积上限未记录
+                </p>
+              ) : (
+                <>
+                  <ExpandableValue label="输入" value={tool.input} />
+                  <ExpandableValue label="输出" value={tool.output} />
+                </>
+              )}
             </div>
           ))}
         </div>

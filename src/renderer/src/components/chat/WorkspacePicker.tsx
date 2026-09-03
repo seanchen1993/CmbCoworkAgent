@@ -30,6 +30,7 @@ import { isRemoteInboxThread, REMOTE_INBOX_WORKSPACE_NAME } from "@/lib/remote-t
 
 interface WorkspacePickerProps {
   threadId: string
+  environmentRailCollapsed: boolean
   onGitStatusChange?: (threadId: string, isGit: boolean) => void
 }
 
@@ -108,6 +109,7 @@ export const WorkspacePicker = memo(WorkspacePickerImpl)
 
 function WorkspacePickerImpl({
   threadId,
+  environmentRailCollapsed,
   onGitStatusChange
 }: WorkspacePickerProps): React.JSX.Element {
   const workspacePath = useThreadStateSelector(
@@ -158,6 +160,13 @@ function WorkspacePickerImpl({
 
   // PR-11 — Setup(maintenance) re-run state. Independent of git/worktree flow.
   const [reinitLoading, setReinitLoading] = useState(false)
+
+  useEffect(() => {
+    if (!environmentRailCollapsed) return
+    setOpen(false)
+    setBranchName("")
+    setWorktreeError(null)
+  }, [environmentRailCollapsed])
 
   async function handleReinitWorkspace(): Promise<void> {
     if (!workspacePath || reinitLoading) return

@@ -291,6 +291,8 @@ export type StreamEvent =
 
 export interface Message {
   id: string
+  /** Durable transcript order. Present on messages read from thread_messages pages. */
+  ordinal?: number
   provider_source_id?: string
   provider_occurrence?: number
   role: "user" | "assistant" | "system" | "tool"
@@ -382,6 +384,9 @@ export interface GoalEvent {
   active_window_id?: string | null
   message: string
   created_at: Date | string | number
+  /** Durable location of the matching Goal turn (or its first runtime message). */
+  transcript_ordinal?: number | null
+  transcript_message_id?: string | null
 }
 
 export interface GoalSnapshot {

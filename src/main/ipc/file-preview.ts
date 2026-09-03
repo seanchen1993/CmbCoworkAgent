@@ -10,13 +10,16 @@ import {
   type WorkspaceFilePreviewReadRequest,
   type WorkspaceFilePreviewReadResult,
   type WorkspaceFilePreviewReleaseRequest,
-  type WorkspaceFilePreviewSource
+  type WorkspaceFilePreviewSource,
+  type ToolFilePreviewGrantRequest,
+  type ToolFilePreviewGrantResult
 } from "../../shared/workspace-file-preview"
 import { readThreadWorkspacePathInWorker } from "../thread-metadata-hydration/client"
 import {
   resolveExternalFileReadGrant,
   revokeExternalFileReadGrantsForOwner
 } from "../services/external-file-read-tokens"
+import { authorizeTrustedToolFilePreview } from "../services/trusted-tool-file-preview"
 import { openStableFileHandle } from "../services/stable-file-handle"
 import { getWorkspaceFilePreviewClient } from "../workspace-file-preview/client"
 import { workspaceFilePreviewFailure } from "../workspace-file-preview/errors"
@@ -216,6 +219,33 @@ function inlineMediaPolicy(mimeType: string, size: number): { allowed: boolean; 
 }
 
 export function registerWorkspaceFilePreviewHandlers(ipcMain: IpcMain): void {
+  ipcMain.handle(
+    "workspace:authorizeToolFilePreview",
+    async (event, request: ToolFilePreviewGrantRequest): Promise<ToolFilePreviewGrantResult> => {
+      if (
+        !request ||
+        typeof request !== "object" ||
+        !validBoundedString(request.threadId, 256) ||
+        !validBoundedString(request.toolCallId, 1_024)
+      ) {
+        return { success: false, error: "Invalid tool file preview authorization request" }
+      }
+
+      const workspacePath = await readThreadWorkspacePathInWorker(request.threadId).catch(
+        () => null
+      )
+      const issued = authorizeTrustedToolFilePreview(
+        request.threadId,
+        request.toolCallId,
+        event.sender.id,
+        workspacePath
+      )
+      if (!issued.success) return issued
+      if (issued.external) attachOwnerCleanup(event.sender)
+      return issued
+    }
+  )
+
   ipcMain.handle(
     "workspace:filePreviewRead",
     async (

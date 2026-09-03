@@ -31,6 +31,7 @@ export type CompactedSubagentTranscripts = {
 
 export const SUBAGENT_TRANSCRIPT_HYDRATION_CONCURRENCY = 16
 export const SUBAGENT_TRANSCRIPT_PAGE_HYDRATION_BYTES = 32 * 1024 * 1024
+const SUBAGENT_TRANSCRIPT_TOOL_GROUP_LOOKBACK = 101
 
 let contentMutationTail: Promise<void> = Promise.resolve()
 let transcriptReferenceEpoch = 0
@@ -546,10 +547,85 @@ export interface SubagentTranscriptManifestPage {
   messages: unknown[]
   hydrateIndexes: number[]
   deferredHydration: boolean
+  deferredHydrationIndex?: number
   end: number
   start: number
   nextBefore?: number
   total: number
+}
+
+function transcriptMessageRole(value: unknown): string {
+  return isRecord(value) && typeof value.role === "string" ? value.role : ""
+}
+
+function transcriptToolResultId(value: unknown): string {
+  return isRecord(value) && typeof value.tool_call_id === "string" ? value.tool_call_id : ""
+}
+
+function transcriptAssistantOwnsToolResults(
+  assistant: unknown,
+  toolResultIds: ReadonlySet<string>
+): boolean {
+  if (!isRecord(assistant) || assistant.role !== "assistant") return false
+  if (isSubagentTranscriptBlobRef(assistant.tool_calls_ref, "tool_calls")) return true
+  if (!Array.isArray(assistant.tool_calls)) return false
+  if (toolResultIds.size === 0) return assistant.tool_calls.length > 0
+  return assistant.tool_calls.some(
+    (toolCall) =>
+      isRecord(toolCall) &&
+      typeof toolCall.id === "string" &&
+      toolResultIds.has(toolCall.id)
+  )
+}
+
+/**
+ * A transcript page must never begin in the middle of an assistant/tool-result group. Walking
+ * backwards is bounded by the already-selected manifest window; the row-backed reader supplies
+ * the one exceptional predecessor group when the count boundary itself lands on a tool result.
+ */
+function alignedSubagentToolGroupStart(messages: readonly unknown[], start: number): number {
+  if (start <= 0 || transcriptMessageRole(messages[start]) !== "tool") return start
+  const toolResultIds = new Set<string>()
+  let candidate = start
+  let inspected = 0
+  while (
+    candidate >= 0 &&
+    inspected < SUBAGENT_TRANSCRIPT_TOOL_GROUP_LOOKBACK &&
+    transcriptMessageRole(messages[candidate]) === "tool"
+  ) {
+    const toolCallId = transcriptToolResultId(messages[candidate])
+    if (toolCallId) toolResultIds.add(toolCallId)
+    candidate -= 1
+    inspected += 1
+  }
+  return candidate >= 0 && transcriptAssistantOwnsToolResults(messages[candidate], toolResultIds)
+    ? candidate
+    : start
+}
+
+function projectToolGroupOwner(rawMessage: unknown): unknown {
+  const projected = projectStartupMessage(rawMessage)
+  if (!isRecord(rawMessage) || !isRecord(projected) || !Array.isArray(rawMessage.tool_calls)) {
+    return projected
+  }
+  const projectedToolCalls = rawMessage.tool_calls.slice(0, 100).flatMap((rawToolCall) => {
+    if (!isRecord(rawToolCall)) return []
+    const id = typeof rawToolCall.id === "string" ? projectSubagentDescription(rawToolCall.id) : ""
+    const name =
+      typeof rawToolCall.name === "string" ? projectSubagentDescription(rawToolCall.name) : ""
+    if (!id || !name) return []
+    let args = rawToolCall.args
+    const serializedArgs = serializeBlobValue(args)
+    if (Buffer.byteLength(serializedArgs, "utf8") > SUBAGENT_TRANSCRIPT_INLINE_BYTES) {
+      args = { preview: projectSubagentTranscriptStartupContent(serializedArgs) }
+    }
+    return [{ id, name, args }]
+  })
+  projected.tool_calls = projectedToolCalls
+  projected.subagent_startup_tool_calls_projection =
+    rawMessage.tool_calls.length > projectedToolCalls.length ||
+    projected.subagent_startup_tool_calls_projection === true
+  return projected
 }
 
 /** Select a bounded manifest page before any sidecar hydration or IPC cloning. */
@@ -575,6 +651,7 @@ export function sliceSubagentTranscriptManifestPage(
   let hydrationBytes = 0
   let start = end
   let deferredHydration = false
+  let deferredHydrationIndex: number | undefined
   const estimatedHydrationBytes = (value: unknown): number => {
     if (!isRecord(value)) return Buffer.byteLength(serializeBlobValue(value), "utf8")
     if (
@@ -623,13 +700,49 @@ export function sliceSubagentTranscriptManifestPage(
       }
     } else {
       deferredHydration = true
+      deferredHydrationIndex = 0
       break
     }
+  }
+  const alignedStart = alignedSubagentToolGroupStart(messages, start)
+  if (alignedStart < start) {
+    const prefixLength = start - alignedStart
+    const prefix = new Array<unknown>(prefixLength)
+    const prefixHydrateIndexes: number[] = []
+    // Prioritize the owning assistant. If a pathological tool-call payload exceeds the entire
+    // hydration budget, retain a bounded id/name projection so the UI can still render the card.
+    const prioritizedIndexes = [
+      alignedStart,
+      ...Array.from({ length: prefixLength - 1 }, (_, index) => alignedStart + index + 1)
+    ]
+    for (const sourceIndex of prioritizedIndexes) {
+      const rawMessage = messages[sourceIndex]
+      const messageBytes = estimatedHydrationBytes(rawMessage)
+      const canHydrate = hydrationBytes + messageBytes <= boundedHydrationBytes
+      const prefixIndex = sourceIndex - alignedStart
+      prefix[prefixIndex] = canHydrate
+        ? rawMessage
+        : sourceIndex === alignedStart
+          ? projectToolGroupOwner(rawMessage)
+          : projectStartupMessage(rawMessage)
+      if (canHydrate) {
+        hydrationBytes += messageBytes
+        prefixHydrateIndexes.push(prefixIndex)
+      }
+    }
+    for (let index = 0; index < hydrateIndexes.length; index += 1) {
+      hydrateIndexes[index] += prefixLength
+    }
+    hydrateIndexes.unshift(...prefixHydrateIndexes)
+    selected.unshift(...prefix)
+    if (deferredHydrationIndex !== undefined) deferredHydrationIndex += prefixLength
+    start = alignedStart
   }
   return {
     messages: selected,
     hydrateIndexes,
     deferredHydration,
+    ...(deferredHydrationIndex !== undefined && { deferredHydrationIndex }),
     end,
     start,
     ...(start > 0 && { nextBefore: start }),

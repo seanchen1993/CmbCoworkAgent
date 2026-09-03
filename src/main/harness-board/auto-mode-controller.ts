@@ -29,6 +29,7 @@ import type {
   ManagedRunSessionAction,
   ManagedRunSnapshot,
   ManagedRunStartInput,
+  ManagedRunStartValidationInput,
   ManagedRunStopInput,
   ManagedRunSummary,
   ManagedRunThreadCreatedEvent
@@ -141,6 +142,20 @@ function hasActiveFeatureThread(projectId: string, featureId: string): boolean {
     }
   }
   return false
+}
+
+function assertManagedRunCanStart(projectId: string, featureId: string): void {
+  const existing = managedRunStore.findRunningRun(projectId, featureId)
+  if (hasActiveFeatureThread(projectId, featureId)) {
+    throw new Error("已有运行中的会话，无法开启托管")
+  }
+  if (existing?.snapshot?.status === "running") {
+    throw new Error("已有运行中的托管 Run，无法开启新的托管")
+  }
+}
+
+export function validateManagedRunStart(input: ManagedRunStartValidationInput): void {
+  assertManagedRunCanStart(input.projectId, input.featureId)
 }
 
 function toManagedRunSessionAction(
@@ -635,13 +650,7 @@ export async function startManagedRun(input: ManagedRunStartRequest): Promise<Ma
     if (!workspaceDirectoryExists) {
       throw new Error("所选会话工作区不存在或不是文件夹")
     }
-    const existing = managedRunStore.findRunningRun(input.projectId, input.featureId)
-    if (hasActiveFeatureThread(input.projectId, input.featureId)) {
-      throw new Error("已有运行中的会话，无法开启托管")
-    }
-    if (existing?.snapshot?.status === "running") {
-      throw new Error("已有运行中的托管 Run，无法开启新的托管")
-    }
+    assertManagedRunCanStart(input.projectId, input.featureId)
 
     const created = managedRunStore.createRun(input.projectId, input.featureId, workspacePath)
     publishManagedRunChanged(lastRunSummary(created))

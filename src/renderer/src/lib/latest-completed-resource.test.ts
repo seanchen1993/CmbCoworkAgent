@@ -21,6 +21,7 @@ describe("completed resource path intent", () => {
 
     expect(projection.latestResourceEvent).toMatchObject({
       path: "/tmp/report.md",
+      toolCallId: "call-1",
       workspacePathKind: "absolute"
     })
   })
@@ -33,6 +34,7 @@ describe("completed resource path intent", () => {
 
     expect(projection.latestResourceEvent).toMatchObject({
       path: "src/report.md",
+      toolCallId: "call-1",
       workspacePathKind: "relative"
     })
   })
