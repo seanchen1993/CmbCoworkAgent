@@ -104,7 +104,13 @@ export function getTraceReporter(): ITraceReporter {
 function reportTraceInBackground(trace: AgentTrace): void {
   const reporter = _reporter
   const reportTask = Promise.resolve()
-    .then(() => reporter.report(sanitizeTraceForCloudUpload(trace)))
+    // Rehydrate before sanitising. Deduplication exists to protect the
+    // collection budget and the local file; the cloud copy is bounded by the
+    // sanitiser's own limits instead. And the sanitiser's oversized path
+    // rebuilds model calls and nodes field by field, which would drop the
+    // pointers while keeping the emptied values — the upload would arrive with
+    // blank args and blank text wherever a value had been shared.
+    .then(() => reporter.report(sanitizeTraceForCloudUpload(rehydrateTraceContent(trace))))
     .catch((error) => {
       console.warn("[Tracer] Reporter.report() threw:", error)
     })
@@ -460,13 +466,17 @@ const TRACE_MAX_MODEL_CALLS = 64
  * tokenUsage — so per-call token usage survives a long turn instead of
  * stopping at 64.
  *
- * Four times the full-entry cap rather than more: a skeleton is ~410 bytes,
- * not the ~120 its own fields suggest, because TraceModelCall requires
- * inputMessages, outputMessage and toolCalls to be present even when empty. At
- * 512 that was 209KB and put the maxed-out trace within 14% of the size where
- * the write queue drops it whole.
+ * A skeleton costs ~410 bytes, not the ~120 its own fields suggest, because
+ * TraceModelCall requires inputMessages, outputMessage and toolCalls to be
+ * present even when empty. 512 of them is ~209KB, which puts a maxed-out trace
+ * at ~883KB against the 1MB where the write queue drops it whole — a 12%
+ * margin, deliberately spent to keep per-call usage available for long turns.
+ *
+ * If this ever needs to cover more than 512 calls, do not raise it: a compact
+ * top-level series of [startedAtMs, input, output] costs ~30 bytes a call, so
+ * a thousand calls fit in 30KB instead of the 209KB these skeletons spend.
  */
-const TRACE_MAX_MODEL_CALL_SKELETONS = 256
+const TRACE_MAX_MODEL_CALL_SKELETONS = 512
 const TRACE_MAX_MODEL_MESSAGES = 64
 const TRACE_MAX_NODES = 512
 const TRACE_MAX_SKILLS = 128
@@ -1058,10 +1068,7 @@ export class TraceCollector {
     // Token totals are summed off this array by the dashboard, and per-call
     // usage is worth keeping on its own. Neither a spent budget nor the
     // full-entry cap should cost the entry: they cost its messages.
-    if (
-      this.modelCalls.length >= TRACE_MAX_MODEL_CALLS ||
-      !this.collectionBudget.canAdd(512)
-    ) {
+    if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS || !this.collectionBudget.canAdd(512)) {
       this.modelCalls.push({
         ...(typeof call.messageId === "string"
           ? { messageId: clampText(call.messageId, 128) }
