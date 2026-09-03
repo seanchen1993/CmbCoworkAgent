@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useAppStore } from "@/lib/store"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
 import { cn } from "@/lib/utils"
@@ -44,6 +45,7 @@ import {
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
+const REQUIREMENT_CONTINUATION_MESSAGE = "基于该需求已有资料和历史结论继续沟通。"
 
 type PreviewTab = "expert-process" | "source" | "prd" | "requirement-space"
 
@@ -115,15 +117,11 @@ function isRequirementSpacePublished(manifest: RequirementPrdManifest | null): b
   return manifest?.prd.status.toLowerCase() === "published"
 }
 
-function hasRequirementSpaceManifestData(manifest: RequirementPrdManifest): boolean {
-  return (
-    manifest.prd.name !== "" ||
-    manifest.prd.status !== "" ||
-    manifest.prd.description !== "" ||
-    manifest.prd.file !== "" ||
-    Boolean(manifest.prd.prDetailUrl) ||
-    manifest.functions.length > 0
-  )
+function isRequirementPrdGenerationCompleted(
+  manifest: RequirementPrdManifest | null | undefined
+): boolean {
+  const status = manifest?.prd.status.trim().toLowerCase()
+  return status === "generated" || status === "published"
 }
 
 function buildRequirementMarkdown(requirement: RequirementRecord, sourcePreview: string): string {
@@ -179,6 +177,7 @@ function RequirementConversationSession({
   // ChatContainer treats this stream state as the source of truth for an active turn.
   const streamLoading = useThreadStream(threadId ?? "").isLoading
   const autoQueuedPrdGenerationRef = useRef(false)
+  const continuationMessageThreadIdsRef = useRef(new Set<string>())
   const conversationLoadingObservedRef = useRef(false)
   const publishRequestQueuedRef = useRef(false)
   const [previewTab, setPreviewTab] = useState<PreviewTab>(() => getInitialPreviewTab(requirement))
@@ -264,8 +263,7 @@ function RequirementConversationSession({
   const prdGenerationCompleted =
     isRequirementGenerated(requirement) ||
     isRequirementPublished(requirement) ||
-    requirementSpaceManifest?.prd.status === "generated" ||
-    requirementSpaceManifest?.prd.status === "published"
+    isRequirementPrdGenerationCompleted(requirementSpaceManifest)
   const requirementSpacePublished =
     requirementSpaceManifest !== null
       ? isRequirementSpacePublished(requirementSpaceManifest)
@@ -346,6 +344,7 @@ function RequirementConversationSession({
           { preserveView: true }
         )
         const updated = await attachConversation(item, thread.thread_id)
+        continuationMessageThreadIdsRef.current.add(thread.thread_id)
         setSelectedThreadId(thread.thread_id)
         await onSelectRequirement(updated, thread.thread_id)
       },
@@ -454,7 +453,7 @@ function RequirementConversationSession({
     setManifestLoading(true)
     setManifestError(null)
     try {
-      if (!options?.forceRead && hasRequirementSpaceManifestData(requirement.prdManifest)) {
+      if (!options?.forceRead && isRequirementPrdGenerationCompleted(requirement.prdManifest)) {
         const manifest = requirement.prdManifest
         setRequirementSpaceManifest(manifest)
         if (isRequirementSpacePublished(manifest)) {
@@ -607,6 +606,26 @@ function RequirementConversationSession({
 
   useEffect(() => {
     if (
+      !threadId ||
+      !continuationMessageThreadIdsRef.current.has(threadId) ||
+      !threadState ||
+      threadState.historyLoading
+    ) {
+      return
+    }
+
+    continuationMessageThreadIdsRef.current.delete(threadId)
+    threadState.addQueuedMessage({
+      id: crypto.randomUUID(),
+      text: REQUIREMENT_CONTINUATION_MESSAGE,
+      contextLabel: "requirement-workbench",
+      created_at: new Date(),
+      updated_at: new Date()
+    })
+  }, [threadId, threadState, threadState?.historyLoading])
+
+  useEffect(() => {
+    if (
       !autoGeneratePrd ||
       autoQueuedPrdGenerationRef.current ||
       (isRequirementGenerated(requirement) || isRequirementPublished(requirement)) ||
@@ -656,10 +675,7 @@ function RequirementConversationSession({
     const checkPrdCompletion = async (): Promise<void> => {
       const manifest = await loadRequirementSpaceManifest({ forceRead: true })
       if (cancelled) return
-      if (
-        manifest?.prd.status === "generated" ||
-        manifest?.prd.status === "published"
-      ) {
+      if (isRequirementPrdGenerationCompleted(manifest)) {
         setPreviewTab("prd")
       }
       // Reset publish queue when the conversation ended without a successful publish
@@ -812,27 +828,40 @@ function RequirementConversationSession({
                           : "生成中"}
                     </span>
                   </TabsTrigger>
-                  <TabsTrigger
-                    value="requirement-space"
-                    disabled={!prdGenerationCompleted}
-                    className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
-                  >
-                    需求空间3.0
-                    <span
-                      className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
-                        requirementSpacePublished
-                          ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
-                          : "border-status-info/30 bg-status-info/15 text-status-info"
-                      }`}
-                    >
-                      {requirementSpacePublished ? (
-                        <CheckCircle2 className="size-2.5" />
-                      ) : (
-                        <Loader2 className="size-2.5" />
-                      )}
-                      {requirementSpacePublished ? "已发布" : "未发布"}
-                    </span>
-                  </TabsTrigger>
+                  <TooltipProvider delayDuration={180}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex">
+                          <TabsTrigger
+                            value="requirement-space"
+                            disabled={!prdGenerationCompleted}
+                            className="h-9 gap-1.5 rounded-none border-b-2 border-transparent px-3 text-[12px] font-semibold data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none disabled:cursor-not-allowed disabled:opacity-45"
+                          >
+                            需求空间3.0
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none ${
+                                requirementSpacePublished
+                                  ? "border-status-nominal/30 bg-status-nominal/15 text-status-nominal"
+                                  : "border-status-info/30 bg-status-info/15 text-status-info"
+                              }`}
+                            >
+                              {requirementSpacePublished ? (
+                                <CheckCircle2 className="size-2.5" />
+                              ) : (
+                                <Loader2 className="size-2.5" />
+                              )}
+                              {requirementSpacePublished ? "已发布" : "未发布"}
+                            </span>
+                          </TabsTrigger>
+                        </span>
+                      </TooltipTrigger>
+                      {!prdGenerationCompleted ? (
+                        <TooltipContent side="bottom" className="max-w-64 text-xs leading-relaxed">
+                          需求文档还在生成中，请完成需求梳理后再试。
+                        </TooltipContent>
+                      ) : null}
+                    </Tooltip>
+                  </TooltipProvider>
                 </TabsList>
               </div>
 
@@ -1026,20 +1055,35 @@ function RequirementConversationSession({
                       <div className={"flex justify-between items-center"}>
                         <div className="mt-4 flex flex-wrap items-center gap-2">
                           {!isRequirementSpacePublished(requirementSpaceManifest) ? (
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={publishRequestQueued || conversationLoading}
-                              className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
-                              onClick={handlePublishToRequirementSpace}
-                            >
-                              {publishRequestQueued ? (
-                                <Loader2 className="size-3.5 animate-spin" />
-                              ) : (
-                                <Send className="size-3.5" />
-                              )}
-                              {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
-                            </Button>
+                            <TooltipProvider delayDuration={180}>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="inline-flex">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      disabled={publishRequestQueued || conversationLoading}
+                                      className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
+                                      onClick={handlePublishToRequirementSpace}
+                                    >
+                                      {publishRequestQueued ? (
+                                        <Loader2 className="size-3.5 animate-spin" />
+                                      ) : (
+                                        <Send className="size-3.5" />
+                                      )}
+                                      {publishRequestQueued ? "发布请求已发送" : "发布到需求空间3.0"}
+                                    </Button>
+                                  </span>
+                                </TooltipTrigger>
+                                {publishRequestQueued || conversationLoading ? (
+                                  <TooltipContent side="top" className="max-w-56 text-xs leading-relaxed">
+                                    {publishRequestQueued
+                                      ? "发布请求已提交，请稍候。"
+                                      : "当前正在处理需求，请稍候再发布。"}
+                                  </TooltipContent>
+                                ) : null}
+                              </Tooltip>
+                            </TooltipProvider>
                           ) : null}
                           {requirementSpaceManifest.prd.prDetailUrl ? (
                             <button
@@ -1057,21 +1101,36 @@ function RequirementConversationSession({
                           ) : null}
                         </div>
                         {!isRequirementSpacePublished(requirementSpaceManifest) ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={conversationLoading || tokenSaving}
-                            className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
-                            onClick={() => void handleSendLeanstarToken()}
-                          >
-                            {tokenSaving ? (
-                              <Loader2 className="size-3.5 animate-spin" />
-                            ) : (
-                              <KeyRound className="size-3.5" />
-                            )}
-                            {hasStoredToken ? "发送Token身份令牌" : "获取Token身份令牌"}
-                          </Button>
+                          <TooltipProvider delayDuration={180}>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="inline-flex">
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={conversationLoading || tokenSaving}
+                                    className="h-8 gap-1.5 rounded-[7px] px-3 text-sm"
+                                    onClick={() => void handleSendLeanstarToken()}
+                                  >
+                                    {tokenSaving ? (
+                                      <Loader2 className="size-3.5 animate-spin" />
+                                    ) : (
+                                      <KeyRound className="size-3.5" />
+                                    )}
+                                    {hasStoredToken ? "发送Token身份令牌" : "获取Token身份令牌"}
+                                  </Button>
+                                </span>
+                              </TooltipTrigger>
+                              {conversationLoading || tokenSaving ? (
+                                  <TooltipContent side="top" className="max-w-56 text-xs leading-relaxed">
+                                  {tokenSaving
+                                    ? "身份验证正在处理中，请稍候。"
+                                    : "当前正在处理需求，请稍候再进行身份验证。"}
+                                </TooltipContent>
+                              ) : null}
+                            </Tooltip>
+                          </TooltipProvider>
                         ) : null}
                       </div>
                     </section>

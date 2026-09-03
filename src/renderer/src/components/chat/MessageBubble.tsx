@@ -63,6 +63,31 @@ function parseUserVisibleSkillContent(content: string): {
   return { visibleText: legacy.text, skillName: legacy.skillName }
 }
 
+function UserMessageContent({
+  text,
+  skillName,
+  showRequirementWorkbenchBadge
+}: {
+  text: string
+  skillName: string | null
+  showRequirementWorkbenchBadge: boolean
+}): React.JSX.Element {
+  return (
+    <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
+      {showRequirementWorkbenchBadge && (
+        <span className="mb-1 mr-1.5 text-sm  inline-flex items-center gap-1 align-middle font-bold text-emerald-600 dark:text-emerald-400">
+          <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
+            <Sparkles className="size-3.5" />
+          </span>
+          需求工作台
+        </span>
+      )}
+      {skillName && <SkillChip label={skillName} compact className="mr-2" />}
+      {text}
+    </div>
+  )
+}
+
 function parseGoalUserSetMessage(text: string): {
   objective: string
   attachments: string | null
@@ -813,18 +838,11 @@ function MessageBubbleImpl({
         // by still rendering the chip with an empty tail.
         const { visibleText, skillName } = parseUserVisibleSkillContent(displayContent)
         return (
-          <div className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]">
-            {isRequirementWorkbenchMessage && (
-              <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-medium text-emerald-600 dark:text-emerald-400">
-                <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
-                  <Sparkles className="size-3.5" />
-                </span>
-                需求工作台
-              </span>
-            )}
-            {skillName && <SkillChip label={skillName} compact className="mr-2" />}
-            {visibleText}
-          </div>
+          <UserMessageContent
+            text={visibleText}
+            skillName={skillName}
+            showRequirementWorkbenchBadge={isRequirementWorkbenchMessage}
+          />
         )
       }
       return <StreamingMarkdown isStreaming={isStreaming}>{displayContent}</StreamingMarkdown>
@@ -841,21 +859,12 @@ function MessageBubbleImpl({
           if (isUser) {
             const { visibleText, skillName } = parseUserVisibleSkillContent(displayText)
             return (
-              <div
+              <UserMessageContent
                 key={index}
-                className="whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/95 [overflow-wrap:anywhere]"
-              >
-                {isRequirementWorkbenchMessage && (
-                  <span className="mr-1.5 inline-flex items-center gap-1 align-middle font-medium text-emerald-600 dark:text-emerald-400">
-                    <span className="inline-flex size-5 items-center justify-center rounded-md bg-lime-200/80 text-emerald-700 dark:bg-lime-300/20 dark:text-lime-300">
-                      <Sparkles className="size-3.5" />
-                    </span>
-                    需求工作台
-                  </span>
-                )}
-                {skillName && <SkillChip label={skillName} compact className="mr-2" />}
-                {visibleText}
-              </div>
+                text={visibleText}
+                skillName={skillName}
+                showRequirementWorkbenchBadge={isRequirementWorkbenchMessage}
+              />
             )
           }
           return (
