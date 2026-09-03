@@ -403,6 +403,17 @@ function buildSkillAuthorByRawName(
   return result
 }
 
+/** Whether a recorded tool input carries anything beyond "no arguments yet". */
+function hasToolNodeInput(input: unknown): boolean {
+  if (input === undefined || input === null) return false
+  if (typeof input === "object" && !Array.isArray(input)) {
+    return Object.keys(input as Record<string, unknown>).length > 0
+  }
+  if (Array.isArray(input)) return input.length > 0
+  if (typeof input === "string") return input.trim().length > 0
+  return true
+}
+
 // ─────────────────────────────────────────────────────────
 // TraceCollector class
 // ─────────────────────────────────────────────────────────
@@ -1270,7 +1281,10 @@ export class TraceCollector {
   }): string {
     if (params.toolCallId) {
       const existing = this.toolNodeByCallId.get(params.toolCallId)
-      if (existing) return existing
+      if (existing) {
+        this.completeToolNode(existing, params)
+        return existing
+      }
     }
 
     const byMessage = params.llmMessageId
@@ -1300,6 +1314,33 @@ export class TraceCollector {
 
     if (params.toolCallId && stored) this.toolNodeByCallId.set(params.toolCallId, id)
     return id
+  }
+
+  /**
+   * A tool call first seen mid-stream carries `args: {}` because its arguments
+   * are still arriving, and the first observation is the one that wins the
+   * node. Let a later, complete observation of the same call fill in what the
+   * first one could not — otherwise the trace shows every tool with an empty
+   * input.
+   */
+  private completeToolNode(nodeId: string, params: { name: string; input?: unknown }): void {
+    const node = this.getNode(nodeId)
+    if (!node) return
+    if ((!node.name || node.name === "unknown") && params.name && params.name !== "unknown") {
+      node.name = clampText(params.name, 512)
+    }
+    // A node that already carries an input — inline or interned — is complete.
+    if (node.inputRef || hasToolNodeInput(node.input)) return
+    if (!hasToolNodeInput(params.input)) return
+    const bounded = this.collectionBudget.takeValue(params.input, 32 * 1024)
+    if (bounded === undefined) return
+    const ref = this.internNodeValue(bounded)
+    if (ref) {
+      node.inputRef = ref
+      delete node.input
+      return
+    }
+    node.input = bounded
   }
 
   addToolResultNode(params: {

@@ -3,6 +3,7 @@ import { flushStrict, upsertThreadMessages } from "../db"
 import { StreamConverter, type SchedulerEvent } from "./stream-converter"
 import type { TraceCollector } from "./trace/collector"
 import { TurnAttributionRecorder } from "./turn-attribution"
+import { TurnTraceRecorder } from "./trace/turn-trace-recorder"
 
 export type StandardTurnStreamSink = (event: SchedulerEvent) => void
 
@@ -44,10 +45,12 @@ export function persistStandardTurnUserMessage(input: {
 }
 
 export interface StandardTurnStreamOptions {
-  /** Anchors skill attribution to this turn inside a whole-thread snapshot. */
+  /** Anchors attribution and trace recording to this turn in a whole-thread snapshot. */
   userMessageId?: string
   /** Injectable for tests; built from threadId + trace when omitted. */
   attribution?: TurnAttributionRecorder
+  /** Injectable for tests; built from trace when omitted. */
+  traceRecorder?: TurnTraceRecorder
 }
 
 export class StandardTurnStreamConsumer {
@@ -61,11 +64,18 @@ export class StandardTurnStreamConsumer {
    * generations to the skills that produced them.
    */
   private readonly attribution?: TurnAttributionRecorder
+  /**
+   * Model calls, token usage and the assistant side of the conversation are
+   * recorded here for the same reason: the converted events carry neither
+   * `usage_metadata` nor `response_metadata`, so a turn recorded off them
+   * reports as having used no model at all.
+   */
+  private readonly traceRecorder?: TurnTraceRecorder
 
   constructor(
     private readonly threadId: string,
     private readonly sink?: StandardTurnStreamSink,
-    private readonly trace?: TraceCollector,
+    trace?: TraceCollector,
     options: StandardTurnStreamOptions = {}
   ) {
     this.attribution =
@@ -73,6 +83,14 @@ export class StandardTurnStreamConsumer {
       (trace
         ? new TurnAttributionRecorder({
             threadId,
+            tracer: trace,
+            ...(options.userMessageId ? { userMessageId: options.userMessageId } : {})
+          })
+        : undefined)
+    this.traceRecorder =
+      options.traceRecorder ??
+      (trace
+        ? new TurnTraceRecorder({
             tracer: trace,
             ...(options.userMessageId ? { userMessageId: options.userMessageId } : {})
           })
@@ -98,6 +116,7 @@ export class StandardTurnStreamConsumer {
       const [mode, data] = chunk as [string, unknown]
       const serialized = JSON.parse(JSON.stringify(data)) as unknown
       this.attribution?.onStreamChunk(mode, serialized)
+      this.traceRecorder?.onStreamChunk(mode, serialized)
       for (const event of this.converter.processChunk(mode, serialized)) {
         this.observe(event)
         this.sink?.(event)
@@ -110,26 +129,17 @@ export class StandardTurnStreamConsumer {
   }
 
   private observe(event: SchedulerEvent): void {
+    // Tool nodes and their results are recorded by traceRecorder off the values
+    // snapshots: a streamed delta can still carry `args: {}`, and the LLM node
+    // a tool call belongs under does not exist yet at delta time. Only the
+    // tool-name summary is collected here.
     if (event.type === "message-delta" && Array.isArray(event.toolCalls)) {
-      for (const call of event.toolCalls as Array<{ id?: string; name?: string; args?: unknown }>) {
-        if (!call.name) continue
-        this.toolNames.add(call.name)
-        this.trace?.addToolNode({
-          name: call.name,
-          input: call.args,
-          llmMessageId: event.id,
-          toolCallId: call.id
-        })
+      for (const call of event.toolCalls as Array<{ name?: string }>) {
+        if (call.name) this.toolNames.add(call.name)
       }
     }
     if (event.type === "tool-message") {
       if (event.name) this.toolNames.add(event.name)
-      this.trace?.addToolResultNode({
-        toolCallId: event.toolCallId,
-        output: event.content,
-        status: event.isError ? "error" : "success",
-        metadata: { messageId: event.id }
-      })
       return
     }
     if (event.type !== "full-messages") return
