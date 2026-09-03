@@ -276,12 +276,6 @@ function SummaryComparison({
       sample: "defectDensity"
     },
     {
-      label: "平均千行代码缺陷率",
-      hint: "千行代码缺陷率 = CMBDevClaw 开发项目的缺陷数之和 × 1000 ÷ 累计已 Push 采纳行数之和。",
-      read: (group) => group.defectRatePerKloc,
-      sample: "defectRate"
-    },
-    {
       label: "平均发起 ST 耗时",
       hint: "ST 发起时间 - 立项时间",
       read: (group) => group.avgTestLeadDays,
@@ -564,7 +558,6 @@ function ProjectRow({ item }: { item: ProjectMetricProjectItem }): React.JSX.Ele
       <td className="px-3 py-2 text-right tabular-nums">
         {formatMetric(item.defectDensityPer100Fp)}
       </td>
-      <td className="px-3 py-2 text-right tabular-nums">{formatMetric(item.defectRatePerKloc)}</td>
       <td className="px-3 py-2 text-right tabular-nums">
         <ProjectDateMetric
           value={item.testLeadDays}
@@ -941,7 +934,7 @@ export function ProjectMetricsSection({
         ) : null}
 
         <div className="mt-3 overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[1580px] table-fixed text-xs">
+          <table className="w-full min-w-[1455px] table-fixed text-xs">
             <colgroup>
               <col className="w-[250px]" />
               <col className="w-[190px]" />
@@ -949,7 +942,6 @@ export function ProjectMetricsSection({
               <col className="w-[90px]" />
               <col className="w-[90px]" />
               <col className="w-[105px]" />
-              <col className="w-[125px]" />
               <col className="w-[120px]" />
               <col className="w-[125px]" />
               <col className="w-[155px]" />
@@ -976,7 +968,6 @@ export function ProjectMetricsSection({
                   onSort={cycleSort}
                 />
                 <th className="px-3 py-2 text-right font-medium">缺陷密度</th>
-                <th className="px-3 py-2 text-right font-medium">千行代码缺陷率</th>
                 <th className="px-3 py-2 text-right font-medium">发起 ST 耗时</th>
                 <SortableProjectMetricTh
                   label="特性上线耗时"
