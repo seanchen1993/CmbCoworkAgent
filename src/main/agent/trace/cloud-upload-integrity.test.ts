@@ -115,9 +115,11 @@ describe("cloud upload integrity", () => {
       expect(uploaded.totalModelCalls).toBe(turns)
       // HARD_TRACE_BYTES (96KB) triggers the summarising pass, it does not cap
       // the result: the summary still carries every model call, node and step,
-      // so a maxed-out turn uploads ~380KB. Pinned so a change in the entry
-      // caps shows up here rather than on the network.
-      expect(Buffer.byteLength(JSON.stringify(uploaded), "utf8")).toBeLessThan(420 * 1024)
+      // so a maxed-out turn uploads ~440KB — more since the tail reserve, which
+      // trades size for the end of a long turn being readable. Pinned so a
+      // change in the caps or the reserve shows up here rather than on the
+      // network, where the reporter's 10s timeout is the thing that notices.
+      expect(Buffer.byteLength(JSON.stringify(uploaded), "utf8")).toBeLessThan(480 * 1024)
     }
   }, 60_000)
 

@@ -74,6 +74,13 @@ export function truncateKeepingEnds(value: string, maxChars: number): string {
   )
 }
 
+/**
+ * Share of the collection pool reserved for the end of a turn. A quarter keeps
+ * the head long enough to show how the work started while still covering the
+ * last few steps, which is where the answer usually is.
+ */
+export const TRACE_TAIL_RESERVE_RATIO = 0.25
+
 export const TRACE_COLLECTION_MAX_BYTES = 512 * 1024
 export const TRACE_PERSISTED_MAX_BYTES = 1024 * 1024
 
@@ -246,11 +253,20 @@ export function clampText(value: string, maxChars: number): string {
 export class TraceCollectionBudget {
   private remainingBytes: number
 
+  /**
+   * Bytes held back for whatever turns out to be the end of the turn. Taken out
+   * of the same pool, not added to it: the trace's size ceiling is unchanged,
+   * the spend is just no longer entirely front-loaded.
+   */
+  readonly tailReserveBytes: number
+
   constructor(maxBytes = TRACE_COLLECTION_MAX_BYTES) {
     // Leave room for the fixed field names and punctuation that wrap the
     // budgeted containers. Top-level scalars are not funded from here — they
     // use clampText and are bounded by their own nature.
-    this.remainingBytes = Math.max(0, maxBytes - 32 * 1024)
+    const pool = Math.max(0, maxBytes - 32 * 1024)
+    this.tailReserveBytes = Math.floor(pool * TRACE_TAIL_RESERVE_RATIO)
+    this.remainingBytes = pool - this.tailReserveBytes
   }
 
   get remaining(): number {
@@ -284,6 +300,13 @@ export class TraceCollectionBudget {
   }
 
   takeValue(value: unknown, maxBytes: number): unknown {
+    // Same rule as takeText: a drained budget must not turn a whole value into
+    // the "[trace budget exhausted]" placeholder. boundTelemetryValue emits
+    // that marker to show where a nested value was cut, which is useful inside
+    // a structure and actively wrong as the value itself — a node output that
+    // became the marker rendered as the model's reply on the trace detail page.
+    // Absent is the honest answer; the caller's own optional handling takes over.
+    if (this.remainingBytes <= 0) return undefined
     const result = boundTelemetryValue(value, {
       maxBytes: Math.min(this.remainingBytes, maxBytes)
     })
