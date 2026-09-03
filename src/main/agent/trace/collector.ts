@@ -72,7 +72,7 @@ import {
   type TraceKeyProtector,
   type TraceStorageInitializationResult
 } from "./local-storage"
-import { TraceContentInterner, makeContentRef, rehydrateTraceContent } from "./content-refs"
+import { TraceContentInterner, rehydrateTraceContent } from "./content-refs"
 import {
   TRACE_COLLECTION_MAX_BYTES,
   TRACE_PERSISTED_MAX_BYTES,
@@ -510,6 +510,25 @@ function isChatMessageArray(value: unknown): value is TraceChatMessage[] {
   )
 }
 
+const COUNTABLE_NODE_METADATA_KEYS = [
+  "toolCallId",
+  "messageId",
+  "toolCallCount",
+  "toolNames",
+  "index"
+] as const
+
+function pickCountableMetadata(
+  metadata: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!metadata) return undefined
+  const picked: Record<string, unknown> = {}
+  for (const key of COUNTABLE_NODE_METADATA_KEYS) {
+    if (metadata[key] !== undefined) picked[key] = metadata[key]
+  }
+  return Object.keys(picked).length > 0 ? picked : undefined
+}
+
 function boundTraceChatMessage(
   message: TraceChatMessage,
   budget: TraceCollectionBudget
@@ -647,6 +666,17 @@ export class TraceCollector {
   private currentStepStartedAt: string = nowIsoLocal()
   private currentToolCalls: TraceToolCall[] = []
   private recordedToolCallCount = 0
+
+  /**
+   * Counted as work arrives, independent of every array. The arrays stop at
+   * their TRACE_MAX_* caps; the turn does not, and these totals are what the
+   * operations dashboard aggregates.
+   */
+  private observedToolCallCount = 0
+  private observedModelCallCount = 0
+  private observedInputTokens = 0
+  private observedOutputTokens = 0
+  private observedTotalTokens = 0
 
   constructor(
     threadId: string,
@@ -873,6 +903,7 @@ export class TraceCollector {
 
   /** Record a tool call within the current step. */
   recordToolCall(call: TraceToolCall): void {
+    this.observedToolCallCount += 1
     // The count caps are hard: past them the array itself must stop growing.
     if (
       this.recordedToolCallCount >= TRACE_MAX_TOOL_CALLS ||
@@ -917,7 +948,13 @@ export class TraceCollector {
       if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return sum
       return sum + Math.floor(count)
     }, 0)
-    return Math.max(stepToolCalls, nodeToolCalls, metadataToolCalls, metadataToolCallCounts)
+    return Math.max(
+      this.observedToolCallCount,
+      stepToolCalls,
+      nodeToolCalls,
+      metadataToolCalls,
+      metadataToolCallCounts
+    )
   }
 
   /**
@@ -966,11 +1003,15 @@ export class TraceCollector {
     return output
   }
 
-  /** Node input/output/metadata values, which are untyped and often duplicates. */
-  private internNodeValue(value: unknown): unknown {
+  /**
+   * Node input/output/metadata values, which are untyped and often duplicates.
+   * Returns the id to store in a sibling `*Ref` field when the value is a
+   * repeat, or undefined when this copy is the one keeping the bytes.
+   */
+  private internNodeValue(value: unknown): string | undefined {
     const claim = this.internValue(value)
-    if (!claim) return value
-    return "mid" in claim ? value : makeContentRef(claim.ref)
+    if (!claim || "mid" in claim) return undefined
+    return claim.ref
   }
 
   /**
@@ -992,6 +1033,15 @@ export class TraceCollector {
 
   /** Record one LLM run (input context + output message). */
   recordModelCall(call: TraceModelCall): void {
+    this.observedModelCallCount += 1
+    const usage = call.tokenUsage
+    if (usage) {
+      const input = usage.inputTokens ?? 0
+      const output = usage.outputTokens ?? 0
+      this.observedInputTokens += input
+      this.observedOutputTokens += output
+      this.observedTotalTokens += usage.totalTokens ?? input + output
+    }
     if (this.modelCalls.length >= TRACE_MAX_MODEL_CALLS) return
     // Token totals are summed off this array by the dashboard, so a spent
     // budget must cost the messages, not the entry: keep timing and usage.
@@ -1164,14 +1214,23 @@ export class TraceCollector {
     node.status = params.status ?? "success"
     node.endedAt = params.endedAt ?? nowIsoLocal()
     if (params.output !== undefined) {
-      node.output = this.internNodeValue(this.collectionBudget.takeValue(params.output, 32 * 1024))
+      const bounded = this.collectionBudget.takeValue(params.output, 32 * 1024)
+      const ref = this.internNodeValue(bounded)
+      if (ref) {
+        node.output = undefined
+        node.outputRef = ref
+      } else {
+        node.output = bounded
+      }
     }
     if (params.metadata) {
       const metadata = this.collectionBudget.takeValue(params.metadata, 32 * 1024)
       if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
         const interned: Record<string, unknown> = {}
         for (const [key, value] of Object.entries(metadata as Record<string, unknown>)) {
-          interned[key] = this.internNodeValue(value)
+          const ref = this.internNodeValue(value)
+          if (ref) interned[`${key}Ref`] = ref
+          else interned[key] = value
         }
         node.metadata = { ...(node.metadata ?? {}), ...interned }
       }
@@ -1395,6 +1454,11 @@ export class TraceCollector {
       // Flattened for dashboard aggregation — `sum` cannot reach into the
       // per-call array above.
       ...summarizeTraceCacheTokens(this.modelCalls),
+      // Counted as the turn ran, so these stay right past TRACE_MAX_MODEL_CALLS.
+      totalInputTokens: this.observedInputTokens,
+      totalOutputTokens: this.observedOutputTokens,
+      totalTokens: this.observedTotalTokens,
+      totalModelCalls: this.observedModelCallCount,
       nodes: this.finalizeNodes(
         outcome,
         endedAt,
@@ -1566,6 +1630,10 @@ export class TraceCollector {
     return this.nodes
   }
 
+  /**
+   * Structural and countable metadata only: the tool/result pairing key, the
+   * llm message id, and the per-node tool counts getTotalToolCalls reads.
+   */
   private pushNode(node: TraceNode): boolean {
     if (this.nodes.length >= TRACE_MAX_NODES) return false
     // Structure is what makes the tree readable and countable; only the payload
@@ -1580,7 +1648,10 @@ export class TraceCollector {
         ...(node.endedAt ? { endedAt: clampText(node.endedAt, 64) } : {}),
         input: undefined,
         output: undefined,
-        metadata: undefined,
+        // Payload goes, but these keys are how the tree pairs a tool with its
+        // result and how getTotalToolCalls counts — dropping them would undo
+        // the very thing the skeleton exists to preserve.
+        metadata: pickCountableMetadata(node.metadata),
         truncated: true
       }
       const skeletonIndex = this.nodes.push(skeleton) - 1
@@ -1588,6 +1659,12 @@ export class TraceCollector {
       return true
     }
     const metadata = this.collectionBudget.takeValue(node.metadata, 32 * 1024)
+    const rawInput =
+      node.input !== undefined && !isChatMessageArray(node.input)
+        ? this.collectionBudget.takeValue(node.input, 32 * 1024)
+        : undefined
+    const boundedInputRef = rawInput !== undefined ? this.internNodeValue(rawInput) : undefined
+    const boundedInput = boundedInputRef ? undefined : rawInput
     const boundedNode: TraceNode = {
       ...node,
       // Structure (ids, parent links, timestamps) stays out of the budget:
@@ -1610,9 +1687,10 @@ export class TraceCollector {
         ? {
             input: isChatMessageArray(node.input)
               ? this.collectionBudget.takeValue(node.input, 32 * 1024)
-              : this.internNodeValue(this.collectionBudget.takeValue(node.input, 32 * 1024))
+              : boundedInput
           }
         : {}),
+      ...(boundedInputRef ? { inputRef: boundedInputRef } : {}),
       ...(node.output !== undefined
         ? { output: this.collectionBudget.takeValue(node.output, 32 * 1024) }
         : {}),

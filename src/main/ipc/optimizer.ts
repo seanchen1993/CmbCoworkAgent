@@ -61,11 +61,26 @@ function notifyRenderer(channel: string, payload?: unknown): void {
  * Sum token usage across all model calls in a trace.
  * Returns zeros when modelCalls is absent or empty.
  */
-function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+/**
+ * Prefer the totals the collector counted as the turn ran. Summing modelCalls
+ * understates any turn that went past TRACE_MAX_MODEL_CALLS, and the array is
+ * still the only source for traces recorded before those fields existed.
+ */
+function summarizeTraceTokenUsage(
+  trace: Pick<AgentTrace, "modelCalls" | "totalInputTokens" | "totalOutputTokens" | "totalTokens">
+): {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
 } {
+  if (typeof trace.totalTokens === "number" || typeof trace.totalInputTokens === "number") {
+    return {
+      totalInputTokens: trace.totalInputTokens ?? 0,
+      totalOutputTokens: trace.totalOutputTokens ?? 0,
+      totalTokens: trace.totalTokens ?? 0
+    }
+  }
+  const modelCalls = trace.modelCalls
   if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
     return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
   }
@@ -493,9 +508,7 @@ export function registerOptimizerHandlers(ipcMain: IpcMain): void {
         : readRecentTraces(opts?.limit ?? 20))
 
       return traces.map((trace) => {
-        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(
-          trace.modelCalls
-        )
+        const { totalInputTokens, totalOutputTokens, totalTokens } = summarizeTraceTokenUsage(trace)
         return {
           traceId: trace.traceId,
           threadId: trace.threadId,

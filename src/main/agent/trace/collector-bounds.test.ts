@@ -130,9 +130,9 @@ describe("bounded trace telemetry", () => {
     const tracer = new TraceCollector("thread-skeleton", "hi", "model", {
       includeSkillEval: false
     })
-    // Under every TRACE_MAX_* cap, so this isolates the byte-budget behaviour:
-    // the caps are a separate, still-hard limit.
-    const TURNS = 60
+    // Deliberately past TRACE_MAX_MODEL_CALLS (64) and TRACE_MAX_STEPS (128):
+    // the arrays stop there, the counters must not.
+    const TURNS = 300
     for (let i = 0; i < TURNS; i += 1) {
       const messageId = `m-${i}`
       const blob = `${i}-` + "a".repeat(8 * 1024)
@@ -155,14 +155,15 @@ describe("bounded trace telemetry", () => {
     // The budget runs out long before 120 turns. Dropping the entries outright
     // used to take the counts with them, understating exactly the longest turns
     // — and the dashboard sums tool counts and tokens off these arrays.
+    // Counted as the turn ran, so the caps on the arrays do not reach them.
     expect(trace.totalToolCalls).toBe(TURNS)
-    expect(trace.steps).toHaveLength(TURNS)
-    expect(trace.modelCalls).toHaveLength(TURNS)
-    const tokens = (trace.modelCalls ?? []).reduce(
-      (sum, call) => sum + (call.tokenUsage?.inputTokens ?? 0),
-      0
-    )
-    expect(tokens).toBe(TURNS * 1000)
+    expect(trace.totalModelCalls).toBe(TURNS)
+    expect(trace.totalInputTokens).toBe(TURNS * 1000)
+    expect(trace.totalOutputTokens).toBe(TURNS * 50)
+    expect(trace.totalTokens).toBe(TURNS * 1050)
+    // The arrays themselves still stop at their caps.
+    expect(trace.modelCalls?.length).toBeLessThanOrEqual(64)
+    expect(trace.steps.length).toBeLessThanOrEqual(128)
 
     // Skeletons carry shape, not payload.
     const skeletons = (trace.modelCalls ?? []).filter((call) => call.truncated)

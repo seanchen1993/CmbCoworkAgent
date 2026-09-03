@@ -93,11 +93,17 @@ describe("trace content refs", () => {
     expect(call.outputMessage.contentRef).toEqual(expect.any(String))
     expect(call.outputMessage.content).toBe("")
 
+    // Refs are sibling strings, never an object dropped where a string used to
+    // be: the server ingests this into Elasticsearch, and changing a value's
+    // type at an existing path risks a mapping conflict that rejects the doc.
     const llmNode = (trace.nodes ?? []).find((node) => node.type === "llm")
-    expect(llmNode?.output).toHaveProperty("__traceRef")
-    expect(llmNode?.metadata?.reasoning).toHaveProperty("__traceRef")
+    expect(llmNode?.output).toBeUndefined()
+    expect(typeof llmNode?.outputRef).toBe("string")
+    expect(llmNode?.metadata?.reasoning).toBeUndefined()
+    expect(typeof llmNode?.metadata?.reasoningRef).toBe("string")
     const toolNode = (trace.nodes ?? []).find((node) => node.type === "tool")
-    expect(toolNode?.input).toHaveProperty("__traceRef")
+    expect(toolNode?.input).toBeUndefined()
+    expect(typeof toolNode?.inputRef).toBe("string")
   })
 
   it("restores every value, and no read path leaks a ref", async () => {
@@ -118,8 +124,8 @@ describe("trace content refs", () => {
       }
       if (node.type === "tool") expect(node.input).toEqual(ARGS)
     }
-    expect(JSON.stringify(whole)).not.toContain("__traceRef")
-    expect(JSON.stringify(buildTraceTree(trace))).not.toContain("__traceRef")
+    expect(JSON.stringify(whole)).not.toContain('Ref":')
+    expect(JSON.stringify(buildTraceTree(trace))).not.toContain('Ref":')
   })
 
   it("rehydration is idempotent and leaves ref-free traces alone", async () => {

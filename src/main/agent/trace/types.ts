@@ -128,7 +128,19 @@ export interface TraceNode {
   startedAt: string
   endedAt?: string
   input?: unknown
+  /**
+   * `input` is omitted; its value lives under this id elsewhere in the trace.
+   *
+   * A sibling string rather than a marker object inside `input`: the upload is
+   * ingested into Elasticsearch by the server, and putting an object where a
+   * string had been indexed risks a mapping conflict that rejects the whole
+   * document. A new field of its own can never collide.
+   */
+  inputRef?: string
   output?: unknown
+  /** `output` is omitted; its value lives under this id. Same reasoning as inputRef. */
+  outputRef?: string
+  /** Metadata values are interned as a sibling `<key>Ref` string, for the same reason. */
   metadata?: Record<string, unknown>
   /** Recorded after the byte budget was spent: structure kept, payload dropped. */
   truncated?: boolean
@@ -535,6 +547,18 @@ export interface AgentTrace {
    * LangChain adapters fold cache counts into `input_tokens`.
    */
   cacheReadTokens?: number
+  /**
+   * Σ token usage across every model call the turn actually made, counted as
+   * calls arrive rather than summed from `modelCalls`. That array stops at
+   * TRACE_MAX_MODEL_CALLS, so summing it understates long turns by exactly the
+   * amount that makes them interesting. Flattened for the same reason
+   * cacheReadTokens is: a `sum` agg cannot reach into a nested array.
+   */
+  totalInputTokens?: number
+  totalOutputTokens?: number
+  totalTokens?: number
+  /** Model calls the turn made, including any past TRACE_MAX_MODEL_CALLS. */
+  totalModelCalls?: number
   /** Unified LangSmith-style run tree nodes */
   nodes?: TraceNode[]
   /** Total number of tool calls across all steps */

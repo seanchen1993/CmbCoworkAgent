@@ -18,30 +18,11 @@ import type { AgentTrace, TraceChatMessage, TraceNode, TraceToolCall } from "./t
  * Refs resolve only within one trace, and every read path rehydrates before
  * anything downstream sees a trace.
  */
-export const TRACE_REF_KEY = "__traceRef"
-
-export interface TraceContentRef {
-  [TRACE_REF_KEY]: string
-}
-
 /** Below this a ref costs more than the bytes it saves. */
 const MIN_INTERNED_CHARS = 64
 
 function digest(kind: string, text: string): string {
   return createHash("sha1").update(`${kind} ${text}`).digest("hex").slice(0, 16)
-}
-
-export function makeContentRef(id: string): TraceContentRef {
-  return { [TRACE_REF_KEY]: id }
-}
-
-export function isContentRef(value: unknown): value is TraceContentRef {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    typeof (value as TraceContentRef)[TRACE_REF_KEY] === "string"
-  )
 }
 
 /**
@@ -76,6 +57,22 @@ export class TraceContentInterner {
 }
 
 type ContentIndex = Map<string, unknown>
+
+/**
+ * Rehydration restores the values, so the ids and pointers have done their job.
+ * Strip them: a consumer should get back the shape it would have seen if the
+ * trace had never been deduplicated, and a stray pointer is exactly the kind of
+ * thing that reads as data to a dashboard.
+ */
+function stripRefFields<T extends object>(value: T): T {
+  const next = { ...value } as Record<string, unknown>
+  for (const key of Object.keys(next)) {
+    if (key.endsWith("Ref") || key.endsWith("Mid") || key === "ref" || key === "mid") {
+      delete next[key]
+    }
+  }
+  return next as T
+}
 
 function indexToolCalls(calls: readonly TraceToolCall[] | undefined, index: ContentIndex): void {
   for (const call of calls ?? []) {
@@ -116,27 +113,21 @@ function buildContentIndex(trace: AgentTrace): ContentIndex {
   return index
 }
 
-/** Resolve one possibly-ref'd value. A dangling id yields undefined, never junk. */
-function resolveValue(value: unknown, index: ContentIndex): unknown {
-  if (!isContentRef(value)) return value
-  return index.get(value[TRACE_REF_KEY])
-}
-
 function rehydrateToolCalls(
   calls: TraceToolCall[] | undefined,
   index: ContentIndex
 ): TraceToolCall[] | undefined {
   if (!calls) return calls
   return calls.map((call) => {
-    if (typeof call.argsRef !== "string") return call
+    if (typeof call.argsRef !== "string") return stripRefFields(call)
     const args = index.get(call.argsRef)
-    return {
+    return stripRefFields({
       ...call,
       args:
         args && typeof args === "object" && !Array.isArray(args)
           ? (args as Record<string, unknown>)
           : {}
-    }
+    })
   })
 }
 
@@ -157,13 +148,19 @@ function rehydrateMessage(message: TraceChatMessage, index: ContentIndex): Trace
     const text = index.get(output.reasoningRef)
     output = typeof text === "string" ? { ...output, reasoning: text } : output
   }
-  return output
+  return stripRefFields(output)
 }
 
 function rehydrateNode(node: TraceNode, index: ContentIndex): TraceNode {
   const next: TraceNode = { ...node }
-  if (isContentRef(next.input)) next.input = resolveValue(next.input, index)
-  if (isContentRef(next.output)) next.output = resolveValue(next.output, index)
+  if (typeof next.inputRef === "string") {
+    next.input = index.get(next.inputRef)
+    delete next.inputRef
+  }
+  if (typeof next.outputRef === "string") {
+    next.output = index.get(next.outputRef)
+    delete next.outputRef
+  }
   if (Array.isArray(next.input)) {
     next.input = next.input.map((item) =>
       item && typeof item === "object" ? rehydrateMessage(item as TraceChatMessage, index) : item
@@ -173,8 +170,10 @@ function rehydrateNode(node: TraceNode, index: ContentIndex): TraceNode {
     let changed = false
     const metadata: Record<string, unknown> = {}
     for (const [key, value] of Object.entries(next.metadata)) {
-      if (isContentRef(value)) {
-        metadata[key] = resolveValue(value, index)
+      // Interned metadata lives under "<key>Ref" as a string, so restoring it
+      // means putting the original key back and dropping the pointer.
+      if (key.endsWith("Ref") && typeof value === "string" && index.has(value)) {
+        metadata[key.slice(0, -3)] = index.get(value)
         changed = true
       } else {
         metadata[key] = value
@@ -195,10 +194,12 @@ export function rehydrateTraceContent<T extends AgentTrace>(trace: T): T {
   if (index.size === 0) return trace
 
   const next = { ...trace }
-  next.steps = (trace.steps ?? []).map((step) => ({
-    ...step,
-    toolCalls: rehydrateToolCalls(step.toolCalls, index) ?? []
-  }))
+  next.steps = (trace.steps ?? []).map((step) =>
+    stripRefFields({
+      ...step,
+      toolCalls: rehydrateToolCalls(step.toolCalls, index) ?? []
+    })
+  )
   if (trace.modelCalls) {
     next.modelCalls = trace.modelCalls.map((call) => ({
       ...call,

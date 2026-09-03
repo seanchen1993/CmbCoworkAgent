@@ -2362,11 +2362,26 @@ function codeSkillAdoptionBucketAggs(
   }
 }
 
-function summarizeTraceTokenUsage(modelCalls: AgentTrace["modelCalls"]): {
+/**
+ * Prefer the totals the collector counted as the turn ran. Summing modelCalls
+ * understates any turn that went past TRACE_MAX_MODEL_CALLS, and the array is
+ * still the only source for traces recorded before those fields existed.
+ */
+function summarizeTraceTokenUsage(
+  trace: Pick<AgentTrace, "modelCalls" | "totalInputTokens" | "totalOutputTokens" | "totalTokens">
+): {
   totalInputTokens: number
   totalOutputTokens: number
   totalTokens: number
 } {
+  if (typeof trace.totalTokens === "number" || typeof trace.totalInputTokens === "number") {
+    return {
+      totalInputTokens: trace.totalInputTokens ?? 0,
+      totalOutputTokens: trace.totalOutputTokens ?? 0,
+      totalTokens: trace.totalTokens ?? 0
+    }
+  }
+  const modelCalls = trace.modelCalls
   if (!Array.isArray(modelCalls) || modelCalls.length === 0) {
     return { totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0 }
   }
@@ -2461,7 +2476,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
 
   if (parsed.trace) {
     const trace = normalizeParsedTrace(parsed.trace, source, hit)
-    const usage = summarizeTraceTokenUsage(trace.modelCalls)
+    const usage = summarizeTraceTokenUsage(trace)
     const fallbackInputTokens = asNumber(source.totalInputTokens)
     const fallbackOutputTokens = asNumber(source.totalOutputTokens)
     const fallbackTotalTokens = asNumber(
@@ -2554,7 +2569,7 @@ function normalizeTraceDetail(hit: EsSearchHit): DashboardTraceDetail {
 }
 
 function traceToDashboardTraceDetail(trace: AgentTrace): DashboardTraceDetail {
-  const usage = summarizeTraceTokenUsage(trace.modelCalls)
+  const usage = summarizeTraceTokenUsage(trace)
   let nodes: TraceNode[] | undefined
   let rawError: string | undefined
   try {
