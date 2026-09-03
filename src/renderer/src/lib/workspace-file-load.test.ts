@@ -6,6 +6,7 @@ import {
   hydrateInitialWorkspaceFiles,
   markWorkspaceFilesStale,
   readWorkspacePathWithFallback,
+  resumeWorkspaceFilesDeduped,
   retainWorkspaceFilesForPathChange,
   setWorkspaceFileScanTimeoutForTests
 } from "./workspace-file-load"
@@ -73,8 +74,9 @@ describe("workspace file loading", () => {
     expect(source).toMatch(/workspaceChangedWhileReading/)
     expect(rightPanelSource).not.toContain("cancelWorkspaceFileContinuation")
     expect(rightPanelSource).toMatch(
-      /continueWorkspaceFilesDeduped\(threadId, workspacePath, \{\s*onProgress:/
+      /resumeWorkspaceFilesDeduped\(threadId, workspacePath, \{\s*onProgress:/
     )
+    expect(rightPanelSource).toMatch(/setWorkspaceFiles\?\.\(files\)/)
     expect(rightPanelSource).toMatch(/requestFenceRef\.current\.observe\(threadId, workspacePath\)/)
     expect(rightPanelSource).toMatch(/requestFenceRef\.current\.isCurrent\(requestToken\)/)
     expect(rightPanelSource).toMatch(/\}, \[threadId, workspaceKey\]\)/)
@@ -364,5 +366,88 @@ describe("workspace file loading", () => {
     })
     expect(fileScanOpen).toHaveBeenCalledTimes(2)
     markWorkspaceFilesStale("thread-continuation-timeout", "C:/continuation-timeout")
+  })
+
+  it("replays a lost 10k cursor and advances beyond the visible segment", async () => {
+    const fileScanOpen = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: true,
+        scanId: "scan-evicted",
+        workspacePath: "C:/large-workspace"
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        scanId: "scan-recovered",
+        workspacePath: "C:/large-workspace"
+      })
+    const firstSegmentSize = 10_000
+    let evictedOffset = 0
+    let recoveredOffset = 0
+    const fileScanNext = vi.fn(
+      async (scanId: string, _threadId: string, continuation?: string) => {
+        if (scanId === "scan-evicted" && continuation) {
+          return {
+            success: false as const,
+            files: [],
+            done: true,
+            error: "Workspace file scan is not available"
+          }
+        }
+        if (scanId === "scan-recovered" && continuation) {
+          return {
+            success: true as const,
+            files: [{ path: "/after-10000.ts", is_dir: false }],
+            done: true,
+            truncated: false,
+            workspacePath: "C:/large-workspace"
+          }
+        }
+        const offset = scanId === "scan-evicted" ? evictedOffset : recoveredOffset
+        const pageSize = Math.min(128, firstSegmentSize - offset)
+        const files = Array.from({ length: pageSize }, (_, pageIndex) => ({
+          path: `/file-${String(offset + pageIndex).padStart(5, "0")}.ts`,
+          is_dir: false
+        }))
+        const nextOffset = offset + pageSize
+        if (scanId === "scan-evicted") evictedOffset = nextOffset
+        else recoveredOffset = nextOffset
+        const truncated = nextOffset === firstSegmentSize
+        return {
+          success: true as const,
+          files,
+          done: false,
+          truncated,
+          ...(truncated
+            ? {
+                continuation:
+                  scanId === "scan-evicted" ? "evicted-token" : "recovered-token"
+              }
+            : {}),
+          workspacePath: "C:/large-workspace"
+        }
+      }
+    )
+    const fileScanCancel = vi.fn().mockResolvedValue({ success: true })
+    installWorkspaceApi({ fileScanOpen, fileScanNext, fileScanCancel })
+
+    await expect(
+      loadWorkspaceFilesDeduped("thread-large", "C:/large-workspace")
+    ).resolves.toMatchObject({
+      files: expect.arrayContaining([{ path: "/file-09999.ts", is_dir: false }]),
+      continuationAvailable: true
+    })
+
+    const recovery = resumeWorkspaceFilesDeduped("thread-large", "C:/large-workspace")
+    const sharedRecovery = resumeWorkspaceFilesDeduped("thread-large", "C:/large-workspace")
+    expect(sharedRecovery).toBe(recovery)
+    const recovered = await recovery
+    expect(recovered.files).toHaveLength(firstSegmentSize + 1)
+    expect(recovered.files.at(-1)?.path).toBe("/after-10000.ts")
+    expect(recovered.continuationAvailable).toBe(false)
+    expect(fileScanOpen).toHaveBeenCalledTimes(2)
+    expect(fileScanNext).toHaveBeenCalledTimes(Math.ceil(firstSegmentSize / 128) * 2 + 2)
+    expect(fileScanCancel).toHaveBeenCalledWith("scan-evicted")
+    markWorkspaceFilesStale("thread-large", "C:/large-workspace")
   })
 })

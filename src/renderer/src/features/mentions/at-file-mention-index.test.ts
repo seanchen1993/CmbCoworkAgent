@@ -48,6 +48,26 @@ describe("workspace @ mention index", () => {
     ).rejects.toMatchObject({ name: "AbortError" })
   })
 
+  it("includes common text files shown by the Files panel but still excludes media", async () => {
+    const files: FileInfo[] = [
+      { path: "/app/application.properties", is_dir: false },
+      { path: "/scripts/build.ps1", is_dir: false },
+      { path: "/events/output.jsonl", is_dir: false },
+      { path: "/assets/logo.png", is_dir: false }
+    ]
+
+    await expect(searchWorkspaceMentionFiles(files, "properties")).resolves.toMatchObject([
+      { workspaceFilePath: "/app/application.properties" }
+    ])
+    await expect(searchWorkspaceMentionFiles(files, "build.ps1")).resolves.toMatchObject([
+      { workspaceFilePath: "/scripts/build.ps1" }
+    ])
+    await expect(searchWorkspaceMentionFiles(files, "output.jsonl")).resolves.toMatchObject([
+      { workspaceFilePath: "/events/output.jsonl" }
+    ])
+    await expect(searchWorkspaceMentionFiles(files, "logo.png")).resolves.toEqual([])
+  })
+
   it("finds a file in a later bounded workspace segment", async () => {
     const initialFiles = largeFixture(100)
     const laterFiles = [

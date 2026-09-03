@@ -259,7 +259,7 @@ import {
   CHAT_SEARCH_DOCUMENT_TEXT_LIMIT
 } from "@/lib/bounded-chat-search-text"
 import { buildStreamingMarkdownPreview } from "@/lib/streaming-markdown-schedule"
-import { continueWorkspaceFilesDeduped, loadWorkspaceFilesDeduped } from "@/lib/workspace-file-load"
+import { loadWorkspaceFilesDeduped, resumeWorkspaceFilesDeduped } from "@/lib/workspace-file-load"
 import {
   createChatScrollState,
   isChatScrollDetached,
@@ -4935,13 +4935,13 @@ export function ChatContainer({
   const loadMoreWorkspaceMentionFiles = useCallback(
     async (signal: AbortSignal) => {
       if (!workspacePath) return null
-      let result: Awaited<ReturnType<typeof continueWorkspaceFilesDeduped>> | null
+      let result: Awaited<ReturnType<typeof resumeWorkspaceFilesDeduped>> | null
       try {
         // Do not bind the shared bounded scan to one transient keystroke. A
         // superseded query stops awaiting it, while the completed segment is
         // still published for the next query and the Files panel.
         result = await awaitWorkspaceMentionLoad(
-          continueWorkspaceFilesDeduped(threadId, workspacePath),
+          resumeWorkspaceFilesDeduped(threadId, workspacePath),
           signal
         )
       } catch (error) {

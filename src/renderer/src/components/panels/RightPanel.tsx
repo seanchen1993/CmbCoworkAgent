@@ -61,12 +61,12 @@ import { getToolLabel } from "@/lib/tool-labels"
 import { orderSubagentsForDisplay } from "@/lib/subagent-state"
 import {
   hasLoadedWorkspaceFiles,
-  continueWorkspaceFilesDeduped,
   getWorkspaceFilePathRevision,
   loadWorkspaceFilesDeduped,
   markWorkspaceFilesStale,
   normalizeWorkspaceFileKey,
   readWorkspacePathWithFallback,
+  resumeWorkspaceFilesDeduped,
   subscribeWorkspaceFilePathChanges,
   subscribeWorkspaceFileResults
 } from "@/lib/workspace-file-load"
@@ -2750,7 +2750,7 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
   useEffect(() => {
     if (!threadId || !workspacePath) return
     const workspaceKey = normalizeWorkspaceFileKey(workspacePath)
-    return subscribeWorkspaceFileResults((publishedKey, _files, result) => {
+    return subscribeWorkspaceFileResults((publishedKey, files, result) => {
       if (publishedKey !== workspaceKey || !result) return
       if (
         result.workspacePath &&
@@ -2758,6 +2758,11 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
       ) {
         return
       }
+      // Consume the shared publication directly as well as through
+      // ThreadProvider. This closes the render window where the boundary says
+      // another segment loaded but the Files tree and @ index still hold the
+      // previous 10k array.
+      setWorkspaceFiles?.(files)
       setLoadBoundary({
         threadId,
         workspacePath,
@@ -2765,7 +2770,7 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
         continuationAvailable: result.continuationAvailable === true
       })
     })
-  }, [threadId, workspacePath])
+  }, [setWorkspaceFiles, threadId, workspacePath])
 
   const handleContinueWorkspace = useCallback(async (): Promise<void> => {
     if (!threadId || !workspacePath || !setWorkspaceFiles || continuationLoading) return
@@ -2776,7 +2781,7 @@ function FilesContent({ threadId }: { threadId: string | null }): React.JSX.Elem
     setContinuationLoading(true)
     setScanState({ threadId, count: workspaceFiles.length })
     try {
-      const result = await continueWorkspaceFilesDeduped(threadId, workspacePath, {
+      const result = await resumeWorkspaceFilesDeduped(threadId, workspacePath, {
         onProgress: (count) => {
           if (!controller.signal.aborted && requestFenceRef.current.isCurrent(requestToken)) {
             setScanState({ threadId, count })
