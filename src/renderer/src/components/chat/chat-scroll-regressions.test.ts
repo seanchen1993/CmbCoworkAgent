@@ -14,6 +14,8 @@ import {
 } from "./chat-scroll-session-store"
 import {
   createChatScrollState,
+  resolveChatBottomScrollWriter,
+  shouldConfirmChatViewportBottom,
   transitionChatScroll,
   type ChatScrollEffect,
   type ChatScrollEvent,
@@ -65,6 +67,47 @@ function detachedSession(threadId: string, unreadCount = 0): ChatScrollSession {
 }
 
 describe("chat scroll regression scenarios", () => {
+  it("keeps a streaming scrollbar drag detached until the pointer is released", () => {
+    let state = dispatch(attachedState(), {
+      type: "USER_DETACH",
+      source: "user-input"
+    }).state
+
+    const confirmWhileDragging = shouldConfirmChatViewportBottom({
+      distanceToBottom: 0,
+      movementDelta: 300,
+      atBottomThreshold: 32,
+      detachDelta: 1,
+      detached: true,
+      downwardIntentActive: true,
+      scrollbarPointerActive: true
+    })
+    if (confirmWhileDragging) {
+      state = dispatch(state, { type: "BOTTOM_CONFIRMED" }).state
+    }
+
+    for (let update = 0; update < 100; update += 1) {
+      const growth = dispatch(state, { type: "CONTENT_GROWN" })
+      expect(growth.effects).toEqual([])
+      state = growth.state
+    }
+    expect(state.mode).toBe("detached")
+
+    state = dispatch(state, { type: "BOTTOM_CONFIRMED" }).state
+    expect(state.mode).toBe("following")
+    expect(dispatch(state, { type: "CONTENT_GROWN" }).effects).toEqual([
+      { type: "scroll-to-bottom", reason: "content-grown", generation: state.generation }
+    ])
+  })
+
+  it("uses one scroll writer per frame while following virtualized output", () => {
+    expect(resolveChatBottomScrollWriter(true, "content-grown", 0)).toBe("viewport")
+    expect(resolveChatBottomScrollWriter(true, "content-grown", 5)).toBe("viewport")
+    expect(resolveChatBottomScrollWriter(true, "content-appended", 0)).toBe("virtual-index")
+    expect(resolveChatBottomScrollWriter(true, "content-appended", 1)).toBe("viewport")
+    expect(resolveChatBottomScrollWriter(false, "initial-position", 0)).toBe("viewport")
+  })
+
   it("does not accept BOTTOM_CONFIRMED before the active thread data is ready", () => {
     const initial = createChatScrollState("thread-1")
 
