@@ -60,7 +60,12 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
   throw new Error(`Timed out waiting for ${label}`)
 }
 
-async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) {
+async function createContext(
+  options: {
+    remoteApprovalEnabled?: boolean
+    agentMode?: "normal" | "coordinator" | "workflow"
+  } = {}
+) {
   const root = await mkdtemp(join(tmpdir(), "cmb-im-approval-"))
   const SQL = await initSqlJs()
   const database = new SQL.Database()
@@ -96,7 +101,7 @@ async function createContext(options: { remoteApprovalEnabled?: boolean } = {}) 
     title: "桌面会话",
     status: "idle",
     thread_values: null,
-    metadata: JSON.stringify({ workspacePath: root, agentMode: "normal" })
+    metadata: JSON.stringify({ workspacePath: root, agentMode: options.agentMode ?? "normal" })
   }
   const broker = new ApprovalDecisionBroker()
   const generatedCodes = ["A1B2C3", "D4E5F6", "012ABC", "789DEF", "AAA111"]
@@ -420,9 +425,7 @@ async function testCommandsAreInferredWhileUnsupportedOperationsStayDesktopOnly(
       ...ROUTE
     })
     assert(approvalResult.includes("一次性批准"))
-    assert.deepEqual(executeDecisions, [
-      { type: "approve", tool_call_id: execute.tool_call.id }
-    ])
+    assert.deepEqual(executeDecisions, [{ type: "approve", tool_call_id: execute.tool_call.id }])
   } finally {
     context.service.dispose()
     context.database.close()
@@ -564,6 +567,36 @@ async function testBrokerPreservesDesktopDecisionSurfaceAndCommandIsExplicit(): 
   assert.deepEqual(calls, [{ code: "D4E5F6", decision: "reject", ...ROUTE }])
 }
 
+async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
+  for (const agentMode of ["coordinator", "workflow"] as const) {
+    const context = await createContext({ agentMode })
+    try {
+      const request = approvalRequest({
+        id: `request-${agentMode}`,
+        operation: "write_file",
+        cwd: context.root,
+        filePath: join(context.root, `${agentMode}.ts`)
+      })
+      const decisions = context.register(request)
+      await waitFor(() => context.deliveryText(request.id).includes("A1B2C3"), agentMode)
+      assert(
+        (
+          await context.service.resolveCode({
+            code: "A1B2C3",
+            decision: "approve",
+            ...ROUTE
+          })
+        ).includes("一次性批准")
+      )
+      assert.deepEqual(decisions, [{ type: "approve", tool_call_id: request.tool_call.id }])
+    } finally {
+      context.service.dispose()
+      context.database.close()
+      await rm(context.root, { recursive: true, force: true })
+    }
+  }
+}
+
 async function main(): Promise<void> {
   await testDefaultOffDoesNotPublishOrResolve()
   await testWorkspaceApprovalIsSingleUseAndAudited()
@@ -574,6 +607,7 @@ async function main(): Promise<void> {
   await testCommandInsideToolArgsIsRecognized()
   await testConcurrentCodesPointToExactlyOneRequest()
   await testBrokerPreservesDesktopDecisionSurfaceAndCommandIsExplicit()
+  await testAdvancedModesCanPublishAndResolve()
   console.log("IM remote approval tests passed")
 }
 

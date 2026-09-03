@@ -592,7 +592,12 @@ async function testSimulatedZhaohuUserJourney(): Promise<void> {
     const helpText = journey.eventReplyText(help.event.eventId)
     assert(helpText.includes("/会话"))
     assert(helpText.includes("/批准"))
+    assert(helpText.includes("/<技能名> <任务> 或 /技能 <技能名或短码> <任务>"))
+    assert(helpText.includes("/goal 或 /goal status|pause|resume|clear"))
+    assert(helpText.includes("自定义回答使用“其他 <内容>”"))
+    assert(helpText.includes("//<文本>"))
     assert.equal(helpText.match(/^\/收件箱 —/gmu)?.length, 1)
+    assert.equal(helpText.trimEnd().split("\n").at(-1)?.startsWith("/重试 "), true)
 
     const current = await journey.send("/当前")
     assert(journey.eventReplyText(current.event.eventId).includes("当前目标：【收件箱】"))

@@ -1,4 +1,5 @@
 import { IpcMain, BrowserWindow, dialog } from "electron"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { nowIsoLocal } from "../util/local-time"
 import { AsyncKeyedLock } from "./async-keyed-lock"
 import { withThreadRunMutationLock } from "./thread-run-mutation-lock"
@@ -307,12 +308,11 @@ import {
   buildGoalStartPrompt,
   displayGoalObjective,
   displayGoalPausedReason,
-  GoalManager,
   isGoalBoundaryStillCurrent,
   validateGoalText
 } from "../agent/goals/goal-manager"
 import { buildGoalContinuationPromptFromHookContexts } from "../agent/goals/internal-prompt"
-import { SqlGoalStore } from "../agent/goals/goal-store"
+import { goalManager, goalStore } from "../agent/goals/runtime"
 import {
   extractGoalTransportAttachmentNames,
   extractGoalTransportPayload,
@@ -394,9 +394,11 @@ import { finishTraceInBackground } from "../agent/trace/collector"
 import {
   createBrowserWindowAgentRunDelivery,
   registerActiveAgentRunInspector,
+  registerAgentGoalControlImplementation,
   registerAgentRunImplementation,
   startAgentRun,
-  type AgentRunDelivery
+  type AgentRunDelivery,
+  type AgentRunExecutionContext
 } from "../agent/agent-run-service"
 
 function withHarnessStageInvalidation(
@@ -473,8 +475,7 @@ function releaseWorkflowNotification(runId: string, runToken: string): boolean {
 const streamChannelByRunController = new WeakMap<AbortController, string>()
 
 let agentTaskShutdownStarted = false
-const goalStore = new SqlGoalStore()
-const goalManager = new GoalManager(goalStore)
+const agentRunExecutionContextStorage = new AsyncLocalStorage<AgentRunExecutionContext>()
 // Deferred-delivery background evidence (see GoalBackgroundEvidenceStash): a
 // notification turn that delivers result A but defers (B still pending) parks
 // A's evidence here so the eventual evaluation sees every delivered batch, not
@@ -988,10 +989,17 @@ function sendDesktopForeignOwnerBusy(
 function rejectDesktopRunForForeignOwner(
   threadId: string,
   window: BrowserWindow,
-  channel: string
+  channel: string,
+  context: AgentRunExecutionContext = { source: "desktop" }
 ): boolean {
   const lease = getLocalThreadRunLease(threadId)
-  if (!lease || lease.owner === "desktop") return false
+  if (!lease) return false
+  if (context.allowForeignOwnerGoalControl) return false
+  const managedLease = context.localRunLease
+  if (managedLease && lease.owner === managedLease.owner && lease.runId === managedLease.runId) {
+    return false
+  }
+  if (!managedLease && lease.owner === "desktop") return false
   sendDesktopForeignOwnerBusy(window, channel, lease)
   return true
 }
@@ -1024,6 +1032,22 @@ function claimDesktopThreadRunLease(threadId: string, runId: string): LocalThrea
     runId,
     ...(current?.owner === "desktop" ? { handoffFromRunId: current.runId } : {})
   })
+}
+
+function claimAgentThreadRunLease(
+  threadId: string,
+  runId: string,
+  context: AgentRunExecutionContext = { source: "desktop" }
+): LocalThreadRunLeaseClaim {
+  const managedLease = context.localRunLease
+  if (managedLease) {
+    return claimLocalThreadRunLease({
+      threadId,
+      owner: managedLease.owner,
+      runId: managedLease.runId
+    })
+  }
+  return claimDesktopThreadRunLease(threadId, runId)
 }
 
 export function isActiveAgentRunAborting(threadId: string): boolean {
@@ -1272,6 +1296,11 @@ function emitGoalNotice(
     console.warn("[Goal] failed to persist goal notice:", error)
   }
   const payload = { message, goalId, activeWindowId, eventId, createdAt }
+  try {
+    agentRunExecutionContextStorage.getStore()?.onGoalNotice?.(payload)
+  } catch (error) {
+    console.warn("[Goal] managed transport notice callback failed:", error)
+  }
   if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
     window.webContents.send(channel, {
       type: "custom",
@@ -1411,6 +1440,50 @@ function handleGoalNonStartingControlCommand(params: {
   }
 
   return { handled: false, terminatedCurrentRun: false }
+}
+
+async function executeAgentGoalControl(
+  request: { threadId: string; message: string },
+  delivery: AgentRunDelivery,
+  context: AgentRunExecutionContext
+): Promise<GoalControlResult> {
+  const { threadId, message } = request
+  return agentRunExecutionContextStorage.run(context, () =>
+    withThreadRunMutationLock(threadId, async () => {
+      const window = delivery.window
+      const activeController = activeRuns.get(threadId)
+      const channel = activeController
+        ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
+        : `agent:stream:${threadId}`
+      // Choose the active request channel under the same lock used by run
+      // replacement. A terminating goal command must abort and complete the
+      // same physical request, never a predecessor or queued successor.
+      lastFetchErrorByChannel.delete(channel)
+      lastFailoverByChannel.delete(channel)
+      const goalCommand = parseGoalSlashCommand(message)
+      const result = handleGoalNonStartingControlCommand({
+        threadId,
+        command: goalCommand,
+        originalMessage: message,
+        window,
+        channel,
+        sendDone: false,
+        sendDoneForTerminatingControl: true
+      })
+      if (!result.handled) {
+        return {
+          ...result,
+          notice: emitGoalNotice(
+            window,
+            channel,
+            threadId,
+            "该 /goal 命令需要在当前运行结束后发送。"
+          )
+        }
+      }
+      return result
+    })
+  )
 }
 
 function pauseActiveGoalAfterBoundary(
@@ -1712,6 +1785,8 @@ interface PhysicalAgentRunSettlementOptions {
   disposeTurnState: () => void
   criticalBeforeReleasePhases?: readonly RunSettlementPhase[]
   beforeNotificationPhases?: readonly RunSettlementPhase[]
+  runOwner?: LocalThreadRunLease["owner"]
+  releaseRunLease?: boolean
 }
 
 async function settlePhysicalAgentRun({
@@ -1727,7 +1802,9 @@ async function settlePhysicalAgentRun({
   turnStateShouldDispose,
   disposeTurnState,
   criticalBeforeReleasePhases = [],
-  beforeNotificationPhases = []
+  beforeNotificationPhases = [],
+  runOwner = "desktop",
+  releaseRunLease = true
 }: PhysicalAgentRunSettlementOptions): Promise<void> {
   let transcriptFlushSucceeded = false
   let notificationSettlement = Promise.resolve()
@@ -1800,8 +1877,7 @@ async function settlePhysicalAgentRun({
       },
       {
         name: "dispose-turn-state",
-        shouldRun: () =>
-          turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken),
+        shouldRun: () => turnStateShouldDispose && shouldDisposeTurnState(threadId, runToken),
         run: disposeTurnState
       },
       {
@@ -1811,7 +1887,8 @@ async function settlePhysicalAgentRun({
       },
       {
         name: "release-local-thread-run-lease",
-        run: () => releaseLocalThreadRunLease(threadId, "desktop", runToken)
+        shouldRun: () => releaseRunLease,
+        run: () => releaseLocalThreadRunLease(threadId, runOwner, runToken)
       }
     ],
     resolveSettlement,
@@ -3649,37 +3726,91 @@ function messageContentToText(content: Message["content"]): string {
     .join("\n")
 }
 
-function scheduleDesktopTurnCompletion(threadId: string, runToken: string, cursor: number): void {
+function prepareFinalAssistantCandidate(
+  threadId: string,
+  runToken: string,
+  cursor: number
+): StreamAssistantCandidate | undefined {
   let candidate: StreamAssistantCandidate | undefined
   try {
     flushPendingStreamTranscriptMessages(threadId, runToken, { throwOnError: true })
     const latest = latestStreamAssistantCandidate.get(threadId)
-    if (!latest || latest.revision <= cursor) return
+    if (!latest || latest.revision <= cursor) return undefined
     candidate = { ...latest }
   } catch (error) {
-    console.warn("[IM] Failed to prepare desktop completion observation:", error)
-    return
+    console.warn("[Agent] Failed to prepare final assistant observation:", error)
+    return undefined
   }
+  return candidate
+}
+
+async function readFinalAssistantCandidate(
+  threadId: string,
+  candidate: StreamAssistantCandidate
+): Promise<{ messageId: string; finalText: string } | null> {
+  await flushStrict()
+  const message = getThreadMessagesByIds(threadId, [candidate.messageId])[0]
+  if (!message || message.role !== "assistant" || message.tool_calls?.length) return null
+  const finalText = messageContentToText(message.content).trim()
+  return finalText ? { messageId: message.id, finalText } : null
+}
+
+function scheduleDesktopTurnCompletion(threadId: string, runToken: string, cursor: number): void {
+  const candidate = prepareFinalAssistantCandidate(threadId, runToken, cursor)
+  if (!candidate) return
 
   void (async () => {
     try {
       // The delivery id is derived only after the final assistant row is on
       // disk. This side task never feeds failure back into agent:invoke.
-      await flushStrict()
-      const message = getThreadMessagesByIds(threadId, [candidate!.messageId])[0]
-      if (!message || message.role !== "assistant" || message.tool_calls?.length) return
-      const finalText = messageContentToText(message.content).trim()
-      if (!finalText) return
+      const result = await readFinalAssistantCandidate(threadId, candidate)
+      if (!result) return
       await imDesktopCompletionObserver.observe({
         source: "desktop",
         threadId,
-        finalAssistantMessageId: message.id,
-        finalText
+        finalAssistantMessageId: result.messageId,
+        finalText: result.finalText
       })
     } catch (error) {
       console.warn("[IM] Desktop completion observation failed without affecting the turn:", error)
     }
   })()
+}
+
+async function deliverManagedAgentRunCompletion(
+  context: AgentRunExecutionContext,
+  threadId: string,
+  runToken: string,
+  cursor: number
+): Promise<void> {
+  const callback = context.onFinalAssistant
+  if (!callback) {
+    scheduleDesktopTurnCompletion(threadId, runToken, cursor)
+    return
+  }
+  const candidate = prepareFinalAssistantCandidate(threadId, runToken, cursor)
+  if (!candidate) return
+  const result = await readFinalAssistantCandidate(threadId, candidate)
+  if (result) await callback(result)
+}
+
+function notifyManagedAgentRunCancelled(context: AgentRunExecutionContext): void {
+  try {
+    context.onRunCancelled?.()
+  } catch (error) {
+    console.warn("[Agent] Managed run cancellation callback failed:", error)
+  }
+}
+
+function notifyManagedDetachedResult(
+  context: AgentRunExecutionContext,
+  signal: { kind: "coordinator" | "workflow"; threadId: string; runId?: string }
+): void {
+  try {
+    context.onDetachedResultAvailable?.(signal)
+  } catch (error) {
+    console.warn("[Agent] Managed detached-result callback failed:", error)
+  }
 }
 
 const streamTranscriptToolCallAccumulators = new Map<
@@ -5651,50 +5782,24 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     "agent:goal-control",
     async (event, { threadId, message }: { threadId: string; message: string }) => {
-      return withThreadRunMutationLock(threadId, async () => {
-        const window = BrowserWindow.fromWebContents(event.sender)
-        const activeController = activeRuns.get(threadId)
-        const channel = activeController
-          ? (streamChannelByRunController.get(activeController) ?? `agent:stream:${threadId}`)
-          : `agent:stream:${threadId}`
-        // Choose the active request channel under the same lock used by run
-        // replacement. A terminating goal command must abort and complete the
-        // same physical request, never a predecessor or queued successor.
-        lastFetchErrorByChannel.delete(channel)
-        lastFailoverByChannel.delete(channel)
-        const goalCommand = parseGoalSlashCommand(message)
-        const result = handleGoalNonStartingControlCommand({
-          threadId,
-          command: goalCommand,
-          originalMessage: message,
-          window,
-          channel,
-          sendDone: false,
-          sendDoneForTerminatingControl: true
-        })
-        if (!result.handled) {
-          return {
-            ...result,
-            notice: emitGoalNotice(
-              window,
-              channel,
-              threadId,
-              "该 /goal 命令需要在当前运行结束后发送。"
-            )
-          }
-        }
-        return result
-      })
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (!window) throw new Error("Agent goal control window is unavailable")
+      return executeAgentGoalControl(
+        { threadId, message },
+        createBrowserWindowAgentRunDelivery(window),
+        { source: "desktop" }
+      )
     }
   )
 
   // Handle agent invocation with streaming. The transport-neutral run body is
   // registered here; the IPC listener below is only an adapter into this path.
   registerActiveAgentRunInspector(hasActiveAgentRun)
+  registerAgentGoalControlImplementation(executeAgentGoalControl)
 
-  registerAgentRunImplementation(
-    async (
-      {
+  registerAgentRunImplementation((request, delivery, runExecutionContext) =>
+    agentRunExecutionContextStorage.run(runExecutionContext, async () => {
+      const {
         threadId,
         message,
         modelId,
@@ -5703,9 +5808,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         agentMode: requestedAgentMode,
         managedExecution,
         coordinatorInternalNotification
-      }: AgentInvokeParams,
-      delivery
-    ) => {
+      }: AgentInvokeParams = request
       // Freeze a mode/workspace snapshot from the durable thread BEFORE anything
       // can patch it: workflow-notification detection and forced-coordinator
       // gating must see the state the request was prepared against, not a later
@@ -5751,8 +5854,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         : baseChannel
       const channel = resolveAgentStreamRequestChannel(ambientChannel, streamRequestId)
       if (rejectAgentStartDuringShutdown(window, channel)) return
-      if (rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)) return
-      if (rejectDesktopRunForForeignOwner(threadId, window, channel)) return
+      if (
+        runExecutionContext.source === "desktop" &&
+        rejectDesktopRunForRemoteReadOnlyThread(threadId, window, channel)
+      ) {
+        return
+      }
+      if (rejectDesktopRunForForeignOwner(threadId, window, channel, runExecutionContext)) return
       let modelInputMessage = message
       let routingMessage = message
       let rootUserPrompt = message
@@ -6044,7 +6152,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           normalSubagentsEnabled: initialInvokeMetadata.subagentsEnabled !== false,
           threadIncarnation: captureThreadIncarnation(initialInvokeThread)
         }
-        const nextInvokeRunToken = uuid()
+        const nextInvokeRunToken = runExecutionContext.localRunLease?.runId ?? uuid()
         const replacement = await withThreadRunMutationLock(threadId, () =>
           withActiveRunReplacementLock(threadId, async () => {
             if (rejectAgentStartDuringShutdown(window, channel)) {
@@ -6074,7 +6182,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               closePhysicalStreamRunBeforeSetupPublication(window, channel, error)
               return { prePublicationFailure: true as const }
             }
-            const leaseClaim = claimDesktopThreadRunLease(threadId, nextInvokeRunToken)
+            const leaseClaim = runExecutionContext.localRunLease
+              ? claimAgentThreadRunLease(threadId, nextInvokeRunToken, runExecutionContext)
+              : claimDesktopThreadRunLease(threadId, nextInvokeRunToken)
             if (!leaseClaim.acquired) {
               return { leaseConflict: leaseClaim.conflict }
             }
@@ -6094,7 +6204,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             }
             if (rejectAgentStartDuringShutdown(window, channel)) {
               clearCurrentRunMessageQueue(threadId, nextInvokeRunToken)
-              releaseLocalThreadRunLease(threadId, "desktop", nextInvokeRunToken)
+              if (!runExecutionContext.localRunLease?.managedExternally) {
+                releaseLocalThreadRunLease(
+                  threadId,
+                  runExecutionContext.localRunLease?.owner ?? "desktop",
+                  nextInvokeRunToken
+                )
+              }
               return { startRejectedDuringShutdown: true as const }
             }
 
@@ -6160,6 +6276,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           activeRunSettledPromise,
           resolveActiveRunSettled
         } = replacement
+        const externalSignal = runExecutionContext.signal
+        const abortFromExternalSignal = (): void => {
+          if (!abortController.signal.aborted) abortController.abort(externalSignal?.reason)
+        }
+        if (externalSignal?.aborted) {
+          abortFromExternalSignal()
+        } else {
+          externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true })
+        }
+        const removeExternalAbortSubscription = (): void => {
+          externalSignal?.removeEventListener("abort", abortFromExternalSignal)
+        }
         const physicalStreamRunSetupGuard = createPhysicalStreamRunSetupGuard({
           isActive: () => isPhysicalStreamRunActive(threadId, runToken, abortController.signal),
           ownsLease: () => ownsPhysicalStreamRunLease(threadId, runToken, abortController),
@@ -6178,11 +6306,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           }
         })
         pendingPhysicalStreamRunSetupGuard = physicalStreamRunSetupGuard
+        physicalStreamRunSetupGuard.addCleanup(removeExternalAbortSubscription)
         physicalStreamRunSetupGuard.addCleanup((_wasActive, wasOwner) => {
           if (!wasOwner) return
           revokeSandboxAclsForRun(runToken)
           discardAgentAutoCommitTracking(threadId)
-          releaseLocalThreadRunLease(threadId, "desktop", runToken)
+          if (!runExecutionContext.localRunLease?.managedExternally) {
+            releaseLocalThreadRunLease(
+              threadId,
+              runExecutionContext.localRunLease?.owner ?? "desktop",
+              runToken
+            )
+          }
           if (shouldDisposeTurnState(threadId, runToken)) {
             disposeTurnRuntimeState(threadId, turnState)
           }
@@ -6323,7 +6458,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           flushPendingStreamTranscriptMessages(threadId, runToken)
           abortController.abort()
         }
-        const removeWindowClosedSubscription = subscribeWindowClosed(window, onWindowClosed)
+        const removeWindowClosedSubscription =
+          runExecutionContext.source === "desktop"
+            ? subscribeWindowClosed(window, onWindowClosed)
+            : () => undefined
         physicalStreamRunSetupGuard.addCleanup(() => {
           removeWindowClosedSubscription()
         })
@@ -6538,13 +6676,19 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             )
             return
           }
+          const managedByExternalTransport =
+            runExecutionContext.source === "im" &&
+            Boolean(runExecutionContext.onDetachedResultAvailable)
+          const suppressNotificationAutoRun = managedByExternalTransport
+            ? true
+            : event.suppressNotificationAutoRun
           if (event.workers) {
             sendCoordinatorWorkers(
               window,
               channel,
               event.workers,
               event.notification,
-              event.suppressNotificationAutoRun
+              suppressNotificationAutoRun
             )
           } else {
             sendCoordinatorWorkerDelta(
@@ -6552,8 +6696,14 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               channel,
               event.worker,
               event.notification,
-              event.suppressNotificationAutoRun
+              suppressNotificationAutoRun
             )
+          }
+          if (event.notification && event.suppressNotificationAutoRun !== true) {
+            notifyManagedDetachedResult(runExecutionContext, {
+              kind: "coordinator",
+              threadId
+            })
           }
         }
         const onCoordinatorNotificationAction = (notificationIds: string[]): void => {
@@ -6696,7 +6846,13 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const workflowLaunchedRunIds = new Set<string>()
         const onWorkflowLaunched = (runId: string): void => {
           const normalized = runId.trim()
-          if (normalized) workflowLaunchedRunIds.add(normalized)
+          if (!normalized) return
+          workflowLaunchedRunIds.add(normalized)
+          notifyManagedDetachedResult(runExecutionContext, {
+            kind: "workflow",
+            threadId,
+            runId: normalized
+          })
         }
         const markAutoModeTerminal = (
           outcome: AgentTurnEndEvent["outcome"],
@@ -6967,6 +7123,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             prepareStandardUserPrompt({
               rawMessage,
               initialModelInput,
+              trustedExplicitSkill: runExecutionContext.trustedExplicitSkill,
+              allowExplicitSkillFromMessage:
+                runExecutionContext.source === "desktop" ||
+                runExecutionContext.allowTrustedTransportSkillMarker === true,
               threadId,
               workspacePath,
               turnState,
@@ -7154,12 +7314,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: errorMessage
               })
               sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7339,12 +7494,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: buildNormalModeGuardMessage(blockedNormalModeGuardState)
               })
               sendCoordinatorWorkers(window, channel, blockedNormalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7386,12 +7536,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                 error: errorMessage
               })
               sendCoordinatorWorkers(window, channel, normalModeGuardState.workers)
-              finishTraceInBackground(
-                tracer,
-                "error",
-                "COORDINATOR_NORMAL_MODE_BLOCKED",
-                "Agent"
-              )
+              finishTraceInBackground(tracer, "error", "COORDINATOR_NORMAL_MODE_BLOCKED", "Agent")
               return
             }
           }
@@ -7698,8 +7843,11 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           lastFailoverByChannel.set(channel, failoverAttempts)
           const coordinatorWorkerTurnPlanning = createCoordinatorWorkerTurnPlanningState()
           const invokeRuntimeFactory = prepareStandardThreadRuntimeFactory({
-            source: "desktop",
-            runLease: { owner: "desktop", runId: runToken },
+            source: runExecutionContext.source,
+            runLease: {
+              owner: runExecutionContext.localRunLease?.owner ?? "desktop",
+              runId: runToken
+            },
             baseOptions: () => ({
               threadId,
               outputStyle: getRequestedOutputStyle(metadata),
@@ -7712,6 +7860,12 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               coordinatorWorkerTurnPlanning,
               abortSignal: abortController.signal,
               enableRequestUserInput: true,
+              allowDeferredUserInputRenderer: runExecutionContext.source === "im",
+              interactionWaitHooks:
+                runExecutionContext.source === "im"
+                  ? runExecutionContext.interactionWaitHooks
+                  : undefined,
+              extraSystemPrompt: runExecutionContext.extraSystemPrompt,
               noSkillEvolutionTool: true,
               agentMode: effectiveAgentMode,
               disableSubagents: shouldDisableNormalModeSubagents(effectiveAgentMode, metadata),
@@ -7736,7 +7890,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               onCoordinatorNotificationAction,
               onWorkflowLaunched
             }),
-            harnessContext: harnessAgentContext
+            harnessContext: harnessAgentContext,
+            remotePolicy: runExecutionContext.remotePolicy
           })
           usedModelId = effectiveModelId
           const isFirstAttempt = true
@@ -9171,8 +9326,18 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               })
             }
             throwIfInvokeAborted()
-            if (invokeFinalOutcome === "success" && !isInternalNotificationTurn) {
-              scheduleDesktopTurnCompletion(threadId, runToken, desktopCompletionCursor)
+            if (invokeFinalOutcome === "success") {
+              // Team/Workflow notification turns are normally claimed by the
+              // main-process IM pump. If the renderer won that durable claim first,
+              // observe its final assistant row as a fallback so an authorized IM
+              // route still receives the detached result. The observer is a no-op
+              // for threads without an active remote grant.
+              await deliverManagedAgentRunCompletion(
+                runExecutionContext,
+                threadId,
+                runToken,
+                desktopCompletionCursor
+              )
             }
             turnStateShouldDispose = true
             if (!autoModeTerminal) {
@@ -9351,8 +9516,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                           isPathInsideAnyDirectory(filePath, memoryDirectoryPaths, workspacePath)
                         )
                     )
-                    const directMemoryTurnCount =
-                      memoryBatch.turns.length - turnsToSummarize.length
+                    const directMemoryTurnCount = memoryBatch.turns.length - turnsToSummarize.length
 
                     const resolveMemoryModel = async (): Promise<ChatOpenAI | null> => {
                       const memRoutingResult = await resolveModel({
@@ -9487,6 +9651,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               console.warn("[Agent] Failed to schedule memory maintenance:", error)
             }
           } else {
+            notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
             finishTraceInBackground(tracer, "cancelled", undefined, "Agent")
@@ -9577,12 +9742,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             pauseActiveGoalForRuntimeStop(failureFuseHalt.decision.reason)
             sendFailureFuseHalt(window, channel, failureFuseHalt)
             syncUsedSkillsContext()
-            finishTraceInBackground(
-              tracer,
-              "cancelled",
-              failureFuseHalt.decision.reason,
-              "Agent"
-            )
+            finishTraceInBackground(tracer, "cancelled", failureFuseHalt.decision.reason, "Agent")
             if (invokeRoutingResult) {
               rememberRoutingFeedback(threadId, {
                 resolvedTier: invokeRoutingResult.resolvedTier,
@@ -9696,6 +9856,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             markAutoModeTerminal("error", "provider_error", errMsg)
             turnStateShouldDispose = true
           } else {
+            notifyManagedAgentRunCancelled(runExecutionContext)
             pauseActiveGoalForRuntimeStop("Agent run was aborted.")
             syncUsedSkillsContext()
             finishTraceInBackground(tracer, "cancelled", undefined, "Agent")
@@ -9736,6 +9897,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
             controller: abortController,
             settledPromise: activeRunSettledPromise,
             resolveSettlement: resolveActiveRunSettled,
+            runOwner: runExecutionContext.localRunLease?.owner ?? "desktop",
+            releaseRunLease: !runExecutionContext.localRunLease?.managedExternally,
             criticalBeforeReleasePhases: [
               {
                 name: "settle-managed-workflow-handoff",
@@ -9789,9 +9952,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                     const contextModelId =
                       usedModelId ?? invokeRoutingResult?.resolvedModelId ?? modelId
                     const maxTokens = (
-                      contextModelId
-                        ? getModelConfigByRef(contextModelId)
-                        : getDefaultModelConfig()
+                      contextModelId ? getModelConfigByRef(contextModelId) : getDefaultModelConfig()
                     )?.maxTokens
                     if (
                       highWaterInputTokens > 0 &&
@@ -9847,7 +10008,10 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
                   )
               }
             ],
-            removeWindowListener: removeWindowClosedSubscription,
+            removeWindowListener: () => {
+              removeWindowClosedSubscription()
+              removeExternalAbortSubscription()
+            },
             settleNotifications: () => settleDrainedCoordinatorNotifications("restore"),
             cleanupNotificationSkills: () => {
               if (!clearCoordinatorNotificationSelectedSkillsOnExit) return
@@ -9891,7 +10055,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         pendingPhysicalStreamRunSetupGuard?.abandon()
         pendingPhysicalStreamRunSetupGuard = undefined
       }
-    }
+    })
   )
 
   // Transport adapter for renderer-originated agent invocations.

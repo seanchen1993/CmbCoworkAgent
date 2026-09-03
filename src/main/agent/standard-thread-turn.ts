@@ -39,6 +39,10 @@ import { TraceCollector, type TraceCollectorOptions } from "./trace/collector"
 import { createAgentRuntime, type CreateAgentRuntimeOptions, type DeepAgent } from "./runtime"
 import { assertLocalThreadRunLease, type LocalThreadRunOwner } from "./thread-run-lease"
 import { primeHarnessStageAttribution } from "../services/harness-stage-attribution"
+import {
+  formatSkillUseBlock as formatTrustedSkillUseBlock,
+  type SkillUseBlockMetadata
+} from "../../shared/skill-use-block"
 
 export type StandardTurnSource = "desktop" | "im" | "scheduler" | "heartbeat"
 
@@ -418,6 +422,8 @@ async function activateExplicitSkillFromMessage({
 export async function prepareStandardUserPrompt({
   rawMessage,
   initialModelInput,
+  trustedExplicitSkill,
+  allowExplicitSkillFromMessage = true,
   threadId,
   workspacePath,
   turnState,
@@ -430,6 +436,13 @@ export async function prepareStandardUserPrompt({
 }: {
   rawMessage: string
   initialModelInput: string
+  /**
+   * Host-resolved explicit skill. Remote transports use this instead of
+   * trusting a user-authored CMBDEVCLAW-SKILL-USE block.
+   */
+  trustedExplicitSkill?: SkillUseBlockMetadata
+  /** Desktop transport payloads are trusted by default; untrusted transports disable this. */
+  allowExplicitSkillFromMessage?: boolean
   threadId: string
   workspacePath: string
   turnState: PromptPreparationTurnState
@@ -441,9 +454,16 @@ export async function prepareStandardUserPrompt({
   isPreparationCurrent?: () => boolean
 }): Promise<PreparedUserPrompt> {
   let preparedMessage = initialModelInput
-  const explicitSkillActivationMessage = parseSkillUseBlock(rawMessage)
-    ? rawMessage
-    : initialModelInput
+  const trustedExplicitSkillBlock = trustedExplicitSkill
+    ? formatTrustedSkillUseBlock(trustedExplicitSkill)
+    : undefined
+  const explicitSkillActivationMessage = trustedExplicitSkillBlock
+    ? [initialModelInput.trimEnd(), trustedExplicitSkillBlock].filter(Boolean).join("\n\n")
+    : allowExplicitSkillFromMessage
+      ? parseSkillUseBlock(rawMessage)
+        ? rawMessage
+        : initialModelInput
+      : ""
   const explicitSkillActivation = await activateExplicitSkillFromMessage({
     message: explicitSkillActivationMessage,
     workspacePath,

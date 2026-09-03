@@ -356,8 +356,6 @@ export class ImRemoteUserInputService {
     if (!thread) return null
     const parsed = parseStandardThreadMetadata(thread.metadata)
     if (!parsed.workspacePath || !canonicalDirectory(parsed.workspacePath)) return null
-    if (parsed.agentMode !== "normal") return null
-
     const registered = this.dependencies.interactionRoutes.get(threadId)
     if (registered) {
       const event = this.dependencies.events.getEvent(registered.eventId)

@@ -1,4 +1,6 @@
 import type { RemoteImEventV1 } from "../../../shared/im-gateway-contract"
+import type { AgentRunDelivery } from "../../agent/agent-run-service"
+import { parseGoalSlashCommand } from "../../agent/goals/slash"
 import { ImConversationTurnQueue } from "./conversation-turn-queue"
 import type { ImIngressResult } from "./ingress-sequencer"
 import { ImIngressSequencer } from "./ingress-sequencer"
@@ -15,6 +17,10 @@ import { registerImDesktopCompletionReplyDrainer } from "./desktop-completion"
 import { imRemoteApprovalService } from "./remote-approval-service"
 import { imRemoteUserInputService } from "./remote-user-input-service"
 import { imInboxService } from "./inbox-service"
+import { ImSkillCommandService, imSkillCommandService } from "./skill-command"
+import { ImRemoteModeNotificationPump } from "./remote-mode-notification-pump"
+import { ImGoalRunBridge } from "./goal-runner"
+import { imRemoteCapabilityGuard } from "./capability-guard"
 
 /**
  * Headless orchestration boundary used by the production WSS adapter and the
@@ -27,7 +33,10 @@ export class ImUnifiedBotService {
   readonly ingress: ImIngressSequencer
   readonly turnQueue: ImConversationTurnQueue
   readonly commandRouter: ImCommandRouter
+  readonly skillCommands: ImSkillCommandService
   readonly replyClient: ImReplyClient
+  readonly modeNotificationPump: ImRemoteModeNotificationPump
+  readonly goalRuns: ImGoalRunBridge
   private readonly unregisterSchedulerGateway: () => void
   private readonly unregisterDesktopCompletionReplyDrainer: () => void
   private readonly unregisterRemoteApprovalReplyDrainer: () => void
@@ -36,7 +45,12 @@ export class ImUnifiedBotService {
 
   constructor(
     readonly gateway: ImGatewayClientPort = unavailableImGatewayClient,
-    options: { waitingDesktopTtlMs?: number } = {}
+    options: {
+      waitingDesktopTtlMs?: number
+      skillCommands?: ImSkillCommandService
+      getAgentRunDelivery?: () => AgentRunDelivery | null
+      goalRuns?: ImGoalRunBridge
+    } = {}
   ) {
     this.replyClient = new ImReplyClient(gateway)
     this.unregisterSchedulerGateway = registerImInboxSchedulerGateway(gateway, this.replyClient)
@@ -49,9 +63,18 @@ export class ImUnifiedBotService {
     this.unregisterRemoteUserInputReplyDrainer = imRemoteUserInputService.registerReplyDrainer(
       this.replyClient
     )
+    this.goalRuns =
+      options.goalRuns ??
+      new ImGoalRunBridge({ getDelivery: options.getAgentRunDelivery ?? (() => null) })
+    this.modeNotificationPump = new ImRemoteModeNotificationPump({
+      replyClient: this.replyClient,
+      goalRuns: this.goalRuns
+    })
     this.runner = new ImRemoteRunner({
       gateway,
       replyClient: this.replyClient,
+      goalRuns: this.goalRuns,
+      onDetachedResultAvailable: (notice) => this.modeNotificationPump.schedule(notice),
       ...(options.waitingDesktopTtlMs ? { waitingDesktopTtlMs: options.waitingDesktopTtlMs } : {})
     })
     this.ingress = new ImIngressSequencer({
@@ -66,13 +89,36 @@ export class ImUnifiedBotService {
       getCurrentEventId: (conversationKey, threadId) =>
         this.turnQueue.getCurrentEventId(conversationKey, threadId)
     })
+    this.skillCommands = options.skillCommands ?? imSkillCommandService
   }
 
   async receiveEvent(event: RemoteImEventV1): Promise<ImIngressResult> {
     const command = parseImCommand(event.message.text)
+    const goalCommand = event.message.text.trimStart().startsWith("//")
+      ? { type: "none" as const }
+      : parseGoalSlashCommand(event.message.text)
     const settings = getBuiltinRobotSettings()
     if (!settings.enabled) {
       return this.ingress.receiveControlEvent(event, async () => "本设备的内置机器人已断开。")
+    }
+    if (
+      goalCommand.type === "status" ||
+      goalCommand.type === "invalid" ||
+      goalCommand.type === "pause" ||
+      goalCommand.type === "clear"
+    ) {
+      return this.ingress.receiveControlEvent(event, async (storedEvent) => {
+        const decision = await imRemoteCapabilityGuard.evaluate(storedEvent)
+        if (!decision.allowed) return decision.message
+        return this.goalRuns.runControl({
+          threadId: decision.target.threadId,
+          message: event.message.text,
+          userMessageId: `im:${event.eventId}:goal-control`
+        })
+      })
+    }
+    if (goalCommand.type !== "none") {
+      return this.receiveOrdinaryEvent(event)
     }
     if (command?.name === "retry") {
       const resolved = this.commandRouter.resolveRetryEvent(event.conversationKey, command.argument)
@@ -113,6 +159,16 @@ export class ImUnifiedBotService {
         })
       )
     }
+    if (event.message.text.trim().startsWith("/")) {
+      const prepared = await this.skillCommands.prepareForIngress({
+        message: event.message.text,
+        conversationKey: event.conversationKey,
+        principalId: event.principalId
+      })
+      if (prepared.kind === "control") {
+        return this.ingress.receiveControlEvent(event, async () => prepared.reply)
+      }
+    }
     return this.receiveOrdinaryEvent(event)
   }
 
@@ -140,6 +196,7 @@ export class ImUnifiedBotService {
         })
       )
     })
+    await this.modeNotificationPump.recoverAndStart()
     this.startOutboxRetryLoop()
     return recovered
   }
@@ -176,6 +233,7 @@ export class ImUnifiedBotService {
     this.unregisterDesktopCompletionReplyDrainer()
     this.unregisterRemoteApprovalReplyDrainer()
     this.unregisterRemoteUserInputReplyDrainer()
+    this.modeNotificationPump.stop()
     return this.turnQueue.stop()
   }
 

@@ -368,28 +368,11 @@ export class ImRemoteAccessService {
     thread: ThreadRow
     workspacePath: string
   } {
-    const { thread, workspacePath, parsed } = this.validateThreadStructure(threadId)
-    if (parsed.agentMode !== "normal") {
-      throw new ImRemoteAccessError(
-        "REMOTE_THREAD_UNSUPPORTED",
-        "第一阶段只支持普通 Agent 模式的会话。"
-      )
-    }
-    const goal = this.dependencies.getGoal(threadId)
-    if (
-      (goal && goal.status !== "complete") ||
-      this.dependencies.coordinator.hasRunningWorkersForThread(threadId) ||
-      this.dependencies.coordinator.hasNotifications(threadId) ||
-      this.dependencies.coordinator.hasTerminalWorkerAwaitingNotificationForThread(threadId) ||
-      this.dependencies.workflow.isBusyForThread(threadId, workspacePath) ||
-      this.dependencies.hasPendingApproval(threadId) ||
-      this.dependencies.hasPendingUserInput(threadId)
-    ) {
-      throw new ImRemoteAccessError(
-        "REMOTE_THREAD_UNSUPPORTED",
-        "会话仍有高级模式任务或桌面交互待处理，暂不能接入招乎。"
-      )
-    }
+    // A grant describes which durable Thread IM may address. Execution mode,
+    // detached workers/workflows and transient HITL state are evaluated at turn
+    // time; treating them as grant structure made an otherwise valid switch
+    // silently disappear from /会话.
+    const { thread, workspacePath } = this.validateThreadStructure(threadId)
     return { thread, workspacePath }
   }
 

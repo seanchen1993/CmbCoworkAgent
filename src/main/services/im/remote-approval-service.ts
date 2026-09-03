@@ -455,7 +455,7 @@ export class ImRemoteApprovalService {
     if (!thread) return null
     const parsed = parseStandardThreadMetadata(thread.metadata)
     const workspacePath = parsed.workspacePath ? canonicalDirectory(parsed.workspacePath) : null
-    if (!workspacePath || parsed.agentMode !== "normal") return null
+    if (!workspacePath) return null
 
     const threadGrant = this.dependencies.access.getThreadGrant(threadId)
     if (threadGrant?.state === "active") {

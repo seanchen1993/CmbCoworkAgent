@@ -20,11 +20,12 @@ const ROUTE = {
 
 function userInputRequest(input: {
   requestId: string
+  threadId?: string
   questions?: UserInputRequest["questions"]
 }): UserInputRequest {
   return {
     requestId: input.requestId,
-    threadId: "thread-1",
+    threadId: input.threadId ?? "thread-1",
     createdAt: "2026-08-03T08:00:00.000Z",
     questions: input.questions ?? [
       {
@@ -49,7 +50,13 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
   throw new Error(`Timed out waiting for ${label}`)
 }
 
-async function createContext(options: { enabled?: boolean } = {}) {
+async function createContext(
+  options: {
+    enabled?: boolean
+    agentMode?: "normal" | "coordinator" | "workflow"
+    threadIds?: string[]
+  } = {}
+) {
   const root = await mkdtemp(join(tmpdir(), "cmb-im-user-input-"))
   const SQL = await initSqlJs()
   const database = new SQL.Database()
@@ -62,21 +69,27 @@ async function createContext(options: { enabled?: boolean } = {}) {
     now: () => clock.now
   }
   const conversations = new ImConversationStateStore(persistence)
-  const grants = new ImRemoteGrantStore(persistence, () => "grant-thread-1")
+  let grantSequence = 0
+  const grants = new ImRemoteGrantStore(persistence, () => `grant-thread-${++grantSequence}`)
   const events = new ImEventStore(persistence)
   await conversations.ensureConversation(ROUTE)
-  await grants.enableThreadGrant({ route: ROUTE, threadId: "thread-1", title: "桌面会话" })
-
-  const thread: ThreadRow = {
-    thread_id: "thread-1",
-    created_at: clock.now,
-    updated_at: clock.now,
-    title: "桌面会话",
-    status: "idle",
-    thread_values: null,
-    metadata: JSON.stringify({ workspacePath: root, agentMode: "normal" })
+  const threadIds = options.threadIds ?? ["thread-1"]
+  const threads = new Map<string, ThreadRow>()
+  for (const [index, threadId] of threadIds.entries()) {
+    const title = index === 0 ? "桌面会话" : `桌面会话 ${index + 1}`
+    await grants.enableThreadGrant({ route: ROUTE, threadId, title })
+    threads.set(threadId, {
+      thread_id: threadId,
+      created_at: clock.now,
+      updated_at: clock.now,
+      title,
+      status: "idle",
+      thread_values: null,
+      metadata: JSON.stringify({ workspacePath: root, agentMode: options.agentMode ?? "normal" })
+    })
   }
-  let pending: UserInputRequest | null = null
+
+  const pending = new Map<string, UserInputRequest>()
   let pendingListener: ((request: Readonly<UserInputRequest>) => void) | null = null
   let removedListener: ((requestId: string, threadId: string) => void) | null = null
   const responses: UserInputResponse[] = []
@@ -91,7 +104,7 @@ async function createContext(options: { enabled?: boolean } = {}) {
     access: { getThreadGrant: (threadId) => grants.getThreadGrant(threadId) },
     grants,
     events,
-    getThread: (threadId) => (threadId === thread.thread_id ? thread : null),
+    getThread: (threadId) => threads.get(threadId) ?? null,
     getSettings: () => ({
       enabled: options.enabled !== false,
       gatewayUrl: null,
@@ -99,13 +112,16 @@ async function createContext(options: { enabled?: boolean } = {}) {
       remoteApprovalEnabled: false,
       waitingDesktopTtlMinutes: 10
     }),
-    getPendingForThread: (threadId) => (pending?.threadId === threadId ? pending : null),
+    getPendingForThread: (threadId) => pending.get(threadId) ?? null,
     submitResponse: (response, submitOptions) => {
-      if (!pending || pending.requestId !== response.requestId) return false
+      const entry = [...pending.entries()].find(
+        ([, request]) => request.requestId === response.requestId
+      )
+      if (!entry) return false
       responses.push(response)
       responseOptions.push(submitOptions)
-      const removed = pending
-      pending = null
+      const [threadId, removed] = entry
+      pending.delete(threadId)
       removedListener?.(removed.requestId, removed.threadId)
       return true
     },
@@ -142,7 +158,7 @@ async function createContext(options: { enabled?: boolean } = {}) {
   }
 
   function emit(request: UserInputRequest): void {
-    pending = request
+    pending.set(request.threadId, request)
     pendingListener?.(request)
   }
 
@@ -165,10 +181,10 @@ async function createContext(options: { enabled?: boolean } = {}) {
     emit,
     publish,
     sendPendingCount: () => sendPendingCount,
-    removePending: () => {
-      if (!pending) return
-      const removed = pending
-      pending = null
+    removePending: (threadId = "thread-1") => {
+      const removed = pending.get(threadId)
+      if (!removed) return
+      pending.delete(threadId)
       removedListener?.(removed.requestId, removed.threadId)
     }
   }
@@ -353,11 +369,65 @@ async function testDisabledRobotDoesNotPublish(): Promise<void> {
   }
 }
 
+async function testAdvancedModesCanPublishAndResolve(): Promise<void> {
+  for (const agentMode of ["coordinator", "workflow"] as const) {
+    const context = await createContext({ agentMode })
+    try {
+      const request = userInputRequest({ requestId: `request-${agentMode}` })
+      await context.publish(request)
+      assert.equal(
+        await context.service.resolveAnswer({ argument: "A1B2C3 1", ...ROUTE }),
+        "已从招乎提交回答，任务将继续执行。"
+      )
+      assert.equal(context.responses.length, 1)
+    } finally {
+      context.service.dispose()
+      context.database.close()
+      await rm(context.root, { recursive: true, force: true })
+    }
+  }
+}
+
+async function testConcurrentThreadsUseIndependentCodes(): Promise<void> {
+  const threadIds = ["thread-1", "thread-2", "thread-3"]
+  const context = await createContext({ threadIds })
+  try {
+    const requests = threadIds.map((threadId, index) =>
+      userInputRequest({ requestId: `request-concurrent-${index + 1}`, threadId })
+    )
+    await Promise.all(requests.map((request) => context.publish(request)))
+
+    const codes = requests.map(
+      (request) =>
+        context.deliveryText(request.requestId).match(/\/回答 ([A-F0-9]{6}) <编号>/u)?.[1]
+    )
+    assert.deepEqual(codes, ["A1B2C3", "D4E5F6", "012ABC"])
+
+    for (const code of codes) {
+      assert(code)
+      assert.equal(
+        await context.service.resolveAnswer({ argument: `${code} 1`, ...ROUTE }),
+        "已从招乎提交回答，任务将继续执行。"
+      )
+    }
+    assert.deepEqual(
+      context.responses.map((response) => response.requestId),
+      requests.map((request) => request.requestId)
+    )
+  } finally {
+    context.service.dispose()
+    context.database.close()
+    await rm(context.root, { recursive: true, force: true })
+  }
+}
+
 async function main(): Promise<void> {
   await testPromptAndSingleUseOptionAnswer()
   await testMultipleQuestionsRotateCodeAndAcceptCustomText()
   await testExpiryDesktopRaceAndExplicitCommand()
   await testDisabledRobotDoesNotPublish()
+  await testAdvancedModesCanPublishAndResolve()
+  await testConcurrentThreadsUseIndependentCodes()
   console.log("IM remote user-input tests passed")
 }
 

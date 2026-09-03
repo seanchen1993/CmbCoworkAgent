@@ -18,10 +18,7 @@ import { ImInboxService } from "../src/main/services/im/inbox-service"
 import { ImIngressSequencer } from "../src/main/services/im/ingress-sequencer"
 import type { ImPersistenceDependencies } from "../src/main/services/im/persistence"
 import { ImReplyClient } from "../src/main/services/im/reply-client"
-import {
-  ImRemoteAccessError,
-  ImRemoteAccessService
-} from "../src/main/services/im/remote-access-service"
+import { ImRemoteAccessService } from "../src/main/services/im/remote-access-service"
 import { ImRemoteGrantStore } from "../src/main/services/im/remote-grant-store"
 import { eventShortCode } from "../src/main/services/im/reply-segmentation"
 import {
@@ -655,28 +652,33 @@ async function testDesktopThreadGrantBindsWithoutMutatingMetadata(): Promise<voi
       transientlyBusyAccess.validateThreadForCompletionDelivery("desktop-thread")
     assert.equal(deliveryTarget.thread.thread_id, "desktop-thread")
     assert.equal(deliveryTarget.workspacePath, await realpath(context.root))
-    assert.throws(
-      () => transientlyBusyAccess.validateThreadForRemoteAccess("desktop-thread"),
-      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
+    assert.equal(
+      transientlyBusyAccess.validateThreadForRemoteAccess("desktop-thread").thread.thread_id,
+      "desktop-thread",
+      "grant structure must not depend on transient Goal/worker/workflow/HITL state"
     )
 
-    context.updateLocalThread("desktop-thread", {
-      metadata: JSON.stringify({ ...originalMetadata, agentMode: "coordinator" })
-    })
-    assert.equal(
-      context.access.validateThreadForCompletionDelivery("desktop-thread").thread.thread_id,
-      "desktop-thread"
-    )
-    assert.throws(
-      () => context.access.validateThreadForRemoteAccess("desktop-thread"),
-      (error) => error instanceof ImRemoteAccessError && error.code === "REMOTE_THREAD_UNSUPPORTED"
-    )
-    const unsupported = await guard.evaluate(event)
-    assert.equal(unsupported.allowed, false)
-    assert.equal(
-      unsupported.allowed ? null : unsupported.reasonCode,
-      "REMOTE_AGENT_MODE_UNSUPPORTED"
-    )
+    for (const { label, ...executionProfile } of [
+      { label: "Solo", agentMode: "normal", subagentsEnabled: false },
+      { label: "Multi", agentMode: "normal", subagentsEnabled: true },
+      { label: "Team", agentMode: "coordinator" },
+      { label: "Workflow", agentMode: "workflow" }
+    ]) {
+      context.updateLocalThread("desktop-thread", {
+        metadata: JSON.stringify({ ...originalMetadata, ...executionProfile })
+      })
+      assert.equal(
+        context.access.validateThreadForCompletionDelivery("desktop-thread").thread.thread_id,
+        "desktop-thread"
+      )
+      assert.equal(
+        context.access.validateThreadForRemoteAccess("desktop-thread").thread.thread_id,
+        "desktop-thread",
+        `${label} mode is a supported execution snapshot for a granted Thread`
+      )
+      const supported = await guard.evaluate(event)
+      assert.equal(supported.allowed, true, `${label} should be remotely executable`)
+    }
 
     context.updateLocalThread("desktop-thread", { metadata: JSON.stringify(originalMetadata) })
     await context.grants.revokeThreadGrant("desktop-thread")

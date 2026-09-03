@@ -7,6 +7,7 @@ import {
   type DeepAgent,
   type RuntimeInteractionWaitHooks
 } from "../../agent/runtime"
+import { parseGoalSlashCommand } from "../../agent/goals/slash"
 import {
   createStandardTurnTrace,
   getHarnessAgentContext,
@@ -18,6 +19,13 @@ import {
   type HarnessAgentContext,
   type RemoteTurnPolicy
 } from "../../agent/standard-thread-turn"
+import {
+  adaptCoordinatorSkillUseForWorkerDelegation,
+  extractCoordinatorSelectedSkill,
+  getAgentModeFromMetadata,
+  type AgentMode,
+  type CoordinatorSelectedSkill
+} from "../../agent/coordinator-mode"
 import {
   claimLocalThreadRunLease,
   getLocalThreadRunLease,
@@ -68,6 +76,13 @@ import {
 } from "./remote-interaction-route"
 import { ImReplyClient } from "./reply-client"
 import { trackEvent } from "../event-reporter"
+import type { SkillUseBlockMetadata } from "../../../shared/skill-use-block"
+import {
+  ImSkillCommandError,
+  imSkillCommandService,
+  neutralizeImSkillUseMarkers
+} from "./skill-command"
+import { ImGoalRunBridge } from "./goal-runner"
 
 const IM_INBOX_BLOCKED_TOOLS = [
   "execute",
@@ -103,6 +118,19 @@ export interface ImRemoteTurnExecutionInput {
   signal: AbortSignal
   capability: Extract<ImRemoteCapabilityDecision, { allowed: true }>
   interactionWaitHooks?: RuntimeInteractionWaitHooks
+  onDetachedResultAvailable?: (signal: ImDetachedResultSignal) => void
+}
+
+export interface ImDetachedResultSignal {
+  kind: "coordinator" | "workflow"
+  threadId: string
+  runId?: string
+}
+
+export interface ImDetachedResultNotice extends ImDetachedResultSignal {
+  conversationKey: string
+  principalId: string
+  targetSnapshot: NonNullable<ImEventRecord["targetSnapshot"]>
 }
 
 export interface PreparedRemoteStandardTurnInput {
@@ -119,6 +147,18 @@ export interface PreparedRemoteStandardTurnInput {
   signal: AbortSignal
   remotePolicy?: RemoteTurnPolicy
   interactionWaitHooks?: RuntimeInteractionWaitHooks
+  explicitSkill?: SkillUseBlockMetadata
+  agentMode?: AgentMode
+  /** Trusted plumbing turn used to fold detached Team/Workflow results back into the thread. */
+  internalNotificationTurn?: boolean
+  /** Internal notification turns are checkpoint-only and must not create a synthetic user bubble. */
+  persistUserMessage?: boolean
+  /** Detached-result reporting must not auto-commit unrelated foreground workspace edits. */
+  disableAutoCommit?: boolean
+  coordinatorTurnPrompt?: string
+  coordinatorNotificationSelectedSkills?: Record<string, CoordinatorSelectedSkill | undefined>
+  onCoordinatorNotificationAction?: (notificationIds: string[]) => void
+  onDetachedResultAvailable?: (signal: ImDetachedResultSignal) => void
 }
 
 export interface ImRemoteRunnerDependencies {
@@ -138,6 +178,8 @@ export interface ImRemoteRunnerDependencies {
   permitRenewIntervalMs: number
   waitingDesktopTtlMs: number
   setThreadLifecycle: (event: ImEventRecord, state: ImRemoteThreadLifecycleState) => Promise<void>
+  onDetachedResultAvailable?: (notice: ImDetachedResultNotice) => void
+  goalRuns: ImGoalRunBridge
 }
 
 export type ImRemoteThreadLifecycleState =
@@ -274,8 +316,18 @@ export async function executePreparedRemoteStandardTurn(
     routingTaskSource,
     signal,
     remotePolicy,
-    interactionWaitHooks
+    interactionWaitHooks,
+    explicitSkill,
+    agentMode: requestedAgentMode,
+    internalNotificationTurn = false,
+    persistUserMessage = true,
+    disableAutoCommit = false,
+    coordinatorTurnPrompt,
+    coordinatorNotificationSelectedSkills,
+    onCoordinatorNotificationAction,
+    onDetachedResultAvailable
   } = input
+  const agentMode = requestedAgentMode ?? getAgentModeFromMetadata(metadata)
   const channel = `scheduler:stream:${threadId}`
   const hookScope = createPersistentThreadHookScope(threadId)
   const skillUseTracker = createSkillUseTracker()
@@ -297,32 +349,46 @@ export async function executePreparedRemoteStandardTurn(
       ...(harnessFeature ? { harnessFeature } : {})
     }
   })
-  tracer.setExecutionMode("normal")
+  tracer.setExecutionMode(agentMode)
 
-  persistStandardTurnUserMessage({
-    threadId,
-    messageId: userMessageId,
-    content: rawMessage
-  })
-  const preparedPrompt = await prepareStandardUserPrompt({
-    rawMessage,
-    initialModelInput: rawMessage,
-    threadId,
-    workspacePath,
-    turnState: { hookScope, skillUseTracker, skillHookKeys, turnId: userMessageId },
-    harnessAgentContext: harnessContext,
-    onHookResult,
-    onHookSkippedFactory,
-    isPreparationCurrent: () => !signal.aborted
-  })
-  if (!preparedPrompt.accepted) {
-    await tracer.finish("cancelled", preparedPrompt.reason)
-    throw new ImPreparedPromptRejectedError(preparedPrompt.reason)
+  if (persistUserMessage) {
+    persistStandardTurnUserMessage({
+      threadId,
+      messageId: userMessageId,
+      content: rawMessage
+    })
+  }
+  let modelPrompt = rawMessage
+  if (!internalNotificationTurn) {
+    const preparedPrompt = await prepareStandardUserPrompt({
+      rawMessage,
+      initialModelInput: rawMessage,
+      trustedExplicitSkill: explicitSkill,
+      allowExplicitSkillFromMessage: source !== "im",
+      threadId,
+      workspacePath,
+      turnState: { hookScope, skillUseTracker, skillHookKeys, turnId: userMessageId },
+      harnessAgentContext: harnessContext,
+      onHookResult,
+      onHookSkippedFactory,
+      isPreparationCurrent: () => !signal.aborted
+    })
+    if (!preparedPrompt.accepted) {
+      await tracer.finish("cancelled", preparedPrompt.reason)
+      throw new ImPreparedPromptRejectedError(preparedPrompt.reason)
+    }
+    modelPrompt = preparedPrompt.content
+  }
+
+  let coordinatorSelectedSkill: CoordinatorSelectedSkill | undefined
+  if (agentMode === "coordinator") {
+    coordinatorSelectedSkill = extractCoordinatorSelectedSkill(modelPrompt) ?? undefined
+    modelPrompt = adaptCoordinatorSkillUseForWorkerDelegation(modelPrompt)
   }
 
   const routing = await resolveStandardTurnRouting({
     taskSource: routingTaskSource,
-    message: preparedPrompt.content,
+    message: modelPrompt,
     threadId,
     requestedModelId: typeof metadata.model === "string" ? metadata.model : undefined
   })
@@ -331,7 +397,9 @@ export async function executePreparedRemoteStandardTurn(
     if (routing.result.routingTrace) tracer.setRoutingTrace(routing.result.routingTrace)
   }
 
-  const snapshot = await startAgentGitSnapshot(threadId, workspacePath).catch(() => null)
+  const snapshot = disableAutoCommit
+    ? null
+    : await startAgentGitSnapshot(threadId, workspacePath).catch(() => null)
   const releasePin = pinCheckpointer(threadId)
   let agent: DeepAgent | null = null
   let completionSucceeded = false
@@ -353,7 +421,13 @@ export async function executePreparedRemoteStandardTurn(
         threadId,
         workspacePath,
         abortSignal: signal,
-        agentMode: "normal",
+        agentMode,
+        disableSubagents: agentMode === "normal" && metadata.subagentsEnabled === false,
+        coordinatorSelectedSkill,
+        coordinatorExplicitSelectedSkill: coordinatorSelectedSkill,
+        coordinatorTurnPrompt,
+        coordinatorNotificationSelectedSkills,
+        onCoordinatorNotificationAction,
         traceContext: tracer.getTraceContext(),
         hookTurnId: userMessageId,
         hookScope,
@@ -371,7 +445,27 @@ export async function executePreparedRemoteStandardTurn(
         }),
         extraSystemPrompt: IM_UNTRUSTED_INPUT_CONTEXT,
         autoApproveFileEdits: targetKind === "inbox",
-        onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath)
+        onFileMutation: (filePath) => recordAgentTouchedFile(threadId, workspacePath, filePath),
+        onCoordinatorWorkerEvent: (event) => {
+          if (event.stream) return
+          mirrorStandardTurnStreamToRenderer(threadId, {
+            type: "custom",
+            data: {
+              type: "coordinator_workers",
+              ...(event.workers ? { workers: event.workers } : { worker: event.worker }),
+              ...(event.notification ? { notification: event.notification } : {}),
+              // The main-process IM pump owns this result. Keep the existing desktop
+              // view updated without racing the renderer's notification submitter.
+              suppressNotificationAutoRun: true
+            }
+          })
+          if (event.notification && event.suppressNotificationAutoRun !== true) {
+            onDetachedResultAvailable?.({ kind: "coordinator", threadId })
+          }
+        },
+        onWorkflowLaunched: (workflowRunId) => {
+          onDetachedResultAvailable?.({ kind: "workflow", threadId, runId: workflowRunId })
+        }
       }),
       harnessContext,
       remotePolicy
@@ -387,7 +481,7 @@ export async function executePreparedRemoteStandardTurn(
         const stream = await agent.stream(
           index === 0
             ? {
-                messages: [new HumanMessage({ id: userMessageId, content: preparedPrompt.content })]
+                messages: [new HumanMessage({ id: userMessageId, content: modelPrompt })]
               }
             : null,
           {
@@ -411,57 +505,59 @@ export async function executePreparedRemoteStandardTurn(
     if (!agent) throw new Error("No IM runtime could be created")
 
     let revision = 0
-    const completion = await runCompletionHooksWithRevision({
-      threadId,
-      workspacePath,
-      turnId: userMessageId,
-      pluginOutputDir: harnessContext.pluginOutputDir,
-      systemId: harnessContext.systemId,
-      ...getHarnessHookContext(harnessContext),
-      abortSignal: signal,
-      getStopContext: () => ({
-        userMessage: rawMessage,
-        assistantResponse: streamConsumer.getFinalAssistantText(),
-        toolCalls: streamConsumer.getToolNames(),
-        usedSkills: skillUseTracker.getUsedSkillNames()
-      }),
-      hookScope,
-      skillUseTracker,
-      runRevision: async (revisionPrompt) => {
-        revision += 1
-        const stream = await agent!.stream(
-          {
-            messages: [
-              new HumanMessage({
-                id: `${userMessageId}:revision:${revision}`,
-                content: revisionPrompt
-              })
-            ]
+    const completion = internalNotificationTurn
+      ? "passed"
+      : await runCompletionHooksWithRevision({
+          threadId,
+          workspacePath,
+          turnId: userMessageId,
+          pluginOutputDir: harnessContext.pluginOutputDir,
+          systemId: harnessContext.systemId,
+          ...getHarnessHookContext(harnessContext),
+          abortSignal: signal,
+          getStopContext: () => ({
+            userMessage: rawMessage,
+            assistantResponse: streamConsumer.getFinalAssistantText(),
+            toolCalls: streamConsumer.getToolNames(),
+            usedSkills: skillUseTracker.getUsedSkillNames()
+          }),
+          hookScope,
+          skillUseTracker,
+          runRevision: async (revisionPrompt) => {
+            revision += 1
+            const stream = await agent!.stream(
+              {
+                messages: [
+                  new HumanMessage({
+                    id: `${userMessageId}:revision:${revision}`,
+                    content: revisionPrompt
+                  })
+                ]
+              },
+              {
+                configurable: { thread_id: threadId },
+                signal,
+                streamMode: ["messages", "values"],
+                recursionLimit: getAgentGraphRecursionLimit()
+              }
+            )
+            await streamConsumer.consume(stream, signal)
           },
-          {
-            configurable: { thread_id: threadId },
-            signal,
-            streamMode: ["messages", "values"],
-            recursionLimit: getAgentGraphRecursionLimit()
-          }
-        )
-        await streamConsumer.consume(stream, signal)
-      },
-      sendNotice: (message) =>
-        mirrorStandardTurnStreamToRenderer(threadId, {
-          type: "custom",
-          data: { type: "hook_notice", message }
-        }),
-      sendError: (message) =>
-        mirrorStandardTurnStreamToRenderer(threadId, {
-          type: "custom",
-          data: { type: "hook_notice", message }
-        }),
-      onHookResult,
-      onHookSkippedFactory,
-      maxRevisionAttempts: MAX_COMPLETION_HOOK_REVISIONS,
-      revisionPromptPrefix: COMPLETION_HOOK_REVISION_PREFIX
-    })
+          sendNotice: (message) =>
+            mirrorStandardTurnStreamToRenderer(threadId, {
+              type: "custom",
+              data: { type: "hook_notice", message }
+            }),
+          sendError: (message) =>
+            mirrorStandardTurnStreamToRenderer(threadId, {
+              type: "custom",
+              data: { type: "hook_notice", message }
+            }),
+          onHookResult,
+          onHookSkippedFactory,
+          maxRevisionAttempts: MAX_COMPLETION_HOOK_REVISIONS,
+          revisionPromptPrefix: COMPLETION_HOOK_REVISION_PREFIX
+        })
     if (completion !== "passed") {
       throw new ImCompletionHookRejectedError(`Completion hooks ended with ${completion}`)
     }
@@ -470,12 +566,14 @@ export async function executePreparedRemoteStandardTurn(
     const finalText = streamConsumer.getFinalAssistantText().trim() || "处理完成。"
     tracer.setUsedSkills(skillUseTracker.getUsedSkillNames())
     await tracer.finish("success")
-    await maybeAutoCommitAfterAgentRun({
-      threadId,
-      workspacePath,
-      userPrompt: rawMessage,
-      snapshot
-    }).catch((error) => console.warn("[IM] Auto-commit finalize failed:", error))
+    if (!disableAutoCommit) {
+      await maybeAutoCommitAfterAgentRun({
+        threadId,
+        workspacePath,
+        userPrompt: rawMessage,
+        snapshot
+      }).catch((error) => console.warn("[IM] Auto-commit finalize failed:", error))
+    }
     completionSucceeded = true
     return finalText
   } catch (error) {
@@ -508,11 +606,59 @@ export async function executePreparedRemoteStandardTurn(
   }
 }
 
-async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput): Promise<string> {
-  const { event, capability, runId, signal, interactionWaitHooks } = input
+async function executePreparedImStandardTurn(
+  input: ImRemoteTurnExecutionInput,
+  goalRuns: ImGoalRunBridge
+): Promise<string> {
+  const { event, capability, runId, signal, interactionWaitHooks, onDetachedResultAvailable } =
+    input
   const { target, metadata, workspacePath } = capability
+  const escapedSlashCommand = event.messageText.trimStart().startsWith("//")
+  const directGoalCommand =
+    !escapedSlashCommand && parseGoalSlashCommand(event.messageText).type !== "none"
+  // Built-in control syntax owns /goal even if an installed skill has the same
+  // display name. A same-named skill remains addressable through /技能 <短码>.
+  const preparedMessage = directGoalCommand
+    ? ({
+        kind: "ordinary",
+        visibleText: neutralizeImSkillUseMarkers(event.messageText),
+        explicitSkill: undefined
+      } as const)
+    : await imSkillCommandService.prepareForExecution({
+        message: event.messageText,
+        target
+      })
+  const agentMode = getAgentModeFromMetadata(metadata)
+  const remotePolicy =
+    target.kind === "inbox"
+      ? createImInboxRemotePolicy({ allowRequestUserInput: true })
+      : agentMode === "normal" && metadata.subagentsEnabled === false
+        ? { disableSubagents: true }
+        : undefined
+  if (
+    directGoalCommand ||
+    goalRuns.shouldUseGoalPipeline(target.threadId, preparedMessage.visibleText, {
+      ignoreSlashCommand: escapedSlashCommand
+    })
+  ) {
+    return goalRuns.run({
+      threadId: target.threadId,
+      target,
+      metadata,
+      prepared: escapedSlashCommand
+        ? { ...preparedMessage, visibleText: `\u200B${preparedMessage.visibleText}` }
+        : preparedMessage,
+      runId,
+      signal,
+      userMessageId: `im:${event.eventId}:user`,
+      agentMode,
+      remotePolicy,
+      interactionWaitHooks,
+      onDetachedResultAvailable
+    })
+  }
   return executePreparedRemoteStandardTurn({
-    rawMessage: event.messageText,
+    rawMessage: preparedMessage.visibleText,
     userMessageId: `im:${event.eventId}:user`,
     threadId: target.threadId,
     targetKind: target.kind,
@@ -523,11 +669,11 @@ async function executePreparedImStandardTurn(input: ImRemoteTurnExecutionInput):
     source: "im",
     routingTaskSource: "chat",
     signal,
-    remotePolicy:
-      target.kind === "inbox"
-        ? createImInboxRemotePolicy({ allowRequestUserInput: true })
-        : undefined,
-    interactionWaitHooks
+    agentMode,
+    explicitSkill: preparedMessage.explicitSkill?.use,
+    remotePolicy,
+    interactionWaitHooks,
+    onDetachedResultAvailable
   })
 }
 
@@ -538,6 +684,7 @@ export class ImRemoteRunner {
   constructor(dependencies: Partial<ImRemoteRunnerDependencies> = {}) {
     const gateway = dependencies.gateway ?? unavailableImGatewayClient
     const eventStore = dependencies.eventStore ?? imEventStore
+    const goalRuns = dependencies.goalRuns ?? new ImGoalRunBridge()
     this.dependencies = {
       gateway,
       eventStore,
@@ -545,7 +692,8 @@ export class ImRemoteRunner {
       conversationState: dependencies.conversationState ?? imConversationStateStore,
       capabilityGuard: dependencies.capabilityGuard ?? imRemoteCapabilityGuard,
       replyClient: dependencies.replyClient ?? new ImReplyClient(gateway, eventStore),
-      executeTurn: dependencies.executeTurn ?? executePreparedImStandardTurn,
+      executeTurn:
+        dependencies.executeTurn ?? ((input) => executePreparedImStandardTurn(input, goalRuns)),
       getThread: dependencies.getThread ?? getThread,
       getThreadMessages: dependencies.getThreadMessages ?? getThreadMessages,
       updateThread: dependencies.updateThread ?? updateThread,
@@ -554,7 +702,9 @@ export class ImRemoteRunner {
       createRunId: dependencies.createRunId ?? randomUUID,
       permitRenewIntervalMs: dependencies.permitRenewIntervalMs ?? 30_000,
       waitingDesktopTtlMs: dependencies.waitingDesktopTtlMs ?? DEFAULT_WAITING_DESKTOP_TTL_MS,
-      setThreadLifecycle: dependencies.setThreadLifecycle ?? setRemoteThreadLifecycle
+      setThreadLifecycle: dependencies.setThreadLifecycle ?? setRemoteThreadLifecycle,
+      onDetachedResultAvailable: dependencies.onDetachedResultAvailable,
+      goalRuns
     }
   }
 
@@ -825,7 +975,17 @@ export class ImRemoteRunner {
         runId,
         signal: executionAbort.signal,
         capability: decision,
-        interactionWaitHooks
+        interactionWaitHooks,
+        onDetachedResultAvailable: this.dependencies.onDetachedResultAvailable
+          ? (signal) => {
+              this.dependencies.onDetachedResultAvailable?.({
+                ...signal,
+                conversationKey: event.conversationKey,
+                principalId: event.principalId,
+                targetSnapshot: target
+              })
+            }
+          : undefined
       })
       if (executionAbort.signal.aborted) {
         throw executionAbort.signal.reason ?? new DOMException("IM run aborted", "AbortError")
@@ -915,16 +1075,22 @@ export class ImRemoteRunner {
       }
 
       const reasonCode =
-        error instanceof ImPreparedPromptRejectedError ||
-        error instanceof ImCompletionHookRejectedError
+        error instanceof ImSkillCommandError
           ? error.reasonCode
-          : "REMOTE_RUNTIME_FAILED"
+          : error instanceof ImPreparedPromptRejectedError ||
+              error instanceof ImCompletionHookRejectedError
+            ? error.reasonCode
+            : "REMOTE_RUNTIME_FAILED"
       const retryable =
+        !(error instanceof ImSkillCommandError) &&
         !(error instanceof ImPreparedPromptRejectedError) &&
         !(error instanceof ImCompletionHookRejectedError) &&
         isRetryableApiError(error)
       console.error("[IM] Standard turn failed:", error)
-      const reply = failureReply(reasonCode, retryable, event.eventId)
+      const reply =
+        error instanceof ImSkillCommandError
+          ? error.publicReply
+          : failureReply(reasonCode, retryable, event.eventId)
       const terminal = await this.dependencies.eventStore.finalizeEventWithReplies({
         eventId: event.eventId,
         state: "failed",

@@ -193,8 +193,11 @@ function testRuntimeEntryPointArchitecture(): void {
     "same-owner handoff is an exact compare-and-swap"
   )
   assert(
-    count(desktop, "const leaseClaim = claimDesktopThreadRunLease(") === 3,
-    "invoke, resume, and interrupt each claim under the existing mutation lock"
+    count(desktop, "const leaseClaim =") === 3 &&
+      desktop.includes(
+        "claimAgentThreadRunLease(threadId, nextInvokeRunToken, runExecutionContext)"
+      ),
+    "invoke, resume, and interrupt each claim under the existing mutation lock; invoke may use an externally managed lease"
   )
   for (const [label, start, end, runToken] of [
     [
@@ -230,12 +233,20 @@ function testRuntimeEntryPointArchitecture(): void {
     )
   }
   assert(
-    count(desktop, 'releaseLocalThreadRunLease(threadId, "desktop", runToken)') === 4,
+    desktop.includes("releaseLocalThreadRunLease(threadId, runOwner, runToken)") &&
+      count(desktop, 'releaseLocalThreadRunLease(threadId, "desktop", runToken)') === 2 &&
+      count(desktop, 'releaseLocalThreadRunLease(threadId, "desktop", nextResumeRunToken)') === 1 &&
+      count(desktop, 'releaseLocalThreadRunLease(threadId, "desktop", nextInterruptRunToken)') ===
+        1,
     "the shared physical-run finalizer and all abandoned setup guards use identity-fenced release"
   )
   assert(
-    count(desktop, "rejectDesktopRunForForeignOwner(threadId, window, channel)") === 3,
-    "all desktop Runtime starts reject a visible foreign owner before stateful work"
+    count(desktop, "rejectDesktopRunForForeignOwner(threadId, window, channel)") === 2 &&
+      count(
+        desktop,
+        "rejectDesktopRunForForeignOwner(threadId, window, channel, runExecutionContext)"
+      ) === 1,
+    "all Runtime starts reject a visible foreign owner before stateful work, while invoke can recognize its externally managed lease"
   )
   const cancelHandler = desktop.slice(desktop.indexOf('"agent:cancel"'))
   assertSourceOrder(

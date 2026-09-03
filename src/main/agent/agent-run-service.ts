@@ -1,5 +1,9 @@
 import type { BrowserWindow } from "electron"
+import type { SkillUseBlockMetadata } from "../../shared/skill-use-block"
 import type { AgentInvokeParams } from "../types"
+import type { RuntimeInteractionWaitHooks } from "./runtime"
+import type { RemoteTurnPolicy, StandardTurnSource } from "./standard-thread-turn"
+import type { LocalThreadRunOwner } from "./thread-run-lease"
 
 export type AgentRunRequest = AgentInvokeParams
 
@@ -14,12 +18,75 @@ export interface AgentRunHandle {
   completion: Promise<void>
 }
 
+export interface AgentRunGoalNotice {
+  message: string
+  goalId: string | null
+  activeWindowId: string | null
+  eventId: number | null
+  createdAt: number
+}
+
+export interface AgentRunFinalAssistant {
+  messageId: string
+  finalText: string
+}
+
+export interface AgentRunDetachedResultSignal {
+  kind: "coordinator" | "workflow"
+  threadId: string
+  runId?: string
+}
+
+export interface AgentGoalControlRequest {
+  threadId: string
+  message: string
+}
+
+export interface AgentGoalControlResult {
+  handled: boolean
+  terminatedCurrentRun: boolean
+  notice?: AgentRunGoalNotice
+}
+
+/**
+ * Trusted main-process execution metadata. Renderer calls use the desktop
+ * defaults; managed transports may reuse the same run body without pretending
+ * that their lease or security policy belongs to the desktop.
+ */
+export interface AgentRunExecutionContext {
+  source: StandardTurnSource
+  localRunLease?: {
+    owner: LocalThreadRunOwner
+    runId: string
+    /** The caller releases the lease only after its own durable settlement. */
+    managedExternally?: boolean
+  }
+  signal?: AbortSignal
+  allowForeignOwnerGoalControl?: boolean
+  trustedExplicitSkill?: SkillUseBlockMetadata
+  allowTrustedTransportSkillMarker?: boolean
+  remotePolicy?: RemoteTurnPolicy
+  interactionWaitHooks?: RuntimeInteractionWaitHooks
+  extraSystemPrompt?: string
+  onGoalNotice?: (notice: AgentRunGoalNotice) => void
+  onFinalAssistant?: (result: AgentRunFinalAssistant) => void | Promise<void>
+  onRunCancelled?: () => void
+  onDetachedResultAvailable?: (signal: AgentRunDetachedResultSignal) => void
+}
+
 type AgentRunImplementation = (
   request: AgentRunRequest,
-  delivery: AgentRunDelivery
+  delivery: AgentRunDelivery,
+  context: AgentRunExecutionContext
 ) => Promise<void>
 
 type ActiveAgentRunInspector = (threadId: string) => boolean
+
+type AgentGoalControlImplementation = (
+  request: AgentGoalControlRequest,
+  delivery: AgentRunDelivery,
+  context: AgentRunExecutionContext
+) => Promise<AgentGoalControlResult>
 
 /**
  * Runtime injection keeps this service independent from the IPC-heavy agent.ts module:
@@ -29,10 +96,17 @@ type ActiveAgentRunInspector = (threadId: string) => boolean
  * ESM import cycle.
  */
 let agentRunImplementation: AgentRunImplementation | null = null
+let agentGoalControlImplementation: AgentGoalControlImplementation | null = null
 let activeAgentRunInspector: ActiveAgentRunInspector = () => false
 
 export function registerAgentRunImplementation(implementation: AgentRunImplementation): void {
   agentRunImplementation = implementation
+}
+
+export function registerAgentGoalControlImplementation(
+  implementation: AgentGoalControlImplementation
+): void {
+  agentGoalControlImplementation = implementation
 }
 
 export function registerActiveAgentRunInspector(inspector: ActiveAgentRunInspector): void {
@@ -58,7 +132,8 @@ export function createBrowserWindowAgentRunDelivery(window: BrowserWindow): Agen
 
 export async function startAgentRun(
   request: AgentRunRequest,
-  delivery: AgentRunDelivery
+  delivery: AgentRunDelivery,
+  context: AgentRunExecutionContext = { source: "desktop" }
 ): Promise<AgentRunHandle> {
   if (!agentRunImplementation) {
     throw new Error("Agent run service is not initialized")
@@ -66,9 +141,23 @@ export async function startAgentRun(
   if (!delivery.isAvailable()) {
     throw new Error("Agent run delivery is unavailable")
   }
-  const completion = agentRunImplementation(request, delivery)
+  const completion = agentRunImplementation(request, delivery, context)
   return {
     threadId: request.threadId,
     completion
   }
+}
+
+export async function controlAgentGoal(
+  request: AgentGoalControlRequest,
+  delivery: AgentRunDelivery,
+  context: AgentRunExecutionContext = { source: "desktop" }
+): Promise<AgentGoalControlResult> {
+  if (!agentGoalControlImplementation) {
+    throw new Error("Agent goal control service is not initialized")
+  }
+  if (!delivery.isAvailable()) {
+    throw new Error("Agent run delivery is unavailable")
+  }
+  return agentGoalControlImplementation(request, delivery, context)
 }

@@ -2,7 +2,6 @@ import { existsSync, realpathSync, statSync } from "node:fs"
 import { resolve } from "node:path"
 import { DEFAULT_IM_CHANNEL_ID } from "../../../shared/im-gateway-contract"
 import { coordinatorWorkerManager } from "../../agent/coordinator-worker-manager"
-import { SqlGoalStore } from "../../agent/goals/goal-store"
 import { hasPendingApprovalForRuntimeThread } from "../../agent/runtime"
 import { parseStandardThreadMetadata } from "../../agent/standard-thread-turn"
 import { workflowRunManager } from "../../agent/workflow/run-manager"
@@ -97,8 +96,7 @@ function sameSnapshot(left: ImTargetSnapshot, right: ImTargetSnapshot): boolean 
     canonicalPath(left.workspacePath) === canonicalPath(right.workspacePath) &&
     (left.kind === "inbox" ||
       (left.kind === "thread" && right.kind === "thread"
-        ? left.grantId === right.grantId &&
-          left.grantVersion === right.grantVersion
+        ? left.grantId === right.grantId && left.grantVersion === right.grantVersion
         : left.kind === "feature" &&
           right.kind === "feature" &&
           left.bindingId === right.bindingId &&
@@ -139,14 +137,12 @@ function metadataMatchesTarget(
   return binding.projectId === target.projectId && binding.slug === target.featureSlug
 }
 
-const defaultGoalStore = new SqlGoalStore()
-
 export class ImRemoteCapabilityGuard {
   constructor(
     private readonly dependencies: ImRemoteCapabilityGuardDependencies = {
       conversationState: imConversationStateStore,
       getThread,
-      getGoal: (threadId) => defaultGoalStore.get(threadId),
+      getGoal: () => null,
       coordinator: coordinatorWorkerManager,
       workflow: workflowRunManager,
       hasPendingApproval: hasPendingApprovalForRuntimeThread,
@@ -317,59 +313,6 @@ export class ImRemoteCapabilityGuard {
         }
       }
     }
-    if (parsed.agentMode !== "normal") {
-      return {
-        allowed: false,
-        reasonCode: "REMOTE_AGENT_MODE_UNSUPPORTED",
-        message: "该会话不是普通 Agent 模式，请在桌面继续处理。"
-      }
-    }
-
-    const goal = this.dependencies.getGoal(snapshot.threadId)
-    if (goal && goal.status !== "complete") {
-      return {
-        allowed: false,
-        reasonCode: "REMOTE_GOAL_UNSUPPORTED",
-        message: "该会话存在进行中或暂停的 Goal，请在桌面继续处理。"
-      }
-    }
-    if (this.dependencies.coordinator.hasRunningWorkersForThread(snapshot.threadId)) {
-      return {
-        allowed: false,
-        reasonCode: "REMOTE_COORDINATOR_UNSUPPORTED",
-        message: "该会话存在 Coordinator worker，请在桌面继续处理。"
-      }
-    }
-    if (
-      this.dependencies.coordinator.hasNotifications(snapshot.threadId) ||
-      this.dependencies.coordinator.hasTerminalWorkerAwaitingNotificationForThread(
-        snapshot.threadId
-      )
-    ) {
-      return {
-        allowed: false,
-        reasonCode: "REMOTE_INTERNAL_NOTIFICATION_PENDING",
-        message: "该会话有待处理的内部任务通知，请先在桌面处理。"
-      }
-    }
-    if (this.dependencies.workflow.isBusyForThread(snapshot.threadId, parsed.workspacePath)) {
-      return {
-        allowed: false,
-        reasonCode: "REMOTE_WORKFLOW_UNSUPPORTED",
-        message: "该会话存在运行中或待报告的 Workflow，请在桌面继续处理。"
-      }
-    }
-    if (
-      this.dependencies.hasPendingApproval(snapshot.threadId) ||
-      this.dependencies.hasPendingUserInput(snapshot.threadId)
-    ) {
-      return {
-        allowed: false,
-        reasonCode: "REMOTE_INTERACTION_PENDING",
-        message: "该会话正在等待审批或补充输入，请先处理当前交互。"
-      }
-    }
-
     return {
       allowed: true,
       thread,

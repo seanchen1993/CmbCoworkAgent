@@ -459,6 +459,7 @@ import { getLocalIP } from "./net-utils"
 import { trackEvent } from "./services/event-reporter"
 import type { EventCategory } from "./services/event-reporter"
 import { builtinRobotManager } from "./services/im/manager"
+import { createBrowserWindowAgentRunDelivery } from "./agent/agent-run-service"
 import {
   configurePetWindow,
   createPetWindow,
@@ -1435,6 +1436,9 @@ if (browserNativeMessagingHostLaunch) {
 
     const initialModelCatalogLoad = startBuiltinModelCatalogRefresh()
     createWindow()
+    builtinRobotManager.setAgentRunDeliveryResolver(() =>
+      mainWindow ? createBrowserWindowAgentRunDelivery(mainWindow) : null
+    )
     setAppAttentionHandler(requestAppAttention)
     await initializeAppTray({
       getMainWindow: () => mainWindow,

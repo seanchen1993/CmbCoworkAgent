@@ -314,9 +314,9 @@ function testClearOnEveryRunExit(): void {
   )
   assertSourceOrder(
     agentIpc,
-    "const nextInvokeRunToken = uuid()",
+    "const nextInvokeRunToken = runExecutionContext.localRunLease?.runId ?? uuid()",
     "const replacement = await withThreadRunMutationLock",
-    "new invoke reserves its physical token before entering replacement"
+    "new invoke fixes its physical token before entering replacement, reusing an externally held IM lease when present"
   )
   assertSourceOrder(
     replacementBody,
@@ -605,8 +605,19 @@ function testClearOnEveryRunExit(): void {
     "disposeDeletedAgentThreadRuntime(threadId)",
     "thread deletion synchronously blocks late transcript chunks after the point of no return"
   )
-  const goalControlStart = agentIpc.indexOf('"agent:goal-control"')
-  assert(goalControlStart >= 0, "goal control handler exists")
+  const goalControlAdapterStart = agentIpc.indexOf('"agent:goal-control"')
+  assert(goalControlAdapterStart >= 0, "goal control handler exists")
+  const goalControlAdapterBody = agentIpc.slice(
+    goalControlAdapterStart,
+    goalControlAdapterStart + 700
+  )
+  assertIncludes(
+    goalControlAdapterBody,
+    "return executeAgentGoalControl(",
+    "desktop goal control delegates to the shared desktop/IM implementation"
+  )
+  const goalControlStart = agentIpc.indexOf("async function executeAgentGoalControl(")
+  assert(goalControlStart >= 0, "shared goal control implementation exists")
   const goalControlBody = agentIpc.slice(goalControlStart, goalControlStart + 2200)
   assertSourceOrder(
     goalControlBody,
@@ -738,11 +749,12 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
     'name: "release-active-controller"',
     "ownership-critical workflow claims release before successor publication"
   )
-  const workflowClaimPhaseStart = agentIpc.indexOf(
-    'name: "release-workflow-notification-claim"'
-  )
+  const workflowClaimPhaseStart = agentIpc.indexOf('name: "release-workflow-notification-claim"')
   assert(workflowClaimPhaseStart >= 0, "workflow claim release phase exists")
-  const workflowClaimPhaseBody = agentIpc.slice(workflowClaimPhaseStart, workflowClaimPhaseStart + 700)
+  const workflowClaimPhaseBody = agentIpc.slice(
+    workflowClaimPhaseStart,
+    workflowClaimPhaseStart + 700
+  )
   assertIncludes(
     workflowClaimPhaseBody,
     "workflowNotificationToSettle?.ownerRunToken === runToken",
@@ -855,7 +867,7 @@ function testPhysicalRunSettlementCannotStrandQueuedReplacements(): void {
   )
   assertIncludes(
     agentIpc,
-    "normalizedWorkspace,\n    input.featureId ?? \"<no-feature>\"",
+    'normalizedWorkspace,\n    input.featureId ?? "<no-feature>"',
     "same-thread workspace or memory-scope changes cannot merge pending batches"
   )
   assertIncludes(
@@ -1085,9 +1097,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
     "mergeIncrementalMessageContent(existing, incoming)",
     "main transcript coalescing uses block-aware delta merging"
   )
-  const physicalForwardStart = agentIpc.indexOf(
-    "function persistAndForwardPhysicalRunStreamChunk("
-  )
+  const physicalForwardStart = agentIpc.indexOf("function persistAndForwardPhysicalRunStreamChunk(")
   const physicalForwardBody = agentIpc.slice(physicalForwardStart, physicalForwardStart + 1800)
   assertIncludes(
     physicalForwardBody,
@@ -1506,7 +1516,7 @@ function testStreamTranscriptBuffersArePhysicalRunScoped(): void {
   for (const [index, label] of ["invoke", "resume", "interrupt"].entries()) {
     const body = agentIpc.slice(
       completionBoundaryIndexes[index],
-      completionBoundaryIndexes[index] + 1000
+      completionBoundaryIndexes[index] + 1800
     )
     const fence =
       label === "invoke"

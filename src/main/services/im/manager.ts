@@ -1,3 +1,4 @@
+import type { AgentRunDelivery } from "../../agent/agent-run-service"
 import {
   deleteLegacyChatXRobotCredentials,
   getBuiltinRobotSettings,
@@ -96,6 +97,11 @@ export class BuiltinRobotManager {
   private activeIdentityToken: string | null = null
   private confirmedRoute: ImGrantRouteIdentity | null = null
   private routeReconciliation: Promise<void> = Promise.resolve()
+  private getAgentRunDelivery: () => AgentRunDelivery | null = () => null
+
+  setAgentRunDeliveryResolver(resolver: () => AgentRunDelivery | null): void {
+    this.getAgentRunDelivery = resolver
+  }
 
   start(appVersion?: string): Promise<void> {
     if (appVersion?.trim()) this.appVersion = appVersion.trim()
@@ -451,7 +457,8 @@ export class BuiltinRobotManager {
       }
     })
     const service = new ImUnifiedBotService(client, {
-      waitingDesktopTtlMs: settings.waitingDesktopTtlMinutes * 60_000
+      waitingDesktopTtlMs: settings.waitingDesktopTtlMinutes * 60_000,
+      getAgentRunDelivery: this.getAgentRunDelivery
     })
     this.client = client
     this.service = service

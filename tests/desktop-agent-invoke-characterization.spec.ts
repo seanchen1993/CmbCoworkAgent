@@ -139,7 +139,8 @@ function testFreshTurnGoalAndTranscriptSemantics(): void {
     invoke,
     [
       "flushPendingStreamTranscriptMessagesForThread(threadId, { throwOnError: true })",
-      "const leaseClaim = claimDesktopThreadRunLease(threadId, nextInvokeRunToken)",
+      "const leaseClaim = runExecutionContext.localRunLease",
+      ": claimDesktopThreadRunLease(threadId, nextInvokeRunToken)",
       "setCurrentRunMessageQueueOwner(threadId, nextInvokeRunToken)",
       "const nextTurnState = getOrCreateTurnState(",
       "resetTurnStateForNewInvoke(",
