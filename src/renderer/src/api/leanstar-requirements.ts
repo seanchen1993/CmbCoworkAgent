@@ -15,9 +15,46 @@ export type ProductRequirement = {
 }
 
 export type ImplementationDetail = {
-  code: string
+  frCode?: string
+  subFrCode?: string
   title: string
-  status?: string
+  implementDevopsOrgId?: string
+  frStatus?: string
+  subFrStatus?: string
+  projectCode?: string
+  frOwner?: string
+  priority?: string
+}
+
+// /detail 接口返回的“需求整体详情”。规格未列举具体字段，仅给出用途，故以宽松索引签名承载。
+export type RequirementDetail = {
+  code?: string
+  title?: string
+  description?: string
+  [key: string]: unknown
+}
+
+// 实施功能（subFr）的唯一标识，优先 subFrCode，回退 frCode。
+export function getDetailCode(detail?: ImplementationDetail): string {
+  return detail?.subFrCode || detail?.frCode || ""
+}
+
+export type NamespaceTreeNode = {
+  devopsOrgId: string
+  pathName: string
+  pathId: string
+  orgLevel?: string
+  isOrgLeaf?: boolean
+  namespaceId?: string
+  namespaceEnabled?: boolean
+  namespaceType?: string
+  memberType?: string
+  roleCode?: string
+  selected?: boolean
+  expandable?: boolean
+  accessible?: boolean
+  inaccessibleReason?: string
+  children?: NamespaceTreeNode[]
 }
 
 type PageResponse<T> = {
@@ -25,57 +62,249 @@ type PageResponse<T> = {
   total?: number
 }
 
+type NamespaceTreeResponse = {
+  namespaceTreeList?: NamespaceTreeNode[]
+}
+
 const MOCK_PRODUCTS: DigitalProduct[] = [
-  { id: "dp-wplus", name: "市场 W+ 数字产品" },
-  { id: "dp-mobile-bank", name: "招商银行手机银行" },
-  { id: "dp-credit", name: "信用卡数字服务" }
+  { id: "dp-wplus", name: "Mock 数字产品 A" },
+  { id: "dp-mobile-bank", name: "Mock 数字产品 B" },
+  { id: "dp-credit", name: "Mock 数字产品 C" }
 ]
 
 const MOCK_REQUIREMENTS: Record<string, ProductRequirement[]> = {
-  "dp-wplus": [
-    { code: "P2603-2406", title: "用户登录优化", status: "OPEN", priority: "HIGH", owner: "杨琪" },
+  "org-wplus": [
     {
-      code: "P2603-2412",
-      title: "首页权益卡片改版",
-      status: "OPEN",
-      priority: "MEDIUM",
-      owner: "李宁"
-    }
-  ],
-  "dp-mobile-bank": [
-    {
-      code: "P2602-1031",
-      title: "转账流程体验升级",
+      code: "P2603-2406",
+      title: "Mock 需求 A-1",
       status: "OPEN",
       priority: "HIGH",
-      owner: "周敏"
+      owner: "Mock 负责人 1"
     },
-    { code: "P2602-1044", title: "消息中心整合", status: "DRAFT", priority: "LOW", owner: "王超" }
-  ],
-  "dp-credit": [
     {
-      code: "P2601-0788",
-      title: "账单分期引导优化",
+      code: "P2603-2412",
+      title: "Mock 需求 A-2",
       status: "OPEN",
       priority: "MEDIUM",
-      owner: "陈晨"
+      owner: "Mock 负责人 2"
+    }
+  ],
+  "org-mobile": [
+    {
+      code: "P2602-1031",
+      title: "Mock 需求 B-1",
+      status: "OPEN",
+      priority: "HIGH",
+      owner: "Mock 负责人 3"
+    },
+    {
+      code: "P2602-1044",
+      title: "Mock 需求 B-2",
+      status: "DRAFT",
+      priority: "LOW",
+      owner: "Mock 负责人 4"
+    }
+  ],
+  "org-credit": [
+    {
+      code: "P2601-0788",
+      title: "Mock 需求 C-1",
+      status: "OPEN",
+      priority: "MEDIUM",
+      owner: "Mock 负责人 5"
     }
   ]
 }
 
 const MOCK_DETAILS: Record<string, ImplementationDetail[]> = {
   "P2603-2406": [
-    { code: "FR2603-001", title: "短信验证码登录", status: "OPEN" },
-    { code: "FR2603-002", title: "生物识别快捷登录", status: "OPEN" }
+    {
+      frCode: "FR2603",
+      subFrCode: "FR2603-001",
+      title: "Mock 功能 A-1-1",
+      implementDevopsOrgId: "org-wplus",
+      frStatus: "OPEN",
+      subFrStatus: "OPEN",
+      projectCode: "PJ-2603-001",
+      frOwner: "Mock 负责人 1",
+      priority: "HIGH"
+    },
+    {
+      frCode: "FR2603",
+      subFrCode: "FR2603-002",
+      title: "Mock 功能 A-1-2",
+      implementDevopsOrgId: "org-wplus",
+      frStatus: "OPEN",
+      subFrStatus: "OPEN",
+      projectCode: "PJ-2603-002",
+      frOwner: "Mock 负责人 2",
+      priority: "MEDIUM"
+    }
   ],
-  "P2603-2412": [{ code: "FR2603-014", title: "权益卡片排序", status: "OPEN" }],
+  "P2603-2412": [
+    {
+      frCode: "FR2603",
+      subFrCode: "FR2603-014",
+      title: "Mock 功能 A-2-1",
+      implementDevopsOrgId: "org-wplus",
+      frStatus: "OPEN",
+      subFrStatus: "OPEN",
+      projectCode: "PJ-2603-014",
+      frOwner: "Mock 负责人 2",
+      priority: "MEDIUM"
+    }
+  ],
   "P2602-1031": [
-    { code: "FR2602-088", title: "收款人智能搜索", status: "OPEN" },
-    { code: "FR2602-089", title: "转账结果页优化", status: "OPEN" }
+    {
+      frCode: "FR2602",
+      subFrCode: "FR2602-088",
+      title: "Mock 功能 B-1-1",
+      implementDevopsOrgId: "org-mobile",
+      frStatus: "OPEN",
+      subFrStatus: "OPEN",
+      projectCode: "PJ-2602-088",
+      frOwner: "Mock 负责人 3",
+      priority: "HIGH"
+    },
+    {
+      frCode: "FR2602",
+      subFrCode: "FR2602-089",
+      title: "Mock 功能 B-1-2",
+      implementDevopsOrgId: "org-mobile",
+      frStatus: "OPEN",
+      subFrStatus: "OPEN",
+      projectCode: "PJ-2602-089",
+      frOwner: "Mock 负责人 4",
+      priority: "MEDIUM"
+    }
   ],
-  "P2602-1044": [{ code: "FR2602-102", title: "消息分类筛选", status: "DRAFT" }],
-  "P2601-0788": [{ code: "FR2601-037", title: "分期方案对比", status: "OPEN" }]
+  "P2602-1044": [
+    {
+      frCode: "FR2602",
+      subFrCode: "FR2602-102",
+      title: "Mock 功能 B-2-1",
+      implementDevopsOrgId: "org-mobile",
+      frStatus: "DRAFT",
+      subFrStatus: "DRAFT",
+      projectCode: "PJ-2602-102",
+      frOwner: "Mock 负责人 4",
+      priority: "LOW"
+    }
+  ],
+  "P2601-0788": [
+    {
+      frCode: "FR2601",
+      subFrCode: "FR2601-037",
+      title: "Mock 功能 C-1-1",
+      implementDevopsOrgId: "org-credit",
+      frStatus: "OPEN",
+      subFrStatus: "OPEN",
+      projectCode: "PJ-2601-037",
+      frOwner: "Mock 负责人 5",
+      priority: "MEDIUM"
+    }
+  ]
 }
+
+const MOCK_REQUIREMENT_DETAIL: Record<string, RequirementDetail> = {
+  "P2603-2406": { code: "P2603-2406", title: "Mock 需求 A-1" },
+  "P2603-2412": { code: "P2603-2412", title: "Mock 需求 A-2" },
+  "P2602-1031": { code: "P2602-1031", title: "Mock 需求 B-1" },
+  "P2602-1044": { code: "P2602-1044", title: "Mock 需求 B-2" },
+  "P2601-0788": { code: "P2601-0788", title: "Mock 需求 C-1" }
+}
+
+const MOCK_NAMESPACE_TREE: NamespaceTreeNode[] = [
+  {
+    devopsOrgId: "org-cmb",
+    pathName: "Mock 银行",
+    pathId: "cmb",
+    orgLevel: "总行",
+    isOrgLeaf: false,
+    namespaceId: "",
+    expandable: true,
+    accessible: true,
+    children: [
+      {
+        devopsOrgId: "org-it",
+        pathName: "Mock 银行/Mock 总行/Mock 技术部",
+        pathId: "cmb/it",
+        orgLevel: "部门",
+        isOrgLeaf: false,
+        namespaceId: "",
+        expandable: true,
+        accessible: true,
+        children: [
+          {
+            devopsOrgId: "org-wplus",
+            pathName: "Mock 银行/Mock 总行/Mock 技术部/Mock 开发组 A",
+            pathId: "cmb/it/wplus",
+            orgLevel: "组",
+            isOrgLeaf: true,
+            namespaceId: "ns-wplus",
+            namespaceEnabled: true,
+            namespaceType: "IT_GROUP",
+            memberType: "OWN",
+            roleCode: "MEMBER",
+            accessible: true
+          },
+          {
+            devopsOrgId: "org-cloud",
+            pathName: "Mock 银行/Mock 总行/Mock 技术部/Mock 开发组 B（无权限）",
+            pathId: "cmb/it/cloud",
+            orgLevel: "组",
+            isOrgLeaf: true,
+            namespaceId: "ns-cloud",
+            namespaceEnabled: true,
+            namespaceType: "IT_GROUP",
+            memberType: "OWN",
+            roleCode: "MEMBER",
+            accessible: false,
+            inaccessibleReason: "UNAUTHORIZED"
+          }
+        ]
+      },
+      {
+        devopsOrgId: "org-retail",
+        pathName: "Mock 银行/Mock 总行/Mock 业务部",
+        pathId: "cmb/retail",
+        orgLevel: "部门",
+        isOrgLeaf: false,
+        namespaceId: "",
+        expandable: true,
+        accessible: true,
+        children: [
+          {
+            devopsOrgId: "org-mobile",
+            pathName: "Mock 银行/Mock 总行/Mock 业务部/Mock 开发组 C",
+            pathId: "cmb/retail/mobile",
+            orgLevel: "组",
+            isOrgLeaf: true,
+            namespaceId: "ns-mobile",
+            namespaceEnabled: true,
+            namespaceType: "IT_GROUP",
+            memberType: "OWN",
+            roleCode: "MEMBER",
+            accessible: true
+          },
+          {
+            devopsOrgId: "org-credit",
+            pathName: "Mock 银行/Mock 总行/Mock 业务部/Mock 开发组 D",
+            pathId: "cmb/retail/credit",
+            orgLevel: "组",
+            isOrgLeaf: true,
+            namespaceId: "ns-credit",
+            namespaceEnabled: true,
+            namespaceType: "IT_GROUP",
+            memberType: "OWN",
+            roleCode: "MEMBER",
+            accessible: true
+          }
+        ]
+      }
+    ]
+  }
+]
 
 async function getToken(): Promise<string> {
   const result = await window.api.requirements.getToken()
@@ -113,9 +342,12 @@ export const leanstarRequirementsApi = {
     })
   },
 
-  listProductRequirements(productId: string): Promise<PageResponse<ProductRequirement>> {
+  listProductRequirements(
+    domainId: string,
+    domainType: string
+  ): Promise<PageResponse<ProductRequirement>> {
     if (USE_MOCK) {
-      const content = MOCK_REQUIREMENTS[productId] ?? []
+      const content = MOCK_REQUIREMENTS[domainId] ?? []
       return Promise.resolve({ content, total: content.length })
     }
     return request<PageResponse<ProductRequirement>>("/api/requirement/product-requirements/page", {
@@ -123,7 +355,7 @@ export const leanstarRequirementsApi = {
       body: JSON.stringify({
         pageIndex: 1,
         pageSize: 15,
-        domain: { id: productId, type: "DIGITAL_PRODUCT" }
+        domain: { id: domainId, type: domainType }
       })
     })
   },
@@ -134,5 +366,21 @@ export const leanstarRequirementsApi = {
       `/api/requirement/product-requirements/${encodeURIComponent(code)}/impl-detail`,
       { method: "GET" }
     )
+  },
+
+  // 第三步：需求整体详情
+  getRequirementDetail(code: string): Promise<RequirementDetail> {
+    if (USE_MOCK) return Promise.resolve(MOCK_REQUIREMENT_DETAIL[code] ?? {})
+    return request<RequirementDetail>(
+      `/api/requirement/product-requirements/${encodeURIComponent(code)}/detail`,
+      { method: "GET" }
+    )
+  },
+
+  getNamespaceTree(): Promise<NamespaceTreeResponse> {
+    if (USE_MOCK) return Promise.resolve({ namespaceTreeList: MOCK_NAMESPACE_TREE })
+    return request<NamespaceTreeResponse>("/api/leanstar/namespaces/tree", {
+      method: "GET"
+    })
   }
 }

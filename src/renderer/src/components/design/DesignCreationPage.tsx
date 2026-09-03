@@ -18,10 +18,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type { DesignCreationRequest, DesignSessionKind, DesignSystemInfo } from "./types"
-import {
-  RequirementCascadeSelector,
-  type RequirementCascadeSelection
-} from "./RequirementCascadeSelector"
+import { getDetailCode } from "@/api/leanstar-requirements"
+import { NamespaceTreeSelector, type NamespaceTreeSelection } from "./RequirementCascadeSelector"
 
 type SelectionMode = "select" | "upload" | "none"
 
@@ -220,8 +218,9 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
   const [templateUploading, setTemplateUploading] = useState(false)
   const [templateError, setTemplateError] = useState<string | null>(null)
   const [requirementMode, setRequirementMode] = useState<SelectionMode>("select")
-  const [requirementSelection, setRequirementSelection] =
-    useState<RequirementCascadeSelection | null>(null)
+  const [requirementSelection, setRequirementSelection] = useState<NamespaceTreeSelection | null>(
+    null
+  )
   const [uploadedRequirement, setUploadedRequirement] = useState<UploadedFile | null>(null)
   const [requirementUploading, setRequirementUploading] = useState(false)
   const [linkModalOpen, setLinkModalOpen] = useState(false)
@@ -430,7 +429,7 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
     if (requirementMode === "upload") return `需求：上传 ${uploadedRequirement?.name || "尚未选择"}`
     if (!requirementSelection) return "需求：未选择"
     const detailCount = requirementSelection.implementationDetails.length
-    return `需求：${requirementSelection.requirement.title} · ${requirementSelection.product.name}${detailCount ? `（${detailCount} 项实施详情）` : ""}`
+    return `需求：${requirementSelection.requirement.title} · ${requirementSelection.pathName}${detailCount ? `（${detailCount} 项实施详情）` : ""}`
   }
 
   const handleStart = (): void => {
@@ -455,10 +454,10 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
               : "",
             requirementMode === "select" && requirementSelection
               ? [
-                  `数字产品：${requirementSelection.product.name}（${requirementSelection.product.id}）`,
+                  `命名空间：${requirementSelection.pathName}（${requirementSelection.namespaceId}）`,
                   `需求特性：${requirementSelection.requirement.title}（${requirementSelection.requirement.code}）`,
                   requirementSelection.implementationDetails.length > 0
-                    ? `特性实施详情：${requirementSelection.implementationDetails.map((detail) => `${detail.title}（${detail.code}）`).join("、")}`
+                    ? `特性实施详情：${requirementSelection.implementationDetails.map((detail) => `${detail.title}（${getDetailCode(detail)}）`).join("、")}`
                     : "特性实施详情：暂无"
                 ].join("\n")
               : "",
@@ -485,7 +484,7 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
           : undefined,
       requirementModuleId:
         method === "prompt" && requirementMode === "select"
-          ? requirementSelection?.implementationDetails[0]?.code
+          ? getDetailCode(requirementSelection?.implementationDetails[0]) || undefined
           : undefined,
       requirementUploadPath:
         method === "prompt" && requirementMode === "upload" ? uploadedRequirement?.path : undefined,
@@ -769,7 +768,7 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                       选择需求
                     </h2>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      可使用整个需求，或仅使用其中一个功能特性。
+                      选择组织树中的叶子命名空间作为本次设计的系统。
                     </p>
                   </div>
                   <div
@@ -801,7 +800,7 @@ export function DesignCreationPage({ onBack }: { onBack: () => void }): React.JS
                 </div>
 
                 {requirementMode === "select" && (
-                  <RequirementCascadeSelector
+                  <NamespaceTreeSelector
                     value={requirementSelection}
                     onChange={setRequirementSelection}
                   />
