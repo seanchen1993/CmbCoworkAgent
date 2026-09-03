@@ -195,6 +195,7 @@ function RequirementConversationSession({
   const [tokenDialogOpen, setTokenDialogOpen] = useState(false)
   const [tokenDraft, setTokenDraft] = useState("")
   const [tokenSaving, setTokenSaving] = useState(false)
+  const [hasStoredToken, setHasStoredToken] = useState(false)
   const focusExpertProcess = useCallback((): boolean => {
     if (!threadId || subagents.length === 0) return false
     const isAnalyst = (item: (typeof subagents)[number]): boolean => {
@@ -273,7 +274,10 @@ function RequirementConversationSession({
   const hasThreadState = threadState !== null
 
   useEffect(() => {
-    setSelectedThreadId(requirement.threadIds[0] ?? null)
+    setSelectedThreadId((current) => {
+      if (current && requirement.threadIds.includes(current)) return current
+      return requirement.threadIds[0] ?? null
+    })
   }, [requirement.id, requirement.threadIds])
 
   useEffect(() => {
@@ -410,6 +414,21 @@ function RequirementConversationSession({
       requirement.system
     ]
   )
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const result = await window.api.requirements.getToken()
+        if (!cancelled) setHasStoredToken(result.success ? Boolean(result.token) : false)
+      } catch {
+        if (!cancelled) setHasStoredToken(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const loadSourcePreview = useCallback(async (): Promise<void> => {
     setSourcePreviewLoading(true)
     setSourcePreviewError(null)
@@ -548,6 +567,7 @@ function RequirementConversationSession({
     try {
       const result = await window.api.requirements.saveToken(token)
       if (!result.success) throw new Error(result.error || "保存 Token 失败")
+      setHasStoredToken(true)
       setTokenDialogOpen(false)
       queueLeanstarToken(token)
     } catch (error) {
@@ -641,6 +661,11 @@ function RequirementConversationSession({
         manifest?.prd.status === "published"
       ) {
         setPreviewTab("prd")
+      }
+      // Reset publish queue when the conversation ended without a successful publish
+      if (!isRequirementSpacePublished(manifest)) {
+        publishRequestQueuedRef.current = false
+        setPublishRequestQueued(false)
       }
     }
 
@@ -1045,7 +1070,7 @@ function RequirementConversationSession({
                             ) : (
                               <KeyRound className="size-3.5" />
                             )}
-                            发送Token身份令牌
+                            {hasStoredToken ? "发送Token身份令牌" : "获取Token身份令牌"}
                           </Button>
                         ) : null}
                       </div>
