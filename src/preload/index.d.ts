@@ -2092,7 +2092,11 @@ interface CustomAPI {
     syncManifest: (payload: {
       reqId: string
       manifest: unknown
-    }) => Promise<{ success: boolean; error?: string }>
+    }) => Promise<{
+      success: boolean
+      requirement?: Awaited<ReturnType<NonNullable<CustomAPI["requirements"]>["list"]>>[number]
+      error?: string
+    }>
     saveFiles: (payload: {
       workspacePath: string
       requirementId: string

@@ -33,7 +33,6 @@ import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useAppStore } from "@/lib/store"
 import { useThreadState, useThreadStream } from "@/lib/thread-context"
-import { loadWorkspaceFilesDeduped, markWorkspaceFilesStale } from "@/lib/workspace-file-load"
 import { cn } from "@/lib/utils"
 import {
   fromPersistedRequirement,
@@ -45,8 +44,6 @@ import {
 
 const REQUIREMENT_SPACE_PUBLISH_MESSAGE = "发布到需求空间"
 const LEANSTAR_TOKEN_MESSAGE_PREFIX = "精益之星身份令牌-Token："
-const PRD_COMPLETION_CHECK_MAX_ATTEMPTS = 4
-const PRD_COMPLETION_CHECK_RETRY_DELAY_MS = 500
 
 type PreviewTab = "expert-process" | "source" | "prd" | "requirement-space"
 
@@ -171,8 +168,10 @@ function RequirementConversationSession({
   const deleteThread = useAppStore((state) => state.deleteThread)
   const openSubagentFocusView = useAppStore((state) => state.openSubagentFocusView)
   const subagentFocusView = useAppStore((state) => state.subagentFocusView)
-  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(requirement.threadId)
-  const threadId = selectedThreadId ?? requirement.threadId ?? null
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
+    requirement.threadIds[0] ?? null
+  )
+  const threadId = selectedThreadId ?? requirement.threadIds[0] ?? null
   const threadState = useThreadState(threadId)
   const subagents = useMemo(() => threadState?.subagents ?? [], [threadState?.subagents])
   const expertProcessRunning = subagents.some((item) => item.status === "running")
@@ -182,7 +181,6 @@ function RequirementConversationSession({
   const autoQueuedPrdGenerationRef = useRef(false)
   const conversationLoadingObservedRef = useRef(false)
   const publishRequestQueuedRef = useRef(false)
-  const workspaceFilesRef = useRef(threadState?.workspaceFiles ?? [])
   const [previewTab, setPreviewTab] = useState<PreviewTab>(() => getInitialPreviewTab(requirement))
   const [selectedPrdPath, setSelectedPrdPath] = useState<string | null>(null)
   const [prdPreviewReloadToken, setPrdPreviewReloadToken] = useState(0)
@@ -263,19 +261,24 @@ function RequirementConversationSession({
   )
   const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
   const prdGenerationCompleted =
-    isRequirementGenerated(requirement) || isRequirementPublished(requirement)
+    isRequirementGenerated(requirement) ||
+    isRequirementPublished(requirement) ||
+    requirementSpaceManifest?.prd.status === "generated" ||
+    requirementSpaceManifest?.prd.status === "published"
   const requirementSpacePublished =
     requirementSpaceManifest !== null
       ? isRequirementSpacePublished(requirementSpaceManifest)
       : isRequirementPublished(requirement)
   const conversationLoading = streamLoading || threadState?.scheduledTaskLoading === true
-  const setWorkspaceFiles = threadState?.setWorkspaceFiles
-  const workspacePath = threadState?.workspacePath ?? requirement.requirementPath
   const hasThreadState = threadState !== null
 
   useEffect(() => {
-    setSelectedThreadId(requirement.threadId)
-  }, [requirement.id, requirement.threadId])
+    setSelectedThreadId(requirement.threadIds[0] ?? null)
+  }, [requirement.id, requirement.threadIds])
+
+  useEffect(() => {
+    setRequirementSpaceManifest(requirement.prdManifest)
+  }, [requirement.id, requirement.prdManifest])
 
   const attachConversation = useCallback(
     async (
@@ -306,8 +309,9 @@ function RequirementConversationSession({
       const updated = fromPersistedRequirement(result.requirement, requirement.system)
       onRequirementUpdated(updated)
       if (deletedThreadId === threadId) {
-        setSelectedThreadId(updated.threadId)
-        if (updated.threadId) await onSelectRequirement(updated, updated.threadId)
+        const nextThreadId = updated.threadIds[0] ?? null
+        setSelectedThreadId(nextThreadId)
+        if (nextThreadId) await onSelectRequirement(updated, nextThreadId)
       }
     },
     [onRequirementUpdated, onSelectRequirement, requirement.system, threadId]
@@ -363,6 +367,31 @@ function RequirementConversationSession({
           throw new Error(result.error || "重命名需求失败")
         onRequirementUpdated(fromPersistedRequirement(result.requirement, requirement.system))
       },
+      onRefreshRequirementStatus: async (item) => {
+        const manifestThreadId = item.threadIds[0]
+        if (!manifestThreadId) throw new Error("该需求尚未关联沟通会话")
+        const readResult = await window.api.workspace.readFile(
+          manifestThreadId,
+          "/prd/prd-manifest.json"
+        )
+        if (!readResult.success || readResult.content === undefined) {
+          throw new Error(readResult.error || "未找到 prd-manifest.json")
+        }
+        let manifest: unknown
+        try {
+          manifest = JSON.parse(readResult.content)
+        } catch {
+          throw new Error("prd-manifest.json 格式无效")
+        }
+        const syncResult = await window.api.requirements.syncManifest({
+          reqId: item.id,
+          manifest
+        })
+        if (!syncResult.success || !syncResult.requirement) {
+          throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
+        }
+        onRequirementUpdated(fromPersistedRequirement(syncResult.requirement, item.system))
+      },
       onNewRequirement: onNew,
       onBackToHistory: onBack
     }),
@@ -399,38 +428,21 @@ function RequirementConversationSession({
   }, [requirement.id])
 
   useEffect(() => {
-    workspaceFilesRef.current = threadState?.workspaceFiles ?? []
-  }, [threadState?.workspaceFiles])
-
-  useEffect(() => {
     void loadSourcePreview()
   }, [loadSourcePreview])
 
-  const refreshPrdFiles = useCallback(async (): Promise<boolean> => {
-    if (!threadId || !setWorkspaceFiles || !workspacePath) return false
-
-    markWorkspaceFilesStale(threadId, workspacePath)
-    const result = await loadWorkspaceFilesDeduped(threadId, workspacePath)
-    if (result.success && result.files && result.workspacePath === workspacePath) {
-      workspaceFilesRef.current = result.files
-      setWorkspaceFiles(result.files)
-      return isRequirementGenerated(requirement) || isRequirementPublished(requirement)
-    }
-    return isRequirementGenerated(requirement) || isRequirementPublished(requirement)
-  }, [requirement, setWorkspaceFiles, threadId, workspacePath])
-
-  const loadRequirementSpaceManifest = useCallback(async (): Promise<void> => {
+  const loadRequirementSpaceManifest = useCallback(async (options?: { forceRead?: boolean }): Promise<RequirementPrdManifest | null> => {
     setManifestLoading(true)
     setManifestError(null)
     try {
-      if (hasRequirementSpaceManifestData(requirement.prdManifest)) {
+      if (!options?.forceRead && hasRequirementSpaceManifestData(requirement.prdManifest)) {
         const manifest = requirement.prdManifest
         setRequirementSpaceManifest(manifest)
         if (isRequirementSpacePublished(manifest)) {
           publishRequestQueuedRef.current = false
           setPublishRequestQueued(false)
         }
-        return
+        return manifest
       }
       if (!threadId) throw new Error("该需求尚未关联沟通会话")
 
@@ -453,18 +465,23 @@ function RequirementConversationSession({
         throw new Error(syncResult.error || "同步 prd-manifest.json 失败")
       }
       const manifest = normalizeRequirementSpaceManifest(rawManifest)
+      if (syncResult.requirement) {
+        onRequirementUpdated(fromPersistedRequirement(syncResult.requirement, requirement.system))
+      }
       setRequirementSpaceManifest(manifest)
       if (isRequirementSpacePublished(manifest)) {
         publishRequestQueuedRef.current = false
         setPublishRequestQueued(false)
       }
+      return manifest
     } catch (error) {
       setRequirementSpaceManifest(null)
       setManifestError(error instanceof Error ? error.message : "读取需求空间数据失败")
+      return null
     } finally {
       setManifestLoading(false)
     }
-  }, [requirement.id, requirement.prdManifest, threadId])
+  }, [onRequirementUpdated, requirement.id, requirement.prdManifest, requirement.system, threadId])
 
   const handlePublishToRequirementSpace = useCallback((): void => {
     if (
@@ -558,16 +575,8 @@ function RequirementConversationSession({
 
       setPreviewTab("prd")
       setSelectedPrdPath(matchingFile?.path ?? targetPath)
-      if (!matchingFile) {
-        void refreshPrdFiles().catch((error) => {
-          console.warn(
-            "[RequirementConversationView] Failed to refresh PRD files for function preview:",
-            error
-          )
-        })
-      }
     },
-    [prdFiles, refreshPrdFiles]
+    [prdFiles]
   )
 
   useEffect(() => {
@@ -625,19 +634,13 @@ function RequirementConversationSession({
     let cancelled = false
 
     const checkPrdCompletion = async (): Promise<void> => {
-      for (let attempt = 0; attempt < PRD_COMPLETION_CHECK_MAX_ATTEMPTS; attempt += 1) {
-        const completed = await refreshPrdFiles()
-        if (cancelled) return
-        if (completed) {
-          setPreviewTab("prd")
-          void loadRequirementSpaceManifest()
-          return
-        }
-        if (attempt < PRD_COMPLETION_CHECK_MAX_ATTEMPTS - 1) {
-          await new Promise((resolve) =>
-            window.setTimeout(resolve, PRD_COMPLETION_CHECK_RETRY_DELAY_MS)
-          )
-        }
+      const manifest = await loadRequirementSpaceManifest({ forceRead: true })
+      if (cancelled) return
+      if (
+        manifest?.prd.status === "generated" ||
+        manifest?.prd.status === "published"
+      ) {
+        setPreviewTab("prd")
       }
     }
 
@@ -652,7 +655,6 @@ function RequirementConversationSession({
     conversationLoading,
     hasThreadState,
     loadRequirementSpaceManifest,
-    refreshPrdFiles,
     requirement.coreFilesMissing,
     requirement.workspaceMissing,
     threadId
@@ -660,20 +662,11 @@ function RequirementConversationSession({
 
   useEffect(() => {
     if (previewTab !== "requirement-space" || !prdGenerationCompleted) return
-    void refreshPrdFiles()
-      .then((completed) => {
-        if (completed) return loadRequirementSpaceManifest()
-        return undefined
-      })
-      .catch((error) => {
-        console.warn("[RequirementConversationView] Failed to load requirement space data:", error)
-      })
+    void loadRequirementSpaceManifest()
   }, [
-    conversationLoading,
     loadRequirementSpaceManifest,
     prdGenerationCompleted,
-    previewTab,
-    refreshPrdFiles
+    previewTab
   ])
 
   return (
@@ -740,14 +733,6 @@ function RequirementConversationSession({
                 setPreviewTab(nextTab)
                 if (nextTab === "expert-process") {
                   focusExpertProcess()
-                }
-                if (nextTab === "prd") {
-                  void refreshPrdFiles().catch((error) => {
-                    console.warn(
-                      "[RequirementConversationView] Failed to refresh PRD files:",
-                      error
-                    )
-                  })
                 }
               }}
               className="flex min-h-0 flex-1 flex-col"

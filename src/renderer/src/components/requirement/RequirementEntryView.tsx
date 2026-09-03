@@ -88,6 +88,7 @@ export function RequirementEntryView(): React.JSX.Element {
       }
       return sortRequirementsByUpdatedAt([...current, requirement])
     })
+    setSelectedRequirement((current) => (current?.id === requirement.id ? requirement : current))
   }
 
   const ensureRequirementThread = async (
@@ -98,7 +99,7 @@ export function RequirementEntryView(): React.JSX.Element {
       const existingThread = await window.api.threads.get(threadId)
       if (existingThread) {
         await selectThread(threadId, { preserveView: true })
-        return threadId === requirement.threadId ? requirement : { ...requirement, threadId }
+        return requirement
       }
     }
 

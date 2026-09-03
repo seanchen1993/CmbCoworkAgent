@@ -4103,6 +4103,7 @@ const api = {
     syncManifest: (payload: { reqId: string; manifest: unknown }) =>
       ipcRenderer.invoke("requirements:sync-manifest", payload) as Promise<{
         success: boolean
+        requirement?: RequirementRuntimeItem
         error?: string
       }>,
     saveFiles: (payload: {

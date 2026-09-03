@@ -452,13 +452,12 @@ describe("requirement source preview", () => {
     expect(created.success).toBe(true)
 
     const first = (await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-a" })) as {
-      requirement: { threadId: string; threadIds: string[] }
+      requirement: { threadIds: string[] }
     }
     expect(first.requirement.threadIds).toEqual(["thread-a"])
     const second = (await attach!(null, { reqId: created.requirement.reqId, threadId: "thread-b" })) as {
-      requirement: { threadId: string; threadIds: string[] }
+      requirement: { threadIds: string[] }
     }
-    expect(second.requirement.threadId).toBe("thread-a")
     expect(second.requirement.threadIds).toEqual(["thread-a", "thread-b"])
 
     const renamed = (await rename!(null, {
@@ -469,8 +468,7 @@ describe("requirement source preview", () => {
     const detached = (await detach!(null, {
       reqId: created.requirement.reqId,
       threadId: "thread-a"
-    })) as { requirement: { threadId: string; threadIds: string[] } }
-    expect(detached.requirement.threadId).toBe("thread-b")
+    })) as { requirement: { threadIds: string[] } }
     expect(detached.requirement.threadIds).toEqual(["thread-b"])
     await remove!(null, created.requirement.reqId)
   })

@@ -9,6 +9,7 @@ import {
   Info,
   Loader2,
   Plus,
+  RefreshCw,
   Search,
   Trash2,
   Pencil
@@ -62,6 +63,7 @@ export type RequirementSidebarMode = {
   onDeleteAllConversations: (requirement: RequirementRecord, threadIds: string[]) => Promise<void>
   onDeleteRequirement: (requirement: RequirementRecord) => Promise<void>
   onRenameRequirement: (requirement: RequirementRecord, title: string) => Promise<void>
+  onRefreshRequirementStatus: (requirement: RequirementRecord) => Promise<void>
   onNewRequirement?: () => void
   onBackToHistory?: () => void
 }
@@ -202,6 +204,7 @@ export function RequirementThreadSidebar({
     threadId?: string
   } | null>(null)
   const [hoveredRequirementId, setHoveredRequirementId] = useState<string | null>(null)
+  const [refreshingRequirementId, setRefreshingRequirementId] = useState<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const initialTargetThreadIdRef = useRef(currentThreadId)
   const initialTargetScrolledRef = useRef(false)
@@ -280,6 +283,18 @@ export function RequirementThreadSidebar({
       setHoveredRequirementId(null)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除需求失败")
+    }
+  }
+
+  const refreshRequirementStatus = async (requirement: RequirementRecord): Promise<void> => {
+    setRefreshingRequirementId(requirement.id)
+    try {
+      await mode.onRefreshRequirementStatus(requirement)
+      toast.success("需求状态已刷新")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "刷新需求状态失败")
+    } finally {
+      setRefreshingRequirementId(null)
     }
   }
 
@@ -528,12 +543,27 @@ export function RequirementThreadSidebar({
                         <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
                           <Info className="size-3.5" />
                         </span>
-                        <div className="min-w-0">
+                        <div className="min-w-0 flex-1">
                           <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                             需求信息
                           </div>
-                          <div className="break-words text-sm font-semibold leading-5 text-foreground">
-                            {requirement.title}
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="min-w-0 flex-1 break-words text-sm font-semibold leading-5 text-foreground">
+                              {requirement.title}
+                            </div>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 shrink-0 gap-1.5 px-2 text-[11px]"
+                              disabled={refreshingRequirementId === requirement.id}
+                              onClick={() => void refreshRequirementStatus(requirement)}
+                            >
+                              <RefreshCw
+                                className={`size-3 ${refreshingRequirementId === requirement.id ? "animate-spin" : ""}`}
+                              />
+                              刷新状态
+                            </Button>
                           </div>
                         </div>
                       </div>

@@ -17,9 +17,7 @@ export type RequirementSource = {
 
 export type RequirementIndexItem = {
   reqId: string
-  threadId: string | null
-  /** All conversations belonging to this requirement. threadId remains for legacy readers. */
-  threadIds?: string[]
+  threadIds: string[]
   systemId: string
   title: string
   requirementPath?: string
@@ -147,11 +145,11 @@ type RequirementsIndexFile = {
 }
 
 function getRequirementThreadIds(
-  item: Pick<RequirementIndexItem, "threadId" | "threadIds">
+  item: Pick<RequirementIndexItem, "threadIds">
 ): string[] {
   return [
     ...new Set(
-      [...(item.threadId ? [item.threadId] : []), ...(item.threadIds ?? [])]
+      item.threadIds
         .filter((value): value is string => typeof value === "string")
         .map((value) => value.trim())
         .filter(Boolean)
@@ -278,7 +276,9 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
   )
   const list = Array.isArray(data.list) ? data.list : []
   const normalized = list.map((rawItem) => {
-    const item = { ...rawItem }
+    const { threadId: _legacyThreadId, ...item } = rawItem as typeof rawItem & {
+      threadId?: unknown
+    }
     const normalizedThreadIds = getRequirementThreadIds(item)
     delete item.workDir
     delete item.prdVersion
@@ -293,7 +293,6 @@ async function readRequirementIndex(): Promise<RequirementIndexItem[]> {
           : "text"
     return {
       ...item,
-      threadId: normalizedThreadIds[0] ?? null,
       threadIds: normalizedThreadIds,
       source: {
         ...item.source,
@@ -576,7 +575,6 @@ async function createRequirement(
   const reqId = `req-${Date.now()}-${randomUUID().slice(0, 8)}`
   const item: RequirementIndexItem = {
     reqId,
-    threadId: null,
     threadIds: [],
     systemId,
     title,
@@ -631,7 +629,6 @@ async function attachRequirementThread(
   const next = {
     ...list[index],
     // Binding a thread only enables conversation. It is not a requirement content update.
-    threadId: currentThreadIds[0] ?? (normalizedThreadId || null),
     threadIds: normalizedThreadId
       ? Array.from(new Set([...currentThreadIds, normalizedThreadId]))
       : currentThreadIds
@@ -650,7 +647,7 @@ async function detachRequirementThread(reqId: string, threadId: string): Promise
   if (index < 0) throw new Error(`需求不存在：${normalizedReqId}`)
   const currentThreadIds = getRequirementThreadIds(list[index])
   const threadIds = currentThreadIds.filter((value) => value !== normalizedThreadId)
-  const next = { ...list[index], threadId: threadIds[0] ?? null, threadIds }
+  const next = { ...list[index], threadIds }
   list[index] = next
   await writeRequirementIndex(list)
   return toRuntimeRequirement(next)

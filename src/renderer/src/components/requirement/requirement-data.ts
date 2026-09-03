@@ -25,8 +25,7 @@ export type RequirementPrdManifest = {
 
 export type RequirementRecord = {
   id: string
-  threadId: string | null
-  threadIds?: string[]
+  threadIds: string[]
   systemId: string
   title: string
   requirementPath: string
@@ -48,11 +47,11 @@ export type RequirementRecord = {
 }
 
 export function getRequirementThreadIds(
-  requirement: Pick<RequirementRecord, "threadId" | "threadIds">
+  requirement: Pick<RequirementRecord, "threadIds">
 ): string[] {
   return [
     ...new Set(
-      [...(requirement.threadId ? [requirement.threadId] : []), ...(requirement.threadIds ?? [])]
+      requirement.threadIds
         .map((value) => value.trim())
         .filter(Boolean)
     )
@@ -73,7 +72,6 @@ export function fromPersistedRequirement(
   const abnormal = item.coreFilesMissing || item.workspaceMissing
   return {
     id: item.reqId,
-    threadId: item.threadId,
     threadIds: getRequirementThreadIds(item),
     systemId: item.systemId,
     title: item.title,
