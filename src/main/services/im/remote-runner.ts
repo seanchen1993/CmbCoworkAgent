@@ -41,6 +41,7 @@ import { makeBroadcastHookResultCallback } from "../../hooks/result-callback"
 import { flushStrict, getThread, getThreadMessages, updateThread } from "../../db"
 import type { ScheduledTaskImDeliveryContext } from "../../types"
 import { rememberRoutingDecision } from "../../routing"
+import { getModelConfigByRef } from "../../models/registry"
 import { generateTitle } from "../title-generator"
 import {
   discardAgentAutoCommitTracking,
@@ -390,7 +391,13 @@ export async function executePreparedRemoteStandardTurn(
       const modelId = candidates[index]
       try {
         agent = await runtimeFactory.create(modelId)
-        if (modelId) tracer.setModelId(modelId)
+        if (modelId) {
+          tracer.setModelId(modelId)
+          // Fallback name until the API reports its own: config.model is the
+          // real API model name, config.name is only a display label.
+          const modelConfig = getModelConfigByRef(modelId)
+          if (modelConfig?.model) tracer.setModelName(modelConfig.model)
+        }
         const stream = await agent.stream(
           index === 0
             ? {
