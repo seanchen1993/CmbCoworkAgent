@@ -5,7 +5,10 @@
  *   npx tsx tests/requirement-mode-skills.spec.ts
  */
 
-import { createRequirementSkillsBackend } from "../src/main/agent/library/requirement-mode.ts"
+import {
+  createAllowedSkillsBackend,
+  parseAllowedNames
+} from "../src/main/agent/library/requirement-mode.ts"
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message)
@@ -25,7 +28,7 @@ function createBackend(entriesByPath: Record<string, Entry[]>): {
 
 async function testConfiguredSkillsOnly(): Promise<void> {
   const source = "/skills"
-  const backend = createRequirementSkillsBackend(
+  const backend = createAllowedSkillsBackend(
     createBackend({
       [source]: [
         { path: "/skills/requirement-to-prd", is_dir: true },
@@ -51,7 +54,7 @@ async function testConfiguredSkillsOnly(): Promise<void> {
 
 async function testNoConfiguredSkillsExposesNone(): Promise<void> {
   const source = "/skills"
-  const backend = createRequirementSkillsBackend(
+  const backend = createAllowedSkillsBackend(
     createBackend({
       [source]: [
         { path: "/skills/requirement-to-prd", is_dir: true },
@@ -68,7 +71,7 @@ async function testNoConfiguredSkillsExposesNone(): Promise<void> {
 
 async function testCaseDistinctSkillsRemainDistinct(): Promise<void> {
   const source = "/skills"
-  const backend = createRequirementSkillsBackend(
+  const backend = createAllowedSkillsBackend(
     createBackend({
       [source]: [
         { path: "/skills/requirement-to-prd", is_dir: true },
@@ -90,7 +93,7 @@ async function testCaseDistinctSkillsRemainDistinct(): Promise<void> {
 async function testNestedReadsAreUnchanged(): Promise<void> {
   const source = "/skills"
   const skillRoot = "/skills/requirement-to-prd"
-  const backend = createRequirementSkillsBackend(
+  const backend = createAllowedSkillsBackend(
     createBackend({ [skillRoot]: [{ path: `${skillRoot}/SKILL.md`, is_dir: false }] }),
     [source],
     [skillRoot]
@@ -98,6 +101,23 @@ async function testNestedReadsAreUnchanged(): Promise<void> {
 
   const entries = await backend.lsInfo(skillRoot)
   assert(entries.length === 1, "skill contents must remain readable after root filtering")
+}
+
+function testAllowedNamesMetadataSemantics(): void {
+  assert(
+    parseAllowedNames({}, "allowedSkills") === undefined,
+    "missing allow metadata must preserve unrestricted behavior"
+  )
+  const empty = parseAllowedNames({ allowedSkills: [] }, "allowedSkills")
+  assert(Array.isArray(empty) && empty.length === 0, "an empty allowlist must disable all skills")
+  const parsed = parseAllowedNames(
+    { allowedSkills: [" requirement-to-prd ", "requirement-to-prd", 3, ""] },
+    "allowedSkills"
+  )
+  assert(
+    JSON.stringify(parsed) === JSON.stringify(["requirement-to-prd"]),
+    "allow metadata must ignore invalid entries and normalize duplicates"
+  )
 }
 
 async function run(): Promise<void> {
@@ -109,6 +129,8 @@ async function run(): Promise<void> {
   console.log("PASS case-distinct unconfigured skills remain hidden")
   await testNestedReadsAreUnchanged()
   console.log("PASS requirement skill contents remain readable")
+  testAllowedNamesMetadataSemantics()
+  console.log("PASS session allowlist metadata semantics")
 }
 
 run().catch((error) => {

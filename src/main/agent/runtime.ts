@@ -261,9 +261,9 @@ import {
   type AgentShellAccess
 } from "./agent-registry"
 import {
-  REQUIREMENT_MODE_CONFIG,
-  createRequirementSkillsBackend,
-  resolveRequirementSkillRootDirs
+  createAllowedSkillsBackend,
+  parseAllowedNames,
+  resolveAllowedSkillRootDirs
 } from "./library/requirement-mode"
 import {
   createWorkerValuesSnapshotContext,
@@ -1772,7 +1772,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     name,
     memory,
     skills,
-    allowedSkillRootDirs = [],
+    allowedSkillRootDirs,
     filesystemSystemPrompt,
     summarizationTrigger,
     summarizationKeep,
@@ -1785,7 +1785,6 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
     subagentExtraSystemPromptForRestrictedRoles = false,
     mainFilesystemEnabled = true,
     mainTodosEnabled = true,
-    requirementMode = false,
     subagentDefaultTools,
     taskSystemPrompt = TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent = true,
@@ -1844,8 +1843,8 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const filesystemBackend = backend ? backend : (config: any) => new StateBackend(config)
   const skillsBackend =
-    requirementMode
-      ? createRequirementSkillsBackend(filesystemBackend, skills ?? [], allowedSkillRootDirs)
+    allowedSkillRootDirs !== undefined
+      ? createAllowedSkillsBackend(filesystemBackend, skills ?? [], allowedSkillRootDirs)
       : filesystemBackend
   const skillsMiddlewareArray =
     skills != null && skills.length > 0
@@ -2589,7 +2588,7 @@ export function createDeepAgent(params: Record<string, any> = {}): ReactAgent<an
       createMalformedToolCallGuardMiddleware(),
       ...(mainTodosEnabled ? [todoListMiddleware()] : []),
       ...(mainFilesystemEnabled
-        ? [createFsMiddleware(requirementMode ? filesystemSystemPrompt : "\n")]
+        ? [createFsMiddleware(filesystemSystemPrompt ?? "\n")]
         : []),
       fileToolArgsMiddleware,
       ...postFsToolDocStripMiddleware,
@@ -4096,8 +4095,10 @@ export interface CreateAgentRuntimeOptions {
   soloTaskTraceManager?: SoloTaskTraceManager
   /** Disable the synchronous deepagents task tool for leaf runtimes such as coordinator async workers. */
   disableSubagents?: boolean
-  /** Restricts a requirement conversation to the analyst subagent. */
-  requirementMode?: boolean
+  /** Explicit session skill allowlist. Undefined preserves all available skills; [] hides all. */
+  allowedSkillNames?: string[]
+  /** Explicit session expert allowlist. Undefined preserves all available experts; [] disables all. */
+  allowedExpertNames?: string[]
   /** Optional filesystem access limits for leaf runtimes: coordinator async
    * workers (workload/ownedFiles) or registry agents (disallowedTools/shellAccess). */
   filesystemAccess?: CoordinatorWorkerFilesystemAccess
@@ -4216,7 +4217,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
     traceContext,
     soloTaskTraceManager,
     disableSubagents = false,
-    requirementMode = false,
+    allowedSkillNames,
+    allowedExpertNames,
     onHookResult,
     onFailureFuseNotice,
     onContextCompaction,
@@ -4264,6 +4266,8 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   })
   const projectModeSoloSubagentConfig =
     runtimePolicy.isProjectMode && agentMode === "normal" ? subagentConfig : undefined
+  const sessionAllowedExpertNames =
+    allowedExpertNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedExperts")
 
   console.log("[Runtime] Creating agent runtime...")
   console.log("[Runtime] Thread ID:", threadId)
@@ -4342,12 +4346,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       return undefined
     }
   }
+  const allRegistryProfiles = loadAgentProfiles(workspacePath, projectModeSoloSubagentConfig)
+  const registryProfiles =
+    sessionAllowedExpertNames === undefined
+      ? allRegistryProfiles
+      : allRegistryProfiles.filter((profile) => sessionAllowedExpertNames.includes(profile.name))
   const registrySubagentSpecs =
     agentMode === "normal" && !disableSubagents
-      ? (requirementMode
-          ? REQUIREMENT_MODE_CONFIG.subagentProfiles
-          : loadAgentProfiles(workspacePath, projectModeSoloSubagentConfig)
-        ).map((profile) => ({
+      ? registryProfiles.map((profile) => ({
           name: profile.name,
           description: profile.description,
           systemPrompt: profile.systemPrompt,
@@ -4787,9 +4793,12 @@ The workspace root is: ${workspacePath}`
   console.log("[Runtime] Plugin skills sources count:", pluginSkillsSources.length)
 
   const allSkillsSources = combineSkillMiddlewareSources(skillsSources, pluginSkillsSources)
-  const requirementSkillRootDirs = requirementMode
-    ? await resolveRequirementSkillRootDirs(allSkillsSources)
-    : []
+  const sessionAllowedSkillNames =
+    allowedSkillNames ?? parseAllowedNames(runtimeThreadMetadata, "allowedSkills")
+  const allowedSkillRootDirs =
+    sessionAllowedSkillNames === undefined
+      ? undefined
+      : await resolveAllowedSkillRootDirs(allSkillsSources, sessionAllowedSkillNames)
   const skillLifecycleSources = [...skillLifecycleRootSources, ...pluginSkillSourceMetadata]
   backend.setHiddenSkillDirs(getDisabledSkillDirs())
   backend.setSkillLifecycleRegistry(
@@ -6102,7 +6111,6 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
     subagentExtraSystemPromptForRestrictedRoles: projectModeTaskSubagentsInheritFullContext,
     mainTodosEnabled: !isCoordinatorMode,
     mainFilesystemEnabled: !isCoordinatorMode,
-    requirementMode,
     mainSubagentsEnabled: !isCoordinatorMode && !disableSubagents && runtimePolicy.includeSubagents,
     filesystemAccess: options.filesystemAccess,
     registrySubagentSpecs,
@@ -6114,11 +6122,11 @@ Access limits: read-only handoff continuation. Do not modify files, run commands
       process.platform === "win32" && windowsSandbox !== "none" ? "powershell" : "unknown",
     taskSystemPrompt: isCoordinatorMode ? buildCoordinatorTaskPrompt(threadId) : TASK_TOOL_PROMPT,
     includeGeneralPurposeSubagent:
-      !requirementMode &&
+      sessionAllowedExpertNames === undefined &&
       !isCoordinatorMode &&
       isGeneralPurposeSubagentEnabled(projectModeSoloSubagentConfig),
     skills: mainSkillSources,
-    allowedSkillRootDirs: requirementSkillRootDirs,
+    allowedSkillRootDirs,
     memory: mainMemorySources,
     // The orchestrator handles execute/file approval internally via IPC. In YOLO
     // mode it skips initial approvals but still prompts before sandbox escape.

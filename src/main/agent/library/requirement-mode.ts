@@ -1,34 +1,22 @@
-import type { AgentProfile } from "../agent-registry"
 import { discoverSkills } from "../../skills/discovery"
-import { ANALYST_PROFILE } from "./analyst"
 import { resolve } from "path"
 
 /**
- * Restriction profile for the requirement-management conversation mode.
- *
- * The runtime reads this config to filter the subagent profiles the main
- * agent may call via the task tool, and the skills the main agent may
- * invoke. Everything else in requirement mode (System Prompt, tool gating,
- * coordinator bypass) is driven by the `requirementMode` flag plumbed
- * through `CreateAgentRuntimeOptions` / `createDeepAgent`.
- *
- * Extend requirement mode by appending entries to the arrays below — the
- * runtime never needs to change. Keep this list curated: every entry here
- * is what the requirement-mode main agent is allowed to use, nothing more.
+ * The default session capability preset for a newly-created requirement
+ * conversation. Runtime authorization is driven by the session metadata,
+ * so other conversation types can reuse it.
  */
-export interface RestrictedModeConfig {
-  /** Subagent profiles the main agent may call via the task tool. */
-  readonly subagentProfiles: readonly AgentProfile[]
-  /** Skill names the main agent may invoke. Empty = no skills. */
-  readonly skillNames: readonly string[]
+export interface SessionCapabilityPreset {
+  readonly allowedExperts: readonly string[]
+  readonly allowedSkills: readonly string[]
 }
 
-export const REQUIREMENT_MODE_CONFIG: RestrictedModeConfig = {
-  subagentProfiles: [ANALYST_PROFILE],
-  skillNames: ["requirement-to-prd"]
+export const REQUIREMENT_SESSION_CAPABILITIES: SessionCapabilityPreset = {
+  allowedExperts: ["analyst"],
+  allowedSkills: ["requirement-to-prd"]
 }
 
-export const REQUIREMENT_MODE_SYSTEM_PROMPT = `## Requirement Mode
+export const REQUIREMENT_SYSTEM_PROMPT = `## Requirement Mode
 You are handling one requirement-management conversation only.
 
 Allowed work: understand the current requirement, inspect its requirement workspace, clarify business rules, assess scope and acceptance criteria, generate or review PRD documents through the requirement-to-prd skill, and publish only after explicit user authorization.
@@ -39,32 +27,35 @@ Before any PRD work, call the task subagent with subagent_type="analyst". Give i
 
 Use the requirement-to-prd skill for PRD work. Do not generate a formal PRD before the user has confirmed the initial PRD. Do not publish unless the user has explicitly authorized publication after the formal PRD is ready.`
 
-export function getRequirementRuntimeOptions(metadata: Record<string, unknown>): {
-  requirementMode: boolean
-  runtimeOptions: Record<string, unknown>
-} {
-  const requirementMode =
-    typeof metadata.requirementId === "string" && metadata.requirementId.trim().length > 0
-  return {
-    requirementMode,
-    runtimeOptions: requirementMode
-      ? {
-          requirementMode: true,
-          extraSystemPrompt: REQUIREMENT_MODE_SYSTEM_PROMPT,
-          enableAgentsPrompt: false,
-          noSchedulerTool: true,
-          disableSubagents: false
-        }
-      : {}
-  }
+export function getRequirementRuntimeOptions(metadata: Record<string, unknown>): Record<string, unknown> {
+  return typeof metadata.requirementId === "string" && metadata.requirementId.trim().length > 0
+    ? { extraSystemPrompt: REQUIREMENT_SYSTEM_PROMPT }
+    : {}
 }
 
-export async function resolveRequirementSkillRootDirs(sourceDirs: string[]): Promise<string[]> {
+export function parseAllowedNames(metadata: Record<string, unknown>, key: string): string[] | undefined {
+  const value = metadata[key]
+  if (!Array.isArray(value)) return undefined
+  return [
+    ...new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  ]
+}
+
+export async function resolveAllowedSkillRootDirs(
+  sourceDirs: string[],
+  allowedSkillNames: readonly string[]
+): Promise<string[]> {
+  const allowedNames = new Set(allowedSkillNames)
   return Array.from(
     new Map(
       (await Promise.all(sourceDirs.map((source) => discoverSkills(source))))
         .flat()
-        .filter((skill) => REQUIREMENT_MODE_CONFIG.skillNames.includes(skill.name))
+        .filter((skill) => allowedNames.has(skill.name))
         .map((skill) => [resolve(skill.rootDir), skill.rootDir])
     ).values()
   )
@@ -75,7 +66,7 @@ function normalizeBackendPath(input: string): string {
 }
 
 /** Restricts only SkillsMiddleware's source-directory enumeration. */
-export function createRequirementSkillsBackend(
+export function createAllowedSkillsBackend(
   backend: any,
   sourceDirs: string[],
   allowedSkillRootDirs: string[]

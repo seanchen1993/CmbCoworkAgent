@@ -260,6 +260,9 @@ function RequirementConversationSession({
     (file) => !file.is_dir && file.path === effectiveSelectedPrdPath
   )
   const prdFileCount = prdFiles.filter((file) => !file.is_dir).length
+  const manifestPrdPath =
+    requirementSpaceManifest?.prd.file.trim() || requirement.prdManifest.prd.file.trim()
+  const fallbackPrdPath = manifestPrdPath || "/prd/full-prd.md"
   const prdGenerationCompleted =
     isRequirementGenerated(requirement) ||
     isRequirementPublished(requirement) ||
@@ -281,6 +284,14 @@ function RequirementConversationSession({
   useEffect(() => {
     setRequirementSpaceManifest(requirement.prdManifest)
   }, [requirement.id, requirement.prdManifest])
+
+  useEffect(() => {
+    const sessionPaused =
+      threadState?.queueAutoDrainSuppressed === true || threadState?.goalUi.goal?.status === "paused"
+    if (!sessionPaused || !publishRequestQueuedRef.current) return
+    publishRequestQueuedRef.current = false
+    setPublishRequestQueued(false)
+  }, [threadState?.goalUi.goal?.status, threadState?.queueAutoDrainSuppressed])
 
   const attachConversation = useCallback(
     async (
@@ -331,6 +342,7 @@ function RequirementConversationSession({
         }
       },
       onCreateConversation: async (item) => {
+        await window.api.expertAgents.setEnabled("analyst", true)
         const thread = await createThread(
           {
             title: `PRD 沟通 · ${item.title}`,
@@ -339,6 +351,8 @@ function RequirementConversationSession({
             requirementSystem: item.system,
             requirementSourceType: item.sourceType,
             requirementSourceName: item.sourceName,
+            allowedSkills: ["requirement-to-prd"],
+            allowedExperts: ["analyst"],
             workspacePath: item.requirementPath
           },
           { preserveView: true }
@@ -503,7 +517,7 @@ function RequirementConversationSession({
     }
   }, [onRequirementUpdated, requirement.id, requirement.prdManifest, requirement.system, threadId])
 
-  const handlePublishToRequirementSpace = useCallback((): void => {
+  const handlePublishToRequirementSpace = useCallback(async (): Promise<void> => {
     if (
       !threadState ||
       conversationLoading ||
@@ -515,9 +529,19 @@ function RequirementConversationSession({
 
     publishRequestQueuedRef.current = true
     setPublishRequestQueued(true)
+    let publishMessage = REQUIREMENT_SPACE_PUBLISH_MESSAGE
+    try {
+      const tokenResult = await window.api.requirements.getToken()
+      const token = tokenResult.success ? tokenResult.token.trim() : ""
+      if (token) {
+        publishMessage = `${publishMessage}\n\n${LEANSTAR_TOKEN_MESSAGE_PREFIX}${token}`
+      }
+    } catch {
+      // A token is optional; publish requests must still be deliverable without one.
+    }
     threadState.addQueuedMessage({
       id: crypto.randomUUID(),
-      text: REQUIREMENT_SPACE_PUBLISH_MESSAGE,
+      text: publishMessage,
       created_at: new Date(),
       updated_at: new Date()
     })
@@ -677,6 +701,10 @@ function RequirementConversationSession({
     const checkPrdCompletion = async (): Promise<void> => {
       const manifest = await loadRequirementSpaceManifest({ forceRead: true })
       if (cancelled) return
+      const workspaceResult = await window.api.workspace.loadFromDisk(threadId)
+      if (!cancelled && workspaceResult.success) {
+        threadState.setWorkspaceFiles(workspaceResult.files)
+      }
       if (isRequirementPrdGenerationCompleted(manifest)) {
         setPreviewTab("prd")
       }
@@ -700,7 +728,8 @@ function RequirementConversationSession({
     loadRequirementSpaceManifest,
     requirement.coreFilesMissing,
     requirement.workspaceMissing,
-    threadId
+    threadId,
+    threadState
   ])
 
   useEffect(() => {
@@ -969,19 +998,18 @@ function RequirementConversationSession({
                       </div>
                     </section>
                   </div>
-                ) : (
-                  <div className="flex min-h-0 flex-1 items-center justify-center px-6 text-center">
-                    <div className="flex max-w-[260px] flex-col items-center gap-3">
-                      <span className="flex size-10 items-center justify-center rounded-full bg-primary/10 text-primary">
-                        <Loader2 className="size-5 animate-spin" />
-                      </span>
-                      <div className="text-sm font-semibold text-foreground">等待生成中</div>
-                      <p className="text-sm leading-5 text-muted-foreground">
-                        继续在中间会话中补充需求，PRD 文件生成后会自动显示。
-                      </p>
-                    </div>
-                  </div>
-                )}
+                ) : threadId ? (
+                  <section className="min-h-0 flex-1 overflow-hidden bg-white p-2">
+                    <ResourcePreview
+                      key={`${fallbackPrdPath}:${prdPreviewReloadToken}`}
+                      filePath={fallbackPrdPath.replace(/^\/+/, "")}
+                      workspacePath={threadState?.workspacePath ?? requirement.requirementPath}
+                      threadId={threadId}
+                      reloadToken={prdPreviewReloadToken}
+                      onReload={() => setPrdPreviewReloadToken((value) => value + 1)}
+                    />
+                  </section>
+                ) : null}
               </TabsContent>
 
               <TabsContent value="requirement-space" className="m-0 min-h-0 flex-1 overflow-y-auto">

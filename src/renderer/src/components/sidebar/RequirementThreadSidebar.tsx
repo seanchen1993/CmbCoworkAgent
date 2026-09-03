@@ -4,9 +4,9 @@ import {
   AlertCircle,
   ChevronDown,
   ChevronRight,
+  ClipboardList,
   createLucideIcon,
   GitFork,
-  Info,
   Loader2,
   Plus,
   RefreshCw,
@@ -542,7 +542,7 @@ export function RequirementThreadSidebar({
                     <div className="border-b border-border/70 bg-muted/20 px-4 py-3">
                       <div className="flex items-start gap-2.5">
                         <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                          <Info className="size-3.5" />
+                          <ClipboardList className="size-3.5" />
                         </span>
                         <div className="min-w-0 flex-1">
                           <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">

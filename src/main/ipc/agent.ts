@@ -6503,10 +6503,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         const persistedCoordinatorTurnPrompt = parseCoordinatorTurnPromptMetadata(metadata)
         const persistedCoordinatorNotificationSelectedSkills =
           parseCoordinatorNotificationSelectedSkillsMetadata(metadata)
-        const {
-          requirementMode,
-          runtimeOptions: requirementRuntimeOptions
-        } = getRequirementRuntimeOptions(metadata)
+        const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
         const metadataAgentMode = getAgentModeFromMetadata(metadata)
         const hasExplicitNormalAgentMode = metadata.agentMode === "normal"
         const requestedMode =
@@ -6540,11 +6537,9 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
           coordinatorRequest.source === "environment"
         const coordinatorFromMetadata =
           coordinatorRequest.enabled && coordinatorRequest.source === "metadata"
-        const effectiveAgentMode: AgentMode = requirementMode
-          ? "normal"
-          : coordinatorForcedByRequest
-            ? "coordinator"
-            : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
+        const effectiveAgentMode: AgentMode = coordinatorForcedByRequest
+          ? "coordinator"
+          : (requestedMode ?? (coordinatorFromMetadata ? "coordinator" : metadataAgentMode))
         tracer.setExecutionMode(effectiveAgentMode)
         const runtimeTraceContext = tracer.getTraceContext()
         if (
@@ -9194,8 +9189,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
         threadId,
         metadata
       )
-      const { runtimeOptions: requirementRuntimeOptions } =
-        getRequirementRuntimeOptions(metadata)
+      const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
       // Resume = same logical turn as the interrupted invoke. Keep hook scope
       // continuity while pruning scopes that did not opt in to interrupt persistence.
       if (onAgentsPromptLoadStatus) {
@@ -9820,8 +9814,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: resumeAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(resumeAgentMode, metadata),
-              ...requirementRuntimeOptions,
+            disableSubagents: shouldDisableNormalModeSubagents(resumeAgentMode, metadata),
+            ...requirementRuntimeOptions,
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),
@@ -10253,8 +10247,7 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
       threadId,
       metadata
     )
-    const { runtimeOptions: requirementRuntimeOptions } =
-      getRequirementRuntimeOptions(metadata)
+    const requirementRuntimeOptions = getRequirementRuntimeOptions(metadata)
     if (onAgentsPromptLoadStatus) {
       onAgentsPromptLoadStatus = guardPhysicalStreamRunCallback(
         threadId,
@@ -10850,8 +10843,8 @@ export function registerAgentHandlers(ipcMain: IpcMain): void {
               enableRequestUserInput: true,
               noSkillEvolutionTool: true,
               agentMode: interruptAgentMode,
-              disableSubagents: shouldDisableNormalModeSubagents(interruptAgentMode, metadata),
-              ...requirementRuntimeOptions,
+            disableSubagents: shouldDisableNormalModeSubagents(interruptAgentMode, metadata),
+            ...requirementRuntimeOptions,
               retryHooks: buildModelRetryHooks(window, channel, () =>
                 isPhysicalStreamRunActive(threadId, runToken, abortController.signal)
               ),

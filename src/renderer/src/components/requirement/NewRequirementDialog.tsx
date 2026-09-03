@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react"
-import { ArrowRight, FileText, FolderOpen, Link, Loader2, Upload } from "lucide-react"
+import {
+  ArrowRight,
+  BadgeCheck,
+  FileText,
+  FolderOpen,
+  Link,
+  Loader2,
+  Sparkles,
+  Upload
+} from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import {
@@ -11,6 +20,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { marketApi } from "@/api/market"
 import {
@@ -241,7 +251,7 @@ export function NewRequirementDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-[680px]">
+      <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[680px]">
         <DialogHeader>
           <div className="px-6 pt-5">
             <DialogTitle>
@@ -253,7 +263,7 @@ export function NewRequirementDialog({
             </DialogDescription>
           </div>
         </DialogHeader>
-        <div className="space-y-4 px-6 pb-5 pt-4">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-5 pt-4">
           <div className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
             <div className="mb-2 flex items-center gap-2">
               <FolderOpen className="size-4 text-primary" />
@@ -282,31 +292,47 @@ export function NewRequirementDialog({
             </p>
           </div>
 
-          <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
-            {[
-              { id: "file" as const, label: "文件", icon: Upload },
-              { id: "link" as const, label: "链接", icon: Link },
-              { id: "text" as const, label: "文本", icon: ArrowRight }
-            ].map((item) => {
-              const Icon = item.icon
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setSource(item.id)}
-                  className={cn(
-                    "flex h-8 items-center gap-1.5 rounded px-3 text-sm font-semibold transition-colors",
-                    source === item.id
-                      ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <Icon className="size-3.5" />
-                  {item.label}
-                </button>
-              )
-            })}
-          </div>
+          <TooltipProvider delayDuration={150}>
+            <div className="inline-flex w-fit rounded-lg bg-[#f3ede6] p-1">
+              {[
+                { id: "file" as const, label: "文件", icon: Upload },
+                { id: "text" as const, label: "文本", icon: ArrowRight },
+                { id: "link" as const, label: "链接", icon: Link }
+              ].map((item) => {
+                const Icon = item.icon
+                const disabled = item.id === "link"
+                const tab = (
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setSource(item.id)}
+                    className={cn(
+                      "flex h-8 items-center gap-1.5 rounded px-3 text-sm font-semibold transition-colors",
+                      disabled
+                        ? "cursor-not-allowed text-muted-foreground/50"
+                        : source === item.id
+                          ? "bg-white text-foreground shadow-[0_1px_3px_rgba(0,0,0,0.08)]"
+                          : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    <Icon className="size-3.5" />
+                    {item.label}
+                  </button>
+                )
+
+                return disabled ? (
+                  <Tooltip key={item.id}>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex">{tab}</span>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">敬请期待</TooltipContent>
+                  </Tooltip>
+                ) : (
+                  <span key={item.id}>{tab}</span>
+                )
+              })}
+            </div>
+          </TooltipProvider>
 
           {source === "file" ? (
             <button
@@ -417,6 +443,32 @@ export function NewRequirementDialog({
                 ? "上传需求文件后会默认带出文件名，支持继续编辑。"
                 : "建议填写一个便于检索和沟通的需求名称。"}
             </p>
+          </div>
+          <div className="space-y-4 border-t border-border pt-4">
+            <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <BadgeCheck className="size-4 text-primary" />
+                <h3 className="text-sm font-semibold text-foreground">已绑定专家</h3>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground">
+                <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <BadgeCheck className="size-3.5" />
+                </span>
+                需求分析师
+              </div>
+            </section>
+            <section className="rounded-xl border-[1.5px] border-border bg-[#fdfbf7] p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <Sparkles className="size-4 text-primary" />
+                <h3 className="text-sm font-semibold text-foreground">已绑定技能</h3>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-white px-2.5 py-2 text-sm font-semibold text-foreground">
+                <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <FileText className="size-3.5" />
+                </span>
+                需求文档3.0标准化
+              </div>
+            </section>
           </div>
         </div>
         <DialogFooter className="border-t border-border bg-[#fbf8f4] px-6 py-3">

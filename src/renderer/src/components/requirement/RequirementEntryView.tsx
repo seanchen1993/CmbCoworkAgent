@@ -103,6 +103,7 @@ export function RequirementEntryView(): React.JSX.Element {
       }
     }
 
+    await window.api.expertAgents.setEnabled("analyst", true)
     const thread = await createThread(
       {
         title: `PRD 沟通 · ${requirement.title}`,
@@ -111,6 +112,8 @@ export function RequirementEntryView(): React.JSX.Element {
         requirementSystem: requirement.system,
         requirementSourceType: requirement.sourceType,
         requirementSourceName: requirement.sourceName,
+        allowedSkills: ["requirement-to-prd"],
+        allowedExperts: ["analyst"],
         ...(requirement.requirementPath ? { workspacePath: requirement.requirementPath } : {})
       },
       { preserveView: true }
